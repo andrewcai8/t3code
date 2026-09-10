@@ -2,12 +2,19 @@
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, and Grok Build session history from your connected
+**Usage** combines Codex, Claude Code, and Grok Build session history with Cursor account history from your connected
 environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
 cost. These estimates are not your subscription bill.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
 record are missing from the totals.
+
+Cursor reads the existing login for each enabled Cursor instance. File credential stores and
+`CURSOR_AUTH_TOKEN` are supported; Keychain credentials are unavailable here. Cursor history is
+account-wide, including requests made outside T3 Code. The same account counts once across selected
+environments. Cursor records are requests, and sessions count only known conversations. Its costs
+come from Cursor's reported token costs, not your subscription bill. Custom model prices do not
+replace them. Incomplete reads are marked partial. History refreshes can reuse results for one minute.
 
 On web and desktop, use the environment dropdown to filter costs, tokens, and limits. All
 environments are selected by default. The dropdown shows which environments are still scanning;
@@ -26,7 +33,7 @@ without public pricing.
 
 Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
 tokens that are free. Saved prices replace automatic pricing for all of that environment's
-history and are shared with clients connected to it. When environments have different prices,
+transcript history and are shared with clients connected to it. When environments have different prices,
 cells show **Mixed**. Edit rates directly in the table, then choose **Save changes** to apply all
 edited rows. Untouched cells keep each environment's rate. Select one environment to inspect its
 prices. **Reset to automatic** marks a model's override for removal when you save; you can undo
@@ -39,8 +46,8 @@ the dialog.
 
 ## Track subscription limits
 
-**Usage → Limits** pools every subscription account it can see per provider, so with several Codex
-or Claude accounts across your environments and hubs you read one number per window rather than a
+**Usage → Limits** pools every subscription account it can see per provider, so with several Codex,
+Claude, or Cursor accounts across your environments and hubs you read one number per window rather than a
 list. Each window card shows how much of the pool is left and a bar with one segment per account,
 kept in the same column across windows. Accounts are ordered by their 5-hour reset, soonest
 first, or by the first available window when no account reports a 5-hour limit. A gap means the
@@ -53,6 +60,10 @@ the bar show each account's quota, countdown, and credits. Tap a row to open its
 
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.
+
+Cursor shows independently reported Auto and API percentages with the billing-cycle reset.
+On-demand spending is a separate budget when Cursor reports both usage and a limit. A missing
+window means Cursor did not report it; it does not mean zero usage.
 
 If a window looks stale, refresh Limits to re-check every provider and hub.
 

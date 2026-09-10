@@ -10,6 +10,7 @@ import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
+  readonly sourceId?: string;
   readonly timestampMs: number;
   readonly model: string;
   readonly sessionId: string;

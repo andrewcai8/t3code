@@ -277,15 +277,26 @@ export function UsageRouteScreen() {
                   className="w-36"
                 />
               </View>
+              {merged.providers.some((provider) => provider.provider === "cursor") ? (
+                <Text className="text-sm text-foreground-muted">
+                  Cursor history covers each account across devices. Costs are provider-reported;
+                  records are requests and sessions are known conversations.
+                </Text>
+              ) : null}
+              {merged.coverageNotices.map((notice) => (
+                <Text key={notice} className="text-sm text-foreground-muted">
+                  {notice}
+                </Text>
+              ))}
               {merged.duplicateSources.length > 0 ? (
                 <Text className="text-sm text-foreground-muted">
-                  Counted once across environments sharing a transcript directory:{" "}
+                  Counted once across environments sharing history:{" "}
                   {merged.duplicateSources.join(", ")}
                 </Text>
               ) : null}
               {isPending ? (
                 <Text className="py-16 text-center text-base text-foreground-muted">
-                  Scanning provider transcripts…
+                  Reading provider usage…
                 </Text>
               ) : selectedEnvironments.length === 0 ? (
                 <Text className="py-16 text-center text-base text-foreground-muted">

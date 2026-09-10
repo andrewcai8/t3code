@@ -1,5 +1,5 @@
 /**
- * Usage reporting contract.
+ * Usage reporting contract. Cursor contributes account-wide dashboard history.
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
  * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
@@ -21,18 +21,16 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 5 as const;
+export const USAGE_CONTRACT_VERSION = 6 as const;
 
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * v5 only adds `grok` to {@link UsageProviderKind}; v4 Claude/Codex buckets
- * remain valid, so mixed-version environments keep those totals instead of
- * treating every older server as stale.
+ * v6 adds account-scoped Cursor usage. v4/v5 transcript summaries remain valid.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex", "grok"]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "grok", "cursor"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -88,10 +86,9 @@ export type UsageTokenTotals = typeof UsageTokenTotals.Type;
  * whose tokens are included in the token totals but which contributed nothing
  * to `costUsd`.
  */
-export const UsageBucket = Schema.Struct({
+const UsageBucketFields = {
   day: UsageDay,
   hourStart: Schema.optional(TrimmedNonEmptyString),
-  provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
@@ -102,12 +99,20 @@ export const UsageBucket = Schema.Struct({
    */
   cacheSavingsUsd: Schema.Number,
   costSource: UsageCostSource,
-  /** Distinct assistant responses, after de-duplication. */
+  /** Transcript assistant responses, or Cursor dashboard requests. */
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
-  /** Distinct transcript sessions that contributed to this cell. */
+  /** Known transcript sessions or Cursor conversations contributing to this cell. */
   sessions: NonNegativeInt,
-});
+};
+export const UsageBucket = Schema.Union([
+  Schema.Struct({ ...UsageBucketFields, provider: Schema.Literals(["claude", "codex", "grok"]) }),
+  Schema.Struct({
+    ...UsageBucketFields,
+    provider: Schema.Literal("cursor"),
+    sourceId: TrimmedNonEmptyString,
+  }),
+]);
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
@@ -117,7 +122,7 @@ export type UsageBucket = typeof UsageBucket.Type;
  * the same provider home and would otherwise double count. The client drops
  * duplicate fingerprints before merging.
  */
-export const UsageSourceFingerprint = Schema.Struct({
+const TranscriptSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
   resolvedHomePath: TrimmedNonEmptyString,
@@ -132,6 +137,15 @@ export const UsageSourceFingerprint = Schema.Struct({
    */
   volumeId: Schema.String,
 });
+export const UsageSourceFingerprint = Schema.Union([
+  TranscriptSourceFingerprint,
+  Schema.Struct({
+    kind: Schema.Literals(["account", "unavailable"]),
+    provider: Schema.Literal("cursor"),
+    sourceId: TrimmedNonEmptyString,
+    label: TrimmedNonEmptyString,
+  }),
+]);
 export type UsageSourceFingerprint = typeof UsageSourceFingerprint.Type;
 
 export const UsageSourceStatus = Schema.Literals(["ok", "missing", "partial", "failed"]);
@@ -140,6 +154,7 @@ export type UsageSourceStatus = typeof UsageSourceStatus.Type;
 export const UsageSource = Schema.Struct({
   fingerprint: UsageSourceFingerprint,
   status: UsageSourceStatus,
+  readAt: Schema.optional(Schema.String),
   scannedFiles: NonNegativeInt,
   skippedFiles: NonNegativeInt,
   /** Records that parsed but carried no recognisable usage payload. */

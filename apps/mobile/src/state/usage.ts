@@ -150,7 +150,7 @@ export function useUsage(
     environments,
     selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,
-    isPartial: answeredCount > 0 && stillReporting > 0,
+    isPartial: (answeredCount > 0 && stillReporting > 0) || merged.coverageNotices.length > 0,
     refresh,
   };
 }
