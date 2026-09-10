@@ -1,3 +1,4 @@
+import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -631,6 +632,7 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
+      const environmentControl = yield* EnvironmentControl.EnvironmentControl;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -1276,6 +1278,7 @@ const makeWsRpcLayer = (
             auth,
             cwd: config.cwd,
             keybindingsConfigPath: config.keybindingsConfigPath,
+            environmentControl: true,
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
@@ -2063,6 +2066,18 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.environmentControlList]: () =>
+          observeRpcEffect(WS_METHODS.environmentControlList, environmentControl.list),
+        [WS_METHODS.environmentControlStart]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.environmentControlStart,
+            environmentControl.start(input.environmentId),
+          ),
+        [WS_METHODS.environmentControlStop]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.environmentControlStop,
+            environmentControl.stop(input.environmentId),
           ),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
