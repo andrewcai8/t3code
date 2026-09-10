@@ -9,6 +9,7 @@ import type {
   UsageProviderKind,
 } from "@t3tools/contracts";
 import {
+  displayUsageLimits,
   elapsedShare,
   formatDuration,
   formatResetsIn,
@@ -141,7 +142,8 @@ export function AccountLimits(props: {
   readonly trailing?: ReactNode;
   readonly footer?: ReactNode;
 }) {
-  const { limits, now, dense = false } = props;
+  const { now, dense = false } = props;
+  const limits = props.limits ? displayUsageLimits(props.driver, props.limits) : undefined;
   const color = useBarColor(props.driver);
   if (!limits) return null;
   const notice = limitsNotice(limits);

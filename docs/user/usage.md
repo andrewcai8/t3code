@@ -61,9 +61,8 @@ the bar show each account's quota, countdown, and credits. Tap a row to open its
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.
 
-Cursor shows independently reported Auto and API percentages with the billing-cycle reset.
-On-demand spending is a separate budget when Cursor reports both usage and a limit. A missing
-window means Cursor did not report it; it does not mean zero usage.
+Cursor's **Monthly usage** shows the reported included Auto allowance with its billing-cycle
+reset. If Cursor does not report that allowance, it stays unavailable.
 
 If a window looks stale, refresh Limits to re-check every provider and hub.
 
