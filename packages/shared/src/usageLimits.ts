@@ -25,6 +25,19 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+export function displayUsageLimits(
+  driver: ServerProvider["driver"],
+  limits: ServerProviderUsageLimits,
+): ServerProviderUsageLimits {
+  if (driver !== "cursor") return limits;
+  return {
+    ...limits,
+    windows: limits.windows
+      .filter((window) => window.id === "cursor_auto")
+      .map((window) => ({ ...window, label: "Monthly usage" })),
+  };
+}
+
 /**
  * Providers that belong on the Limits view: enabled, installed, and one whose
  * driver reports subscription usage at all. A driver with no notion of usage
@@ -257,7 +270,9 @@ export function collectLimitAccounts(
   for (const [environmentId, presentation] of presentations) {
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
-      if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
+      if (!provider.usageLimits) continue;
+      const limits = displayUsageLimits(provider.driver, provider.usageLimits);
+      if (limitsNotice(limits) !== null) continue;
       merge(
         accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity) ??
           `${environmentId}:${provider.instanceId}`,
@@ -271,7 +286,7 @@ export function collectLimitAccounts(
           environments: [{ environmentId, label }],
           sourceLabel: null,
           redeem: { environmentId, input: { instanceId: provider.instanceId } },
-          limits: provider.usageLimits,
+          limits,
         },
       );
     }
@@ -286,7 +301,8 @@ export function collectLimitAccounts(
         ? `${presentation.entry.target.label} · ${source.label}`
         : source.label;
       for (const account of source.accounts) {
-        if (limitsNotice(account.usageLimits) !== null) continue;
+        const limits = displayUsageLimits(account.driver, account.usageLimits);
+        if (limitsNotice(limits) !== null) continue;
         merge(accountKey(account.driver, account.email) ?? `${source.id}:${account.id}`, {
           key: `${source.id}:${account.id}`,
           driver: account.driver,
@@ -306,7 +322,7 @@ export function collectLimitAccounts(
                 },
               }
             : null,
-          limits: account.usageLimits,
+          limits,
         });
       }
     }
@@ -332,7 +348,9 @@ export function collectLimitNotices(
       // An account that can never report (API key) is left out; one that
       // failed, or reported nothing at all, is worth a line.
       if (provider.usageLimits?.unavailable?.reason === "unsupported") continue;
-      const notice = provider.usageLimits ? limitsNotice(provider.usageLimits) : null;
+      const notice = provider.usageLimits
+        ? limitsNotice(displayUsageLimits(provider.driver, provider.usageLimits))
+        : null;
       const name = provider.displayName?.trim() || String(provider.driver);
       if (notice) notices.push(`${label(environmentLabel, name)}: ${notice}`);
     }

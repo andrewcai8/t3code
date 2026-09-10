@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   type LimitAccount,
+  displayUsageLimits,
   isUsageLimitsCommand,
   collectProviderUsageLimits,
   sameUsageLimitCommandCoverage,
@@ -1198,6 +1199,44 @@ describe("isUsageLimitsCommand", () => {
 });
 
 describe("Cursor account limits", () => {
+  it("shows only Monthly usage while preserving the reported windows", () => {
+    const limits = {
+      checkedAt: "2026-09-10T00:00:00Z",
+      windows: [
+        { ...window, id: "cursor_auto", label: "Auto", usedPercent: 74.42733333333334 },
+        { ...window, id: "cursor_api", label: "API", usedPercent: 100 },
+        { ...window, id: "cursor_ondemand", label: "On-demand", usedPercent: 26 },
+      ],
+    };
+    const displayed = displayUsageLimits(ProviderDriverKind.make("cursor"), limits);
+    expect(displayed.windows).toEqual([
+      { ...window, id: "cursor_auto", label: "Monthly usage", usedPercent: 74.42733333333334 },
+    ]);
+    expect(limits.windows.map((window) => window.label)).toEqual(["Auto", "API", "On-demand"]);
+    expect(displayUsageLimits(ProviderDriverKind.make("codex"), limits)).toBe(limits);
+  });
+
+  it("does not substitute API usage when the included allowance is unavailable", () => {
+    const cursor = provider({
+      driver: ProviderDriverKind.make("cursor"),
+      usageLimits: {
+        checkedAt: "2026-09-10T00:00:00Z",
+        windows: [{ ...window, id: "cursor_api", label: "API", usedPercent: 40 }],
+      },
+    });
+    const input = new Map([
+      [
+        EnvironmentId.make("local"),
+        {
+          entry: { target: { label: "Local" } },
+          serverConfig: { providers: [cursor] },
+        },
+      ],
+    ]);
+    expect(collectLimitAccounts(input)).toEqual([]);
+    expect(collectLimitNotices(input)).toEqual(["cursor: No limits reported."]);
+  });
+
   it("deduplicates authoritative account identities while keeping two teams sharing an email separate", () => {
     const cursor = (instance: string, accountIdentity: string, usedPercent: number) =>
       provider({
@@ -1206,7 +1245,11 @@ describe("Cursor account limits", () => {
         auth: { status: "authenticated", email: "shared@example.com", accountIdentity },
         usageLimits: {
           checkedAt: "2026-09-10T00:00:00Z",
-          windows: [{ id: "cursor_api", kind: "monthly", label: "API", usedPercent }],
+          windows: [
+            { id: "cursor_auto", kind: "monthly", label: "Auto", usedPercent },
+            { id: "cursor_api", kind: "monthly", label: "API", usedPercent: 100 },
+            { id: "cursor_ondemand", kind: "other", label: "On-demand", usedPercent: 0 },
+          ],
         },
       });
     const accounts = collectLimitAccounts(
@@ -1231,7 +1274,7 @@ describe("Cursor account limits", () => {
     expect(accounts.map((account) => account.environments.length)).toEqual([2, 1]);
     const pools = collectLimitPools(accounts, now);
     expect(pools[0]?.windows.map((window) => [window.label, window.members.length])).toEqual([
-      ["API", 2],
+      ["Monthly usage", 2],
     ]);
   });
 });
