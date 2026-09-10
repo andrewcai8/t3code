@@ -1,3 +1,9 @@
+import {
+  EnvironmentControlError,
+  EnvironmentControlInput,
+  EnvironmentControlList,
+  EnvironmentControlResult,
+} from "./environmentControl.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
@@ -335,6 +341,9 @@ export const WS_METHODS = {
   serverReportClientActivity: "server.reportClientActivity",
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
+  environmentControlList: "environmentControl.list",
+  environmentControlStart: "environmentControl.start",
+  environmentControlStop: "environmentControl.stop",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -570,6 +579,22 @@ const WsServerRetryResourceTelemetryRpc = Rpc.make(WS_METHODS.serverRetryResourc
   payload: Schema.Struct({}),
   success: ResourceTelemetryRetryResult,
   error: EnvironmentAuthorizationError,
+});
+
+const EnvironmentControlListRpc = Rpc.make(WS_METHODS.environmentControlList, {
+  payload: Schema.Struct({}),
+  success: EnvironmentControlList,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlStartRpc = Rpc.make(WS_METHODS.environmentControlStart, {
+  payload: EnvironmentControlInput,
+  success: EnvironmentControlResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlStopRpc = Rpc.make(WS_METHODS.environmentControlStop, {
+  payload: EnvironmentControlInput,
+  success: EnvironmentControlResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
 const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
@@ -1226,6 +1251,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
+  EnvironmentControlListRpc,
+  EnvironmentControlStartRpc,
+  EnvironmentControlStopRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,

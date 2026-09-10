@@ -1,3 +1,4 @@
+import { CloudComputeControls } from "./CloudComputeControls";
 import { NativeHeaderToolbar } from "../../native/StackHeader";
 import { useNavigation } from "@react-navigation/native";
 import { SymbolView } from "../../components/AppSymbol";
@@ -95,6 +96,21 @@ export function ConnectionsRouteScreen() {
             </Text>
           </View>
         )}
+        {connectedEnvironments
+          .filter((environment) => environment.connectionState === "connected")
+          .map((environment) => (
+            <CloudComputeControls
+              key={environment.environmentId}
+              managerId={environment.environmentId}
+              managerLabel={environment.environmentLabel}
+              onStarted={(id) => {
+                if (!connectedEnvironments.some((entry) => entry.environmentId === id))
+                  return false;
+                onReconnectEnvironment(id);
+                return true;
+              }}
+            />
+          ))}
       </ScrollView>
     </View>
   );

@@ -1,3 +1,4 @@
+import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -500,6 +501,7 @@ const buildAppUnderTest = (options?: {
   onPairingChangesSubscribed?: Effect.Effect<void>;
   config?: Partial<ServerConfig.ServerConfig["Service"]>;
   layers?: {
+    environmentControl?: Partial<EnvironmentControl.EnvironmentControl["Service"]>;
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     environmentTheme?: Partial<EnvironmentTheme.EnvironmentThemeService["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
@@ -1028,6 +1030,16 @@ const buildAppUnderTest = (options?: {
     const appLayer = servedRoutesLayer.pipe(
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
+      Layer.provide(
+        Layer.succeed(EnvironmentControl.EnvironmentControl, {
+          list: Effect.succeed([]),
+          start: () =>
+            Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
+          stop: () =>
+            Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
+          ...options?.layers?.environmentControl,
+        }),
+      ),
       Layer.provide(
         Layer.mock(AnalyticsService.AnalyticsService)({
           record: () => Effect.void,
@@ -5780,6 +5792,110 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         failureMessage.includes("Unauthorized") ||
           failureMessage.includes("An error occurred during Open"),
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("cloud compute RPCs list and command the selected existing environment", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("managed-cloud");
+      const observed: Array<string> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          environmentControl: {
+            list: Effect.succeed([
+              {
+                environmentId,
+                label: "Cloud",
+                provider: "e2b",
+                state: { kind: "stopped", observedAt: "2026-09-10T12:00:00Z" },
+              },
+            ]),
+            start: (id) =>
+              Effect.sync(() => {
+                observed.push(`start:${id}`);
+                return {
+                  kind: "updated",
+                  environment: {
+                    environmentId: id,
+                    label: "Cloud",
+                    provider: "e2b",
+                    state: { kind: "running", observedAt: "2026-09-10T12:00:01Z" },
+                  },
+                };
+              }),
+            stop: (id) =>
+              Effect.sync(() => {
+                observed.push(`stop:${id}`);
+                return { kind: "refused", reason: "busy", message: "Work is active." };
+              }),
+          },
+        },
+      });
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            const list = yield* client[WS_METHODS.environmentControlList]({});
+            assert.equal(list[0]?.environmentId, environmentId);
+            assert.equal(list[0]?.state.kind, "stopped");
+            const started = yield* client[WS_METHODS.environmentControlStart]({ environmentId });
+            assert.equal(started.kind, "updated");
+            const stopped = yield* client[WS_METHODS.environmentControlStop]({ environmentId });
+            assert.deepEqual(stopped, {
+              kind: "refused",
+              reason: "busy",
+              message: "Work is active.",
+            });
+          }),
+        ),
+      );
+      assert.deepEqual(observed, ["start:managed-cloud", "stop:managed-cloud"]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("cloud compute read-only sessions cannot start or stop hosts", () =>
+    Effect.gen(function* () {
+      let commands = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          environmentControl: {
+            start: () =>
+              Effect.sync(() => {
+                commands++;
+                return { kind: "refused", reason: "unknown", message: "No target" };
+              }),
+            stop: () =>
+              Effect.sync(() => {
+                commands++;
+                return { kind: "refused", reason: "unknown", message: "No target" };
+              }),
+          },
+        },
+      });
+      const token = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+        scope: "orchestration:read",
+      });
+      const ticketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+        headers: { authorization: `Bearer ${token.body.access_token ?? ""}` },
+      });
+      const { ticket } = yield* responseJsonEffect<{ readonly ticket: string }>(ticketResponse);
+      const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(ticket)}`;
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            assert.deepEqual(yield* client[WS_METHODS.environmentControlList]({}), []);
+            for (const tag of [
+              WS_METHODS.environmentControlStart,
+              WS_METHODS.environmentControlStop,
+            ]) {
+              const error = yield* client[tag]({ environmentId: EnvironmentId.make("cloud") }).pipe(
+                Effect.flip,
+              );
+              assert.equal(error._tag, "EnvironmentAuthorizationError");
+            }
+          }),
+        ),
+      );
+      assert.equal(commands, 0);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

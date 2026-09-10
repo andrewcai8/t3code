@@ -21,7 +21,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 
 import {
   createAtomCommandScheduler,
@@ -960,7 +960,39 @@ export function createServerEnvironmentAtoms<R, E>(
     readonly input: EnvironmentRpcInput<typeof WS_METHODS.subscribeServerLifecycle>;
   }) => welcomeFamily(target.environmentId);
 
+  const managedEnvironments = createEnvironmentQueryAtomFamily(runtime, {
+    label: "environment-data:cloud:compute",
+    staleTimeMs: 5_000,
+    execute: (input: EnvironmentRpcInput<typeof WS_METHODS.environmentControlList>) =>
+      request(WS_METHODS.environmentControlList, input).pipe(Effect.timeout("20 seconds")),
+  });
+  const refreshManagedEnvironments = (
+    target: { readonly environmentId: EnvironmentId },
+    registry: AtomRegistry.AtomRegistry,
+  ) =>
+    Effect.sync(() =>
+      registry.refresh(managedEnvironments({ environmentId: target.environmentId, input: {} })),
+    );
   return {
+    managedEnvironments,
+    startManagedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:start",
+      tag: WS_METHODS.environmentControlStart,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.environmentId}`,
+      },
+      onSettled: refreshManagedEnvironments,
+    }),
+    stopManagedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:stop",
+      tag: WS_METHODS.environmentControlStop,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.environmentId}`,
+      },
+      onSettled: refreshManagedEnvironments,
+    }),
     configValueAtom,
     updateStateAtom,
     settingsValueAtom,

@@ -29,6 +29,25 @@ connection. Pull request diffs and provider settings keep working after the
 previous credential expires. A failed renewal affects that request; it does not
 disconnect an otherwise healthy conversation.
 
+## Cloud compute
+
+A configured cloud manager adds compute status and Start/Stop controls in
+**Settings → Connections** on web and desktop and **Settings → Environments** on
+mobile. Pair with that manager to use its controls. Compute status is separate
+from the connection status. Refresh checks the cloud provider without starting a
+paused machine. Start resumes the machine and retries its saved connection. If
+this device has not connected to that environment before, choose it in T3 Connect
+or pair with it after it starts.
+
+Stop preserves the environment and its conversations. It refuses to stop when
+work is active or fresh idle activity cannot be verified. The controller and
+host reporters must support safe manual stopping. An older installation reports
+that an upgrade is required. The existing automatic idle policy still applies.
+
+The manager must remain running and reachable. A manager on your Mac cannot
+accept phone commands while that Mac is off. Using those commands without the Mac
+requires a separately deployed manager.
+
 ## Pair over a LAN or private network
 
 Use direct pairing when the other device can reach the host's network address.

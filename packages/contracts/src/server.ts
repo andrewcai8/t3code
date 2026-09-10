@@ -547,6 +547,7 @@ export function environmentThemeFileHasColors(file: EnvironmentThemeFile): boole
 }
 
 export const ServerConfig = Schema.Struct({
+  environmentControl: Schema.optionalKey(Schema.Boolean),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,
