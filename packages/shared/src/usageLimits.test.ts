@@ -1196,3 +1196,42 @@ describe("isUsageLimitsCommand", () => {
     expect(isUsageLimitsCommand("/usage")).toBe(false);
   });
 });
+
+describe("Cursor account limits", () => {
+  it("deduplicates authoritative account identities while keeping two teams sharing an email separate", () => {
+    const cursor = (instance: string, accountIdentity: string, usedPercent: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make(instance),
+        driver: ProviderDriverKind.make("cursor"),
+        auth: { status: "authenticated", email: "shared@example.com", accountIdentity },
+        usageLimits: {
+          checkedAt: "2026-09-10T00:00:00Z",
+          windows: [{ id: "cursor_api", kind: "monthly", label: "API", usedPercent }],
+        },
+      });
+    const accounts = collectLimitAccounts(
+      new Map([
+        [
+          EnvironmentId.make("local"),
+          {
+            entry: { target: { label: "Local" } },
+            serverConfig: { providers: [cursor("a", "team-a", 50)] },
+          },
+        ],
+        [
+          EnvironmentId.make("remote"),
+          {
+            entry: { target: { label: "Remote" } },
+            serverConfig: { providers: [cursor("alias", "team-a", 50), cursor("b", "team-b", 20)] },
+          },
+        ],
+      ]),
+    );
+    expect(accounts).toHaveLength(2);
+    expect(accounts.map((account) => account.environments.length)).toEqual([2, 1]);
+    const pools = collectLimitPools(accounts, now);
+    expect(pools[0]?.windows.map((window) => [window.label, window.members.length])).toEqual([
+      ["API", 2],
+    ]);
+  });
+});

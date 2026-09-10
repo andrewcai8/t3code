@@ -34,7 +34,13 @@ type Driver = ServerProvider["driver"];
 function useBarColor(driver: Driver): string | null {
   const colors = useProviderColors();
   const kind: UsageProviderKind | null =
-    driver === "codex" ? "codex" : driver === "claudeAgent" ? "claude" : null;
+    driver === "cursor"
+      ? "cursor"
+      : driver === "codex"
+        ? "codex"
+        : driver === "claudeAgent"
+          ? "claude"
+          : null;
   return kind ? colors[kind] : null;
 }
 

@@ -39,6 +39,8 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
+import { readCursorUsage } from "./cursorUsage.ts";
+
 import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -529,6 +531,17 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const cursor = yield* Effect.promise(() =>
+      readCursorUsage({
+        instances: settings.providerInstances,
+        environment: hostEnvironment,
+        input,
+        readFile: (filePath) => Effect.runPromise(fileSystem.readFileString(filePath)),
+        aggregator,
+      }),
+    );
+    sources.push(...cursor);
+
     const pruned = pruneScanCache(fileCache, {
       livePaths,
       walkedRoots,
@@ -562,10 +575,7 @@ export const make = Effect.gen(function* () {
    */
   const inflightScans = new Map<string, Deferred.Deferred<UsageSummary, UsageReadError>>();
 
-  const scanKey = (
-    input: UsageSummaryInput,
-    priceOverrides: ServerSettingsValue["usagePriceOverrides"],
-  ): string =>
+  const scanKey = (input: UsageSummaryInput, settings: ServerSettingsValue): string =>
     JSON.stringify([
       input.timeZone,
       input.sinceDay,
@@ -573,12 +583,13 @@ export const make = Effect.gen(function* () {
       input.resolution ?? "day",
       input.sinceTime ?? null,
       input.untilTime ?? null,
-      priceOverrides,
+      settings.usagePriceOverrides,
+      settings.providerInstances,
     ]);
 
   const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
     const settings = yield* readSettings;
-    const key = scanKey(input, settings.usagePriceOverrides);
+    const key = scanKey(input, settings);
     const deferred = yield* Effect.uninterruptible(
       Effect.gen(function* () {
         const existing = inflightScans.get(key);

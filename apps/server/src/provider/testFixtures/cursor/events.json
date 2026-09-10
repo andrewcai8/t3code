@@ -1,0 +1,49 @@
+{
+  "totalUsageEventsCount": 9537,
+  "usageEventsDisplay": [
+    {
+      "timestamp": "1789044068921",
+      "model": "grok-bot-default",
+      "kind": "USAGE_EVENT_KIND_INCLUDED_IN_ULTRA",
+      "requestsCosts": 2,
+      "usageBasedCosts": "-",
+      "isTokenBasedCall": true,
+      "tokenUsage": {
+        "inputTokens": 544,
+        "outputTokens": 31,
+        "cacheReadTokens": 76800,
+        "totalCents": 7.9534
+      },
+      "owningUser": "<redacted>",
+      "cursorTokenFee": 0,
+      "isChargeable": true,
+      "serviceAccountId": "<redacted>",
+      "isHeadless": false,
+      "chargedCents": 7.9534,
+      "conversationId": "<redacted>",
+      "subscriptionProductId": "<redacted>"
+    },
+    {
+      "timestamp": "1789044059098",
+      "model": "grok-bot-default",
+      "kind": "USAGE_EVENT_KIND_INCLUDED_IN_ULTRA",
+      "requestsCosts": 7.8,
+      "usageBasedCosts": "-",
+      "isTokenBasedCall": true,
+      "tokenUsage": {
+        "inputTokens": 76406,
+        "outputTokens": 301,
+        "cacheReadTokens": 512,
+        "totalCents": 31.1554
+      },
+      "owningUser": "<redacted>",
+      "cursorTokenFee": 0,
+      "isChargeable": true,
+      "serviceAccountId": "<redacted>",
+      "isHeadless": false,
+      "chargedCents": 31.1554,
+      "conversationId": "<redacted>",
+      "subscriptionProductId": "<redacted>"
+    }
+  ]
+}

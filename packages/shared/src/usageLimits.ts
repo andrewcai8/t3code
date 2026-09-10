@@ -102,7 +102,7 @@ export function collectLimitSources(
   const nativeAccounts = new Set<string>();
   for (const presentation of presentations.values()) {
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
-      const key = accountKey(provider.driver, provider.auth.email);
+      const key = accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity);
       if (
         key !== null &&
         provider.usageLimits?.windows.length &&
@@ -145,7 +145,12 @@ export function collectLimitSources(
   );
 }
 
-function accountKey(driver: ServerProvider["driver"], email: string | undefined): string | null {
+function accountKey(
+  driver: ServerProvider["driver"],
+  email: string | undefined,
+  identity?: string,
+): string | null {
+  if (identity) return `${driver}:account:${identity}`;
   const normalizedEmail = email?.trim().toLowerCase();
   return normalizedEmail ? `${driver}:${normalizedEmail}` : null;
 }
@@ -254,7 +259,7 @@ export function collectLimitAccounts(
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
       if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
       merge(
-        accountKey(provider.driver, provider.auth.email) ??
+        accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity) ??
           `${environmentId}:${provider.instanceId}`,
         {
           key: `${environmentId}:${provider.instanceId}`,
@@ -649,7 +654,7 @@ export function collectProviderUsageLimits(
   );
   const nativeAccounts = new Set(
     native.flatMap((provider) => {
-      const key = accountKey(provider.driver, provider.auth.email);
+      const key = accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity);
       return key && provider.usageLimits?.windows.length && !provider.usageLimits.unavailable
         ? [key]
         : [];
@@ -659,7 +664,7 @@ export function collectProviderUsageLimits(
   const notices: string[] = [];
   for (const provider of native) {
     if (!provider.usageLimits) continue;
-    const key = accountKey(provider.driver, provider.auth.email);
+    const key = accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity);
     const hubCredits = sources
       .flatMap((source) => source.accounts.map((account) => ({ source, account })))
       .filter(

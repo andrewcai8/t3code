@@ -181,6 +181,11 @@ function SegmentPopover({
       </div>
       <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
         <Row label="Left">{remaining}%</Row>
+        {window.budgetUsd ? (
+          <Row label="On-demand">
+            ${window.budgetUsd.used.toFixed(2)} / ${window.budgetUsd.limit.toFixed(2)}
+          </Row>
+        ) : null}
         {window.resetsAt ? (
           <Row label="Resets">
             {formatUpcomingTimestamp(window.resetsAt, timestampFormat, now)}

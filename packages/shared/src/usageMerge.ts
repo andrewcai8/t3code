@@ -79,6 +79,7 @@ export interface MergedUsage {
   readonly costQuality: CostQuality;
   /** Environments whose data was dropped as a duplicate of another's. */
   readonly duplicateSources: readonly string[];
+  readonly coverageNotices: readonly string[];
   readonly contributingEnvironments: readonly EnvironmentId[];
   readonly staleEnvironments: readonly EnvironmentId[];
 }
@@ -91,7 +92,11 @@ export interface MergedUsage {
  * home path, which is every Mac in a fleet, from collapsing into one source and
  * having one of them silently dropped.
  */
-function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
+function fingerprintKey(fingerprint: UsageSourceFingerprint, environmentId: EnvironmentId): string {
+  if ("kind" in fingerprint)
+    return fingerprint.kind === "account"
+      ? `cursor-account:${fingerprint.sourceId}`
+      : `unavailable:${environmentId}:${fingerprint.sourceId}`;
   return [
     fingerprint.hostId,
     fingerprint.provider,
@@ -116,18 +121,36 @@ function claimSources(environments: readonly EnvironmentUsage[]): {
   const ownerByFingerprint = new Map<string, EnvironmentId>();
   const duplicates: string[] = [];
 
-  const ordered = [...environments].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
-
-  for (const environment of ordered) {
-    for (const source of environment.summary.sources) {
-      if (source.status === "missing") continue;
-      const key = fingerprintKey(source.fingerprint);
-      if (ownerByFingerprint.has(key)) {
-        duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
-        continue;
-      }
-      ownerByFingerprint.set(key, environment.environmentId);
+  const candidates = environments.flatMap((environment) =>
+    environment.summary.sources.map((source) => ({ environment, source })),
+  );
+  const rank = { ok: 3, partial: 2, failed: 1, missing: 0 };
+  candidates.sort((a, b) => {
+    const identity = fingerprintKey(
+      a.source.fingerprint,
+      a.environment.environmentId,
+    ).localeCompare(fingerprintKey(b.source.fingerprint, b.environment.environmentId));
+    if (identity) return identity;
+    if ("kind" in a.source.fingerprint && "kind" in b.source.fingerprint) {
+      const quality = rank[b.source.status] - rank[a.source.status];
+      if (quality) return quality;
+      const freshness = (b.source.readAt ?? b.environment.summary.readAt).localeCompare(
+        a.source.readAt ?? a.environment.summary.readAt,
+      );
+      if (freshness) return freshness;
     }
+    return a.environment.environmentId.localeCompare(b.environment.environmentId);
+  });
+  for (const { environment, source } of candidates) {
+    if (source.status === "missing") continue;
+    const key = fingerprintKey(source.fingerprint, environment.environmentId);
+    if (ownerByFingerprint.has(key)) {
+      const label =
+        "kind" in source.fingerprint
+          ? source.fingerprint.label
+          : source.fingerprint.resolvedHomePath;
+      duplicates.push(`${environment.label}: ${label}`);
+    } else ownerByFingerprint.set(key, environment.environmentId);
   }
 
   return { ownerByFingerprint, duplicates };
@@ -142,13 +165,16 @@ function ownedContribution(
   readonly sessionsByProvider: ReadonlyMap<UsageProviderKind, number>;
 } {
   const ownedProviders = new Set<UsageProviderKind>();
+  const ownedAccounts = new Set<string>();
   const sessionsByProvider = new Map<UsageProviderKind, number>();
   for (const source of environment.summary.sources) {
     if (source.status === "missing") continue;
-    const key = fingerprintKey(source.fingerprint);
+    const key = fingerprintKey(source.fingerprint, environment.environmentId);
     if (ownerByFingerprint.get(key) === environment.environmentId) {
       const provider = source.fingerprint.provider;
-      ownedProviders.add(provider);
+      if ("kind" in source.fingerprint) {
+        if (source.fingerprint.kind === "account") ownedAccounts.add(source.fingerprint.sourceId);
+      } else ownedProviders.add(provider);
       // Distinct within a directory. Summing per-bucket session counts instead
       // would count a session once per day and model it spans.
       sessionsByProvider.set(
@@ -158,7 +184,11 @@ function ownedContribution(
     }
   }
   return {
-    buckets: environment.summary.buckets.filter((bucket) => ownedProviders.has(bucket.provider)),
+    buckets: environment.summary.buckets.filter((bucket) =>
+      bucket.provider === "cursor"
+        ? ownedAccounts.has(bucket.sourceId)
+        : ownedProviders.has(bucket.provider),
+    ),
     sessionsByProvider,
   };
 }
@@ -198,6 +228,7 @@ const EMPTY_MERGED: MergedUsage = {
     cacheSavingsUsd: 0,
   },
   duplicateSources: [],
+  coverageNotices: [],
   contributingEnvironments: [],
   staleEnvironments: [],
 };
@@ -230,6 +261,20 @@ export function mergeUsage(
   }
 
   const { ownerByFingerprint, duplicates } = claimSources(current);
+  const coverageNotices = current.flatMap((environment) =>
+    environment.summary.sources.flatMap((source) => {
+      if (
+        source.status === "ok" ||
+        source.status === "missing" ||
+        ownerByFingerprint.get(fingerprintKey(source.fingerprint, environment.environmentId)) !==
+          environment.environmentId
+      )
+        return [];
+      const label =
+        "kind" in source.fingerprint ? source.fingerprint.label : source.fingerprint.provider;
+      return [`${environment.label} · ${label}: ${source.message ?? "Usage is incomplete."}`];
+    }),
+  );
 
   let costUsd = 0;
   let uncachedInputTokens = 0;
@@ -420,6 +465,7 @@ export function mergeUsage(
       cacheSavingsUsd,
     },
     duplicateSources: duplicates,
+    coverageNotices,
     contributingEnvironments,
     staleEnvironments,
   };

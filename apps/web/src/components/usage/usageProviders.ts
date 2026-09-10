@@ -1,6 +1,6 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import { ClaudeAI, GrokIcon, type Icon, OpenAI } from "../Icons";
+import { ClaudeAI, CursorIcon, GrokIcon, type Icon, OpenAI } from "../Icons";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -24,6 +24,7 @@ export const PROVIDER_PRESENTATION = {
     color: "#d97757",
     mark: ClaudeAI,
   },
+  cursor: { label: "Cursor", color: "#758bd8", mark: CursorIcon },
   grok: {
     label: "Grok Build",
     // Contrast-aware neutral between the Codex series and muted chart chrome.

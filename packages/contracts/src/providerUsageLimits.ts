@@ -24,6 +24,12 @@ export const ServerProviderUsageWindow = Schema.Struct({
   usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
   resetsAt: Schema.optional(IsoDateTime),
   windowDurationMins: Schema.optional(NonNegativeInt),
+  budgetUsd: Schema.optional(
+    Schema.Struct({
+      used: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+      limit: Schema.Finite.check(Schema.isGreaterThan(0)),
+    }),
+  ),
 });
 export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
 

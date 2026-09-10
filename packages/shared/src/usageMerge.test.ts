@@ -1,17 +1,22 @@
 import {
   USAGE_CONTRACT_VERSION,
+  USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
-  type UsageBucket,
+  UsageBucket,
+  type UsageSource,
   type UsageDay,
   type UsageProviderKind,
   type UsageSummary,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mergeUsage, type EnvironmentUsage } from "./usageMerge.ts";
 
+const decodeBucket = Schema.decodeUnknownSync(UsageBucket);
+
 function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
-  return {
+  return decodeBucket({
     day: "2026-08-07" as UsageDay,
     provider: "claude",
     model: "claude-fable-5",
@@ -29,7 +34,7 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     unpricedRecords: 0,
     sessions: 1,
     ...overrides,
-  };
+  });
 }
 
 function summary(
@@ -158,7 +163,7 @@ describe("mergeUsage", () => {
           summary(
             [bucket()],
             [{ provider: "claude", hostId: "linux", homePath: "/b" }],
-            USAGE_CONTRACT_VERSION - 2,
+            USAGE_MERGE_COMPATIBLE_SINCE - 1,
           ),
         ),
       ],
@@ -338,4 +343,136 @@ describe("mergeUsage", () => {
     expect(merged.daily).toHaveLength(1);
     expect(merged.daily[0]?.costUsd).toBe(10);
   });
+});
+
+describe("Cursor account ownership", () => {
+  function account(
+    id: string,
+    status: UsageSource["status"] = "ok",
+    readAt = "2026-09-10T00:00:00Z",
+  ): UsageSource {
+    return {
+      fingerprint: { kind: "account", provider: "cursor", sourceId: id, label: id },
+      status,
+      readAt,
+      scannedFiles: 0,
+      skippedFiles: 0,
+      malformedRecords: 0,
+      distinctSessions: status === "failed" ? 0 : 1,
+      message: status === "ok" ? null : "Incomplete account",
+    };
+  }
+  function accountSummary(ids: readonly string[], sources: readonly UsageSource[]) {
+    return {
+      ...summary(
+        ids.map((id) => bucket({ provider: "cursor", sourceId: id })),
+        [],
+      ),
+      sources,
+    };
+  }
+  it("counts overlapping account sets once without dropping the second account on a host", () => {
+    const merged = mergeUsage(
+      [
+        environment("host-a", accountSummary(["a"], [account("a")])),
+        environment("host-b", accountSummary(["a", "b"], [account("a"), account("b")])),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.costUsd).toBe(20);
+    expect(merged.sessions).toBe(2);
+    expect(merged.records).toBe(10);
+    expect(merged.providers.map((provider) => provider.provider)).toEqual(["cursor"]);
+  });
+  it("selects complete then fresh account copies even when interleaved with physical sources", () => {
+    const physical = summary(
+      [bucket()],
+      [{ provider: "claude", hostId: "host-a", homePath: "/claude" }],
+    );
+    const broken = accountSummary(["a"], [account("a", "failed", "2026-09-11T00:00:00Z")]);
+    const partial = accountSummary(["a"], [account("a", "partial", "2026-09-12T00:00:00Z")]);
+    const complete = accountSummary(["a"], [account("a")]);
+    const newest = {
+      ...accountSummary(["a"], [account("a", "ok", "2026-09-10T12:00:00Z")]),
+      buckets: [bucket({ provider: "cursor", sourceId: "a", costUsd: 30 })],
+    };
+    const candidates = [
+      environment("a", {
+        ...broken,
+        buckets: [...broken.buckets, ...physical.buckets],
+        sources: [...broken.sources, ...physical.sources],
+      }),
+      environment("b", partial),
+      environment("c", complete),
+      environment("d", newest),
+    ];
+    for (const inputs of [candidates, candidates.toReversed()]) {
+      const merged = mergeUsage(inputs, USAGE_CONTRACT_VERSION);
+      expect(merged.costUsd).toBe(40);
+      expect(merged.coverageNotices).toEqual([]);
+      expect(merged.contributingEnvironments).toContain("d");
+    }
+  });
+  it("reports a partial winning source and rejects unreferenced Cursor buckets", () => {
+    const merged = mergeUsage(
+      [environment("host", accountSummary(["a", "unclaimed"], [account("a", "partial")]))],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.costUsd).toBe(10);
+    expect(merged.coverageNotices).toEqual(["host · a: Incomplete account"]);
+    expect(() => bucket({ provider: "cursor" })).toThrow();
+  });
+  it("keeps v4 and v5 transcript summaries alongside v6 account usage", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "v4",
+          summary([bucket()], [{ provider: "claude", hostId: "old4", homePath: "/claude" }], 4),
+        ),
+        environment(
+          "v5",
+          summary(
+            [bucket({ provider: "grok" })],
+            [{ provider: "grok", hostId: "old5", homePath: "/grok" }],
+            5,
+          ),
+        ),
+        environment("v6", accountSummary(["a"], [account("a")])),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.costUsd).toBe(30);
+    expect(merged.staleEnvironments).toEqual([]);
+    expect(merged.providers.map((provider) => provider.provider)).toEqual([
+      "claude",
+      "grok",
+      "cursor",
+    ]);
+  });
+});
+
+it("keeps unidentified Cursor instances local to each environment and admits no history from them", () => {
+  const unavailable: UsageSource = {
+    fingerprint: { kind: "unavailable", provider: "cursor", sourceId: "cursor", label: "Cursor" },
+    status: "failed",
+    scannedFiles: 0,
+    skippedFiles: 0,
+    malformedRecords: 0,
+    distinctSessions: 0,
+    message: "Login unavailable",
+  };
+  const unavailableSummary = {
+    ...summary([bucket({ provider: "cursor", sourceId: "cursor" })], []),
+    sources: [unavailable],
+  };
+  const result = mergeUsage(
+    [environment("local", unavailableSummary), environment("remote", unavailableSummary)],
+    USAGE_CONTRACT_VERSION,
+  );
+  expect(result.costUsd).toBe(0);
+  expect(result.coverageNotices).toEqual([
+    "local · Cursor: Login unavailable",
+    "remote · Cursor: Login unavailable",
+  ]);
+  expect(result.duplicateSources).toEqual([]);
 });
