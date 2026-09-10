@@ -60,6 +60,7 @@ const Page = Schema.Struct({
   totalUsageEventsCount: Count.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
   usageEventsDisplay: Schema.optional(Schema.Array(Schema.Unknown)),
 });
+type CursorPage = typeof Page.Type;
 const AuthFile = Schema.Struct({ accessToken: Schema.NonEmptyString });
 const decodeAuth = Schema.decodeUnknownSync(Schema.fromJsonString(AuthFile));
 const decodeMe = Schema.decodeUnknownSync(Me);
@@ -86,6 +87,7 @@ const TTL_MS = 60_000;
 const MAX_CACHE_ENTRIES = 128;
 const PAGE_SIZE = 500;
 const MAX_PAGES = 40;
+const PAGE_CONCURRENCY = 4;
 const MAX_HISTORY_MS = 30_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -288,57 +290,80 @@ export function makeCursorDashboardReader(
               : Date.parse(`${input.untilDay}T00:00:00Z`) + 2 * DAY_MS;
           const signal = AbortSignal.timeout(MAX_HISTORY_MS);
           const events: CursorUsageEvent[] = [];
-          let expected: number | undefined;
+          let expected: number;
           let seen = 0;
           let malformedRecords = 0;
           let message: string | null = null;
-          for (let page = 1; page <= MAX_PAGES; page++) {
-            try {
-              const result = decodePage(
-                await request(
-                  "GetFilteredUsageEvents",
-                  {
-                    page,
-                    pageSize: PAGE_SIZE,
-                    startDate: String(startDate),
-                    endDate: String(endDate),
-                    ...(account.teamId === undefined ? {} : { teamId: account.teamId }),
-                  },
-                  signal,
-                ),
-              );
-              if (expected !== undefined && expected !== result.totalUsageEventsCount)
-                message = "Cursor history changed during pagination; coverage may be incomplete.";
-              expected = result.totalUsageEventsCount;
-              const rows = result.usageEventsDisplay ?? [];
-              for (const row of rows.slice(0, PAGE_SIZE)) {
-                try {
-                  const event = decodeEvent(row);
-                  if (!event.tokenUsage) malformedRecords++;
-                  events.push(event);
-                } catch {
-                  malformedRecords++;
-                }
-              }
-              seen += rows.length;
-              if (rows.length > PAGE_SIZE) {
-                message = "Cursor returned an oversized history page; coverage is incomplete.";
-                break;
-              }
-              if (seen > expected)
-                message =
-                  "Cursor returned more requests than its reported count; coverage may be incomplete.";
-              if (seen >= expected) break;
-              if (rows.length === 0 || page === MAX_PAGES) {
-                message = "Cursor history reached the read limit; coverage is incomplete.";
-                break;
-              }
-            } catch {
-              if (page === 1) throw new Error("Cursor history could not be read for this account.");
-              message = "A later Cursor history page could not be read; totals are partial.";
-              break;
-            }
+          const requestPage = async (page: number) =>
+            decodePage(
+              await request(
+                "GetFilteredUsageEvents",
+                {
+                  page,
+                  pageSize: PAGE_SIZE,
+                  startDate: String(startDate),
+                  endDate: String(endDate),
+                  ...(account.teamId === undefined ? {} : { teamId: account.teamId }),
+                },
+                signal,
+              ),
+            );
+          let firstPage: CursorPage;
+          try {
+            firstPage = await requestPage(1);
+          } catch {
+            throw new Error("Cursor history could not be read for this account.");
           }
+          expected = firstPage.totalUsageEventsCount;
+          const pages: Array<CursorPage | null> = [firstPage];
+          let fetchedRows = firstPage.usageEventsDisplay?.length ?? 0;
+          let laterPageFailed = false;
+          for (
+            let first = 2;
+            first <= MAX_PAGES && fetchedRows < expected;
+            first += PAGE_CONCURRENCY
+          ) {
+            const batchSize = Math.min(
+              PAGE_CONCURRENCY,
+              MAX_PAGES - first + 1,
+              Math.max(1, expected - fetchedRows),
+            );
+            const batch = await Promise.all(
+              Array.from({ length: batchSize }, (_, i) => requestPage(first + i).catch(() => null)),
+            );
+            pages.push(...batch);
+            for (const page of batch) {
+              if (page === null) laterPageFailed = true;
+              else fetchedRows += page.usageEventsDisplay?.length ?? 0;
+            }
+            if (laterPageFailed) break;
+          }
+          for (const result of pages) {
+            if (result === null) {
+              message = "A later Cursor history page could not be read; totals are partial.";
+              continue;
+            }
+            if (result.totalUsageEventsCount !== expected)
+              message = "Cursor history changed during pagination; coverage may be incomplete.";
+            const rows = result.usageEventsDisplay ?? [];
+            for (const row of rows.slice(0, PAGE_SIZE)) {
+              try {
+                const event = decodeEvent(row);
+                if (!event.tokenUsage) malformedRecords++;
+                events.push(event);
+              } catch {
+                malformedRecords++;
+              }
+            }
+            seen += rows.length;
+            if (rows.length > PAGE_SIZE)
+              message = "Cursor returned an oversized history page; coverage is incomplete.";
+            if (seen > expected)
+              message =
+                "Cursor returned more requests than its reported count; coverage may be incomplete.";
+          }
+          if (seen < expected && !laterPageFailed)
+            message = "Cursor history reached the read limit; coverage is incomplete.";
           if (malformedRecords > 0)
             message ??=
               "Some Cursor requests did not include readable token usage; totals are partial.";

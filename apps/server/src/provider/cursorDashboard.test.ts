@@ -164,6 +164,25 @@ describe("Cursor dashboard", () => {
     );
   });
 
+  it("fetches remaining history pages concurrently after the first page", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const api = makeCursorDashboardReader({
+      fetch: async (url) => {
+        if (String(url).endsWith("GetMe")) return Response.json(me);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await Promise.resolve();
+        active -= 1;
+        return Response.json({ totalUsageEventsCount: 4, usageEventsDisplay: [event] });
+      },
+    });
+
+    const history = await (await api(environment)).readHistory(input);
+    expect(history.events).toHaveLength(4);
+    expect(maxActive).toBe(3);
+  });
+
   it("bounds reads at 40 pages and retries partial reads", async () => {
     const api = reader({
       page: () => ({ totalUsageEventsCount: 99999, usageEventsDisplay: [event] }),

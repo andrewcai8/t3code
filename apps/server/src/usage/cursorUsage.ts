@@ -4,6 +4,9 @@ import { readCursorDashboard, type CursorHistory } from "../provider/cursorDashb
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import type { UsageAggregator } from "./usageAggregation.ts";
 
+type ProviderInstance =
+  ServerSettings["providerInstances"][keyof ServerSettings["providerInstances"]];
+
 /** Resolves local aliases before contributing each account's requests once. */
 export async function readCursorUsage(input: {
   readonly instances: ServerSettings["providerInstances"];
@@ -14,8 +17,8 @@ export async function readCursorUsage(input: {
   readonly dashboard?: typeof readCursorDashboard;
 }): Promise<readonly UsageSource[]> {
   const accounts = new Map<string, { source: UsageSource; history: CursorHistory | null }>();
-  for (const [instanceId, instance] of Object.entries(input.instances)) {
-    if (instance.driver !== "cursor" || instance.enabled === false) continue;
+  const readInstance = async ([instanceId, instance]: readonly [string, ProviderInstance]) => {
+    if (instance.driver !== "cursor" || instance.enabled === false) return null;
     let source: UsageSource = {
       fingerprint: {
         kind: "unavailable",
@@ -32,6 +35,7 @@ export async function readCursorUsage(input: {
         "Cursor account usage is unavailable. Check this instance's existing login and file credential store.",
     };
     let key = `unavailable:${instanceId}`;
+    let retry: (() => Promise<CursorHistory>) | undefined;
     try {
       const dashboard = await (input.dashboard ?? readCursorDashboard)(
         mergeProviderInstanceEnvironment(instance.environment, input.environment),
@@ -48,22 +52,57 @@ export async function readCursorUsage(input: {
           label: instance.displayName || "Cursor account",
         },
       };
-      if (accounts.get(key)?.source.status === "ok") continue;
       const history = await dashboard.readHistory(input.input);
-      if (history.status === "ok" || !accounts.get(key)?.history) {
-        accounts.set(key, {
-          source: {
-            ...source,
-            status: history.status,
-            readAt: history.readAt,
-            message: history.message,
-            malformedRecords: history.malformedRecords,
-          },
-          history,
-        });
-      }
+      retry = () => dashboard.readHistory(input.input);
+      return {
+        key,
+        source: {
+          ...source,
+          status: history.status,
+          readAt: history.readAt,
+          message: history.message,
+          malformedRecords: history.malformedRecords,
+        },
+        history,
+        retry,
+      };
     } catch {
-      if (!accounts.has(key)) accounts.set(key, { source, history: null });
+      return { key, source, history: null, retry };
+    }
+  };
+
+  // Cursor history is remote and each configured account is independent. Read
+  // accounts together so one slow dashboard cannot hold every other account
+  // behind it; the ordered merge below keeps alias precedence deterministic.
+  const results = await Promise.all(Object.entries(input.instances).map(readInstance));
+  for (const result of results) {
+    if (result === null) continue;
+    const previous = accounts.get(result.key);
+    if (previous?.source.status === "ok") continue;
+    let history = result.history;
+    if (history?.status !== "ok" && previous?.history !== undefined && previous.history !== null) {
+      try {
+        const retried = await result.retry?.();
+        if (retried?.status === "ok") history = retried;
+      } catch {
+        // Keep the first partial result when the alias retry also fails.
+      }
+    }
+    if (history?.status === "ok" || previous?.history === undefined) {
+      const nextSource =
+        history !== null && history !== result.history
+          ? {
+              ...result.source,
+              status: history.status,
+              readAt: history.readAt,
+              message: history.message,
+              malformedRecords: history.malformedRecords,
+            }
+          : result.source;
+      accounts.set(result.key, {
+        source: nextSource,
+        history,
+      });
     }
   }
   const sources: UsageSource[] = [];
