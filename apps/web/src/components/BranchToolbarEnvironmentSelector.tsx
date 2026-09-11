@@ -1,8 +1,11 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { ScaleIcon } from "lucide-react";
+import { CloudIcon, ScaleIcon } from "lucide-react";
 import { memo, useMemo } from "react";
 
 import type { EnvironmentOption } from "./BranchToolbar.logic";
+
+/** Not an environment id: the machine it names has yet to be created. */
+export const CREATE_CLOUD_VALUE = "create-cloud-environment";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { composerFloatingLayerProps } from "./chat/composerEventScope";
 import {
@@ -24,6 +27,10 @@ interface BranchToolbarEnvironmentSelectorProps {
   // Absent when there is only one environment to show: the indicator still
   // renders (as a static label) so remote projects are always identifiable.
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  // Absent where an environment cannot be created, which is any install
+  // without a configured cloud manager.
+  onCreateCloudEnvironment?: (() => void) | undefined;
+  creatingCloudEnvironment?: boolean;
 }
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -31,6 +38,8 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   onAutoEnvironment,
   envLocked,
   environmentId,
+  onCreateCloudEnvironment,
+  creatingCloudEnvironment,
   availableEnvironments,
   onEnvironmentChange,
 }: BranchToolbarEnvironmentSelectorProps) {
@@ -85,9 +94,19 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     <Select
       modal={false}
       value={autoEnvironmentLabel ? "auto" : environmentId}
-      onValueChange={(value) =>
-        value === "auto" ? onAutoEnvironment?.() : onEnvironmentChange(value as EnvironmentId)
-      }
+      onValueChange={(value) => {
+        // A sentinel rather than an environment id: the machine this names
+        // does not exist yet, which is the whole point of choosing it.
+        if (value === CREATE_CLOUD_VALUE) {
+          onCreateCloudEnvironment?.();
+          return;
+        }
+        if (value === "auto") {
+          onAutoEnvironment?.();
+          return;
+        }
+        onEnvironmentChange(value as EnvironmentId);
+      }}
       items={environmentItems}
     >
       <SelectTrigger
@@ -141,6 +160,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               </span>
             </SelectItem>
           ))}
+          {onCreateCloudEnvironment ? (
+            <SelectItem value={CREATE_CLOUD_VALUE} disabled={creatingCloudEnvironment === true}>
+              <span className="inline-flex items-center gap-1.5">
+                <CloudIcon className="size-3" aria-hidden="true" />
+                {creatingCloudEnvironment ? "Creating cloud machine…" : "New cloud machine (E2B)"}
+              </span>
+            </SelectItem>
+          ) : null}
         </SelectGroup>
       </SelectPopup>
     </Select>

@@ -2,6 +2,7 @@ import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environ
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   ChevronDownIcon,
+  CloudIcon,
   FolderGit2Icon,
   FolderGitIcon,
   FolderIcon,
@@ -26,7 +27,10 @@ import {
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
-import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
+import {
+  BranchToolbarEnvironmentSelector,
+  CREATE_CLOUD_VALUE,
+} from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { Button } from "./ui/button";
 import {
@@ -64,6 +68,8 @@ interface BranchToolbarProps {
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  onCreateCloudEnvironment?: (() => void) | undefined;
+  creatingCloudEnvironment?: boolean;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
 }
@@ -78,6 +84,8 @@ interface MobileRunContextSelectorProps {
   showEnvironmentPicker: boolean;
   showEnvironmentIndicator: boolean;
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
+  onCreateCloudEnvironment: (() => void) | undefined;
+  creatingCloudEnvironment: boolean | undefined;
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   onEnvModeChange: (mode: EnvMode) => void;
@@ -95,6 +103,8 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   showEnvironmentPicker,
   showEnvironmentIndicator,
   onEnvironmentChange,
+  onCreateCloudEnvironment,
+  creatingCloudEnvironment,
   effectiveEnvMode,
   activeWorktreePath,
   onEnvModeChange,
@@ -180,11 +190,17 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
               <MenuGroupLabel>Run on</MenuGroupLabel>
               <MenuRadioGroup
                 value={autoEnvironmentLabel ? "auto" : environmentId}
-                onValueChange={(value) =>
-                  value === "auto"
-                    ? onAutoEnvironment?.()
-                    : onEnvironmentChange(value as EnvironmentId)
-                }
+                onValueChange={(value) => {
+                  if (value === CREATE_CLOUD_VALUE) {
+                    onCreateCloudEnvironment?.();
+                    return;
+                  }
+                  if (value === "auto") {
+                    onAutoEnvironment?.();
+                    return;
+                  }
+                  onEnvironmentChange(value as EnvironmentId);
+                }}
               >
                 {onAutoEnvironment && (
                   <MenuRadioItem
@@ -214,6 +230,21 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                     </span>
                   </MenuRadioItem>
                 ))}
+                {onCreateCloudEnvironment ? (
+                  <MenuRadioItem
+                    value={CREATE_CLOUD_VALUE}
+                    disabled={envLocked || creatingCloudEnvironment === true}
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <CloudIcon className="size-3" aria-hidden="true" />
+                      <span className="min-w-0 truncate">
+                        {creatingCloudEnvironment
+                          ? "Creating cloud machine…"
+                          : "New cloud machine (E2B)"}
+                      </span>
+                    </span>
+                  </MenuRadioItem>
+                ) : null}
               </MenuRadioGroup>
             </MenuGroup>
             <MenuSeparator />
@@ -455,6 +486,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   onComposerFocusRequest,
   availableEnvironments,
   onEnvironmentChange,
+  onCreateCloudEnvironment,
+  creatingCloudEnvironment,
   composerControlsHostRef,
   contextStripVisible = true,
 }: BranchToolbarProps) {
@@ -556,6 +589,8 @@ export const BranchToolbar = memo(function BranchToolbar({
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={showEnvironmentIndicator}
             onEnvironmentChange={onEnvironmentChange}
+            onCreateCloudEnvironment={onCreateCloudEnvironment}
+            creatingCloudEnvironment={creatingCloudEnvironment}
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             onEnvModeChange={onEnvModeChange}
@@ -581,6 +616,8 @@ export const BranchToolbar = memo(function BranchToolbar({
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
+                {...(onCreateCloudEnvironment ? { onCreateCloudEnvironment } : {})}
+                {...(creatingCloudEnvironment !== undefined ? { creatingCloudEnvironment } : {})}
               />
               {showGitControls ? (
                 <Separator

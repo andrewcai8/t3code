@@ -307,6 +307,7 @@ import {
   primaryServerSettingsAtom,
   serverEnvironment,
 } from "../state/server";
+import { connectPairing } from "../connection/onboarding";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import {
@@ -4214,6 +4215,60 @@ export default function ChatView(props: ChatViewProps) {
   const linkedThreadPullRequest =
     activeThreadMetadata?.linkedPullRequest ?? activeThreadMetadata?.branchPullRequest ?? null;
   const activeProjectRepository = activeProject?.repositoryIdentity?.displayName ?? null;
+
+  /**
+   * Ask the primary environment for a cloud machine and run this draft on it.
+   *
+   * Choosing where to run is a composer decision, so creating somewhere to run
+   * belongs beside it rather than in settings: the moment someone wants a cloud
+   * machine is the moment they are starting work, not configuring an app.
+   *
+   * The repository comes from the project so the machine arrives with the code
+   * already on it. Without that a new machine is an empty box, and the person
+   * who asked for it has to go and fill it before it is worth anything.
+   */
+  const provisionCloudEnvironment = useAtomCommand(serverEnvironment.provisionEnvironment, {
+    reportFailure: false,
+  });
+  const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
+  const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
+  const cloudAccount = useMemo(() => {
+    const providers = primaryEnvironment?.serverConfig?.providers ?? [];
+    return providers.find((provider) => provider.enabled && provider.driver === "codex") ?? null;
+  }, [primaryEnvironment]);
+  const canCreateCloudEnvironment =
+    primaryEnvironmentId !== null &&
+    primaryEnvironment?.serverConfig?.environmentControl === true &&
+    cloudAccount !== null;
+  const handleCreateCloudEnvironment = useCallback(async () => {
+    if (!canCreateCloudEnvironment || primaryEnvironmentId === null || !cloudAccount) return;
+    const identity = activeProject?.repositoryIdentity;
+    const repository =
+      identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+    setCreatingCloudEnvironment(true);
+    try {
+      const created = await provisionCloudEnvironment({
+        environmentId: primaryEnvironmentId,
+        input: {
+          provider: "e2b" as const,
+          providerInstanceId: cloudAccount.instanceId,
+          ...(repository ? { repository } : {}),
+        },
+      });
+      if (AsyncResult.isFailure(created)) return;
+      if (created.value.kind !== "provisioned") return;
+      await connectCloudPairing({ pairingUrl: created.value.environment.pairingUrl });
+    } finally {
+      setCreatingCloudEnvironment(false);
+    }
+  }, [
+    activeProject,
+    canCreateCloudEnvironment,
+    cloudAccount,
+    connectCloudPairing,
+    primaryEnvironmentId,
+    provisionCloudEnvironment,
+  ]);
   const linkedThreadPullRequestKey = linkedThreadPullRequest
     ? JSON.stringify([
         linkedThreadPullRequest.projectId,
@@ -8645,6 +8700,14 @@ export default function ChatView(props: ChatViewProps) {
                                     : undefined
                                 }
                                 availableEnvironments={logicalProjectEnvironments}
+                                {...(canCreateCloudEnvironment
+                                  ? {
+                                      onCreateCloudEnvironment: () => {
+                                        void handleCreateCloudEnvironment();
+                                      },
+                                    }
+                                  : {})}
+                                creatingCloudEnvironment={creatingCloudEnvironment}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />

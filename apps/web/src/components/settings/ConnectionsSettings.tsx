@@ -1,5 +1,4 @@
 import { CloudComputeControls } from "./CloudComputeControls";
-import { NewCloudEnvironment } from "./NewCloudEnvironment";
 import { ChevronsLeftRightEllipsisIcon, PlusIcon, QrCodeIcon, TerminalIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -3610,10 +3609,6 @@ export function ConnectionsSettings() {
                 void handleConnectSavedBackend(id);
                 return true;
               }}
-            />
-            <NewCloudEnvironment
-              managerId={environment.environmentId}
-              managerLabel={environment.label}
             />
           </div>
         ))}
