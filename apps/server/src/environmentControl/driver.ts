@@ -1,6 +1,7 @@
 // @effect-diagnostics globalFetch:off - this injected Promise driver owns SDK and controller HTTP I/O.
 // @effect-diagnostics nodeBuiltinImport:off - provisioning reads account credentials at the same Promise boundary.
 // @effect-diagnostics globalDate:off - the readiness deadline is wall-clock polling around that boundary.
+// @effect-diagnostics cryptoRandomUUID:off - the environment ID is written into a sandbox, not Effect state.
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -258,13 +259,34 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         );
         if (cloned.exitCode !== 0) throw new Error("Repository clone failed");
       } else {
+        // The template already ships an initialised workspace, so this only
+        // has to cover a template that does not.
         await run(
-          "mkdir -p /home/user/work && cd /home/user/work && git init -q && " +
+          "mkdir -p /home/user/work && cd /home/user/work && " +
+            "(git rev-parse --git-dir >/dev/null 2>&1 || (git init -q && " +
             "git config user.email agent@t3.local && git config user.name t3 && " +
-            "echo '# workspace' > README.md && git add -A && git commit -qm init",
+            "echo '# workspace' > README.md && git add -A && git commit -qm init))",
         );
       }
 
+      // Every sandbox from the template inherits one environment ID, and
+      // clients key environments by it, so each environment has to be given its
+      // own before anything pairs with it.
+      //
+      // This costs the full first-start load, around five minutes. The template
+      // captures its server already running and answering in under two seconds,
+      // but that warmth is the captured process's own memory: the page cache is
+      // not restored with it, so a replacement process reads the 1.5 GB install
+      // from cold disk exactly as if nothing had been captured. Reusing the
+      // captured server instead would need the identity to be settable without
+      // a restart, which the server does not support today.
+      // The bracket keeps the pattern from matching the command carrying it,
+      // which would otherwise make this kill its own shell.
+      await run("pkill -f '[t]3 serve' || true");
+      await sandbox.files.write(
+        "/home/user/.t3/userdata/environment-id",
+        `${globalThis.crypto.randomUUID()}\n`,
+      );
       // Binding to every interface is what lets the sandbox's own hostname
       // reach the server; the environment never joins a relay.
       await sandbox.commands
