@@ -156,6 +156,21 @@ async function prepare(
     );
   }
 
+  // A checkout is not a working tree: whatever the repository refuses to carry
+  // has to arrive separately or nothing in it runs.
+  for (const file of provisioning.workspaceFiles ?? []) {
+    const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
+      throw new ProvisionRefused(
+        "unconfigured",
+        `Workspace file '${file.source}' is configured but missing on this machine.`,
+      );
+    });
+    const target = NodePath.posix.join(projectDir, file.destination);
+    await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
+    await sandbox.files.write(target, contents);
+    await run(`chmod 600 ${target}`);
+  }
+
   // Every sandbox from the template inherits one environment ID, and clients
   // key environments by it, so each environment has to be given its own before
   // anything pairs with it.

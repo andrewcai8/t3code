@@ -41,3 +41,15 @@ it("carries the reason a request was declined", () => {
   expect(refusal.reason).toBe("credentials");
   expect(refusal.message).toContain("codex_x");
 });
+
+it("names a missing workspace file rather than provisioning a broken checkout", () => {
+  // A configured file that is absent means the environment would come up
+  // looking fine and fail the first time anything ran. Saying so beats
+  // handing back an environment the caller has to debug.
+  const refusal = new ProvisionRefused(
+    "unconfigured",
+    "Workspace file '/secrets/backend.env' is configured but missing on this machine.",
+  );
+  expect(refusal.reason).toBe("unconfigured");
+  expect(refusal.message).toContain("/secrets/backend.env");
+});

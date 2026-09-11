@@ -34,6 +34,24 @@ const Provisioning = Schema.Struct({
   templateId: TrimmedNonEmptyString,
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Files copied into a new environment's checkout, by path within it.
+   *
+   * A clone is not a working tree: a backend needs its dotenv before anything
+   * runs. These are named one by one rather than discovered, because the files
+   * worth copying here are exactly the ones a repository refuses to carry, and
+   * an environment holding them can reach whatever they unlock.
+   */
+  workspaceFiles: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        /** Absolute path on the machine running the server. */
+        source: TrimmedNonEmptyString,
+        /** Path relative to the checkout root. */
+        destination: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
 });
 export type Provisioning = typeof Provisioning.Type;
 
