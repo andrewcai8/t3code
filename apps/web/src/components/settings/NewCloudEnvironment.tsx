@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { type EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useState } from "react";
+import { connectPairing as connectPairingAtom } from "../../connection/onboarding";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -15,8 +16,12 @@ import { Label } from "../ui/label";
  * advance. This asks for one that does not exist yet, which is what someone
  * wants when they are about to start work rather than resume it.
  *
- * The result is a pairing token, and a pairing token is single use, so it is
- * shown rather than spent: pairing here would hand back a dead link.
+ * The environment is added here rather than handed back as a link to paste.
+ * A pairing token is single use, so showing it means someone has to spend it
+ * by hand before the environment exists anywhere they can see it — which is a
+ * strange thing to ask of the person who just pressed a button asking for one.
+ * The URL is still offered if adding it fails, since the token is only spent
+ * on success.
  */
 export function NewCloudEnvironment({
   managerId,
@@ -29,6 +34,7 @@ export function NewCloudEnvironment({
   const provision = useAtomCommand(serverEnvironment.provisionEnvironment, {
     reportFailure: false,
   });
+  const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const accounts = (config?.providers ?? []).filter(
     (provider) => provider.enabled && provider.driver === "codex",
   );
@@ -62,8 +68,16 @@ export function NewCloudEnvironment({
         setMessage(result.value.message);
         return;
       }
-      setPairingUrl(result.value.environment.pairingUrl);
-      setMessage("Ready. Open this link, or paste it into Add environment, to connect.");
+      const url = result.value.environment.pairingUrl;
+      const added = await connectPairing({ pairingUrl: url });
+      if (AsyncResult.isFailure(added)) {
+        // The token is spent only on success, so the link is still worth
+        // offering when adding it here did not work.
+        setPairingUrl(url);
+        setMessage("Created, but could not be added automatically. Use this link instead.");
+        return;
+      }
+      setMessage(`Added ${result.value.environment.providerInstanceId}. It is ready to use.`);
     } finally {
       setBusy(false);
     }
