@@ -28,3 +28,46 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
   "EnvironmentControlError",
   { message: Schema.String },
 ) {}
+
+/**
+ * A cloud environment asked for on demand, rather than declared in advance.
+ *
+ * The managed environments above are long-lived machines an operator names in
+ * configuration. This is the other shape: a caller picks a provider and an
+ * account, and gets back a fresh environment to pair with. The two share a
+ * provider vocabulary and nothing else.
+ */
+export const EnvironmentProvisionInput = Schema.Struct({
+  provider: Schema.Literals(["e2b"]),
+  /** Which provider account the environment should run its agent on. */
+  providerInstanceId: TrimmedNonEmptyString,
+  /** `owner/name`; omitted leaves the environment with an empty workspace. */
+  repository: Schema.optional(TrimmedNonEmptyString),
+  branch: Schema.optional(TrimmedNonEmptyString),
+});
+export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
+
+export const ProvisionedEnvironment = Schema.Struct({
+  sandboxId: TrimmedNonEmptyString,
+  /** Single use, and the only way a client can reach the new environment. */
+  pairingUrl: TrimmedNonEmptyString,
+  projectDir: TrimmedNonEmptyString,
+  providerInstanceId: TrimmedNonEmptyString,
+});
+export type ProvisionedEnvironment = typeof ProvisionedEnvironment.Type;
+
+export const EnvironmentProvisionResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("provisioned"), environment: ProvisionedEnvironment }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    /**
+     * `unconfigured` means this install has no provisioning template, which is
+     * the ordinary state of a machine that never set cloud environments up.
+     * `credentials` means the named account has none on this machine, and
+     * `failed` covers a provider that accepted the request and did not finish.
+     */
+    reason: Schema.Literals(["unconfigured", "credentials", "unsupported", "failed"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionResult = typeof EnvironmentProvisionResult.Type;

@@ -24,8 +24,22 @@ const Target = Schema.Struct({
     }),
   ]),
 });
+/**
+ * What an install needs to create environments on demand, as opposed to
+ * controlling ones it already declares. Absent on a machine that only manages
+ * named targets, which is why provisioning refuses with `unconfigured` rather
+ * than failing.
+ */
+const Provisioning = Schema.Struct({
+  templateId: TrimmedNonEmptyString,
+  /** Required only for cloning private repositories into a new environment. */
+  githubToken: Schema.optional(TrimmedNonEmptyString),
+});
+export type Provisioning = typeof Provisioning.Type;
+
 export const EnvironmentControlConfig = Schema.Struct({
   e2bApiKey: TrimmedNonEmptyString,
+  provisioning: Schema.optional(Provisioning),
   namespaceToken: Schema.optional(TrimmedNonEmptyString),
   broker: Schema.Struct({
     ...E2bIdentity.fields,

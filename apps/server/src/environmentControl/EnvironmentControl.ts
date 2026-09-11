@@ -4,6 +4,8 @@ import {
   type ComputeState,
   type EnvironmentId,
   type EnvironmentControlResult,
+  type EnvironmentProvisionInput,
+  type EnvironmentProvisionResult,
   type ManagedEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -11,7 +13,12 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ServerConfig from "../config.ts";
 import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
-import { createCloudDriver, type CloudDriver } from "./driver.ts";
+import {
+  createCloudDriver,
+  ProvisionRefused,
+  type CloudDriver,
+  type ProvisionRequest,
+} from "./driver.ts";
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -98,6 +105,23 @@ export function createEnvironmentControl(
     list: () => Promise.all(targets.map(snapshot)),
     start: (id: EnvironmentId) => command(id, "start"),
     stop: (id: EnvironmentId) => command(id, "stop"),
+    // Provisioning does not touch the declared targets, so it needs none of
+    // the fencing above: there is no existing environment to race with. A
+    // declined request is an answer the caller can act on, so it is mapped
+    // here rather than collapsing into "the provider is unavailable".
+    provision: async (request: ProvisionRequest): Promise<EnvironmentProvisionResult> => {
+      try {
+        const environment = await driver.provision(request);
+        return {
+          kind: "provisioned",
+          environment: { ...environment, providerInstanceId: request.providerInstanceId },
+        };
+      } catch (cause) {
+        if (cause instanceof ProvisionRefused)
+          return { kind: "refused", reason: cause.reason, message: cause.message };
+        throw cause;
+      }
+    },
   };
 }
 
@@ -111,6 +135,9 @@ export class EnvironmentControl extends Context.Service<
     readonly stop: (
       id: EnvironmentId,
     ) => Effect.Effect<EnvironmentControlResult, EnvironmentControlError>;
+    readonly provision: (
+      input: EnvironmentProvisionInput,
+    ) => Effect.Effect<EnvironmentProvisionResult, EnvironmentControlError>;
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
@@ -145,6 +172,22 @@ export const layer = Layer.effect(
       });
     return {
       list: run((service) => service.list(), []),
+      provision: (input) =>
+        run<EnvironmentProvisionResult>(
+          (service) =>
+            service.provision({
+              providerInstanceId: input.providerInstanceId,
+              repository: input.repository,
+              branch: input.branch,
+            }),
+          // An install with no provisioning template is the ordinary case for a
+          // machine that only manages named targets, not a failure.
+          {
+            kind: "refused" as const,
+            reason: "unconfigured" as const,
+            message: "This install has no cloud provisioning template configured.",
+          },
+        ),
       start: (id) => run((service) => service.start(id), refused("unknown")),
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };

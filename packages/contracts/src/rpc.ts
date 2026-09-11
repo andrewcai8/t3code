@@ -3,6 +3,8 @@ import {
   EnvironmentControlInput,
   EnvironmentControlList,
   EnvironmentControlResult,
+  EnvironmentProvisionInput,
+  EnvironmentProvisionResult,
 } from "./environmentControl.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
@@ -369,6 +371,7 @@ export const WS_METHODS = {
   environmentControlList: "environmentControl.list",
   environmentControlStart: "environmentControl.start",
   environmentControlStop: "environmentControl.stop",
+  environmentControlProvision: "environmentControl.provision",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -620,6 +623,12 @@ const EnvironmentControlStartRpc = Rpc.make(WS_METHODS.environmentControlStart, 
 const EnvironmentControlStopRpc = Rpc.make(WS_METHODS.environmentControlStop, {
   payload: EnvironmentControlInput,
   success: EnvironmentControlResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+
+const EnvironmentControlProvisionRpc = Rpc.make(WS_METHODS.environmentControlProvision, {
+  payload: EnvironmentProvisionInput,
+  success: EnvironmentProvisionResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
@@ -1333,6 +1342,7 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlListRpc,
   EnvironmentControlStartRpc,
   EnvironmentControlStopRpc,
+  EnvironmentControlProvisionRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
+import { ProvisionRefused } from "./driver.ts";
 import type { CloudDriver, Observation } from "./driver.ts";
 
 const target: ManagedTarget = {
@@ -15,6 +16,12 @@ function setup(initial: Observation = { kind: "stopped" }) {
   let state = initial;
   const calls: string[] = [];
   const driver: CloudDriver = {
+    // Provisioning creates environments rather than controlling declared ones,
+    // so the control cases never reach it; the provisioning case below does.
+    provision: async () => {
+      calls.push("provision");
+      throw new ProvisionRefused("unconfigured", "no template here");
+    },
     observe: async () => {
       calls.push("observe");
       return state;
@@ -126,5 +133,21 @@ describe("managed cloud commands", () => {
     });
     expect(JSON.stringify(await manager.list())).not.toContain("secret");
     expect(calls).toEqual([]);
+  });
+});
+
+it("answers a declined provisioning request instead of failing", async () => {
+  // An install with no template is an ordinary configuration state. Reporting
+  // it as a provider failure would send the operator looking at the provider.
+  const { manager } = setup();
+  const refusal = await manager.provision({
+    providerInstanceId: "codex_ac3",
+    repository: undefined,
+    branch: undefined,
+  });
+  expect(refusal).toEqual({
+    kind: "refused",
+    reason: "unconfigured",
+    message: "no template here",
   });
 });
