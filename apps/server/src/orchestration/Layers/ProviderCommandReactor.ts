@@ -41,6 +41,7 @@ import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { decideRevival } from "../AgentRevival.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -55,6 +56,10 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+
+// Mirrors the wording the server uses when it continues threads across an
+// update, so a revived thread reads the same to the provider either way.
+const REVIVAL_CONTINUATION_PROMPT = "Continue where you left off.";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
@@ -347,6 +352,10 @@ const make = Effect.gen(function* () {
   const threadModelSelections = new Map<string, ModelSelection>();
   const compactingThreadIds = new Set<ThreadId>();
   const stoppingThreadIds = new Set<ThreadId>();
+  // Revivals attempted per thread since it last made progress. Reset in
+  // setThreadSession, the one chokepoint every healthy transition passes
+  // through, so a thread that recovers gets its full budget back.
+  const revivalAttempts = new Map<ThreadId, number>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -407,17 +416,25 @@ const make = Effect.gen(function* () {
     readonly session: OrchestrationSession;
     readonly createdAt: string;
   }) =>
-    serverCommandId("provider-session-set").pipe(
-      Effect.flatMap((commandId) =>
-        orchestrationEngine.dispatch({
-          type: "thread.session.set",
-          commandId,
-          threadId: input.threadId,
-          session: input.session,
-          createdAt: input.createdAt,
-        }),
-      ),
-    );
+    Effect.suspend(() => {
+      if (
+        (input.session.status === "running" || input.session.status === "ready") &&
+        input.session.lastError === null
+      ) {
+        revivalAttempts.delete(input.threadId);
+      }
+      return serverCommandId("provider-session-set").pipe(
+        Effect.flatMap((commandId) =>
+          orchestrationEngine.dispatch({
+            type: "thread.session.set",
+            commandId,
+            threadId: input.threadId,
+            session: input.session,
+            createdAt: input.createdAt,
+          }),
+        ),
+      );
+    });
 
   const setThreadSessionErrorOnTurnStartFailure = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
@@ -445,6 +462,7 @@ const make = Effect.gen(function* () {
       },
       createdAt: input.createdAt,
     });
+    yield* considerRevival({ threadId: input.threadId, detail: input.detail });
   });
 
   const restoreCompaction = Effect.fnUntraced(function* (threadId: ThreadId, fromRunning = false) {
@@ -540,6 +558,70 @@ const make = Effect.gen(function* () {
     return yield* projectionSnapshotQuery
       .getThreadDetailById(threadId, { activityKinds: [] })
       .pipe(Effect.map(Option.getOrUndefined));
+  });
+
+  /**
+   * Bring back a thread whose provider session died mid-turn.
+   *
+   * The judgement lives in decideRevival; this only supplies the facts and
+   * carries out the answer. The delay is served before re-reading the thread
+   * so a stop, a settle, or a human message that lands in the meantime wins
+   * over a revival that was decided on stale state.
+   */
+  const considerRevival = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly detail: string;
+  }) {
+    const thread = yield* resolveThreadShell(input.threadId);
+    if (!thread) return;
+    const decision = decideRevival({
+      status: thread.session?.status ?? "error",
+      lastError: input.detail,
+      settled: thread.settledAt !== null,
+      stopRequested: stoppingThreadIds.has(input.threadId),
+      attempts: revivalAttempts.get(input.threadId) ?? 0,
+    });
+    if (decision.kind === "exhausted") {
+      yield* Effect.logWarning("gave up reviving provider session", {
+        threadId: input.threadId,
+        attempts: decision.attempts,
+      });
+      return;
+    }
+    if (decision.kind !== "revive") return;
+    revivalAttempts.set(input.threadId, decision.attempt);
+    yield* forkParked(
+      Effect.gen(function* () {
+        yield* Effect.sleep(Duration.millis(decision.delayMs));
+        if (stoppingThreadIds.has(input.threadId)) return;
+        const current = yield* resolveThreadShell(input.threadId);
+        // Anything that moved the thread on its own makes the revival moot.
+        if (!current || current.settledAt !== null || current.session?.status !== "error") return;
+        const providerInstanceId = current.modelSelection.instanceId;
+        const capabilities = yield* providerService.getCapabilities(providerInstanceId);
+        yield* Effect.logInfo("reviving provider session", {
+          threadId: input.threadId,
+          attempt: decision.attempt,
+        });
+        yield* providerService.sendTurn({
+          threadId: input.threadId,
+          ...(capabilities.promptlessTurnContinuation === true
+            ? { continuation: true }
+            : { input: REVIVAL_CONTINUATION_PROMPT }),
+          interactionMode: current.interactionMode,
+        });
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.void
+            : Effect.logWarning("failed to revive provider session", {
+                threadId: input.threadId,
+                attempt: decision.attempt,
+                cause,
+              }),
+        ),
+      ),
+    );
   });
 
   const rejectStartedThreadModelChangeIfRequired = Effect.fnUntraced(function* (input: {

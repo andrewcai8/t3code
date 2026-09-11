@@ -3132,6 +3132,47 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
+  it("revives a thread whose provider session died mid-turn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.sendTurn.mockImplementationOnce(
+      (_: unknown) => Effect.fail("simulated session death") as never,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-revival-1"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-revival-1"),
+          role: "user",
+          text: "work",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+
+    // The death is recorded before anything is retried.
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return thread?.session?.status === "error";
+    });
+
+    // The revival lands on its own, with no further input from anyone.
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2, 10_000);
+    await harness.drain();
+
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      threadId: "thread-1",
+    });
+  });
+
   it("rejects provider changes after a thread is already bound to a session provider", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
