@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - private configuration is loaded at the Promise-based SDK boundary.
 import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import { EnvironmentId, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -61,4 +62,36 @@ export async function readConfig(path: string): Promise<EnvironmentControlConfig
       throw new Error("Sandbox ownership metadata required");
   }
   return config;
+}
+
+export const CONTROL_CONFIG_FILENAME = "environment-control.json";
+
+const onDisk = async (path: string) => {
+  try {
+    await NodeFSP.access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Where to read cloud control configuration, or `null` when it is not set up.
+ *
+ * The default lives beside `settings.json` in the state directory, so a packaged
+ * app and a dev run find it the same way and a launcher that rewrites the
+ * environment cannot hide it. An explicit override is returned even when the
+ * file is missing: naming a path that does not exist is a misconfiguration and
+ * has to fail loudly, whereas the default being absent just means a machine has
+ * no cloud controls.
+ */
+export async function resolveControlConfigPath(input: {
+  readonly explicit?: string | undefined;
+  readonly stateDir: string;
+  readonly exists?: (path: string) => Promise<boolean>;
+}): Promise<string | null> {
+  const explicit = input.explicit?.trim();
+  if (explicit) return explicit;
+  const path = NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME);
+  return (await (input.exists ?? onDisk)(path)) ? path : null;
 }

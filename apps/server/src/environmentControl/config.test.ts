@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
-import { readConfig } from "./config.ts";
+import { readConfig, resolveControlConfigPath } from "./config.ts";
 
 it("loads private configuration and rejects ambiguous target mappings", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cloud-config-"));
@@ -38,4 +38,45 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
+});
+
+it("resolves cloud control configuration from the state directory by default", async () => {
+  const seen: string[] = [];
+  const path = await resolveControlConfigPath({
+    stateDir: "/state",
+    exists: async (candidate) => {
+      seen.push(candidate);
+      return true;
+    },
+  });
+  expect(path).toBe("/state/environment-control.json");
+  expect(seen).toEqual(["/state/environment-control.json"]);
+});
+
+it("reports no cloud control configuration rather than failing when the default is absent", async () => {
+  expect(await resolveControlConfigPath({ stateDir: "/state", exists: async () => false })).toBe(
+    null,
+  );
+});
+
+it("keeps an explicit path even when it is missing, so the mistake surfaces", async () => {
+  // Naming a file that does not exist is a misconfiguration and has to fail
+  // loudly downstream; reporting "no cloud controls" would hide it.
+  expect(
+    await resolveControlConfigPath({
+      explicit: "/elsewhere/control.json",
+      stateDir: "/state",
+      exists: async () => false,
+    }),
+  ).toBe("/elsewhere/control.json");
+});
+
+it("treats a whitespace-only override as unset", async () => {
+  expect(
+    await resolveControlConfigPath({
+      explicit: "   ",
+      stateDir: "/state",
+      exists: async () => false,
+    }),
+  ).toBe(null);
 });

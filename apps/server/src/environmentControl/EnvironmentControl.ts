@@ -9,7 +9,8 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { readConfig, type ManagedTarget } from "./config.ts";
+import * as ServerConfig from "../config.ts";
+import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
 import { createCloudDriver, type CloudDriver } from "./driver.ts";
 
 const refusalMessages = {
@@ -113,32 +114,39 @@ export class EnvironmentControl extends Context.Service<
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
-export const layer = Layer.sync(EnvironmentControl, () => {
-  let manager: Promise<ReturnType<typeof createEnvironmentControl> | null> | undefined;
-  const resolve = () =>
-    (manager ??= (async () => {
-      const path = process.env.T3CODE_ENVIRONMENT_CONTROL_CONFIG;
-      if (!path) return null;
-      const config = await readConfig(path);
-      return createEnvironmentControl(config.targets, createCloudDriver(config));
-    })());
-  const run = <A>(
-    fn: (service: NonNullable<Awaited<ReturnType<typeof resolve>>>) => Promise<A>,
-    absent: A,
-  ) =>
-    Effect.tryPromise({
-      try: async () => {
-        const service = await resolve();
-        return service ? fn(service) : absent;
-      },
-      catch: () =>
-        new EnvironmentControlError({
-          message: "Cloud controls are unavailable. Check the manager's private configuration.",
-        }),
-    });
-  return {
-    list: run((service) => service.list(), []),
-    start: (id) => run((service) => service.start(id), refused("unknown")),
-    stop: (id) => run((service) => service.stop(id), refused("unknown")),
-  };
-});
+export const layer = Layer.effect(
+  EnvironmentControl,
+  Effect.gen(function* () {
+    const { stateDir } = yield* ServerConfig.ServerConfig;
+    let manager: Promise<ReturnType<typeof createEnvironmentControl> | null> | undefined;
+    const resolve = () =>
+      (manager ??= (async () => {
+        const path = await resolveControlConfigPath({
+          explicit: process.env.T3CODE_ENVIRONMENT_CONTROL_CONFIG,
+          stateDir,
+        });
+        if (!path) return null;
+        const config = await readConfig(path);
+        return createEnvironmentControl(config.targets, createCloudDriver(config));
+      })());
+    const run = <A>(
+      fn: (service: NonNullable<Awaited<ReturnType<typeof resolve>>>) => Promise<A>,
+      absent: A,
+    ) =>
+      Effect.tryPromise({
+        try: async () => {
+          const service = await resolve();
+          return service ? fn(service) : absent;
+        },
+        catch: () =>
+          new EnvironmentControlError({
+            message: "Cloud controls are unavailable. Check the manager's private configuration.",
+          }),
+      });
+    return {
+      list: run((service) => service.list(), []),
+      start: (id) => run((service) => service.start(id), refused("unknown")),
+      stop: (id) => run((service) => service.stop(id), refused("unknown")),
+    };
+  }),
+);
