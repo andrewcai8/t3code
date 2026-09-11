@@ -100,6 +100,116 @@ const Capabilities = Schema.Struct({
 const decodeCapabilities = Schema.decodeUnknownExit(Capabilities);
 const decodeControllerResult = Schema.decodeUnknownSync(ControllerResult);
 
+/**
+ * Everything a created sandbox needs before anyone can pair with it.
+ *
+ * Split out so the caller can destroy a sandbox whose preparation failed: a
+ * half-built environment is unreachable, still billing, and its id is known to
+ * nobody once the error propagates.
+ */
+async function prepare(
+  sandbox: Sandbox,
+  provisioning: NonNullable<EnvironmentControlConfig["provisioning"]>,
+  request: ProvisionRequest,
+  auth: string,
+): Promise<Provisioned> {
+  const run = (command: string, timeoutMs = 180_000) =>
+    sandbox.commands.run(command, { timeoutMs });
+
+  await sandbox.files.write("/home/user/.codex/auth.json", auth);
+  await run("chmod 600 /home/user/.codex/auth.json");
+
+  let projectDir = "/home/user/work";
+  if (request.repository) {
+    if (!provisioning.githubToken)
+      throw new ProvisionRefused(
+        "unconfigured",
+        "Cloning a repository needs a configured GitHub token.",
+      );
+    // A credential file keeps the token out of the clone URL, so it never
+    // reaches the remote, `git remote -v`, or shell history.
+    await sandbox.files.write(
+      "/home/user/.git-credentials",
+      `https://x-access-token:${provisioning.githubToken}@github.com\n`,
+    );
+    await run("chmod 600 /home/user/.git-credentials");
+    await run(
+      "git config --global credential.helper store && " +
+        "git config --global user.email agent@t3.local && git config --global user.name t3",
+    );
+    projectDir = repositoryDirectory(request.repository);
+    const branch = request.branch ? `--branch ${request.branch} ` : "";
+    const cloned = await run(
+      `mkdir -p /home/user/work && git clone --filter=blob:none ${branch}` +
+        `${repositoryUrl(request.repository)} ${projectDir}`,
+      900_000,
+    );
+    if (cloned.exitCode !== 0) throw new Error("Repository clone failed");
+  } else {
+    // The template already ships an initialised workspace, so this only has to
+    // cover a template that does not.
+    await run(
+      "mkdir -p /home/user/work && cd /home/user/work && " +
+        "(git rev-parse --git-dir >/dev/null 2>&1 || (git init -q && " +
+        "git config user.email agent@t3.local && git config user.name t3 && " +
+        "echo '# workspace' > README.md && git add -A && git commit -qm init))",
+    );
+  }
+
+  // Every sandbox from the template inherits one environment ID, and clients
+  // key environments by it, so each environment has to be given its own before
+  // anything pairs with it.
+  //
+  // This costs the full first-start load, around five minutes. The template
+  // captures its server already running and answering in under two seconds, but
+  // that warmth is the captured process's own memory: the page cache is not
+  // restored with it, so a replacement process reads the 1.5 GB install from
+  // cold disk exactly as if nothing had been captured. Reusing the captured
+  // server instead would need the identity to be settable without a restart,
+  // which the server does not support today.
+  //
+  // The bracket keeps the pattern from matching the command carrying it, which
+  // would otherwise make this kill its own shell.
+  await run("pkill -f '[t]3 serve' || true");
+  await sandbox.files.write(
+    "/home/user/.t3/userdata/environment-id",
+    `${globalThis.crypto.randomUUID()}\n`,
+  );
+  // Binding to every interface is what lets the sandbox's own hostname reach
+  // the server; the environment never joins a relay.
+  await sandbox.commands
+    .run(
+      `nohup sh -c 'cd ${projectDir} && exec t3 serve --no-browser --host 0.0.0.0 ` +
+        `--port ${PROVISIONED_PORT} > /tmp/serve.out 2>&1' >/dev/null 2>&1 &`,
+      { timeoutMs: 20_000, background: true },
+    )
+    .catch(() => undefined);
+  const host = sandbox.getHost(PROVISIONED_PORT);
+  const deadline = Date.now() + 600_000;
+  let ready = false;
+  while (!ready && Date.now() < deadline) {
+    await NodeTimersPromises.setTimeout(1_000);
+    ready = await fetch(`https://${host}/`)
+      .then((response) => response.status === 200)
+      .catch(() => false);
+  }
+  if (!ready) throw new Error("Provisioned environment never answered");
+  await run(`t3 project add ${projectDir}`).catch(() => undefined);
+
+  // Minted last and never spent here: the token is single use, and verifying it
+  // would hand the caller a dead link.
+  const paired = await run(`t3 pair --ttl 12h --label 'cloud-${request.providerInstanceId}'`);
+  const token = /Token:\s*([A-Z0-9]+)/.exec(
+    (paired.stdout ?? "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""),
+  )?.[1];
+  if (!token) throw new Error("Could not mint a pairing token");
+  return {
+    sandboxId: sandbox.sandboxId,
+    pairingUrl: `https://${host}/pair#token=${token}`,
+    projectDir,
+  };
+}
+
 export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver {
   const api = { apiKey: config.e2bApiKey, requestTimeoutMs: 15_000 };
   async function e2bInfo(
@@ -226,100 +336,14 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         lifecycle: { onTimeout: "pause", autoResume: true },
         metadata: { purpose: "t3-environment", account: request.providerInstanceId },
       });
-      const run = (command: string, timeoutMs = 180_000) =>
-        sandbox.commands.run(command, { timeoutMs });
-
-      await sandbox.files.write("/home/user/.codex/auth.json", auth);
-      await run("chmod 600 /home/user/.codex/auth.json");
-
-      let projectDir = "/home/user/work";
-      if (request.repository) {
-        if (!provisioning.githubToken)
-          throw new ProvisionRefused(
-            "unconfigured",
-            "Cloning a repository needs a configured GitHub token.",
-          );
-        // A credential file keeps the token out of the clone URL, so it never
-        // reaches the remote, `git remote -v`, or shell history.
-        await sandbox.files.write(
-          "/home/user/.git-credentials",
-          `https://x-access-token:${provisioning.githubToken}@github.com\n`,
-        );
-        await run("chmod 600 /home/user/.git-credentials");
-        await run(
-          "git config --global credential.helper store && " +
-            "git config --global user.email agent@t3.local && git config --global user.name t3",
-        );
-        projectDir = repositoryDirectory(request.repository);
-        const branch = request.branch ? `--branch ${request.branch} ` : "";
-        const cloned = await run(
-          `mkdir -p /home/user/work && git clone --filter=blob:none ${branch}` +
-            `${repositoryUrl(request.repository)} ${projectDir}`,
-          900_000,
-        );
-        if (cloned.exitCode !== 0) throw new Error("Repository clone failed");
-      } else {
-        // The template already ships an initialised workspace, so this only
-        // has to cover a template that does not.
-        await run(
-          "mkdir -p /home/user/work && cd /home/user/work && " +
-            "(git rev-parse --git-dir >/dev/null 2>&1 || (git init -q && " +
-            "git config user.email agent@t3.local && git config user.name t3 && " +
-            "echo '# workspace' > README.md && git add -A && git commit -qm init))",
-        );
+      try {
+        return await prepare(sandbox, provisioning, request, auth);
+      } catch (cause) {
+        // A sandbox that never finished being prepared is unreachable and
+        // still billing, and nothing else knows its id to clean up later.
+        await sandbox.kill().catch(() => undefined);
+        throw cause;
       }
-
-      // Every sandbox from the template inherits one environment ID, and
-      // clients key environments by it, so each environment has to be given its
-      // own before anything pairs with it.
-      //
-      // This costs the full first-start load, around five minutes. The template
-      // captures its server already running and answering in under two seconds,
-      // but that warmth is the captured process's own memory: the page cache is
-      // not restored with it, so a replacement process reads the 1.5 GB install
-      // from cold disk exactly as if nothing had been captured. Reusing the
-      // captured server instead would need the identity to be settable without
-      // a restart, which the server does not support today.
-      // The bracket keeps the pattern from matching the command carrying it,
-      // which would otherwise make this kill its own shell.
-      await run("pkill -f '[t]3 serve' || true");
-      await sandbox.files.write(
-        "/home/user/.t3/userdata/environment-id",
-        `${globalThis.crypto.randomUUID()}\n`,
-      );
-      // Binding to every interface is what lets the sandbox's own hostname
-      // reach the server; the environment never joins a relay.
-      await sandbox.commands
-        .run(
-          `nohup sh -c 'cd ${projectDir} && exec t3 serve --no-browser --host 0.0.0.0 ` +
-            `--port ${PROVISIONED_PORT} > /tmp/serve.out 2>&1' >/dev/null 2>&1 &`,
-          { timeoutMs: 20_000, background: true },
-        )
-        .catch(() => undefined);
-      const host = sandbox.getHost(PROVISIONED_PORT);
-      const deadline = Date.now() + 600_000;
-      let ready = false;
-      while (!ready && Date.now() < deadline) {
-        await NodeTimersPromises.setTimeout(1_000);
-        ready = await fetch(`https://${host}/`)
-          .then((response) => response.status === 200)
-          .catch(() => false);
-      }
-      if (!ready) throw new Error("Provisioned environment never answered");
-      await run(`t3 project add ${projectDir}`).catch(() => undefined);
-
-      // Minted last and never spent here: the token is single use, and
-      // verifying it would hand the caller a dead link.
-      const paired = await run(`t3 pair --ttl 12h --label 'cloud-${request.providerInstanceId}'`);
-      const token = /Token:\s*([A-Z0-9]+)/.exec(
-        (paired.stdout ?? "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""),
-      )?.[1];
-      if (!token) throw new Error("Could not mint a pairing token");
-      return {
-        sandboxId: sandbox.sandboxId,
-        pairingUrl: `https://${host}/pair#token=${token}`,
-        projectDir,
-      };
     },
     stop: async (target, instanceId) => {
       const response = await controller(target, "capabilities");
