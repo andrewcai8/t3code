@@ -42,6 +42,18 @@ const Provisioning = Schema.Struct({
    * worth copying here are exactly the ones a repository refuses to carry, and
    * an environment holding them can reach whatever they unlock.
    */
+  /**
+   * Hosts a new environment may reach. Everything else is denied.
+   *
+   * An agent with a shell can read any credential the environment holds, so
+   * the useful control is not hiding values but bounding where they can go.
+   * Absent, the environment reaches the whole internet, which is E2B's
+   * default; listing hosts turns that into deny-by-default.
+   *
+   * Host rules cover HTTP and HTTPS. Anything speaking another protocol — a
+   * database wire protocol, say — needs its address listed as a CIDR instead.
+   */
+  egressAllow: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   workspaceFiles: Schema.optional(
     Schema.Array(
       Schema.Struct({

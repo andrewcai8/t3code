@@ -6,7 +6,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
-import { Sandbox } from "e2b";
+import { ALL_TRAFFIC, Sandbox } from "e2b";
 import { loadUserToken, fromBearerToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
@@ -345,11 +345,17 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         );
       });
 
+      const allowed = provisioning.egressAllow;
       const sandbox = await Sandbox.create(provisioning.templateId, {
         ...api,
         timeoutMs: 6 * 3_600_000,
         lifecycle: { onTimeout: "pause", autoResume: true },
         metadata: { purpose: "t3-environment", account: request.providerInstanceId },
+        // Denying everything first is what makes the allow list meaningful;
+        // without the deny, listing hosts grants nothing and blocks nothing.
+        ...(allowed && allowed.length > 0
+          ? { network: { allowOut: [...allowed], denyOut: [ALL_TRAFFIC] } }
+          : {}),
       });
       try {
         return await prepare(sandbox, provisioning, request, auth);
