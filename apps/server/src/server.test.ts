@@ -1040,6 +1040,12 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.succeed(EnvironmentControl.EnvironmentControl, {
           list: Effect.succeed([]),
+          provision: () =>
+            Effect.succeed({
+              kind: "refused",
+              reason: "unconfigured",
+              message: "Not configured",
+            }),
           start: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           stop: () =>

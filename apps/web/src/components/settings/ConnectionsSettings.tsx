@@ -1,4 +1,5 @@
 import { CloudComputeControls } from "./CloudComputeControls";
+import { NewCloudEnvironment } from "./NewCloudEnvironment";
 import { ChevronsLeftRightEllipsisIcon, PlusIcon, QrCodeIcon, TerminalIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -3600,16 +3601,21 @@ export function ConnectionsSettings() {
       {environments
         .filter((environment) => environment.connection.phase === "connected")
         .map((environment) => (
-          <CloudComputeControls
-            key={environment.environmentId}
-            managerId={environment.environmentId}
-            managerLabel={environment.label}
-            onStarted={(id) => {
-              if (!environments.some((entry) => entry.environmentId === id)) return false;
-              void handleConnectSavedBackend(id);
-              return true;
-            }}
-          />
+          <div key={environment.environmentId}>
+            <CloudComputeControls
+              managerId={environment.environmentId}
+              managerLabel={environment.label}
+              onStarted={(id) => {
+                if (!environments.some((entry) => entry.environmentId === id)) return false;
+                void handleConnectSavedBackend(id);
+                return true;
+              }}
+            />
+            <NewCloudEnvironment
+              managerId={environment.environmentId}
+              managerLabel={environment.label}
+            />
+          </div>
         ))}
       <LoadBalancingSettings environments={environments} />
     </SettingsPageContainer>

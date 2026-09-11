@@ -984,6 +984,17 @@ export function createServerEnvironmentAtoms<R, E>(
       },
       onSettled: refreshManagedEnvironments,
     }),
+    // Provisioning creates an environment rather than controlling a declared
+    // one, so it has nothing to refresh: the result is a pairing URL the caller
+    // uses, not a change to the managed list.
+    provisionEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:provision",
+      tag: WS_METHODS.environmentControlProvision,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.providerInstanceId}`,
+      },
+    }),
     stopManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:stop",
       tag: WS_METHODS.environmentControlStop,
