@@ -171,6 +171,21 @@ async function prepare(
     await run(`chmod 600 ${target}`);
   }
 
+  // Without this every environment from the template calls itself by the
+  // sandbox image's hostname, so a list of them reads as the same name
+  // repeated and none of them can be told apart. The server prefers
+  // PRETTY_HOSTNAME on Linux, and it reads it when it starts, which the
+  // restart below is about to do anyway.
+  const label = request.repository
+    ? `${repositoryUrl(request.repository)
+        .split("/")
+        .pop()!
+        .replace(/\.git$/, "")} · ${request.providerInstanceId}`
+    : request.providerInstanceId;
+  await run(
+    `printf 'PRETTY_HOSTNAME=%s\\n' ${JSON.stringify(JSON.stringify(label))} | sudo tee /etc/machine-info >/dev/null`,
+  ).catch(() => undefined);
+
   // Every sandbox from the template inherits one environment ID, and clients
   // key environments by it, so each environment has to be given its own before
   // anything pairs with it.
