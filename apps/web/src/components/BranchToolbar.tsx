@@ -24,6 +24,7 @@ import {
   resolveLockedWorkspaceLabel,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
+  shouldOfferEnvironmentChoice,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
@@ -551,9 +552,11 @@ export const BranchToolbar = memo(function BranchToolbar({
     });
   }, [activeProjectRef, draftId, previousWorktreeSeed, setDraftThreadContext, threadRef]);
 
-  const showEnvironmentPicker = Boolean(
-    availableEnvironments && availableEnvironments.length > 1 && onEnvironmentChange,
-  );
+  const showEnvironmentPicker = shouldOfferEnvironmentChoice({
+    environmentCount: availableEnvironments?.length ?? 0,
+    canChangeEnvironment: Boolean(availableEnvironments && onEnvironmentChange),
+    canCreateEnvironment: onCreateCloudEnvironment !== undefined,
+  });
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
   const showEnvironmentIndicator = shouldShowEnvironmentIndicator({

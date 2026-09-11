@@ -19,6 +19,7 @@ import {
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
   shouldShowComposerContextStrip,
+  shouldOfferEnvironmentChoice,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 
@@ -832,5 +833,50 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+});
+
+describe("shouldOfferEnvironmentChoice", () => {
+  it("offers a choice between machines that already exist", () => {
+    expect(
+      shouldOfferEnvironmentChoice({
+        environmentCount: 2,
+        canChangeEnvironment: true,
+        canCreateEnvironment: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("offers a choice on a single machine when another can be created", () => {
+    // Otherwise the first cloud machine can never be created from the place
+    // machines are chosen: the control that would add one is hidden until one
+    // has already been added.
+    expect(
+      shouldOfferEnvironmentChoice({
+        environmentCount: 1,
+        canChangeEnvironment: true,
+        canCreateEnvironment: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("stays quiet on a single machine with nothing to create", () => {
+    expect(
+      shouldOfferEnvironmentChoice({
+        environmentCount: 1,
+        canChangeEnvironment: true,
+        canCreateEnvironment: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("never offers a choice the composer cannot act on", () => {
+    expect(
+      shouldOfferEnvironmentChoice({
+        environmentCount: 3,
+        canChangeEnvironment: false,
+        canCreateEnvironment: true,
+      }),
+    ).toBe(false);
   });
 });

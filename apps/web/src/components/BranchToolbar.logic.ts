@@ -47,6 +47,23 @@ export function resolveEnvironmentOptionLabel(input: {
 // A remote (non-primary) environment is always surfaced, even when it is the
 // only environment available: with a single connected machine there is nothing
 // to pick, but the user still needs to see where the project runs.
+/**
+ * Whether the composer should offer a choice of machine.
+ *
+ * More than one machine is the obvious reason. Being able to create one is the
+ * other, and it is the case that matters most: an install with a single
+ * machine would otherwise hide the control that adds a second, so the first
+ * cloud machine could never be created from the place machines are chosen.
+ */
+export function shouldOfferEnvironmentChoice(input: {
+  environmentCount: number;
+  canChangeEnvironment: boolean;
+  canCreateEnvironment: boolean;
+}): boolean {
+  if (!input.canChangeEnvironment) return false;
+  return input.environmentCount > 1 || input.canCreateEnvironment;
+}
+
 export function shouldShowEnvironmentIndicator(input: {
   activeEnvironment: Pick<EnvironmentOption, "isPrimary"> | null;
   canPickEnvironment: boolean;
