@@ -129,18 +129,21 @@ describe("Namespace relay transport", () => {
   it("attempts every cleanup step so retries are safe", async () => {
     const events: string[] = [];
     const lease = { resource, environmentId: "env-1", connectorTokenId: "token-1" };
-    const deps = {
+    const relay = {
+      provision: async () => ({ endpoint, connectorToken: "unused" }),
       release: async () => {
         events.push("release");
       },
+    };
+    const secrets = {
       put: async () => "x",
       delete: async () => {
         events.push("delete");
       },
     };
     const mac = macWith(events);
-    await disposeNamespaceTransport(mac, deps, deps, lease);
-    await disposeNamespaceTransport(mac, deps, deps, lease);
+    await disposeNamespaceTransport(mac, relay, secrets, lease);
+    await disposeNamespaceTransport(mac, relay, secrets, lease);
     expect(events).toEqual([
       "delete",
       "release",
