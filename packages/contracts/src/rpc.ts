@@ -9,6 +9,8 @@ import {
   EnvironmentProvisionDisposeResult,
   EnvironmentProvisionClaimInput,
   EnvironmentProvisionClaimResult,
+  EnvironmentProvisionTouchInput,
+  EnvironmentProvisionTouchResult,
 } from "./environmentControl.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
@@ -378,6 +380,7 @@ export const WS_METHODS = {
   environmentControlProvision: "environmentControl.provision",
   environmentControlDispose: "environmentControl.dispose",
   environmentControlClaim: "environmentControl.claim",
+  environmentControlTouch: "environmentControl.touch",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -645,6 +648,11 @@ const EnvironmentControlDisposeRpc = Rpc.make(WS_METHODS.environmentControlDispo
 const EnvironmentControlClaimRpc = Rpc.make(WS_METHODS.environmentControlClaim, {
   payload: EnvironmentProvisionClaimInput,
   success: EnvironmentProvisionClaimResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlTouchRpc = Rpc.make(WS_METHODS.environmentControlTouch, {
+  payload: EnvironmentProvisionTouchInput,
+  success: EnvironmentProvisionTouchResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
@@ -1361,6 +1369,7 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlProvisionRpc,
   EnvironmentControlDisposeRpc,
   EnvironmentControlClaimRpc,
+  EnvironmentControlTouchRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,

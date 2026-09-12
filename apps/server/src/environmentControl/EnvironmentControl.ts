@@ -13,6 +13,8 @@ import {
   type EnvironmentProvisionDisposeResult,
   type EnvironmentProvisionClaimInput,
   type EnvironmentProvisionClaimResult,
+  type EnvironmentProvisionTouchInput,
+  type EnvironmentProvisionTouchResult,
   type ManagedEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -225,6 +227,23 @@ export function createEnvironmentControl(
             message: "The cloud sandbox lease could not be claimed.",
           };
     },
+    touch: async (
+      input: EnvironmentProvisionTouchInput,
+    ): Promise<EnvironmentProvisionTouchResult> => {
+      if (!leaseRegistry)
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The cloud sandbox lease registry is unavailable.",
+        };
+      return (await leaseRegistry.touch(input.leaseId))
+        ? { kind: "touched" }
+        : {
+            kind: "refused",
+            reason: "unknown",
+            message: "The cloud sandbox lease could not be renewed.",
+          };
+    },
     reapExpiredLeases,
   };
 }
@@ -248,6 +267,9 @@ export class EnvironmentControl extends Context.Service<
     readonly claim: (
       input: EnvironmentProvisionClaimInput,
     ) => Effect.Effect<EnvironmentProvisionClaimResult, EnvironmentControlError>;
+    readonly touch: (
+      input: EnvironmentProvisionTouchInput,
+    ) => Effect.Effect<EnvironmentProvisionTouchResult, EnvironmentControlError>;
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
@@ -315,6 +337,12 @@ export const layer = Layer.effect(
         }),
       claim: (input) =>
         run<EnvironmentProvisionClaimResult>((service) => service.claim(input), {
+          kind: "refused" as const,
+          reason: "unknown" as const,
+          message: "This install has no cloud provisioning template configured.",
+        }),
+      touch: (input) =>
+        run<EnvironmentProvisionTouchResult>((service) => service.touch(input), {
           kind: "refused" as const,
           reason: "unknown" as const,
           message: "This install has no cloud provisioning template configured.",

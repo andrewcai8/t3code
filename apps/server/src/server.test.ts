@@ -1058,6 +1058,12 @@ const buildAppUnderTest = (options?: {
               reason: "unknown",
               message: "Not configured",
             }),
+          touch: () =>
+            Effect.succeed({
+              kind: "refused",
+              reason: "unknown",
+              message: "Not configured",
+            }),
           start: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           stop: () =>

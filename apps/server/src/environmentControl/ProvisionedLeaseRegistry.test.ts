@@ -129,4 +129,22 @@ describe("ProvisionedLeaseRegistry", () => {
     });
     expect(await registry.expired(new Date("2026-01-01T01:00:01.000Z"))).toHaveLength(0);
   });
+
+  it("renews a claimed lease", async () => {
+    const registry = await makeRegistry();
+    await registry.register({
+      leaseId: "lease-1",
+      sandboxId: "sandbox-1",
+      providerInstanceId: "codex",
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    await registry.claim({
+      leaseId: "lease-1",
+      owner: { environmentId: "remote", threadId: "thread-1" },
+    });
+    expect(await registry.touch("lease-1", new Date("2026-01-01T01:00:00.000Z"))).toMatchObject({
+      expiresAt: "2026-01-01T02:00:00.000Z",
+    });
+    expect(await registry.touch("missing")).toBeNull();
+  });
 });

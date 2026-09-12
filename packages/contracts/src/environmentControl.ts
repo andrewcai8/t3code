@@ -106,3 +106,18 @@ export const EnvironmentProvisionClaimResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionClaimResult = typeof EnvironmentProvisionClaimResult.Type;
+
+export const EnvironmentProvisionTouchInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionTouchInput = typeof EnvironmentProvisionTouchInput.Type;
+
+export const EnvironmentProvisionTouchResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("touched") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literal("unknown"),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionTouchResult = typeof EnvironmentProvisionTouchResult.Type;

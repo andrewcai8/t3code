@@ -63,6 +63,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.environmentControlProvision]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlDispose]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlClaim]: AuthOrchestrationOperateScope,
+  [WS_METHODS.environmentControlTouch]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverGetUsageSummary]: AuthOrchestrationReadScope,
   [WS_METHODS.serverRefreshUsageRates]: AuthOrchestrationReadScope,
   [WS_METHODS.serverSignalProcess]: AuthOrchestrationOperateScope,

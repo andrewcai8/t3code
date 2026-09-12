@@ -39,6 +39,7 @@ export interface ProvisionedLeaseRegistry {
     readonly owner: ProvisionedLeaseOwner;
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
+  readonly touch: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
   readonly findBySandbox: (sandboxId: string) => Promise<ProvisionedLease | null>;
   readonly beginRelease: (input: {
     readonly leaseId?: string | undefined;
@@ -140,6 +141,22 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
           ...current,
           owner: input.owner,
           updatedAt: nowIso(input.now),
+        };
+        const next = [...leases];
+        next[index] = updated;
+        return { leases: next, value: updated };
+      }),
+    touch: (leaseId, now) =>
+      mutate((leases) => {
+        const index = leases.findIndex((lease) => lease.leaseId === leaseId);
+        const current = index < 0 ? undefined : leases[index];
+        if (!current || current.state !== "active" || current.owner === null)
+          return { leases, value: null };
+        const timestamp = now ?? new Date();
+        const updated: ProvisionedLease = {
+          ...current,
+          updatedAt: timestamp.toISOString(),
+          expiresAt: new Date(timestamp.getTime() + 60 * 60 * 1000).toISOString(),
         };
         const next = [...leases];
         next[index] = updated;

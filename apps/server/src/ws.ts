@@ -2088,6 +2088,8 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.environmentControlDispose, environmentControl.dispose(input)),
         [WS_METHODS.environmentControlClaim]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlClaim, environmentControl.claim(input)),
+        [WS_METHODS.environmentControlTouch]: (input) =>
+          observeRpcEffect(WS_METHODS.environmentControlTouch, environmentControl.touch(input)),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",
