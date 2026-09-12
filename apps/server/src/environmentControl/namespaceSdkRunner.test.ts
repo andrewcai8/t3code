@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { exposedOrigin, pairToken, shapeFor } from "./namespaceSdkRunner.ts";
 
 describe("Namespace runner boundary parsing", () => {

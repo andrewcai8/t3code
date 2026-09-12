@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off cryptoRandomUUID:off
 import { execFile as execFileCallback } from "node:child_process";
+import * as NodeTimersPromises from "node:timers/promises";
 import { promisify } from "node:util";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
@@ -52,6 +53,26 @@ const repositoryUrl = (repository: string): string => {
   if (!owner || !name) throw new Error(`Repository must look like owner/name, got '${repository}'`);
   return `https://github.com/${owner}/${name}.git`;
 };
+
+async function waitForT3(
+  run: (args: readonly string[]) => Promise<{ stdout: string; stderr: string }>,
+  name: string,
+): Promise<void> {
+  const runtimeFiles = [
+    "/Users/runner/.t3/userdata/server-runtime.json",
+    "/Users/runner/.t3/dev/server-runtime.json",
+  ];
+  for (let attempt = 0; attempt < 120; attempt++) {
+    for (const file of runtimeFiles) {
+      try {
+        await run(["exec", name, "--", "sh", "-lc", `test -s ${JSON.stringify(file)}`]);
+        return;
+      } catch {}
+    }
+    await NodeTimersPromises.setTimeout(1_000);
+  }
+  throw new Error("Namespace T3 server did not become ready");
+}
 
 export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}): NamespaceRunner {
   const cli = options.cli ?? "devbox";
@@ -130,7 +151,9 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       const command =
         `mkdir -p ${JSON.stringify(projectDir)} && cd ${JSON.stringify(projectDir)} && ` +
         "npx --yes t3@0.0.40 serve --no-browser --host 0.0.0.0 --port 3000";
-      await run(["exec", "-d", nameOf(resource), "--", "sh", "-lc", command]);
+      const name = nameOf(resource);
+      await run(["exec", "-d", name, "--", "sh", "-lc", command]);
+      await waitForT3(run, name);
     },
     expose: async ({ resource, port }) => {
       const name = nameOf(resource);

@@ -314,7 +314,9 @@ async function prepare(
 export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver {
   const api = { apiKey: config.e2bApiKey, requestTimeoutMs: 15_000 };
   const namespaceRunner = config.provisioning?.namespace
-    ? createNamespaceSdkRunner({ token: config.namespaceToken })
+    ? createNamespaceSdkRunner(
+        config.namespaceToken === undefined ? {} : { token: config.namespaceToken },
+      )
     : undefined;
   const namespaceProxy = new NamespaceProxyManager();
   async function e2bInfo(
