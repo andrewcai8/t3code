@@ -49,7 +49,7 @@ export interface NamespaceProvisioned {
 
 function isNotFound(cause: unknown): boolean {
   const message = cause instanceof Error ? cause.message : String(cause);
-  return /(?:status\s*[:=]?\s*)?404\b|not found/i.test(message);
+  return /(?:status\s*[:=]?\s*)?404\b|not[\s_-]?found/i.test(message);
 }
 
 /** Create and prepare a Namespace Mac, leaving it reachable through T3. */
