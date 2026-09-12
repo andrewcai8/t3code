@@ -17,6 +17,9 @@ const StoredProvisionedLease = Schema.Struct({
   leaseId: Schema.String,
   sandboxId: Schema.String,
   provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  namespaceProxy: Schema.optional(
+    Schema.Struct({ proxyId: Schema.String, proxyOrigin: Schema.String }),
+  ),
   namespaceResource: Schema.optional(
     Schema.Struct({
       provider: Schema.Literal("namespace"),
@@ -45,6 +48,7 @@ export interface ProvisionedLeaseRegistry {
     readonly sandboxId: string;
     readonly providerInstanceId: string;
     readonly provider?: "e2b" | "namespace";
+    readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly namespaceResource?: NamespaceResource;
     readonly now?: Date;
   }) => Promise<ProvisionedLease>;
@@ -120,7 +124,9 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
           if (
             existing.sandboxId !== input.sandboxId ||
             existing.providerInstanceId !== input.providerInstanceId ||
-            existing.provider !== input.provider
+            existing.provider !== input.provider ||
+            existing.namespaceProxy?.proxyId !== input.namespaceProxy?.proxyId ||
+            existing.namespaceProxy?.proxyOrigin !== input.namespaceProxy?.proxyOrigin
           ) {
             throw new Error("Provisioned lease identity conflict");
           }
@@ -131,6 +137,7 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
           leaseId: input.leaseId,
           sandboxId: input.sandboxId,
           ...(input.provider === undefined ? {} : { provider: input.provider }),
+          ...(input.namespaceProxy === undefined ? {} : { namespaceProxy: input.namespaceProxy }),
           ...(input.namespaceResource === undefined
             ? {}
             : { namespaceResource: input.namespaceResource }),

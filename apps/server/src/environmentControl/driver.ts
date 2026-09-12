@@ -63,6 +63,7 @@ export interface Provisioned {
   readonly pairingUrl: string;
   readonly projectDir: string;
   readonly namespaceResource?: NamespaceResource;
+  readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
 }
 
 /**
@@ -103,6 +104,7 @@ export interface CloudDriver {
   dispose(input: {
     readonly sandboxId: string;
     readonly namespaceResource?: NamespaceResource;
+    readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
   }): Promise<void>;
 }
 const Capabilities = Schema.Struct({

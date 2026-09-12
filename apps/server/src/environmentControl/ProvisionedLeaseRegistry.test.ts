@@ -51,6 +51,23 @@ describe("ProvisionedLeaseRegistry", () => {
     });
   });
 
+  it("persists the manager proxy identity across reopening", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
+    temporaryDirectories.push(directory);
+    const path = NodePath.join(directory, "leases.json");
+    await createProvisionedLeaseRegistry(path).register({
+      leaseId: "lease-proxy",
+      sandboxId: "sandbox-proxy",
+      providerInstanceId: "codex",
+      namespaceProxy: { proxyId: "proxy-1", proxyOrigin: "https://proxy.example" },
+    });
+    expect(await createProvisionedLeaseRegistry(path).findBySandbox("sandbox-proxy")).toMatchObject(
+      {
+        namespaceProxy: { proxyId: "proxy-1", proxyOrigin: "https://proxy.example" },
+      },
+    );
+  });
+
   it("rejects a different owner and makes release idempotent", async () => {
     const registry = await makeRegistry();
     await registry.register({

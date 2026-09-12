@@ -10,6 +10,9 @@ export const ManagedEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   label: TrimmedNonEmptyString,
   provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  namespaceProxy: Schema.optional(
+    Schema.Struct({ proxyId: TrimmedNonEmptyString, proxyOrigin: TrimmedNonEmptyString }),
+  ),
   state: ComputeState,
 });
 export type ManagedEnvironment = typeof ManagedEnvironment.Type;

@@ -132,11 +132,11 @@ export function createEnvironmentControl(
             });
       if (release !== "started") continue;
       try {
-        await driver.dispose(
-          lease.namespaceResource
-            ? { sandboxId: lease.sandboxId, namespaceResource: lease.namespaceResource }
-            : { sandboxId: lease.sandboxId },
-        );
+        await driver.dispose({
+          sandboxId: lease.sandboxId,
+          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+          ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
+        });
         await leaseRegistry.markDisposed(lease.leaseId);
       } catch {
         // Leave the lease releasing so the next control request can retry it.
@@ -165,6 +165,7 @@ export function createEnvironmentControl(
               ...(environment.namespaceResource
                 ? { namespaceResource: environment.namespaceResource }
                 : {}),
+              ...(environment.namespaceProxy ? { namespaceProxy: environment.namespaceProxy } : {}),
             });
           } catch (cause) {
             await driver.dispose({ sandboxId: environment.sandboxId }).catch(() => undefined);
@@ -197,11 +198,11 @@ export function createEnvironmentControl(
           if (release === "started") {
             try {
               const lease = await leaseRegistry.findBySandbox(input.sandboxId);
-              await driver.dispose(
-                lease?.namespaceResource
-                  ? { sandboxId: input.sandboxId, namespaceResource: lease.namespaceResource }
-                  : { sandboxId: input.sandboxId },
-              );
+              await driver.dispose({
+                sandboxId: input.sandboxId,
+                ...(lease?.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+                ...(lease?.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
+              });
               if (lease) await leaseRegistry.markDisposed(lease.leaseId);
               return { kind: "disposed" };
             } catch {
