@@ -9,7 +9,7 @@ export type ComputeState = typeof ComputeState.Type;
 export const ManagedEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   label: TrimmedNonEmptyString,
-  provider: Schema.Literals(["e2b", "namespace"]),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
   state: ComputeState,
 });
 export type ManagedEnvironment = typeof ManagedEnvironment.Type;
@@ -38,7 +38,7 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
  * provider vocabulary and nothing else.
  */
 export const EnvironmentProvisionInput = Schema.Struct({
-  provider: Schema.Literals(["e2b"]),
+  provider: Schema.Literals(["e2b", "namespace"]),
   /** Which provider account the environment should run its agent on. */
   providerInstanceId: TrimmedNonEmptyString,
   /** `owner/name`; omitted leaves the environment with an empty workspace. */
@@ -49,6 +49,7 @@ export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
 
 export const ProvisionedEnvironment = Schema.Struct({
   leaseId: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
   sandboxId: TrimmedNonEmptyString,
   /** Single use, and the only way a client can reach the new environment. */
   pairingUrl: TrimmedNonEmptyString,
@@ -76,6 +77,7 @@ export type EnvironmentProvisionResult = typeof EnvironmentProvisionResult.Type;
 /** A one-shot cleanup request for an environment created by provisioning. */
 export const EnvironmentProvisionDisposeInput = Schema.Struct({
   leaseId: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
   sandboxId: TrimmedNonEmptyString,
 });
 export type EnvironmentProvisionDisposeInput = typeof EnvironmentProvisionDisposeInput.Type;

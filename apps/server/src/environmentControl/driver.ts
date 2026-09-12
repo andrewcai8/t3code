@@ -13,6 +13,7 @@ import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
 import * as Schema from "effect/Schema";
 import type { EnvironmentControlConfig, ManagedTarget } from "./config.ts";
+import type { NamespaceResource } from "./namespaceProvisioner.ts";
 
 export type Observation =
   | { readonly kind: "stopped" }
@@ -34,6 +35,7 @@ function isMissingSandbox(cause: unknown): boolean {
 }
 
 export interface ProvisionRequest {
+  readonly provider: "e2b" | "namespace";
   readonly providerInstanceId: string;
   readonly repository?: string | undefined;
   readonly branch?: string | undefined;
@@ -56,9 +58,11 @@ export class ProvisionRefused extends Error {
 }
 
 export interface Provisioned {
+  readonly provider: "e2b" | "namespace";
   readonly sandboxId: string;
   readonly pairingUrl: string;
   readonly projectDir: string;
+  readonly namespaceResource?: NamespaceResource;
 }
 
 /**
@@ -96,7 +100,10 @@ export interface CloudDriver {
   wake(target: ManagedTarget): Promise<void>;
   stop(target: ManagedTarget, instanceId: string): Promise<ControllerResult>;
   provision(request: ProvisionRequest): Promise<Provisioned>;
-  dispose(sandboxId: string): Promise<void>;
+  dispose(input: {
+    readonly sandboxId: string;
+    readonly namespaceResource?: NamespaceResource;
+  }): Promise<void>;
 }
 const Capabilities = Schema.Struct({
   protocol: Schema.Literal(2),
@@ -291,6 +298,7 @@ async function prepare(
   )?.[1];
   if (!token) throw new Error("Could not mint a pairing token");
   return {
+    provider: "e2b" as const,
     sandboxId: sandbox.sandboxId,
     pairingUrl: `https://${host}/pair#token=${token}`,
     projectDir,
@@ -403,11 +411,27 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
      * processes intact.
      */
     provision: async (request) => {
+      if (request.provider === "namespace") {
+        if (!config.provisioning?.namespace)
+          throw new ProvisionRefused(
+            "unconfigured",
+            "Namespace provisioning is not configured on this install.",
+          );
+        throw new ProvisionRefused(
+          "unsupported",
+          "Namespace provisioning is wired at the provider boundary, but its client-reachable endpoint is not configured yet.",
+        );
+      }
       const provisioning = config.provisioning;
       if (!provisioning)
         throw new ProvisionRefused(
           "unconfigured",
           "This install has no cloud provisioning template configured.",
+        );
+      if (!provisioning.templateId)
+        throw new ProvisionRefused(
+          "unconfigured",
+          "E2B provisioning is not configured on this install.",
         );
       const authPath = accountAuthPath(request.providerInstanceId);
       const auth = await NodeFSP.readFile(authPath, "utf8").catch(() => {
@@ -450,7 +474,9 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         throw cause;
       }
     },
-    dispose: async (sandboxId) => {
+    dispose: async ({ sandboxId, namespaceResource }) => {
+      if (namespaceResource)
+        throw new Error("Namespace disposal requires a configured Namespace runner");
       let info: Awaited<ReturnType<typeof Sandbox.getInfo>>;
       try {
         info = await Sandbox.getInfo(sandboxId, api);

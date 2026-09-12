@@ -32,7 +32,7 @@ const Target = Schema.Struct({
  * than failing.
  */
 const Provisioning = Schema.Struct({
-  templateId: TrimmedNonEmptyString,
+  templateId: Schema.optional(TrimmedNonEmptyString),
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
   /**
@@ -92,6 +92,14 @@ const Provisioning = Schema.Struct({
         destination: TrimmedNonEmptyString,
       }),
     ),
+  ),
+  /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
+  namespace: Schema.optional(
+    Schema.Struct({
+      size: TrimmedNonEmptyString,
+      region: Schema.optional(TrimmedNonEmptyString),
+      idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+    }),
   ),
 });
 export type Provisioning = typeof Provisioning.Type;

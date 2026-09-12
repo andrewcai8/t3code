@@ -4,6 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
+import type { NamespaceResource } from "./namespaceProvisioner.ts";
 
 export const ProvisionedLeaseState = Schema.Literals(["active", "releasing", "disposed"]);
 export type ProvisionedLeaseState = typeof ProvisionedLeaseState.Type;
@@ -15,6 +16,16 @@ const ProvisionedLeaseOwner = Schema.Struct({
 const StoredProvisionedLease = Schema.Struct({
   leaseId: Schema.String,
   sandboxId: Schema.String,
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  namespaceResource: Schema.optional(
+    Schema.Struct({
+      provider: Schema.Literal("namespace"),
+      devboxId: Schema.String,
+      instanceId: Schema.String,
+      region: Schema.String,
+      workspaceDir: Schema.String,
+    }),
+  ),
   providerInstanceId: Schema.String,
   state: ProvisionedLeaseState,
   owner: Schema.NullOr(ProvisionedLeaseOwner),
@@ -33,6 +44,8 @@ export interface ProvisionedLeaseRegistry {
     readonly leaseId: string;
     readonly sandboxId: string;
     readonly providerInstanceId: string;
+    readonly provider?: "e2b" | "namespace";
+    readonly namespaceResource?: NamespaceResource;
     readonly now?: Date;
   }) => Promise<ProvisionedLease>;
   readonly claim: (input: {
@@ -106,7 +119,8 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         if (existing) {
           if (
             existing.sandboxId !== input.sandboxId ||
-            existing.providerInstanceId !== input.providerInstanceId
+            existing.providerInstanceId !== input.providerInstanceId ||
+            existing.provider !== input.provider
           ) {
             throw new Error("Provisioned lease identity conflict");
           }
@@ -116,6 +130,10 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         const lease: ProvisionedLease = {
           leaseId: input.leaseId,
           sandboxId: input.sandboxId,
+          ...(input.provider === undefined ? {} : { provider: input.provider }),
+          ...(input.namespaceResource === undefined
+            ? {}
+            : { namespaceResource: input.namespaceResource }),
           providerInstanceId: input.providerInstanceId,
           state: "active",
           owner: null,

@@ -164,6 +164,7 @@ describe("managed cloud commands", () => {
       const { driver } = setup();
       let disposeCalls = 0;
       driver.provision = async () => ({
+        provider: "e2b",
         sandboxId: "provisioned-sandbox",
         pairingUrl: "https://example.test/pair",
         projectDir: "/home/user/work/project",
@@ -173,6 +174,7 @@ describe("managed cloud commands", () => {
       };
       const manager = createEnvironmentControl([target], driver, registry);
       const provisioned = await manager.provision({
+        provider: "e2b",
         providerInstanceId: "codex",
         repository: undefined,
         branch: undefined,
@@ -213,6 +215,7 @@ it("answers a declined provisioning request instead of failing", async () => {
   // it as a provider failure would send the operator looking at the provider.
   const { manager } = setup();
   const refusal = await manager.provision({
+    provider: "e2b",
     providerInstanceId: "codex_ac3",
     repository: undefined,
     branch: undefined,

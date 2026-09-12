@@ -132,7 +132,11 @@ export function createEnvironmentControl(
             });
       if (release !== "started") continue;
       try {
-        await driver.dispose(lease.sandboxId);
+        await driver.dispose(
+          lease.namespaceResource
+            ? { sandboxId: lease.sandboxId, namespaceResource: lease.namespaceResource }
+            : { sandboxId: lease.sandboxId },
+        );
         await leaseRegistry.markDisposed(lease.leaseId);
       } catch {
         // Leave the lease releasing so the next control request can retry it.
@@ -157,9 +161,13 @@ export function createEnvironmentControl(
               leaseId,
               sandboxId: environment.sandboxId,
               providerInstanceId: request.providerInstanceId,
+              provider: environment.provider,
+              ...(environment.namespaceResource
+                ? { namespaceResource: environment.namespaceResource }
+                : {}),
             });
           } catch (cause) {
-            await driver.dispose(environment.sandboxId).catch(() => undefined);
+            await driver.dispose({ sandboxId: environment.sandboxId }).catch(() => undefined);
             throw cause;
           }
         }
@@ -188,8 +196,12 @@ export function createEnvironmentControl(
             };
           if (release === "started") {
             try {
-              await driver.dispose(input.sandboxId);
               const lease = await leaseRegistry.findBySandbox(input.sandboxId);
+              await driver.dispose(
+                lease?.namespaceResource
+                  ? { sandboxId: input.sandboxId, namespaceResource: lease.namespaceResource }
+                  : { sandboxId: input.sandboxId },
+              );
               if (lease) await leaseRegistry.markDisposed(lease.leaseId);
               return { kind: "disposed" };
             } catch {
@@ -201,7 +213,7 @@ export function createEnvironmentControl(
             }
           }
         }
-        await driver.dispose(input.sandboxId);
+        await driver.dispose({ sandboxId: input.sandboxId });
         return { kind: "disposed" };
       } catch {
         return {
@@ -330,6 +342,7 @@ export const layer = Layer.effect(
         run<EnvironmentProvisionResult>(
           (service) =>
             service.provision({
+              provider: input.provider,
               providerInstanceId: input.providerInstanceId,
               repository: input.repository,
               branch: input.branch,
