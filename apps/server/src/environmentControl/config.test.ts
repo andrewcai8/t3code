@@ -59,6 +59,21 @@ it("reports no cloud control configuration rather than failing when the default 
   );
 });
 
+it("falls back to the machine-level configuration for isolated state directories", async () => {
+  const fallback = "/home/andrew/.t3/environment-control.json";
+  const seen: string[] = [];
+  const path = await resolveControlConfigPath({
+    stateDir: "/worktree/.t3/userdata",
+    fallback,
+    exists: async (candidate) => {
+      seen.push(candidate);
+      return candidate === fallback;
+    },
+  });
+  expect(path).toBe(fallback);
+  expect(seen).toEqual(["/worktree/.t3/userdata/environment-control.json", fallback]);
+});
+
 it("keeps an explicit path even when it is missing, so the mistake surfaces", async () => {
   // Naming a file that does not exist is a misconfiguration and has to fail
   // loudly downstream; reporting "no cloud controls" would hide it.

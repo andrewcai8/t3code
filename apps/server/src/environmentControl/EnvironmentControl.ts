@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - provider control resolves state in a Node filesystem boundary.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
 import {
   EnvironmentControlError,
   type ComputeState,
@@ -283,6 +284,7 @@ export const layer = Layer.effect(
         const path = await resolveControlConfigPath({
           explicit: process.env.T3CODE_ENVIRONMENT_CONTROL_CONFIG,
           stateDir,
+          fallback: NodePath.join(NodeOS.homedir(), ".t3", "environment-control.json"),
         });
         if (!path) return null;
         const config = await readConfig(path);

@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - private configuration is loaded at the Promise-based SDK boundary.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { EnvironmentId, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -150,20 +151,28 @@ const onDisk = async (path: string) => {
 /**
  * Where to read cloud control configuration, or `null` when it is not set up.
  *
- * The default lives beside `settings.json` in the state directory, so a packaged
- * app and a dev run find it the same way and a launcher that rewrites the
- * environment cannot hide it. An explicit override is returned even when the
- * file is missing: naming a path that does not exist is a misconfiguration and
- * has to fail loudly, whereas the default being absent just means a machine has
- * no cloud controls.
+ * The default lives beside `settings.json` in the state directory, with the
+ * machine-level `~/.t3` location as a fallback for desktop dev runs that use an
+ * isolated state directory. An explicit override is returned even when the file
+ * is missing: naming a path that does not exist is a misconfiguration and has to
+ * fail loudly, whereas the default being absent just means a machine has no
+ * cloud controls.
  */
 export async function resolveControlConfigPath(input: {
   readonly explicit?: string | undefined;
   readonly stateDir: string;
+  readonly fallback?: string | undefined;
   readonly exists?: (path: string) => Promise<boolean>;
 }): Promise<string | null> {
   const explicit = input.explicit?.trim();
   if (explicit) return explicit;
-  const path = NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME);
-  return (await (input.exists ?? onDisk)(path)) ? path : null;
+  const candidates = [
+    NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME),
+    input.fallback ?? NodePath.join(NodeOS.homedir(), ".t3", CONTROL_CONFIG_FILENAME),
+  ];
+  const exists = input.exists ?? onDisk;
+  for (const path of candidates) {
+    if (await exists(path)) return path;
+  }
+  return null;
 }
