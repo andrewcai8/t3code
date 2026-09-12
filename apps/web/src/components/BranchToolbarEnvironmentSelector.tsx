@@ -6,6 +6,9 @@ import type { EnvironmentOption } from "./BranchToolbar.logic";
 
 /** Not an environment id: the machine it names has yet to be created. */
 export const CREATE_CLOUD_VALUE = "create-cloud-environment";
+export const CREATE_NAMESPACE_VALUE = "create-namespace-environment";
+
+export type CloudEnvironmentProvider = "e2b" | "namespace";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { composerFloatingLayerProps } from "./chat/composerEventScope";
 import {
@@ -29,7 +32,8 @@ interface BranchToolbarEnvironmentSelectorProps {
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   // Absent where an environment cannot be created, which is any install
   // without a configured cloud manager.
-  onCreateCloudEnvironment?: (() => void) | undefined;
+  onCreateCloudEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
+  onCreateNamespaceEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
   creatingCloudEnvironment?: boolean;
   cloudEnvironmentPending?: boolean;
 }
@@ -40,6 +44,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   envLocked,
   environmentId,
   onCreateCloudEnvironment,
+  onCreateNamespaceEnvironment,
   creatingCloudEnvironment,
   cloudEnvironmentPending,
   availableEnvironments,
@@ -58,13 +63,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         value: env.environmentId,
         label: env.label,
       })),
-      ...(onCreateCloudEnvironment
-        ? [
-            {
-              value: CREATE_CLOUD_VALUE,
-              label: "E2B",
-            },
-          ]
+      ...(onCreateCloudEnvironment ? [{ value: CREATE_CLOUD_VALUE, label: "E2B" }] : []),
+      ...(onCreateNamespaceEnvironment
+        ? [{ value: CREATE_NAMESPACE_VALUE, label: "Namespace Mac" }]
         : []),
     ],
     [
@@ -73,6 +74,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       cloudEnvironmentPending,
       onAutoEnvironment,
       onCreateCloudEnvironment,
+      onCreateNamespaceEnvironment,
     ],
   );
 
@@ -116,7 +118,11 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         // A sentinel rather than an environment id: the machine this names
         // does not exist yet, which is the whole point of choosing it.
         if (value === CREATE_CLOUD_VALUE) {
-          onCreateCloudEnvironment?.();
+          onCreateCloudEnvironment?.("e2b");
+          return;
+        }
+        if (value === CREATE_NAMESPACE_VALUE) {
+          onCreateNamespaceEnvironment?.("namespace");
           return;
         }
         if (value === "auto") {
@@ -183,6 +189,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               <span className="inline-flex items-center gap-1.5">
                 <CloudIcon className="size-3" aria-hidden="true" />
                 {creatingCloudEnvironment ? "Preparing E2B…" : "E2B"}
+              </span>
+            </SelectItem>
+          ) : null}
+          {onCreateNamespaceEnvironment ? (
+            <SelectItem value={CREATE_NAMESPACE_VALUE}>
+              <span className="inline-flex items-center gap-1.5">
+                <CloudIcon className="size-3" aria-hidden="true" />
+                Namespace Mac
               </span>
             </SelectItem>
           ) : null}

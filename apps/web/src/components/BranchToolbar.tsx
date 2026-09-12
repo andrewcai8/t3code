@@ -31,6 +31,8 @@ import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
 import {
   BranchToolbarEnvironmentSelector,
   CREATE_CLOUD_VALUE,
+  CREATE_NAMESPACE_VALUE,
+  type CloudEnvironmentProvider,
 } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { Button } from "./ui/button";
@@ -69,7 +71,8 @@ interface BranchToolbarProps {
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
-  onCreateCloudEnvironment?: (() => void) | undefined;
+  onCreateCloudEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
+  onCreateNamespaceEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
   creatingCloudEnvironment?: boolean;
   cloudEnvironmentPending?: boolean;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
@@ -86,7 +89,8 @@ interface MobileRunContextSelectorProps {
   showEnvironmentPicker: boolean;
   showEnvironmentIndicator: boolean;
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
-  onCreateCloudEnvironment: (() => void) | undefined;
+  onCreateCloudEnvironment: ((provider: CloudEnvironmentProvider) => void) | undefined;
+  onCreateNamespaceEnvironment: ((provider: CloudEnvironmentProvider) => void) | undefined;
   creatingCloudEnvironment: boolean | undefined;
   cloudEnvironmentPending: boolean | undefined;
   effectiveEnvMode: EnvMode;
@@ -107,6 +111,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   showEnvironmentIndicator,
   onEnvironmentChange,
   onCreateCloudEnvironment,
+  onCreateNamespaceEnvironment,
   creatingCloudEnvironment,
   cloudEnvironmentPending,
   effectiveEnvMode,
@@ -204,7 +209,11 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                 }
                 onValueChange={(value) => {
                   if (value === CREATE_CLOUD_VALUE) {
-                    onCreateCloudEnvironment?.();
+                    onCreateCloudEnvironment?.("e2b");
+                    return;
+                  }
+                  if (value === CREATE_NAMESPACE_VALUE) {
+                    onCreateNamespaceEnvironment?.("namespace");
                     return;
                   }
                   if (value === "auto") {
@@ -252,6 +261,14 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                       <span className="min-w-0 truncate">
                         {creatingCloudEnvironment ? "Creating E2B sandbox…" : "E2B"}
                       </span>
+                    </span>
+                  </MenuRadioItem>
+                ) : null}
+                {onCreateNamespaceEnvironment ? (
+                  <MenuRadioItem value={CREATE_NAMESPACE_VALUE} disabled={envLocked}>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <CloudIcon className="size-3" aria-hidden="true" />
+                      <span className="min-w-0 truncate">Namespace Mac</span>
                     </span>
                   </MenuRadioItem>
                 ) : null}
@@ -497,6 +514,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   availableEnvironments,
   onEnvironmentChange,
   onCreateCloudEnvironment,
+  onCreateNamespaceEnvironment,
   creatingCloudEnvironment,
   cloudEnvironmentPending,
   composerControlsHostRef,
@@ -603,6 +621,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             showEnvironmentIndicator={showEnvironmentIndicator}
             onEnvironmentChange={onEnvironmentChange}
             onCreateCloudEnvironment={onCreateCloudEnvironment}
+            onCreateNamespaceEnvironment={onCreateNamespaceEnvironment}
             creatingCloudEnvironment={creatingCloudEnvironment}
             cloudEnvironmentPending={cloudEnvironmentPending}
             effectiveEnvMode={effectiveEnvMode}
@@ -631,6 +650,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 availableEnvironments={availableEnvironments}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
                 {...(onCreateCloudEnvironment ? { onCreateCloudEnvironment } : {})}
+                {...(onCreateNamespaceEnvironment ? { onCreateNamespaceEnvironment } : {})}
                 {...(creatingCloudEnvironment !== undefined ? { creatingCloudEnvironment } : {})}
                 {...(cloudEnvironmentPending !== undefined ? { cloudEnvironmentPending } : {})}
               />
