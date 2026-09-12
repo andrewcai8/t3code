@@ -31,6 +31,7 @@ interface BranchToolbarEnvironmentSelectorProps {
   // without a configured cloud manager.
   onCreateCloudEnvironment?: (() => void) | undefined;
   creatingCloudEnvironment?: boolean;
+  cloudEnvironmentPending?: boolean;
 }
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -40,6 +41,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   environmentId,
   onCreateCloudEnvironment,
   creatingCloudEnvironment,
+  cloudEnvironmentPending,
   availableEnvironments,
   onEnvironmentChange,
 }: BranchToolbarEnvironmentSelectorProps) {
@@ -56,8 +58,22 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         value: env.environmentId,
         label: env.label,
       })),
+      ...(onCreateCloudEnvironment
+        ? [
+            {
+              value: CREATE_CLOUD_VALUE,
+              label: cloudEnvironmentPending ? "Cloud chat on send" : "New cloud chat (E2B)",
+            },
+          ]
+        : []),
     ],
-    [availableEnvironments, autoEnvironmentLabel, onAutoEnvironment],
+    [
+      availableEnvironments,
+      autoEnvironmentLabel,
+      cloudEnvironmentPending,
+      onAutoEnvironment,
+      onCreateCloudEnvironment,
+    ],
   );
 
   // The static label carries the xs control's height (h-7 sm:h-6) as well as
@@ -93,7 +109,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   return (
     <Select
       modal={false}
-      value={autoEnvironmentLabel ? "auto" : environmentId}
+      value={
+        cloudEnvironmentPending ? CREATE_CLOUD_VALUE : autoEnvironmentLabel ? "auto" : environmentId
+      }
       onValueChange={(value) => {
         // A sentinel rather than an environment id: the machine this names
         // does not exist yet, which is the whole point of choosing it.
@@ -164,7 +182,11 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             <SelectItem value={CREATE_CLOUD_VALUE} disabled={creatingCloudEnvironment === true}>
               <span className="inline-flex items-center gap-1.5">
                 <CloudIcon className="size-3" aria-hidden="true" />
-                {creatingCloudEnvironment ? "Creating cloud chat…" : "New cloud chat (E2B)"}
+                {creatingCloudEnvironment
+                  ? "Creating cloud chat…"
+                  : cloudEnvironmentPending
+                    ? "Cloud chat on send"
+                    : "New cloud chat (E2B)"}
               </span>
             </SelectItem>
           ) : null}

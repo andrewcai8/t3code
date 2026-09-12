@@ -71,6 +71,7 @@ interface BranchToolbarProps {
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   onCreateCloudEnvironment?: (() => void) | undefined;
   creatingCloudEnvironment?: boolean;
+  cloudEnvironmentPending?: boolean;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
 }
@@ -87,6 +88,7 @@ interface MobileRunContextSelectorProps {
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
   onCreateCloudEnvironment: (() => void) | undefined;
   creatingCloudEnvironment: boolean | undefined;
+  cloudEnvironmentPending: boolean | undefined;
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   onEnvModeChange: (mode: EnvMode) => void;
@@ -106,6 +108,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   onEnvironmentChange,
   onCreateCloudEnvironment,
   creatingCloudEnvironment,
+  cloudEnvironmentPending,
   effectiveEnvMode,
   activeWorktreePath,
   onEnvModeChange,
@@ -156,8 +159,10 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
           data-composer-label-motion
           className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
         >
-          {autoEnvironmentLabel ??
-            (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+          {cloudEnvironmentPending
+            ? "Cloud chat on send"
+            : (autoEnvironmentLabel ??
+              (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel))}
         </span>
       </span>
     </>
@@ -190,7 +195,13 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
             <MenuGroup>
               <MenuGroupLabel>Run on</MenuGroupLabel>
               <MenuRadioGroup
-                value={autoEnvironmentLabel ? "auto" : environmentId}
+                value={
+                  cloudEnvironmentPending
+                    ? CREATE_CLOUD_VALUE
+                    : autoEnvironmentLabel
+                      ? "auto"
+                      : environmentId
+                }
                 onValueChange={(value) => {
                   if (value === CREATE_CLOUD_VALUE) {
                     onCreateCloudEnvironment?.();
@@ -239,7 +250,11 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                     <span className="flex min-w-0 items-center gap-1.5">
                       <CloudIcon className="size-3" aria-hidden="true" />
                       <span className="min-w-0 truncate">
-                        {creatingCloudEnvironment ? "Creating cloud chat…" : "New cloud chat (E2B)"}
+                        {creatingCloudEnvironment
+                          ? "Creating cloud chat…"
+                          : cloudEnvironmentPending
+                            ? "Cloud chat on send"
+                            : "New cloud chat (E2B)"}
                       </span>
                     </span>
                   </MenuRadioItem>
@@ -487,6 +502,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   onEnvironmentChange,
   onCreateCloudEnvironment,
   creatingCloudEnvironment,
+  cloudEnvironmentPending,
   composerControlsHostRef,
   contextStripVisible = true,
 }: BranchToolbarProps) {
@@ -592,6 +608,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             onEnvironmentChange={onEnvironmentChange}
             onCreateCloudEnvironment={onCreateCloudEnvironment}
             creatingCloudEnvironment={creatingCloudEnvironment}
+            cloudEnvironmentPending={cloudEnvironmentPending}
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             onEnvModeChange={onEnvModeChange}
@@ -619,6 +636,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
                 {...(onCreateCloudEnvironment ? { onCreateCloudEnvironment } : {})}
                 {...(creatingCloudEnvironment !== undefined ? { creatingCloudEnvironment } : {})}
+                {...(cloudEnvironmentPending !== undefined ? { cloudEnvironmentPending } : {})}
               />
               {showGitControls ? (
                 <Separator
