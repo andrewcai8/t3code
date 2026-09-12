@@ -183,7 +183,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       return `${origin}/pair#token=${encodeURIComponent(pairToken(pair.stdout))}`;
     },
     destroyInstance: async (resource) => {
-      await run(["shutdown", nameOf(resource)]);
+      await run(["shutdown", nameOf(resource), "--force"]);
     },
     expireDevbox: async (resource) => {
       await run(["expire", nameOf(resource), "--force"]);
