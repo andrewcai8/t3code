@@ -146,6 +146,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
+import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
@@ -2148,6 +2149,7 @@ export default function Sidebar() {
     reorderActiveThread,
     archiveThread,
     deleteThread,
+    stopProvisionedCloudMachine,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -4009,6 +4011,7 @@ export default function Sidebar() {
               isSettled,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+              hasProvisionedCloudMachine: provisionedSandboxFor(threadRef) !== null,
               isRegeneratingTitle,
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
@@ -4080,6 +4083,9 @@ export default function Sidebar() {
             return;
           case "unpin":
             attemptUnpin(threadRef);
+            return;
+          case "stop-cloud-machine":
+            await stopProvisionedCloudMachine(threadRef);
             return;
           case "rename":
             startThreadRename(threadRef, thread.title);
@@ -4200,6 +4206,7 @@ export default function Sidebar() {
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
+      stopProvisionedCloudMachine,
       handleMultiSelectContextMenu,
       markThreadUnread,
       openProjectSettings,

@@ -35,6 +35,7 @@ import {
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { useUiStateStore } from "../uiStateStore";
+import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
@@ -89,6 +90,7 @@ export function useThreadActionMenu(input: {
     confirmAndUnpinThread,
     archiveThread,
     deleteThread,
+    stopProvisionedCloudMachine,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -143,6 +145,7 @@ export function useThreadActionMenu(input: {
           isSettled: supports.settlement && thread.settledOverride === "settled",
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
+          hasProvisionedCloudMachine: provisionedSandboxFor(threadRef) !== null,
           isRegeneratingTitle,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
@@ -230,6 +233,9 @@ export function useThreadActionMenu(input: {
             return;
           case "unsnooze":
             await reportFailure("Failed to wake thread", () => unsnoozeThread(threadRef));
+            return;
+          case "stop-cloud-machine":
+            await stopProvisionedCloudMachine(threadRef);
             return;
           case "pin":
             await reportFailure("Failed to pin thread", () => pinThread(threadRef));
@@ -348,6 +354,7 @@ export function useThreadActionMenu(input: {
       router,
       settleThread,
       snoozeThread,
+      stopProvisionedCloudMachine,
       threadRef,
       timestampFormat,
       unsettleThread,
