@@ -364,6 +364,27 @@ export function useThreadActions() {
       if (archiveResult._tag === "Failure") {
         return archiveResult;
       }
+      const disposeResult = await disposeProvisionedSandboxForThread(threadRef);
+      if (disposeResult._tag === "Success") {
+        const value = disposeResult.value;
+        if (value.kind === "refused") {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Thread archived, but its cloud machine is still running.",
+              description: value.message,
+            }),
+          );
+        }
+      } else if (!isAtomCommandInterrupted(disposeResult)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Thread archived, but its cloud machine is still running.",
+            description: "Retry archiving after the cloud manager is reachable.",
+          }),
+        );
+      }
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -383,7 +404,13 @@ export function useThreadActions() {
 
       return archiveResult;
     },
-    [archiveThreadMutation, getCurrentRouteThreadRef, markThreadVisited, resolveThreadTarget],
+    [
+      archiveThreadMutation,
+      disposeProvisionedSandboxForThread,
+      getCurrentRouteThreadRef,
+      markThreadVisited,
+      resolveThreadTarget,
+    ],
   );
 
   const unarchiveThread = useCallback(
