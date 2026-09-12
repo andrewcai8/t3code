@@ -54,6 +54,34 @@ const Provisioning = Schema.Struct({
    * database wire protocol, say — needs its address listed as a CIDR instead.
    */
   egressAllow: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /**
+   * Environment variables written into a new environment's shell profile.
+   *
+   * Some agents read their credential from the environment rather than a file,
+   * and a sandbox command does not inherit anything the template was built
+   * with, so the value has to be placed where a shell will find it.
+   */
+  shellEnvironment: Schema.optional(
+    Schema.Array(Schema.Struct({ name: TrimmedNonEmptyString, source: TrimmedNonEmptyString })),
+  ),
+  /**
+   * Files placed in a new environment's home directory, by path within it.
+   *
+   * Agent CLIs keep their sign-in where they expect to find it, and each keeps
+   * it somewhere different. Copying those files is what makes an environment
+   * usable by more than the one agent whose credentials provisioning knows how
+   * to install, and saves signing in again on every machine.
+   */
+  homeFiles: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        /** Absolute path on the machine running the server. */
+        source: TrimmedNonEmptyString,
+        /** Path relative to the environment's home directory. */
+        destination: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
   workspaceFiles: Schema.optional(
     Schema.Array(
       Schema.Struct({

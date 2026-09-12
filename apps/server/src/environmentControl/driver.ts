@@ -119,6 +119,60 @@ async function prepare(
   await sandbox.files.write("/home/user/.codex/auth.json", auth);
   await run("chmod 600 /home/user/.codex/auth.json");
 
+  // Each agent CLI reads its sign-in from its own place, so copying those
+  // files is what lets an environment run more than the one agent whose
+  // credentials provisioning installs by name.
+  for (const file of provisioning.homeFiles ?? []) {
+    const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
+      throw new ProvisionRefused(
+        "credentials",
+        `Home file '${file.source}' is configured but missing on this machine.`,
+      );
+    });
+    const target = NodePath.posix.join("/home/user", file.destination);
+    await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
+    await sandbox.files.write(target, contents);
+    await run(`chmod 600 ${target}`);
+  }
+
+  // Written to the profile rather than exported per command: an agent runs
+  // these CLIs from its own shell, and nothing it starts would inherit a
+  // variable set around the command that provisioned the machine.
+  const shellEnvironment = provisioning.shellEnvironment ?? [];
+  if (shellEnvironment.length > 0) {
+    const lines: string[] = [];
+    for (const variable of shellEnvironment) {
+      const value = await NodeFSP.readFile(variable.source, "utf8").catch(() => {
+        throw new ProvisionRefused(
+          "credentials",
+          `Value for '${variable.name}' is configured but missing on this machine.`,
+        );
+      });
+      lines.push(`export ${variable.name}=${JSON.stringify(value.trim())}`);
+    }
+    await sandbox.files.write("/home/user/.profile.d-agents.sh", `${lines.join("\n")}\n`);
+    await run("chmod 600 /home/user/.profile.d-agents.sh");
+    await run(
+      "grep -q profile.d-agents /home/user/.bashrc 2>/dev/null || " +
+        "echo '. /home/user/.profile.d-agents.sh' >> /home/user/.bashrc",
+    );
+    await run(
+      "grep -q profile.d-agents /home/user/.profile 2>/dev/null || " +
+        "echo '. /home/user/.profile.d-agents.sh' >> /home/user/.profile",
+    );
+  }
+
+  // Cloning uses a credential helper, but `gh` reads its own config, and an
+  // agent that cannot reach `gh` can commit and never open a pull request.
+  if (provisioning.githubToken) {
+    await run("mkdir -p /home/user/.config/gh");
+    await sandbox.files.write(
+      "/home/user/.config/gh/hosts.yml",
+      `github.com:\n    oauth_token: ${provisioning.githubToken}\n    git_protocol: https\n`,
+    );
+    await run("chmod 600 /home/user/.config/gh/hosts.yml");
+  }
+
   let projectDir = "/home/user/work";
   if (request.repository) {
     if (!provisioning.githubToken)
