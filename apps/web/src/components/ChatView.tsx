@@ -1713,6 +1713,10 @@ export default function ChatView(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  // The cloud handoff resumes sending from the same render that clears the
+  // pending environment flag. Let that internal call cross the guard once;
+  // an ordinary user send must still wait for the handoff to finish.
+  const resumingCloudSendRef = useRef(false);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
@@ -6733,7 +6737,7 @@ export default function ChatView(props: ChatViewProps) {
       !clientSettingsHydrated ||
       threadDetailLoading ||
       sendInFlightRef.current ||
-      pendingCloudSendEnvironmentId !== null ||
+      (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
@@ -7512,7 +7516,10 @@ export default function ChatView(props: ChatViewProps) {
     }
     setPendingCloudSendEnvironmentId(null);
     setCloudProvisioningPhase(null);
-    void onSend();
+    resumingCloudSendRef.current = true;
+    void onSend().finally(() => {
+      resumingCloudSendRef.current = false;
+    });
   }, [
     activeEnvironment?.serverConfig,
     activeThread?.environmentId,
