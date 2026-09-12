@@ -6,6 +6,8 @@ import {
   type EnvironmentControlResult,
   type EnvironmentProvisionInput,
   type EnvironmentProvisionResult,
+  type EnvironmentProvisionDisposeInput,
+  type EnvironmentProvisionDisposeResult,
   type ManagedEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -122,6 +124,20 @@ export function createEnvironmentControl(
         throw cause;
       }
     },
+    dispose: async (
+      input: EnvironmentProvisionDisposeInput,
+    ): Promise<EnvironmentProvisionDisposeResult> => {
+      try {
+        await driver.dispose(input.sandboxId);
+        return { kind: "disposed" };
+      } catch {
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The cloud sandbox could not be disposed.",
+        };
+      }
+    },
   };
 }
 
@@ -138,6 +154,9 @@ export class EnvironmentControl extends Context.Service<
     readonly provision: (
       input: EnvironmentProvisionInput,
     ) => Effect.Effect<EnvironmentProvisionResult, EnvironmentControlError>;
+    readonly dispose: (
+      input: EnvironmentProvisionDisposeInput,
+    ) => Effect.Effect<EnvironmentProvisionDisposeResult, EnvironmentControlError>;
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
@@ -188,6 +207,12 @@ export const layer = Layer.effect(
             message: "This install has no cloud provisioning template configured.",
           },
         ),
+      dispose: (input) =>
+        run<EnvironmentProvisionDisposeResult>((service) => service.dispose(input), {
+          kind: "refused" as const,
+          reason: "unconfigured" as const,
+          message: "This install has no cloud provisioning template configured.",
+        }),
       start: (id) => run((service) => service.start(id), refused("unknown")),
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };

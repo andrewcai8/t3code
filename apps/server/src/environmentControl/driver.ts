@@ -28,6 +28,11 @@ export type ControllerResult = typeof ControllerResult.Type;
 /** The port a provisioned environment serves T3 on. */
 const PROVISIONED_PORT = 3000;
 
+function isMissingSandbox(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return /(?:status\s*[:=]?\s*)?404\b|sandbox[^\n]*not found/i.test(message);
+}
+
 export interface ProvisionRequest {
   readonly providerInstanceId: string;
   readonly repository?: string | undefined;
@@ -91,6 +96,7 @@ export interface CloudDriver {
   wake(target: ManagedTarget): Promise<void>;
   stop(target: ManagedTarget, instanceId: string): Promise<ControllerResult>;
   provision(request: ProvisionRequest): Promise<Provisioned>;
+  dispose(sandboxId: string): Promise<void>;
 }
 const Capabilities = Schema.Struct({
   protocol: Schema.Literal(2),
@@ -433,6 +439,26 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         // still billing, and nothing else knows its id to clean up later.
         await sandbox.kill().catch(() => undefined);
         throw cause;
+      }
+    },
+    dispose: async (sandboxId) => {
+      let info: Awaited<ReturnType<typeof Sandbox.getInfo>>;
+      try {
+        info = await Sandbox.getInfo(sandboxId, api);
+      } catch (cause) {
+        // Disposal is safe to retry after a client crash or a provider-side
+        // cleanup. A missing sandbox is already in the desired state.
+        if (isMissingSandbox(cause)) return;
+        throw cause;
+      }
+      if (info.sandboxId !== sandboxId || info.metadata.purpose !== "t3-environment") {
+        throw new Error("Sandbox ownership or purpose changed");
+      }
+      try {
+        const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
+        await sandbox.kill();
+      } catch (cause) {
+        if (!isMissingSandbox(cause)) throw cause;
       }
     },
     stop: async (target, instanceId) => {

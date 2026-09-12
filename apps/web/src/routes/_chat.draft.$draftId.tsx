@@ -11,6 +11,7 @@ import {
 import { SidebarInset } from "../components/ui/sidebar";
 import { waitForDraftHeroTransition } from "../components/chat/draftHeroTransition";
 import { buildThreadRouteParams } from "../threadRoutes";
+import { transferProvisionedSandboxLease } from "../cloud/provisionedSandboxLeases";
 import { useThread, useThreadRefs } from "../state/entities";
 
 function DraftChatThreadRouteView() {
@@ -39,6 +40,7 @@ function DraftChatThreadRouteView() {
     if (!inferredThreadRef || draftSession?.promotedTo) {
       return;
     }
+    transferProvisionedSandboxLease(draftId, inferredThreadRef);
     markPromotedDraftThreadByRef(inferredThreadRef);
   }, [draftSession?.promotedTo, inferredThreadRef]);
 

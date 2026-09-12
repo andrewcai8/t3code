@@ -1046,6 +1046,12 @@ const buildAppUnderTest = (options?: {
               reason: "unconfigured",
               message: "Not configured",
             }),
+          dispose: () =>
+            Effect.succeed({
+              kind: "refused",
+              reason: "unconfigured",
+              message: "Not configured",
+            }),
           start: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           stop: () =>

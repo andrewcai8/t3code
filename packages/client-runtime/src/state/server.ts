@@ -995,6 +995,14 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.providerInstanceId}`,
       },
     }),
+    disposeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:dispose",
+      tag: WS_METHODS.environmentControlDispose,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.sandboxId}`,
+      },
+    }),
     stopManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:stop",
       tag: WS_METHODS.environmentControlStop,

@@ -308,6 +308,10 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { connectPairing } from "../connection/onboarding";
+import {
+  forgetProvisionedSandbox,
+  rememberProvisionedSandbox,
+} from "../cloud/provisionedSandboxLeases";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import {
@@ -323,6 +327,7 @@ import {
   useThread,
   useThreadRefs,
   useThreadShell,
+  waitForProjectMatch,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
@@ -4279,10 +4284,15 @@ export default function ChatView(props: ChatViewProps) {
         toastManager.add({ type: "error", title: created.value.message });
         return;
       }
+      const lease = {
+        sandboxId: created.value.environment.sandboxId,
+        managerEnvironmentId: primaryEnvironmentId,
+      };
       const paired = await connectCloudPairing({
         pairingUrl: created.value.environment.pairingUrl,
       });
       if (AsyncResult.isFailure(paired)) {
+        rememberProvisionedSandbox(composerDraftTarget, lease);
         toastManager.add({
           type: "error",
           title: "The machine was created but could not be added.",
@@ -4290,9 +4300,51 @@ export default function ChatView(props: ChatViewProps) {
         });
         return;
       }
+      // Pairing is asynchronous: the remote server must publish its cloned
+      // project before the new draft can point at it. Waiting on the project
+      // atom keeps the cloud action as one user-visible operation rather than
+      // leaving a machine stranded on an unrelated local draft.
+      const pairedProject = await waitForProjectMatch((project) => {
+        if (project.environmentId !== paired.value) return false;
+        if (!identity) return true;
+        const candidate = project.repositoryIdentity;
+        return (
+          candidate?.canonicalKey === identity.canonicalKey ||
+          (candidate?.owner === identity.owner && candidate?.name === identity.name)
+        );
+      }).catch(() => null);
+      if (pairedProject === null) {
+        // Keep the lease on the current target so deleting that draft/thread
+        // still has a path to dispose the machine if project publication was
+        // delayed or the remote checkout failed.
+        rememberProvisionedSandbox(composerDraftTarget, lease);
+        toastManager.add({
+          type: "warning",
+          title: "Cloud machine ready, but its project is still loading.",
+          description: "Open a new cloud chat after the project appears.",
+        });
+        return;
+      }
+      const newDraft = await handleNewThread(
+        scopeProjectRef(pairedProject.environmentId, pairedProject.id),
+        { replace: true },
+      );
+      if (newDraft === null) {
+        rememberProvisionedSandbox(composerDraftTarget, lease);
+        toastManager.add({
+          type: "warning",
+          title: "Cloud machine ready, but the new chat could not open.",
+          description: "Delete the current chat later to release the machine.",
+        });
+        return;
+      }
+      rememberProvisionedSandbox(newDraft.draftId, lease);
+      if (typeof composerDraftTarget !== "string" || composerDraftTarget !== newDraft.draftId) {
+        forgetProvisionedSandbox(composerDraftTarget);
+      }
       toastManager.add({
         type: "success",
-        title: `Cloud machine ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
+        title: `Cloud chat ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
         ...(repository ? { description: `${repository} is checked out on it.` } : {}),
       });
     } finally {
@@ -4303,6 +4355,7 @@ export default function ChatView(props: ChatViewProps) {
     canCreateCloudEnvironment,
     cloudAccount,
     connectCloudPairing,
+    handleNewThread,
     primaryEnvironmentId,
     provisionCloudEnvironment,
   ]);

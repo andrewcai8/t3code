@@ -4,7 +4,11 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -17,6 +21,7 @@ import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../component
 import { useComposerDraftStore } from "../composerDraftStore";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
+import { serverEnvironment } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
@@ -40,6 +45,7 @@ import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import { useAtomCommand } from "../state/use-atom-command";
+import { forgetProvisionedSandbox, provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -183,6 +189,10 @@ export function useThreadActions() {
   const deleteThreadMutation = useAtomCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
+  const disposeProvisionedEnvironment = useAtomCommand(
+    serverEnvironment.disposeProvisionedEnvironment,
+    { reportFailure: false },
+  );
   const settleThreadMutation = useAtomCommand(threadEnvironment.settle, {
     reportFailure: false,
   });
@@ -312,6 +322,34 @@ export function useThreadActions() {
 
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
+      const disposeSandboxForThread = async (threadRef: ScopedThreadRef) => {
+        const lease = provisionedSandboxFor(threadRef);
+        if (!lease) return;
+        const result = await disposeProvisionedEnvironment({
+          environmentId: lease.managerEnvironmentId,
+          input: { sandboxId: lease.sandboxId },
+        });
+        if (result._tag === "Success" && result.value.kind === "disposed") {
+          forgetProvisionedSandbox(threadRef);
+          return;
+        }
+        if (
+          (result._tag === "Failure" && !isAtomCommandInterrupted(result)) ||
+          (result._tag === "Success" && result.value.kind === "refused")
+        ) {
+          const refusalMessage =
+            result._tag === "Success" && result.value.kind === "refused"
+              ? result.value.message
+              : "Retry deleting the thread after the cloud manager is reachable.";
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Thread deleted, but its cloud machine is still running.",
+              description: refusalMessage,
+            }),
+          );
+        }
+      };
       const resolved = resolveThreadTarget(target);
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
@@ -321,6 +359,7 @@ export function useThreadActions() {
         });
         if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
+          await disposeSandboxForThread(target);
         }
         return result;
       }
@@ -405,6 +444,7 @@ export function useThreadActions() {
         return deleteResult;
       }
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      await disposeSandboxForThread(threadRef);
       releaseComposerDraftUploads(threadRef);
       clearComposerDraftForThread(threadRef);
       clearProjectDraftThreadById(
@@ -487,6 +527,7 @@ export function useThreadActions() {
       clearTerminalUiState,
       closeTerminal,
       deleteThreadMutation,
+      disposeProvisionedEnvironment,
       getCurrentRouteThreadRef,
       refreshVcsStatus,
       removeWorktree,

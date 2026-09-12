@@ -71,3 +71,19 @@ export const EnvironmentProvisionResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionResult = typeof EnvironmentProvisionResult.Type;
+
+/** A one-shot cleanup request for an environment created by provisioning. */
+export const EnvironmentProvisionDisposeInput = Schema.Struct({
+  sandboxId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionDisposeInput = typeof EnvironmentProvisionDisposeInput.Type;
+
+export const EnvironmentProvisionDisposeResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("disposed") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unconfigured", "unknown"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionDisposeResult = typeof EnvironmentProvisionDisposeResult.Type;

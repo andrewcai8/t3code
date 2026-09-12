@@ -22,6 +22,9 @@ function setup(initial: Observation = { kind: "stopped" }) {
       calls.push("provision");
       throw new ProvisionRefused("unconfigured", "no template here");
     },
+    dispose: async () => {
+      calls.push("dispose");
+    },
     observe: async () => {
       calls.push("observe");
       return state;
@@ -133,6 +136,20 @@ describe("managed cloud commands", () => {
     });
     expect(JSON.stringify(await manager.list())).not.toContain("secret");
     expect(calls).toEqual([]);
+  });
+
+  it("disposes a provisioned sandbox through the cloud driver", async () => {
+    const { manager, driver, calls } = setup();
+    await manager.dispose({ sandboxId: "provisioned-sandbox" });
+    expect(calls).toEqual(["dispose"]);
+    driver.dispose = async () => {
+      throw new Error("provider unavailable");
+    };
+    await expect(manager.dispose({ sandboxId: "provisioned-sandbox" })).resolves.toEqual({
+      kind: "refused",
+      reason: "unknown",
+      message: "The cloud sandbox could not be disposed.",
+    });
   });
 });
 

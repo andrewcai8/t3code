@@ -2084,6 +2084,8 @@ const makeWsRpcLayer = (
             WS_METHODS.environmentControlProvision,
             environmentControl.provision(input),
           ),
+        [WS_METHODS.environmentControlDispose]: (input) =>
+          observeRpcEffect(WS_METHODS.environmentControlDispose, environmentControl.dispose(input)),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",

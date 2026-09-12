@@ -239,9 +239,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                     <span className="flex min-w-0 items-center gap-1.5">
                       <CloudIcon className="size-3" aria-hidden="true" />
                       <span className="min-w-0 truncate">
-                        {creatingCloudEnvironment
-                          ? "Creating cloud machine…"
-                          : "New cloud machine (E2B)"}
+                        {creatingCloudEnvironment ? "Creating cloud chat…" : "New cloud chat (E2B)"}
                       </span>
                     </span>
                   </MenuRadioItem>
