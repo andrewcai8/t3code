@@ -2,6 +2,7 @@
 export interface NamespaceResource {
   readonly provider: "namespace";
   readonly devboxId: string;
+  readonly devboxName?: string;
   readonly instanceId: string;
   readonly region: string;
   /** The image's real workspace root; macOS Devboxes use /Users/runner. */

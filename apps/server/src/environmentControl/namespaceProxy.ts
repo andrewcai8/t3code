@@ -44,7 +44,7 @@ const copyHeaders = (
     if (HOP_BY_HOP.has(name.toLowerCase()) || value === undefined) continue;
     result[name] = Array.isArray(value) ? value.join(", ") : value;
   }
-  if (authorization) result.authorization = authorization;
+  if (authorization) result["x-nsc-ingress-auth"] = authorization;
   return result;
 };
 

@@ -24,6 +24,7 @@ const StoredProvisionedLease = Schema.Struct({
     Schema.Struct({
       provider: Schema.Literal("namespace"),
       devboxId: Schema.String,
+      devboxName: Schema.optional(Schema.String),
       instanceId: Schema.String,
       region: Schema.String,
       workspaceDir: Schema.String,

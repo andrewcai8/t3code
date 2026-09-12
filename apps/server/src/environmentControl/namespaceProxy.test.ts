@@ -43,7 +43,7 @@ describe("NamespaceProxyManager", () => {
     });
     expect(await response.text()).toBe("ab");
     expect(seen.url).toBe("/api/run?q=1");
-    expect(seen.headers?.authorization).toBe("Bearer secret");
+    expect(seen.headers?.["x-nsc-ingress-auth"]).toBe("Bearer secret");
     expect(seen.headers?.cookie).toBeUndefined();
     expect(seen.headers?.host).not.toBe("evil");
     await manager.close({ proxyId: "p1" });
