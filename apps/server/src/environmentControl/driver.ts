@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - provisioning reads account credentials at the same Promise boundary.
 // @effect-diagnostics globalDate:off - the readiness deadline is wall-clock polling around that boundary.
 // @effect-diagnostics cryptoRandomUUID:off - the environment ID is written into a sandbox, not Effect state.
+import * as NodeCrypto from "node:crypto";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -14,6 +15,9 @@ import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute
 import * as Schema from "effect/Schema";
 import type { EnvironmentControlConfig, ManagedTarget } from "./config.ts";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
+import { disposeNamespace, provisionNamespace } from "./namespaceProvisioner.ts";
+import { createNamespaceSdkRunner } from "./namespaceSdkRunner.ts";
+import { NamespaceProxyManager } from "./namespaceProxy.ts";
 
 export type Observation =
   | { readonly kind: "stopped" }
@@ -309,6 +313,10 @@ async function prepare(
 
 export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver {
   const api = { apiKey: config.e2bApiKey, requestTimeoutMs: 15_000 };
+  const namespaceRunner = config.provisioning?.namespace
+    ? createNamespaceSdkRunner({ token: config.namespaceToken })
+    : undefined;
+  const namespaceProxy = new NamespaceProxyManager();
   async function e2bInfo(
     identity:
       | EnvironmentControlConfig["broker"]
@@ -419,10 +427,42 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
             "unconfigured",
             "Namespace provisioning is not configured on this install.",
           );
-        throw new ProvisionRefused(
-          "unsupported",
-          "Namespace provisioning is wired at the provider boundary, but its client-reachable endpoint is not configured yet.",
-        );
+        if (!config.namespaceIngressToken)
+          throw new ProvisionRefused(
+            "credentials",
+            "Namespace provisioning needs an ingress access token to connect the private workspace URL.",
+          );
+        if (!namespaceRunner)
+          throw new ProvisionRefused("unsupported", "Namespace provisioning is unavailable.");
+        const prepared = await provisionNamespace(namespaceRunner, {
+          ...config.provisioning.namespace,
+          providerInstanceId: request.providerInstanceId,
+          repository: request.repository,
+          branch: request.branch,
+        });
+        try {
+          const upstream = new URL(prepared.pairingUrl);
+          const proxy = await namespaceProxy.open({
+            proxyId: NodeCrypto.randomUUID(),
+            upstreamHttpBaseUrl: `${upstream.origin}/`,
+            upstreamWsBaseUrl: `${upstream.protocol === "https:" ? "wss:" : "ws:"}//${upstream.host}/`,
+            upstreamAuthorization: `Bearer ${config.namespaceIngressToken}`,
+          });
+          const pairing = new URL(prepared.pairingUrl);
+          pairing.protocol = "http:";
+          pairing.host = new URL(proxy.proxyOrigin).host;
+          return {
+            provider: "namespace",
+            sandboxId: prepared.resource.devboxId,
+            pairingUrl: pairing.toString(),
+            projectDir: prepared.projectDir,
+            namespaceResource: prepared.resource,
+            namespaceProxy: proxy,
+          };
+        } catch (cause) {
+          await disposeNamespace(namespaceRunner, prepared.resource).catch(() => undefined);
+          throw cause;
+        }
       }
       const provisioning = config.provisioning;
       if (!provisioning)
@@ -476,9 +516,13 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         throw cause;
       }
     },
-    dispose: async ({ sandboxId, namespaceResource }) => {
-      if (namespaceResource)
-        throw new Error("Namespace disposal requires a configured Namespace runner");
+    dispose: async ({ sandboxId, namespaceResource, namespaceProxy: proxy }) => {
+      if (namespaceResource) {
+        if (!namespaceRunner) throw new Error("Namespace runner is unavailable");
+        if (proxy) await namespaceProxy.close(proxy);
+        await disposeNamespace(namespaceRunner, namespaceResource);
+        return;
+      }
       let info: Awaited<ReturnType<typeof Sandbox.getInfo>>;
       try {
         info = await Sandbox.getInfo(sandboxId, api);

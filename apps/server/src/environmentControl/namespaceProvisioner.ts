@@ -2,7 +2,7 @@
 export interface NamespaceResource {
   readonly provider: "namespace";
   readonly devboxId: string;
-  readonly devboxName?: string;
+  readonly devboxName?: string | undefined;
   readonly instanceId: string;
   readonly region: string;
   /** The image's real workspace root; macOS Devboxes use /Users/runner. */
@@ -14,6 +14,8 @@ export interface NamespaceRunner {
     readonly size: string;
     readonly region?: string | undefined;
     readonly idleTimeoutMinutes?: number | undefined;
+    readonly repository?: string | undefined;
+    readonly branch?: string | undefined;
   }) => Promise<NamespaceResource>;
   readonly bootstrap: (input: {
     readonly resource: NamespaceResource;

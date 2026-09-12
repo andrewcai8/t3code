@@ -53,7 +53,7 @@ describe("cloud SDK and controller boundary", () => {
       driver.provision({ provider: "namespace", providerInstanceId: "codex" }),
     ).rejects.toMatchObject({
       name: "ProvisionRefused",
-      reason: "unsupported",
+      reason: "credentials",
     });
     expect(sdk.connect).not.toHaveBeenCalled();
   });

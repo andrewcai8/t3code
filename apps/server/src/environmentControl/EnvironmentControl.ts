@@ -168,7 +168,17 @@ export function createEnvironmentControl(
               ...(environment.namespaceProxy ? { namespaceProxy: environment.namespaceProxy } : {}),
             });
           } catch (cause) {
-            await driver.dispose({ sandboxId: environment.sandboxId }).catch(() => undefined);
+            await driver
+              .dispose({
+                sandboxId: environment.sandboxId,
+                ...(environment.namespaceResource
+                  ? { namespaceResource: environment.namespaceResource }
+                  : {}),
+                ...(environment.namespaceProxy
+                  ? { namespaceProxy: environment.namespaceProxy }
+                  : {}),
+              })
+              .catch(() => undefined);
             throw cause;
           }
         }

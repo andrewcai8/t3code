@@ -1674,7 +1674,9 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [pendingServerThreadEnvMode, setPendingServerThreadEnvMode] =
     useState<DraftThreadEnvMode | null>(null);
-  const [cloudProvisioningRequested, setCloudProvisioningRequested] = useState(false);
+  const [cloudProvisioningRequested, setCloudProvisioningRequested] = useState<
+    "e2b" | "namespace" | null
+  >(null);
   const [pendingCloudSendEnvironmentId, setPendingCloudSendEnvironmentId] =
     useState<EnvironmentId | null>(null);
   const [pendingServerThreadBranch, setPendingServerThreadBranch] = useState<string | null>();
@@ -3481,7 +3483,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const onAutoEnvironment = useCallback(() => {
     if (envLocked || !draftId) return;
-    setCloudProvisioningRequested(false);
+    setCloudProvisioningRequested(null);
     setPendingCloudSendEnvironmentId(null);
     if (composerHasAttachments) {
       toastManager.add({
@@ -3526,7 +3528,7 @@ export default function ChatView(props: ChatViewProps) {
   const onEnvironmentChange = useCallback(
     (nextEnvironmentId: EnvironmentId) => {
       if (envLocked || !draftId) return;
-      setCloudProvisioningRequested(false);
+      setCloudProvisioningRequested(null);
       setPendingCloudSendEnvironmentId(null);
       const target = logicalProjectEnvironments.find(
         (env) => env.environmentId === nextEnvironmentId,
@@ -4256,16 +4258,19 @@ export default function ChatView(props: ChatViewProps) {
     primaryEnvironmentId !== null &&
     primaryEnvironment?.serverConfig?.environmentControl === true &&
     cloudAccount !== null;
-  const handleSelectCloudEnvironment = useCallback(() => {
-    if (!canCreateCloudEnvironment || !cloudAccount) return;
-    setCloudProvisioningRequested(true);
-    setPendingCloudSendEnvironmentId(null);
-    toastManager.add({
-      type: "info",
-      title: "E2B selected",
-      description: "Your E2B environment will start when you send the first message.",
-    });
-  }, [canCreateCloudEnvironment, cloudAccount]);
+  const handleSelectCloudEnvironment = useCallback(
+    (provider: "e2b" | "namespace") => {
+      if (!canCreateCloudEnvironment || !cloudAccount) return;
+      setCloudProvisioningRequested(provider);
+      setPendingCloudSendEnvironmentId(null);
+      toastManager.add({
+        type: "info",
+        title: `${provider === "namespace" ? "Namespace Mac" : "E2B"} selected`,
+        description: `Your ${provider === "namespace" ? "Namespace Mac" : "E2B"} environment will start when you send the first message.`,
+      });
+    },
+    [canCreateCloudEnvironment, cloudAccount],
+  );
   const provisionCloudEnvironmentForSend = useCallback(async () => {
     if (
       !cloudProvisioningRequested ||
@@ -4286,7 +4291,7 @@ export default function ChatView(props: ChatViewProps) {
     // like it ignored the request.
     toastManager.add({
       type: "info",
-      title: "Preparing E2B…",
+      title: `Preparing ${cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B"}…`,
       description: repository ? `Setting up the environment and cloning ${repository}.` : undefined,
     });
     let readyForSend = false;
@@ -4294,7 +4299,7 @@ export default function ChatView(props: ChatViewProps) {
       const created = await provisionCloudEnvironment({
         environmentId: primaryEnvironmentId,
         input: {
-          provider: "e2b" as const,
+          provider: cloudProvisioningRequested,
           providerInstanceId: cloudAccount.instanceId,
           ...(repository ? { repository } : {}),
         },
@@ -4375,7 +4380,7 @@ export default function ChatView(props: ChatViewProps) {
         startFromOrigin: false,
         environmentSelection: "manual",
       });
-      setCloudProvisioningRequested(false);
+      setCloudProvisioningRequested(null);
       setPendingCloudSendEnvironmentId(pairedProject.environmentId);
       setCloudProvisioningPhase("ready");
       readyForSend = true;
@@ -4405,10 +4410,13 @@ export default function ChatView(props: ChatViewProps) {
   const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (cloudProvisioningPhase === null) return null;
     const copy = {
-      creating: ["Preparing E2B", "Setting up the environment. This can take a few minutes."],
-      pairing: ["Connecting E2B", "Adding the new environment to this chat."],
-      "loading-project": ["Loading project on E2B", "Waiting for the checkout to appear."],
-      ready: ["E2B ready", "Sending your first message."],
+      creating: [
+        "Preparing environment",
+        "Setting up the environment. This can take a few minutes.",
+      ],
+      pairing: ["Connecting environment", "Adding the new environment to this chat."],
+      "loading-project": ["Loading project", "Waiting for the checkout to appear."],
+      ready: ["Environment ready", "Sending your first message."],
     }[cloudProvisioningPhase];
     return {
       id: `cloud-provisioning:${draftId ?? routeThreadKey}`,
@@ -8920,13 +8928,16 @@ export default function ChatView(props: ChatViewProps) {
                                 availableEnvironments={logicalProjectEnvironments}
                                 {...(canCreateCloudEnvironment
                                   ? {
-                                      onCreateCloudEnvironment: () => {
-                                        handleSelectCloudEnvironment();
+                                      onCreateCloudEnvironment: (provider) => {
+                                        handleSelectCloudEnvironment(provider);
+                                      },
+                                      onCreateNamespaceEnvironment: (provider) => {
+                                        handleSelectCloudEnvironment(provider);
                                       },
                                     }
                                   : {})}
                                 creatingCloudEnvironment={creatingCloudEnvironment}
-                                cloudEnvironmentPending={cloudProvisioningRequested}
+                                cloudEnvironmentPending={cloudProvisioningRequested !== null}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />
