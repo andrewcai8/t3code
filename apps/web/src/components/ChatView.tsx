@@ -4251,8 +4251,18 @@ export default function ChatView(props: ChatViewProps) {
   >(null);
   const cloudAccount = useMemo(() => {
     const providers = primaryEnvironment?.serverConfig?.providers ?? [];
-    return providers.find((provider) => provider.enabled && provider.driver === "codex") ?? null;
-  }, [primaryEnvironment]);
+    const selected =
+      activeProviderInstanceId === null
+        ? null
+        : (providers.find(
+            (provider) => provider.enabled && provider.instanceId === activeProviderInstanceId,
+          ) ?? null);
+    return (
+      selected ??
+      providers.find((provider) => provider.enabled && provider.driver === "codex") ??
+      null
+    );
+  }, [activeProviderInstanceId, primaryEnvironment]);
   const canCreateCloudEnvironment =
     draftId !== null &&
     primaryEnvironmentId !== null &&
