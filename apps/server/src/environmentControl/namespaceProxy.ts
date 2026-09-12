@@ -1,7 +1,7 @@
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeTls from "node:tls";
-import { Readable as NodeReadable } from "node:stream";
+import { Readable as NodeStream } from "node:stream";
 
 export interface NamespaceProxyLease {
   readonly proxyId: string;
@@ -108,7 +108,7 @@ export class NamespaceProxyManager {
       });
       response.writeHead(upstream.status, responseHeaders);
       if (upstream.body) {
-        for await (const chunk of NodeReadable.fromWeb(upstream.body)) response.write(chunk);
+        for await (const chunk of NodeStream.Readable.fromWeb(upstream.body)) response.write(chunk);
       }
       response.end();
     } catch {
