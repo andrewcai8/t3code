@@ -182,7 +182,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             <SelectItem value={CREATE_CLOUD_VALUE} disabled={creatingCloudEnvironment === true}>
               <span className="inline-flex items-center gap-1.5">
                 <CloudIcon className="size-3" aria-hidden="true" />
-                {creatingCloudEnvironment ? "Creating E2B sandbox…" : "E2B"}
+                {creatingCloudEnvironment ? "Preparing E2B…" : "E2B"}
               </span>
             </SelectItem>
           ) : null}

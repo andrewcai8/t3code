@@ -4276,7 +4276,7 @@ export default function ChatView(props: ChatViewProps) {
     toastManager.add({
       type: "info",
       title: "E2B selected",
-      description: "The E2B sandbox will be created when you send the first message.",
+      description: "Your E2B environment will start when you send the first message.",
     });
   }, [canCreateCloudEnvironment, cloudAccount]);
   const provisionCloudEnvironmentForSend = useCallback(async () => {
@@ -4299,8 +4299,8 @@ export default function ChatView(props: ChatViewProps) {
     // like it ignored the request.
     toastManager.add({
       type: "info",
-      title: "Creating E2B sandbox…",
-      description: repository ? `Building the sandbox and cloning ${repository}.` : undefined,
+      title: "Preparing E2B…",
+      description: repository ? `Setting up the environment and cloning ${repository}.` : undefined,
     });
     let readyForSend = false;
     try {
@@ -4341,8 +4341,7 @@ export default function ChatView(props: ChatViewProps) {
         rememberProvisionedSandbox(draftId, lease);
         toastManager.add({
           type: "error",
-          title: "The machine was created but could not be added.",
-          description: created.value.environment.pairingUrl,
+          title: "E2B was created but could not be connected.",
         });
         return false;
       }
@@ -4383,7 +4382,7 @@ export default function ChatView(props: ChatViewProps) {
       readyForSend = true;
       toastManager.add({
         type: "success",
-        title: `E2B ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
+        title: "E2B ready.",
         description: repository
           ? `${repository} is checked out. Sending your message now.`
           : undefined,
@@ -4407,8 +4406,8 @@ export default function ChatView(props: ChatViewProps) {
   const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (cloudProvisioningPhase === null) return null;
     const copy = {
-      creating: ["Creating E2B sandbox", "Building the sandbox. This can take a few minutes."],
-      pairing: ["Connecting to E2B", "Pairing the new sandbox with T3."],
+      creating: ["Preparing E2B", "Setting up the environment. This can take a few minutes."],
+      pairing: ["Connecting E2B", "Adding the new environment to this chat."],
       "loading-project": ["Loading project on E2B", "Waiting for the checkout to appear."],
       ready: ["E2B ready", "Sending your first message."],
     }[cloudProvisioningPhase];
