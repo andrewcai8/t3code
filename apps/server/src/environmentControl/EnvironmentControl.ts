@@ -1,4 +1,7 @@
-// @effect-diagnostics globalDate:off - provider driver snapshots use the same ISO wire format from a Promise boundary.
+// @effect-diagnostics globalDate:off - provider control crosses a Promise boundary.
+// @effect-diagnostics nodeBuiltinImport:off - provider control resolves state in a Node filesystem boundary.
+import * as NodeCrypto from "node:crypto";
+import * as NodePath from "node:path";
 import {
   EnvironmentControlError,
   type ComputeState,
@@ -8,6 +11,8 @@ import {
   type EnvironmentProvisionResult,
   type EnvironmentProvisionDisposeInput,
   type EnvironmentProvisionDisposeResult,
+  type EnvironmentProvisionClaimInput,
+  type EnvironmentProvisionClaimResult,
   type ManagedEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -21,6 +26,10 @@ import {
   type CloudDriver,
   type ProvisionRequest,
 } from "./driver.ts";
+import {
+  createProvisionedLeaseRegistry,
+  type ProvisionedLeaseRegistry,
+} from "./ProvisionedLeaseRegistry.ts";
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -39,6 +48,7 @@ const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult
 export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
   driver: CloudDriver,
+  leaseRegistry?: ProvisionedLeaseRegistry,
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -103,6 +113,25 @@ export function createEnvironmentControl(
     pending.set(environmentId, { action, promise });
     return promise;
   };
+  const reapExpiredLeases = async (): Promise<void> => {
+    if (!leaseRegistry) return;
+    for (const lease of await leaseRegistry.expired()) {
+      const release =
+        lease.state === "releasing"
+          ? "started"
+          : await leaseRegistry.beginRelease({
+              leaseId: lease.leaseId,
+              sandboxId: lease.sandboxId,
+            });
+      if (release !== "started") continue;
+      try {
+        await driver.dispose(lease.sandboxId);
+        await leaseRegistry.markDisposed(lease.leaseId);
+      } catch {
+        // Leave the lease releasing so the next control request can retry it.
+      }
+    }
+  };
   return {
     list: () => Promise.all(targets.map(snapshot)),
     start: (id: EnvironmentId) => command(id, "start"),
@@ -114,9 +143,22 @@ export function createEnvironmentControl(
     provision: async (request: ProvisionRequest): Promise<EnvironmentProvisionResult> => {
       try {
         const environment = await driver.provision(request);
+        const leaseId = NodeCrypto.randomUUID();
+        if (leaseRegistry) {
+          try {
+            await leaseRegistry.register({
+              leaseId,
+              sandboxId: environment.sandboxId,
+              providerInstanceId: request.providerInstanceId,
+            });
+          } catch (cause) {
+            await driver.dispose(environment.sandboxId).catch(() => undefined);
+            throw cause;
+          }
+        }
         return {
           kind: "provisioned",
-          environment: { ...environment, providerInstanceId: request.providerInstanceId },
+          environment: { ...environment, leaseId, providerInstanceId: request.providerInstanceId },
         };
       } catch (cause) {
         if (cause instanceof ProvisionRefused)
@@ -128,6 +170,30 @@ export function createEnvironmentControl(
       input: EnvironmentProvisionDisposeInput,
     ): Promise<EnvironmentProvisionDisposeResult> => {
       try {
+        if (leaseRegistry) {
+          const release = await leaseRegistry.beginRelease(input);
+          if (release === "disposed") return { kind: "disposed" };
+          if (release === "busy")
+            return {
+              kind: "refused",
+              reason: "unknown",
+              message: "Another cleanup is already in progress.",
+            };
+          if (release === "started") {
+            try {
+              await driver.dispose(input.sandboxId);
+              const lease = await leaseRegistry.findBySandbox(input.sandboxId);
+              if (lease) await leaseRegistry.markDisposed(lease.leaseId);
+              return { kind: "disposed" };
+            } catch {
+              return {
+                kind: "refused",
+                reason: "unknown",
+                message: "The cloud sandbox could not be disposed.",
+              };
+            }
+          }
+        }
         await driver.dispose(input.sandboxId);
         return { kind: "disposed" };
       } catch {
@@ -138,6 +204,28 @@ export function createEnvironmentControl(
         };
       }
     },
+    claim: async (
+      input: EnvironmentProvisionClaimInput,
+    ): Promise<EnvironmentProvisionClaimResult> => {
+      if (!leaseRegistry)
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The cloud sandbox lease registry is unavailable.",
+        };
+      const lease = await leaseRegistry.claim({
+        leaseId: input.leaseId,
+        owner: { environmentId: input.environmentId, threadId: input.threadId },
+      });
+      return lease
+        ? { kind: "claimed" }
+        : {
+            kind: "refused",
+            reason: "unknown",
+            message: "The cloud sandbox lease could not be claimed.",
+          };
+    },
+    reapExpiredLeases,
   };
 }
 
@@ -157,6 +245,9 @@ export class EnvironmentControl extends Context.Service<
     readonly dispose: (
       input: EnvironmentProvisionDisposeInput,
     ) => Effect.Effect<EnvironmentProvisionDisposeResult, EnvironmentControlError>;
+    readonly claim: (
+      input: EnvironmentProvisionClaimInput,
+    ) => Effect.Effect<EnvironmentProvisionClaimResult, EnvironmentControlError>;
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
@@ -173,7 +264,16 @@ export const layer = Layer.effect(
         });
         if (!path) return null;
         const config = await readConfig(path);
-        return createEnvironmentControl(config.targets, createCloudDriver(config));
+        const leaseRegistry = createProvisionedLeaseRegistry(
+          NodePath.join(stateDir, "provisioned-sandbox-leases.json"),
+        );
+        const service = createEnvironmentControl(
+          config.targets,
+          createCloudDriver(config),
+          leaseRegistry,
+        );
+        await service.reapExpiredLeases();
+        return service;
       })());
     const run = <A>(
       fn: (service: NonNullable<Awaited<ReturnType<typeof resolve>>>) => Promise<A>,
@@ -211,6 +311,12 @@ export const layer = Layer.effect(
         run<EnvironmentProvisionDisposeResult>((service) => service.dispose(input), {
           kind: "refused" as const,
           reason: "unconfigured" as const,
+          message: "This install has no cloud provisioning template configured.",
+        }),
+      claim: (input) =>
+        run<EnvironmentProvisionClaimResult>((service) => service.claim(input), {
+          kind: "refused" as const,
+          reason: "unknown" as const,
           message: "This install has no cloud provisioning template configured.",
         }),
       start: (id) => run((service) => service.start(id), refused("unknown")),

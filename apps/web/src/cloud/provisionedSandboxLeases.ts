@@ -2,12 +2,14 @@ import { EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 export interface ProvisionedSandboxLease {
+  readonly leaseId: string;
   readonly sandboxId: string;
   readonly managerEnvironmentId: EnvironmentId;
 }
 
 const STORAGE_KEY = "t3code:provisioned-sandbox-leases:v1";
 const PersistedLease = Schema.Struct({
+  leaseId: Schema.optional(Schema.String),
   sandboxId: Schema.String,
   managerEnvironmentId: Schema.String,
 });
@@ -32,6 +34,7 @@ function readPersisted(): void {
     const parsed = decodePersistedLeases(JSON.parse(raw));
     for (const [entryKey, value] of Object.entries(parsed)) {
       leases.set(entryKey, {
+        leaseId: value.leaseId ?? value.sandboxId,
         sandboxId: value.sandboxId,
         managerEnvironmentId: EnvironmentId.make(value.managerEnvironmentId),
       });

@@ -48,6 +48,7 @@ export const EnvironmentProvisionInput = Schema.Struct({
 export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
 
 export const ProvisionedEnvironment = Schema.Struct({
+  leaseId: Schema.optional(TrimmedNonEmptyString),
   sandboxId: TrimmedNonEmptyString,
   /** Single use, and the only way a client can reach the new environment. */
   pairingUrl: TrimmedNonEmptyString,
@@ -74,6 +75,7 @@ export type EnvironmentProvisionResult = typeof EnvironmentProvisionResult.Type;
 
 /** A one-shot cleanup request for an environment created by provisioning. */
 export const EnvironmentProvisionDisposeInput = Schema.Struct({
+  leaseId: Schema.optional(TrimmedNonEmptyString),
   sandboxId: TrimmedNonEmptyString,
 });
 export type EnvironmentProvisionDisposeInput = typeof EnvironmentProvisionDisposeInput.Type;
@@ -87,3 +89,20 @@ export const EnvironmentProvisionDisposeResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionDisposeResult = typeof EnvironmentProvisionDisposeResult.Type;
+
+export const EnvironmentProvisionClaimInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+  threadId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionClaimInput = typeof EnvironmentProvisionClaimInput.Type;
+
+export const EnvironmentProvisionClaimResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("claimed") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literal("unknown"),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionClaimResult = typeof EnvironmentProvisionClaimResult.Type;

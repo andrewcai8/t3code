@@ -1,9 +1,14 @@
+// @effect-diagnostics nodeBuiltinImport:off - these tests use a temporary filesystem boundary.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionRefused } from "./driver.ts";
 import type { CloudDriver, Observation } from "./driver.ts";
+import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 
 const target: ManagedTarget = {
   environmentId: EnvironmentId.make("cloud"),
@@ -150,6 +155,56 @@ describe("managed cloud commands", () => {
       reason: "unknown",
       message: "The cloud sandbox could not be disposed.",
     });
+  });
+
+  it("registers a provisioned sandbox and disposes it idempotently", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-control-"));
+    try {
+      const registry = createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
+      const { driver } = setup();
+      let disposeCalls = 0;
+      driver.provision = async () => ({
+        sandboxId: "provisioned-sandbox",
+        pairingUrl: "https://example.test/pair",
+        projectDir: "/home/user/work/project",
+      });
+      driver.dispose = async () => {
+        disposeCalls += 1;
+      };
+      const manager = createEnvironmentControl([target], driver, registry);
+      const provisioned = await manager.provision({
+        providerInstanceId: "codex",
+        repository: undefined,
+        branch: undefined,
+      });
+      expect(provisioned.kind).toBe("provisioned");
+      if (provisioned.kind !== "provisioned") return;
+      const leaseId = provisioned.environment.leaseId;
+      expect(leaseId).toMatch(/^[0-9a-f-]{36}$/);
+      if (!leaseId) return;
+      await expect(
+        manager.claim({
+          leaseId,
+          environmentId: EnvironmentId.make("remote"),
+          threadId: "thread-1",
+        }),
+      ).resolves.toEqual({ kind: "claimed" });
+      await expect(
+        manager.dispose({
+          leaseId,
+          sandboxId: provisioned.environment.sandboxId,
+        }),
+      ).resolves.toEqual({ kind: "disposed" });
+      await expect(
+        manager.dispose({
+          leaseId,
+          sandboxId: provisioned.environment.sandboxId,
+        }),
+      ).resolves.toEqual({ kind: "disposed" });
+      expect(disposeCalls).toBe(1);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 });
 

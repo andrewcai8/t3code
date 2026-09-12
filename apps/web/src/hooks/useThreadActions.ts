@@ -327,7 +327,7 @@ export function useThreadActions() {
         if (!lease) return;
         const result = await disposeProvisionedEnvironment({
           environmentId: lease.managerEnvironmentId,
-          input: { sandboxId: lease.sandboxId },
+          input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId },
         });
         if (result._tag === "Success" && result.value.kind === "disposed") {
           forgetProvisionedSandbox(threadRef);

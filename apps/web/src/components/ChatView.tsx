@@ -4235,6 +4235,9 @@ export default function ChatView(props: ChatViewProps) {
   const provisionCloudEnvironment = useAtomCommand(serverEnvironment.provisionEnvironment, {
     reportFailure: false,
   });
+  const claimCloudLease = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
   const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
   const cloudAccount = useMemo(() => {
@@ -4285,6 +4288,7 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const lease = {
+        leaseId: created.value.environment.leaseId ?? created.value.environment.sandboxId,
         sandboxId: created.value.environment.sandboxId,
         managerEnvironmentId: primaryEnvironmentId,
       };
@@ -4338,14 +4342,32 @@ export default function ChatView(props: ChatViewProps) {
         });
         return;
       }
+      const claimed = await claimCloudLease({
+        environmentId: primaryEnvironmentId,
+        input: {
+          leaseId: lease.leaseId,
+          environmentId: pairedProject.environmentId,
+          threadId: newDraft.threadId,
+        },
+      });
       rememberProvisionedSandbox(newDraft.draftId, lease);
       if (typeof composerDraftTarget !== "string" || composerDraftTarget !== newDraft.draftId) {
         forgetProvisionedSandbox(composerDraftTarget);
       }
       toastManager.add({
-        type: "success",
+        type:
+          AsyncResult.isSuccess(claimed) && claimed.value.kind === "claimed"
+            ? "success"
+            : "warning",
         title: `Cloud chat ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
-        ...(repository ? { description: `${repository} is checked out on it.` } : {}),
+        ...(AsyncResult.isSuccess(claimed) && claimed.value.kind === "claimed"
+          ? repository
+            ? { description: `${repository} is checked out on it.` }
+            : {}
+          : {
+              description:
+                "The chat is ready, but its cloud lease could not be claimed. Delete the chat after reconnecting to release it.",
+            }),
       });
     } finally {
       setCreatingCloudEnvironment(false);
@@ -4353,6 +4375,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeProject,
     canCreateCloudEnvironment,
+    claimCloudLease,
     cloudAccount,
     connectCloudPairing,
     handleNewThread,
