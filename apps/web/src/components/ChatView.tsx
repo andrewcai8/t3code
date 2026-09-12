@@ -4358,6 +4358,11 @@ export default function ChatView(props: ChatViewProps) {
         if (project.environmentId !== paired.value) return false;
         if (!identity) return true;
         const candidate = project.repositoryIdentity;
+        // A freshly booted child can publish its project before the async git
+        // identity resolver fills this field. The child was created for this
+        // draft and starts with no other projects, so the first project in
+        // that environment is the safe handoff target.
+        if (candidate == null) return true;
         return (
           candidate?.canonicalKey === identity.canonicalKey ||
           (candidate?.owner === identity.owner && candidate?.name === identity.name)
@@ -4378,6 +4383,13 @@ export default function ChatView(props: ChatViewProps) {
       rememberProvisionedSandbox(draftId, lease);
       setDraftThreadContext(draftId, {
         projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
+        // The sandbox itself is the isolation boundary. Do not try to create
+        // a second worktree inside its already-cloned checkout, which would
+        // require a base branch the draft does not have after pairing.
+        envMode: "local",
+        branch: null,
+        worktreePath: null,
+        startFromOrigin: false,
         environmentSelection: "manual",
       });
       setCloudProvisioningRequested(false);
