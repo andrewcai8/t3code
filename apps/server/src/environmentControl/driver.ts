@@ -250,13 +250,10 @@ async function prepare(
   // key environments by it, so each environment has to be given its own before
   // anything pairs with it.
   //
-  // This costs the full first-start load, around five minutes. The template
-  // captures its server already running and answering in under two seconds, but
-  // that warmth is the captured process's own memory: the page cache is not
-  // restored with it, so a replacement process reads the 1.5 GB install from
-  // cold disk exactly as if nothing had been captured. Reusing the captured
-  // server instead would need the identity to be settable without a restart,
-  // which the server does not support today.
+  // The child is forked from the template's already-running server. A fork
+  // keeps the process memory and page cache, so replacing the inherited server
+  // after writing this ID takes seconds rather than rereading the install from
+  // cold disk.
   //
   // The bracket keeps the pattern from matching the command carrying it, which
   // would otherwise make this kill its own shell.
@@ -279,7 +276,7 @@ async function prepare(
   let ready = false;
   while (!ready && Date.now() < deadline) {
     await NodeTimersPromises.setTimeout(1_000);
-    ready = await fetch(`https://${host}/`)
+    ready = await fetch(`https://${host}/`, { signal: AbortSignal.timeout(5_000) })
       .then((response) => response.status === 200)
       .catch(() => false);
   }
@@ -421,23 +418,35 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
       });
 
       const allowed = provisioning.egressAllow;
-      const sandbox = await Sandbox.create(provisioning.templateId, {
+      const network =
+        allowed && allowed.length > 0
+          ? { network: { allowOut: [...allowed], denyOut: [ALL_TRAFFIC] } }
+          : {};
+      // The parent exists only long enough to make a memory-preserving fork.
+      // Its kill timeout is a final guard if this process dies between create
+      // and fork; it must never become a warm sandbox that bills while idle.
+      const parent = await Sandbox.create(provisioning.templateId, {
         ...api,
-        timeoutMs: 6 * 3_600_000,
-        lifecycle: { onTimeout: "pause", autoResume: true },
+        timeoutMs: 10 * 60_000,
+        lifecycle: { onTimeout: "kill" },
         metadata: { purpose: "t3-environment", account: request.providerInstanceId },
         // Denying everything first is what makes the allow list meaningful;
         // without the deny, listing hosts grants nothing and blocks nothing.
-        ...(allowed && allowed.length > 0
-          ? { network: { allowOut: [...allowed], denyOut: [ALL_TRAFFIC] } }
-          : {}),
+        ...network,
       });
+      let sandbox: Sandbox | undefined;
       try {
+        const fork = (await parent.fork({ count: 1, timeoutMs: 6 * 3_600_000 }))[0];
+        if (!(fork instanceof Sandbox))
+          throw new Error(`Could not fork the E2B template: ${String(fork)}`);
+        sandbox = fork;
+        await parent.kill();
         return await prepare(sandbox, provisioning, request, auth);
       } catch (cause) {
         // A sandbox that never finished being prepared is unreachable and
         // still billing, and nothing else knows its id to clean up later.
-        await sandbox.kill().catch(() => undefined);
+        await sandbox?.kill().catch(() => undefined);
+        await parent.kill().catch(() => undefined);
         throw cause;
       }
     },

@@ -19,8 +19,10 @@ import {
   type ManagedEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import * as ServerConfig from "../config.ts";
 import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
 import {
@@ -33,6 +35,8 @@ import {
   createProvisionedLeaseRegistry,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
+
+const LEASE_REAP_INTERVAL_MS = 5 * 60 * 1000;
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -313,6 +317,13 @@ export const layer = Layer.effect(
             message: "Cloud controls are unavailable. Check the manager's private configuration.",
           }),
       });
+    yield* Effect.gen(function* () {
+      const service = yield* Effect.promise(resolve);
+      if (!service) return;
+      yield* Effect.promise(async () => {
+        await service.reapExpiredLeases().catch(() => undefined);
+      }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
+    }).pipe(Effect.forkScoped);
     return {
       list: run((service) => service.list(), []),
       provision: (input) =>
