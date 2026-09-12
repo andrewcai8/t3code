@@ -112,7 +112,8 @@ describe("ProvisionedLeaseRegistry", () => {
       providerInstanceId: "codex",
       now: new Date("2026-01-01T00:00:00.000Z"),
     });
-    expect(await registry.expired(new Date("2026-01-01T01:00:01.000Z"))).toHaveLength(1);
+    expect(await registry.expired(new Date("2026-01-01T00:14:59.000Z"))).toHaveLength(0);
+    expect(await registry.expired(new Date("2026-01-01T00:15:01.000Z"))).toHaveLength(1);
   });
 
   it("expires a claimed lease after its heartbeat deadline", async () => {
@@ -127,7 +128,8 @@ describe("ProvisionedLeaseRegistry", () => {
       leaseId: "lease-1",
       owner: { environmentId: "remote", threadId: "thread-1" },
     });
-    expect(await registry.expired(new Date("2026-01-01T01:00:01.000Z"))).toHaveLength(1);
+    expect(await registry.expired(new Date("2026-01-01T00:14:59.000Z"))).toHaveLength(0);
+    expect(await registry.expired(new Date("2026-01-01T00:15:01.000Z"))).toHaveLength(1);
   });
 
   it("renews a claimed lease", async () => {
@@ -142,8 +144,8 @@ describe("ProvisionedLeaseRegistry", () => {
       leaseId: "lease-1",
       owner: { environmentId: "remote", threadId: "thread-1" },
     });
-    expect(await registry.touch("lease-1", new Date("2026-01-01T01:00:00.000Z"))).toMatchObject({
-      expiresAt: "2026-01-01T02:00:00.000Z",
+    expect(await registry.touch("lease-1", new Date("2026-01-01T00:15:00.000Z"))).toMatchObject({
+      expiresAt: "2026-01-01T00:30:00.000Z",
     });
     expect(await registry.touch("missing")).toBeNull();
   });

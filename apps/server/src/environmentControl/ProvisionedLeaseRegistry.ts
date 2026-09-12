@@ -23,6 +23,7 @@ const StoredProvisionedLease = Schema.Struct({
   expiresAt: Schema.String,
 });
 const StoredProvisionedLeases = Schema.Array(StoredProvisionedLease);
+const LEASE_HEARTBEAT_TTL_MS = 15 * 60 * 1000;
 
 export type ProvisionedLease = typeof StoredProvisionedLease.Type;
 export type ProvisionedLeaseOwner = typeof ProvisionedLeaseOwner.Type;
@@ -120,7 +121,9 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
           owner: null,
           createdAt: now,
           updatedAt: now,
-          expiresAt: new Date((input.now ?? new Date()).getTime() + 60 * 60 * 1000).toISOString(),
+          expiresAt: new Date(
+            (input.now ?? new Date()).getTime() + LEASE_HEARTBEAT_TTL_MS,
+          ).toISOString(),
         };
         return { leases: [...leases, lease], value: lease };
       }),
@@ -156,7 +159,7 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         const updated: ProvisionedLease = {
           ...current,
           updatedAt: timestamp.toISOString(),
-          expiresAt: new Date(timestamp.getTime() + 60 * 60 * 1000).toISOString(),
+          expiresAt: new Date(timestamp.getTime() + LEASE_HEARTBEAT_TTL_MS).toISOString(),
         };
         const next = [...leases];
         next[index] = updated;
