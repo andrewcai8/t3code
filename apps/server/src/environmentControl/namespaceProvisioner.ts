@@ -21,6 +21,7 @@ export interface NamespaceRunner {
     readonly resource: NamespaceResource;
     readonly projectDir: string;
     readonly providerInstanceId: string;
+    readonly agentDriver?: string | undefined;
     readonly repository?: string | undefined;
     readonly branch?: string | undefined;
   }) => Promise<void>;
@@ -37,6 +38,7 @@ export interface NamespaceProvisionRequest {
   readonly region?: string | undefined;
   readonly idleTimeoutMinutes?: number | undefined;
   readonly providerInstanceId: string;
+  readonly agentDriver?: string | undefined;
   readonly repository?: string | undefined;
   readonly branch?: string | undefined;
 }

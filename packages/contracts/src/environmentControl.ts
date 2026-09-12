@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
   Schema.Struct({ kind: Schema.Literals(["running", "stopped"]), observedAt: Schema.String }),
@@ -42,6 +43,8 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
  */
 export const EnvironmentProvisionInput = Schema.Struct({
   provider: Schema.Literals(["e2b", "namespace"]),
+  /** Provider driver selected in the local composer. */
+  agentDriver: Schema.optional(ProviderDriverKind),
   /** Which provider account the environment should run its agent on. */
   providerInstanceId: TrimmedNonEmptyString,
   /** `owner/name`; omitted leaves the environment with an empty workspace. */

@@ -243,6 +243,7 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
+  selectProviderInstanceByUsage,
   sortProviderInstanceEntries,
 } from "../providerInstances";
 import {
@@ -4250,19 +4251,17 @@ export default function ChatView(props: ChatViewProps) {
     "creating" | "pairing" | "loading-project" | "ready" | null
   >(null);
   const cloudAccount = useMemo(() => {
-    const providers = primaryEnvironment?.serverConfig?.providers ?? [];
     const selected =
       activeProviderInstanceId === null
-        ? null
-        : (providers.find(
-            (provider) => provider.enabled && provider.instanceId === activeProviderInstanceId,
-          ) ?? null);
+        ? selectedProviderEntry
+        : (providerInstanceEntries.find(
+            (entry) => entry.instanceId === activeProviderInstanceId,
+          ) ?? selectedProviderEntry);
+    if (!selected) return null;
     return (
-      selected ??
-      providers.find((provider) => provider.enabled && provider.driver === "codex") ??
-      null
-    );
-  }, [activeProviderInstanceId, primaryEnvironment]);
+      selectProviderInstanceByUsage(providerInstanceEntries, selected.driverKind) ?? selected
+    ).snapshot;
+  }, [activeProviderInstanceId, providerInstanceEntries, selectedProviderEntry]);
   const canCreateCloudEnvironment =
     draftId !== null &&
     primaryEnvironmentId !== null &&
@@ -4281,7 +4280,10 @@ export default function ChatView(props: ChatViewProps) {
     },
     [canCreateCloudEnvironment, cloudAccount],
   );
-  const provisionCloudEnvironmentForSend = useCallback(async () => {
+  const provisionCloudEnvironmentForSend = useCallback(async (handoff: {
+    readonly agentDriver: ProviderDriverKind;
+    readonly modelSelection: ModelSelection;
+  }) => {
     if (
       !cloudProvisioningRequested ||
       !canCreateCloudEnvironment ||
@@ -4294,6 +4296,8 @@ export default function ChatView(props: ChatViewProps) {
     const identity = activeProject?.repositoryIdentity;
     const repository =
       identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+    const cloudEnvironmentLabel =
+      cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
     setCreatingCloudEnvironment(true);
     setCloudProvisioningPhase("creating");
     // The menu closes on the click that starts this, taking its pending label
@@ -4311,6 +4315,7 @@ export default function ChatView(props: ChatViewProps) {
         input: {
           provider: cloudProvisioningRequested,
           providerInstanceId: cloudAccount.instanceId,
+          agentDriver: handoff.agentDriver,
           ...(repository ? { repository } : {}),
         },
       });
@@ -4343,7 +4348,7 @@ export default function ChatView(props: ChatViewProps) {
         rememberProvisionedSandbox(draftId, lease);
         toastManager.add({
           type: "error",
-          title: "E2B was created but could not be connected.",
+          title: `${cloudEnvironmentLabel} was created but could not be connected.`,
         });
         return false;
       }
@@ -4373,12 +4378,13 @@ export default function ChatView(props: ChatViewProps) {
         rememberProvisionedSandbox(draftId, lease);
         toastManager.add({
           type: "warning",
-          title: "E2B ready, but its project is still loading.",
-          description: "Open a new E2B chat after the project appears.",
+          title: `${cloudEnvironmentLabel} ready, but its project is still loading.`,
+          description: `Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
         });
         return false;
       }
       rememberProvisionedSandbox(draftId, lease);
+      setComposerDraftModelSelection(draftId, handoff.modelSelection);
       setDraftThreadContext(draftId, {
         projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
         // The sandbox itself is the isolation boundary. Do not try to create
@@ -4396,7 +4402,7 @@ export default function ChatView(props: ChatViewProps) {
       readyForSend = true;
       toastManager.add({
         type: "success",
-        title: "E2B ready.",
+        title: `${cloudEnvironmentLabel} ready.`,
         description: repository
           ? `${repository} is checked out. Sending your message now.`
           : undefined,
@@ -4415,6 +4421,7 @@ export default function ChatView(props: ChatViewProps) {
     draftId,
     primaryEnvironmentId,
     provisionCloudEnvironment,
+    setComposerDraftModelSelection,
     setDraftThreadContext,
   ]);
   const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
@@ -6992,9 +6999,22 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (cloudProvisioningRequested) {
+      const cloudModel =
+        cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
+          ? ctxSelectedModel
+          : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
+            ctxSelectedModel);
+      const cloudHandoff = {
+        agentDriver: ctxSelectedProvider,
+        modelSelection: createModelSelection(
+          cloudAccount?.instanceId ?? ctxSelectedModelSelection.instanceId,
+          cloudModel,
+          ctxSelectedModelSelection.options,
+        ),
+      };
       sendInFlightRef.current = true;
       try {
-        await provisionCloudEnvironmentForSend();
+        await provisionCloudEnvironmentForSend(cloudHandoff);
       } finally {
         sendInFlightRef.current = false;
       }

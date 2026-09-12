@@ -10,6 +10,7 @@ import {
   resolveDefaultProviderModelSelection,
   resolveSelectableProviderInstance,
   resolveProviderDriverKindForInstanceSelection,
+  selectProviderInstanceByUsage,
 } from "./providerInstances";
 
 function provider(input: {
@@ -21,6 +22,7 @@ function provider(input: {
   accentColor?: string;
   status?: ServerProvider["status"];
   models?: ServerProvider["models"];
+  usageLimits?: ServerProvider["usageLimits"];
 }): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make(input.instanceId),
@@ -35,6 +37,7 @@ function provider(input: {
     auth: { status: "authenticated" },
     checkedAt: "2026-01-01T00:00:00.000Z",
     models: input.models ?? [],
+    ...(input.usageLimits ? { usageLimits: input.usageLimits } : {}),
     slashCommands: [],
     skills: [],
   };
@@ -46,6 +49,73 @@ const model = (slug: string, isCustom = false, isDefault = false) => ({
   isCustom,
   ...(isDefault ? { isDefault: true } : {}),
   capabilities: {},
+});
+
+const usage = (usedPercents: number[], unavailable = false): ServerProvider["usageLimits"] => ({
+  checkedAt: "2026-01-01T00:00:00.000Z",
+  windows: usedPercents.map((usedPercent, index) => ({
+    id: `window-${index}`,
+    kind: "weekly",
+    label: `Window ${index}`,
+    usedPercent,
+  })),
+  ...(unavailable ? { unavailable: { reason: "probeFailed" as const } } : {}),
+});
+
+describe("selectProviderInstanceByUsage", () => {
+  it("chooses the ready account with the lowest fullest usage window", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex_a",
+        usageLimits: usage([20, 70]),
+      }),
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex_b",
+        usageLimits: usage([30, 40]),
+      }),
+    ]);
+
+    expect(
+      selectProviderInstanceByUsage(entries, ProviderDriverKind.make("codex"))?.instanceId,
+    ).toBe("codex_b");
+  });
+
+  it("ignores unavailable usage and falls back by instance id", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex_z",
+        usageLimits: usage([], true),
+      }),
+      provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex_a" }),
+    ]);
+
+    expect(
+      selectProviderInstanceByUsage(entries, ProviderDriverKind.make("codex"))?.instanceId,
+    ).toBe("codex_a");
+  });
+
+  it("only considers enabled, available, ready instances for the selected driver", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("claude"),
+        instanceId: "claude",
+        usageLimits: usage([1]),
+      }),
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex",
+        status: "error",
+        usageLimits: usage([1]),
+      }),
+    ]);
+
+    expect(
+      selectProviderInstanceByUsage(entries, ProviderDriverKind.make("codex")),
+    ).toBeUndefined();
+  });
 });
 
 describe("isProviderInstancePickerReady", () => {

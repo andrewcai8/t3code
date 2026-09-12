@@ -1,6 +1,12 @@
 import { expect, it } from "vite-plus/test";
 
-import { ProvisionRefused, accountAuthPath, repositoryDirectory, repositoryUrl } from "./driver.ts";
+import {
+  ProvisionRefused,
+  accountAuthPath,
+  enableChildProvider,
+  repositoryDirectory,
+  repositoryUrl,
+} from "./driver.ts";
 
 it("reads each account's credentials from its own shadow home", () => {
   // Every entry in a shadow home except auth.json links back to the shared
@@ -10,6 +16,12 @@ it("reads each account's credentials from its own shadow home", () => {
 
 it("leaves the default instance on the real Codex home", () => {
   expect(accountAuthPath("codex", "/home/a")).toBe("/home/a/.codex/auth.json");
+});
+
+it("resolves Cursor accounts from their isolated homes", () => {
+  expect(accountAuthPath("cursor_work", "/home/a")).toBe(
+    "/home/a/.t3/userdata/cursor-homes/cursor_work/.cursor/auth.json",
+  );
 });
 
 it("accepts the spellings a person actually pastes", () => {
@@ -52,4 +64,19 @@ it("names a missing workspace file rather than provisioning a broken checkout", 
   );
   expect(refusal.reason).toBe("unconfigured");
   expect(refusal.message).toContain("/secrets/backend.env");
+});
+
+it("enables the selected provider instance without copying local paths", () => {
+  const settings = enableChildProvider(
+    JSON.stringify({ providers: { codex: { enabled: true } } }),
+    "cursor",
+    "cursor_work",
+  );
+  const parsed = JSON.parse(settings) as {
+    providers: Record<string, { enabled?: boolean }>;
+    providerInstances: Record<string, { driver?: string; enabled?: boolean }>;
+  };
+  expect(parsed.providers.cursor?.enabled).toBe(true);
+  expect(parsed.providerInstances.cursor_work).toEqual({ driver: "cursor", enabled: true });
+  expect(settings).not.toContain("/Users/andrew");
 });

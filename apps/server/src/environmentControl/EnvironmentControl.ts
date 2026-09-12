@@ -354,6 +354,7 @@ export const layer = Layer.effect(
           (service) =>
             service.provision({
               provider: input.provider,
+              agentDriver: input.agentDriver,
               providerInstanceId: input.providerInstanceId,
               repository: input.repository,
               branch: input.branch,

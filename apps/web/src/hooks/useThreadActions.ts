@@ -289,7 +289,7 @@ export function useThreadActions() {
         api.dialogs.confirm(
           [
             `Stop the cloud machine for "${thread?.title ?? "this thread"}"?`,
-            "This permanently stops the E2B sandbox and ends any running work.",
+            "This permanently stops the cloud machine and ends any running work.",
             "The thread and conversation will remain.",
           ].join("\n"),
           { variant: "destructive" },
@@ -314,7 +314,7 @@ export function useThreadActions() {
         toastManager.add({
           type: "success",
           title: "Cloud machine stopped",
-          description: "The thread remains, but its E2B workspace has been released.",
+          description: "The thread remains, but its cloud workspace has been released.",
         });
         return;
       }

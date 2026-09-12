@@ -138,7 +138,14 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           : "/Users/runner/workspaces",
       };
     },
-    bootstrap: async ({ resource, projectDir, repository, branch }) => {
+    bootstrap: async ({
+      resource,
+      projectDir,
+      providerInstanceId,
+      agentDriver,
+      repository,
+      branch,
+    }) => {
       if (repository === undefined) {
         const command = `mkdir -p ${JSON.stringify(projectDir)}`;
         await run(["exec", nameOf(resource), "--", "sh", "-lc", command]);
@@ -148,8 +155,15 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           `git checkout ${JSON.stringify(branch)}`;
         await run(["exec", nameOf(resource), "--", "sh", "-lc", command]);
       }
+      const settingsPath = "/Users/runner/.t3/userdata/settings.json";
+      const providerSetup = agentDriver
+        ? `node -e ${JSON.stringify(
+            `const fs=require("node:fs");const p=${JSON.stringify(settingsPath)};let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};s.providers={...(s.providers||{}),[${JSON.stringify(agentDriver)}]:{...(s.providers?.[${JSON.stringify(agentDriver)}]||{}),enabled:true}};s.providerInstances={...(s.providerInstances||{}),[${JSON.stringify(providerInstanceId)}]:{...(s.providerInstances?.[${JSON.stringify(providerInstanceId)}]||{}),driver:${JSON.stringify(agentDriver)},enabled:true}};fs.mkdirSync(require("node:path").dirname(p),{recursive:true});fs.writeFileSync(p,JSON.stringify(s)+"\\n")`,
+          )} && `
+        : "";
       const command =
         `mkdir -p ${JSON.stringify(projectDir)} && cd ${JSON.stringify(projectDir)} && ` +
+        providerSetup +
         "npx --yes t3@0.0.40 serve --no-browser --host 0.0.0.0 --port 3000";
       const name = nameOf(resource);
       await run(["exec", "-d", name, "--", "sh", "-lc", command]);

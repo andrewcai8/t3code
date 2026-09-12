@@ -41,6 +41,8 @@ function isMissingSandbox(cause: unknown): boolean {
 export interface ProvisionRequest {
   readonly provider: "e2b" | "namespace";
   readonly providerInstanceId: string;
+  /** Agent driver selected in the local composer. */
+  readonly agentDriver?: string | undefined;
   readonly repository?: string | undefined;
   readonly branch?: string | undefined;
 }
@@ -78,9 +80,54 @@ export interface Provisioned {
  * distinguishes one account from another.
  */
 export function accountAuthPath(providerInstanceId: string, home = NodeOS.homedir()): string {
+  if (providerInstanceId === "cursor" || providerInstanceId.startsWith("cursor_")) {
+    return NodePath.join(
+      home,
+      ".t3/userdata/cursor-homes",
+      providerInstanceId,
+      ".cursor/auth.json",
+    );
+  }
   return providerInstanceId === "codex"
     ? NodePath.join(home, ".codex/auth.json")
     : NodePath.join(home, `.${providerInstanceId}/auth.json`);
+}
+
+type ChildSettings = {
+  providers?: Record<string, Record<string, unknown>>;
+  providerInstances?: Record<string, Record<string, unknown>>;
+  [key: string]: unknown;
+};
+
+export function enableChildProvider(
+  existing: string,
+  agentDriver: string,
+  providerInstanceId: string,
+): string {
+  let settings: ChildSettings = {};
+  try {
+    const parsed = JSON.parse(existing);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      settings = parsed as ChildSettings;
+    }
+  } catch {}
+  const providers = settings.providers ?? {};
+  const providerInstances = settings.providerInstances ?? {};
+  return `${JSON.stringify({
+    ...settings,
+    providers: {
+      ...providers,
+      [agentDriver]: { ...(providers[agentDriver] ?? {}), enabled: true },
+    },
+    providerInstances: {
+      ...providerInstances,
+      [providerInstanceId]: {
+        ...(providerInstances[providerInstanceId] ?? {}),
+        driver: agentDriver,
+        enabled: true,
+      },
+    },
+  })}\n`;
 }
 
 /** `owner/name`, or a github.com URL in any of its usual spellings. */
@@ -135,20 +182,35 @@ async function prepare(
   const run = (command: string, timeoutMs = 180_000) =>
     sandbox.commands.run(command, { timeoutMs });
 
-  await sandbox.files.write("/home/user/.codex/auth.json", auth);
-  await run("chmod 600 /home/user/.codex/auth.json");
+  if (request.agentDriver) {
+    const settingsPath = "/home/user/.t3/userdata/settings.json";
+    const existing = await sandbox.files.read(settingsPath).catch(() => "{}");
+    await sandbox.files.write(
+      settingsPath,
+      enableChildProvider(existing, request.agentDriver, request.providerInstanceId),
+    );
+  }
+
+  const selectedCredentialTarget =
+    request.agentDriver === "cursor"
+      ? "/home/user/.cursor/auth.json"
+      : "/home/user/.codex/auth.json";
+  await run(`mkdir -p ${NodePath.posix.dirname(selectedCredentialTarget)}`);
+  await sandbox.files.write(selectedCredentialTarget, auth);
+  await run(`chmod 600 ${selectedCredentialTarget}`);
 
   // Each agent CLI reads its sign-in from its own place, so copying those
   // files is what lets an environment run more than the one agent whose
   // credentials provisioning installs by name.
   for (const file of provisioning.homeFiles ?? []) {
+    const target = NodePath.posix.join("/home/user", file.destination);
+    if (target === selectedCredentialTarget) continue;
     const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
       throw new ProvisionRefused(
         "credentials",
         `Home file '${file.source}' is configured but missing on this machine.`,
       );
     });
-    const target = NodePath.posix.join("/home/user", file.destination);
     await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
     await sandbox.files.write(target, contents);
     await run(`chmod 600 ${target}`);
@@ -439,6 +501,7 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         const prepared = await provisionNamespace(namespaceRunner, {
           ...config.provisioning.namespace,
           providerInstanceId: request.providerInstanceId,
+          agentDriver: request.agentDriver,
           repository: request.repository,
           branch: request.branch,
         });
