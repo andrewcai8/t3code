@@ -1,7 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - this local listener owns the Node HTTP boundary and fetches its private upstream.
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
-import * as NodeTls from "node:tls";
 import * as NodeStream from "node:stream";
+import * as NodeTls from "node:tls";
 
 export interface NamespaceProxyLease {
   readonly proxyId: string;
@@ -18,6 +19,7 @@ export interface NamespaceProxyOpenInput {
 type StoredLease = NamespaceProxyOpenInput & {
   readonly server: NodeHttp.Server;
   readonly proxyOrigin: string;
+  readonly sockets: Set<NodeStream.Duplex>;
 };
 
 const HOP_BY_HOP = new Set([
@@ -59,9 +61,11 @@ export class NamespaceProxyManager {
     if (this.leases.has(input.proxyId))
       throw new Error(`Namespace proxy already exists: ${input.proxyId}`);
     const server = NodeHttp.createServer((request, response) => {
-      void this.forwardHttp(input, request, response);
+      const lease = this.leases.get(input.proxyId);
+      if (lease) void this.forwardHttp(lease, request, response);
+      else response.writeHead(404).end();
     });
-    const lease: StoredLease = { ...input, server, proxyOrigin: "" };
+    const lease: StoredLease = { ...input, server, proxyOrigin: "", sockets: new Set() };
     this.leases.set(input.proxyId, lease);
     try {
       await new Promise<void>((resolve, reject) => {
@@ -74,7 +78,11 @@ export class NamespaceProxyManager {
       const proxyOrigin = `http://127.0.0.1:${address.port}`;
       const stored = { ...lease, proxyOrigin };
       this.leases.set(input.proxyId, stored);
-      server.on("upgrade", (request, socket) => this.forwardWebSocket(stored, request, socket));
+      server.on("upgrade", (request, socket) => {
+        stored.sockets.add(socket);
+        socket.once("close", () => stored.sockets.delete(socket));
+        this.forwardWebSocket(stored, request, socket);
+      });
       return { proxyId: input.proxyId, proxyOrigin };
     } catch (error) {
       this.leases.delete(input.proxyId);
@@ -87,6 +95,8 @@ export class NamespaceProxyManager {
     const lease = this.leases.get(input.proxyId);
     if (!lease) return;
     this.leases.delete(input.proxyId);
+    for (const socket of lease.sockets) socket.destroy();
+    lease.server.closeAllConnections();
     await new Promise<void>((resolve) => lease.server.close(() => resolve()));
   }
 
@@ -97,11 +107,16 @@ export class NamespaceProxyManager {
   ): Promise<void> {
     try {
       const target = joinUrl(lease.upstreamHttpBaseUrl, request.url ?? "/");
-      const upstream = await fetch(target, {
-        method: request.method,
+      const method = request.method ?? "GET";
+      const requestInit: RequestInit = {
+        method,
         headers: copyHeaders(request.headers, lease.upstreamAuthorization),
-        body: request.method === "GET" || request.method === "HEAD" ? undefined : request,
-      });
+      };
+      if (method !== "GET" && method !== "HEAD") {
+        requestInit.body = request;
+        requestInit.duplex = "half";
+      }
+      const upstream = await fetch(target, requestInit);
       const responseHeaders: Record<string, string> = {};
       upstream.headers.forEach((value, name) => {
         if (!HOP_BY_HOP.has(name)) responseHeaders[name] = value;
@@ -120,7 +135,7 @@ export class NamespaceProxyManager {
   private forwardWebSocket(
     lease: StoredLease,
     request: NodeHttp.IncomingMessage,
-    client: NodeNet.Socket,
+    client: NodeStream.Duplex,
   ): void {
     const target = new URL(joinUrl(lease.upstreamWsBaseUrl, request.url ?? "/"));
     const port = Number(target.port || (target.protocol === "wss:" ? 443 : 80));
@@ -128,7 +143,8 @@ export class NamespaceProxyManager {
       target.protocol === "wss:"
         ? NodeTls.connect({ host: target.hostname, port, servername: target.hostname })
         : NodeNet.connect(port, target.hostname);
-    connect.once("connect", () => {
+    const readyEvent = target.protocol === "wss:" ? "secureConnect" : "connect";
+    connect.once(readyEvent, () => {
       const headers = copyHeaders(request.headers, lease.upstreamAuthorization);
       headers.host = target.host;
       headers.connection = "Upgrade";

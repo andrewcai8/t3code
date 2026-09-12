@@ -1,5 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - this test drives a real local HTTP boundary.
 import * as NodeHttp from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 
 const listen = (handler: NodeHttp.RequestListener) =>
@@ -14,15 +15,16 @@ const listen = (handler: NodeHttp.RequestListener) =>
 
 describe("NamespaceProxyManager", () => {
   it("forwards query and streaming response with sanitized headers", async () => {
-    const seen: { url?: string; headers?: NodeHttp.IncomingHttpHeaders } = {};
+    const seen: { url: string | undefined; headers: NodeHttp.IncomingHttpHeaders | undefined } = {
+      url: undefined,
+      headers: undefined,
+    };
     const upstream = await listen((request, response) => {
       seen.url = request.url;
       seen.headers = request.headers;
       response.writeHead(200, { "content-type": "text/plain" });
       response.write("a");
-      setTimeout(() => {
-        response.end("b");
-      }, 1);
+      queueMicrotask(() => response.end("b"));
     });
     const manager = new NamespaceProxyManager();
     const lease = await manager.open({
