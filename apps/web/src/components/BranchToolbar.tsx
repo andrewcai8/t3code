@@ -160,7 +160,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
           className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
         >
           {cloudEnvironmentPending
-            ? "Cloud chat on send"
+            ? "E2B"
             : (autoEnvironmentLabel ??
               (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel))}
         </span>
@@ -250,11 +250,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                     <span className="flex min-w-0 items-center gap-1.5">
                       <CloudIcon className="size-3" aria-hidden="true" />
                       <span className="min-w-0 truncate">
-                        {creatingCloudEnvironment
-                          ? "Creating cloud chat…"
-                          : cloudEnvironmentPending
-                            ? "Cloud chat on send"
-                            : "New cloud chat (E2B)"}
+                        {creatingCloudEnvironment ? "Creating E2B sandbox…" : "E2B"}
                       </span>
                     </span>
                   </MenuRadioItem>

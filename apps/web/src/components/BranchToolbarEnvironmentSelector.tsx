@@ -62,7 +62,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         ? [
             {
               value: CREATE_CLOUD_VALUE,
-              label: cloudEnvironmentPending ? "Cloud chat on send" : "New cloud chat (E2B)",
+              label: "E2B",
             },
           ]
         : []),
@@ -182,11 +182,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             <SelectItem value={CREATE_CLOUD_VALUE} disabled={creatingCloudEnvironment === true}>
               <span className="inline-flex items-center gap-1.5">
                 <CloudIcon className="size-3" aria-hidden="true" />
-                {creatingCloudEnvironment
-                  ? "Creating cloud chat…"
-                  : cloudEnvironmentPending
-                    ? "Cloud chat on send"
-                    : "New cloud chat (E2B)"}
+                {creatingCloudEnvironment ? "Creating E2B sandbox…" : "E2B"}
               </span>
             </SelectItem>
           ) : null}

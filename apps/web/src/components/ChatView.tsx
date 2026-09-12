@@ -366,6 +366,7 @@ import {
 } from "./chat/ThreadErrorBanner";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ComposerSurface } from "./chat/ComposerSurface";
+import { Spinner } from "./ui/spinner";
 import {
   hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
@@ -4255,6 +4256,9 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeCloudLease, touchCloudLease]);
   const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
   const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
+  const [cloudProvisioningPhase, setCloudProvisioningPhase] = useState<
+    "creating" | "pairing" | "loading-project" | "ready" | null
+  >(null);
   const cloudAccount = useMemo(() => {
     const providers = primaryEnvironment?.serverConfig?.providers ?? [];
     return providers.find((provider) => provider.enabled && provider.driver === "codex") ?? null;
@@ -4270,8 +4274,8 @@ export default function ChatView(props: ChatViewProps) {
     setPendingCloudSendEnvironmentId(null);
     toastManager.add({
       type: "info",
-      title: "Cloud chat selected",
-      description: "The E2B machine will be created when you send the first message.",
+      title: "E2B selected",
+      description: "The E2B sandbox will be created when you send the first message.",
     });
   }, [canCreateCloudEnvironment, cloudAccount]);
   const provisionCloudEnvironmentForSend = useCallback(async () => {
@@ -4288,14 +4292,16 @@ export default function ChatView(props: ChatViewProps) {
     const repository =
       identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
     setCreatingCloudEnvironment(true);
+    setCloudProvisioningPhase("creating");
     // The menu closes on the click that starts this, taking its pending label
     // with it, and building takes minutes. Without a word here the app looks
     // like it ignored the request.
     toastManager.add({
       type: "info",
-      title: "Creating a cloud machine…",
-      description: repository ? `Cloning ${repository}. This takes a few minutes.` : undefined,
+      title: "Creating E2B sandbox…",
+      description: repository ? `Building the sandbox and cloning ${repository}.` : undefined,
     });
+    let readyForSend = false;
     try {
       const created = await provisionCloudEnvironment({
         environmentId: primaryEnvironmentId,
@@ -4326,6 +4332,7 @@ export default function ChatView(props: ChatViewProps) {
         sandboxId: created.value.environment.sandboxId,
         managerEnvironmentId: primaryEnvironmentId,
       };
+      setCloudProvisioningPhase("pairing");
       const paired = await connectCloudPairing({
         pairingUrl: created.value.environment.pairingUrl,
       });
@@ -4342,6 +4349,7 @@ export default function ChatView(props: ChatViewProps) {
       // project before the new draft can point at it. Waiting on the project
       // atom keeps the cloud action as one user-visible operation rather than
       // leaving a machine stranded on an unrelated local draft.
+      setCloudProvisioningPhase("loading-project");
       const pairedProject = await waitForProjectMatch((project) => {
         if (project.environmentId !== paired.value) return false;
         if (!identity) return true;
@@ -4358,8 +4366,8 @@ export default function ChatView(props: ChatViewProps) {
         rememberProvisionedSandbox(draftId, lease);
         toastManager.add({
           type: "warning",
-          title: "Cloud machine ready, but its project is still loading.",
-          description: "Open a new cloud chat after the project appears.",
+          title: "E2B ready, but its project is still loading.",
+          description: "Open a new E2B chat after the project appears.",
         });
         return false;
       }
@@ -4370,9 +4378,11 @@ export default function ChatView(props: ChatViewProps) {
       });
       setCloudProvisioningRequested(false);
       setPendingCloudSendEnvironmentId(pairedProject.environmentId);
+      setCloudProvisioningPhase("ready");
+      readyForSend = true;
       toastManager.add({
         type: "success",
-        title: `Cloud machine ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
+        title: `E2B ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
         description: repository
           ? `${repository} is checked out. Sending your message now.`
           : undefined,
@@ -4380,6 +4390,7 @@ export default function ChatView(props: ChatViewProps) {
       return true;
     } finally {
       setCreatingCloudEnvironment(false);
+      if (!readyForSend) setCloudProvisioningPhase(null);
     }
   }, [
     activeProject,
@@ -4392,6 +4403,23 @@ export default function ChatView(props: ChatViewProps) {
     provisionCloudEnvironment,
     setDraftThreadContext,
   ]);
+  const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (cloudProvisioningPhase === null) return null;
+    const copy = {
+      creating: ["Creating E2B sandbox", "Building the sandbox. This can take a few minutes."],
+      pairing: ["Connecting to E2B", "Pairing the new sandbox with T3."],
+      "loading-project": ["Loading project on E2B", "Waiting for the checkout to appear."],
+      ready: ["E2B ready", "Sending your first message."],
+    }[cloudProvisioningPhase];
+    return {
+      id: `cloud-provisioning:${draftId ?? routeThreadKey}`,
+      variant: "default",
+      priority: "activity",
+      icon: <Spinner />,
+      title: copy[0],
+      description: copy[1],
+    };
+  }, [cloudProvisioningPhase, draftId, routeThreadKey]);
   const linkedThreadPullRequestKey = linkedThreadPullRequest
     ? JSON.stringify([
         linkedThreadPullRequest.projectId,
@@ -6161,6 +6189,8 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const cloudProvisioningItems =
+      cloudProvisioningBannerItem === null ? [] : [cloudProvisioningBannerItem];
     const resumeCompactionItems =
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -6170,6 +6200,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
+        ...cloudProvisioningItems,
         ...usageLimitsItems,
         ...systemComposerBannerItems,
         ...backgroundLivenessItems,
@@ -6180,6 +6211,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [
       ...feedbackBannerItems,
+      ...cloudProvisioningItems,
       ...usageLimitsItems,
       ...systemComposerBannerItems,
       ...backgroundLivenessItems,
@@ -6228,6 +6260,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    cloudProvisioningBannerItem,
     feedbackBannerItems,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
@@ -7478,6 +7511,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     setPendingCloudSendEnvironmentId(null);
+    setCloudProvisioningPhase(null);
     void onSend();
   }, [
     activeEnvironment?.serverConfig,
