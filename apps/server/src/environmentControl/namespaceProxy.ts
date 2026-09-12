@@ -1,7 +1,7 @@
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeTls from "node:tls";
-import { Readable as NodeStream } from "node:stream";
+import * as NodeStream from "node:stream";
 
 export interface NamespaceProxyLease {
   readonly proxyId: string;
