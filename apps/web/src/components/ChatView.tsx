@@ -1387,6 +1387,7 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
+const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
 
 /**
  * Drops the send-time anchored end space. That space is what holds a sent
@@ -4358,7 +4359,7 @@ export default function ChatView(props: ChatViewProps) {
           candidate?.canonicalKey === identity.canonicalKey ||
           (candidate?.owner === identity.owner && candidate?.name === identity.name)
         );
-      }).catch(() => null);
+      }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
       if (pairedProject === null) {
         // Keep the lease on the current target so deleting that draft/thread
         // still has a path to dispose the machine if project publication was
