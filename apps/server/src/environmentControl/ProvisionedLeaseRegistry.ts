@@ -192,10 +192,10 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
     expired: (now) =>
       consistentRead((leases) => {
         const cutoff = (now ?? new Date()).toISOString();
+        // An expired active lease is recoverable when its heartbeat stops.
         return leases.filter(
           (lease) =>
-            lease.expiresAt <= cutoff &&
-            (lease.state === "releasing" || (lease.state === "active" && lease.owner === null)),
+            lease.expiresAt <= cutoff && (lease.state === "releasing" || lease.state === "active"),
         );
       }),
   };

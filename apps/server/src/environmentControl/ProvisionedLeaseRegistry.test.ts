@@ -115,7 +115,7 @@ describe("ProvisionedLeaseRegistry", () => {
     expect(await registry.expired(new Date("2026-01-01T01:00:01.000Z"))).toHaveLength(1);
   });
 
-  it("does not expire a claimed lease", async () => {
+  it("expires a claimed lease after its heartbeat deadline", async () => {
     const registry = await makeRegistry();
     await registry.register({
       leaseId: "lease-1",
@@ -127,7 +127,7 @@ describe("ProvisionedLeaseRegistry", () => {
       leaseId: "lease-1",
       owner: { environmentId: "remote", threadId: "thread-1" },
     });
-    expect(await registry.expired(new Date("2026-01-01T01:00:01.000Z"))).toHaveLength(0);
+    expect(await registry.expired(new Date("2026-01-01T01:00:01.000Z"))).toHaveLength(1);
   });
 
   it("renews a claimed lease", async () => {
