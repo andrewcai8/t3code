@@ -35,6 +35,7 @@ const HOP_BY_HOP = new Set([
   "authorization",
   "cookie",
 ]);
+const FETCH_DECODED = new Set(["content-encoding", "content-length"]);
 const copyHeaders = (
   headers: NodeHttp.IncomingHttpHeaders,
   authorization?: string,
@@ -119,7 +120,7 @@ export class NamespaceProxyManager {
       const upstream = await fetch(target, requestInit);
       const responseHeaders: Record<string, string> = {};
       upstream.headers.forEach((value, name) => {
-        if (!HOP_BY_HOP.has(name)) responseHeaders[name] = value;
+        if (!HOP_BY_HOP.has(name) && !FETCH_DECODED.has(name)) responseHeaders[name] = value;
       });
       response.writeHead(upstream.status, responseHeaders);
       if (upstream.body) {
