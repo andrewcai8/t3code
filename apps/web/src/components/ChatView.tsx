@@ -4246,6 +4246,14 @@ export default function ChatView(props: ChatViewProps) {
     const repository =
       identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
     setCreatingCloudEnvironment(true);
+    // The menu closes on the click that starts this, taking its pending label
+    // with it, and building takes minutes. Without a word here the app looks
+    // like it ignored the request.
+    toastManager.add({
+      type: "info",
+      title: "Creating a cloud machine…",
+      description: repository ? `Cloning ${repository}. This takes a few minutes.` : undefined,
+    });
     try {
       const created = await provisionCloudEnvironment({
         environmentId: primaryEnvironmentId,
@@ -4255,9 +4263,38 @@ export default function ChatView(props: ChatViewProps) {
           ...(repository ? { repository } : {}),
         },
       });
-      if (AsyncResult.isFailure(created)) return;
-      if (created.value.kind !== "provisioned") return;
-      await connectCloudPairing({ pairingUrl: created.value.environment.pairingUrl });
+      // Building a machine takes minutes, so every way it can end has to say
+      // so. Reverting the label and going quiet leaves someone watching a
+      // menu, unsure whether they are waiting or have already failed.
+      if (AsyncResult.isFailure(created)) {
+        toastManager.add({
+          type: "error",
+          title: "Could not reach the manager to create a machine.",
+        });
+        return;
+      }
+      if (created.value.kind !== "provisioned") {
+        // The refusal already explains what to configure; repeating it is more
+        // use than a generic failure.
+        toastManager.add({ type: "error", title: created.value.message });
+        return;
+      }
+      const paired = await connectCloudPairing({
+        pairingUrl: created.value.environment.pairingUrl,
+      });
+      if (AsyncResult.isFailure(paired)) {
+        toastManager.add({
+          type: "error",
+          title: "The machine was created but could not be added.",
+          description: created.value.environment.pairingUrl,
+        });
+        return;
+      }
+      toastManager.add({
+        type: "success",
+        title: `Cloud machine ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
+        ...(repository ? { description: `${repository} is checked out on it.` } : {}),
+      });
     } finally {
       setCreatingCloudEnvironment(false);
     }
