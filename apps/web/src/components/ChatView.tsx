@@ -4242,23 +4242,6 @@ export default function ChatView(props: ChatViewProps) {
   const claimCloudLease = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
     reportFailure: false,
   });
-  const touchCloudLease = useAtomCommand(serverEnvironment.touchProvisionedEnvironment, {
-    reportFailure: false,
-  });
-  const activeCloudLease =
-    isServerThread && activeThreadRef ? provisionedSandboxFor(activeThreadRef) : null;
-  useEffect(() => {
-    if (!activeCloudLease) return;
-    const touch = () => {
-      void touchCloudLease({
-        environmentId: activeCloudLease.managerEnvironmentId,
-        input: { leaseId: activeCloudLease.leaseId },
-      });
-    };
-    touch();
-    const interval = globalThis.setInterval(touch, 5 * 60 * 1000);
-    return () => globalThis.clearInterval(interval);
-  }, [activeCloudLease, touchCloudLease]);
   const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
   const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
   const [cloudProvisioningPhase, setCloudProvisioningPhase] = useState<

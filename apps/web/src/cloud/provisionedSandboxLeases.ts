@@ -73,6 +73,10 @@ export function provisionedSandboxFor(
   return leases.get(key(target)) ?? null;
 }
 
+export function allProvisionedSandboxes(): ReadonlyArray<ProvisionedSandboxLease> {
+  return [...leases.values()];
+}
+
 export function forgetProvisionedSandbox(target: string | ScopedThreadRef): void {
   if (leases.delete(key(target))) persist();
 }
