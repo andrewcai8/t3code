@@ -5,6 +5,8 @@ import {
   type OrchestrationShellStreamItem,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -12,6 +14,8 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
+import { RpcClientError } from "effect/unstable/rpc";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -20,6 +24,7 @@ import {
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
+import { deriveActivityAvailability, presentConnectionState } from "../connection/presentation.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
@@ -60,6 +65,144 @@ function session(client: WsRpcProtocolClient): RpcSession.RpcSession {
 }
 
 describe("environment shell synchronization", () => {
+  it.effect.each(["protocol", "fatal"] as const)(
+    "stops reporting live shell activity after a %s defect while the session stays healthy",
+    (kind) =>
+      Effect.gen(function* () {
+        const subscriptions = yield* Queue.unbounded<{
+          readonly events: Queue.Queue<OrchestrationShellStreamItem, RpcClientError.RpcClientError>;
+          readonly closed: Deferred.Deferred<void>;
+        }>();
+        const opened = yield* Ref.make(0);
+        const client = {
+          [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
+            Stream.unwrap(
+              Effect.gen(function* () {
+                const events = yield* Queue.unbounded<
+                  OrchestrationShellStreamItem,
+                  RpcClientError.RpcClientError
+                >();
+                const closed = yield* Deferred.make<void>();
+                yield* Ref.update(opened, (count) => count + 1);
+                yield* Effect.addFinalizer(() => Deferred.succeed(closed, undefined));
+                yield* Queue.offer(subscriptions, { events, closed });
+                return Stream.fromQueue(events);
+              }),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const healthySession = session(client);
+        const activeSession = yield* SubscriptionRef.make(Option.some(healthySession));
+        const supervisorState = yield* SubscriptionRef.make({
+          ...AVAILABLE_CONNECTION_STATE,
+          desired: true,
+          phase: "connected" as const,
+          attempt: 1,
+          generation: 1,
+        });
+        const shellState = yield* makeEnvironmentShellState().pipe(
+          Effect.provideService(
+            EnvironmentSupervisor.EnvironmentSupervisor,
+            EnvironmentSupervisor.EnvironmentSupervisor.of({
+              target: TARGET,
+              state: supervisorState,
+              session: activeSession,
+              prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+              connect: Effect.void,
+              disconnect: Effect.void,
+              retryNow: Effect.void,
+            }),
+          ),
+          Effect.provideService(
+            Persistence.EnvironmentCacheStore,
+            Persistence.EnvironmentCacheStore.of({
+              loadShell: () => Effect.succeed(Option.none()),
+              saveShell: () => Effect.void,
+              loadThread: () => Effect.succeed(Option.none()),
+              saveThread: () => Effect.void,
+              removeThread: () => Effect.void,
+              loadServerConfig: () => Effect.succeed(Option.none()),
+              saveServerConfig: () => Effect.void,
+              loadVcsRefs: () => Effect.succeed(Option.none()),
+              saveVcsRefs: () => Effect.void,
+              removeVcsRefs: () => Effect.void,
+              clearVcsRefs: () => Effect.void,
+              clear: () => Effect.void,
+            }),
+          ),
+          Effect.provideService(
+            ShellSnapshotLoader,
+            ShellSnapshotLoader.of({ load: () => Effect.succeed(Option.none()) }),
+          ),
+        );
+        const first = yield* Queue.take(subscriptions);
+        yield* Queue.offerAll(first.events, [
+          { kind: "snapshot", snapshot: LIVE_SHELL_SNAPSHOT },
+          { kind: "synchronized" },
+        ]);
+        yield* SubscriptionRef.changes(shellState).pipe(
+          Stream.filter((state) => state.status === "live"),
+          Stream.runHead,
+        );
+
+        const error = new Error("SYNTHETIC_RAW_SHELL_DEFECT");
+        yield* Queue.failCause(
+          first.events,
+          kind === "fatal"
+            ? Cause.die(error)
+            : Cause.fail(
+                new RpcClientError.RpcClientError({
+                  reason: new RpcClientError.RpcClientDefect({
+                    message: error.message,
+                    cause: error,
+                  }),
+                }),
+              ),
+        );
+        yield* Deferred.await(first.closed);
+        yield* TestClock.adjust("1 second");
+        yield* healthySession.probe;
+
+        const failed = yield* SubscriptionRef.get(shellState);
+        expect(failed).toEqual({
+          status: "cached",
+          snapshot: Option.some(LIVE_SHELL_SNAPSHOT),
+          error: Option.some("Could not synchronize environment data."),
+        });
+        const connectionPhase = presentConnectionState(
+          yield* SubscriptionRef.get(supervisorState),
+        ).phase;
+        expect(connectionPhase).toBe("connected");
+        expect(yield* SubscriptionRef.get(activeSession)).toEqual(Option.some(healthySession));
+        expect(yield* Ref.get(opened)).toBe(1);
+        expect(
+          deriveActivityAvailability({
+            connectionPhase,
+            shellStatus: failed.status,
+            syncFailed: Option.isSome(failed.error),
+          }),
+        ).toEqual({ kind: "unavailable", label: "Sync failed" });
+
+        if (kind === "fatal") return;
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        const next = yield* Queue.take(subscriptions);
+        expect((yield* SubscriptionRef.get(shellState)).error).toEqual(Option.none());
+        yield* Queue.offerAll(next.events, [
+          { kind: "snapshot", snapshot: { ...LIVE_SHELL_SNAPSHOT, snapshotSequence: 2 } },
+          { kind: "synchronized" },
+        ]);
+        const recovered = yield* SubscriptionRef.changes(shellState).pipe(
+          Stream.filter((state) => state.status === "live"),
+          Stream.runHead,
+          Effect.map(Option.getOrThrow),
+        );
+        expect(recovered.error).toEqual(Option.none());
+        expect(recovered.snapshot).toEqual(
+          Option.some({ ...LIVE_SHELL_SNAPSHOT, snapshotSequence: 2 }),
+        );
+        expect(yield* Ref.get(opened)).toBe(2);
+      }),
+  );
+
   it.effect("publishes live state before persistence and preserves it when ready", () =>
     Effect.gen(function* () {
       const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
