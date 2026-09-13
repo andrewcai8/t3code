@@ -53,7 +53,16 @@ describe("cloud SDK and controller boundary", () => {
     sdk.getInfo
       .mockResolvedValueOnce({ ...retained, state: "paused" })
       .mockResolvedValueOnce({ ...retained, state: "running" });
-    sdk.connect.mockResolvedValue({ sandboxId: "retained" });
+    sdk.connect.mockResolvedValue({ sandboxId: "retained", getHost: () => "retained.invalid" });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        environmentId: "child",
+        label: "Child",
+        platform: { os: "linux", arch: "x64" },
+        serverVersion: "0.0.40",
+        capabilities: {},
+      }),
+    );
     expect(
       await createCloudDriver(config).resume({
         sandboxId: "retained",
@@ -66,6 +75,36 @@ describe("cloud SDK and controller boundary", () => {
       expect.objectContaining({ timeoutMs: 3_600_000 }),
     );
   });
+  it.each(["unreachable", "wrong-environment"])(
+    "does not report recovery when T3 is %s inside a running sandbox",
+    async (failure) => {
+      sdk.getInfo.mockResolvedValue({
+        sandboxId: "retained",
+        state: "running",
+        metadata: { purpose: "t3-environment", account: "codex" },
+      });
+      sdk.connect.mockResolvedValue({ sandboxId: "retained", getHost: () => "retained.invalid" });
+      const http = vi.spyOn(globalThis, "fetch");
+      if (failure === "unreachable") http.mockRejectedValue(new Error("connection refused"));
+      else
+        http.mockResolvedValue(
+          Response.json({
+            environmentId: "different",
+            label: "Other",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "0.0.40",
+            capabilities: {},
+          }),
+        );
+      await expect(
+        createCloudDriver(config).resume({
+          sandboxId: "retained",
+          providerInstanceId: "codex",
+          environmentId: "child",
+        }),
+      ).rejects.toThrow(/T3|environment/);
+    },
+  );
   it("refuses a provisioned sandbox owned by another account", async () => {
     sdk.getInfo.mockResolvedValue({
       sandboxId: "retained",
