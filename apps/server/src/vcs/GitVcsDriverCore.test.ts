@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, it, describe } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -688,6 +688,62 @@ it.effect("backs off failed upstream refreshes across linked worktrees", () =>
 
 it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   describe("process environment", () => {
+    it.effect.skipIf(
+      HostProcessPlatform.defaultValue() === "win32" ||
+        NodeFS.existsSync("/sys/fs/cgroup/t3/workloads/cgroup.procs"),
+    )("refuses to run Git when its required workload isolation is unavailable", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver
+          .execute({
+            operation: "GitVcsDriver.test.unavailableWorkloadIsolation",
+            cwd,
+            args: ["init"],
+          })
+          .pipe(
+            Effect.provideService(HostProcessPlatform, "linux"),
+            Effect.provideService(HostProcessEnvironment, { T3CODE_WORKLOAD_ISOLATION: "1" }),
+            Effect.result,
+          );
+
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) {
+          assert.deepInclude(result.failure, {
+            _tag: "GitCommandError",
+            command: "git",
+            cwd,
+            exitCode: 125,
+          });
+        }
+        assert.isFalse(yield* fs.exists(path.join(cwd, ".git")));
+      }),
+    );
+
+    it.effect("preserves literal arguments, caller environment, and Git trace hooks", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.execute({
+          operation: "GitVcsDriver.test.literalArguments",
+          cwd,
+          args: [
+            "-c",
+            'alias.inspect=!f() { test -n "$GIT_TRACE2_EVENT" || exit 1; printf "%s\\n" "$LC_ALL" "$1"; }; f',
+            "inspect",
+            'spaces; $(false) & "quotes"',
+          ],
+          env: { LC_ALL: "zh_CN.UTF-8" },
+          progress: { onHookStarted: () => Effect.void },
+        });
+
+        assert.equal(result.exitCode, 0);
+        assert.equal(result.stdout, 'zh_CN.UTF-8\nspaces; $(false) & "quotes"\n');
+      }),
+    );
+
     it.effect("preserves the caller locale for general Git subprocesses", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
