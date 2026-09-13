@@ -1,6 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/unstable/reactivity";
-import { LIVE_ACTIVITY_AVAILABILITY } from "@t3tools/client-runtime/connection";
+import {
+  LIVE_ACTIVITY_AVAILABILITY,
+  type ActivityAvailability,
+} from "@t3tools/client-runtime/connection";
 import { environmentPresentations } from "../../state/presentation";
 import { QuestionAnswerHistory } from "./QuestionAnswerHistory";
 import * as Haptics from "expo-haptics";
@@ -204,6 +207,7 @@ function ShimmerWorkContent(props: {
 const LIVE_ACTIVITY_ATOM = Atom.make(LIVE_ACTIVITY_AVAILABILITY);
 
 export function ShimmeringWorkContent(props: {
+  readonly activityAvailability?: ActivityAvailability;
   readonly className?: string;
   readonly textClassName?: string;
   /** Secondary line: no icon slot, caption size. */
@@ -216,11 +220,12 @@ export function ShimmeringWorkContent(props: {
   readonly themeAppearance?: "light" | "dark";
   readonly toolIcon?: ToolActivityIcon;
 }) {
-  const availability = useAtomValue(
-    props.environmentId
+  const fallbackAvailability = useAtomValue(
+    props.activityAvailability === undefined && props.environmentId
       ? environmentPresentations.activityAvailabilityAtom(props.environmentId)
       : LIVE_ACTIVITY_ATOM,
   );
+  const availability = props.activityAvailability ?? fallbackAvailability;
   const [availableWidth, setAvailableWidth] = useState(0);
   const [textWidth, setTextWidth] = useState(0);
   const [appIsActive, setAppIsActive] = useState(AppState.currentState === "active");
@@ -306,7 +311,11 @@ export function ShimmeringWorkContent(props: {
         toolIcon={props.toolIcon}
         onTextLayout={(event) => setTextWidth(event.nativeEvent.lines[0]?.width ?? 0)}
       />
-      {!reducedMotion && appIsActive && screenIsFocused && contentWidth > 0 ? (
+      {availability.kind === "live" &&
+      !reducedMotion &&
+      appIsActive &&
+      screenIsFocused &&
+      contentWidth > 0 ? (
         <Animated.View
           className="absolute inset-y-0 left-0 overflow-hidden"
           pointerEvents="none"
@@ -425,6 +434,7 @@ export function collapsedWorkLogHeight(activities: ReadonlyArray<ThreadFeedActiv
 }
 
 interface ThreadWorkLogProps {
+  readonly activityAvailability: ActivityAvailability;
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
   readonly anchorKey: string;
   readonly environmentId: EnvironmentId;
@@ -446,6 +456,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
     (row: ThreadFeedActivity) => (
       <ThreadWorkLogRow
         key={row.id}
+        activityAvailability={props.activityAvailability}
         row={row}
         anchorKey={props.anchorKey}
         copied={props.copiedRowId === row.id}
@@ -459,6 +470,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       />
     ),
     [
+      props.activityAvailability,
       props.anchorKey,
       props.copiedRowId,
       props.expandedRows,
@@ -797,6 +809,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
         <View className="min-h-8 flex-row items-center gap-1.5">
           {row.live && !expanded ? (
             <ShimmeringWorkContent
+              activityAvailability={props.activityAvailability}
               environmentId={props.environmentId}
               icon={icon}
               iconSubtleColor={props.iconSubtleColor}
@@ -912,6 +925,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
 });
 
 export function ThreadWorkGroupToggle(props: {
+  readonly activityAvailability: ActivityAvailability;
   readonly environmentId: EnvironmentId;
   readonly rowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
   readonly expanded: boolean;
@@ -954,6 +968,7 @@ export function ThreadWorkGroupToggle(props: {
         {props.shimmer ? (
           <ShimmeringWorkContent
             key={props.rowSizing.textSizeKey}
+            activityAvailability={props.activityAvailability}
             environmentId={props.environmentId}
             icon={icon}
             iconSubtleColor={props.iconSubtleColor}
@@ -1007,7 +1022,7 @@ const AGENT_SPAWN_TONE_DOT_CLASS = {
  * remounting the card (see the batch key in appendActivityGroupRows).
  */
 export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
-  readonly environmentId: EnvironmentId;
+  readonly activityAvailability: ActivityAvailability;
   readonly summary: AgentSpawnSummary;
   readonly expanded: boolean;
   readonly iconSubtleColor: ColorValue;
@@ -1016,9 +1031,7 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
   readonly onCopy: () => void;
 }) {
   const { summary, expanded } = props;
-  const availability = useAtomValue(
-    environmentPresentations.activityAvailabilityAtom(props.environmentId),
-  );
+  const availability = props.activityAvailability;
   const unavailable = availability.kind !== "live";
   const unavailableLabel = availability.kind === "unavailable" ? availability.label : "Syncing";
   const working = summary.tone === "working" && !unavailable;
@@ -1075,6 +1088,7 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
               {working ? (
                 <ShimmeringWorkContent
                   key={props.rowSizing.textSizeKey}
+                  activityAvailability={props.activityAvailability}
                   compact
                   icon="brain"
                   iconSubtleColor={props.iconSubtleColor}
@@ -1141,13 +1155,11 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
 });
 
 export function ThreadThinkingRow(props: {
-  readonly environmentId: EnvironmentId;
+  readonly activityAvailability: ActivityAvailability;
   readonly rowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
   readonly iconSubtleColor: ColorValue;
 }) {
-  const availability = useAtomValue(
-    environmentPresentations.activityAvailabilityAtom(props.environmentId),
-  );
+  const availability = props.activityAvailability;
   if (availability.kind !== "live") return <View className="min-h-8" />;
   return (
     <View
@@ -1158,6 +1170,7 @@ export function ThreadThinkingRow(props: {
     >
       <ShimmeringWorkContent
         key={props.rowSizing.textSizeKey}
+        activityAvailability={props.activityAvailability}
         icon="brain"
         iconSubtleColor={props.iconSubtleColor}
         label="Thinking"

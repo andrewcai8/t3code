@@ -21,6 +21,7 @@ import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
   type PreparedConnection,
+  type SupervisorConnectionState,
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
@@ -92,10 +93,10 @@ describe("environment shell synchronization", () => {
         } as unknown as WsRpcProtocolClient;
         const healthySession = session(client);
         const activeSession = yield* SubscriptionRef.make(Option.some(healthySession));
-        const supervisorState = yield* SubscriptionRef.make({
+        const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>({
           ...AVAILABLE_CONNECTION_STATE,
           desired: true,
-          phase: "connected" as const,
+          phase: "connected",
           attempt: 1,
           generation: 1,
         });

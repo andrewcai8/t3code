@@ -1,4 +1,5 @@
 import * as Haptics from "expo-haptics";
+import type { ActivityAvailability } from "@t3tools/client-runtime/connection";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
 import type {
@@ -230,6 +231,7 @@ function isFreshTimestamp(input: string): boolean {
 }
 
 export interface ThreadFeedProps {
+  readonly activityAvailability: ActivityAvailability;
   readonly queuedMessages: ReadonlyArray<QueuedThreadMessage>;
   readonly dispatchingMessageId: MessageId | null;
   readonly onEditPendingMessage: (message: QueuedThreadMessage) => void;
@@ -1324,6 +1326,7 @@ function renderFeedEntry(
   info: { item: PendingThreadFeedEntry; index: number },
   props: Pick<
     ThreadFeedProps,
+    | "activityAvailability"
     | "environmentId"
     | "onUseArtifactTemplate"
     | "skills"
@@ -1391,7 +1394,7 @@ function renderFeedEntry(
   if (entry.type === "thinking") {
     return (
       <ThreadThinkingRow
-        environmentId={props.environmentId}
+        activityAvailability={props.activityAvailability}
         rowSizing={props.workRowSizing}
         iconSubtleColor={iconSubtleColor}
       />
@@ -1401,7 +1404,7 @@ function renderFeedEntry(
   if (entry.type === "agent-spawn") {
     return (
       <ThreadAgentSpawnCard
-        environmentId={props.environmentId}
+        activityAvailability={props.activityAvailability}
         summary={entry.summary}
         expanded={entry.expanded}
         iconSubtleColor={iconSubtleColor}
@@ -1415,6 +1418,7 @@ function renderFeedEntry(
   if (entry.type === "work-toggle") {
     return (
       <ThreadWorkGroupToggle
+        activityAvailability={props.activityAvailability}
         environmentId={props.environmentId}
         rowSizing={props.workRowSizing}
         expanded={entry.expanded}
@@ -1660,6 +1664,7 @@ function renderFeedEntry(
       // Anchors/details live in ThreadFeed and survive this group-only remount.
       key={`${entry.id}:${props.workRowSizing.textSizeKey}`}
       activities={entry.activities}
+      activityAvailability={props.activityAvailability}
       environmentId={props.environmentId}
       anchorKey={entry.id}
       copiedRowId={props.copiedRowId}
@@ -2278,6 +2283,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // even when the final message update arrives before the turn settles.
   const listAppearanceData = useMemo(
     () => ({
+      activityAvailability: props.activityAvailability,
       dispatchingMessageId: props.dispatchingMessageId,
       unsettledTurnId,
       copiedRowId,
@@ -2291,6 +2297,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       viewportWidth,
     }),
     [
+      props.activityAvailability,
       props.dispatchingMessageId,
       unsettledTurnId,
       copiedRowId,
@@ -2707,6 +2714,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       >
         <ThreadMediaVisibility>
           {renderFeedEntry(info, {
+            activityAvailability: props.activityAvailability,
             environmentId: props.environmentId,
             dispatchingMessageId: props.dispatchingMessageId,
             onEditPendingMessage: props.onEditPendingMessage,
@@ -2741,6 +2749,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       </Animated.View>
     ),
     [
+      props.activityAvailability,
       props.dispatchingMessageId,
       props.onEditPendingMessage,
       copiedRowId,

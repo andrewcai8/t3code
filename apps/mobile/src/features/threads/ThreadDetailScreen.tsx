@@ -1,6 +1,11 @@
-import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import {
+  deriveActivityAvailability,
+  type EnvironmentConnectionPhase,
+} from "@t3tools/client-runtime/connection";
 import { useAtomValue } from "@effect/atom-react";
-import { environmentPresentations } from "../../state/presentation";
+import * as Option from "effect/Option";
+import type { EnvironmentShellState } from "@t3tools/client-runtime/state/shell";
+import { environmentShell } from "../../state/shell";
 import {
   appendCodexArtifactTemplateUsePrompt,
   type CodexArtifactTemplate,
@@ -333,7 +338,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     : Math.max(insets.bottom, 12);
   const contentPresentationKind = props.contentPresentation.kind;
   const activityAvailability = useAtomValue(
-    environmentPresentations.activityAvailabilityAtom(props.environmentId),
+    environmentShell.stateValueAtom(props.environmentId),
+    useCallback(
+      (shellState: EnvironmentShellState) =>
+        deriveActivityAvailability({
+          connectionPhase: props.connectionStateLabel,
+          shellStatus: shellState.status,
+          threadStatus: props.threadSyncStatus ?? "empty",
+          syncFailed: Option.isSome(shellState.error) || Boolean(props.threadSyncError),
+        }),
+      [props.connectionStateLabel, props.threadSyncStatus, props.threadSyncError],
+    ),
   );
   // The raw sync status enters "synchronizing" on every full fetch, cached or
   // not. Whether messages are already on screen decides the pill label: no
@@ -367,12 +382,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     if (connectionStatus !== null) {
       return connectionStatus;
     }
-    if (activityAvailability.kind === "unavailable" || props.threadSyncError) {
+    if (activityAvailability.kind === "unavailable") {
       return {
         kind: "connection",
         tone: "unavailable",
-        label:
-          activityAvailability.kind === "unavailable" ? activityAvailability.label : "Sync failed",
+        label: activityAvailability.label,
         onPress: props.onReconnectEnvironment,
       };
     }
@@ -890,6 +904,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           />
           <ThreadFeed
             key={selectedThreadKey}
+            activityAvailability={activityAvailability}
             environmentId={props.environmentId}
             threadId={props.selectedThread.id}
             workspaceRoot={props.threadCwd}

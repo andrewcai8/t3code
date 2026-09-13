@@ -68,6 +68,25 @@ describe("activity availability", () => {
       }),
     ).toEqual({ kind: "live" });
   });
+
+  it("keeps a failed thread unavailable through reconnect until its replacement synchronizes", () => {
+    const states = [
+      { connectionPhase: "connected", threadStatus: "cached", syncFailed: true },
+      { connectionPhase: "reconnecting", threadStatus: "cached", syncFailed: true },
+      { connectionPhase: "connected", threadStatus: "cached", syncFailed: true },
+      { connectionPhase: "connected", threadStatus: "synchronizing", syncFailed: false },
+      { connectionPhase: "connected", threadStatus: "live", syncFailed: false },
+    ] as const;
+    expect(
+      states.map((state) => deriveActivityAvailability({ ...state, shellStatus: "live" })),
+    ).toEqual([
+      { kind: "unavailable", label: "Sync failed" },
+      { kind: "unavailable", label: "Reconnecting" },
+      { kind: "unavailable", label: "Sync failed" },
+      { kind: "synchronizing" },
+      { kind: "live" },
+    ]);
+  });
 });
 
 const TARGET = new BearerConnectionTarget({
