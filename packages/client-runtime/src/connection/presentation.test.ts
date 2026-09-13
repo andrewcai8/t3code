@@ -12,9 +12,63 @@ import {
   connectionCatalogDisplayUrl,
   connectionStatusText,
   connectionStatusTitle,
+  deriveActivityAvailability,
   presentEnvironmentConnection,
   presentConnectionState,
 } from "./presentation.ts";
+
+describe("activity availability", () => {
+  it.each([
+    ["available", "Disconnected"],
+    ["offline", "Offline"],
+    ["connecting", "Connecting"],
+    ["reconnecting", "Reconnecting"],
+    ["error", "Connection failed"],
+  ] as const)("does not report cached work as live while %s", (connectionPhase, label) => {
+    expect(
+      deriveActivityAvailability({ connectionPhase, shellStatus: "live", threadStatus: "live" }),
+    ).toEqual({ kind: "unavailable", label });
+  });
+
+  it.each(["empty", "cached", "synchronizing"] as const)(
+    "waits for the %s shell even after the socket and detail reconnect",
+    (shellStatus) => {
+      expect(
+        deriveActivityAvailability({
+          connectionPhase: "connected",
+          shellStatus,
+          threadStatus: "live",
+        }),
+      ).toEqual({ kind: "synchronizing" });
+    },
+  );
+
+  it.each(["empty", "cached", "synchronizing"] as const)(
+    "waits for %s detail in an open chat",
+    (threadStatus) => {
+      expect(
+        deriveActivityAvailability({
+          connectionPhase: "connected",
+          shellStatus: "live",
+          threadStatus,
+        }),
+      ).toEqual({ kind: "synchronizing" });
+    },
+  );
+
+  it("restores live activity only after the data used by that view synchronizes", () => {
+    expect(
+      deriveActivityAvailability({ connectionPhase: "connected", shellStatus: "live" }),
+    ).toEqual({ kind: "live" });
+    expect(
+      deriveActivityAvailability({
+        connectionPhase: "connected",
+        shellStatus: "live",
+        threadStatus: "live",
+      }),
+    ).toEqual({ kind: "live" });
+  });
+});
 
 const TARGET = new BearerConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),

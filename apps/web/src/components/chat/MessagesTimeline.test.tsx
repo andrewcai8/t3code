@@ -272,6 +272,64 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("replaces live work and thinking on disconnect while retaining the conversation", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const element = class {};
+    vi.stubGlobal("Element", element);
+    vi.stubGlobal("window", { ...window, Element: element });
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    const turnId = TurnId.make("retained-running-turn");
+    const props = {
+      ...buildProps(),
+      isWorking: true,
+      activeTurnStartedAt: MESSAGE_CREATED_AT,
+      runningTurnId: turnId,
+      latestTurn: {
+        turnId,
+        state: "running" as const,
+        startedAt: MESSAGE_CREATED_AT,
+        completedAt: null,
+      },
+      timelineEntries: [buildUserTimelineEntry("Keep this history while disconnected")],
+    };
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<MessagesTimeline {...props} activityAvailability={{ kind: "live" }} />);
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Working for");
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline
+            {...props}
+            activityAvailability={{ kind: "unavailable", label: "Reconnecting" }}
+          />,
+        );
+      });
+      const disconnected = JSON.stringify(renderer!.toJSON());
+      expect(disconnected).toContain("Keep this history while disconnected");
+      expect(disconnected).toContain("Reconnecting");
+      expect(disconnected).not.toContain("Working for");
+      expect(disconnected).not.toContain("Thinking");
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} activityAvailability={{ kind: "synchronizing" }} />,
+        );
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Syncing");
+      expect(JSON.stringify(renderer!.toJSON())).not.toContain("Working for");
+      await act(() => {
+        renderer!.update(<MessagesTimeline {...props} activityAvailability={{ kind: "live" }} />);
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Working for");
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Keep this history while disconnected");
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders previous and next controls with the minimap", () => {
     const first = buildUserTimelineEntry("First turn");
     const secondBase = buildUserTimelineEntry("Second turn");
