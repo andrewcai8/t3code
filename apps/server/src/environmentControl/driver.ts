@@ -18,6 +18,11 @@ import type { NamespaceResource } from "./namespaceProvisioner.ts";
 import { disposeNamespace, provisionNamespace } from "./namespaceProvisioner.ts";
 import { createNamespaceSdkRunner } from "./namespaceSdkRunner.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
+import {
+  buildNamespacePreparation,
+  ProvisionRefused,
+  type ProvisioningProviderProfile,
+} from "./ProvisioningProviderProfile.ts";
 
 export type Observation =
   | { readonly kind: "stopped" }
@@ -46,23 +51,6 @@ export interface ProvisionRequest {
   readonly repository?: string | undefined;
   readonly branch?: string | undefined;
 }
-/**
- * A provisioning request the driver declines rather than fails.
- *
- * An install with no template, or an account with no credentials on this
- * machine, is an ordinary configuration state and deserves a specific answer
- * the caller can act on — not the generic "provider is unavailable" a thrown
- * error would produce.
- */
-export class ProvisionRefused extends Error {
-  readonly reason: "unconfigured" | "credentials" | "unsupported";
-  constructor(reason: "unconfigured" | "credentials" | "unsupported", message: string) {
-    super(message);
-    this.reason = reason;
-    this.name = "ProvisionRefused";
-  }
-}
-
 export interface Provisioned {
   readonly provider: "e2b" | "namespace";
   readonly sandboxId: string;
@@ -237,10 +225,10 @@ async function prepare(
     const target = NodePath.posix.join("/home/user", file.destination);
     if (target === selectedCredentialTarget) continue;
     const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
-      throw new ProvisionRefused(
-        "credentials",
-        `Home file '${file.source}' is configured but missing on this machine.`,
-      );
+      throw new ProvisionRefused({
+        reason: "credentials",
+        message: `Home file '${file.source}' is configured but missing on this machine.`,
+      });
     });
     await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
     await sandbox.files.write(target, contents);
@@ -255,10 +243,10 @@ async function prepare(
     const lines: string[] = [];
     for (const variable of shellEnvironment) {
       const value = await NodeFSP.readFile(variable.source, "utf8").catch(() => {
-        throw new ProvisionRefused(
-          "credentials",
-          `Value for '${variable.name}' is configured but missing on this machine.`,
-        );
+        throw new ProvisionRefused({
+          reason: "credentials",
+          message: `Value for '${variable.name}' is configured but missing on this machine.`,
+        });
       });
       lines.push(`export ${variable.name}=${JSON.stringify(value.trim())}`);
     }
@@ -288,10 +276,10 @@ async function prepare(
   let projectDir = "/home/user/work";
   if (request.repository) {
     if (!provisioning.githubToken)
-      throw new ProvisionRefused(
-        "unconfigured",
-        "Cloning a repository needs a configured GitHub token.",
-      );
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: "Cloning a repository needs a configured GitHub token.",
+      });
     // A credential file keeps the token out of the clone URL, so it never
     // reaches the remote, `git remote -v`, or shell history.
     await sandbox.files.write(
@@ -326,10 +314,10 @@ async function prepare(
   // has to arrive separately or nothing in it runs.
   for (const file of provisioning.workspaceFiles ?? []) {
     const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
-      throw new ProvisionRefused(
-        "unconfigured",
-        `Workspace file '${file.source}' is configured but missing on this machine.`,
-      );
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: `Workspace file '${file.source}' is configured but missing on this machine.`,
+      });
     });
     const target = NodePath.posix.join(projectDir, file.destination);
     await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
@@ -404,7 +392,10 @@ async function prepare(
   };
 }
 
-export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver {
+export function createCloudDriver(
+  config: EnvironmentControlConfig,
+  resolveProfile?: (request: ProvisionRequest) => Promise<ProvisioningProviderProfile>,
+): CloudDriver {
   const api = { apiKey: config.e2bApiKey, requestTimeoutMs: 15_000 };
   const namespaceRunner = config.provisioning?.namespace
     ? createNamespaceSdkRunner(
@@ -518,69 +509,41 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
     provision: async (request) => {
       if (request.provider === "namespace") {
         if (!config.provisioning?.namespace)
-          throw new ProvisionRefused(
-            "unconfigured",
-            "Namespace provisioning is not configured on this install.",
-          );
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Namespace provisioning is not configured on this install.",
+          });
         if (!config.namespaceIngressToken)
-          throw new ProvisionRefused(
-            "credentials",
-            "Namespace provisioning needs an ingress access token to connect the private workspace URL.",
-          );
+          throw new ProvisionRefused({
+            reason: "credentials",
+            message:
+              "Namespace provisioning needs an ingress access token to connect the private workspace URL.",
+          });
         if (!namespaceRunner)
-          throw new ProvisionRefused("unsupported", "Namespace provisioning is unavailable.");
+          throw new ProvisionRefused({
+            reason: "unsupported",
+            message: "Namespace provisioning is unavailable.",
+          });
         if (request.repository && !config.provisioning.githubToken)
-          throw new ProvisionRefused(
-            "unconfigured",
-            "Cloning a repository into Namespace needs a configured GitHub token.",
-          );
-        const namespaceFiles: {
-          source: string;
-          destination: string;
-          mode?: string;
-        }[] = [];
-        const namespaceEnvironment: { name: string; value: string }[] = [];
-        if (request.agentDriver === "codex" || request.agentDriver === "cursor") {
-          const authPath = accountAuthPath(request.providerInstanceId);
-          await NodeFSP.access(authPath).catch(() => {
-            throw new ProvisionRefused(
-              "credentials",
-              `No credentials for '${request.providerInstanceId}' on this machine.`,
-            );
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Cloning a repository into Namespace needs a configured GitHub token.",
           });
-          namespaceFiles.push({
-            source: authPath,
-            destination:
-              request.agentDriver === "cursor"
-                ? "/Users/runner/.config/cursor/auth.json"
-                : "/Users/runner/.codex/auth.json",
-            mode: "600",
+        if (!resolveProfile)
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Provider account resolution is unavailable.",
           });
-          if (request.agentDriver === "codex")
-            namespaceEnvironment.push({ name: "CODEX_HOME", value: "/Users/runner/.codex" });
-          else
-            namespaceEnvironment.push(
-              { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file" },
-              { name: "CURSOR_CONFIG_DIR", value: "/Users/runner/.config/cursor" },
-              { name: "HOME", value: "/Users/runner" },
-              {
-                name: "PATH",
-                value: "/Users/runner/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-              },
-            );
-        }
-        for (const file of config.provisioning?.homeFiles ?? []) {
-          namespaceFiles.push({ source: file.source, destination: file.destination, mode: "600" });
-        }
+        const profile = await resolveProfile(request);
+        const preparation = await buildNamespacePreparation(profile, config.provisioning);
         const prepared = await provisionNamespace(namespaceRunner, {
           ...config.provisioning.namespace,
           providerInstanceId: request.providerInstanceId,
-          agentDriver: request.agentDriver,
+          agentDriver: profile.kind,
           repository: request.repository,
           branch: request.branch,
           githubToken: config.provisioning.githubToken,
-          files: namespaceFiles,
-          environment: namespaceEnvironment,
+          ...preparation,
           workspaceFiles: config.provisioning.workspaceFiles ?? [],
         });
         try {
@@ -609,21 +572,21 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
       }
       const provisioning = config.provisioning;
       if (!provisioning)
-        throw new ProvisionRefused(
-          "unconfigured",
-          "This install has no cloud provisioning template configured.",
-        );
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "This install has no cloud provisioning template configured.",
+        });
       if (!provisioning.templateId)
-        throw new ProvisionRefused(
-          "unconfigured",
-          "E2B provisioning is not configured on this install.",
-        );
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "E2B provisioning is not configured on this install.",
+        });
       const authPath = accountAuthPath(request.providerInstanceId);
       const auth = await NodeFSP.readFile(authPath, "utf8").catch(() => {
-        throw new ProvisionRefused(
-          "credentials",
-          `No credentials for '${request.providerInstanceId}' on this machine.`,
-        );
+        throw new ProvisionRefused({
+          reason: "credentials",
+          message: `No credentials for '${request.providerInstanceId}' on this machine.`,
+        });
       });
 
       const allowed = provisioning.egressAllow;

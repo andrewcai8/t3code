@@ -28,6 +28,17 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   try {
     await NodeFSP.writeFile(path, JSON.stringify(config), { mode: 0o600 });
     expect((await readConfig(path)).targets[0]?.environmentId).toBe("cloud");
+    expect((await readConfig(path)).provisioning?.namespace?.prepareCommands).toBeUndefined();
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        ...config,
+        provisioning: { namespace: { size: "m", prepareCommands: ["./prepare-native.sh"] } },
+      }),
+    );
+    expect((await readConfig(path)).provisioning?.namespace?.prepareCommands).toEqual([
+      "./prepare-native.sh",
+    ]);
     await NodeFSP.writeFile(path, JSON.stringify({ ...config, targets: [target, target] }));
     await expect(readConfig(path)).rejects.toThrow("Duplicate managed environment");
     await NodeFSP.writeFile(

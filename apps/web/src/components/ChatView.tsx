@@ -243,7 +243,6 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
-  selectProviderInstanceByUsage,
   sortProviderInstanceEntries,
 } from "../providerInstances";
 import {
@@ -2451,6 +2450,7 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
+    const waitForAutomaticReconnect = environmentReconnecting && !canReconnectOnSend;
     // Reconnecting to a version-skewed server with no update in flight
     // usually means the server is restarting mid-update and a refresh wiped
     // the in-memory update state. Fold the reconnect and version banners
@@ -2493,14 +2493,14 @@ export default function ChatView(props: ChatViewProps) {
               <Button
                 size="xs"
                 variant="ghost"
-                disabled={environmentReconnecting}
+                disabled={waitForAutomaticReconnect}
                 onClick={() =>
                   void handleReconnectActiveEnvironment(
                     activeEnvironmentUnavailableState.environmentId,
                   )
                 }
               >
-                {environmentReconnecting ? "Reconnecting..." : "Reconnect"}
+                {waitForAutomaticReconnect ? "Reconnecting..." : "Reconnect"}
               </Button>
               <Button
                 size="xs"
@@ -2600,6 +2600,7 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
+    canReconnectOnSend,
     reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
     navigate,
@@ -4270,16 +4271,7 @@ export default function ChatView(props: ChatViewProps) {
   const [cloudProvisioningPhase, setCloudProvisioningPhase] = useState<
     "creating" | "pairing" | "loading-project" | "ready" | null
   >(null);
-  const cloudAccount = useMemo(() => {
-    const selected =
-      activeProviderInstanceId === null
-        ? selectedProviderEntry
-        : (providerInstanceEntries.find((entry) => entry.instanceId === activeProviderInstanceId) ??
-          selectedProviderEntry);
-    if (!selected) return null;
-    return (selectProviderInstanceByUsage(providerInstanceEntries, selected.driverKind) ?? selected)
-      .snapshot;
-  }, [activeProviderInstanceId, providerInstanceEntries, selectedProviderEntry]);
+  const cloudAccount = activeProviderStatus;
   const canCreateCloudEnvironment =
     draftId !== null &&
     primaryEnvironmentId !== null &&
@@ -9013,7 +9005,7 @@ export default function ChatView(props: ChatViewProps) {
                                     }
                                   : {})}
                                 creatingCloudEnvironment={creatingCloudEnvironment}
-                                cloudEnvironmentPending={cloudProvisioningRequested !== null}
+                                pendingCloudProvider={cloudProvisioningRequested}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />

@@ -8,6 +8,7 @@ import * as NodeUtil from "node:util";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import type { NamespaceResource, NamespaceRunner } from "./namespaceProvisioner.ts";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
@@ -87,7 +88,7 @@ const namespaceProviderSettings = (
       : agentDriver === "cursor"
         ? [
             { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
-            { name: "CURSOR_CONFIG_DIR", value: `${homeDir}/.config/cursor`, sensitive: false },
+            { name: "CURSOR_CONFIG_DIR", value: `${homeDir}/.cursor`, sensitive: false },
             { name: "HOME", value: homeDir, sensitive: false },
             {
               name: "PATH",
@@ -95,21 +96,27 @@ const namespaceProviderSettings = (
               sensitive: false,
             },
           ]
-        : undefined;
+        : agentDriver === "claudeAgent"
+          ? [{ name: "CLAUDE_CONFIG_DIR", value: `${homeDir}/.claude`, sensitive: false }]
+          : [];
   const settings = {
     driver: agentDriver,
     enabled: true,
-    ...(environment ? { environment } : {}),
+    environment,
     ...(agentDriver === "codex" ? { config: { homePath: `${homeDir}/.codex` } } : {}),
     ...(agentDriver === "cursor" ? { config: { binaryPath: `${homeDir}/.local/bin/agent` } } : {}),
+    ...(agentDriver === "claudeAgent" ? { config: { homePath: `${homeDir}/.claude` } } : {}),
   };
-  return `const fs=require("node:fs");const p=${JSON.stringify(`${homeDir}/.t3/userdata/settings.json`)};let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};s.providers={...(s.providers||{}),[${JSON.stringify(agentDriver)}]:{...(s.providers?.[${JSON.stringify(agentDriver)}]||{}),enabled:true}};s.providerInstances={...(s.providerInstances||{}),[${JSON.stringify(providerInstanceId)}]:${JSON.stringify(settings)}};fs.mkdirSync(require("node:path").dirname(p),{recursive:true});fs.writeFileSync(p,JSON.stringify(s)+"\\n")`;
+  const disabledProviders = Object.fromEntries(
+    Object.keys(DEFAULT_SERVER_SETTINGS.providers).map((driver) => [driver, { enabled: false }]),
+  );
+  return `const fs=require("node:fs");const p=${JSON.stringify(`${homeDir}/.t3/userdata/settings.json`)};let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};let e=[];try{e=JSON.parse(fs.readFileSync(${JSON.stringify(`${homeDir}/.t3/provisioning-environment.json`)},"utf8"))}catch{};const i=${JSON.stringify(settings)};i.environment=[...new Map([...e,...(i.environment||[])].map(v=>[v.name,v])).values()];s.providers=${JSON.stringify(disabledProviders)};s.providerInstances={[${JSON.stringify(providerInstanceId)}]:i};fs.mkdirSync(require("node:path").dirname(p),{recursive:true});fs.writeFileSync(p,JSON.stringify(s)+"\\n",{mode:0o600});fs.chmodSync(p,0o600)`;
 };
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 const runtimePath = (homeDir: string): string =>
-  `${homeDir}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
+  `${homeDir}/.local/bin:${homeDir}/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
 
 function retainedHome(resource: NamespaceResource): string {
   if (!resource.homeDir?.startsWith("/Volumes/"))
@@ -322,6 +329,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       githubToken,
       files = [],
       environment = [],
+      prepareCommands = [],
     }) => {
       const homeDir = retainedHome(resource);
       const runInHome = (args: readonly string[]) => {
@@ -354,7 +362,10 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           "--",
           "sh",
           "-lc",
-          'chmod 600 "$HOME/.git-credentials" && git config --global credential.helper store',
+          'chmod 600 "$HOME/.git-credentials" && ' +
+            'git config --global --replace-all credential.helper "" && git config --global --add credential.helper store && ' +
+            "git config --global --fixed-value --replace-all url.https://github.com/.insteadOf git@github.com: git@github.com: && " +
+            "git config --global --fixed-value --replace-all url.https://github.com/.insteadOf ssh://git@github.com/ ssh://git@github.com/",
         ]);
         const clone =
           `mkdir -p ${shellQuote(NodePath.posix.dirname(projectDir))} && ` +
@@ -381,21 +392,39 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
         ]);
       }
       if (environment.length > 0) {
-        const lines = environment.map(({ name, value }) => {
+        const retainedEnvironment = environment.map(({ name, value, sensitive }) => {
           if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
             throw new Error("Namespace environment variable name is invalid");
-          const retainedValue = ["HOME", "PATH", "CODEX_HOME", "CURSOR_CONFIG_DIR"].includes(name)
+          const retainedValue = [
+            "HOME",
+            "PATH",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "CURSOR_CONFIG_DIR",
+          ].includes(name)
             ? value.replaceAll("/Users/runner", homeDir)
             : value;
-          return `export ${name}=${shellQuote(retainedValue)}`;
+          return { name, value: retainedValue, sensitive: sensitive ?? false };
         });
+        const lines = retainedEnvironment.map(
+          ({ name, value }) => `export ${name}=${shellQuote(value)}`,
+        );
         const temporaryDir = await NodeFSP.mkdtemp(
           NodePath.join(NodeOS.tmpdir(), "t3-namespace-env-"),
         );
         const temporaryFile = NodePath.join(temporaryDir, "profile.d-agents.sh");
+        const temporaryEnvironment = NodePath.join(temporaryDir, "environment.json");
         await NodeFSP.writeFile(temporaryFile, `${lines.join("\n")}\n`, { mode: 0o600 });
+        await NodeFSP.writeFile(temporaryEnvironment, JSON.stringify(retainedEnvironment), {
+          mode: 0o600,
+        });
         try {
           await upload(nameOf(resource), temporaryFile, `${homeDir}/.profile.d-agents.sh`);
+          await upload(
+            nameOf(resource),
+            temporaryEnvironment,
+            `${homeDir}/.t3/provisioning-environment.json`,
+          );
         } finally {
           await NodeFSP.rm(temporaryDir, { recursive: true, force: true });
         }
@@ -405,7 +434,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           "--",
           "sh",
           "-lc",
-          'chmod 600 "$HOME/.profile.d-agents.sh"',
+          'chmod 600 "$HOME/.profile.d-agents.sh" "$HOME/.t3/provisioning-environment.json"',
         ]);
         await runInHome([
           "exec",
@@ -421,19 +450,30 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
         : "";
       const providerInstall =
         agentDriver === "codex"
-          ? "npm install --global --no-fund --no-audit @openai/codex@latest && "
+          ? "npm install --global --no-fund --no-audit @openai/codex@latest"
           : agentDriver === "cursor"
             ? "curl https://cursor.com/install -fsS | bash && " +
               'test -x "$HOME/.local/bin/agent" && ' +
-              'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi && '
+              'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi'
             : agentDriver === "claudeAgent"
-              ? "npm install --global --no-fund --no-audit @anthropic-ai/claude-code@latest && "
+              ? "npm install --global --no-fund --no-audit @anthropic-ai/claude-code@latest"
               : "";
+      if (providerInstall)
+        await runInHome(["exec", nameOf(resource), "--", "sh", "-lc", providerInstall]);
+      for (const command of prepareCommands) {
+        await runInHome([
+          "exec",
+          nameOf(resource),
+          "--",
+          "sh",
+          "-lc",
+          `cd ${shellQuote(projectDir)} && ${command}`,
+        ]);
+      }
       const command =
         `mkdir -p ${shellQuote(projectDir)} && cd ${shellQuote(projectDir)} && ` +
-        providerInstall +
         providerSetup +
-        "npx --yes t3@0.0.40 serve --no-browser --host 0.0.0.0 --port 3000";
+        "npx --yes t3@0.0.40 --no-browser --auto-bootstrap-project-from-cwd --host 0.0.0.0 --port 3000";
       const name = nameOf(resource);
       await runInHome(["exec", "-d", name, "--", "sh", "-lc", command]);
       await waitForT3(run, name);

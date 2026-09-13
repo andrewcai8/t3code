@@ -27,18 +27,23 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Path from "effect/Path";
+import * as FileSystem from "effect/FileSystem";
+import { ServerSettingsService } from "../serverSettings.ts";
+import {
+  ProvisionRefused,
+  resolveProvisioningProviderProfile,
+} from "./ProvisioningProviderProfile.ts";
 import * as ServerConfig from "../config.ts";
 import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
-import {
-  createCloudDriver,
-  ProvisionRefused,
-  type CloudDriver,
-  type ProvisionRequest,
-} from "./driver.ts";
+import { createCloudDriver, type CloudDriver, type ProvisionRequest } from "./driver.ts";
 import {
   createProvisionedLeaseRegistry,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
+
+const isProvisionRefused = Schema.is(ProvisionRefused);
 
 const LEASE_REAP_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -196,7 +201,7 @@ export function createEnvironmentControl(
           environment: { ...environment, leaseId, providerInstanceId: request.providerInstanceId },
         };
       } catch (cause) {
-        if (cause instanceof ProvisionRefused)
+        if (isProvisionRefused(cause))
           return { kind: "refused", reason: cause.reason, message: cause.message };
         throw cause;
       }
@@ -425,6 +430,27 @@ export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
     const { stateDir } = yield* ServerConfig.ServerConfig;
+    const settings = yield* ServerSettingsService;
+    const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
+    const resolveProfile = async (request: ProvisionRequest) => {
+      const result = await Effect.runPromiseWith(profileContext)(
+        settings.getSettings.pipe(
+          Effect.flatMap((current) => resolveProvisioningProviderProfile(current, request)),
+          Effect.match({
+            onSuccess: (profile) => ({ kind: "resolved" as const, profile }),
+            onFailure: (error) => ({ kind: "refused" as const, error }),
+          }),
+        ),
+      );
+      if (result.kind === "refused")
+        throw isProvisionRefused(result.error)
+          ? result.error
+          : new ProvisionRefused({
+              reason: "unconfigured",
+              message: "Provider account settings could not be read.",
+            });
+      return result.profile;
+    };
     let manager: Promise<ReturnType<typeof createEnvironmentControl> | null> | undefined;
     const resolve = () =>
       (manager ??= (async () => {
@@ -440,7 +466,7 @@ export const layer = Layer.effect(
         );
         const service = createEnvironmentControl(
           config.targets,
-          createCloudDriver(config),
+          createCloudDriver(config, resolveProfile),
           leaseRegistry,
         );
         await service.reapExpiredLeases();

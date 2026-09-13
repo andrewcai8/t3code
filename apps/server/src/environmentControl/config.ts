@@ -99,6 +99,7 @@ const Provisioning = Schema.Struct({
       size: TrimmedNonEmptyString,
       region: Schema.optional(TrimmedNonEmptyString),
       idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
     }),
   ),
 });

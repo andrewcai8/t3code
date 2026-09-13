@@ -35,7 +35,12 @@ export interface NamespaceRunner {
       readonly destination: string;
       readonly mode?: string | undefined;
     }[];
-    readonly environment?: readonly { readonly name: string; readonly value: string }[];
+    readonly environment?: readonly {
+      readonly name: string;
+      readonly value: string;
+      readonly sensitive?: boolean;
+    }[];
+    readonly prepareCommands?: readonly string[];
   }) => Promise<void>;
   readonly expose: (input: {
     readonly resource: NamespaceResource;
@@ -59,7 +64,12 @@ export interface NamespaceProvisionRequest {
     readonly destination: string;
     readonly mode?: string | undefined;
   }[];
-  readonly environment?: readonly { readonly name: string; readonly value: string }[];
+  readonly environment?: readonly {
+    readonly name: string;
+    readonly value: string;
+    readonly sensitive?: boolean;
+  }[];
+  readonly prepareCommands?: readonly string[];
   readonly workspaceFiles?: readonly {
     readonly source: string;
     readonly destination: string;

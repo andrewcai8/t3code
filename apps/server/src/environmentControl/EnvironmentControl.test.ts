@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
-import { ProvisionRefused } from "./driver.ts";
+import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 import type { CloudDriver, Observation } from "./driver.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 
@@ -26,7 +26,7 @@ function setup(initial: Observation = { kind: "stopped" }) {
     // so the control cases never reach it; the provisioning case below does.
     provision: async () => {
       calls.push("provision");
-      throw new ProvisionRefused("unconfigured", "no template here");
+      throw new ProvisionRefused({ reason: "unconfigured", message: "no template here" });
     },
     dispose: async () => {
       calls.push("dispose");
