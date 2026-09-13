@@ -26,6 +26,59 @@ afterEach(async () => {
 });
 
 describe("ProvisionedLeaseRegistry", () => {
+  it("reactivates a Namespace lease with its same owner, home, volume and proxy", async () => {
+    const registry = await makeRegistry();
+    const namespaceResource = {
+      provider: "namespace" as const,
+      devboxId: "devbox",
+      instanceId: "old",
+      region: "us",
+      workspaceDir: "/Volumes/devbox/work",
+      homeDir: "/Volumes/devbox/.t3-home",
+    };
+    const namespaceProxy = { proxyId: "proxy", proxyOrigin: "http://127.0.0.1:40001" };
+    await registry.register({
+      leaseId: "lease",
+      sandboxId: "devbox",
+      providerInstanceId: "codex",
+      namespaceResource,
+      namespaceProxy,
+    });
+    await registry.claim({
+      leaseId: "lease",
+      owner: { environmentId: "child", threadId: "thread" },
+    });
+    await registry.markPaused("lease");
+    const input = {
+      leaseId: "lease",
+      namespaceResource: { ...namespaceResource, instanceId: "new" },
+      namespaceProxy,
+      now: new Date("2026-09-13T00:00:00.000Z"),
+    };
+    const resumed = await registry.markActive(input);
+    expect(resumed).toMatchObject({
+      leaseId: "lease",
+      sandboxId: "devbox",
+      state: "active",
+      namespaceResource: { ...namespaceResource, instanceId: "new" },
+      namespaceProxy,
+      owner: { environmentId: "child", threadId: "thread" },
+      expiresAt: "2026-09-13T00:15:00.000Z",
+    });
+    expect(await registry.markActive(input)).toEqual(resumed);
+    await expect(
+      registry.markActive({
+        ...input,
+        namespaceProxy: { ...namespaceProxy, proxyOrigin: "http://127.0.0.1:40002" },
+      }),
+    ).rejects.toThrow("identity conflict");
+    await registry.beginRelease({ leaseId: "lease", sandboxId: "devbox" });
+    expect(await registry.markActive(input)).toBeNull();
+    await registry.markDisposed("lease");
+    expect(await registry.markActive(input)).toBeNull();
+    await registry.markPaused("lease");
+    expect(await registry.findBySandbox("devbox")).toMatchObject({ state: "disposed" });
+  });
   it("persists a lease and allows the same owner to claim it after reopening", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
     temporaryDirectories.push(directory);

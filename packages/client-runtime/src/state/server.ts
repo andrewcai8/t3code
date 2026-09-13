@@ -1019,6 +1019,15 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
       },
     }),
+    resumeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:resume",
+      tag: WS_METHODS.environmentControlResume,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.leaseId}:${input.environmentId}:${input.threadId}`,
+      },
+    }),
     touchProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:touch",
       tag: WS_METHODS.environmentControlTouch,

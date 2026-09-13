@@ -1,8 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - these tests use a temporary filesystem boundary.
+// @effect-diagnostics globalDate:off - these tests use fixed registry timestamps.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
@@ -33,6 +34,10 @@ function setup(initial: Observation = { kind: "stopped" }) {
     pause: async () => {
       calls.push("pause");
     },
+    resume: async () => {
+      calls.push("resume");
+      return {};
+    },
     observe: async () => {
       calls.push("observe");
       return state;
@@ -57,6 +62,136 @@ function setup(initial: Observation = { kind: "stopped" }) {
   return { driver, calls, manager: createEnvironmentControl([target], driver) };
 }
 describe("managed cloud commands", () => {
+  const resumeInput = {
+    leaseId: "lease",
+    sandboxId: "sandbox",
+    environmentId: EnvironmentId.make("child"),
+    threadId: "thread",
+  };
+  async function withLease(
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      driver: CloudDriver;
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+  ) {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-resume-"));
+    try {
+      const registry = createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        providerInstanceId: "codex",
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      await registry.claim({
+        leaseId: "lease",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      const driver = setup().driver;
+      await test({ registry, driver, manager: createEnvironmentControl([], driver, registry) });
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  }
+  it("resumes the retained owned workspace and renews its lease only after provider readiness", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.markPaused("lease");
+      const ready = Promise.withResolvers<void>();
+      const started = Promise.withResolvers<void>();
+      driver.resume = vi.fn(async () => {
+        started.resolve();
+        await ready.promise;
+        return {};
+      });
+      const resumed = manager.resume(resumeInput);
+      await started.promise;
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({
+        state: "paused",
+        expiresAt: "2026-01-01T00:15:00.000Z",
+      });
+      expect(manager.resume(resumeInput)).toBe(resumed);
+      expect(await manager.pause(resumeInput)).toMatchObject({ kind: "refused" });
+      expect(await manager.dispose(resumeInput)).toMatchObject({ kind: "refused" });
+      await manager.reapExpiredLeases();
+      ready.resolve();
+      expect(await resumed).toEqual({ kind: "resumed" });
+      expect(driver.resume).toHaveBeenCalledTimes(1);
+      expect(driver.resume).toHaveBeenCalledWith({
+        sandboxId: "sandbox",
+        environmentId: "child",
+        providerInstanceId: "codex",
+      });
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({
+        state: "active",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      expect(await registry.expired()).toEqual([]);
+      expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
+      expect(driver.resume).toHaveBeenCalledTimes(2);
+    });
+  });
+  it("leaves failed recovery paused and allows another attempt", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.markPaused("lease");
+      driver.resume = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("secret-provider-token"))
+        .mockResolvedValue({});
+      const failure = await manager.resume(resumeInput);
+      expect(failure).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "The workspace could not be reconnected. Retry shortly.",
+      });
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "paused" });
+      expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
+    });
+  });
+  it("refuses an unknown lease or wrong owner without contacting the provider", async () => {
+    await withLease(async ({ driver, manager }) => {
+      driver.resume = vi.fn();
+      for (const changed of [
+        { leaseId: "other" },
+        { sandboxId: "other" },
+        { environmentId: EnvironmentId.make("other") },
+        { threadId: "other" },
+      ]) {
+        expect(await manager.resume({ ...resumeInput, ...changed })).toMatchObject({
+          kind: "refused",
+        });
+      }
+      expect(driver.resume).not.toHaveBeenCalled();
+    });
+  });
+  it.each(["releasing", "disposed"] as const)("cannot revive a %s lease", async (state) => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.beginRelease(resumeInput);
+      if (state === "disposed") await registry.markDisposed("lease");
+      driver.resume = vi.fn();
+      expect(await manager.resume(resumeInput)).toMatchObject({ kind: "refused" });
+      expect(await manager.pause(resumeInput)).toMatchObject({ kind: "refused" });
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({ state });
+      expect(driver.resume).not.toHaveBeenCalled();
+    });
+  });
+  it("refuses resume while the reaper is pausing the same resource", async () => {
+    await withLease(async ({ driver, manager, registry }) => {
+      const started = Promise.withResolvers<void>();
+      const paused = Promise.withResolvers<void>();
+      driver.pause = async () => {
+        started.resolve();
+        await paused.promise;
+      };
+      const reaped = manager.reapExpiredLeases();
+      await started.promise;
+      expect(await manager.resume(resumeInput)).toMatchObject({ kind: "refused" });
+      paused.resolve();
+      await reaped;
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "paused" });
+      expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
+    });
+  });
   it("refresh only observes targets and never contacts or bootstraps the broker", async () => {
     const { manager, calls } = setup();
     const list = await manager.list();

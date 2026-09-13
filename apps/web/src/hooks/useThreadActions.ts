@@ -52,6 +52,7 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import { useAtomCommand } from "../state/use-atom-command";
 import { forgetProvisionedSandbox, provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
+import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -190,6 +191,7 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
 }
 
 export function useThreadActions() {
+  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const closeTerminal = useAtomCommand(terminalEnvironment.close);
   const archiveThreadMutation = useAtomCommand(threadEnvironment.archive, {
     reportFailure: false,
@@ -431,6 +433,9 @@ export function useThreadActions() {
 
   const unarchiveThread = useCallback(
     async (target: ScopedThreadRef) => {
+      const recovery = await recoverEnvironment(target.environmentId);
+      if (recovery.kind === "failed")
+        return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
       const result = await unarchiveThreadMutation({
         environmentId: target.environmentId,
         input: { threadId: target.threadId },
@@ -440,7 +445,7 @@ export function useThreadActions() {
       }
       return result;
     },
-    [unarchiveThreadMutation],
+    [recoverEnvironment, unarchiveThreadMutation],
   );
 
   const deleteThread = useCallback(
@@ -697,6 +702,9 @@ export function useThreadActions() {
 
   const unsettleThread = useCallback(
     async (target: ScopedThreadRef) => {
+      const recovery = await recoverEnvironment(target.environmentId);
+      if (recovery.kind === "failed")
+        return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
       if (!readEnvironmentSupportsSettlement(target.environmentId)) {
         return AsyncResult.failure(
           Cause.fail(
@@ -714,7 +722,7 @@ export function useThreadActions() {
         input: { threadId: target.threadId, reason: "user" },
       });
     },
-    [unsettleThreadMutation],
+    [recoverEnvironment, unsettleThreadMutation],
   );
 
   const pinThread = useCallback(

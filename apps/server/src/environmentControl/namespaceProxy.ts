@@ -32,8 +32,6 @@ const HOP_BY_HOP = new Set([
   "transfer-encoding",
   "upgrade",
   "host",
-  "authorization",
-  "cookie",
 ]);
 const FETCH_DECODED = new Set(["content-encoding", "content-length"]);
 const copyHeaders = (
@@ -59,6 +57,34 @@ export class NamespaceProxyManager {
   private readonly leases = new Map<string, StoredLease>();
 
   async open(input: NamespaceProxyOpenInput): Promise<NamespaceProxyLease> {
+    return this.bind(input, 0);
+  }
+
+  async restore(
+    input: NamespaceProxyOpenInput & NamespaceProxyLease,
+  ): Promise<NamespaceProxyLease> {
+    const origin = new URL(input.proxyOrigin);
+    const port = Number(origin.port);
+    if (
+      origin.protocol !== "http:" ||
+      origin.hostname !== "127.0.0.1" ||
+      !Number.isInteger(port) ||
+      port < 1 ||
+      port > 65535 ||
+      origin.origin !== input.proxyOrigin
+    )
+      throw new Error("Namespace proxy origin must be a loopback HTTP origin with a port");
+    const existing = this.leases.get(input.proxyId);
+    if (existing) {
+      if (existing.proxyOrigin !== input.proxyOrigin)
+        throw new Error("Namespace proxy origin does not match its retained lease");
+      this.leases.set(input.proxyId, { ...existing, ...input });
+      return { proxyId: input.proxyId, proxyOrigin: input.proxyOrigin };
+    }
+    return this.bind(input, port);
+  }
+
+  private async bind(input: NamespaceProxyOpenInput, port: number): Promise<NamespaceProxyLease> {
     if (this.leases.has(input.proxyId))
       throw new Error(`Namespace proxy already exists: ${input.proxyId}`);
     const server = NodeHttp.createServer((request, response) => {
@@ -71,7 +97,7 @@ export class NamespaceProxyManager {
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
-        server.listen(0, "127.0.0.1", () => resolve());
+        server.listen(port, "127.0.0.1", () => resolve());
       });
       const address = server.address();
       if (!address || typeof address === "string")
@@ -80,9 +106,14 @@ export class NamespaceProxyManager {
       const stored = { ...lease, proxyOrigin };
       this.leases.set(input.proxyId, stored);
       server.on("upgrade", (request, socket) => {
+        const current = this.leases.get(input.proxyId);
+        if (!current) {
+          socket.destroy();
+          return;
+        }
         stored.sockets.add(socket);
         socket.once("close", () => stored.sockets.delete(socket));
-        this.forwardWebSocket(stored, request, socket);
+        this.forwardWebSocket(current, request, socket);
       });
       return { proxyId: input.proxyId, proxyOrigin };
     } catch (error) {

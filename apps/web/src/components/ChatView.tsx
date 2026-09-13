@@ -455,6 +455,9 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
+import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
+import { provisionedSandboxForEnvironment } from "../cloud/provisionedSandboxLeases";
+import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
 import {
@@ -1417,7 +1420,7 @@ export default function ChatView(props: ChatViewProps) {
   const threadSyncPhase = routeKind === "server" ? (props.threadSyncPhase ?? null) : null;
   const threadDetailLoading = threadSyncPhase === "loading";
   const handleNewThread = useNewThreadHandler();
-  const { settleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
+  const { settleThread, unsettleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
@@ -1472,6 +1475,7 @@ export default function ChatView(props: ChatViewProps) {
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
+  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const environmentById = useMemo(
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
@@ -2143,6 +2147,10 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const canReconnectOnSend =
+    activeEnvironmentUnavailable &&
+    activeThread != null &&
+    provisionedSandboxForEnvironment(activeThread.environmentId) !== null;
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -2175,6 +2183,18 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeEnvironment, activeEnvironmentUnavailable, activeEnvironmentUnavailableLabel]);
   const handleReconnectActiveEnvironment = useCallback(
     async (environmentId: EnvironmentId) => {
+      const recovery = await recoverEnvironment(environmentId);
+      if (recovery.kind === "ready") return;
+      if (recovery.kind === "failed") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not reconnect environment",
+            description: recovery.message,
+          }),
+        );
+        return;
+      }
       const result = await retryEnvironment(environmentId);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2187,7 +2207,7 @@ export default function ChatView(props: ChatViewProps) {
         );
       }
     },
-    [retryEnvironment],
+    [recoverEnvironment, retryEnvironment],
   );
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
@@ -5796,9 +5816,6 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";
-  const unsettleThreadMutation = useAtomCommand(threadEnvironment.unsettle, {
-    reportFailure: false,
-  });
   // Keyed by thread, not a boolean: the pending state must follow the thread
   // it belongs to across navigation, and a request resolving for thread A
   // must never clear (or re-enable) thread B's button.
@@ -5809,10 +5826,7 @@ export default function ChatView(props: ChatViewProps) {
     const threadKey = scopedThreadKey(activeThreadRef);
     setUnsettlingThreadKey(threadKey);
     try {
-      const result = await unsettleThreadMutation({
-        environmentId: activeThreadRef.environmentId,
-        input: { threadId: activeThreadRef.threadId, reason: "user" },
-      });
+      const result = await unsettleThread(activeThreadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -5826,7 +5840,7 @@ export default function ChatView(props: ChatViewProps) {
     } finally {
       setUnsettlingThreadKey((current) => (current === threadKey ? null : current));
     }
-  }, [activeThreadRef, unsettleThreadMutation]);
+  }, [activeThreadRef, unsettleThread]);
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
@@ -6758,7 +6772,8 @@ export default function ChatView(props: ChatViewProps) {
       isSendBusy ||
       isConnecting ||
       !clientSettingsHydrated ||
-      threadDetailLoading ||
+      (threadDetailLoading && !canReconnectOnSend) ||
+      isReconnectPending() ||
       sendInFlightRef.current ||
       (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
@@ -6779,6 +6794,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (activeEnvironmentUnavailable) {
+      if (canReconnectOnSend) {
+        await reconnectAndSend(activeThread.environmentId, { submissionIntent, directAnnotation });
+        return;
+      }
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;
@@ -7537,6 +7556,30 @@ export default function ChatView(props: ChatViewProps) {
       resetLocalDispatch();
     }
   };
+
+  const {
+    reconnectAndSend,
+    reconnecting: reconnectingSend,
+    isPending: isReconnectPending,
+  } = useReconnectSend<{
+    submissionIntent: ComposerSubmissionIntent;
+    directAnnotation:
+      | { annotation: PreviewAnnotationPayload; image: ComposerImageAttachment | null }
+      | undefined;
+  }>({
+    threadKey: routeThreadKey,
+    ready:
+      !activeEnvironmentUnavailable && !threadDetailLoading && !isSendBusy && serverConfig !== null,
+    recover: recoverEnvironment,
+    send: ({ submissionIntent, directAnnotation }) => {
+      void onSend(undefined, submissionIntent, directAnnotation);
+    },
+    onFailure: (message) => {
+      toastManager.add(
+        stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
+      );
+    },
+  });
 
   useEffect(() => {
     if (
@@ -8817,12 +8860,12 @@ export default function ChatView(props: ChatViewProps) {
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
                             phase={phase}
-                            isConnecting={isConnecting}
+                            isConnecting={isConnecting || reconnectingSend}
                             isSendBusy={isSendBusy}
                             sendDisabledReason={
                               feedbackUploading
                                 ? "Sending feedback"
-                                : threadDetailLoading
+                                : threadDetailLoading && !canReconnectOnSend
                                   ? "Messages loading"
                                   : null
                             }
@@ -8838,6 +8881,7 @@ export default function ChatView(props: ChatViewProps) {
                                 : undefined
                             }
                             environmentUnavailable={activeEnvironmentUnavailableState}
+                            canReconnectOnSend={canReconnectOnSend}
                             activePendingApproval={activePendingApproval}
                             pendingApprovals={pendingApprovals}
                             pendingUserInputs={pendingUserInputs}

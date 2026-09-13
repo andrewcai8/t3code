@@ -44,6 +44,57 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 describe("cloud SDK and controller boundary", () => {
+  it("resumes the same E2B sandbox even with the legacy inherited kill timeout", async () => {
+    const retained = {
+      sandboxId: "retained",
+      metadata: { purpose: "t3-environment", account: "codex" },
+      lifecycle: { onTimeout: "kill" },
+    };
+    sdk.getInfo
+      .mockResolvedValueOnce({ ...retained, state: "paused" })
+      .mockResolvedValueOnce({ ...retained, state: "running" });
+    sdk.connect.mockResolvedValue({ sandboxId: "retained" });
+    expect(
+      await createCloudDriver(config).resume({
+        sandboxId: "retained",
+        providerInstanceId: "codex",
+        environmentId: "child",
+      }),
+    ).toEqual({});
+    expect(sdk.connect).toHaveBeenCalledWith(
+      "retained",
+      expect.objectContaining({ timeoutMs: 3_600_000 }),
+    );
+  });
+  it("refuses a provisioned sandbox owned by another account", async () => {
+    sdk.getInfo.mockResolvedValue({
+      sandboxId: "retained",
+      state: "paused",
+      metadata: { purpose: "t3-environment", account: "other" },
+    });
+    await expect(
+      createCloudDriver(config).resume({
+        sandboxId: "retained",
+        providerInstanceId: "codex",
+        environmentId: "child",
+      }),
+    ).rejects.toThrow("ownership");
+    expect(sdk.connect).not.toHaveBeenCalled();
+  });
+  it("does not report a resumed sandbox until it is running", async () => {
+    sdk.getInfo.mockResolvedValue({
+      sandboxId: "retained",
+      state: "paused",
+      metadata: { purpose: "t3-environment", account: "codex" },
+    });
+    await expect(
+      createCloudDriver(config).resume({
+        sandboxId: "retained",
+        providerInstanceId: "codex",
+        environmentId: "child",
+      }),
+    ).rejects.toThrow("did not resume");
+  });
   it("does not silently route Namespace requests through E2B", async () => {
     const driver = createCloudDriver({
       ...config,

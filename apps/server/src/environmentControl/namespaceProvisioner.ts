@@ -1,12 +1,12 @@
-/** The provider boundary for an ephemeral Namespace Mac. */
 export interface NamespaceResource {
   readonly provider: "namespace";
   readonly devboxId: string;
   readonly devboxName?: string | undefined;
   readonly instanceId: string;
   readonly region: string;
-  /** The image's real workspace root; macOS Devboxes use /Users/runner. */
   readonly workspaceDir: string;
+  /** Missing only on legacy leases whose home was not retained. */
+  readonly homeDir?: string | undefined;
 }
 
 export interface NamespaceRunner {
@@ -17,6 +17,11 @@ export interface NamespaceRunner {
     readonly repository?: string | undefined;
     readonly branch?: string | undefined;
   }) => Promise<NamespaceResource>;
+  readonly resume: (input: {
+    readonly resource: NamespaceResource;
+    readonly port: number;
+    readonly environmentId: string;
+  }) => Promise<{ readonly resource: NamespaceResource; readonly upstreamOrigin: string }>;
   readonly bootstrap: (input: {
     readonly resource: NamespaceResource;
     readonly projectDir: string;

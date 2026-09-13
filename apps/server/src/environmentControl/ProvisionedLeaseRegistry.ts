@@ -28,6 +28,7 @@ const StoredProvisionedLease = Schema.Struct({
       instanceId: Schema.String,
       region: Schema.String,
       workspaceDir: Schema.String,
+      homeDir: Schema.optional(Schema.String),
     }),
   ),
   providerInstanceId: Schema.String,
@@ -67,6 +68,12 @@ export interface ProvisionedLeaseRegistry {
   }) => Promise<"missing" | "disposed" | "started" | "busy">;
   readonly markDisposed: (leaseId: string, now?: Date) => Promise<void>;
   readonly markPaused: (leaseId: string, now?: Date) => Promise<void>;
+  readonly markActive: (input: {
+    readonly leaseId: string;
+    readonly namespaceResource?: NamespaceResource;
+    readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
+    readonly now?: Date;
+  }) => Promise<ProvisionedLease | null>;
   readonly expired: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
 }
 
@@ -227,12 +234,39 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
     markPaused: (leaseId, now) =>
       mutate((leases) => ({
         leases: leases.map((lease) =>
-          lease.leaseId === leaseId
+          lease.leaseId === leaseId && (lease.state === "active" || lease.state === "paused")
             ? { ...lease, state: "paused" as const, updatedAt: nowIso(now) }
             : lease,
         ),
         value: undefined,
       })),
+    markActive: (input) =>
+      mutate((leases) => {
+        const current = leases.find((lease) => lease.leaseId === input.leaseId);
+        if (!current || (current.state !== "active" && current.state !== "paused"))
+          return { leases, value: null };
+        if (
+          (input.namespaceResource &&
+            input.namespaceResource.devboxId !== current.namespaceResource?.devboxId) ||
+          (input.namespaceProxy &&
+            (input.namespaceProxy.proxyId !== current.namespaceProxy?.proxyId ||
+              input.namespaceProxy.proxyOrigin !== current.namespaceProxy?.proxyOrigin))
+        )
+          throw new Error("Provisioned lease identity conflict");
+        const now = input.now ?? new Date();
+        const updated: ProvisionedLease = {
+          ...current,
+          ...(input.namespaceResource ? { namespaceResource: input.namespaceResource } : {}),
+          ...(input.namespaceProxy ? { namespaceProxy: input.namespaceProxy } : {}),
+          state: "active",
+          updatedAt: now.toISOString(),
+          expiresAt: new Date(now.getTime() + LEASE_HEARTBEAT_TTL_MS).toISOString(),
+        };
+        return {
+          leases: leases.map((lease) => (lease.leaseId === current.leaseId ? updated : lease)),
+          value: updated,
+        };
+      }),
     expired: (now) =>
       consistentRead((leases) => {
         const cutoff = (now ?? new Date()).toISOString();

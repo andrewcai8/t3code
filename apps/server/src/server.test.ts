@@ -1058,6 +1058,8 @@ const buildAppUnderTest = (options?: {
               reason: "unknown",
               message: "Not configured",
             }),
+          resume: () =>
+            Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           claim: () =>
             Effect.succeed({
               kind: "refused",
@@ -5877,6 +5879,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 observed.push(`stop:${id}`);
                 return { kind: "refused", reason: "busy", message: "Work is active." };
               }),
+            resume: (input) =>
+              Effect.sync(() => {
+                observed.push(
+                  `resume:${input.leaseId}:${input.sandboxId}:${input.environmentId}:${input.threadId}`,
+                );
+                return { kind: "resumed" };
+              }),
           },
         },
       });
@@ -5894,10 +5903,23 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               reason: "busy",
               message: "Work is active.",
             });
+            assert.deepEqual(
+              yield* client[WS_METHODS.environmentControlResume]({
+                leaseId: "retained-lease",
+                sandboxId: "retained-sandbox",
+                environmentId,
+                threadId: "retained-thread",
+              }),
+              { kind: "resumed" },
+            );
           }),
         ),
       );
-      assert.deepEqual(observed, ["start:managed-cloud", "stop:managed-cloud"]);
+      assert.deepEqual(observed, [
+        "start:managed-cloud",
+        "stop:managed-cloud",
+        "resume:retained-lease:retained-sandbox:managed-cloud:retained-thread",
+      ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -5916,6 +5938,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               Effect.sync(() => {
                 commands++;
                 return { kind: "refused", reason: "unknown", message: "No target" };
+              }),
+            resume: () =>
+              Effect.sync(() => {
+                commands++;
+                return { kind: "resumed" };
               }),
           },
         },
@@ -5941,6 +5968,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               );
               assert.equal(error._tag, "EnvironmentAuthorizationError");
             }
+            const resumeError = yield* client[WS_METHODS.environmentControlResume]({
+              leaseId: "lease",
+              sandboxId: "sandbox",
+              environmentId: EnvironmentId.make("child"),
+              threadId: "thread",
+            }).pipe(Effect.flip);
+            assert.equal(resumeError._tag, "EnvironmentAuthorizationError");
           }),
         ),
       );

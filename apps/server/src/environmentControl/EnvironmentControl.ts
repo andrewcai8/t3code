@@ -14,6 +14,8 @@ import {
   type EnvironmentProvisionDisposeResult,
   type EnvironmentProvisionPauseInput,
   type EnvironmentProvisionPauseResult,
+  type EnvironmentProvisionResumeInput,
+  type EnvironmentProvisionResumeResult,
   type EnvironmentProvisionClaimInput,
   type EnvironmentProvisionClaimResult,
   type EnvironmentProvisionTouchInput,
@@ -62,6 +64,11 @@ export function createEnvironmentControl(
   const pending = new Map<
     EnvironmentId,
     { action: "start" | "stop"; promise: Promise<EnvironmentControlResult> }
+  >();
+  const leaseOperations = new Map<
+    string,
+    | { action: "pause" | "dispose" | "reap" }
+    | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
   const snapshot = async (target: ManagedTarget): Promise<ManagedEnvironment> => {
@@ -127,14 +134,21 @@ export function createEnvironmentControl(
     // Heartbeat expiry is a liveness transition only. Keep the provider
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
+      if (leaseOperations.has(lease.sandboxId)) continue;
+      leaseOperations.set(lease.sandboxId, { action: "reap" });
       try {
+        const current = await leaseRegistry.findBySandbox(lease.sandboxId);
+        if (!current || current.state !== "active" || current.expiresAt > new Date().toISOString())
+          continue;
         await driver.pause({
-          sandboxId: lease.sandboxId,
-          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+          sandboxId: current.sandboxId,
+          ...(current.namespaceResource ? { namespaceResource: current.namespaceResource } : {}),
         });
         await leaseRegistry.markPaused(lease.leaseId);
       } catch {
         // Keep the lease eligible for another pause attempt on the next sweep.
+      } finally {
+        leaseOperations.delete(lease.sandboxId);
       }
     }
   };
@@ -190,10 +204,23 @@ export function createEnvironmentControl(
     dispose: async (
       input: EnvironmentProvisionDisposeInput,
     ): Promise<EnvironmentProvisionDisposeResult> => {
+      if (leaseOperations.has(input.sandboxId))
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "Another workspace operation is in progress. Retry shortly.",
+        };
+      leaseOperations.set(input.sandboxId, { action: "dispose" });
       try {
         if (leaseRegistry) {
           const release = await leaseRegistry.beginRelease(input);
           if (release === "disposed") return { kind: "disposed" };
+          if (release === "missing")
+            return {
+              kind: "refused",
+              reason: "unknown",
+              message: "The cloud sandbox lease is unknown.",
+            };
           if (release === "busy")
             return {
               kind: "refused",
@@ -227,11 +254,20 @@ export function createEnvironmentControl(
           reason: "unknown",
           message: "The cloud sandbox could not be disposed.",
         };
+      } finally {
+        leaseOperations.delete(input.sandboxId);
       }
     },
     pause: async (
       input: EnvironmentProvisionPauseInput,
     ): Promise<EnvironmentProvisionPauseResult> => {
+      if (leaseOperations.has(input.sandboxId))
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "Another workspace operation is in progress. Retry shortly.",
+        };
+      leaseOperations.set(input.sandboxId, { action: "pause" });
       try {
         if (!leaseRegistry)
           return {
@@ -240,7 +276,11 @@ export function createEnvironmentControl(
             message: "The cloud sandbox lease registry is unavailable.",
           };
         const lease = await leaseRegistry.findBySandbox(input.sandboxId);
-        if (!lease || (input.leaseId !== undefined && lease.leaseId !== input.leaseId))
+        if (
+          !lease ||
+          (input.leaseId !== undefined && lease.leaseId !== input.leaseId) ||
+          (lease.state !== "active" && lease.state !== "paused")
+        )
           return {
             kind: "refused",
             reason: "unknown",
@@ -258,7 +298,55 @@ export function createEnvironmentControl(
           reason: "unknown",
           message: "The cloud sandbox could not be paused.",
         };
+      } finally {
+        leaseOperations.delete(input.sandboxId);
       }
+    },
+    resume: (input: EnvironmentProvisionResumeInput): Promise<EnvironmentProvisionResumeResult> => {
+      const ownerKey = JSON.stringify([input.leaseId, input.environmentId, input.threadId]);
+      const existing = leaseOperations.get(input.sandboxId);
+      if (existing)
+        return existing.action === "resume" && existing.ownerKey === ownerKey
+          ? existing.promise
+          : Promise.resolve({
+              kind: "refused",
+              reason: "unknown",
+              message: "Another workspace operation is in progress. Retry shortly.",
+            });
+      const promise = (async (): Promise<EnvironmentProvisionResumeResult> => {
+        const lease = await leaseRegistry?.findBySandbox(input.sandboxId);
+        if (
+          !leaseRegistry ||
+          !lease ||
+          lease.leaseId !== input.leaseId ||
+          lease.owner?.environmentId !== input.environmentId ||
+          lease.owner.threadId !== input.threadId ||
+          (lease.state !== "active" && lease.state !== "paused")
+        )
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "This workspace could not be found. Reconnect was refused.",
+          };
+        const resumed = await driver.resume({
+          sandboxId: lease.sandboxId,
+          environmentId: input.environmentId,
+          providerInstanceId: lease.providerInstanceId,
+          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+          ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
+        });
+        if (!(await leaseRegistry.markActive({ leaseId: lease.leaseId, ...resumed })))
+          throw new Error("Lease could not be resumed");
+        return { kind: "resumed" };
+      })()
+        .catch((): EnvironmentProvisionResumeResult => ({
+          kind: "refused",
+          reason: "unknown",
+          message: "The workspace could not be reconnected. Retry shortly.",
+        }))
+        .finally(() => leaseOperations.delete(input.sandboxId));
+      leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
+      return promise;
     },
     claim: async (
       input: EnvironmentProvisionClaimInput,
@@ -324,6 +412,9 @@ export class EnvironmentControl extends Context.Service<
     readonly claim: (
       input: EnvironmentProvisionClaimInput,
     ) => Effect.Effect<EnvironmentProvisionClaimResult, EnvironmentControlError>;
+    readonly resume: (
+      input: EnvironmentProvisionResumeInput,
+    ) => Effect.Effect<EnvironmentProvisionResumeResult, EnvironmentControlError>;
     readonly touch: (
       input: EnvironmentProvisionTouchInput,
     ) => Effect.Effect<EnvironmentProvisionTouchResult, EnvironmentControlError>;
@@ -413,6 +504,12 @@ export const layer = Layer.effect(
           kind: "refused" as const,
           reason: "unknown" as const,
           message: "This install has no cloud provisioning template configured.",
+        }),
+      resume: (input) =>
+        run<EnvironmentProvisionResumeResult>((service) => service.resume(input), {
+          kind: "refused",
+          reason: "unknown",
+          message: "This install has no provisioning template configured.",
         }),
       touch: (input) =>
         run<EnvironmentProvisionTouchResult>((service) => service.touch(input), {

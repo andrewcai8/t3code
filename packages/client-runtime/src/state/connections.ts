@@ -115,6 +115,21 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.retryNow(environmentId)),
       ),
   });
+  const awaitConnected = createRuntimeCommand(runtime, {
+    label: "environment-catalog:await-connected",
+    execute: (environmentId: EnvironmentIdType) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) =>
+          registry.stateChanges(environmentId).pipe(
+            Stream.filter((state) => state.phase === "connected"),
+            Stream.runHead,
+            Effect.flatMap(Effect.fromOption),
+            Effect.asVoid,
+            Effect.timeout("60 seconds"),
+          ),
+        ),
+      ),
+  });
 
   return {
     catalogAtom,
@@ -126,5 +141,6 @@ export function createEnvironmentCatalogAtoms<R, E>(
     remove,
     removeRelayEnvironments,
     retryNow,
+    awaitConnected,
   };
 }

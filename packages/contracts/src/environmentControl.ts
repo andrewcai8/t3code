@@ -116,6 +116,24 @@ export const EnvironmentProvisionPauseResult = Schema.Union([
 ]);
 export type EnvironmentProvisionPauseResult = typeof EnvironmentProvisionPauseResult.Type;
 
+export const EnvironmentProvisionResumeInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+  threadId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionResumeInput = typeof EnvironmentProvisionResumeInput.Type;
+
+export const EnvironmentProvisionResumeResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("resumed") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literal("unknown"),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionResumeResult = typeof EnvironmentProvisionResumeResult.Type;
+
 export const EnvironmentProvisionClaimInput = Schema.Struct({
   leaseId: TrimmedNonEmptyString,
   environmentId: EnvironmentId,

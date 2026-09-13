@@ -171,6 +171,16 @@ export interface CloudDriver {
     readonly sandboxId: string;
     readonly namespaceResource?: NamespaceResource;
   }): Promise<void>;
+  resume(input: {
+    readonly sandboxId: string;
+    readonly environmentId: string;
+    readonly providerInstanceId: string;
+    readonly namespaceResource?: NamespaceResource;
+    readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
+  }): Promise<{
+    readonly namespaceResource?: NamespaceResource;
+    readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
+  }>;
   stop(target: ManagedTarget, instanceId: string): Promise<ControllerResult>;
   provision(request: ProvisionRequest): Promise<Provisioned>;
   dispose(input: {
@@ -674,6 +684,42 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
       } catch (cause) {
         if (!isMissingSandbox(cause)) throw cause;
       }
+    },
+    resume: async ({
+      sandboxId,
+      environmentId,
+      providerInstanceId,
+      namespaceResource,
+      namespaceProxy: proxy,
+    }) => {
+      if (namespaceResource) {
+        if (!namespaceRunner || !proxy || !config.namespaceIngressToken)
+          throw new Error("Namespace recovery configuration is unavailable");
+        const resumed = await namespaceRunner.resume({
+          resource: namespaceResource,
+          port: 3000,
+          environmentId,
+        });
+        const upstream = new URL(resumed.upstreamOrigin);
+        const restored = await namespaceProxy.restore({
+          ...proxy,
+          upstreamHttpBaseUrl: `${upstream.origin}/`,
+          upstreamWsBaseUrl: `${upstream.protocol === "https:" ? "wss:" : "ws:"}//${upstream.host}/`,
+          upstreamAuthorization: `Bearer ${config.namespaceIngressToken}`,
+        });
+        return { namespaceResource: resumed.resource, namespaceProxy: restored };
+      }
+      const info = await Sandbox.getInfo(sandboxId, api);
+      if (
+        info.sandboxId !== sandboxId ||
+        info.metadata.purpose !== "t3-environment" ||
+        info.metadata.account !== providerInstanceId
+      )
+        throw new Error("Sandbox ownership or purpose changed");
+      await Sandbox.connect(sandboxId, { ...api, timeoutMs: 3_600_000 });
+      if ((await Sandbox.getInfo(sandboxId, api)).state !== "running")
+        throw new Error("Sandbox did not resume");
+      return {};
     },
     pause: async ({ sandboxId, namespaceResource }) => {
       if (namespaceResource) {

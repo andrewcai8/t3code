@@ -18,6 +18,7 @@ function runner(): NamespaceRunner & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
+    resume: vi.fn(async () => ({ resource, upstreamOrigin: "https://retained.example" })),
     create: vi.fn(async () => {
       calls.push("create");
       return resource;

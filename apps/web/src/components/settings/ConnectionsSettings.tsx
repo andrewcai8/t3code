@@ -147,6 +147,7 @@ import {
   usePrimaryEnvironment,
 } from "~/state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useProvisionedEnvironmentRecovery } from "../../cloud/useProvisionedEnvironmentRecovery";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ServerUpdateAction, ServerUpdateProgress } from "../ServerUpdateAction";
@@ -1783,6 +1784,7 @@ export function ConnectionsSettings() {
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
+  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
   const primarySessionState = usePrimarySessionState();
   const currentSessionScopes = desktopBridge
@@ -2371,6 +2373,12 @@ export function ConnectionsSettings() {
   const handleConnectSavedBackend = useCallback(
     async (environmentId: EnvironmentId) => {
       setSavedBackendError(null);
+      const recovery = await recoverEnvironment(environmentId);
+      if (recovery.kind === "ready") return;
+      if (recovery.kind === "failed") {
+        setSavedBackendError(recovery.message);
+        return;
+      }
       const result = await retryEnvironment(environmentId);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2385,7 +2393,7 @@ export function ConnectionsSettings() {
         );
       }
     },
-    [retryEnvironment],
+    [recoverEnvironment, retryEnvironment],
   );
 
   const handleRemoveSavedBackend = useCallback(
