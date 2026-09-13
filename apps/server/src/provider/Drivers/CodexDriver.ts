@@ -98,6 +98,16 @@ function makeCodexMaintenanceResolver(sharedHomePath: string) {
   });
 }
 
+export function resolveCodexProviderEnvironment(
+  environment: NodeJS.ProcessEnv,
+  homeLayout: { readonly effectiveHomePath: string | undefined; readonly sharedHomePath: string },
+): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    CODEX_HOME: homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
+  };
+}
+
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
  * driver's `R` so the registry layer aggregates these across every
@@ -136,6 +146,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const modelManifest = yield* ModelManifest.ModelManifest;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(config);
+      // Do not inherit an ambient CODEX_HOME from the shell that launched the
+      // desktop server. Each instance must probe and run against its own home.
+      const providerEnvironment = resolveCodexProviderEnvironment(processEnv, homeLayout);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -166,7 +179,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
           {
             binaryPath: effectiveConfig.binaryPath,
-            env: processEnv,
+            env: providerEnvironment,
           },
         ).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -183,10 +196,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
-        environment: processEnv,
+        environment: providerEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, providerEnvironment);
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
@@ -198,7 +211,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const checkProvider = modelManifest.refreshInBackground.pipe(
         Effect.andThen(
           Effect.zipWith(
-            checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
+            checkCodexProviderStatus(effectiveConfig, undefined, providerEnvironment),
             modelManifest.current,
             (draft, manifest) =>
               stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
@@ -250,9 +263,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               probeCodexSkillsForCwd({
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, providerEnvironment),
                 cwd,
-                environment: processEnv,
+                environment: providerEnvironment,
               }).pipe(
                 Effect.scoped,
                 Effect.timeout("20 seconds"),
@@ -286,10 +299,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               const { client } = yield* withCodexAppServerClient({
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, providerEnvironment),
                 // Account-level request; any directory serves, same as the status probe.
                 cwd: process.cwd(),
-                environment: processEnv,
+                environment: providerEnvironment,
               });
               const response = yield* client.request("account/rateLimitResetCredit/consume", {
                 idempotencyKey,
