@@ -168,7 +168,16 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
-          buildInitialCursorProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+          buildInitialCursorProviderSnapshot(settings.provider).pipe(
+            Effect.flatMap((provider) =>
+              effectiveConfig.enabled
+                ? discoverCursorSkills(undefined, processEnv).pipe(
+                    Effect.map((skills) => ({ ...provider, skills })),
+                  )
+                : Effect.succeed(provider),
+            ),
+            Effect.map(stampIdentity),
+          ),
         checkProvider,
         // Model catalog and capabilities come exclusively from Cursor's
         // list_available_models extension method during provider checks.
