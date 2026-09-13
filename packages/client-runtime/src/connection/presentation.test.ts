@@ -234,3 +234,20 @@ describe("connection presentation", () => {
     });
   });
 });
+
+it("distinguishes a failed data stream from synchronization and prioritizes disconnect", () => {
+  expect(
+    deriveActivityAvailability({
+      connectionPhase: "connected",
+      shellStatus: "cached",
+      syncFailed: true,
+    }),
+  ).toEqual({ kind: "unavailable", label: "Sync failed" });
+  expect(
+    deriveActivityAvailability({
+      connectionPhase: "reconnecting",
+      shellStatus: "cached",
+      syncFailed: true,
+    }),
+  ).toEqual({ kind: "unavailable", label: "Reconnecting" });
+});

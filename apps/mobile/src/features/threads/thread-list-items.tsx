@@ -1,4 +1,6 @@
 import { useRecyclingState } from "@legendapp/list/react-native";
+import { useAtomValue } from "@effect/atom-react";
+import { environmentPresentations } from "../../state/presentation";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -489,7 +491,22 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     onRegenerateThreadTitle,
     onNewThreadOnBranch,
   } = props;
-  const status = resolveThreadStatus(thread);
+  const lastKnownStatus = resolveThreadStatus(thread);
+  const activityAvailability = useAtomValue(
+    environmentPresentations.activityAvailabilityAtom(thread.environmentId),
+  );
+  const status =
+    (lastKnownStatus?.kind === "working" || lastKnownStatus?.kind === "connecting") &&
+    activityAvailability.kind !== "live"
+      ? {
+          ...lastKnownStatus,
+          label:
+            activityAvailability.kind === "unavailable" ? activityAvailability.label : "Syncing",
+          pulse: false,
+          pillClassName: "bg-primary/10",
+          textClassName: "text-foreground-secondary",
+        }
+      : lastKnownStatus;
   const pr = useThreadPr(thread);
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,

@@ -1,4 +1,6 @@
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
+import { useAtomValue } from "@effect/atom-react";
+import { environmentPresentations } from "../../state/presentation";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import type { ThreadMoveDestination } from "./threadOrder";
@@ -456,7 +458,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     : screenColor;
 
   const status = resolveThreadListV2Status(thread);
-  const statusLabel = STATUS_LABEL_BY_STATUS[status];
+  const activityAvailability = useAtomValue(
+    environmentPresentations.activityAvailabilityAtom(thread.environmentId),
+  );
+  const statusLabel =
+    status === "working" && activityAvailability.kind !== "live"
+      ? {
+          label:
+            activityAvailability.kind === "unavailable" ? activityAvailability.label : "Syncing",
+          className: "text-foreground-tertiary",
+        }
+      : STATUS_LABEL_BY_STATUS[status];
   // Settled rows label by the same stamp they sort by, so order and label
   // can't disagree. updatedAt is always present, so the resolver never
   // returns null here.

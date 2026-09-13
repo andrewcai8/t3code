@@ -42,9 +42,7 @@ export function useProvisionedEnvironmentRecovery() {
           { reportFailure: false },
         );
         if (result._tag === "Failure")
-          throw new Error(
-            "The workspace restarted, but the connection is not ready. Retry shortly.",
-          );
+          throw new Error("The workspace connection is not ready. Retry shortly.");
       },
     });
     recoveries.set(registry, recovery);

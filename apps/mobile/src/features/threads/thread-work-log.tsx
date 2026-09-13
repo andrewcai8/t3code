@@ -1,3 +1,7 @@
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/unstable/reactivity";
+import { LIVE_ACTIVITY_AVAILABILITY } from "@t3tools/client-runtime/connection";
+import { environmentPresentations } from "../../state/presentation";
 import { QuestionAnswerHistory } from "./QuestionAnswerHistory";
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
@@ -197,6 +201,8 @@ function ShimmerWorkContent(props: {
   );
 }
 
+const LIVE_ACTIVITY_ATOM = Atom.make(LIVE_ACTIVITY_AVAILABILITY);
+
 export function ShimmeringWorkContent(props: {
   readonly className?: string;
   readonly textClassName?: string;
@@ -210,6 +216,11 @@ export function ShimmeringWorkContent(props: {
   readonly themeAppearance?: "light" | "dark";
   readonly toolIcon?: ToolActivityIcon;
 }) {
+  const availability = useAtomValue(
+    props.environmentId
+      ? environmentPresentations.activityAvailabilityAtom(props.environmentId)
+      : LIVE_ACTIVITY_ATOM,
+  );
   const [availableWidth, setAvailableWidth] = useState(0);
   const [textWidth, setTextWidth] = useState(0);
   const [appIsActive, setAppIsActive] = useState(AppState.currentState === "active");
@@ -241,7 +252,14 @@ export function ShimmeringWorkContent(props: {
   useEffect(() => {
     cancelAnimation(progress);
     progress.value = 0;
-    if (contentWidth <= 0 || reducedMotion || !appIsActive || !screenIsFocused) return;
+    if (
+      availability.kind !== "live" ||
+      contentWidth <= 0 ||
+      reducedMotion ||
+      !appIsActive ||
+      !screenIsFocused
+    )
+      return;
 
     progress.value = withRepeat(
       withSequence(
@@ -261,7 +279,7 @@ export function ShimmeringWorkContent(props: {
       ReduceMotion.Never,
     );
     return () => cancelAnimation(progress);
-  }, [appIsActive, contentWidth, progress, reducedMotion, screenIsFocused]);
+  }, [availability, appIsActive, contentWidth, progress, reducedMotion, screenIsFocused]);
 
   const sweepStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: -SHIMMER_WIDTH + progress.value * (contentWidth + SHIMMER_WIDTH) }],
@@ -989,6 +1007,7 @@ const AGENT_SPAWN_TONE_DOT_CLASS = {
  * remounting the card (see the batch key in appendActivityGroupRows).
  */
 export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
+  readonly environmentId: EnvironmentId;
   readonly summary: AgentSpawnSummary;
   readonly expanded: boolean;
   readonly iconSubtleColor: ColorValue;
@@ -997,7 +1016,13 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
   readonly onCopy: () => void;
 }) {
   const { summary, expanded } = props;
-  const working = summary.tone === "working";
+  const availability = useAtomValue(
+    environmentPresentations.activityAvailabilityAtom(props.environmentId),
+  );
+  const unavailable = availability.kind !== "live";
+  const unavailableLabel = availability.kind === "unavailable" ? availability.label : "Syncing";
+  const working = summary.tone === "working" && !unavailable;
+  const status = summary.tone === "working" && unavailable ? unavailableLabel : summary.status;
   const memberCount = summary.members.length;
   const canExpand = memberCount > 0;
   return (
@@ -1005,7 +1030,7 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
       <Pressable
         accessibilityRole={canExpand ? "button" : undefined}
         accessibilityState={canExpand ? { expanded } : undefined}
-        accessibilityLabel={`${summary.title}, ${summary.status}`}
+        accessibilityLabel={`${summary.title}, ${status}`}
         accessibilityHint={
           canExpand
             ? `Double tap to ${expanded ? "hide" : "show"} ${memberCount} ${memberCount === 1 ? "subagent" : "subagents"}. Long press to copy.`
@@ -1042,7 +1067,9 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
               <View
                 className={cn(
                   "h-1.5 w-1.5 shrink-0 rounded-full",
-                  AGENT_SPAWN_TONE_DOT_CLASS[summary.tone],
+                  AGENT_SPAWN_TONE_DOT_CLASS[
+                    summary.tone === "working" && unavailable ? "stopped" : summary.tone
+                  ],
                 )}
               />
               {working ? (
@@ -1051,12 +1078,12 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
                   compact
                   icon="brain"
                   iconSubtleColor={props.iconSubtleColor}
-                  label={summary.status}
+                  label={status}
                   showIcon={false}
                 />
               ) : (
                 <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
-                  {summary.status}
+                  {status}
                 </Text>
               )}
             </View>
@@ -1083,13 +1110,17 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
                   <View
                     className={cn(
                       "h-1.5 w-1.5 shrink-0 rounded-full",
-                      AGENT_SPAWN_TONE_DOT_CLASS[member.tone],
+                      AGENT_SPAWN_TONE_DOT_CLASS[
+                        member.tone === "working" && unavailable ? "stopped" : member.tone
+                      ],
                     )}
                   />
                   <Text className="min-w-0 flex-1 text-xs text-foreground" numberOfLines={1}>
                     {member.title}
                   </Text>
-                  <Text className="shrink-0 text-2xs text-foreground-muted">{member.status}</Text>
+                  <Text className="shrink-0 text-2xs text-foreground-muted">
+                    {member.tone === "working" && unavailable ? unavailableLabel : member.status}
+                  </Text>
                 </View>
                 {member.detail ? (
                   <Text
@@ -1110,9 +1141,14 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
 });
 
 export function ThreadThinkingRow(props: {
+  readonly environmentId: EnvironmentId;
   readonly rowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
   readonly iconSubtleColor: ColorValue;
 }) {
+  const availability = useAtomValue(
+    environmentPresentations.activityAvailabilityAtom(props.environmentId),
+  );
+  if (availability.kind !== "live") return <View className="min-h-8" />;
   return (
     <View
       accessible

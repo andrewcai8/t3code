@@ -1,4 +1,5 @@
 import { GitPullRequestIcon } from "lucide-react";
+import type { ActivityAvailability } from "@t3tools/client-runtime/connection";
 import {
   type AssistantCitation,
   type EnvironmentId,
@@ -226,6 +227,7 @@ interface TimelineRowSharedState {
 }
 
 interface TimelineRowActivityState {
+  activityAvailability: ActivityAvailability;
   isWorking: boolean;
   isPreparingWorktree: boolean;
   isCompacting: boolean;
@@ -313,6 +315,7 @@ interface MessagesTimelineProps {
   onOpenAgents?: () => void;
   isWorking: boolean;
   isPreparingWorktree?: boolean;
+  activityAvailability: ActivityAvailability;
   isCompacting?: boolean;
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
@@ -368,6 +371,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   citationHistoryLoading = false,
   onCiteAssistantText,
   isWorking,
+  activityAvailability,
   isPreparingWorktree = false,
   isCompacting = false,
   activeTurnStartedAt,
@@ -790,13 +794,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
+      activityAvailability,
       isWorking,
       isPreparingWorktree,
       isCompacting,
       isRevertingCheckpoint,
       latestTurnId: latestTurn?.turnId ?? null,
     }),
-    [isCompacting, isRevertingCheckpoint, isWorking, isPreparingWorktree, latestTurn?.turnId],
+    [
+      activityAvailability,
+      isCompacting,
+      isRevertingCheckpoint,
+      isWorking,
+      isPreparingWorktree,
+      latestTurn?.turnId,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1801,7 +1813,14 @@ function ProposedPlanTimelineRow({
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
-  const { isCompacting, isPreparingWorktree } = use(TimelineRowActivityCtx);
+  const { activityAvailability, isCompacting, isPreparingWorktree } = use(TimelineRowActivityCtx);
+  if (activityAvailability.kind !== "live") {
+    return (
+      <div className="min-h-7 py-1 text-xs text-muted-foreground" role="status">
+        {activityAvailability.kind === "synchronizing" ? "Syncing" : activityAvailability.label}
+      </div>
+    );
+  }
   return (
     <div className="border-b border-border/60 pb-2 pt-1">
       <div className="flex h-6 min-w-0 items-baseline px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
@@ -1836,11 +1855,11 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
 }
 
 function ThinkingTimelineRow() {
-  const { isCompacting, isPreparingWorktree } = use(TimelineRowActivityCtx);
+  const { activityAvailability, isCompacting, isPreparingWorktree } = use(TimelineRowActivityCtx);
   // Reserve the activity row during setup so the handoff keeps the same height.
   return (
     <div className="min-h-7">
-      {isPreparingWorktree || isCompacting ? null : (
+      {activityAvailability.kind !== "live" || isPreparingWorktree || isCompacting ? null : (
         <LiveActivityRow label="Thinking" iconName="brain" active shimmer />
       )}
     </div>
@@ -2201,6 +2220,7 @@ function LiveActivityContent({
 
 function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "work-live" }> }) {
   const ctx = use(TimelineRowCtx);
+  const { activityAvailability } = use(TimelineRowActivityCtx);
   const label = liveWorkEntryLabel(row.entry, ctx.workspaceRoot, row.active);
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
 
@@ -2217,7 +2237,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
         iconName={workEntryIconName(row.entry)}
         toolIcon={row.entry.toolIcon ?? row.entry.toolSource?.icon}
         failed={failed}
-        active={row.active}
+        active={row.active && activityAvailability.kind === "live"}
       />
     </button>
   );
@@ -3200,6 +3220,7 @@ const stopRowToggleWhileSelectingText = (e: MouseEvent<HTMLElement>) => {
 const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: TimelineWorkEntry }) {
   const { workEntry } = props;
   const { agentPanelModel, onOpenAgents } = use(TimelineRowCtx);
+  const { activityAvailability } = use(TimelineRowActivityCtx);
   const spawn = workEntry.agentSpawn;
   if (!spawn) {
     return null;
@@ -3223,6 +3244,7 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
     coordinatorStatus: workflowGroup?.workflow.status,
   });
   const { live, lead } = summary;
+  const unavailable = live && activityAvailability.kind !== "live";
   // Same rule as the panel footer: providers may aggregate member usage into
   // the coordinator, so count the coordinator only when no members exist.
   const totalTokens = agents.reduce(
@@ -3239,9 +3261,14 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
     failed: "bg-destructive",
     completed: "bg-success",
     inactive: "bg-muted-foreground/50",
-  }[summary.tone];
-  const status =
-    live && livePhase ? `${livePhase.title} · ${livePhase.activeCount} working` : summary.status;
+  }[unavailable ? "inactive" : summary.tone];
+  const status = unavailable
+    ? activityAvailability.kind === "unavailable"
+      ? activityAvailability.label
+      : "Syncing"
+    : live && livePhase
+      ? `${livePhase.title} · ${livePhase.activeCount} working`
+      : summary.status;
 
   return (
     <button

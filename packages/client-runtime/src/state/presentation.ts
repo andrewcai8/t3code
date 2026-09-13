@@ -5,9 +5,11 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { AVAILABLE_CONNECTION_STATE, type SupervisorConnectionState } from "../connection/model.ts";
 import {
   presentEnvironmentConnection,
+  deriveActivityAvailability,
   type EnvironmentPresentation,
 } from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
+import type { EnvironmentShellState } from "./shell.ts";
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
   if (left.size !== right.size) {
@@ -28,6 +30,7 @@ export function createEnvironmentPresentationAtoms<E>(input: {
   ) => Atom.Atom<AsyncResult.AsyncResult<SupervisorConnectionState, E>>;
   /** Authoritative live server config, including streamed provider/settings updates. */
   readonly serverConfigValueAtom: (environmentId: EnvironmentId) => Atom.Atom<ServerConfig | null>;
+  readonly shellStateValueAtom: (environmentId: EnvironmentId) => Atom.Atom<EnvironmentShellState>;
 }) {
   const presentationAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => {
@@ -45,6 +48,16 @@ export function createEnvironmentPresentationAtoms<E>(input: {
         serverConfig: get(input.serverConfigValueAtom(environmentId)),
       } satisfies EnvironmentPresentation;
     }).pipe(Atom.withLabel(`environment-presentation:${environmentId}`)),
+  );
+
+  const activityAvailabilityAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) =>
+      deriveActivityAvailability({
+        connectionPhase: get(presentationAtom(environmentId))?.connection.phase ?? "available",
+        shellStatus: get(input.shellStateValueAtom(environmentId)).status,
+        syncFailed: Option.isSome(get(input.shellStateValueAtom(environmentId)).error),
+      }),
+    ).pipe(Atom.withLabel(`environment-activity-availability:${environmentId}`)),
   );
 
   let previous: ReadonlyMap<EnvironmentId, EnvironmentPresentation> = new Map();
@@ -65,6 +78,7 @@ export function createEnvironmentPresentationAtoms<E>(input: {
 
   return {
     presentationAtom,
+    activityAvailabilityAtom,
     presentationsAtom,
   };
 }

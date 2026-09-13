@@ -5,6 +5,7 @@ import {
   visibleThreadPullRequests,
 } from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
+import { environmentPresentations } from "../state/presentation";
 import * as Schema from "effect/Schema";
 import {
   DndContext,
@@ -1090,6 +1091,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  const activityAvailability = useAtomValue(
+    environmentPresentations.activityAvailabilityAtom(thread.environmentId),
+  );
+  const activityUnavailable =
+    (status === "working" || status === "monitoring") && activityAvailability.kind !== "live";
   const isInFlight =
     status === "working" || status === "monitoring" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is
@@ -1118,8 +1124,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
-  const topStatus =
-    status === "working"
+  const topStatus = activityUnavailable
+    ? {
+        label: activityAvailability.kind === "unavailable" ? activityAvailability.label : "Syncing",
+        icon: null,
+        className: "text-muted-foreground",
+      }
+    : status === "working"
       ? {
           label: "Working",
           icon: "working" as const,
@@ -1831,7 +1842,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             wrapper around the ticking duration would make
                             screen readers announce every second. */}
                           <span role="status">{topStatus.label}</span>
-                          {status === "working" ? (
+                          {status === "working" && !activityUnavailable ? (
                             <span aria-hidden>
                               <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                             </span>

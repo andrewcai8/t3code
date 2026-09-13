@@ -43,7 +43,11 @@ import {
   RuntimeMode,
   TerminalOpenInput,
 } from "@t3tools/contracts";
-import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import {
+  deriveActivityAvailability,
+  LIVE_ACTIVITY_AVAILABILITY,
+  type EnvironmentConnectionPresentation,
+} from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
@@ -2144,6 +2148,17 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironment =
     activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
+  const activityAvailability =
+    routeKind === "draft"
+      ? LIVE_ACTIVITY_AVAILABILITY
+      : deriveActivityAvailability({
+          connectionPhase: activeEnvironmentConnectionPhase,
+          shellStatus: activeEnvironmentShell.data?.status ?? "empty",
+          threadStatus: routeThreadState.status,
+          syncFailed:
+            activeEnvironmentShell.data?.error._tag === "Some" ||
+            routeThreadState.error._tag === "Some",
+        });
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
   const canReconnectOnSend =
@@ -2486,8 +2501,13 @@ export default function ChatView(props: ChatViewProps) {
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
           variant: unavailableConnection.phase === "error" ? "error" : "warning",
           icon: <WifiOffIcon />,
-          title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
-          description: environmentReconnecting ? "Trying again" : "Reconnect to continue",
+          title:
+            unavailableConnection.phase === "error"
+              ? `Could not connect to ${activeEnvironmentUnavailableState.label}`
+              : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+          description:
+            unavailableConnection.error ??
+            (environmentReconnecting ? "Trying again" : "Reconnect to continue"),
           actions: (
             <>
               <Button
@@ -5998,7 +6018,11 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
   const backgroundLivenessBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
-    if (activeBackgroundLiveness === null || !activeThread) {
+    if (
+      activeBackgroundLiveness === null ||
+      !activeThread ||
+      activityAvailability.kind !== "live"
+    ) {
       return null;
     }
     const working = activeBackgroundLiveness === "working";
@@ -6031,6 +6055,7 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [
     activeBackgroundLiveness,
+    activityAvailability,
     activeThread,
     agentPanelModel.liveCount,
     handleStopBackgroundWork,
@@ -8721,6 +8746,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenAgents={addAgentsSurface}
                 key={activeThread.id}
                 isWorking={isWorking}
+                activityAvailability={activityAvailability}
                 isPreparingWorktree={isPreparingWorktree}
                 isCompacting={isCompacting}
                 activeTurnStartedAt={activeWorkStartedAt}

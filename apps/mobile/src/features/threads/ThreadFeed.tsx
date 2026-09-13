@@ -1389,12 +1389,19 @@ function renderFeedEntry(
   }
 
   if (entry.type === "thinking") {
-    return <ThreadThinkingRow rowSizing={props.workRowSizing} iconSubtleColor={iconSubtleColor} />;
+    return (
+      <ThreadThinkingRow
+        environmentId={props.environmentId}
+        rowSizing={props.workRowSizing}
+        iconSubtleColor={iconSubtleColor}
+      />
+    );
   }
 
   if (entry.type === "agent-spawn") {
     return (
       <ThreadAgentSpawnCard
+        environmentId={props.environmentId}
         summary={entry.summary}
         expanded={entry.expanded}
         iconSubtleColor={iconSubtleColor}

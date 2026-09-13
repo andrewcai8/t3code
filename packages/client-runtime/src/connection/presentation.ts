@@ -3,6 +3,42 @@ import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type { SupervisorConnectionState } from "./model.ts";
+import type { EnvironmentShellStatus } from "../state/shell.ts";
+import type { EnvironmentThreadStatus } from "../state/threadState.ts";
+
+export type ActivityAvailability =
+  | { readonly kind: "live" }
+  | { readonly kind: "synchronizing" }
+  | { readonly kind: "unavailable"; readonly label: string };
+
+export const LIVE_ACTIVITY_AVAILABILITY: ActivityAvailability = { kind: "live" };
+const SYNC_FAILED_ACTIVITY: ActivityAvailability = { kind: "unavailable", label: "Sync failed" };
+const SYNCHRONIZING_ACTIVITY: ActivityAvailability = { kind: "synchronizing" };
+const UNAVAILABLE_ACTIVITY = {
+  available: { kind: "unavailable", label: "Disconnected" },
+  offline: { kind: "unavailable", label: "Offline" },
+  connecting: { kind: "unavailable", label: "Connecting" },
+  reconnecting: { kind: "unavailable", label: "Reconnecting" },
+  error: { kind: "unavailable", label: "Connection failed" },
+} satisfies Record<Exclude<EnvironmentConnectionPhase, "connected">, ActivityAvailability>;
+
+/** Live activity requires the connection and the snapshots used by its view to be current. */
+export function deriveActivityAvailability(input: {
+  readonly connectionPhase: EnvironmentConnectionPhase;
+  readonly shellStatus: EnvironmentShellStatus;
+  readonly threadStatus?: EnvironmentThreadStatus;
+  readonly syncFailed?: boolean;
+}): ActivityAvailability {
+  if (input.connectionPhase !== "connected") return UNAVAILABLE_ACTIVITY[input.connectionPhase];
+  if (input.syncFailed) return SYNC_FAILED_ACTIVITY;
+  if (
+    input.shellStatus !== "live" ||
+    (input.threadStatus !== undefined && input.threadStatus !== "live")
+  ) {
+    return SYNCHRONIZING_ACTIVITY;
+  }
+  return LIVE_ACTIVITY_AVAILABILITY;
+}
 
 export type EnvironmentConnectionPhase =
   | "available"

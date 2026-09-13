@@ -1,4 +1,6 @@
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import { useAtomValue } from "@effect/atom-react";
+import { environmentPresentations } from "../../state/presentation";
 import {
   appendCodexArtifactTemplateUsePrompt,
   type CodexArtifactTemplate,
@@ -138,6 +140,7 @@ export interface ThreadDetailScreenProps {
   readonly connectionStateLabel: EnvironmentConnectionPhase;
   /** Message sync status for the selected thread (drives the composer status pill). */
   readonly threadSyncStatus?: EnvironmentThreadStatus;
+  readonly threadSyncError?: string | null;
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: { readonly loading: boolean; readonly onLoadEarlier: () => void } | null;
   readonly environmentId: EnvironmentId;
@@ -329,10 +332,16 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     ? 0
     : Math.max(insets.bottom, 12);
   const contentPresentationKind = props.contentPresentation.kind;
+  const activityAvailability = useAtomValue(
+    environmentPresentations.activityAvailabilityAtom(props.environmentId),
+  );
   // The raw sync status enters "synchronizing" on every full fetch, cached or
   // not. Whether messages are already on screen decides the pill label: no
   // data yet → "Loading messages", cached data reconciling → "Syncing".
   const threadSyncLabel = (() => {
+    if (activityAvailability.kind === "synchronizing") {
+      return contentPresentationKind === "ready" ? "Syncing messages..." : "Loading messages...";
+    }
     switch (props.threadSyncStatus) {
       case "empty":
       case "cached":
@@ -357,6 +366,15 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     });
     if (connectionStatus !== null) {
       return connectionStatus;
+    }
+    if (activityAvailability.kind === "unavailable" || props.threadSyncError) {
+      return {
+        kind: "connection",
+        tone: "unavailable",
+        label:
+          activityAvailability.kind === "unavailable" ? activityAvailability.label : "Sync failed",
+        onPress: props.onReconnectEnvironment,
+      };
     }
     if (props.activePendingApproval !== null || props.activePendingUserInput !== null) {
       return null;
