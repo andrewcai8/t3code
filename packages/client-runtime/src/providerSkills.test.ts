@@ -241,6 +241,7 @@ describe("workspace provider snapshots", () => {
   it("uses the cwd snapshot after a provider session has populated it", () => {
     expect(resolveProviderSkillsForCwd(provider, "/workspace/project-a")).toEqual([
       { name: "project", path: "/workspace/project-a/SKILL.md", enabled: true },
+      { name: "global", path: "/global/SKILL.md", enabled: true },
     ]);
     expect(resolveProviderSlashCommandsForCwd(provider, "/workspace/project-a")).toEqual([
       { name: "project" },

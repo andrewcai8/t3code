@@ -115,7 +115,10 @@ export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
 ): ServerProvider["skills"] {
-  return resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? provider.skills;
+  const workspaceSkills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills;
+  return workspaceSkills
+    ? dedupeProviderSkillsByName([...workspaceSkills, ...provider.skills])
+    : provider.skills;
 }
 
 export function resolveProviderSlashCommandsForCwd(
