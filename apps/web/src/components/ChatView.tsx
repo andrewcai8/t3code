@@ -4254,13 +4254,11 @@ export default function ChatView(props: ChatViewProps) {
     const selected =
       activeProviderInstanceId === null
         ? selectedProviderEntry
-        : (providerInstanceEntries.find(
-            (entry) => entry.instanceId === activeProviderInstanceId,
-          ) ?? selectedProviderEntry);
+        : (providerInstanceEntries.find((entry) => entry.instanceId === activeProviderInstanceId) ??
+          selectedProviderEntry);
     if (!selected) return null;
-    return (
-      selectProviderInstanceByUsage(providerInstanceEntries, selected.driverKind) ?? selected
-    ).snapshot;
+    return (selectProviderInstanceByUsage(providerInstanceEntries, selected.driverKind) ?? selected)
+      .snapshot;
   }, [activeProviderInstanceId, providerInstanceEntries, selectedProviderEntry]);
   const canCreateCloudEnvironment =
     draftId !== null &&
@@ -4280,150 +4278,155 @@ export default function ChatView(props: ChatViewProps) {
     },
     [canCreateCloudEnvironment, cloudAccount],
   );
-  const provisionCloudEnvironmentForSend = useCallback(async (handoff: {
-    readonly agentDriver: ProviderDriverKind;
-    readonly modelSelection: ModelSelection;
-  }) => {
-    if (
-      !cloudProvisioningRequested ||
-      !canCreateCloudEnvironment ||
-      primaryEnvironmentId === null ||
-      !cloudAccount ||
-      draftId === null
-    ) {
-      return false;
-    }
-    const identity = activeProject?.repositoryIdentity;
-    const repository =
-      identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
-    const cloudEnvironmentLabel =
-      cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
-    setCreatingCloudEnvironment(true);
-    setCloudProvisioningPhase("creating");
-    // The menu closes on the click that starts this, taking its pending label
-    // with it, and building takes minutes. Without a word here the app looks
-    // like it ignored the request.
-    toastManager.add({
-      type: "info",
-      title: `Preparing ${cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B"}…`,
-      description: repository ? `Setting up the environment and cloning ${repository}.` : undefined,
-    });
-    let readyForSend = false;
-    try {
-      const created = await provisionCloudEnvironment({
-        environmentId: primaryEnvironmentId,
-        input: {
-          provider: cloudProvisioningRequested,
-          providerInstanceId: cloudAccount.instanceId,
-          agentDriver: handoff.agentDriver,
-          ...(repository ? { repository } : {}),
-        },
-      });
-      // Building a machine takes minutes, so every way it can end has to say
-      // so. Reverting the label and going quiet leaves someone watching a
-      // menu, unsure whether they are waiting or have already failed.
-      if (AsyncResult.isFailure(created)) {
-        toastManager.add({
-          type: "error",
-          title: "Could not reach the manager to create a machine.",
-        });
+  const provisionCloudEnvironmentForSend = useCallback(
+    async (handoff: {
+      readonly agentDriver: ProviderDriverKind;
+      readonly modelSelection: ModelSelection;
+    }) => {
+      if (
+        !cloudProvisioningRequested ||
+        !canCreateCloudEnvironment ||
+        primaryEnvironmentId === null ||
+        !cloudAccount ||
+        draftId === null
+      ) {
         return false;
       }
-      if (created.value.kind !== "provisioned") {
-        // The refusal already explains what to configure; repeating it is more
-        // use than a generic failure.
-        toastManager.add({ type: "error", title: created.value.message });
-        return false;
-      }
-      const lease = {
-        leaseId: created.value.environment.leaseId ?? created.value.environment.sandboxId,
-        sandboxId: created.value.environment.sandboxId,
-        managerEnvironmentId: primaryEnvironmentId,
-      };
-      setCloudProvisioningPhase("pairing");
-      const paired = await connectCloudPairing({
-        pairingUrl: created.value.environment.pairingUrl,
-      });
-      if (AsyncResult.isFailure(paired)) {
-        rememberProvisionedSandbox(draftId, lease);
-        toastManager.add({
-          type: "error",
-          title: `${cloudEnvironmentLabel} was created but could not be connected.`,
-        });
-        return false;
-      }
-      // Pairing is asynchronous: the remote server must publish its cloned
-      // project before the new draft can point at it. Waiting on the project
-      // atom keeps the cloud action as one user-visible operation rather than
-      // leaving a machine stranded on an unrelated local draft.
-      setCloudProvisioningPhase("loading-project");
-      const pairedProject = await waitForProjectMatch((project) => {
-        if (project.environmentId !== paired.value) return false;
-        if (!identity) return true;
-        const candidate = project.repositoryIdentity;
-        // A freshly booted child can publish its project before the async git
-        // identity resolver fills this field. The child was created for this
-        // draft and starts with no other projects, so the first project in
-        // that environment is the safe handoff target.
-        if (candidate == null) return true;
-        return (
-          candidate?.canonicalKey === identity.canonicalKey ||
-          (candidate?.owner === identity.owner && candidate?.name === identity.name)
-        );
-      }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
-      if (pairedProject === null) {
-        // Keep the lease on the current target so deleting that draft/thread
-        // still has a path to dispose the machine if project publication was
-        // delayed or the remote checkout failed.
-        rememberProvisionedSandbox(draftId, lease);
-        toastManager.add({
-          type: "warning",
-          title: `${cloudEnvironmentLabel} ready, but its project is still loading.`,
-          description: `Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
-        });
-        return false;
-      }
-      rememberProvisionedSandbox(draftId, lease);
-      setComposerDraftModelSelection(draftId, handoff.modelSelection);
-      setDraftThreadContext(draftId, {
-        projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
-        // The sandbox itself is the isolation boundary. Do not try to create
-        // a second worktree inside its already-cloned checkout, which would
-        // require a base branch the draft does not have after pairing.
-        envMode: "local",
-        branch: null,
-        worktreePath: null,
-        startFromOrigin: false,
-        environmentSelection: "manual",
-      });
-      setCloudProvisioningRequested(null);
-      setPendingCloudSendEnvironmentId(pairedProject.environmentId);
-      setCloudProvisioningPhase("ready");
-      readyForSend = true;
+      const identity = activeProject?.repositoryIdentity;
+      const repository =
+        identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+      const cloudEnvironmentLabel =
+        cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
+      setCreatingCloudEnvironment(true);
+      setCloudProvisioningPhase("creating");
+      // The menu closes on the click that starts this, taking its pending label
+      // with it, and building takes minutes. Without a word here the app looks
+      // like it ignored the request.
       toastManager.add({
-        type: "success",
-        title: `${cloudEnvironmentLabel} ready.`,
+        type: "info",
+        title: `Preparing ${cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B"}…`,
         description: repository
-          ? `${repository} is checked out. Sending your message now.`
+          ? `Setting up the environment and cloning ${repository}.`
           : undefined,
       });
-      return true;
-    } finally {
-      setCreatingCloudEnvironment(false);
-      if (!readyForSend) setCloudProvisioningPhase(null);
-    }
-  }, [
-    activeProject,
-    canCreateCloudEnvironment,
-    cloudProvisioningRequested,
-    cloudAccount,
-    connectCloudPairing,
-    draftId,
-    primaryEnvironmentId,
-    provisionCloudEnvironment,
-    setComposerDraftModelSelection,
-    setDraftThreadContext,
-  ]);
+      let readyForSend = false;
+      try {
+        const created = await provisionCloudEnvironment({
+          environmentId: primaryEnvironmentId,
+          input: {
+            provider: cloudProvisioningRequested,
+            providerInstanceId: cloudAccount.instanceId,
+            agentDriver: handoff.agentDriver,
+            ...(repository ? { repository } : {}),
+          },
+        });
+        // Building a machine takes minutes, so every way it can end has to say
+        // so. Reverting the label and going quiet leaves someone watching a
+        // menu, unsure whether they are waiting or have already failed.
+        if (AsyncResult.isFailure(created)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not reach the manager to create a machine.",
+          });
+          return false;
+        }
+        if (created.value.kind !== "provisioned") {
+          // The refusal already explains what to configure; repeating it is more
+          // use than a generic failure.
+          toastManager.add({ type: "error", title: created.value.message });
+          return false;
+        }
+        const lease = {
+          leaseId: created.value.environment.leaseId ?? created.value.environment.sandboxId,
+          sandboxId: created.value.environment.sandboxId,
+          managerEnvironmentId: primaryEnvironmentId,
+        };
+        setCloudProvisioningPhase("pairing");
+        const paired = await connectCloudPairing({
+          pairingUrl: created.value.environment.pairingUrl,
+        });
+        if (AsyncResult.isFailure(paired)) {
+          rememberProvisionedSandbox(draftId, lease);
+          toastManager.add({
+            type: "error",
+            title: `${cloudEnvironmentLabel} was created but could not be connected.`,
+          });
+          return false;
+        }
+        // Pairing is asynchronous: the remote server must publish its cloned
+        // project before the new draft can point at it. Waiting on the project
+        // atom keeps the cloud action as one user-visible operation rather than
+        // leaving a machine stranded on an unrelated local draft.
+        setCloudProvisioningPhase("loading-project");
+        const pairedProject = await waitForProjectMatch((project) => {
+          if (project.environmentId !== paired.value) return false;
+          if (!identity) return true;
+          const candidate = project.repositoryIdentity;
+          // A freshly booted child can publish its project before the async git
+          // identity resolver fills this field. The child was created for this
+          // draft and starts with no other projects, so the first project in
+          // that environment is the safe handoff target.
+          if (candidate == null) return true;
+          return (
+            candidate?.canonicalKey === identity.canonicalKey ||
+            (candidate?.owner === identity.owner && candidate?.name === identity.name)
+          );
+        }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
+        if (pairedProject === null) {
+          // Keep the lease on the current target so deleting that draft/thread
+          // still has a path to dispose the machine if project publication was
+          // delayed or the remote checkout failed.
+          rememberProvisionedSandbox(draftId, lease);
+          toastManager.add({
+            type: "warning",
+            title: `${cloudEnvironmentLabel} ready, but its project is still loading.`,
+            description: `Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
+          });
+          return false;
+        }
+        rememberProvisionedSandbox(draftId, lease);
+        setComposerDraftModelSelection(draftId, handoff.modelSelection);
+        setDraftThreadContext(draftId, {
+          projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
+          // The sandbox itself is the isolation boundary. Do not try to create
+          // a second worktree inside its already-cloned checkout, which would
+          // require a base branch the draft does not have after pairing.
+          envMode: "local",
+          branch: null,
+          worktreePath: null,
+          startFromOrigin: false,
+          environmentSelection: "manual",
+        });
+        setCloudProvisioningRequested(null);
+        setPendingCloudSendEnvironmentId(pairedProject.environmentId);
+        setCloudProvisioningPhase("ready");
+        readyForSend = true;
+        toastManager.add({
+          type: "success",
+          title: `${cloudEnvironmentLabel} ready.`,
+          description: repository
+            ? `${repository} is checked out. Sending your message now.`
+            : undefined,
+        });
+        return true;
+      } finally {
+        setCreatingCloudEnvironment(false);
+        if (!readyForSend) setCloudProvisioningPhase(null);
+      }
+    },
+    [
+      activeProject,
+      canCreateCloudEnvironment,
+      cloudProvisioningRequested,
+      cloudAccount,
+      connectCloudPairing,
+      draftId,
+      primaryEnvironmentId,
+      provisionCloudEnvironment,
+      setComposerDraftModelSelection,
+      setDraftThreadContext,
+    ],
+  );
   const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (cloudProvisioningPhase === null) return null;
     const copy = {
@@ -6999,11 +7002,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (cloudProvisioningRequested) {
-      const cloudModel =
-        cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
-          ? ctxSelectedModel
-          : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-            ctxSelectedModel);
+      const cloudModel = cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
+        ? ctxSelectedModel
+        : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
+          ctxSelectedModel);
       const cloudHandoff = {
         agentDriver: ctxSelectedProvider,
         modelSelection: createModelSelection(
