@@ -515,12 +515,59 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
           );
         if (!namespaceRunner)
           throw new ProvisionRefused("unsupported", "Namespace provisioning is unavailable.");
+        if (request.repository && !config.provisioning.githubToken)
+          throw new ProvisionRefused(
+            "unconfigured",
+            "Cloning a repository into Namespace needs a configured GitHub token.",
+          );
+        const namespaceFiles: {
+          source: string;
+          destination: string;
+          mode?: string;
+        }[] = [];
+        const namespaceEnvironment: { name: string; value: string }[] = [];
+        if (request.agentDriver === "codex" || request.agentDriver === "cursor") {
+          const authPath = accountAuthPath(request.providerInstanceId);
+          await NodeFSP.access(authPath).catch(() => {
+            throw new ProvisionRefused(
+              "credentials",
+              `No credentials for '${request.providerInstanceId}' on this machine.`,
+            );
+          });
+          namespaceFiles.push({
+            source: authPath,
+            destination:
+              request.agentDriver === "cursor"
+                ? "/Users/runner/.config/cursor/auth.json"
+                : "/Users/runner/.codex/auth.json",
+            mode: "600",
+          });
+          if (request.agentDriver === "codex")
+            namespaceEnvironment.push({ name: "CODEX_HOME", value: "/Users/runner/.codex" });
+          else
+            namespaceEnvironment.push(
+              { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file" },
+              { name: "CURSOR_CONFIG_DIR", value: "/Users/runner/.config/cursor" },
+              { name: "HOME", value: "/Users/runner" },
+              {
+                name: "PATH",
+                value: "/Users/runner/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+              },
+            );
+        }
+        for (const file of config.provisioning?.homeFiles ?? []) {
+          namespaceFiles.push({ source: file.source, destination: file.destination, mode: "600" });
+        }
         const prepared = await provisionNamespace(namespaceRunner, {
           ...config.provisioning.namespace,
           providerInstanceId: request.providerInstanceId,
           agentDriver: request.agentDriver,
           repository: request.repository,
           branch: request.branch,
+          githubToken: config.provisioning.githubToken,
+          files: namespaceFiles,
+          environment: namespaceEnvironment,
+          workspaceFiles: config.provisioning.workspaceFiles ?? [],
         });
         try {
           const upstream = new URL(prepared.pairingUrl);

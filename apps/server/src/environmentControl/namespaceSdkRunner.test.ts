@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { exposedOrigin, pairToken, shapeFor } from "./namespaceSdkRunner.ts";
+import { exposedOrigin, namespaceDestination, pairToken, shapeFor } from "./namespaceSdkRunner.ts";
 
 describe("Namespace runner boundary parsing", () => {
   it("parses the workspace URL returned by devbox url expose", () => {
@@ -16,5 +16,12 @@ describe("Namespace runner boundary parsing", () => {
   it("maps the supported macOS sizes to their documented shapes", () => {
     expect(shapeFor("m")).toMatchObject({ virtualCpu: 6, memoryMegabytes: 14336 });
     expect(shapeFor("l")).toMatchObject({ virtualCpu: 12, memoryMegabytes: 28672 });
+  });
+
+  it("keeps transferred files inside the Namespace runner home", () => {
+    expect(namespaceDestination(".config/cursor/auth.json")).toBe(
+      "/Users/runner/.config/cursor/auth.json",
+    );
+    expect(() => namespaceDestination("../../etc/passwd")).toThrow("escapes");
   });
 });

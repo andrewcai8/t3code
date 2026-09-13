@@ -24,6 +24,13 @@ export interface NamespaceRunner {
     readonly agentDriver?: string | undefined;
     readonly repository?: string | undefined;
     readonly branch?: string | undefined;
+    readonly githubToken?: string | undefined;
+    readonly files?: readonly {
+      readonly source: string;
+      readonly destination: string;
+      readonly mode?: string | undefined;
+    }[];
+    readonly environment?: readonly { readonly name: string; readonly value: string }[];
   }) => Promise<void>;
   readonly expose: (input: {
     readonly resource: NamespaceResource;
@@ -41,6 +48,17 @@ export interface NamespaceProvisionRequest {
   readonly agentDriver?: string | undefined;
   readonly repository?: string | undefined;
   readonly branch?: string | undefined;
+  readonly githubToken?: string | undefined;
+  readonly files?: readonly {
+    readonly source: string;
+    readonly destination: string;
+    readonly mode?: string | undefined;
+  }[];
+  readonly environment?: readonly { readonly name: string; readonly value: string }[];
+  readonly workspaceFiles?: readonly {
+    readonly source: string;
+    readonly destination: string;
+  }[];
 }
 
 export interface NamespaceProvisioned {
@@ -62,7 +80,19 @@ export async function provisionNamespace(
   const resource = await runner.create(request);
   const projectDir = resource.workspaceDir;
   try {
-    await runner.bootstrap({ ...request, resource, projectDir });
+    await runner.bootstrap({
+      ...request,
+      resource,
+      projectDir,
+      files: [
+        ...(request.files ?? []),
+        ...(request.workspaceFiles ?? []).map((file) => ({
+          ...file,
+          destination: `${projectDir}/${file.destination}`,
+          mode: "600",
+        })),
+      ],
+    });
     const pairingUrl = await runner.expose({ resource, port: 3000 });
     return { resource, pairingUrl, projectDir };
   } catch (cause) {
