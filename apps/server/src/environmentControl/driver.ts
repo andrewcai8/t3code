@@ -95,8 +95,11 @@ export function accountAuthPath(providerInstanceId: string, home = NodeOS.homedi
 
 type ChildSettings = {
   providers?: Record<string, Record<string, unknown>>;
-  providerInstances?: Record<string, Record<string, unknown>>;
+  providerInstances?: Record<string, ChildProviderInstanceSettings>;
   [key: string]: unknown;
+};
+type ChildProviderInstanceSettings = Record<string, unknown> & {
+  environment?: Array<{ name: string; value: string; sensitive?: boolean }>;
 };
 
 export function enableChildProvider(
@@ -113,6 +116,19 @@ export function enableChildProvider(
   } catch {}
   const providers = settings.providers ?? {};
   const providerInstances = settings.providerInstances ?? {};
+  const existingInstance = providerInstances[providerInstanceId] ?? {};
+  const environment =
+    agentDriver === "cursor"
+      ? [
+          ...(existingInstance.environment ?? []).filter(
+            (variable) =>
+              !["AGENT_CLI_CREDENTIAL_STORE", "CURSOR_CONFIG_DIR", "HOME"].includes(variable.name),
+          ),
+          { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
+          { name: "CURSOR_CONFIG_DIR", value: "/home/user/.config/cursor", sensitive: false },
+          { name: "HOME", value: "/home/user", sensitive: false },
+        ]
+      : existingInstance.environment;
   return `${JSON.stringify({
     ...settings,
     providers: {
@@ -122,9 +138,10 @@ export function enableChildProvider(
     providerInstances: {
       ...providerInstances,
       [providerInstanceId]: {
-        ...(providerInstances[providerInstanceId] ?? {}),
+        ...existingInstance,
         driver: agentDriver,
         enabled: true,
+        ...(environment ? { environment } : {}),
       },
     },
   })}\n`;
@@ -193,7 +210,7 @@ async function prepare(
 
   const selectedCredentialTarget =
     request.agentDriver === "cursor"
-      ? "/home/user/.cursor/auth.json"
+      ? "/home/user/.config/cursor/auth.json"
       : "/home/user/.codex/auth.json";
   await run(`mkdir -p ${NodePath.posix.dirname(selectedCredentialTarget)}`);
   await sandbox.files.write(selectedCredentialTarget, auth);

@@ -74,9 +74,21 @@ it("enables the selected provider instance without copying local paths", () => {
   );
   const parsed = JSON.parse(settings) as {
     providers: Record<string, { enabled?: boolean }>;
-    providerInstances: Record<string, { driver?: string; enabled?: boolean }>;
+    providerInstances: Record<
+      string,
+      {
+        driver?: string;
+        enabled?: boolean;
+        environment?: Array<{ name: string; value: string }>;
+      }
+    >;
   };
   expect(parsed.providers.cursor?.enabled).toBe(true);
-  expect(parsed.providerInstances.cursor_work).toEqual({ driver: "cursor", enabled: true });
+  expect(parsed.providerInstances.cursor_work).toMatchObject({ driver: "cursor", enabled: true });
+  expect(parsed.providerInstances.cursor_work?.environment).toEqual([
+    { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
+    { name: "CURSOR_CONFIG_DIR", value: "/home/user/.config/cursor", sensitive: false },
+    { name: "HOME", value: "/home/user", sensitive: false },
+  ]);
   expect(settings).not.toContain("/Users/andrew");
 });
