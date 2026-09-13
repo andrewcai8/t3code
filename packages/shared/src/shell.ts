@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { workloadCommand, workloadIsolationEnabled } from "./workload.ts";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as Clock from "effect/Clock";
@@ -633,7 +634,9 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
 ): Effect.fn.Return<ResolvedSpawnCommand> {
   const platform = yield* HostProcessPlatform;
   if (platform !== "win32") {
-    return { command, args: [...args], shell: false };
+    return (yield* workloadIsolationEnabled)
+      ? workloadCommand(command, args)
+      : { command, args: [...args], shell: false };
   }
 
   const hostEnvironment = yield* HostProcessEnvironment;

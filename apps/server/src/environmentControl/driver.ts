@@ -13,6 +13,8 @@ import { createClient, createGlobalTransport, createRegionTransport } from "@nam
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
 import * as Schema from "effect/Schema";
+import { ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
+import { e2bStartCommand, e2bStopInheritedServerCommand } from "./e2bBootstrap.ts";
 import type { EnvironmentControlConfig, ManagedTarget } from "./config.ts";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 import { disposeNamespace, provisionNamespace } from "./namespaceProvisioner.ts";
@@ -37,6 +39,22 @@ export const ControllerResult = Schema.Union([
 export type ControllerResult = typeof ControllerResult.Type;
 /** The port a provisioned environment serves T3 on. */
 const PROVISIONED_PORT = 3000;
+
+const decodeEnvironmentDescriptor = Schema.decodeUnknownSync(ExecutionEnvironmentDescriptor);
+
+async function checkEnvironmentReady(host: string, environmentId: string) {
+  const response = await fetch(`https://${host}/.well-known/t3/environment`, {
+    signal: AbortSignal.timeout(10_000),
+    redirect: "error",
+  }).catch(() => {
+    throw new Error("Sandbox is running, but T3 is unreachable. Reconnect when it is ready.");
+  });
+  if (!response.ok) throw new Error(`T3 is not ready (HTTP ${response.status}).`);
+  const descriptor = decodeEnvironmentDescriptor(await response.json());
+  if (descriptor.environmentId !== environmentId)
+    throw new Error("T3 environment identity changed.");
+  return descriptor;
+}
 
 function isMissingSandbox(cause: unknown): boolean {
   const message = cause instanceof Error ? cause.message : String(cause);
@@ -340,41 +358,35 @@ async function prepare(
     `printf 'PRETTY_HOSTNAME=%s\\n' ${JSON.stringify(JSON.stringify(label))} | sudo tee /etc/machine-info >/dev/null`,
   ).catch(() => undefined);
 
-  // Every sandbox from the template inherits one environment ID, and clients
-  // key environments by it, so each environment has to be given its own before
-  // anything pairs with it.
-  //
-  // The child is forked from the template's already-running server. A fork
-  // keeps the process memory and page cache, so replacing the inherited server
-  // after writing this ID takes seconds rather than rereading the install from
-  // cold disk.
-  //
-  // The bracket keeps the pattern from matching the command carrying it, which
-  // would otherwise make this kill its own shell.
-  await run("pkill -f '[t]3 serve' || true");
-  await sandbox.files.write(
-    "/home/user/.t3/userdata/environment-id",
-    `${globalThis.crypto.randomUUID()}\n`,
+  await sandbox.commands.run(e2bStopInheritedServerCommand(PROVISIONED_PORT, projectDir), {
+    user: "root",
+    timeoutMs: 20_000,
+  });
+  const environmentId = globalThis.crypto.randomUUID();
+  await sandbox.files.write("/home/user/.t3/userdata/environment-id", `${environmentId}\n`);
+  const executable = (await run("command -v t3")).stdout.trim();
+  const path = (await run('printf "%s" "$PATH"')).stdout.trim();
+  await sandbox.commands.run(
+    e2bStartCommand({ executable, path, projectDir, port: PROVISIONED_PORT }),
+    {
+      user: "root",
+      timeoutMs: 20_000,
+    },
   );
-  // Binding to every interface is what lets the sandbox's own hostname reach
-  // the server; the environment never joins a relay.
-  await sandbox.commands
-    .run(
-      `nohup sh -c 'cd ${projectDir} && exec t3 serve --no-browser --host 0.0.0.0 ` +
-        `--port ${PROVISIONED_PORT} > /tmp/serve.out 2>&1' >/dev/null 2>&1 &`,
-      { timeoutMs: 20_000, background: true },
-    )
-    .catch(() => undefined);
   const host = sandbox.getHost(PROVISIONED_PORT);
-  const deadline = Date.now() + 600_000;
-  let ready = false;
-  while (!ready && Date.now() < deadline) {
-    await NodeTimersPromises.setTimeout(1_000);
-    ready = await fetch(`https://${host}/`, { signal: AbortSignal.timeout(5_000) })
-      .then((response) => response.status === 200)
-      .catch(() => false);
+  const deadline = Date.now() + 60_000;
+  let descriptor: ExecutionEnvironmentDescriptor | undefined;
+  while (!descriptor && Date.now() < deadline) {
+    descriptor = await checkEnvironmentReady(host, environmentId).catch(() => undefined);
+    if (!descriptor) await NodeTimersPromises.setTimeout(1_000);
   }
-  if (!ready) throw new Error("Provisioned environment never answered");
+  if (!descriptor)
+    throw new Error("Provisioned T3 environment never answered. Check /tmp/serve.out.");
+  if (!descriptor.capabilities.workloadMemoryLimitBytes) {
+    throw new Error(
+      "E2B template needs a T3 build with workload memory isolation. Update the template before creating an environment.",
+    );
+  }
   await run(`t3 project add ${projectDir}`).catch(() => undefined);
 
   // Minted last and never spent here: the token is single use, and verifying it
@@ -679,9 +691,10 @@ export function createCloudDriver(
         info.metadata.account !== providerInstanceId
       )
         throw new Error("Sandbox ownership or purpose changed");
-      await Sandbox.connect(sandboxId, { ...api, timeoutMs: 3_600_000 });
+      const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 3_600_000 });
       if ((await Sandbox.getInfo(sandboxId, api)).state !== "running")
         throw new Error("Sandbox did not resume");
+      await checkEnvironmentReady(sandbox.getHost(PROVISIONED_PORT), environmentId);
       return {};
     },
     pause: async ({ sandboxId, namespaceResource }) => {

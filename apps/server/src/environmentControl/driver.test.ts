@@ -70,6 +70,10 @@ describe("cloud SDK and controller boundary", () => {
         environmentId: "child",
       }),
     ).toEqual({});
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://retained.invalid/.well-known/t3/environment",
+      expect.objectContaining({ redirect: "error" }),
+    );
     expect(sdk.connect).toHaveBeenCalledWith(
       "retained",
       expect.objectContaining({ timeoutMs: 3_600_000 }),

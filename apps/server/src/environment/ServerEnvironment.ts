@@ -1,3 +1,4 @@
+import { readWorkloadMemoryLimit } from "@t3tools/shared/workload";
 import {
   EnvironmentId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -187,6 +188,7 @@ export const make = Effect.gen(function* () {
   const identity = yield* ServerEnvironmentIdentity;
   const hostPlatform = yield* HostProcessPlatform;
   const hostArchitecture = yield* HostProcessArchitecture;
+  const workloadMemoryLimitBytes = yield* readWorkloadMemoryLimit;
   const environmentId = yield* identity.getEnvironmentId;
   const cwdBaseName = path.basename(serverConfig.cwd).trim();
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
@@ -213,6 +215,7 @@ export const make = Effect.gen(function* () {
     },
     serverVersion: packageJson.version,
     capabilities: {
+      ...(workloadMemoryLimitBytes === undefined ? {} : { workloadMemoryLimitBytes }),
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,

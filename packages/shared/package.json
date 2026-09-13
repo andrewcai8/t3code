@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./workload": {
+      "types": "./src/workload.ts",
+      "import": "./src/workload.ts"
+    },
     "./themePalettes": {
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"
