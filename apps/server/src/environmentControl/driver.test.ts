@@ -124,4 +124,15 @@ describe("cloud SDK and controller boundary", () => {
     });
     expect(http.mock.calls[1]?.[1]?.body).toBe('{"instanceId":"observed-instance"}');
   });
+
+  it("pauses an E2B sandbox without killing it", async () => {
+    const pause = vi.fn().mockResolvedValue(true);
+    sdk.connect.mockResolvedValue({ pause });
+    await createCloudDriver(config).pause({ sandboxId: "target" });
+    expect(sdk.connect).toHaveBeenCalledWith(
+      "target",
+      expect.objectContaining({ timeoutMs: 90_000 }),
+    );
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
 });

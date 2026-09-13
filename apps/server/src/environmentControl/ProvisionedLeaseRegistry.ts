@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 
-export const ProvisionedLeaseState = Schema.Literals(["active", "releasing", "disposed"]);
+export const ProvisionedLeaseState = Schema.Literals(["active", "paused", "releasing", "disposed"]);
 export type ProvisionedLeaseState = typeof ProvisionedLeaseState.Type;
 
 const ProvisionedLeaseOwner = Schema.Struct({
@@ -66,6 +66,7 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<"missing" | "disposed" | "started" | "busy">;
   readonly markDisposed: (leaseId: string, now?: Date) => Promise<void>;
+  readonly markPaused: (leaseId: string, now?: Date) => Promise<void>;
   readonly expired: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
 }
 
@@ -159,7 +160,8 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         if (index < 0) return { leases, value: null };
         const current = leases[index];
         if (!current) return { leases, value: null };
-        if (current.state !== "active") return { leases, value: null };
+        if (current.state !== "active" && current.state !== "paused")
+          return { leases, value: null };
         if (
           current.owner !== null &&
           (current.owner.environmentId !== input.owner.environmentId ||
@@ -179,7 +181,11 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
       mutate((leases) => {
         const index = leases.findIndex((lease) => lease.leaseId === leaseId);
         const current = index < 0 ? undefined : leases[index];
-        if (!current || current.state !== "active" || current.owner === null)
+        if (
+          !current ||
+          (current.state !== "active" && current.state !== "paused") ||
+          current.owner === null
+        )
           return { leases, value: null };
         const timestamp = now ?? new Date();
         const updated: ProvisionedLease = {
@@ -218,14 +224,23 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         ),
         value: undefined,
       })),
+    markPaused: (leaseId, now) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) =>
+          lease.leaseId === leaseId
+            ? { ...lease, state: "paused" as const, updatedAt: nowIso(now) }
+            : lease,
+        ),
+        value: undefined,
+      })),
     expired: (now) =>
       consistentRead((leases) => {
         const cutoff = (now ?? new Date()).toISOString();
-        // An expired active lease is recoverable when its heartbeat stops.
-        return leases.filter(
-          (lease) =>
-            lease.expiresAt <= cutoff && (lease.state === "releasing" || lease.state === "active"),
+        // Heartbeat expiry pauses the lease. The provider resource remains recoverable.
+        const expired = leases.filter(
+          (lease) => lease.expiresAt <= cutoff && lease.state === "active",
         );
+        return expired;
       }),
   };
 }

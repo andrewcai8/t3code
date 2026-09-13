@@ -30,6 +30,9 @@ function setup(initial: Observation = { kind: "stopped" }) {
     dispose: async () => {
       calls.push("dispose");
     },
+    pause: async () => {
+      calls.push("pause");
+    },
     observe: async () => {
       calls.push("observe");
       return state;
@@ -192,6 +195,14 @@ describe("managed cloud commands", () => {
         }),
       ).resolves.toEqual({ kind: "claimed" });
       await expect(
+        manager.pause({ leaseId, sandboxId: provisioned.environment.sandboxId }),
+      ).resolves.toEqual({ kind: "paused" });
+      await expect(
+        registry.findBySandbox(provisioned.environment.sandboxId),
+      ).resolves.toMatchObject({
+        state: "paused",
+      });
+      await expect(
         manager.dispose({
           leaseId,
           sandboxId: provisioned.environment.sandboxId,
@@ -204,6 +215,34 @@ describe("managed cloud commands", () => {
         }),
       ).resolves.toEqual({ kind: "disposed" });
       expect(disposeCalls).toBe(1);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("pauses an expired lease without disposing the provider resource", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-control-"));
+    try {
+      const registry = createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
+      await registry.register({
+        leaseId: "expired-lease",
+        sandboxId: "expired-sandbox",
+        provider: "e2b",
+        providerInstanceId: "codex",
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const calls: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async () => {
+        calls.push("pause");
+      };
+      driver.dispose = async () => {
+        calls.push("dispose");
+      };
+      const manager = createEnvironmentControl([], driver, registry);
+      await manager.reapExpiredLeases();
+      expect(calls).toEqual(["pause"]);
+      expect(await registry.findBySandbox("expired-sandbox")).toMatchObject({ state: "paused" });
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

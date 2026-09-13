@@ -12,6 +12,8 @@ import {
   type EnvironmentProvisionResult,
   type EnvironmentProvisionDisposeInput,
   type EnvironmentProvisionDisposeResult,
+  type EnvironmentProvisionPauseInput,
+  type EnvironmentProvisionPauseResult,
   type EnvironmentProvisionClaimInput,
   type EnvironmentProvisionClaimResult,
   type EnvironmentProvisionTouchInput,
@@ -122,24 +124,17 @@ export function createEnvironmentControl(
   };
   const reapExpiredLeases = async (): Promise<void> => {
     if (!leaseRegistry) return;
+    // Heartbeat expiry is a liveness transition only. Keep the provider
+    // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
-      const release =
-        lease.state === "releasing"
-          ? "started"
-          : await leaseRegistry.beginRelease({
-              leaseId: lease.leaseId,
-              sandboxId: lease.sandboxId,
-            });
-      if (release !== "started") continue;
       try {
-        await driver.dispose({
+        await driver.pause({
           sandboxId: lease.sandboxId,
           ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
-          ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
         });
-        await leaseRegistry.markDisposed(lease.leaseId);
+        await leaseRegistry.markPaused(lease.leaseId);
       } catch {
-        // Leave the lease releasing so the next control request can retry it.
+        // Keep the lease eligible for another pause attempt on the next sweep.
       }
     }
   };
@@ -234,6 +229,37 @@ export function createEnvironmentControl(
         };
       }
     },
+    pause: async (
+      input: EnvironmentProvisionPauseInput,
+    ): Promise<EnvironmentProvisionPauseResult> => {
+      try {
+        if (!leaseRegistry)
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "The cloud sandbox lease registry is unavailable.",
+          };
+        const lease = await leaseRegistry.findBySandbox(input.sandboxId);
+        if (!lease || (input.leaseId !== undefined && lease.leaseId !== input.leaseId))
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "The cloud sandbox lease is unknown.",
+          };
+        await driver.pause({
+          sandboxId: input.sandboxId,
+          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+        });
+        await leaseRegistry.markPaused(lease.leaseId);
+        return { kind: "paused" };
+      } catch {
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The cloud sandbox could not be paused.",
+        };
+      }
+    },
     claim: async (
       input: EnvironmentProvisionClaimInput,
     ): Promise<EnvironmentProvisionClaimResult> => {
@@ -292,6 +318,9 @@ export class EnvironmentControl extends Context.Service<
     readonly dispose: (
       input: EnvironmentProvisionDisposeInput,
     ) => Effect.Effect<EnvironmentProvisionDisposeResult, EnvironmentControlError>;
+    readonly pause: (
+      input: EnvironmentProvisionPauseInput,
+    ) => Effect.Effect<EnvironmentProvisionPauseResult, EnvironmentControlError>;
     readonly claim: (
       input: EnvironmentProvisionClaimInput,
     ) => Effect.Effect<EnvironmentProvisionClaimResult, EnvironmentControlError>;
@@ -372,6 +401,12 @@ export const layer = Layer.effect(
           kind: "refused" as const,
           reason: "unconfigured" as const,
           message: "This install has no cloud provisioning template configured.",
+        }),
+      pause: (input) =>
+        run<EnvironmentProvisionPauseResult>((service) => service.pause(input), {
+          kind: "refused" as const,
+          reason: "unknown" as const,
+          message: "This install has no provisioning template configured.",
         }),
       claim: (input) =>
         run<EnvironmentProvisionClaimResult>((service) => service.claim(input), {

@@ -98,6 +98,24 @@ export const EnvironmentProvisionDisposeResult = Schema.Union([
 ]);
 export type EnvironmentProvisionDisposeResult = typeof EnvironmentProvisionDisposeResult.Type;
 
+/** Pause a provisioned workspace while retaining its provider resource. */
+export const EnvironmentProvisionPauseInput = Schema.Struct({
+  leaseId: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  sandboxId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionPauseInput = typeof EnvironmentProvisionPauseInput.Type;
+
+export const EnvironmentProvisionPauseResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("paused") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unconfigured", "unknown"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionPauseResult = typeof EnvironmentProvisionPauseResult.Type;
+
 export const EnvironmentProvisionClaimInput = Schema.Struct({
   leaseId: TrimmedNonEmptyString,
   environmentId: EnvironmentId,

@@ -2086,6 +2086,8 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.environmentControlDispose]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlDispose, environmentControl.dispose(input)),
+        [WS_METHODS.environmentControlPause]: (input) =>
+          observeRpcEffect(WS_METHODS.environmentControlPause, environmentControl.pause(input)),
         [WS_METHODS.environmentControlClaim]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlClaim, environmentControl.claim(input)),
         [WS_METHODS.environmentControlTouch]: (input) =>

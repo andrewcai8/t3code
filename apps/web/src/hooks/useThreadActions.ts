@@ -13,6 +13,7 @@ import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-se
 import {
   EnvironmentId,
   type EnvironmentProvisionDisposeResult,
+  type EnvironmentProvisionPauseResult,
   type ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
@@ -67,6 +68,7 @@ export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveB
 type ProvisionedSandboxDisposeOutcome =
   | { readonly kind: "absent" }
   | EnvironmentProvisionDisposeResult;
+type ProvisionedSandboxPauseOutcome = { readonly kind: "absent" } | EnvironmentProvisionPauseResult;
 
 export class ThreadSettlementUnsupportedError extends Schema.TaggedError<ThreadSettlementUnsupportedError>()(
   "ThreadSettlementUnsupportedError",
@@ -202,6 +204,10 @@ export function useThreadActions() {
     serverEnvironment.disposeProvisionedEnvironment,
     { reportFailure: false },
   );
+  const pauseProvisionedEnvironment = useAtomCommand(
+    serverEnvironment.pauseProvisionedEnvironment,
+    { reportFailure: false },
+  );
   const settleThreadMutation = useAtomCommand(threadEnvironment.settle, {
     reportFailure: false,
   });
@@ -276,6 +282,36 @@ export function useThreadActions() {
       return result;
     },
     [disposeProvisionedEnvironment],
+  );
+
+  const pauseProvisionedSandboxForThread = useCallback(
+    async (target: ScopedThreadRef) => {
+      const lease = provisionedSandboxFor(target);
+      if (!lease) return AsyncResult.success<ProvisionedSandboxPauseOutcome>({ kind: "absent" });
+      const result = await pauseProvisionedEnvironment({
+        environmentId: lease.managerEnvironmentId,
+        input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId },
+      });
+      if (result._tag === "Success" && result.value.kind === "refused") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Cloud workspace remains running",
+            description: result.value.message,
+          }),
+        );
+      } else if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Could not pause cloud workspace",
+            description: "Retry when the cloud manager is reachable.",
+          }),
+        );
+      }
+      return result;
+    },
+    [pauseProvisionedEnvironment],
   );
 
   const stopProvisionedCloudMachine = useCallback(
@@ -364,27 +400,7 @@ export function useThreadActions() {
       if (archiveResult._tag === "Failure") {
         return archiveResult;
       }
-      const disposeResult = await disposeProvisionedSandboxForThread(threadRef);
-      if (disposeResult._tag === "Success") {
-        const value = disposeResult.value;
-        if (value.kind === "refused") {
-          toastManager.add(
-            stackedThreadToast({
-              type: "warning",
-              title: "Thread archived, but its cloud machine is still running.",
-              description: value.message,
-            }),
-          );
-        }
-      } else if (!isAtomCommandInterrupted(disposeResult)) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Thread archived, but its cloud machine is still running.",
-            description: "Retry archiving after the cloud manager is reachable.",
-          }),
-        );
-      }
+      await pauseProvisionedSandboxForThread(threadRef);
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -406,9 +422,9 @@ export function useThreadActions() {
     },
     [
       archiveThreadMutation,
-      disposeProvisionedSandboxForThread,
       getCurrentRouteThreadRef,
       markThreadVisited,
+      pauseProvisionedSandboxForThread,
       resolveThreadTarget,
     ],
   );
@@ -665,12 +681,18 @@ export function useThreadActions() {
         environmentId: target.environmentId,
         input: { threadId: target.threadId },
       });
+      if (result._tag === "Success") await pauseProvisionedSandboxForThread(target);
       if (result._tag === "Success" && wokeAt !== null) {
         markThreadVisited(scopedThreadKey(target), wokeAt);
       }
       return result;
     },
-    [markThreadVisited, resolveThreadTarget, settleThreadMutation],
+    [
+      markThreadVisited,
+      pauseProvisionedSandboxForThread,
+      resolveThreadTarget,
+      settleThreadMutation,
+    ],
   );
 
   const unsettleThread = useCallback(

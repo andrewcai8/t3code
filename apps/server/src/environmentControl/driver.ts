@@ -167,6 +167,10 @@ export interface CloudDriver {
   observeBroker(): Promise<Observation>;
   bootstrapBroker(): Promise<void>;
   wake(target: ManagedTarget): Promise<void>;
+  pause(input: {
+    readonly sandboxId: string;
+    readonly namespaceResource?: NamespaceResource;
+  }): Promise<void>;
   stop(target: ManagedTarget, instanceId: string): Promise<ControllerResult>;
   provision(request: ProvisionRequest): Promise<Provisioned>;
   dispose(input: {
@@ -669,6 +673,22 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         await sandbox.kill();
       } catch (cause) {
         if (!isMissingSandbox(cause)) throw cause;
+      }
+    },
+    pause: async ({ sandboxId, namespaceResource }) => {
+      if (namespaceResource) {
+        if (!namespaceRunner) throw new Error("Namespace runner is unavailable");
+        // Shutdown stops the active instance but retains the Devbox record and
+        // workspace, so reconnect can resume it without reprovisioning.
+        await namespaceRunner.destroyInstance(namespaceResource);
+        return;
+      }
+      try {
+        const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
+        await sandbox.pause();
+      } catch (cause) {
+        if (isMissingSandbox(cause)) return;
+        throw cause;
       }
     },
     stop: async (target, instanceId) => {
