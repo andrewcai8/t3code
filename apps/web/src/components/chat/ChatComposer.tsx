@@ -1311,6 +1311,7 @@ export interface ChatComposerProps {
     readonly label: string;
     readonly connection: EnvironmentConnectionPresentation;
   } | null;
+  canReconnectOnSend?: boolean;
 
   // Pending approvals / inputs
   activePendingApproval: PendingApproval | null;
@@ -1455,6 +1456,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sendDisabledReason: externalSendDisabledReason,
     isPreparingWorktree,
     environmentUnavailable,
+    canReconnectOnSend = false,
     activePendingApproval,
     pendingApprovals,
     pendingUserInputs,
@@ -1843,6 +1845,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // the thread's own selection instead of swapping in the setup button and
   // back once the catalog lands.
   const providerCatalogPending = noProviderAvailable && !providerCatalogKnown;
+  const sendNeedsConnection = environmentUnavailable !== null && canReconnectOnSend;
+  const sendingUnavailable =
+    !sendNeedsConnection && (environmentUnavailable !== null || noProviderAvailable);
   const showProviderUnavailable = noProviderAvailable && !providerCatalogPending;
   const providerSetupInstanceId = noProviderAvailable
     ? (unavailableProviderInstanceId ??
@@ -2617,9 +2622,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy ||
     isSendDisabled ||
     isConnecting ||
-    noProviderAvailable ||
+    (!sendNeedsConnection && noProviderAvailable) ||
     projectSelectionRequired ||
-    environmentUnavailable !== null ||
+    (!sendNeedsConnection && environmentUnavailable !== null) ||
     !composerSendState.hasSendableContent;
   const collapsedComposerPrimaryActionLabel = "Send message";
   const showMobilePendingAnswerActions =
@@ -3715,7 +3720,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }, intent: ComposerSubmissionIntent = "foreground") => {
-      if (noProviderAvailable || isSendDisabled) {
+      if ((!sendNeedsConnection && noProviderAvailable) || isSendDisabled) {
         event?.preventDefault();
         return;
       }
@@ -3771,6 +3776,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       blurMobileComposerAfterSend,
       isSendDisabled,
       noProviderAvailable,
+      sendNeedsConnection,
       onSend,
       promptRef,
       shouldBlurMobileComposerOnSubmit,
@@ -6074,9 +6080,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               sendDisabledReason={sendDisabledReason}
                               isConnecting={isConnecting}
                               isEnvironmentUnavailable={
-                                environmentUnavailable !== null ||
-                                noProviderAvailable ||
-                                projectSelectionRequired
+                                sendingUnavailable || projectSelectionRequired
                               }
                               isPreparingWorktree={false}
                               hasSendableContent={false}
@@ -6703,11 +6707,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isSendBusy={isSendBusy}
                       sendDisabledReason={sendDisabledReason}
                       isConnecting={isConnecting}
-                      isEnvironmentUnavailable={
-                        environmentUnavailable !== null ||
-                        noProviderAvailable ||
-                        projectSelectionRequired
-                      }
+                      isEnvironmentUnavailable={sendingUnavailable || projectSelectionRequired}
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
@@ -6812,11 +6812,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isSendBusy={isSendBusy}
                     sendDisabledReason={sendDisabledReason}
                     isConnecting={isConnecting}
-                    isEnvironmentUnavailable={
-                      environmentUnavailable !== null ||
-                      noProviderAvailable ||
-                      projectSelectionRequired
-                    }
+                    isEnvironmentUnavailable={sendingUnavailable || projectSelectionRequired}
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}

@@ -20,6 +20,7 @@ export class BearerConnectionTarget extends Schema.TaggedClass<BearerConnectionT
   {
     ...ConnectionTargetBase,
     connectionId: Schema.String,
+    workspaceStatus: Schema.optionalKey(Schema.Literal("missing")),
   },
 ) {}
 
@@ -72,6 +73,7 @@ export const ConnectionBlockedReason = Schema.Literals([
   "configuration",
   "permission",
   "unsupported",
+  "workspace-missing",
 ]);
 export type ConnectionBlockedReason = typeof ConnectionBlockedReason.Type;
 

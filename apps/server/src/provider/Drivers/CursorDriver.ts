@@ -53,7 +53,7 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { probeCursorSkills } from "./CursorSkills.ts";
+import { discoverCursorSkills, probeCursorSkills } from "./CursorSkills.ts";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("cursor");
@@ -143,6 +143,17 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         processEnv,
         discoverModels,
       ).pipe(
+        // Populate the machine snapshot with user skills during the normal
+        // provider check. The composer can open before a project cwd is
+        // available, so waiting for a workspace-scoped refresh makes skills
+        // disappear from the slash menu in a fresh desktop chat.
+        Effect.flatMap((provider) =>
+          effectiveConfig.enabled
+            ? discoverCursorSkills(undefined, processEnv).pipe(
+                Effect.map((skills) => ({ ...provider, skills })),
+              )
+            : Effect.succeed(provider),
+        ),
         Effect.map(stampIdentity),
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -157,7 +168,16 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
-          buildInitialCursorProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+          buildInitialCursorProviderSnapshot(settings.provider).pipe(
+            Effect.flatMap((provider) =>
+              effectiveConfig.enabled
+                ? discoverCursorSkills(undefined, processEnv).pipe(
+                    Effect.map((skills) => ({ ...provider, skills })),
+                  )
+                : Effect.succeed(provider),
+            ),
+            Effect.map(stampIdentity),
+          ),
         checkProvider,
         // Model catalog and capabilities come exclusively from Cursor's
         // list_available_models extension method during provider checks.

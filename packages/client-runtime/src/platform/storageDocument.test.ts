@@ -71,6 +71,34 @@ const REMOTE_TOKEN = new TokenStore.RemoteDpopAccessToken({
 });
 
 describe("ConnectionCatalogDocument", () => {
+  it("retains missing workspace status and credentials through catalog reload", () => {
+    const original = registerConnectionInCatalog(
+      { ...EMPTY_CONNECTION_CATALOG_DOCUMENT, remoteDpopTokens: [REMOTE_TOKEN] },
+      new BearerConnectionRegistration({
+        target: BEARER_TARGET,
+        profile: BEARER_PROFILE,
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+    const missing = registerConnectionInCatalog(
+      original,
+      new BearerConnectionRegistration({
+        target: new BearerConnectionTarget({ ...BEARER_TARGET, workspaceStatus: "missing" }),
+        profile: BEARER_PROFILE,
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+    const schema = Schema.fromJsonString(ConnectionCatalogDocument);
+    const reloaded = Schema.decodeSync(schema)(Schema.encodeSync(schema)(missing));
+
+    expect(reloaded.targets).toEqual([
+      new BearerConnectionTarget({ ...BEARER_TARGET, workspaceStatus: "missing" }),
+    ]);
+    expect(reloaded.profiles).toEqual(original.profiles);
+    expect(reloaded.credentials).toEqual(original.credentials);
+    expect(reloaded.remoteDpopTokens).toEqual(original.remoteDpopTokens);
+  });
+
   it.effect("persists explicit GitHub trust and forgets it when a connection is removed", () =>
     Effect.gen(function* () {
       let document = EMPTY_CONNECTION_CATALOG_DOCUMENT;

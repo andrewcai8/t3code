@@ -788,6 +788,20 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("working");
   });
 
+  it("reports an expired workspace even when cached activity still says it is running", () => {
+    expect(
+      resolveSidebarThreadStatus(
+        { ...idle, session, hasPendingApprovals: true, backgroundLiveness: "working" },
+        {
+          phase: "error",
+          error: "Workspace expired",
+          traceId: null,
+          blockedReason: "workspace-missing",
+        },
+      ),
+    ).toBe("expired");
+  });
+
   it("reports failed only while the session status is error", () => {
     expect(
       resolveSidebarThreadStatus({

@@ -4,8 +4,6 @@ import { memo, useMemo } from "react";
 
 import type { EnvironmentOption } from "./BranchToolbar.logic";
 
-/** Not an environment id: the machine it names has yet to be created. */
-export const CREATE_CLOUD_VALUE = "create-cloud-environment";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { composerFloatingLayerProps } from "./chat/composerEventScope";
 import {
@@ -18,6 +16,15 @@ import {
   SelectValue,
 } from "./ui/select";
 
+export const CREATE_CLOUD_VALUE = "create-cloud-environment";
+export const CREATE_NAMESPACE_VALUE = "create-namespace-environment";
+
+export type CloudEnvironmentProvider = "e2b" | "namespace";
+export const CLOUD_ENVIRONMENT_OPTIONS = {
+  e2b: { value: CREATE_CLOUD_VALUE, label: "E2B" },
+  namespace: { value: CREATE_NAMESPACE_VALUE, label: "Namespace Mac" },
+} satisfies Record<CloudEnvironmentProvider, { value: string; label: string }>;
+
 interface BranchToolbarEnvironmentSelectorProps {
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
@@ -29,8 +36,10 @@ interface BranchToolbarEnvironmentSelectorProps {
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   // Absent where an environment cannot be created, which is any install
   // without a configured cloud manager.
-  onCreateCloudEnvironment?: (() => void) | undefined;
+  onCreateCloudEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
+  onCreateNamespaceEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
   creatingCloudEnvironment?: boolean;
+  pendingCloudProvider?: CloudEnvironmentProvider | null;
 }
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -39,7 +48,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   envLocked,
   environmentId,
   onCreateCloudEnvironment,
+  onCreateNamespaceEnvironment,
   creatingCloudEnvironment,
+  pendingCloudProvider,
   availableEnvironments,
   onEnvironmentChange,
 }: BranchToolbarEnvironmentSelectorProps) {
@@ -56,8 +67,18 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         value: env.environmentId,
         label: env.label,
       })),
+      ...(onCreateCloudEnvironment ? [{ value: CREATE_CLOUD_VALUE, label: "E2B" }] : []),
+      ...(onCreateNamespaceEnvironment
+        ? [{ value: CREATE_NAMESPACE_VALUE, label: "Namespace Mac" }]
+        : []),
     ],
-    [availableEnvironments, autoEnvironmentLabel, onAutoEnvironment],
+    [
+      availableEnvironments,
+      autoEnvironmentLabel,
+      onAutoEnvironment,
+      onCreateCloudEnvironment,
+      onCreateNamespaceEnvironment,
+    ],
   );
 
   // The static label carries the xs control's height (h-7 sm:h-6) as well as
@@ -93,12 +114,22 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   return (
     <Select
       modal={false}
-      value={autoEnvironmentLabel ? "auto" : environmentId}
+      value={
+        pendingCloudProvider
+          ? CLOUD_ENVIRONMENT_OPTIONS[pendingCloudProvider].value
+          : autoEnvironmentLabel
+            ? "auto"
+            : environmentId
+      }
       onValueChange={(value) => {
         // A sentinel rather than an environment id: the machine this names
         // does not exist yet, which is the whole point of choosing it.
         if (value === CREATE_CLOUD_VALUE) {
-          onCreateCloudEnvironment?.();
+          onCreateCloudEnvironment?.("e2b");
+          return;
+        }
+        if (value === CREATE_NAMESPACE_VALUE) {
+          onCreateNamespaceEnvironment?.("namespace");
           return;
         }
         if (value === "auto") {
@@ -164,7 +195,19 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             <SelectItem value={CREATE_CLOUD_VALUE} disabled={creatingCloudEnvironment === true}>
               <span className="inline-flex items-center gap-1.5">
                 <CloudIcon className="size-3" aria-hidden="true" />
-                {creatingCloudEnvironment ? "Creating cloud machine…" : "New cloud machine (E2B)"}
+                {creatingCloudEnvironment && pendingCloudProvider === "e2b"
+                  ? "Preparing E2B…"
+                  : "E2B"}
+              </span>
+            </SelectItem>
+          ) : null}
+          {onCreateNamespaceEnvironment ? (
+            <SelectItem value={CREATE_NAMESPACE_VALUE} disabled={creatingCloudEnvironment === true}>
+              <span className="inline-flex items-center gap-1.5">
+                <CloudIcon className="size-3" aria-hidden="true" />
+                {creatingCloudEnvironment && pendingCloudProvider === "namespace"
+                  ? "Preparing Namespace Mac…"
+                  : "Namespace Mac"}
               </span>
             </SelectItem>
           ) : null}

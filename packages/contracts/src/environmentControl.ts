@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
   Schema.Struct({ kind: Schema.Literals(["running", "stopped"]), observedAt: Schema.String }),
@@ -9,7 +10,10 @@ export type ComputeState = typeof ComputeState.Type;
 export const ManagedEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   label: TrimmedNonEmptyString,
-  provider: Schema.Literals(["e2b", "namespace"]),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  namespaceProxy: Schema.optional(
+    Schema.Struct({ proxyId: TrimmedNonEmptyString, proxyOrigin: TrimmedNonEmptyString }),
+  ),
   state: ComputeState,
 });
 export type ManagedEnvironment = typeof ManagedEnvironment.Type;
@@ -38,7 +42,9 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
  * provider vocabulary and nothing else.
  */
 export const EnvironmentProvisionInput = Schema.Struct({
-  provider: Schema.Literals(["e2b"]),
+  provider: Schema.Literals(["e2b", "namespace"]),
+  /** Provider driver selected in the local composer. */
+  agentDriver: Schema.optional(ProviderDriverKind),
   /** Which provider account the environment should run its agent on. */
   providerInstanceId: TrimmedNonEmptyString,
   /** `owner/name`; omitted leaves the environment with an empty workspace. */
@@ -48,6 +54,8 @@ export const EnvironmentProvisionInput = Schema.Struct({
 export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
 
 export const ProvisionedEnvironment = Schema.Struct({
+  leaseId: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
   sandboxId: TrimmedNonEmptyString,
   /** Single use, and the only way a client can reach the new environment. */
   pairingUrl: TrimmedNonEmptyString,
@@ -71,3 +79,89 @@ export const EnvironmentProvisionResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionResult = typeof EnvironmentProvisionResult.Type;
+
+/** A one-shot cleanup request for an environment created by provisioning. */
+export const EnvironmentProvisionDisposeInput = Schema.Struct({
+  leaseId: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  sandboxId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionDisposeInput = typeof EnvironmentProvisionDisposeInput.Type;
+
+export const EnvironmentProvisionDisposeResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("disposed") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unconfigured", "unknown"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionDisposeResult = typeof EnvironmentProvisionDisposeResult.Type;
+
+/** Pause a provisioned workspace while retaining its provider resource. */
+export const EnvironmentProvisionPauseInput = Schema.Struct({
+  leaseId: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  sandboxId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionPauseInput = typeof EnvironmentProvisionPauseInput.Type;
+
+export const EnvironmentProvisionPauseResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("paused") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unconfigured", "unknown"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionPauseResult = typeof EnvironmentProvisionPauseResult.Type;
+
+export const EnvironmentProvisionResumeInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+  threadId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionResumeInput = typeof EnvironmentProvisionResumeInput.Type;
+
+export const EnvironmentProvisionResumeResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("resumed") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unknown", "missing"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionResumeResult = typeof EnvironmentProvisionResumeResult.Type;
+
+export const EnvironmentProvisionClaimInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+  threadId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionClaimInput = typeof EnvironmentProvisionClaimInput.Type;
+
+export const EnvironmentProvisionClaimResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("claimed") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literal("unknown"),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionClaimResult = typeof EnvironmentProvisionClaimResult.Type;
+
+export const EnvironmentProvisionTouchInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionTouchInput = typeof EnvironmentProvisionTouchInput.Type;
+
+export const EnvironmentProvisionTouchResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("touched") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unknown", "missing"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionTouchResult = typeof EnvironmentProvisionTouchResult.Type;

@@ -16,6 +16,7 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  | "stop-cloud-machine"
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -32,6 +33,7 @@ export interface ThreadActionMenuState {
   readonly isSettled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
+  readonly hasProvisionedCloudMachine: boolean;
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
@@ -42,6 +44,16 @@ export interface ThreadActionMenuState {
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+}
+
+export function stopProvisionedCloudMachineMenuItem(): ContextMenuItem<"stop-cloud-machine"> {
+  return {
+    id: "stop-cloud-machine",
+    label: "Stop cloud machine",
+    icon: "cloud",
+    destructive: true,
+    separatorBefore: true,
+  };
 }
 
 /**
@@ -95,6 +107,7 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    ...(state.hasProvisionedCloudMachine ? [stopProvisionedCloudMachineMenuItem()] : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [

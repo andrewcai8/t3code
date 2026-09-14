@@ -85,6 +85,31 @@ export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): b
 }
 
 /**
+ * Pick the healthiest account for a driver when a chat does not pin one.
+ * Usage is conservative: the fullest reported window is the account's score,
+ * so an account is only preferred when every reported window has room. Usage
+ * that is unavailable (or has no windows) is ignored and only used as a
+ * deterministic fallback when no account reports a usable score.
+ */
+export function selectProviderInstanceByUsage(
+  entries: ReadonlyArray<ProviderInstanceEntry>,
+  driverKind: ProviderDriverKind,
+): ProviderInstanceEntry | undefined {
+  const candidates = entries
+    .filter((entry) => entry.driverKind === driverKind && isProviderInstancePickerReady(entry))
+    .toSorted((a, b) => String(a.instanceId).localeCompare(String(b.instanceId)));
+  if (candidates.length === 0) return undefined;
+
+  const scored = candidates.flatMap((entry) => {
+    const windows = entry.snapshot.usageLimits?.windows;
+    if (entry.snapshot.usageLimits?.unavailable || !windows || windows.length === 0) return [];
+    const score = Math.max(...windows.map((window) => window.usedPercent));
+    return Number.isFinite(score) ? [{ entry, score }] : [];
+  });
+  return scored.sort((a, b) => a.score - b.score)[0]?.entry ?? candidates[0];
+}
+
+/**
  * Project the wire `ServerProvider[]` into instance entries, one per
  * configured instance. Preserves the server's ordering (which sources
  * from `deriveProviderInstanceConfigMap` — explicit `providerInstances.*`

@@ -180,6 +180,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     reconcilePlatform: () => Effect.die("Unexpected environment reconciliation"),
     remove: () => Effect.die("Unexpected environment removal"),
     removeRelayEnvironments: () => Effect.die("Unexpected environment removal"),
+    markWorkspaceMissing: () => Effect.die("Unexpected missing workspace"),
     retryNow: () => Effect.void,
     setEnabled: () => Effect.die("Unexpected environment toggle"),
     state: () => SubscriptionRef.get(supervisor.state),

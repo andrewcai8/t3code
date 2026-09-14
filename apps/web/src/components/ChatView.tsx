@@ -321,6 +321,11 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { connectPairing } from "../connection/onboarding";
+import {
+  provisionedSandboxFor,
+  rememberProvisionedSandbox,
+  transferProvisionedSandboxLease,
+} from "../cloud/provisionedSandboxLeases";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import {
@@ -336,6 +341,7 @@ import {
   useThread,
   useThreadRefs,
   useThreadShell,
+  waitForProjectMatch,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
@@ -373,6 +379,7 @@ import {
 } from "./chat/ThreadErrorBanner";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ComposerSurface } from "./chat/ComposerSurface";
+import { Spinner } from "./ui/spinner";
 import {
   hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
@@ -469,6 +476,9 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
+import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
+import { provisionedSandboxForEnvironment } from "../cloud/provisionedSandboxLeases";
+import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
 import {
@@ -1407,6 +1417,7 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
+const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
 const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
 const noopHeldTurnDiff = (_turnId: TurnId, _filePath?: string) => {};
 const noopHeldRevert = (_targetTurnCount: number) => {};
@@ -1439,7 +1450,7 @@ export default function ChatView(props: ChatViewProps) {
   const threadSyncPhase = routeKind === "server" ? (props.threadSyncPhase ?? null) : null;
   const threadDetailLoading = threadSyncPhase === "loading";
   const handleNewThread = useNewThreadHandler();
-  const { settleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
+  const { settleThread, unsettleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
@@ -1501,6 +1512,7 @@ export default function ChatView(props: ChatViewProps) {
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
+  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
@@ -1726,6 +1738,11 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [pendingServerThreadEnvMode, setPendingServerThreadEnvMode] =
     useState<DraftThreadEnvMode | null>(null);
+  const [cloudProvisioningRequested, setCloudProvisioningRequested] = useState<
+    "e2b" | "namespace" | null
+  >(null);
+  const [pendingCloudSendEnvironmentId, setPendingCloudSendEnvironmentId] =
+    useState<EnvironmentId | null>(null);
   const [pendingServerThreadBranch, setPendingServerThreadBranch] = useState<string | null>();
   const [
     pendingServerThreadStartFromOriginByThreadId,
@@ -1760,6 +1777,10 @@ export default function ChatView(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  // The cloud handoff resumes sending from the same render that clears the
+  // pending environment flag. Let that internal call cross the guard once;
+  // an ordinary user send must still wait for the handoff to finish.
+  const resumingCloudSendRef = useRef(false);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
@@ -2190,6 +2211,13 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const activeWorkspaceMissing =
+    activeEnvironment?.connection.blockedReason === "workspace-missing";
+  const canReconnectOnSend =
+    activeEnvironmentUnavailable &&
+    !activeWorkspaceMissing &&
+    activeThread != null &&
+    provisionedSandboxForEnvironment(activeThread.environmentId) !== null;
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -2222,6 +2250,18 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeEnvironment, activeEnvironmentUnavailable, activeEnvironmentUnavailableLabel]);
   const handleReconnectActiveEnvironment = useCallback(
     async (environmentId: EnvironmentId) => {
+      const recovery = await recoverEnvironment(environmentId);
+      if (recovery.kind === "ready") return;
+      if (recovery.kind === "failed") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not reconnect environment",
+            description: recovery.message,
+          }),
+        );
+        return;
+      }
       const result = await retryEnvironment(environmentId);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2234,7 +2274,7 @@ export default function ChatView(props: ChatViewProps) {
         );
       }
     },
-    [retryEnvironment],
+    [recoverEnvironment, retryEnvironment],
   );
   const disconnectDelayElapsed = useEnvironmentDisconnectDelay(
     activeEnvironmentUnavailable ? activeEnvironment.environmentId : null,
@@ -2507,6 +2547,7 @@ export default function ChatView(props: ChatViewProps) {
     const items: ComposerBannerStackItem[] = [];
     const updateRunning = serverUpdateState.status === "running";
     const unavailableConnection = activeEnvironmentUnavailableState?.connection ?? null;
+    const workspaceMissing = unavailableConnection?.blockedReason === "workspace-missing";
     const disconnectAction =
       canDisconnectActiveEnvironment && activeEnvironmentUnavailableState ? (
         <Button
@@ -2525,6 +2566,7 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
+    const waitForAutomaticReconnect = environmentReconnecting && !canReconnectOnSend;
     // Reconnecting to a version-skewed server with no update in flight
     // usually means the server is restarting mid-update and a refresh wiped
     // the in-memory update state. Fold the reconnect and version banners
@@ -2561,23 +2603,41 @@ export default function ChatView(props: ChatViewProps) {
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
           variant: unavailableConnection.phase === "error" ? "error" : "warning",
           icon: <WifiOffIcon />,
-          title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+          title: workspaceMissing
+            ? `${activeEnvironmentUnavailableState.label} is no longer available`
+            : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+          description: workspaceMissing
+            ? "This workspace expired. Saved history is available here. Continue in a recovered or new workspace."
+            : environmentReconnecting
+              ? "Trying again"
+              : "Reconnect to continue",
           actions: (
             <>
-              {!environmentReconnecting ? (
+              {!workspaceMissing && (
                 <Button
                   size="xs"
                   variant="ghost"
+                  disabled={waitForAutomaticReconnect}
                   onClick={() =>
                     void handleReconnectActiveEnvironment(
                       activeEnvironmentUnavailableState.environmentId,
                     )
                   }
                 >
-                  Reconnect
+                  {waitForAutomaticReconnect ? "Reconnecting..." : "Reconnect"}
                 </Button>
-              ) : null}
-              {disconnectAction}
+              )}
+              {workspaceMissing ? (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => void navigate({ to: "/settings/connections" })}
+                >
+                  Connections
+                </Button>
+              ) : (
+                disconnectAction
+              )}
             </>
           ),
         });
@@ -2669,6 +2729,7 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
+    canReconnectOnSend,
     reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,
@@ -2732,7 +2793,7 @@ export default function ChatView(props: ChatViewProps) {
   const supportsConversationRollback =
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
-  const phase = derivePhase(activeThread?.session ?? null);
+  const phase = derivePhase(activeWorkspaceMissing ? null : (activeThread?.session ?? null));
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const latestCheckpointCompletedAt = activeThread?.checkpoints.at(-1)?.completedAt ?? null;
   const workspaceMutationId = useMemo(() => {
@@ -3067,7 +3128,8 @@ export default function ChatView(props: ChatViewProps) {
     compactRequestIsActive &&
     !compactionSettled;
   const isWorking =
-    phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting;
+    !activeWorkspaceMissing &&
+    (phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting);
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -3665,6 +3727,8 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const onAutoEnvironment = useCallback(() => {
     if (envLocked || !draftId) return;
+    setCloudProvisioningRequested(null);
+    setPendingCloudSendEnvironmentId(null);
     if (composerHasAttachments) {
       toastManager.add({
         type: "warning",
@@ -3708,6 +3772,8 @@ export default function ChatView(props: ChatViewProps) {
   const onEnvironmentChange = useCallback(
     (nextEnvironmentId: EnvironmentId) => {
       if (envLocked || !draftId) return;
+      setCloudProvisioningRequested(null);
+      setPendingCloudSendEnvironmentId(null);
       const target = logicalProjectEnvironments.find(
         (env) => env.environmentId === nextEnvironmentId,
       );
@@ -4465,96 +4531,206 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadMetadata?.linkedPullRequest ?? activeThreadMetadata?.branchPullRequest ?? null;
   const activeProjectRepository = activeProject?.repositoryIdentity?.displayName ?? null;
 
-  /**
-   * Ask the primary environment for a cloud machine and run this draft on it.
-   *
-   * Choosing where to run is a composer decision, so creating somewhere to run
-   * belongs beside it rather than in settings: the moment someone wants a cloud
-   * machine is the moment they are starting work, not configuring an app.
-   *
-   * The repository comes from the project so the machine arrives with the code
-   * already on it. Without that a new machine is an empty box, and the person
-   * who asked for it has to go and fill it before it is worth anything.
-   */
+  /** Provisioning is reserved by the draft, then committed when its first message is sent. */
   const provisionCloudEnvironment = useAtomCommand(serverEnvironment.provisionEnvironment, {
+    reportFailure: false,
+  });
+  const claimCloudLease = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
     reportFailure: false,
   });
   const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
   const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
-  const cloudAccount = useMemo(() => {
-    const providers = primaryEnvironment?.serverConfig?.providers ?? [];
-    return providers.find((provider) => provider.enabled && provider.driver === "codex") ?? null;
-  }, [primaryEnvironment]);
+  const [cloudProvisioningPhase, setCloudProvisioningPhase] = useState<
+    "creating" | "pairing" | "loading-project" | "ready" | null
+  >(null);
+  const cloudAccount = activeProviderStatus;
   const canCreateCloudEnvironment =
+    draftId !== null &&
     primaryEnvironmentId !== null &&
     primaryEnvironment?.serverConfig?.environmentControl === true &&
     cloudAccount !== null;
-  const handleCreateCloudEnvironment = useCallback(async () => {
-    if (!canCreateCloudEnvironment || primaryEnvironmentId === null || !cloudAccount) return;
-    const identity = activeProject?.repositoryIdentity;
-    const repository =
-      identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
-    setCreatingCloudEnvironment(true);
-    // The menu closes on the click that starts this, taking its pending label
-    // with it, and building takes minutes. Without a word here the app looks
-    // like it ignored the request.
-    toastManager.add({
-      type: "info",
-      title: "Creating a cloud machine…",
-      description: repository ? `Cloning ${repository}. This takes a few minutes.` : undefined,
-    });
-    try {
-      const created = await provisionCloudEnvironment({
-        environmentId: primaryEnvironmentId,
-        input: {
-          provider: "e2b" as const,
-          providerInstanceId: cloudAccount.instanceId,
-          ...(repository ? { repository } : {}),
-        },
-      });
-      // Building a machine takes minutes, so every way it can end has to say
-      // so. Reverting the label and going quiet leaves someone watching a
-      // menu, unsure whether they are waiting or have already failed.
-      if (AsyncResult.isFailure(created)) {
-        toastManager.add({
-          type: "error",
-          title: "Could not reach the manager to create a machine.",
-        });
-        return;
-      }
-      if (created.value.kind !== "provisioned") {
-        // The refusal already explains what to configure; repeating it is more
-        // use than a generic failure.
-        toastManager.add({ type: "error", title: created.value.message });
-        return;
-      }
-      const paired = await connectCloudPairing({
-        pairingUrl: created.value.environment.pairingUrl,
-      });
-      if (AsyncResult.isFailure(paired)) {
-        toastManager.add({
-          type: "error",
-          title: "The machine was created but could not be added.",
-          description: created.value.environment.pairingUrl,
-        });
-        return;
-      }
+  const handleSelectCloudEnvironment = useCallback(
+    (provider: "e2b" | "namespace") => {
+      if (!canCreateCloudEnvironment || !cloudAccount) return;
+      setCloudProvisioningRequested(provider);
+      setPendingCloudSendEnvironmentId(null);
       toastManager.add({
-        type: "success",
-        title: `Cloud machine ready on ${cloudAccount.displayName ?? cloudAccount.instanceId}.`,
-        ...(repository ? { description: `${repository} is checked out on it.` } : {}),
+        type: "info",
+        title: `${provider === "namespace" ? "Namespace Mac" : "E2B"} selected`,
+        description: `Your ${provider === "namespace" ? "Namespace Mac" : "E2B"} environment will start when you send the first message.`,
       });
-    } finally {
-      setCreatingCloudEnvironment(false);
-    }
-  }, [
-    activeProject,
-    canCreateCloudEnvironment,
-    cloudAccount,
-    connectCloudPairing,
-    primaryEnvironmentId,
-    provisionCloudEnvironment,
-  ]);
+    },
+    [canCreateCloudEnvironment, cloudAccount],
+  );
+  const provisionCloudEnvironmentForSend = useCallback(
+    async (handoff: {
+      readonly agentDriver: ProviderDriverKind;
+      readonly modelSelection: ModelSelection;
+    }) => {
+      if (
+        !cloudProvisioningRequested ||
+        !canCreateCloudEnvironment ||
+        primaryEnvironmentId === null ||
+        !cloudAccount ||
+        draftId === null
+      ) {
+        return false;
+      }
+      const identity = activeProject?.repositoryIdentity;
+      const repository =
+        identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+      const cloudEnvironmentLabel =
+        cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
+      setCreatingCloudEnvironment(true);
+      setCloudProvisioningPhase("creating");
+      // The menu closes on the click that starts this, taking its pending label
+      // with it, and building takes minutes. Without a word here the app looks
+      // like it ignored the request.
+      toastManager.add({
+        type: "info",
+        title: `Preparing ${cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B"}…`,
+        description: repository
+          ? `Setting up the environment and cloning ${repository}.`
+          : undefined,
+      });
+      let readyForSend = false;
+      try {
+        const created = await provisionCloudEnvironment({
+          environmentId: primaryEnvironmentId,
+          input: {
+            provider: cloudProvisioningRequested,
+            providerInstanceId: cloudAccount.instanceId,
+            agentDriver: handoff.agentDriver,
+            ...(repository ? { repository } : {}),
+          },
+        });
+        // Building a machine takes minutes, so every way it can end has to say
+        // so. Reverting the label and going quiet leaves someone watching a
+        // menu, unsure whether they are waiting or have already failed.
+        if (AsyncResult.isFailure(created)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not reach the manager to create a machine.",
+          });
+          return false;
+        }
+        if (created.value.kind !== "provisioned") {
+          // The refusal already explains what to configure; repeating it is more
+          // use than a generic failure.
+          toastManager.add({ type: "error", title: created.value.message });
+          return false;
+        }
+        const lease = {
+          leaseId: created.value.environment.leaseId ?? created.value.environment.sandboxId,
+          sandboxId: created.value.environment.sandboxId,
+          managerEnvironmentId: primaryEnvironmentId,
+        };
+        setCloudProvisioningPhase("pairing");
+        const paired = await connectCloudPairing({
+          pairingUrl: created.value.environment.pairingUrl,
+        });
+        if (AsyncResult.isFailure(paired)) {
+          rememberProvisionedSandbox(draftId, lease);
+          toastManager.add({
+            type: "error",
+            title: `${cloudEnvironmentLabel} was created but could not be connected.`,
+          });
+          return false;
+        }
+        // Pairing is asynchronous: the remote server must publish its cloned
+        // project before the new draft can point at it. Waiting on the project
+        // atom keeps the cloud action as one user-visible operation rather than
+        // leaving a machine stranded on an unrelated local draft.
+        setCloudProvisioningPhase("loading-project");
+        const pairedProject = await waitForProjectMatch((project) => {
+          if (project.environmentId !== paired.value) return false;
+          if (!identity) return true;
+          const candidate = project.repositoryIdentity;
+          // A freshly booted child can publish its project before the async git
+          // identity resolver fills this field. The child was created for this
+          // draft and starts with no other projects, so the first project in
+          // that environment is the safe handoff target.
+          if (candidate == null) return true;
+          return (
+            candidate?.canonicalKey === identity.canonicalKey ||
+            (candidate?.owner === identity.owner && candidate?.name === identity.name)
+          );
+        }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
+        if (pairedProject === null) {
+          // Keep the lease on the current target so deleting that draft/thread
+          // still has a path to dispose the machine if project publication was
+          // delayed or the remote checkout failed.
+          rememberProvisionedSandbox(draftId, lease);
+          toastManager.add({
+            type: "warning",
+            title: `${cloudEnvironmentLabel} ready, but its project is still loading.`,
+            description: `Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
+          });
+          return false;
+        }
+        rememberProvisionedSandbox(draftId, lease);
+        setComposerDraftModelSelection(draftId, handoff.modelSelection);
+        setDraftThreadContext(draftId, {
+          projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
+          // The sandbox itself is the isolation boundary. Do not try to create
+          // a second worktree inside its already-cloned checkout, which would
+          // require a base branch the draft does not have after pairing.
+          envMode: "local",
+          branch: null,
+          worktreePath: null,
+          startFromOrigin: false,
+          environmentSelection: "manual",
+        });
+        setCloudProvisioningRequested(null);
+        setPendingCloudSendEnvironmentId(pairedProject.environmentId);
+        setCloudProvisioningPhase("ready");
+        readyForSend = true;
+        toastManager.add({
+          type: "success",
+          title: `${cloudEnvironmentLabel} ready.`,
+          description: repository
+            ? `${repository} is checked out. Sending your message now.`
+            : undefined,
+        });
+        return true;
+      } finally {
+        setCreatingCloudEnvironment(false);
+        if (!readyForSend) setCloudProvisioningPhase(null);
+      }
+    },
+    [
+      activeProject,
+      canCreateCloudEnvironment,
+      cloudProvisioningRequested,
+      cloudAccount,
+      connectCloudPairing,
+      draftId,
+      primaryEnvironmentId,
+      provisionCloudEnvironment,
+      setComposerDraftModelSelection,
+      setDraftThreadContext,
+    ],
+  );
+  const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (cloudProvisioningPhase === null) return null;
+    const copy = {
+      creating: [
+        "Preparing environment",
+        "Setting up the environment. This can take a few minutes.",
+      ],
+      pairing: ["Connecting environment", "Adding the new environment to this chat."],
+      "loading-project": ["Loading project", "Waiting for the checkout to appear."],
+      ready: ["Environment ready", "Sending your first message."],
+    }[cloudProvisioningPhase];
+    return {
+      id: `cloud-provisioning:${draftId ?? routeThreadKey}`,
+      variant: "default",
+      priority: "activity",
+      icon: <Spinner />,
+      title: copy[0],
+      description: copy[1],
+    };
+  }, [cloudProvisioningPhase, draftId, routeThreadKey]);
   const linkedThreadPullRequestKey = linkedThreadPullRequest
     ? JSON.stringify([
         linkedThreadPullRequest.projectId,
@@ -5915,9 +6091,6 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";
-  const unsettleThreadMutation = useAtomCommand(threadEnvironment.unsettle, {
-    reportFailure: false,
-  });
   // Keyed by thread, not a boolean: the pending state must follow the thread
   // it belongs to across navigation, and a request resolving for thread A
   // must never clear (or re-enable) thread B's button.
@@ -5928,10 +6101,7 @@ export default function ChatView(props: ChatViewProps) {
     const threadKey = scopedThreadKey(activeThreadRef);
     setUnsettlingThreadKey(threadKey);
     try {
-      const result = await unsettleThreadMutation({
-        environmentId: activeThreadRef.environmentId,
-        input: { threadId: activeThreadRef.threadId, reason: "user" },
-      });
+      const result = await unsettleThread(activeThreadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -5945,7 +6115,7 @@ export default function ChatView(props: ChatViewProps) {
     } finally {
       setUnsettlingThreadKey((current) => (current === threadKey ? null : current));
     }
-  }, [activeThreadRef, unsettleThreadMutation]);
+  }, [activeThreadRef, unsettleThread]);
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
@@ -6075,7 +6245,9 @@ export default function ChatView(props: ChatViewProps) {
   // stop-everything interrupt: it kills every live background task before
   // interrupting, and works by session, so no active turn is needed.
   const activeBackgroundLiveness =
-    !isWorking && activeThread ? (activeThreadShell?.backgroundLiveness ?? null) : null;
+    !activeWorkspaceMissing && !isWorking && activeThread
+      ? (activeThreadShell?.backgroundLiveness ?? null)
+      : null;
   const [isStoppingBackgroundWork, setIsStoppingBackgroundWork] = useState(false);
   useEffect(() => {
     // "Stopping..." holds until the liveness clears; the interrupt command
@@ -6333,6 +6505,8 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const cloudProvisioningItems =
+      cloudProvisioningBannerItem === null ? [] : [cloudProvisioningBannerItem];
     const resumeCompactionItems =
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -6342,6 +6516,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
+        ...cloudProvisioningItems,
         ...usageLimitsItems,
         ...systemComposerBannerItems,
         ...backgroundLivenessItems,
@@ -6352,6 +6527,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [
       ...feedbackBannerItems,
+      ...cloudProvisioningItems,
       ...usageLimitsItems,
       ...systemComposerBannerItems,
       ...backgroundLivenessItems,
@@ -6400,6 +6576,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    cloudProvisioningBannerItem,
     feedbackBannerItems,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
@@ -7035,8 +7212,10 @@ export default function ChatView(props: ChatViewProps) {
       isConnecting ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
-      threadDetailLoading ||
+      (threadDetailLoading && !canReconnectOnSend) ||
+      isReconnectPending() ||
       sendInFlightRef.current ||
+      (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
@@ -7055,6 +7234,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (activeEnvironmentUnavailable) {
+      if (canReconnectOnSend) {
+        await reconnectAndSend(activeThread.environmentId, { submissionIntent, directAnnotation });
+        return;
+      }
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;
@@ -7307,6 +7490,27 @@ export default function ChatView(props: ChatViewProps) {
           description: "This draft no longer points to an available project.",
         }),
       );
+      return;
+    }
+    if (cloudProvisioningRequested) {
+      const cloudModel = cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
+        ? ctxSelectedModel
+        : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
+          ctxSelectedModel);
+      const cloudHandoff = {
+        agentDriver: ctxSelectedProvider,
+        modelSelection: createModelSelection(
+          cloudAccount?.instanceId ?? ctxSelectedModelSelection.instanceId,
+          cloudModel,
+          ctxSelectedModelSelection.options,
+        ),
+      };
+      sendInFlightRef.current = true;
+      try {
+        await provisionCloudEnvironmentForSend(cloudHandoff);
+      } finally {
+        sendInFlightRef.current = false;
+      }
       return;
     }
     const threadIdForSend = activeThread.id;
@@ -7720,6 +7924,31 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        const cloudLease =
+          isLocalDraftThread && typeof composerDraftTarget === "string"
+            ? provisionedSandboxFor(composerDraftTarget)
+            : null;
+        if (cloudLease && typeof composerDraftTarget === "string") {
+          const claimed = await claimCloudLease({
+            environmentId: cloudLease.managerEnvironmentId,
+            input: {
+              leaseId: cloudLease.leaseId,
+              environmentId,
+              threadId: threadIdForSend,
+            },
+          });
+          transferProvisionedSandboxLease(
+            composerDraftTarget,
+            scopeThreadRef(environmentId, threadIdForSend),
+          );
+          if (!AsyncResult.isSuccess(claimed) || claimed.value.kind !== "claimed") {
+            toastManager.add({
+              type: "warning",
+              title: "Cloud chat started, but its lease could not be claimed.",
+              description: "Stop the cloud machine from the thread menu after reconnecting.",
+            });
+          }
+        }
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.
@@ -7844,6 +8073,56 @@ export default function ChatView(props: ChatViewProps) {
       resetLocalDispatch();
     }
   };
+
+  const {
+    reconnectAndSend,
+    reconnecting: reconnectingSend,
+    isPending: isReconnectPending,
+  } = useReconnectSend<{
+    submissionIntent: ComposerSubmissionIntent;
+    directAnnotation:
+      | { annotation: PreviewAnnotationPayload; image: ComposerImageAttachment | null }
+      | undefined;
+  }>({
+    threadKey: routeThreadKey,
+    ready:
+      !activeEnvironmentUnavailable && !threadDetailLoading && !isSendBusy && serverConfig !== null,
+    recover: recoverEnvironment,
+    send: ({ submissionIntent, directAnnotation }) => {
+      void onSend(undefined, submissionIntent, directAnnotation);
+    },
+    onFailure: (message) => {
+      toastManager.add(
+        stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
+      );
+    },
+  });
+
+  useEffect(() => {
+    if (
+      pendingCloudSendEnvironmentId === null ||
+      draftId === null ||
+      activeProject?.environmentId !== pendingCloudSendEnvironmentId ||
+      activeThread?.environmentId !== pendingCloudSendEnvironmentId ||
+      activeEnvironment?.serverConfig == null ||
+      sendInFlightRef.current
+    ) {
+      return;
+    }
+    setPendingCloudSendEnvironmentId(null);
+    setCloudProvisioningPhase(null);
+    resumingCloudSendRef.current = true;
+    void onSend().finally(() => {
+      resumingCloudSendRef.current = false;
+    });
+  }, [
+    activeEnvironment?.serverConfig,
+    activeThread?.environmentId,
+    activeProject?.environmentId,
+    draftId,
+    onSend,
+    pendingCloudSendEnvironmentId,
+  ]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -9208,7 +9487,7 @@ export default function ChatView(props: ChatViewProps) {
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
                             phase={phase}
-                            isConnecting={isConnecting}
+                            isConnecting={isConnecting || reconnectingSend}
                             isSendBusy={isSendBusy}
                             isRevertingCheckpoint={isRevertingCheckpoint}
                             sendDisabledReason={
@@ -9216,7 +9495,7 @@ export default function ChatView(props: ChatViewProps) {
                                 ? "Rewinding conversation"
                                 : feedbackUploading
                                   ? "Sending feedback"
-                                  : threadDetailLoading
+                                  : threadDetailLoading && !canReconnectOnSend
                                     ? "Messages loading"
                                     : null
                             }
@@ -9232,6 +9511,7 @@ export default function ChatView(props: ChatViewProps) {
                                 : undefined
                             }
                             environmentUnavailable={activeEnvironmentUnavailableState}
+                            canReconnectOnSend={canReconnectOnSend}
                             activePendingApproval={activePendingApproval}
                             pendingApprovals={pendingApprovals}
                             pendingUserInputs={pendingUserInputs}
@@ -9360,12 +9640,16 @@ export default function ChatView(props: ChatViewProps) {
                                 availableEnvironments={logicalProjectEnvironments}
                                 {...(canCreateCloudEnvironment
                                   ? {
-                                      onCreateCloudEnvironment: () => {
-                                        void handleCreateCloudEnvironment();
+                                      onCreateCloudEnvironment: (provider) => {
+                                        handleSelectCloudEnvironment(provider);
+                                      },
+                                      onCreateNamespaceEnvironment: (provider) => {
+                                        handleSelectCloudEnvironment(provider);
                                       },
                                     }
                                   : {})}
                                 creatingCloudEnvironment={creatingCloudEnvironment}
+                                pendingCloudProvider={cloudProvisioningRequested}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />

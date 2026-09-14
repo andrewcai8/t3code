@@ -4,9 +4,19 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
-import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type EnvironmentProvisionDisposeResult,
+  type EnvironmentProvisionPauseResult,
+  type ScopedThreadRef,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -17,6 +27,7 @@ import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../component
 import { useComposerDraftStore } from "../composerDraftStore";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
+import { serverEnvironment } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
@@ -40,6 +51,8 @@ import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import { useAtomCommand } from "../state/use-atom-command";
+import { forgetProvisionedSandbox, provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
+import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -52,6 +65,11 @@ export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveB
     return "Cannot archive a running thread.";
   }
 }
+
+type ProvisionedSandboxDisposeOutcome =
+  | { readonly kind: "absent" }
+  | EnvironmentProvisionDisposeResult;
+type ProvisionedSandboxPauseOutcome = { readonly kind: "absent" } | EnvironmentProvisionPauseResult;
 
 export class ThreadSettlementUnsupportedError extends Schema.TaggedError<ThreadSettlementUnsupportedError>()(
   "ThreadSettlementUnsupportedError",
@@ -173,6 +191,7 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
 }
 
 export function useThreadActions() {
+  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const closeTerminal = useAtomCommand(terminalEnvironment.close);
   const archiveThreadMutation = useAtomCommand(threadEnvironment.archive, {
     reportFailure: false,
@@ -183,6 +202,14 @@ export function useThreadActions() {
   const deleteThreadMutation = useAtomCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
+  const disposeProvisionedEnvironment = useAtomCommand(
+    serverEnvironment.disposeProvisionedEnvironment,
+    { reportFailure: false },
+  );
+  const pauseProvisionedEnvironment = useAtomCommand(
+    serverEnvironment.pauseProvisionedEnvironment,
+    { reportFailure: false },
+  );
   const settleThreadMutation = useAtomCommand(threadEnvironment.settle, {
     reportFailure: false,
   });
@@ -242,6 +269,107 @@ export function useThreadActions() {
       threadRef: target,
     };
   }, []);
+
+  const disposeProvisionedSandboxForThread = useCallback(
+    async (target: ScopedThreadRef) => {
+      const lease = provisionedSandboxFor(target);
+      if (!lease) return AsyncResult.success<ProvisionedSandboxDisposeOutcome>({ kind: "absent" });
+      const result = await disposeProvisionedEnvironment({
+        environmentId: lease.managerEnvironmentId,
+        input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId },
+      });
+      if (result._tag === "Success" && result.value.kind === "disposed") {
+        forgetProvisionedSandbox(target);
+      }
+      return result;
+    },
+    [disposeProvisionedEnvironment],
+  );
+
+  const pauseProvisionedSandboxForThread = useCallback(
+    async (target: ScopedThreadRef) => {
+      const lease = provisionedSandboxFor(target);
+      if (!lease) return AsyncResult.success<ProvisionedSandboxPauseOutcome>({ kind: "absent" });
+      const result = await pauseProvisionedEnvironment({
+        environmentId: lease.managerEnvironmentId,
+        input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId },
+      });
+      if (result._tag === "Success" && result.value.kind === "refused") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Cloud workspace remains running",
+            description: result.value.message,
+          }),
+        );
+      } else if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Could not pause cloud workspace",
+            description: "Retry when the cloud manager is reachable.",
+          }),
+        );
+      }
+      return result;
+    },
+    [pauseProvisionedEnvironment],
+  );
+
+  const stopProvisionedCloudMachine = useCallback(
+    async (target: ScopedThreadRef) => {
+      const lease = provisionedSandboxFor(target);
+      if (!lease) return;
+      const api = readLocalApi();
+      if (!api) return;
+      const thread = readThreadShell(target);
+      const confirmed = await settlePromise(() =>
+        api.dialogs.confirm(
+          [
+            `Stop the cloud machine for "${thread?.title ?? "this thread"}"?`,
+            "This permanently stops the cloud machine and ends any running work.",
+            "The thread and conversation will remain.",
+          ].join("\n"),
+          { variant: "destructive" },
+        ),
+      );
+      if (confirmed._tag === "Failure") {
+        const error = squashAtomCommandFailure(confirmed);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not confirm cloud machine stop",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+        return;
+      }
+      if (!confirmed.value) return;
+
+      const result = await disposeProvisionedSandboxForThread(target);
+      if (result._tag === "Success" && result.value.kind === "absent") return;
+      if (result._tag === "Success" && result.value.kind === "disposed") {
+        toastManager.add({
+          type: "success",
+          title: "Cloud machine stopped",
+          description: "The thread remains, but its cloud workspace has been released.",
+        });
+        return;
+      }
+      const description =
+        result._tag === "Success" && result.value.kind === "refused"
+          ? result.value.message
+          : "Retry after the cloud manager is reachable.";
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Could not stop cloud machine",
+          description,
+        }),
+      );
+    },
+    [disposeProvisionedSandboxForThread],
+  );
   const getCurrentRouteThreadRef = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
     return resolveThreadRouteRef(currentRouteParams);
@@ -274,6 +402,7 @@ export function useThreadActions() {
       if (archiveResult._tag === "Failure") {
         return archiveResult;
       }
+      await pauseProvisionedSandboxForThread(threadRef);
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -293,11 +422,20 @@ export function useThreadActions() {
 
       return archiveResult;
     },
-    [archiveThreadMutation, getCurrentRouteThreadRef, markThreadVisited, resolveThreadTarget],
+    [
+      archiveThreadMutation,
+      getCurrentRouteThreadRef,
+      markThreadVisited,
+      pauseProvisionedSandboxForThread,
+      resolveThreadTarget,
+    ],
   );
 
   const unarchiveThread = useCallback(
     async (target: ScopedThreadRef) => {
+      const recovery = await recoverEnvironment(target.environmentId);
+      if (recovery.kind === "failed")
+        return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
       const result = await unarchiveThreadMutation({
         environmentId: target.environmentId,
         input: { threadId: target.threadId },
@@ -307,11 +445,35 @@ export function useThreadActions() {
       }
       return result;
     },
-    [unarchiveThreadMutation],
+    [recoverEnvironment, unarchiveThreadMutation],
   );
 
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
+      const disposeSandboxForThread = async (threadRef: ScopedThreadRef) => {
+        const result = await disposeProvisionedSandboxForThread(threadRef);
+        if (result._tag === "Success") {
+          const value = result.value;
+          if (value.kind === "absent" || value.kind === "disposed") return;
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Thread deleted, but its cloud machine is still running.",
+              description: value.message,
+            }),
+          );
+          return;
+        }
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Thread deleted, but its cloud machine is still running.",
+              description: "Retry deleting the thread after the cloud manager is reachable.",
+            }),
+          );
+        }
+      };
       const resolved = resolveThreadTarget(target);
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
@@ -321,6 +483,7 @@ export function useThreadActions() {
         });
         if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
+          await disposeSandboxForThread(target);
         }
         return result;
       }
@@ -405,6 +568,7 @@ export function useThreadActions() {
         return deleteResult;
       }
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      await disposeSandboxForThread(threadRef);
       releaseComposerDraftUploads(threadRef);
       clearComposerDraftForThread(threadRef);
       clearProjectDraftThreadById(
@@ -487,6 +651,7 @@ export function useThreadActions() {
       clearTerminalUiState,
       closeTerminal,
       deleteThreadMutation,
+      disposeProvisionedSandboxForThread,
       getCurrentRouteThreadRef,
       refreshVcsStatus,
       removeWorktree,
@@ -521,16 +686,25 @@ export function useThreadActions() {
         environmentId: target.environmentId,
         input: { threadId: target.threadId },
       });
+      if (result._tag === "Success") await pauseProvisionedSandboxForThread(target);
       if (result._tag === "Success" && wokeAt !== null) {
         markThreadVisited(scopedThreadKey(target), wokeAt);
       }
       return result;
     },
-    [markThreadVisited, resolveThreadTarget, settleThreadMutation],
+    [
+      markThreadVisited,
+      pauseProvisionedSandboxForThread,
+      resolveThreadTarget,
+      settleThreadMutation,
+    ],
   );
 
   const unsettleThread = useCallback(
     async (target: ScopedThreadRef) => {
+      const recovery = await recoverEnvironment(target.environmentId);
+      if (recovery.kind === "failed")
+        return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
       if (!readEnvironmentSupportsSettlement(target.environmentId)) {
         return AsyncResult.failure(
           Cause.fail(
@@ -548,7 +722,7 @@ export function useThreadActions() {
         input: { threadId: target.threadId, reason: "user" },
       });
     },
-    [unsettleThreadMutation],
+    [recoverEnvironment, unsettleThreadMutation],
   );
 
   const pinThread = useCallback(
@@ -756,6 +930,7 @@ export function useThreadActions() {
       archiveThread,
       unarchiveThread,
       deleteThread,
+      stopProvisionedCloudMachine,
       confirmAndDeleteThread,
       settleThread,
       unsettleThread,
@@ -772,6 +947,7 @@ export function useThreadActions() {
       confirmAndDeleteThread,
       confirmAndUnpinThread,
       deleteThread,
+      stopProvisionedCloudMachine,
       pinThread,
       reorderPinnedThread,
       reorderActiveThread,

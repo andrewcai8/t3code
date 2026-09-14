@@ -1,8 +1,38 @@
 // @effect-diagnostics nodeBuiltinImport:off - private configuration is loaded at the Promise-based SDK boundary.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { EnvironmentId, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+
+export function canonicalRepository(repository: string): string {
+  const cleaned = repository
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?github\.com\//i, "")
+    .replace(/\.git$/i, "");
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(cleaned))
+    throw new Error("Repository must look like owner/name");
+  return cleaned.toLowerCase();
+}
+
+const RelativeFilePath = TrimmedNonEmptyString.check(
+  Schema.makeFilter(
+    (path) =>
+      !NodePath.posix.isAbsolute(path) &&
+      !path.includes("\\") &&
+      !path.includes("\0") &&
+      path.split("/").every((part) => part !== "..") &&
+      NodePath.posix.normalize(path) !== ".",
+  ),
+);
+const WorkspaceFile = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  destination: RelativeFilePath,
+});
+const Commands = {
+  prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  verifyCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+};
 
 const E2bIdentity = Schema.Struct({
   sandboxId: TrimmedNonEmptyString,
@@ -24,6 +54,12 @@ const Target = Schema.Struct({
     }),
   ]),
 });
+export const NamespaceArtifact = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  destination: TrimmedNonEmptyString,
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export type NamespaceArtifact = typeof NamespaceArtifact.Type;
 /**
  * What an install needs to create environments on demand, as opposed to
  * controlling ones it already declares. Absent on a machine that only manages
@@ -31,17 +67,9 @@ const Target = Schema.Struct({
  * than failing.
  */
 const Provisioning = Schema.Struct({
-  templateId: TrimmedNonEmptyString,
+  templateId: Schema.optional(TrimmedNonEmptyString),
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
-  /**
-   * Files copied into a new environment's checkout, by path within it.
-   *
-   * A clone is not a working tree: a backend needs its dotenv before anything
-   * runs. These are named one by one rather than discovered, because the files
-   * worth copying here are exactly the ones a repository refuses to carry, and
-   * an environment holding them can reach whatever they unlock.
-   */
   /**
    * Hosts a new environment may reach. Everything else is denied.
    *
@@ -82,15 +110,43 @@ const Provisioning = Schema.Struct({
       }),
     ),
   ),
-  workspaceFiles: Schema.optional(
+  /** Files copied into the checkout unless its repository entry overrides them. */
+  workspaceFiles: Schema.optional(Schema.Array(WorkspaceFile)),
+  repositories: Schema.optional(
     Schema.Array(
       Schema.Struct({
-        /** Absolute path on the machine running the server. */
-        source: TrimmedNonEmptyString,
-        /** Path relative to the checkout root. */
-        destination: TrimmedNonEmptyString,
+        repository: TrimmedNonEmptyString,
+        workspaceFiles: Schema.optional(Schema.Array(WorkspaceFile)),
+        e2b: Schema.optional(Schema.Struct(Commands)),
+        namespace: Schema.optional(
+          Schema.Struct({
+            ...Commands,
+            artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
+          }),
+        ),
+      }),
+    ).check(
+      Schema.makeFilter((entries) => {
+        try {
+          return (
+            new Set(entries.map(({ repository }) => canonicalRepository(repository))).size ===
+            entries.length
+          );
+        } catch {
+          return false;
+        }
       }),
     ),
+  ),
+  /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
+  namespace: Schema.optional(
+    Schema.Struct({
+      size: TrimmedNonEmptyString,
+      region: Schema.optional(TrimmedNonEmptyString),
+      idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      ...Commands,
+      artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
+    }),
   ),
 });
 export type Provisioning = typeof Provisioning.Type;
@@ -150,20 +206,28 @@ const onDisk = async (path: string) => {
 /**
  * Where to read cloud control configuration, or `null` when it is not set up.
  *
- * The default lives beside `settings.json` in the state directory, so a packaged
- * app and a dev run find it the same way and a launcher that rewrites the
- * environment cannot hide it. An explicit override is returned even when the
- * file is missing: naming a path that does not exist is a misconfiguration and
- * has to fail loudly, whereas the default being absent just means a machine has
- * no cloud controls.
+ * The default lives beside `settings.json` in the state directory, with the
+ * machine-level `~/.t3` location as a fallback for desktop dev runs that use an
+ * isolated state directory. An explicit override is returned even when the file
+ * is missing: naming a path that does not exist is a misconfiguration and has to
+ * fail loudly, whereas the default being absent just means a machine has no
+ * cloud controls.
  */
 export async function resolveControlConfigPath(input: {
   readonly explicit?: string | undefined;
   readonly stateDir: string;
+  readonly fallback?: string | undefined;
   readonly exists?: (path: string) => Promise<boolean>;
 }): Promise<string | null> {
   const explicit = input.explicit?.trim();
   if (explicit) return explicit;
-  const path = NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME);
-  return (await (input.exists ?? onDisk)(path)) ? path : null;
+  const candidates = [
+    NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME),
+    input.fallback ?? NodePath.join(NodeOS.homedir(), ".t3", CONTROL_CONFIG_FILENAME),
+  ];
+  const exists = input.exists ?? onDisk;
+  for (const path of candidates) {
+    if (await exists(path)) return path;
+  }
+  return null;
 }

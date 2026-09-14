@@ -122,7 +122,7 @@ import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
-import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
@@ -146,6 +146,7 @@ import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
+import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
@@ -1091,7 +1092,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  const environment = useEnvironment(thread.environmentId);
+  const status = resolveSidebarThreadStatus(thread, environment?.connection);
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -1147,10 +1149,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 icon: "input" as const,
                 className: "text-indigo-600 dark:text-indigo-300",
               }
-            : status === "failed"
+            : status === "failed" || status === "expired"
               ? {
-                  label: "Failed",
-                  icon: "failed" as const,
+                  label: status === "expired" ? "Expired" : "Failed",
+                  icon: status === "expired" ? null : ("failed" as const),
                   className: "text-red-700 dark:text-red-300",
                 }
               : isWoke
@@ -2135,6 +2137,7 @@ export default function Sidebar() {
     reorderActiveThread,
     archiveThread,
     deleteThread,
+    stopProvisionedCloudMachine,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -4003,6 +4006,7 @@ export default function Sidebar() {
               isSettled,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+              hasProvisionedCloudMachine: provisionedSandboxFor(threadRef) !== null,
               isRegeneratingTitle,
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
@@ -4074,6 +4078,9 @@ export default function Sidebar() {
             return;
           case "unpin":
             attemptUnpin(threadRef);
+            return;
+          case "stop-cloud-machine":
+            await stopProvisionedCloudMachine(threadRef);
             return;
           case "rename":
             startThreadRename(threadRef, thread.title);
@@ -4194,6 +4201,7 @@ export default function Sidebar() {
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
+      stopProvisionedCloudMachine,
       handleMultiSelectContextMenu,
       markThreadUnread,
       openProjectSettings,

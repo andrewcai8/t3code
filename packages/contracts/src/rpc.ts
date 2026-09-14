@@ -5,6 +5,16 @@ import {
   EnvironmentControlResult,
   EnvironmentProvisionInput,
   EnvironmentProvisionResult,
+  EnvironmentProvisionDisposeInput,
+  EnvironmentProvisionDisposeResult,
+  EnvironmentProvisionPauseInput,
+  EnvironmentProvisionPauseResult,
+  EnvironmentProvisionResumeInput,
+  EnvironmentProvisionResumeResult,
+  EnvironmentProvisionClaimInput,
+  EnvironmentProvisionClaimResult,
+  EnvironmentProvisionTouchInput,
+  EnvironmentProvisionTouchResult,
 } from "./environmentControl.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
@@ -381,6 +391,11 @@ export const WS_METHODS = {
   environmentControlStart: "environmentControl.start",
   environmentControlStop: "environmentControl.stop",
   environmentControlProvision: "environmentControl.provision",
+  environmentControlDispose: "environmentControl.dispose",
+  environmentControlPause: "environmentControl.pause",
+  environmentControlResume: "environmentControl.resume",
+  environmentControlClaim: "environmentControl.claim",
+  environmentControlTouch: "environmentControl.touch",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -642,6 +657,31 @@ const EnvironmentControlStopRpc = Rpc.make(WS_METHODS.environmentControlStop, {
 const EnvironmentControlProvisionRpc = Rpc.make(WS_METHODS.environmentControlProvision, {
   payload: EnvironmentProvisionInput,
   success: EnvironmentProvisionResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlDisposeRpc = Rpc.make(WS_METHODS.environmentControlDispose, {
+  payload: EnvironmentProvisionDisposeInput,
+  success: EnvironmentProvisionDisposeResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlPauseRpc = Rpc.make(WS_METHODS.environmentControlPause, {
+  payload: EnvironmentProvisionPauseInput,
+  success: EnvironmentProvisionPauseResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlClaimRpc = Rpc.make(WS_METHODS.environmentControlClaim, {
+  payload: EnvironmentProvisionClaimInput,
+  success: EnvironmentProvisionClaimResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlResumeRpc = Rpc.make(WS_METHODS.environmentControlResume, {
+  payload: EnvironmentProvisionResumeInput,
+  success: EnvironmentProvisionResumeResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlTouchRpc = Rpc.make(WS_METHODS.environmentControlTouch, {
+  payload: EnvironmentProvisionTouchInput,
+  success: EnvironmentProvisionTouchResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
@@ -1381,6 +1421,11 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlStartRpc,
   EnvironmentControlStopRpc,
   EnvironmentControlProvisionRpc,
+  EnvironmentControlDisposeRpc,
+  EnvironmentControlPauseRpc,
+  EnvironmentControlResumeRpc,
+  EnvironmentControlClaimRpc,
+  EnvironmentControlTouchRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,

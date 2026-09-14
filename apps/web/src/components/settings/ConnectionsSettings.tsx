@@ -165,6 +165,7 @@ import {
 } from "~/state/environments";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useProvisionedEnvironmentRecovery } from "../../cloud/useProvisionedEnvironmentRecovery";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import {
@@ -1481,6 +1482,7 @@ function SavedBackendListRow({
   onRemove,
 }: SavedBackendListRowProps) {
   const environmentId = environment.environmentId;
+  const workspaceMissing = environment.connection.blockedReason === "workspace-missing";
   const enabled = environment.entry.enabled;
   const isConnected = environment.connection.phase === "connected";
   const isRemoving = removingEnvironmentId === environmentId;
@@ -1510,7 +1512,9 @@ function SavedBackendListRow({
     },
     [copyTraceIdToClipboard],
   );
-  const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
+  const versionMismatch = workspaceMissing
+    ? null
+    : resolveServerConfigVersionMismatch(environment.serverConfig);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
@@ -1802,6 +1806,7 @@ export function ConnectionsSettings() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
@@ -2464,6 +2469,14 @@ export function ConnectionsSettings() {
   const handleSetSavedBackendEnabled = useCallback(
     async (environmentId: EnvironmentId, enabled: boolean) => {
       setSavedBackendError(null);
+      if (enabled) {
+        const recovery = await recoverEnvironment(environmentId);
+        if (recovery.kind === "ready") return;
+        if (recovery.kind === "failed") {
+          setSavedBackendError(recovery.message);
+          return;
+        }
+      }
       const result = await setEnvironmentEnabled({ environmentId, enabled });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2481,7 +2494,7 @@ export function ConnectionsSettings() {
         );
       }
     },
-    [setEnvironmentEnabled],
+    [recoverEnvironment, setEnvironmentEnabled],
   );
 
   // Removing forgets the pairing, credentials, and cached threads on this

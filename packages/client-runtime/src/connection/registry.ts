@@ -14,6 +14,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import {
+  BearerConnectionRegistration,
   type ConnectionCatalogEntry,
   type ConnectionRegistration,
   type PlatformConnectionRegistration,
@@ -24,12 +25,14 @@ import {
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as Connectivity from "./connectivity.ts";
-import type {
-  ConnectionAttemptError,
-  ConnectionTarget,
-  NetworkStatus,
-  SupervisorConnectionState,
+import {
+  BearerConnectionTarget,
+  type ConnectionAttemptError,
+  type ConnectionTarget,
+  type NetworkStatus,
+  type SupervisorConnectionState,
 } from "./model.ts";
+import { credentialMissingError, profileMissingError } from "./errors.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -94,6 +97,14 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    readonly markWorkspaceMissing: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<
+      void,
+      | Persistence.ConnectionPersistenceError
+      | ConnectionAttemptError
+      | EnvironmentNotRegisteredError
+    >;
     /**
      * Switches a saved environment on or off. Off drops the socket, stops the
      * retry ladder, and persists so the next launch stays off. Registration,
@@ -452,6 +463,51 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const markWorkspaceMissing = Effect.fn("EnvironmentRegistry.markWorkspaceMissing")(function* (
+    environmentId: EnvironmentId,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
+          return;
+        }
+        const entry = yield* getEntry(environmentId);
+        if (
+          entry.target._tag !== "BearerConnectionTarget" ||
+          entry.target.workspaceStatus === "missing"
+        ) {
+          return;
+        }
+        if (
+          Option.isNone(entry.profile) ||
+          entry.profile.value._tag !== "BearerConnectionProfile"
+        ) {
+          return yield* profileMissingError(entry.target.connectionId);
+        }
+        const credential = yield* credentials.get(entry.target.connectionId);
+        if (Option.isNone(credential)) {
+          return yield* credentialMissingError(entry.target.connectionId);
+        }
+        const target = new BearerConnectionTarget({
+          ...entry.target,
+          workspaceStatus: "missing",
+        });
+        yield* registrations.register(
+          new BearerConnectionRegistration({
+            target,
+            profile: entry.profile.value,
+            credential: credential.value,
+          }),
+        );
+        yield* Ref.update(persistedTargetsByEnvironment, (current) =>
+          new Map(current).set(environmentId, target),
+        );
+        yield* installEntryLocked({ ...entry, target });
+      }),
+    );
+  });
+
   const installPlatformRegistration = Effect.fn("EnvironmentRegistry.installPlatformRegistration")(
     function* (registration: PlatformConnectionRegistration) {
       const entry = connectionRegistrationCatalogEntry(registration);
@@ -804,6 +860,7 @@ export const make = Effect.gen(function* () {
     remove,
     removeRelayEnvironments,
     retryNow,
+    markWorkspaceMissing,
     setEnabled,
     state,
     stateChanges,
