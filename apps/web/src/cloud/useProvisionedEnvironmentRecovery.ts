@@ -26,7 +26,17 @@ export function useProvisionedEnvironmentRecovery() {
           { reportFailure: false },
         );
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-        if (result.value.kind === "refused") throw new Error(result.value.message);
+        if (result.value.kind === "refused") {
+          if (result.value.reason === "missing") {
+            const marked = await runAtomCommand(
+              registry,
+              environmentCatalog.markWorkspaceMissing,
+              threadRef.environmentId,
+            );
+            if (marked._tag === "Failure") throw squashAtomCommandFailure(marked);
+          }
+          throw new Error(result.value.message);
+        }
       },
       retry: async (environmentId) => {
         const result = await runAtomCommand(registry, environmentCatalog.retryNow, environmentId, {

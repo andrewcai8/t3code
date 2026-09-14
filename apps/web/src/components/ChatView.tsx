@@ -2146,8 +2146,11 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const activeWorkspaceMissing =
+    activeEnvironment?.connection.blockedReason === "workspace-missing";
   const canReconnectOnSend =
     activeEnvironmentUnavailable &&
+    !activeWorkspaceMissing &&
     activeThread != null &&
     provisionedSandboxForEnvironment(activeThread.environmentId) !== null;
   const activeReconnectingEnvironmentId =
@@ -2446,6 +2449,7 @@ export default function ChatView(props: ChatViewProps) {
     const items: ComposerBannerStackItem[] = [];
     const updateRunning = serverUpdateState.status === "running";
     const unavailableConnection = activeEnvironmentUnavailableState?.connection ?? null;
+    const workspaceMissing = unavailableConnection?.blockedReason === "workspace-missing";
     const environmentReconnecting =
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
@@ -2486,22 +2490,30 @@ export default function ChatView(props: ChatViewProps) {
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
           variant: unavailableConnection.phase === "error" ? "error" : "warning",
           icon: <WifiOffIcon />,
-          title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
-          description: environmentReconnecting ? "Trying again" : "Reconnect to continue",
+          title: workspaceMissing
+            ? `${activeEnvironmentUnavailableState.label} is no longer available`
+            : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+          description: workspaceMissing
+            ? "This workspace expired. Saved history is available here. Continue in a recovered or new workspace."
+            : environmentReconnecting
+              ? "Trying again"
+              : "Reconnect to continue",
           actions: (
             <>
-              <Button
-                size="xs"
-                variant="ghost"
-                disabled={waitForAutomaticReconnect}
-                onClick={() =>
-                  void handleReconnectActiveEnvironment(
-                    activeEnvironmentUnavailableState.environmentId,
-                  )
-                }
-              >
-                {waitForAutomaticReconnect ? "Reconnecting..." : "Reconnect"}
-              </Button>
+              {!workspaceMissing && (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={waitForAutomaticReconnect}
+                  onClick={() =>
+                    void handleReconnectActiveEnvironment(
+                      activeEnvironmentUnavailableState.environmentId,
+                    )
+                  }
+                >
+                  {waitForAutomaticReconnect ? "Reconnecting..." : "Reconnect"}
+                </Button>
+              )}
               <Button
                 size="xs"
                 variant="ghost"
@@ -2662,7 +2674,7 @@ export default function ChatView(props: ChatViewProps) {
   const supportsConversationRollback =
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
-  const phase = derivePhase(activeThread?.session ?? null);
+  const phase = derivePhase(activeWorkspaceMissing ? null : (activeThread?.session ?? null));
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const latestCheckpointCompletedAt = activeThread?.checkpoints.at(-1)?.completedAt ?? null;
   const workspaceMutationId = useMemo(() => {
@@ -2997,7 +3009,8 @@ export default function ChatView(props: ChatViewProps) {
     compactRequestIsActive &&
     !compactionSettled;
   const isWorking =
-    phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting;
+    !activeWorkspaceMissing &&
+    (phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting);
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -5962,7 +5975,9 @@ export default function ChatView(props: ChatViewProps) {
   // stop-everything interrupt: it kills every live background task before
   // interrupting, and works by session, so no active turn is needed.
   const activeBackgroundLiveness =
-    !isWorking && activeThread ? (activeThreadShell?.backgroundLiveness ?? null) : null;
+    !activeWorkspaceMissing && !isWorking && activeThread
+      ? (activeThreadShell?.backgroundLiveness ?? null)
+      : null;
   const [isStoppingBackgroundWork, setIsStoppingBackgroundWork] = useState(false);
   useEffect(() => {
     // "Stopping..." holds until the liveness clears; the interrupt command
