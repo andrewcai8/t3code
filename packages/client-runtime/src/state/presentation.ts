@@ -41,7 +41,7 @@ export function createEnvironmentPresentationAtoms<E>(input: {
       );
       return {
         entry,
-        connection: presentEnvironmentConnection(state),
+        connection: presentEnvironmentConnection(state, entry.target),
         serverConfig: get(input.serverConfigValueAtom(environmentId)),
       } satisfies EnvironmentPresentation;
     }).pipe(Atom.withLabel(`environment-presentation:${environmentId}`)),

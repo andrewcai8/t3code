@@ -161,7 +161,7 @@ describe("managed cloud commands", () => {
       driver.resume = vi.fn();
       const expected = {
         kind: "refused",
-        reason: "unknown",
+        reason: "missing",
         message: "E2B no longer has this workspace. It cannot be reconnected.",
       };
       expect(await manager.touch({ leaseId: "lease" })).toEqual(expected);
@@ -178,7 +178,7 @@ describe("managed cloud commands", () => {
       driver.resume = vi.fn().mockRejectedValue(new ProvisionedSandboxMissing());
       const expected = {
         kind: "refused",
-        reason: "unknown",
+        reason: "missing",
         message: "E2B no longer has this workspace. It cannot be reconnected.",
       };
       expect(await manager.resume(resumeInput)).toEqual(expected);

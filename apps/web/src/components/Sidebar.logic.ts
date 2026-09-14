@@ -5,6 +5,7 @@ import {
   isAtomCommandInterrupted,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
@@ -794,6 +795,7 @@ export type SidebarThreadStatus =
   | "working"
   | "monitoring"
   | "failed"
+  | "expired"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -816,7 +818,11 @@ type SidebarThreadStatusInput = Pick<
   "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
 >;
 
-export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+export function resolveSidebarThreadStatus(
+  thread: SidebarThreadStatusInput,
+  connection?: EnvironmentConnectionPresentation,
+): SidebarThreadStatus {
+  if (connection?.blockedReason === "workspace-missing") return "expired";
   if (thread.hasPendingApprovals) {
     return "approval";
   }

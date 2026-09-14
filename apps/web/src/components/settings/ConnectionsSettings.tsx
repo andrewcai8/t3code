@@ -1413,6 +1413,7 @@ function SavedBackendListRow({
 }: SavedBackendListRowProps) {
   const environmentId = environment.environmentId;
   const connectionState = environment.connection.phase;
+  const workspaceMissing = environment.connection.blockedReason === "workspace-missing";
   const isConnected = connectionState === "connected";
   const isConnecting = connectionState === "connecting" || connectionState === "reconnecting";
   const stateDotClassName =
@@ -1450,7 +1451,9 @@ function SavedBackendListRow({
     },
     [copyTraceIdToClipboard],
   );
-  const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
+  const versionMismatch = workspaceMissing
+    ? null
+    : resolveServerConfigVersionMismatch(environment.serverConfig);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
@@ -1586,7 +1589,9 @@ function SavedBackendListRow({
               <Button
                 size="xs"
                 variant="outline"
-                disabled={isConnecting || removingEnvironmentId === environmentId}
+                disabled={
+                  workspaceMissing || isConnecting || removingEnvironmentId === environmentId
+                }
                 onClick={() =>
                   void (isConnected ? onRemove(environmentId) : onConnect(environmentId))
                 }

@@ -17,6 +17,7 @@ import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
@@ -34,6 +35,7 @@ import {
 import * as Connectivity from "./connectivity.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import * as ConnectionDriver from "./driver.ts";
+import * as ConnectionResolver from "./resolver.ts";
 import {
   ConnectionTransientError,
   BearerConnectionTarget,
@@ -149,6 +151,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   const cacheClears = yield* Ref.make<ReadonlyArray<EnvironmentId>>([]);
   const ownedDataClears = yield* Ref.make<ReadonlyArray<EnvironmentId>>([]);
   const sessions = yield* Ref.make<ReadonlyArray<SessionControl>>([]);
+  const preparations = yield* Ref.make(0);
   const releasedSessions = yield* Ref.make(0);
   const storedProfiles = yield* Ref.make(
     new Map(initialProfiles.map((profile) => [profile.connectionId, profile])),
@@ -338,38 +341,39 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     prepare: () => Effect.die(new Error("SSH preparation is not used.")),
     disconnect: (target) => Ref.update(disconnectedSshTargets, (current) => [...current, target]),
   });
-  const driver = ConnectionDriver.ConnectionDriver.of({
-    connect: (entry, reportProgress) =>
-      Effect.gen(function* () {
-        const target = entry.target;
-        const prepared = {
-          ...PREPARED,
-          environmentId: target.environmentId,
-          label: target.label,
-          target,
-        };
-        yield* reportProgress({ stage: "preparing" });
-        yield* reportProgress({ stage: "opening", prepared });
-        yield* options?.beforeSessionConnect?.(target.environmentId) ?? Effect.void;
-        const closed = yield* Deferred.make<never, ConnectionTransientError>();
-        yield* Ref.update(sessions, (current) => [...current, { closed }]);
-        const session = yield* Effect.acquireRelease(
-          Effect.succeed({
-            client: {} as RpcSession.RpcSession["client"],
-            initialConfig: Effect.die(new Error("Config is not used by registry tests.")),
-            subscribeServerConfig: () =>
-              Stream.die(new Error("Config is not used by registry tests.")),
-            ready: Effect.void,
-            probe: Effect.void,
-            closed: Deferred.await(closed),
-          } satisfies RpcSession.RpcSession),
-          () => Ref.update(releasedSessions, (count) => count + 1),
-        );
-        yield* reportProgress({ stage: "synchronizing", prepared });
-        yield* session.ready;
-        return { prepared, session };
-      }),
-  });
+  const driver = yield* ConnectionDriver.make.pipe(
+    Effect.provideService(ConnectionResolver.ConnectionResolver, {
+      prepare: (entry) =>
+        Ref.update(preparations, (count) => count + 1).pipe(
+          Effect.as({
+            ...PREPARED,
+            environmentId: entry.target.environmentId,
+            label: entry.target.label,
+            target: entry.target,
+          }),
+        ),
+    }),
+    Effect.provideService(RpcSession.RpcSessionFactory, {
+      connect: (prepared) =>
+        Effect.gen(function* () {
+          yield* options?.beforeSessionConnect?.(prepared.environmentId) ?? Effect.void;
+          const closed = yield* Deferred.make<never, ConnectionTransientError>();
+          yield* Ref.update(sessions, (current) => [...current, { closed }]);
+          return yield* Effect.acquireRelease(
+            Effect.succeed({
+              client: {} as RpcSession.RpcSession["client"],
+              initialConfig: Effect.die(new Error("Config is not used by registry tests.")),
+              subscribeServerConfig: () =>
+                Stream.die(new Error("Config is not used by registry tests.")),
+              ready: Effect.void,
+              probe: Effect.void,
+              closed: Deferred.await(closed),
+            } satisfies RpcSession.RpcSession),
+            () => Ref.update(releasedSessions, (count) => count + 1),
+          );
+        }),
+    }),
+  );
 
   const cacheLayer = Layer.succeed(Persistence.EnvironmentCacheStore, cacheStore);
   const layer = EnvironmentRegistry.layer.pipe(
@@ -400,6 +404,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     cacheClears,
     ownedDataClears,
     sessions,
+    preparations,
     releasedSessions,
     storedProfiles,
     profileReadCount,
@@ -427,6 +432,159 @@ function awaitConnectionState(
 }
 
 describe("EnvironmentRegistry", () => {
+  it.effect("persists a missing workspace without reconnecting or deleting saved data", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [BEARER_TARGET],
+        [BEARER_PROFILE],
+        [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+      );
+      yield* Ref.update(harness.shellCache, (cache) =>
+        new Map(cache).set(BEARER_TARGET.environmentId, CACHED_SNAPSHOT),
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        yield* registry.markWorkspaceMissing(BEARER_TARGET.environmentId);
+        const missing = yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "blocked",
+        );
+        expect(missing.lastFailure).toMatchObject({
+          _tag: "ConnectionBlockedError",
+          reason: "workspace-missing",
+        });
+        expect(missing.retryAt).toBeNull();
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
+
+        yield* registry.markWorkspaceMissing(BEARER_TARGET.environmentId);
+        yield* registry.retryNow(BEARER_TARGET.environmentId);
+        yield* TestClock.adjust("24 hours");
+        expect(yield* Ref.get(harness.preparations)).toBe(1);
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
+        expect((yield* Ref.get(harness.storedTargets)).get(BEARER_TARGET.environmentId)).toEqual(
+          new BearerConnectionTarget({ ...BEARER_TARGET, workspaceStatus: "missing" }),
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+
+      yield* Effect.gen(function* () {
+        const reloaded = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* reloaded.start;
+        const missing = yield* awaitConnectionState(
+          reloaded,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "blocked",
+        );
+        expect(missing.lastFailure?.reason).toBe("workspace-missing");
+        expect(yield* Ref.get(harness.preparations)).toBe(1);
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
+        expect((yield* Ref.get(harness.shellCache)).get(BEARER_TARGET.environmentId)).toEqual(
+          CACHED_SNAPSHOT,
+        );
+        expect((yield* Ref.get(harness.storedProfiles)).get(BEARER_TARGET.connectionId)).toEqual(
+          BEARER_PROFILE,
+        );
+        expect((yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId)).toEqual(
+          BEARER_CREDENTIAL,
+        );
+        expect(yield* Ref.get(harness.cacheClears)).toEqual([]);
+        expect(yield* Ref.get(harness.ownedDataClears)).toEqual([]);
+
+        yield* reloaded.register(
+          new BearerConnectionRegistration({
+            target: BEARER_TARGET,
+            profile: BEARER_PROFILE,
+            credential: BEARER_CREDENTIAL,
+          }),
+        );
+        yield* awaitConnectionState(
+          reloaded,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        expect(yield* Ref.get(harness.preparations)).toBe(2);
+        expect((yield* Ref.get(harness.storedTargets)).get(BEARER_TARGET.environmentId)).toEqual(
+          BEARER_TARGET,
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("does not mark platform or non-bearer environments as missing", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET, SSH_CONNECTION], [SSH_PROFILE]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.reconcilePlatform([
+          new PrimaryConnectionRegistration({ target: TARGET }),
+          new BearerConnectionRegistration({
+            target: BEARER_TARGET,
+            profile: BEARER_PROFILE,
+            credential: BEARER_CREDENTIAL,
+          }),
+        ]);
+        for (const target of [TARGET, BEARER_TARGET, RELAY_TARGET, SSH_CONNECTION]) {
+          yield* registry.markWorkspaceMissing(target.environmentId);
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).get(target.environmentId)?.target,
+          ).toEqual(target);
+        }
+        expect(yield* Ref.get(harness.storedTargets)).toEqual(
+          new Map<EnvironmentId, ConnectionTarget>([
+            [RELAY_TARGET.environmentId, RELAY_TARGET],
+            [SSH_CONNECTION.environmentId, SSH_CONNECTION],
+          ]),
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("keeps the prior registration when persisting a missing workspace fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [BEARER_TARGET],
+        [BEARER_PROFILE],
+        [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+        {
+          beforeRegistrationRegister: () =>
+            Effect.fail(
+              new Persistence.ConnectionPersistenceError({
+                operation: "register-connection",
+                message: "Storage is unavailable.",
+              }),
+            ),
+        },
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        const failure = yield* registry
+          .markWorkspaceMissing(BEARER_TARGET.environmentId)
+          .pipe(Effect.flip);
+        expect(failure._tag).toBe("ConnectionPersistenceError");
+        expect((yield* registry.state(BEARER_TARGET.environmentId)).phase).toBe("connected");
+        expect((yield* Ref.get(harness.storedTargets)).get(BEARER_TARGET.environmentId)).toEqual(
+          BEARER_TARGET,
+        );
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(0);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("replays connected state when arming a desktop commit observer", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([TARGET]);

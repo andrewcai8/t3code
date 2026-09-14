@@ -2,7 +2,12 @@ import type { ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
-import type { SupervisorConnectionState } from "./model.ts";
+import type {
+  ConnectionBlockedReason,
+  ConnectionTarget,
+  SupervisorConnectionState,
+} from "./model.ts";
+import { workspaceMissingError } from "./errors.ts";
 
 export type EnvironmentConnectionPhase =
   | "available"
@@ -16,6 +21,7 @@ export interface EnvironmentConnectionPresentation {
   readonly phase: EnvironmentConnectionPhase;
   readonly error: string | null;
   readonly traceId: string | null;
+  readonly blockedReason?: ConnectionBlockedReason;
 }
 
 export interface EnvironmentPresentation {
@@ -51,11 +57,17 @@ export function presentConnectionState(
         phase: "error",
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
+        ...(state.lastFailure?._tag === "ConnectionBlockedError"
+          ? { blockedReason: state.lastFailure.reason }
+          : {}),
       };
   }
 }
 
 export function connectionStatusText(connection: EnvironmentConnectionPresentation): string {
+  if (connection.blockedReason === "workspace-missing") {
+    return "Workspace expired";
+  }
   switch (connection.phase) {
     case "available":
       return "Available";
@@ -85,7 +97,16 @@ export function connectionStatusTitle(connection: EnvironmentConnectionPresentat
 
 export function presentEnvironmentConnection(
   state: SupervisorConnectionState,
+  target: ConnectionTarget,
 ): EnvironmentConnectionPresentation {
+  if (target._tag === "BearerConnectionTarget" && target.workspaceStatus === "missing") {
+    return {
+      phase: "error",
+      error: workspaceMissingError().message,
+      traceId: null,
+      blockedReason: "workspace-missing",
+    };
+  }
   return presentConnectionState(state);
 }
 

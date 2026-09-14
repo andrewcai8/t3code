@@ -355,7 +355,7 @@ export function createEnvironmentControl(
             await leaseRegistry?.markMissing(input.leaseId);
           return {
             kind: "refused",
-            reason: "unknown",
+            reason: cause instanceof ProvisionedSandboxMissing ? "missing" : "unknown",
             message:
               cause instanceof ProvisionedSandboxMissing
                 ? cause.message
@@ -400,7 +400,7 @@ export function createEnvironmentControl(
       if (!lease || lease.owner === null || (lease.state !== "active" && lease.state !== "paused"))
         return {
           kind: "refused",
-          reason: "unknown",
+          reason: lease?.state === "missing" ? "missing" : "unknown",
           message:
             lease?.state === "missing"
               ? new ProvisionedSandboxMissing().message
@@ -423,7 +423,7 @@ export function createEnvironmentControl(
             await leaseRegistry.markMissing(lease.leaseId);
             return {
               kind: "refused",
-              reason: "unknown",
+              reason: "missing",
               message: new ProvisionedSandboxMissing().message,
             };
           }

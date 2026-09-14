@@ -24,6 +24,13 @@ export function credentialMissingError(connectionId: string): ConnectionBlockedE
   });
 }
 
+export function workspaceMissingError(): ConnectionBlockedError {
+  return new ConnectionBlockedError({
+    reason: "workspace-missing",
+    detail: "This workspace no longer exists. Its saved conversation is still available.",
+  });
+}
+
 export function environmentMismatchError(input: {
   readonly expected: EnvironmentId;
   readonly actual: EnvironmentId;

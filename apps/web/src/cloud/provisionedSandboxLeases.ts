@@ -73,10 +73,6 @@ export function provisionedSandboxFor(
   return leases.get(key(target)) ?? null;
 }
 
-export function allProvisionedSandboxes(): ReadonlyArray<ProvisionedSandboxLease> {
-  return [...leases.values()];
-}
-
 export function provisionedSandboxForEnvironment(environmentId: EnvironmentId) {
   const prefix = `thread:${environmentId}:`;
   for (const [entryKey, lease] of leases) {

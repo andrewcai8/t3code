@@ -115,6 +115,15 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.retryNow(environmentId)),
       ),
   });
+  const markWorkspaceMissing = createRuntimeCommand(runtime, {
+    label: "environment-catalog:mark-workspace-missing",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (environmentId: EnvironmentIdType) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.markWorkspaceMissing(environmentId)),
+      ),
+  });
   const awaitConnected = createRuntimeCommand(runtime, {
     label: "environment-catalog:await-connected",
     execute: (environmentId: EnvironmentIdType) =>
@@ -141,6 +150,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
     remove,
     removeRelayEnvironments,
     retryNow,
+    markWorkspaceMissing,
     awaitConnected,
   };
 }

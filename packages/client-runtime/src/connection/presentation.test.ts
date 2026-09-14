@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./catalog.ts";
 import {
   BearerConnectionTarget,
+  ConnectionBlockedError,
   ConnectionTransientError,
   type SupervisorConnectionState,
 } from "./model.ts";
@@ -50,6 +51,44 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 }
 
 describe("connection presentation", () => {
+  it.each(["available", "offline", "connected"] as const)(
+    "keeps a persisted missing workspace expired while the supervisor is %s",
+    (phase) => {
+      const connection = presentEnvironmentConnection(
+        supervisorState({ phase, network: "offline" }),
+        new BearerConnectionTarget({ ...TARGET, workspaceStatus: "missing" }),
+      );
+      expect(connection).toEqual({
+        phase: "error",
+        error: "This workspace no longer exists. Its saved conversation is still available.",
+        traceId: null,
+        blockedReason: "workspace-missing",
+      });
+      expect(connectionStatusTitle(connection)).toBe("Workspace expired");
+    },
+  );
+
+  it("exposes a missing workspace as a terminal error", () => {
+    const connection = presentConnectionState(
+      supervisorState({
+        phase: "blocked",
+        stage: null,
+        lastFailure: new ConnectionBlockedError({
+          reason: "workspace-missing",
+          detail: "This workspace no longer exists.",
+        }),
+      }),
+    );
+    expect(connection).toEqual({
+      phase: "error",
+      error: "This workspace no longer exists.",
+      traceId: null,
+      blockedReason: "workspace-missing",
+    });
+    expect(connectionStatusText(connection)).toBe("Workspace expired");
+    expect(connectionStatusTitle(connection)).toBe("Workspace expired");
+  });
+
   it("preserves profile display information without exposing credentials", () => {
     expect(connectionCatalogDisplayUrl(ENTRY)).toBe("https://environment.example.test");
   });
@@ -110,6 +149,7 @@ describe("connection presentation", () => {
             traceId: "trace-retry",
           }),
         }),
+        TARGET,
       ),
     ).toEqual({
       phase: "reconnecting",
@@ -138,6 +178,7 @@ describe("connection presentation", () => {
           phase: "offline",
           stage: null,
         }),
+        TARGET,
       ),
     ).toEqual({
       phase: "offline",
@@ -154,6 +195,7 @@ describe("connection presentation", () => {
           stage: null,
           generation: 1,
         }),
+        TARGET,
       ),
     ).toEqual({
       phase: "connected",
@@ -172,6 +214,7 @@ describe("connection presentation", () => {
           stage: null,
           attempt: 0,
         }),
+        TARGET,
       ),
     ).toEqual({
       phase: "available",

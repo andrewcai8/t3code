@@ -128,7 +128,7 @@ export const EnvironmentProvisionResumeResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("resumed") }),
   Schema.Struct({
     kind: Schema.Literal("refused"),
-    reason: Schema.Literal("unknown"),
+    reason: Schema.Literals(["unknown", "missing"]),
     message: Schema.String,
   }),
 ]);
@@ -160,7 +160,7 @@ export const EnvironmentProvisionTouchResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("touched") }),
   Schema.Struct({
     kind: Schema.Literal("refused"),
-    reason: Schema.Literal("unknown"),
+    reason: Schema.Literals(["unknown", "missing"]),
     message: Schema.String,
   }),
 ]);
