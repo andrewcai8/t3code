@@ -128,13 +128,17 @@ for (const endpoint of values.https) {
     `https-transport.${url.hostname}`,
     () =>
       new Promise((resolve, reject) => {
-        const request = NodeHttps.get(url, { rejectUnauthorized: true }, (response) => {
-          const authorized = response.socket.authorized;
-          response.resume();
-          if (!authorized)
-            reject(Object.assign(new Error("TLS not authorized"), { code: "TLS_UNAUTHORIZED" }));
-          else resolve({ httpStatus: response.statusCode, certificateVerified: true });
-        });
+        const request = NodeHttps.get(
+          url,
+          { rejectUnauthorized: true, signal: AbortSignal.timeout(15000) },
+          (response) => {
+            const authorized = response.socket.authorized;
+            response.resume();
+            if (!authorized)
+              reject(Object.assign(new Error("TLS not authorized"), { code: "TLS_UNAUTHORIZED" }));
+            else resolve({ httpStatus: response.statusCode, certificateVerified: true });
+          },
+        );
         request.setTimeout(15000, () =>
           request.destroy(Object.assign(new Error("HTTPS timeout"), { code: "HTTPS_TIMEOUT" })),
         );
