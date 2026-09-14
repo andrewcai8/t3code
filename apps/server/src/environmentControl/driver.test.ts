@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
-import { SandboxNotFoundError } from "e2b";
+import { SandboxNotFoundError, type SandboxNetworkInfo } from "e2b";
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { createCloudDriver, ProvisionedSandboxMissing } from "./driver.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
@@ -8,6 +8,7 @@ import type { EnvironmentControlConfig } from "./config.ts";
 const sdk = vi.hoisted(() => ({
   getInfo: vi.fn(),
   setTimeout: vi.fn(),
+  updateNetwork: vi.fn(),
   create: vi.fn(),
   readFile: vi.fn(),
   connect: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("e2b", async (importOriginal) => ({
     getInfo: sdk.getInfo,
     connect: sdk.connect,
     setTimeout: sdk.setTimeout,
+    updateNetwork: sdk.updateNetwork,
     create: sdk.create,
   },
 }));
@@ -73,6 +75,152 @@ function info(state: "paused" | "running", sandboxId = "broker") {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.clearAllMocks();
+});
+
+describe("E2B resume network reconciliation", () => {
+  const input = {
+    sandboxId: "retained",
+    providerInstanceId: "codex",
+    environmentId: "child",
+  };
+  const managedConfig = { ...config, provisioning: { egressAllow: ["openrouter.ai"] } };
+  const stale: SandboxNetworkInfo = { allowOut: ["github.com"], denyOut: ["0.0.0.0/0"] };
+  const desired: SandboxNetworkInfo = { allowOut: ["openrouter.ai"], denyOut: ["0.0.0.0/0"] };
+  function retained(network: SandboxNetworkInfo, state: "paused" | "running" = "running") {
+    return {
+      sandboxId: input.sandboxId,
+      state,
+      metadata: { purpose: "t3-environment", account: "codex" },
+      network,
+    };
+  }
+  function resumeWith(network: SandboxNetworkInfo, verified = network) {
+    sdk.getInfo
+      .mockResolvedValueOnce(retained(stale, "paused"))
+      .mockResolvedValueOnce(retained(network))
+      .mockResolvedValue(retained(verified));
+    sdk.connect.mockResolvedValue({ sandboxId: input.sandboxId });
+    sdk.updateNetwork.mockResolvedValue(undefined);
+    return createCloudDriver(managedConfig).resume(input);
+  }
+
+  it("replaces the restored policy only after connecting and verifies the effective policy", async () => {
+    sdk.connect.mockImplementationOnce(async () => {
+      expect(sdk.updateNetwork).not.toHaveBeenCalled();
+      expect(sdk.getInfo).toHaveBeenCalledTimes(1);
+    });
+    await expect(resumeWith(stale, desired)).resolves.toEqual({});
+    expect(sdk.updateNetwork).toHaveBeenCalledExactlyOnceWith(
+      "retained",
+      { ...desired, allowInternetAccess: true },
+      { apiKey: "secret-key", requestTimeoutMs: 15_000 },
+    );
+    expect(sdk.getInfo).toHaveBeenCalledTimes(3);
+    await expect(createCloudDriver(managedConfig).resume(input)).resolves.toEqual({});
+    expect(sdk.updateNetwork).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not update a matching policy, including an authenticated proxy", async () => {
+    await expect(
+      resumeWith({
+        ...desired,
+        allowOut: ["OPENROUTER.AI", "openrouter.ai"],
+        egressProxy: { address: "socks5://proxy.example:1080", username: "account" },
+      }),
+    ).resolves.toEqual({});
+    expect(sdk.updateNetwork).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { sandboxId: "another" },
+    { metadata: { purpose: "another", account: "codex" } },
+    { metadata: { purpose: "t3-environment", account: "another" } },
+  ])("refuses changed ownership before any mutation %j", async (changed) => {
+    sdk.getInfo.mockResolvedValue({ ...retained(stale, "paused"), ...changed });
+    await expect(createCloudDriver(managedConfig).resume(input)).rejects.toThrow("ownership");
+    expect(sdk.connect).not.toHaveBeenCalled();
+    expect(sdk.updateNetwork).not.toHaveBeenCalled();
+  });
+
+  it("preserves transforms and an unauthenticated proxy without sending ingress settings", async () => {
+    const preserved = {
+      rules: {
+        "api.example.com": [
+          { transform: { headers: { authorization: "Bearer ${e2b.identity.tokens.test}" } } },
+        ],
+      },
+      egressProxy: { address: "socks5://proxy.example:1080" },
+      allowPublicTraffic: false,
+      maskRequestHost: "custom.example",
+      httpsPorts: [8443],
+    };
+    await expect(
+      resumeWith({ ...stale, ...preserved }, { ...desired, ...preserved }),
+    ).resolves.toEqual({});
+    expect(sdk.updateNetwork.mock.calls[0]?.[1]).toEqual({
+      ...desired,
+      allowInternetAccess: true,
+      rules: preserved.rules,
+      egressProxy: preserved.egressProxy,
+    });
+  });
+
+  it("refuses to replace a proxy whose password the API cannot return", async () => {
+    await expect(
+      resumeWith({
+        ...stale,
+        egressProxy: { address: "socks5://proxy.example:1080", username: "account" },
+      }),
+    ).rejects.toThrow("existing proxy password");
+    expect(sdk.updateNetwork).not.toHaveBeenCalled();
+  });
+
+  it("does not report success when the update fails", async () => {
+    sdk.updateNetwork.mockRejectedValueOnce(new Error("network update unavailable"));
+    await expect(resumeWith(stale, desired)).rejects.toThrow("network update unavailable");
+    expect(sdk.getInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    stale,
+    {
+      ...desired,
+      rules: { "unexpected.example": [{ transform: { headers: { added: "value" } } }] },
+    },
+    { ...desired, egressProxy: { address: "socks5://unexpected.example:1080" } },
+  ])("does not report success when the observed policy differs %j", async (observed) => {
+    await expect(resumeWith(stale, observed)).rejects.toThrow("did not preserve");
+  });
+
+  it("leaves the network unmanaged when egressAllow is absent", async () => {
+    sdk.getInfo.mockResolvedValue(retained(stale));
+    await expect(createCloudDriver(config).resume(input)).resolves.toEqual({});
+    expect(sdk.updateNetwork).not.toHaveBeenCalled();
+  });
+
+  it("restores unrestricted access when egressAllow is explicitly empty", async () => {
+    sdk.getInfo
+      .mockResolvedValueOnce(retained(stale, "paused"))
+      .mockResolvedValueOnce(retained(stale))
+      .mockResolvedValueOnce(retained({}));
+    await expect(
+      createCloudDriver({ ...config, provisioning: { egressAllow: [] } }).resume(input),
+    ).resolves.toEqual({});
+    expect(sdk.updateNetwork.mock.calls[0]?.[1]).toEqual({
+      allowOut: [],
+      denyOut: [],
+      allowInternetAccess: true,
+    });
+  });
+
+  it("replaces a legacy internet denial even when the allow and deny lists match", async () => {
+    sdk.getInfo
+      .mockResolvedValueOnce({ ...retained(desired, "paused"), allowInternetAccess: false })
+      .mockResolvedValueOnce({ ...retained(desired), allowInternetAccess: false })
+      .mockResolvedValueOnce({ ...retained(desired), allowInternetAccess: true });
+    await expect(createCloudDriver(managedConfig).resume(input)).resolves.toEqual({});
+    expect(sdk.updateNetwork.mock.calls[0]?.[1]).toEqual({ ...desired, allowInternetAccess: true });
+  });
 });
 describe("cloud SDK and controller boundary", () => {
   it("creates fork parents with a persistent timeout and cleans them up when a fork fails", async () => {

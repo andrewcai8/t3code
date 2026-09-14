@@ -7,6 +7,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodeUtil from "node:util";
 import { ALL_TRAFFIC, Sandbox, SandboxNotFoundError } from "e2b";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { loadUserToken, fromBearerToken } from "@namespacelabs/sdk/auth";
@@ -53,6 +54,12 @@ export class ProvisionedSandboxMissing extends Error {
 function isMissingSandbox(cause: unknown): boolean {
   const message = cause instanceof Error ? cause.message : String(cause);
   return /(?:status\s*[:=]?\s*)?404\b|sandbox[^\n]*not found/i.test(message);
+}
+
+function sameNetworkAddresses(actual: readonly string[] | undefined, desired: readonly string[]) {
+  const current = new Set(actual?.map((address) => address.toLowerCase()));
+  const expected = new Set(desired.map((address) => address.toLowerCase()));
+  return current.size === expected.size && [...expected].every((address) => current.has(address));
 }
 
 export interface ProvisionRequest {
@@ -607,8 +614,43 @@ export function createCloudDriver(
       try {
         await provisionedE2bInfo(sandboxId, providerInstanceId);
         await Sandbox.connect(sandboxId, { ...api, timeoutMs: PROVISIONED_TIMEOUT_MS });
-        if ((await provisionedE2bInfo(sandboxId, providerInstanceId)).state !== "running")
-          throw new Error("Sandbox did not resume");
+        const resumed = await provisionedE2bInfo(sandboxId, providerInstanceId);
+        if (resumed.state !== "running") throw new Error("Sandbox did not resume");
+        const allowed = config.provisioning?.egressAllow;
+        if (allowed !== undefined) {
+          const allowOut = [...allowed];
+          const denyOut = allowed.length > 0 ? [ALL_TRAFFIC] : [];
+          const matchesPolicy = (info: typeof resumed) =>
+            info.allowInternetAccess !== false &&
+            sameNetworkAddresses(info.network?.allowOut, allowOut) &&
+            sameNetworkAddresses(info.network?.denyOut, denyOut);
+          if (!matchesPolicy(resumed)) {
+            const network = resumed.network;
+            // E2B omits proxy passwords from getInfo. Replacing that proxy
+            // from its public fields would silently remove its credentials.
+            if (network?.egressProxy?.username !== undefined)
+              throw new Error("Cannot reconcile E2B network without the existing proxy password");
+            await Sandbox.updateNetwork(
+              sandboxId,
+              {
+                allowOut,
+                denyOut,
+                allowInternetAccess: true,
+                ...(network?.rules ? { rules: network.rules } : {}),
+                ...(network?.egressProxy ? { egressProxy: network.egressProxy } : {}),
+              },
+              api,
+            );
+            const verified = await provisionedE2bInfo(sandboxId, providerInstanceId);
+            if (
+              verified.state !== "running" ||
+              !matchesPolicy(verified) ||
+              !NodeUtil.isDeepStrictEqual(verified.network?.rules ?? {}, network?.rules ?? {}) ||
+              !NodeUtil.isDeepStrictEqual(verified.network?.egressProxy, network?.egressProxy)
+            )
+              throw new Error("E2B network reconciliation did not preserve the requested policy");
+          }
+        }
         return {};
       } catch (cause) {
         if (cause instanceof SandboxNotFoundError) throw new ProvisionedSandboxMissing();
