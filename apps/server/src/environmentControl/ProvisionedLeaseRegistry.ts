@@ -6,7 +6,13 @@ import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 
-export const ProvisionedLeaseState = Schema.Literals(["active", "paused", "releasing", "disposed"]);
+export const ProvisionedLeaseState = Schema.Literals([
+  "active",
+  "paused",
+  "missing",
+  "releasing",
+  "disposed",
+]);
 export type ProvisionedLeaseState = typeof ProvisionedLeaseState.Type;
 
 const ProvisionedLeaseOwner = Schema.Struct({
@@ -60,6 +66,7 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly touch: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
+  readonly findById: (leaseId: string) => Promise<ProvisionedLease | null>;
   readonly findBySandbox: (sandboxId: string) => Promise<ProvisionedLease | null>;
   readonly beginRelease: (input: {
     readonly leaseId?: string | undefined;
@@ -67,6 +74,7 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<"missing" | "disposed" | "started" | "busy">;
   readonly markDisposed: (leaseId: string, now?: Date) => Promise<void>;
+  readonly markMissing: (leaseId: string, now?: Date) => Promise<void>;
   readonly markPaused: (leaseId: string, now?: Date) => Promise<void>;
   readonly markActive: (input: {
     readonly leaseId: string;
@@ -204,6 +212,8 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         next[index] = updated;
         return { leases: next, value: updated };
       }),
+    findById: (leaseId) =>
+      consistentRead((leases) => leases.find((lease) => lease.leaseId === leaseId) ?? null),
     findBySandbox: (sandboxId) =>
       consistentRead((leases) => leases.find((lease) => lease.sandboxId === sandboxId) ?? null),
     beginRelease: (input) =>
@@ -227,6 +237,15 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         leases: leases.map((lease) =>
           lease.leaseId === leaseId
             ? { ...lease, state: "disposed" as const, updatedAt: nowIso(now) }
+            : lease,
+        ),
+        value: undefined,
+      })),
+    markMissing: (leaseId, now) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) =>
+          lease.leaseId === leaseId && (lease.state === "active" || lease.state === "paused")
+            ? { ...lease, state: "missing" as const, updatedAt: nowIso(now) }
             : lease,
         ),
         value: undefined,

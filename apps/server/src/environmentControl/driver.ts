@@ -7,7 +7,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
-import { ALL_TRAFFIC, Sandbox } from "e2b";
+import { ALL_TRAFFIC, Sandbox, SandboxNotFoundError } from "e2b";
 import { loadUserToken, fromBearerToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
@@ -37,6 +37,13 @@ export const ControllerResult = Schema.Union([
 export type ControllerResult = typeof ControllerResult.Type;
 /** The port a provisioned environment serves T3 on. */
 const PROVISIONED_PORT = 3000;
+const PROVISIONED_TIMEOUT_MS = 6 * 3_600_000;
+
+export class ProvisionedSandboxMissing extends Error {
+  constructor() {
+    super("E2B no longer has this workspace. It cannot be reconnected.");
+  }
+}
 
 function isMissingSandbox(cause: unknown): boolean {
   const message = cause instanceof Error ? cause.message : String(cause);
@@ -169,6 +176,10 @@ export interface CloudDriver {
     readonly namespaceResource?: NamespaceResource;
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
   }>;
+  renew(input: {
+    readonly sandboxId: string;
+    readonly providerInstanceId: string;
+  }): Promise<"running" | "paused" | "missing">;
   stop(target: ManagedTarget, instanceId: string): Promise<ControllerResult>;
   provision(request: ProvisionRequest): Promise<Provisioned>;
   dispose(input: {
@@ -427,6 +438,16 @@ export function createCloudDriver(
       throw new Error("Unknown sandbox state");
     return info;
   }
+  async function provisionedE2bInfo(sandboxId: string, providerInstanceId: string) {
+    const info = await Sandbox.getInfo(sandboxId, api);
+    if (
+      info.sandboxId !== sandboxId ||
+      info.metadata.purpose !== "t3-environment" ||
+      info.metadata.account !== providerInstanceId
+    )
+      throw new Error("Sandbox ownership or purpose changed");
+    return info;
+  }
   async function observeE2b(identity: Parameters<typeof e2bInfo>[0]): Promise<Observation> {
     const info = await e2bInfo(identity);
     return info.state === "paused"
@@ -595,13 +616,12 @@ export function createCloudDriver(
         allowed && allowed.length > 0
           ? { network: { allowOut: [...allowed], denyOut: [ALL_TRAFFIC] } }
           : {};
-      // The parent exists only long enough to make a memory-preserving fork.
-      // Its kill timeout is a final guard if this process dies between create
-      // and fork; it must never become a warm sandbox that bills while idle.
+      // Forks inherit this policy. Keep their memory and files at the deadline;
+      // the temporary parent is explicitly killed after forking.
       const parent = await Sandbox.create(provisioning.templateId, {
         ...api,
         timeoutMs: 10 * 60_000,
-        lifecycle: { onTimeout: "kill" },
+        lifecycle: { onTimeout: "pause", autoResume: false },
         metadata: { purpose: "t3-environment", account: request.providerInstanceId },
         // Denying everything first is what makes the allow list meaningful;
         // without the deny, listing hosts grants nothing and blocks nothing.
@@ -609,7 +629,7 @@ export function createCloudDriver(
       });
       let sandbox: Sandbox | undefined;
       try {
-        const fork = (await parent.fork({ count: 1, timeoutMs: 6 * 3_600_000 }))[0];
+        const fork = (await parent.fork({ count: 1, timeoutMs: PROVISIONED_TIMEOUT_MS }))[0];
         if (!(fork instanceof Sandbox))
           throw new Error(`Could not fork the E2B template: ${String(fork)}`);
         sandbox = fork;
@@ -673,17 +693,37 @@ export function createCloudDriver(
         });
         return { namespaceResource: resumed.resource, namespaceProxy: restored };
       }
-      const info = await Sandbox.getInfo(sandboxId, api);
-      if (
-        info.sandboxId !== sandboxId ||
-        info.metadata.purpose !== "t3-environment" ||
-        info.metadata.account !== providerInstanceId
-      )
-        throw new Error("Sandbox ownership or purpose changed");
-      await Sandbox.connect(sandboxId, { ...api, timeoutMs: 3_600_000 });
-      if ((await Sandbox.getInfo(sandboxId, api)).state !== "running")
-        throw new Error("Sandbox did not resume");
-      return {};
+      try {
+        await provisionedE2bInfo(sandboxId, providerInstanceId);
+        await Sandbox.connect(sandboxId, { ...api, timeoutMs: PROVISIONED_TIMEOUT_MS });
+        if ((await provisionedE2bInfo(sandboxId, providerInstanceId)).state !== "running")
+          throw new Error("Sandbox did not resume");
+        return {};
+      } catch (cause) {
+        if (cause instanceof SandboxNotFoundError) throw new ProvisionedSandboxMissing();
+        throw cause;
+      }
+    },
+    renew: async ({ sandboxId, providerInstanceId }) => {
+      try {
+        const info = await provisionedE2bInfo(sandboxId, providerInstanceId);
+        if (info.state === "paused") return "paused";
+        if (info.endAt.getTime() < Date.now() + PROVISIONED_TIMEOUT_MS)
+          await Sandbox.setTimeout(sandboxId, PROVISIONED_TIMEOUT_MS, api);
+        return "running";
+      } catch (cause) {
+        if (!(cause instanceof SandboxNotFoundError)) throw cause;
+        // A timeout update can race a provider pause. Observe again without
+        // connect(), which would resume a workspace stopped by the user.
+        try {
+          const info = await provisionedE2bInfo(sandboxId, providerInstanceId);
+          if (info.state === "paused") return "paused";
+        } catch (observedCause) {
+          if (observedCause instanceof SandboxNotFoundError) return "missing";
+          throw observedCause;
+        }
+        throw cause;
+      }
     },
     pause: async ({ sandboxId, namespaceResource }) => {
       if (namespaceResource) {

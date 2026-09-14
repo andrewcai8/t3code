@@ -37,7 +37,12 @@ import {
 } from "./ProvisioningProviderProfile.ts";
 import * as ServerConfig from "../config.ts";
 import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
-import { createCloudDriver, type CloudDriver, type ProvisionRequest } from "./driver.ts";
+import {
+  createCloudDriver,
+  ProvisionedSandboxMissing,
+  type CloudDriver,
+  type ProvisionRequest,
+} from "./driver.ts";
 import {
   createProvisionedLeaseRegistry,
   type ProvisionedLeaseRegistry,
@@ -72,7 +77,7 @@ export function createEnvironmentControl(
   >();
   const leaseOperations = new Map<
     string,
-    | { action: "pause" | "dispose" | "reap" }
+    | { action: "pause" | "dispose" | "reap" | "renew" }
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
@@ -326,13 +331,14 @@ export function createEnvironmentControl(
           lease.leaseId !== input.leaseId ||
           lease.owner?.environmentId !== input.environmentId ||
           lease.owner.threadId !== input.threadId ||
-          (lease.state !== "active" && lease.state !== "paused")
+          (lease.state !== "active" && lease.state !== "paused" && lease.state !== "missing")
         )
           return {
             kind: "refused",
             reason: "unknown",
             message: "This workspace could not be found. Reconnect was refused.",
           };
+        if (lease.state === "missing") throw new ProvisionedSandboxMissing();
         const resumed = await driver.resume({
           sandboxId: lease.sandboxId,
           environmentId: input.environmentId,
@@ -344,11 +350,18 @@ export function createEnvironmentControl(
           throw new Error("Lease could not be resumed");
         return { kind: "resumed" };
       })()
-        .catch((): EnvironmentProvisionResumeResult => ({
-          kind: "refused",
-          reason: "unknown",
-          message: "The workspace could not be reconnected. Retry shortly.",
-        }))
+        .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
+          if (cause instanceof ProvisionedSandboxMissing)
+            await leaseRegistry?.markMissing(input.leaseId);
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message:
+              cause instanceof ProvisionedSandboxMissing
+                ? cause.message
+                : "The workspace could not be reconnected. Retry shortly.",
+          };
+        })
         .finally(() => leaseOperations.delete(input.sandboxId));
       leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
       return promise;
@@ -383,13 +396,65 @@ export function createEnvironmentControl(
           reason: "unknown",
           message: "The cloud sandbox lease registry is unavailable.",
         };
-      return (await leaseRegistry.touch(input.leaseId))
-        ? { kind: "touched" }
-        : {
-            kind: "refused",
-            reason: "unknown",
-            message: "The cloud sandbox lease could not be renewed.",
-          };
+      const lease = await leaseRegistry.findById(input.leaseId);
+      if (!lease || lease.owner === null || (lease.state !== "active" && lease.state !== "paused"))
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message:
+            lease?.state === "missing"
+              ? new ProvisionedSandboxMissing().message
+              : "The cloud sandbox lease could not be renewed.",
+        };
+      if (leaseOperations.has(lease.sandboxId))
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "Another workspace operation is in progress. Retry shortly.",
+        };
+      leaseOperations.set(lease.sandboxId, { action: "renew" });
+      try {
+        if (!lease.namespaceResource) {
+          const state = await driver.renew({
+            sandboxId: lease.sandboxId,
+            providerInstanceId: lease.providerInstanceId,
+          });
+          if (state === "missing") {
+            await leaseRegistry.markMissing(lease.leaseId);
+            return {
+              kind: "refused",
+              reason: "unknown",
+              message: new ProvisionedSandboxMissing().message,
+            };
+          }
+          if (state === "paused") {
+            await leaseRegistry.markPaused(lease.leaseId);
+            return {
+              kind: "refused",
+              reason: "unknown",
+              message: "The workspace is paused. Reconnect to continue.",
+            };
+          }
+        }
+        const renewed = lease.namespaceResource
+          ? await leaseRegistry.touch(input.leaseId)
+          : await leaseRegistry.markActive({ leaseId: input.leaseId });
+        return renewed
+          ? { kind: "touched" }
+          : {
+              kind: "refused",
+              reason: "unknown",
+              message: "The cloud sandbox lease could not be renewed.",
+            };
+      } catch {
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The cloud sandbox deadline could not be renewed. Retry shortly.",
+        };
+      } finally {
+        leaseOperations.delete(lease.sandboxId);
+      }
     },
     reapExpiredLeases,
   };
