@@ -31,7 +31,7 @@ describe("NamespaceProxyManager", () => {
       proxyId: "p1",
       upstreamHttpBaseUrl: upstream.origin,
       upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
-      upstreamAuthorization: "Bearer secret",
+      getUpstreamAuthorization: async () => "Bearer secret",
     });
     const response = await fetch(`${lease.proxyOrigin}/api/run?q=1`, {
       headers: {
@@ -59,7 +59,7 @@ describe("NamespaceProxyManager", () => {
       proxyId: "same",
       upstreamHttpBaseUrl: upstream.origin,
       upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
-      upstreamAuthorization: "Bearer x",
+      getUpstreamAuthorization: async () => "Bearer x",
     };
     await manager.open(input);
     await expect(manager.open(input)).rejects.toThrow("already exists");
@@ -87,7 +87,7 @@ describe("Namespace proxy restoration", () => {
       proxyId: "authenticated",
       upstreamHttpBaseUrl: upstream.origin,
       upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
-      upstreamAuthorization: "Bearer namespace-ingress",
+      getUpstreamAuthorization: async () => "Bearer namespace-ingress",
     };
     try {
       const lease = await manager.open(input);
@@ -115,7 +115,7 @@ describe("Namespace proxy restoration", () => {
       proxyId: "retained",
       upstreamHttpBaseUrl: first.origin,
       upstreamWsBaseUrl: first.origin.replace("http", "ws"),
-      upstreamAuthorization: "old",
+      getUpstreamAuthorization: async () => "old",
     };
     try {
       const lease = await manager.open(input);
@@ -124,7 +124,7 @@ describe("Namespace proxy restoration", () => {
         ...lease,
         upstreamHttpBaseUrl: second.origin,
         upstreamWsBaseUrl: second.origin.replace("http", "ws"),
-        upstreamAuthorization: "new",
+        getUpstreamAuthorization: async () => "new",
       };
       expect(
         await (await fetch(lease.proxyOrigin, { headers: { connection: "close" } })).text(),
@@ -159,7 +159,7 @@ describe("Namespace proxy restoration", () => {
           proxyOrigin: occupied.origin,
           upstreamHttpBaseUrl: occupied.origin,
           upstreamWsBaseUrl: occupied.origin.replace("http", "ws"),
-          upstreamAuthorization: "token",
+          getUpstreamAuthorization: async () => "token",
         }),
       ).rejects.toThrow("EADDRINUSE");
       expect(await (await fetch(occupied.origin)).text()).toBe("occupied");
@@ -167,4 +167,93 @@ describe("Namespace proxy restoration", () => {
       await new Promise<void>((resolve) => occupied.server.close(() => resolve()));
     }
   });
+});
+
+const upgrade = (origin: string) =>
+  new Promise<void>((resolve, reject) => {
+    const request = NodeHttp.request(origin, {
+      headers: {
+        connection: "Upgrade",
+        upgrade: "websocket",
+        authorization: "Bearer saved-t3-session",
+      },
+    });
+    request.once("upgrade", (_response, socket) => {
+      socket.destroy();
+      resolve();
+    });
+    request.once("error", reject);
+    request.end();
+  });
+
+it("renews ingress authorization for HTTP requests and WebSocket handshakes", async () => {
+  const received: string[] = [];
+  const upstream = await listen((request, response) => {
+    response.end(`${request.headers["x-nsc-ingress-auth"]}:${request.headers.authorization}`);
+  });
+  upstream.server.on("upgrade", (request, socket) => {
+    received.push(`${request.headers["x-nsc-ingress-auth"]}:${request.headers.authorization}`);
+    socket.end(
+      "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+    );
+  });
+  let authorization = "Bearer first";
+  const manager = new NamespaceProxyManager();
+  const lease = await manager.open({
+    proxyId: "renewable",
+    upstreamHttpBaseUrl: upstream.origin,
+    upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
+    getUpstreamAuthorization: async () => authorization,
+  });
+  try {
+    for (const token of ["Bearer first", "Bearer renewed"]) {
+      authorization = token;
+      const response = await fetch(lease.proxyOrigin, {
+        headers: { authorization: "Bearer saved-t3-session", connection: "close" },
+      });
+      expect(await response.text()).toBe(`${token}:Bearer saved-t3-session`);
+      await upgrade(lease.proxyOrigin);
+    }
+    expect(received).toEqual([
+      "Bearer first:Bearer saved-t3-session",
+      "Bearer renewed:Bearer saved-t3-session",
+    ]);
+  } finally {
+    await manager.close(lease);
+    await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+  }
+});
+
+it("fails closed on HTTP and WebSocket auth errors and recovers on the next request", async () => {
+  let upstreamRequests = 0;
+  const upstream = await listen((_request, response) => {
+    upstreamRequests++;
+    response.end("authenticated");
+  });
+  let fail = true;
+  const manager = new NamespaceProxyManager();
+  const lease = await manager.open({
+    proxyId: "auth-failure",
+    upstreamHttpBaseUrl: upstream.origin,
+    upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
+    getUpstreamAuthorization: async () => {
+      if (fail) throw new Error("private credential failure");
+      return "Bearer renewed";
+    },
+  });
+  try {
+    const response = await fetch(lease.proxyOrigin, { headers: { connection: "close" } });
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("Namespace upstream unavailable");
+    await expect(upgrade(lease.proxyOrigin)).rejects.toThrow();
+    expect(upstreamRequests).toBe(0);
+    fail = false;
+    expect(
+      await (await fetch(lease.proxyOrigin, { headers: { connection: "close" } })).text(),
+    ).toBe("authenticated");
+    expect(upstreamRequests).toBe(1);
+  } finally {
+    await manager.close(lease);
+    await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+  }
 });

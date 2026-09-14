@@ -8,15 +8,29 @@ const sdk = vi.hoisted(() => ({
   connect: vi.fn(),
   fetch: vi.fn(),
   describe: vi.fn(),
+  issueToken: vi.fn().mockResolvedValue("local-session-token"),
+  loadUserToken: vi.fn(),
+  fromBearerToken: vi.fn(),
 }));
 vi.mock("e2b", () => ({ Sandbox: { getInfo: sdk.getInfo, connect: sdk.connect } }));
 vi.mock("@namespacelabs/sdk/auth", () => ({
-  loadUserToken: async () => "token",
-  fromBearerToken: () => "token",
+  loadUserToken: sdk.loadUserToken.mockImplementation(async () => ({ issueToken: sdk.issueToken })),
+  fromBearerToken: sdk.fromBearerToken.mockImplementation((token: string) => ({
+    issueToken: async () => token,
+  })),
 }));
 vi.mock("@namespacelabs/sdk/api", () => ({
-  createClient: () => ({ fetch: sdk.fetch, describeInstance: sdk.describe }),
-  createGlobalTransport: () => ({}),
+  createClient: (
+    _service: unknown,
+    transport: { tokenSource?: { issueToken: (minimum: number) => Promise<string> } },
+  ) => ({
+    fetch: async (...args: unknown[]) => {
+      await transport.tokenSource?.issueToken(60_000);
+      return sdk.fetch(...args);
+    },
+    describeInstance: sdk.describe,
+  }),
+  createGlobalTransport: (options: unknown) => options,
   createRegionTransport: () => ({}),
 }));
 const target = {
@@ -104,7 +118,7 @@ describe("cloud SDK and controller boundary", () => {
       driver.provision({ provider: "namespace", providerInstanceId: "codex" }),
     ).rejects.toMatchObject({
       name: "ProvisionRefused",
-      reason: "credentials",
+      reason: "unconfigured",
     });
     expect(sdk.connect).not.toHaveBeenCalled();
   });
@@ -186,4 +200,44 @@ describe("cloud SDK and controller boundary", () => {
     );
     expect(pause).toHaveBeenCalledTimes(1);
   });
+});
+
+it("loads local Namespace credentials lazily and retries after a failed load", async () => {
+  const driver = createCloudDriver(config);
+  expect(sdk.loadUserToken).not.toHaveBeenCalled();
+  const namespaceTarget = {
+    ...target,
+    machine: {
+      provider: "namespace" as const,
+      name: "name",
+      devboxId: "devbox",
+      volumeName: "volume",
+      region: "region",
+    },
+  };
+  sdk.loadUserToken.mockRejectedValueOnce(new Error("not logged in"));
+  await expect(driver.observe(namespaceTarget)).rejects.toThrow("not logged in");
+  sdk.fetch.mockResolvedValue({ devbox: { id: "devbox", volumeName: "volume" }, instanceId: "" });
+  await expect(driver.observe(namespaceTarget)).resolves.toEqual({ kind: "stopped" });
+  expect(sdk.issueToken).toHaveBeenCalledWith(60_000, undefined);
+  expect(sdk.fromBearerToken).not.toHaveBeenCalled();
+});
+
+it("uses configured Namespace credentials without loading the local nsc session", async () => {
+  sdk.fetch.mockResolvedValue({ devbox: { id: "devbox", volumeName: "volume" }, instanceId: "" });
+  const driver = createCloudDriver({ ...config, namespaceToken: "configured-token" });
+  await expect(
+    driver.observe({
+      ...target,
+      machine: {
+        provider: "namespace",
+        name: "name",
+        devboxId: "devbox",
+        volumeName: "volume",
+        region: "region",
+      },
+    }),
+  ).resolves.toEqual({ kind: "stopped" });
+  expect(sdk.fromBearerToken).toHaveBeenCalledWith("configured-token");
+  expect(sdk.loadUserToken).not.toHaveBeenCalled();
 });
