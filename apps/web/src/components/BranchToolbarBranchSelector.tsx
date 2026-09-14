@@ -398,7 +398,7 @@ export function BranchToolbarBranchSelector({
   };
 
   const selectBranch = (refName: VcsRef) => {
-    if (!branchCwd || !activeProjectCwd || isBranchActionPending) return;
+    if (serverThread?.handoff || !branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
     if (isSelectingWorktreeBase) {
       setThreadBranch(refName.name, null);
@@ -460,7 +460,7 @@ export function BranchToolbarBranchSelector({
 
   const createRef = (rawName: string) => {
     const name = sanitizeNewRefName(rawName);
-    if (!branchCwd || !name || isBranchActionPending) return;
+    if (serverThread?.handoff || !branchCwd || !name || isBranchActionPending) return;
 
     setIsBranchMenuOpen(false);
     onComposerFocusRequest?.();
@@ -527,13 +527,17 @@ export function BranchToolbarBranchSelector({
   // ---------------------------------------------------------------------------
   const branchListScrollElementRef = useRef<HTMLElement | null>(null);
   const previousBranchListScrollTopRef = useRef<number | null>(null);
-  const handleOpenChange = useCallback((open: boolean) => {
-    previousBranchListScrollTopRef.current = null;
-    setIsBranchMenuOpen(open);
-    if (!open) {
-      setBranchQuery("");
-    }
-  }, []);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      if (open && serverThread?.handoff) return;
+      previousBranchListScrollTopRef.current = null;
+      setIsBranchMenuOpen(open);
+      if (!open) {
+        setBranchQuery("");
+      }
+    },
+    [serverThread?.handoff],
+  );
 
   const [showTopBranchScrollFade, setShowTopBranchScrollFade] = useState(false);
   const [showBottomBranchScrollFade, setShowBottomBranchScrollFade] = useState(false);
@@ -776,7 +780,12 @@ export function BranchToolbarBranchSelector({
             // No press-scale: the popup aligns live to this trigger, so a
             // momentary 0.97 shrink would drag the open popup ~3px sideways.
             className="min-w-0 max-w-full font-normal text-muted-foreground/70 text-xs! hover:text-foreground/80 active:scale-100"
-            disabled={isInitialBranchesLoadPending || isBranchActionPending}
+            title={serverThread?.handoff ? "Branch changes are paused for handoff" : undefined}
+            disabled={
+              Boolean(serverThread?.handoff) ||
+              isInitialBranchesLoadPending ||
+              isBranchActionPending
+            }
           >
             <GitBranchIcon className="size-3 shrink-0 opacity-70" />
             <span

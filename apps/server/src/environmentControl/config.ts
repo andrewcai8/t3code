@@ -66,8 +66,24 @@ export type NamespaceArtifact = typeof NamespaceArtifact.Type;
  * named targets, which is why provisioning refuses with `unconfigured` rather
  * than failing.
  */
+export const ProvisionRuntimeArtifact = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  revision: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
+  entrypoint: TrimmedNonEmptyString,
+  runtimeExecutable: TrimmedNonEmptyString,
+  /** Install package dependencies on the target platform before starting T3. */
+  install: Schema.optional(Schema.Literal("npm")),
+});
+export type ProvisionRuntimeArtifact = typeof ProvisionRuntimeArtifact.Type;
 const Provisioning = Schema.Struct({
   templateId: Schema.optional(TrimmedNonEmptyString),
+  runtimeArtifacts: Schema.optional(
+    Schema.Struct({
+      linux: Schema.optional(ProvisionRuntimeArtifact),
+      macos: Schema.optional(ProvisionRuntimeArtifact),
+    }),
+  ),
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
   /**
@@ -135,6 +151,32 @@ const Provisioning = Schema.Struct({
         } catch {
           return false;
         }
+      }),
+    ),
+  ),
+  /**
+   * Skill bundles copied into a new environment, by directory.
+   *
+   * An agent that reaches a prepared sandbox without its playbooks will
+   * improvise, which is the opposite of why a bug is routed to one. Each CLI
+   * reads skills from a different place, so a bundle is named once here and
+   * the selected driver decides where it lands.
+   */
+  skills: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        /** Absolute directory on the machine running the server. */
+        source: TrimmedNonEmptyString,
+        /**
+         * Directory name within the environment's skill root, for a source
+         * that is one skill.
+         *
+         * Omitted, the source is read as a directory of skills and its
+         * children land in the root directly. Every supported CLI resolves a
+         * skill as `<root>/<directory>/SKILL.md` and looks no deeper, so a
+         * plugin holding many skills needs the flat form to be found at all.
+         */
+        name: Schema.optional(TrimmedNonEmptyString),
       }),
     ),
   ),

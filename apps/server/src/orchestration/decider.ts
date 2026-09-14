@@ -46,6 +46,7 @@ import {
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
+import { handoffRejection, type HandoffResponse } from "./ThreadHandoff.ts";
 
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 
@@ -175,9 +176,11 @@ type DecideOrchestrationCommandResult =
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
+  handoffResponse,
 }: {
   readonly commands: ReadonlyArray<OrchestrationCommand>;
   readonly readModel: OrchestrationReadModel;
+  readonly handoffResponse?: HandoffResponse;
 }): Effect.fn.Return<
   ReadonlyArray<PlannedOrchestrationEvent>,
   OrchestrationCommandRejection | PlatformError.PlatformError,
@@ -191,6 +194,7 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
     const decided = yield* decideOrchestrationCommand({
       command: nextCommand,
       readModel: nextReadModel,
+      ...(handoffResponse === undefined ? {} : { handoffResponse }),
     });
     const nextEvents = Array.isArray(decided) ? decided : [decided];
     for (const nextEvent of nextEvents) {
@@ -210,16 +214,63 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   command,
   readModel,
   userInputActivity,
+  handoffResponse,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   readonly userInputActivity?: OrchestrationThreadActivity;
+  readonly handoffResponse?: HandoffResponse;
 }): Effect.fn.Return<
   DecideOrchestrationCommandResult,
   OrchestrationCommandRejection | PlatformError.PlatformError,
   Crypto.Crypto
 > {
+  const blocked = handoffRejection(command, readModel, handoffResponse);
+  if (blocked !== undefined) {
+    return yield* new OrchestrationCommandInvariantError({
+      commandType: command.type,
+      detail: blocked,
+    });
+  }
   switch (command.type) {
+    case "thread.handoff.begin":
+    case "thread.handoff.cancel": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (command.type === "thread.handoff.begin" && thread.handoff != null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This thread already has an active handoff.",
+        });
+      }
+      if (
+        command.type === "thread.handoff.cancel" &&
+        thread.handoff?.handoffId !== command.handoffId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The handoff no longer matches. Read its current state before resuming.",
+        });
+      }
+      const updatedAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: updatedAt,
+          commandId: command.commandId,
+        })),
+        type:
+          command.type === "thread.handoff.begin"
+            ? "thread.handoff-begun"
+            : "thread.handoff-canceled",
+        payload: {
+          threadId: command.threadId,
+          handoffId:
+            command.type === "thread.handoff.begin" ? command.commandId : command.handoffId,
+          updatedAt,
+        },
+      };
+    }
     case "project.create": {
       yield* requireProjectAbsent({
         readModel,
@@ -1332,6 +1383,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
+          ...(handoffResponse === undefined
+            ? {}
+            : {
+                metadata: {
+                  handoffId: handoffResponse.handoffId,
+                  requestId: handoffResponse.requestId,
+                },
+              }),
         })),
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-start-requested",
@@ -1509,6 +1568,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         // steers a running agent or resumes an idle session.
         return yield* decideCommandSequence({
           readModel,
+          ...(handoffResponse === undefined ? {} : { handoffResponse }),
           commands: [
             {
               type: "thread.activity.append",

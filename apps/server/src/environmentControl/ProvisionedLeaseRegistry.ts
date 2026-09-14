@@ -1,9 +1,9 @@
-// @effect-diagnostics nodeBuiltinImport:off - this registry owns a small atomic state file at the server boundary.
 // @effect-diagnostics globalDate:off - this registry uses ISO timestamps at the server boundary.
-import * as NodeFSP from "node:fs/promises";
-import * as NodeCrypto from "node:crypto";
-import * as NodePath from "node:path";
+import { EnvironmentProvisionInput } from "@t3tools/contracts";
+import { retentionExpired } from "./retention.ts";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 
 export const ProvisionedLeaseState = Schema.Literals([
@@ -19,7 +19,7 @@ const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
 });
-const StoredProvisionedLease = Schema.Struct({
+export const StoredProvisionedLease = Schema.Struct({
   leaseId: Schema.String,
   sandboxId: Schema.String,
   provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
@@ -34,8 +34,6 @@ const StoredProvisionedLease = Schema.Struct({
       instanceId: Schema.String,
       region: Schema.String,
       workspaceDir: Schema.String,
-      homeDir: Schema.optional(Schema.String),
-      t3Port: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
     }),
   ),
   providerInstanceId: Schema.String,
@@ -44,9 +42,13 @@ const StoredProvisionedLease = Schema.Struct({
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
+  retentionDeadline: EnvironmentProvisionInput.fields.retentionDeadline,
 });
 const StoredProvisionedLeases = Schema.Array(StoredProvisionedLease);
-const decodeStoredProvisionedLeases = Schema.decodeUnknownSync(StoredProvisionedLeases);
+const decodeLeases = Schema.decodeUnknownSync(StoredProvisionedLeases);
+export const decodeLegacyLeases = Schema.decodeUnknownSync(
+  Schema.fromJsonString(StoredProvisionedLeases),
+);
 const LEASE_HEARTBEAT_TTL_MS = 15 * 60 * 1000;
 
 export type ProvisionedLease = typeof StoredProvisionedLease.Type;
@@ -60,6 +62,7 @@ export interface ProvisionedLeaseRegistry {
     readonly provider?: "e2b" | "namespace";
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly namespaceResource?: NamespaceResource;
+    readonly retentionDeadline?: string;
     readonly now?: Date;
   }) => Promise<ProvisionedLease>;
   readonly claim: (input: {
@@ -91,47 +94,62 @@ function nowIso(now?: Date): string {
   return (now ?? new Date()).toISOString();
 }
 
-export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRegistry {
-  let mutation = Promise.resolve();
-
-  const read = async (): Promise<ProvisionedLease[]> => {
-    try {
-      return [...decodeStoredProvisionedLeases(JSON.parse(await NodeFSP.readFile(path, "utf8")))];
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw cause;
-    }
+export function createProvisionedLeaseRegistry(
+  sql: SqlClient.SqlClient,
+  legacyJson = "[]",
+): ProvisionedLeaseRegistry {
+  const legacy = decodeLegacyLeases(legacyJson);
+  let imported: Promise<void> | undefined;
+  const initialize = () =>
+    (imported ??= (async () => {
+      for (const lease of legacy)
+        await Effect.runPromise(
+          sql`INSERT INTO provisioned_leases (lease_id, lease_json) VALUES (${lease.leaseId}, ${JSON.stringify(lease)}) ON CONFLICT(lease_id) DO NOTHING`,
+        );
+    })());
+  const read = async () => {
+    await initialize();
+    const rows = await Effect.runPromise(
+      sql<{ lease_json: string }>`SELECT lease_json FROM provisioned_leases`,
+    );
+    const leases = [...decodeLeases(rows.map((row) => JSON.parse(row.lease_json)))];
+    return {
+      leases,
+      bodies: new Map(leases.map((lease, index) => [lease.leaseId, rows[index]!.lease_json])),
+    };
   };
-  const write = async (leases: ReadonlyArray<ProvisionedLease>): Promise<void> => {
-    await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
-    const temporary = `${path}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
-    await NodeFSP.writeFile(temporary, JSON.stringify(decodeStoredProvisionedLeases(leases)), {
-      mode: 0o600,
-    });
-    await NodeFSP.rename(temporary, path);
-  };
-  const mutate = <A>(
+  const mutate = async <A>(
     fn: (
       leases: ProvisionedLease[],
     ) =>
       | Promise<{ leases: ProvisionedLease[]; value: A }>
       | { leases: ProvisionedLease[]; value: A },
   ): Promise<A> => {
-    const result = mutation.then(async () => {
-      const next = await fn(await read());
-      await write(next.leases);
-      return next.value;
-    });
-    mutation = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+    for (;;) {
+      const snapshot = await read();
+      const previous = snapshot.leases;
+      const next = await fn(previous);
+      const changed = next.leases.filter(
+        (lease) =>
+          JSON.stringify(lease) !==
+          JSON.stringify(previous.find((item) => item.leaseId === lease.leaseId)),
+      );
+      if (changed.length === 0) return next.value;
+      if (changed.length !== 1) throw new Error("A lease mutation must name one lease.");
+      const lease = changed[0]!;
+      const before = previous.find((item) => item.leaseId === lease.leaseId);
+      const rows = before
+        ? await Effect.runPromise(
+            sql`UPDATE provisioned_leases SET lease_json = ${JSON.stringify(lease)} WHERE lease_id = ${lease.leaseId} AND lease_json = ${snapshot.bodies.get(before.leaseId)} RETURNING lease_id`,
+          )
+        : await Effect.runPromise(
+            sql`INSERT INTO provisioned_leases (lease_id, lease_json) VALUES (${lease.leaseId}, ${JSON.stringify(lease)}) ON CONFLICT(lease_id) DO NOTHING RETURNING lease_id`,
+          );
+      if (rows.length === 1) return next.value;
+    }
   };
-  const consistentRead = async <A>(fn: (leases: ProvisionedLease[]) => A): Promise<A> => {
-    await mutation;
-    return fn(await read());
-  };
+  const consistentRead = async <A>(fn: (leases: ProvisionedLease[]) => A): Promise<A> =>
+    fn((await read()).leases);
 
   return {
     register: (input) =>
@@ -140,6 +158,7 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         if (existing) {
           if (
             existing.sandboxId !== input.sandboxId ||
+            existing.retentionDeadline !== input.retentionDeadline ||
             existing.providerInstanceId !== input.providerInstanceId ||
             existing.provider !== input.provider ||
             existing.namespaceProxy?.proxyId !== input.namespaceProxy?.proxyId ||
@@ -151,6 +170,9 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         }
         const now = nowIso(input.now);
         const lease: ProvisionedLease = {
+          ...(input.retentionDeadline === undefined
+            ? {}
+            : { retentionDeadline: input.retentionDeadline }),
           leaseId: input.leaseId,
           sandboxId: input.sandboxId,
           ...(input.provider === undefined ? {} : { provider: input.provider }),
@@ -164,7 +186,12 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
           createdAt: now,
           updatedAt: now,
           expiresAt: new Date(
-            (input.now ?? new Date()).getTime() + LEASE_HEARTBEAT_TTL_MS,
+            Math.min(
+              (input.now ?? new Date()).getTime() + LEASE_HEARTBEAT_TTL_MS,
+              input.retentionDeadline === undefined
+                ? Infinity
+                : Date.parse(input.retentionDeadline),
+            ),
           ).toISOString(),
         };
         return { leases: [...leases, lease], value: lease };
@@ -175,7 +202,10 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         if (index < 0) return { leases, value: null };
         const current = leases[index];
         if (!current) return { leases, value: null };
-        if (current.state !== "active" && current.state !== "paused")
+        if (
+          (current.state !== "active" && current.state !== "paused") ||
+          retentionExpired(current.retentionDeadline, (input.now ?? new Date()).getTime())
+        )
           return { leases, value: null };
         if (
           current.owner !== null &&
@@ -203,10 +233,19 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
         )
           return { leases, value: null };
         const timestamp = now ?? new Date();
+        if (retentionExpired(current.retentionDeadline, timestamp.getTime()))
+          return { leases, value: null };
         const updated: ProvisionedLease = {
           ...current,
           updatedAt: timestamp.toISOString(),
-          expiresAt: new Date(timestamp.getTime() + LEASE_HEARTBEAT_TTL_MS).toISOString(),
+          expiresAt: new Date(
+            Math.min(
+              timestamp.getTime() + LEASE_HEARTBEAT_TTL_MS,
+              current.retentionDeadline === undefined
+                ? Infinity
+                : Date.parse(current.retentionDeadline),
+            ),
+          ).toISOString(),
         };
         const next = [...leases];
         next[index] = updated;
@@ -244,7 +283,8 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
     markMissing: (leaseId, now) =>
       mutate((leases) => ({
         leases: leases.map((lease) =>
-          lease.leaseId === leaseId && (lease.state === "active" || lease.state === "paused")
+          lease.leaseId === leaseId &&
+          (lease.state === "active" || lease.state === "paused" || lease.state === "releasing")
             ? { ...lease, state: "missing" as const, updatedAt: nowIso(now) }
             : lease,
         ),
@@ -253,7 +293,8 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
     markPaused: (leaseId, now) =>
       mutate((leases) => ({
         leases: leases.map((lease) =>
-          lease.leaseId === leaseId && (lease.state === "active" || lease.state === "paused")
+          lease.leaseId === leaseId &&
+          (lease.state === "active" || lease.state === "paused" || lease.state === "releasing")
             ? { ...lease, state: "paused" as const, updatedAt: nowIso(now) }
             : lease,
         ),
@@ -289,11 +330,11 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
     expired: (now) =>
       consistentRead((leases) => {
         const cutoff = (now ?? new Date()).toISOString();
-        // Heartbeat expiry pauses the lease. The provider resource remains recoverable.
-        const expired = leases.filter(
-          (lease) => lease.expiresAt <= cutoff && lease.state === "active",
+        // An expired active lease is recoverable when its heartbeat stops.
+        return leases.filter(
+          (lease) =>
+            lease.expiresAt <= cutoff && (lease.state === "releasing" || lease.state === "active"),
         );
-        return expired;
       }),
   };
 }

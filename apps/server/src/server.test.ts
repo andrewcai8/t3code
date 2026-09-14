@@ -37,6 +37,7 @@ import {
   ProviderInstanceId,
   type ProviderInstallState,
   ProviderSetupError,
+  ProvisionRequestId,
   ResolvedKeybindingRule,
   type ServerLifecycleStreamEvent,
   ThreadId,
@@ -1051,12 +1052,14 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.succeed(EnvironmentControl.EnvironmentControl, {
           list: Effect.succeed([]),
+          listProvisioned: Effect.succeed([]),
           provision: () =>
             Effect.succeed({
               kind: "refused",
               reason: "unconfigured",
               message: "Not configured",
             }),
+          attach: () => Effect.succeed({ kind: "refused", message: "Not configured" }),
           dispose: () =>
             Effect.succeed({
               kind: "refused",
@@ -5928,6 +5931,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* Effect.scoped(
         withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
           Effect.gen(function* () {
+            assert.deepEqual(yield* client[WS_METHODS.environmentControlListProvisioned]({}), []);
             const list = yield* client[WS_METHODS.environmentControlList]({});
             assert.equal(list[0]?.environmentId, environmentId);
             assert.equal(list[0]?.state.kind, "stopped");
@@ -5955,6 +5959,72 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "start:managed-cloud",
         "stop:managed-cloud",
         "resume:retained-lease:retained-sandbox:managed-cloud:retained-thread",
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("cloud provisioning RPCs preserve request IDs and issue fresh attachments", () =>
+    Effect.gen(function* () {
+      const requestId = ProvisionRequestId.make("b601c79f-8b46-44e9-9675-1ed8d1d6c286");
+      const environmentId = EnvironmentId.make("prepared-cloud");
+      const observed: Array<{ method: string; input: unknown }> = [];
+      let attachments = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          environmentControl: {
+            provision: (input) =>
+              Effect.sync(() => {
+                observed.push({ method: "provision", input });
+                return { kind: "pending", requestId: input.requestId, message: "Preparing" };
+              }),
+            attach: (input) =>
+              Effect.sync(() => {
+                observed.push({ method: "attach", input });
+                attachments++;
+                return {
+                  kind: "attached",
+                  environmentId,
+                  pairingUrl: `https://example.invalid/grant-${attachments}`,
+                };
+              }),
+            dispose: (input) =>
+              Effect.sync(() => {
+                observed.push({ method: "dispose", input });
+                return { kind: "disposed" };
+              }),
+          },
+        },
+      });
+      const input = { requestId, provider: "e2b" as const, providerInstanceId: "codex-account" };
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            for (let retry = 0; retry < 2; retry++) {
+              assert.deepEqual(yield* client[WS_METHODS.environmentControlProvision](input), {
+                kind: "pending",
+                requestId,
+                message: "Preparing",
+              });
+            }
+            for (let grant = 1; grant <= 2; grant++) {
+              assert.deepEqual(yield* client[WS_METHODS.environmentControlAttach]({ requestId }), {
+                kind: "attached",
+                environmentId,
+                pairingUrl: `https://example.invalid/grant-${grant}`,
+              });
+            }
+            assert.deepEqual(yield* client[WS_METHODS.environmentControlDispose]({ requestId }), {
+              kind: "disposed",
+            });
+          }),
+        ),
+      );
+      assert.deepEqual(observed, [
+        { method: "provision", input },
+        { method: "provision", input },
+        { method: "attach", input: { requestId } },
+        { method: "attach", input: { requestId } },
+        { method: "dispose", input: { requestId } },
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

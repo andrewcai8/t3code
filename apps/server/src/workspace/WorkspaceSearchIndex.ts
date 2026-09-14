@@ -1,5 +1,3 @@
-import * as NodeModule from "node:module";
-
 import type {
   DirItem,
   DirSearchResult,
@@ -28,11 +26,16 @@ import type {
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
 // fff-node stays external to the CLI bundle because it dlopens a native
-// library. A static `import` of an external package is a hard error inside a
-// Node single-executable (only built-ins resolve there), so load it through
-// `require`, which reads from the real filesystem in every runtime.
-const requireForFff = NodeModule.createRequire(import.meta.url);
-const { FileFinder } = requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
+// library, and a static `import` of an external package is a hard error inside
+// a Node single-executable (only built-ins resolve there).
+//
+// `createRequire` cannot load it either. The package publishes `exports` with
+// an `import` condition and no `require` one, so every CJS resolution of it
+// fails with ERR_PACKAGE_PATH_NOT_EXPORTED, including subpaths. A dynamic
+// import is the only form that resolves, and it still reads from the real
+// filesystem at runtime rather than being inlined.
+let fffNode: Promise<typeof import("@ff-labs/fff-node")> | undefined;
+const loadFffNode = () => (fffNode ??= import("@ff-labs/fff-node"));
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
@@ -310,6 +313,15 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
   cwd: string,
   variant: WorkspaceSearchIndexVariant,
 ) {
+  const { FileFinder } = yield* Effect.tryPromise({
+    try: loadFffNode,
+    catch: (cause) =>
+      new WorkspaceSearchIndexCreateFailed({
+        cwd,
+        reason: "@ff-labs/fff-node could not be loaded.",
+        cause,
+      }),
+  });
   const result = yield* Effect.try({
     try: () =>
       FileFinder.create({

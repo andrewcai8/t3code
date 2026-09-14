@@ -1,3 +1,4 @@
+import { ProvisionedEnvironmentConnections } from "./ProvisionedEnvironmentConnections";
 import { CloudComputeControls } from "./CloudComputeControls";
 import {
   ChevronsLeftRightEllipsisIcon,
@@ -3765,6 +3766,10 @@ export function ConnectionsSettings() {
         .filter((environment) => environment.connection.phase === "connected")
         .map((environment) => (
           <div key={environment.environmentId}>
+            <ProvisionedEnvironmentConnections
+              managerId={environment.environmentId}
+              managerLabel={environment.label}
+            />
             <CloudComputeControls
               managerId={environment.environmentId}
               managerLabel={environment.label}

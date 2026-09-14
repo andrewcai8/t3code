@@ -2371,6 +2371,11 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.environmentControlListProvisioned]: () =>
+          observeRpcEffect(
+            WS_METHODS.environmentControlListProvisioned,
+            environmentControl.listProvisioned,
+          ),
         [WS_METHODS.environmentControlList]: () =>
           observeRpcEffect(WS_METHODS.environmentControlList, environmentControl.list),
         [WS_METHODS.environmentControlStart]: (input) =>
@@ -2394,6 +2399,8 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.environmentControlPause, environmentControl.pause(input)),
         [WS_METHODS.environmentControlResume]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlResume, environmentControl.resume(input)),
+        [WS_METHODS.environmentControlAttach]: (input) =>
+          observeRpcEffect(WS_METHODS.environmentControlAttach, environmentControl.attach(input)),
         [WS_METHODS.environmentControlClaim]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlClaim, environmentControl.claim(input)),
         [WS_METHODS.environmentControlTouch]: (input) =>

@@ -2,9 +2,12 @@ import {
   EnvironmentControlError,
   EnvironmentControlInput,
   EnvironmentControlList,
+  ProvisionedEnvironmentList,
   EnvironmentControlResult,
   EnvironmentProvisionInput,
   EnvironmentProvisionResult,
+  EnvironmentProvisionAttachInput,
+  EnvironmentProvisionAttachResult,
   EnvironmentProvisionDisposeInput,
   EnvironmentProvisionDisposeResult,
   EnvironmentProvisionPauseInput,
@@ -388,9 +391,11 @@ export const WS_METHODS = {
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   environmentControlList: "environmentControl.list",
+  environmentControlListProvisioned: "environmentControl.listProvisioned",
   environmentControlStart: "environmentControl.start",
   environmentControlStop: "environmentControl.stop",
   environmentControlProvision: "environmentControl.provision",
+  environmentControlAttach: "environmentControl.attach",
   environmentControlDispose: "environmentControl.dispose",
   environmentControlPause: "environmentControl.pause",
   environmentControlResume: "environmentControl.resume",
@@ -643,6 +648,14 @@ const EnvironmentControlListRpc = Rpc.make(WS_METHODS.environmentControlList, {
   success: EnvironmentControlList,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
+const EnvironmentControlListProvisionedRpc = Rpc.make(
+  WS_METHODS.environmentControlListProvisioned,
+  {
+    payload: Schema.Struct({}),
+    success: ProvisionedEnvironmentList,
+    error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+  },
+);
 const EnvironmentControlStartRpc = Rpc.make(WS_METHODS.environmentControlStart, {
   payload: EnvironmentControlInput,
   success: EnvironmentControlResult,
@@ -667,6 +680,11 @@ const EnvironmentControlDisposeRpc = Rpc.make(WS_METHODS.environmentControlDispo
 const EnvironmentControlPauseRpc = Rpc.make(WS_METHODS.environmentControlPause, {
   payload: EnvironmentProvisionPauseInput,
   success: EnvironmentProvisionPauseResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlAttachRpc = Rpc.make(WS_METHODS.environmentControlAttach, {
+  payload: EnvironmentProvisionAttachInput,
+  success: EnvironmentProvisionAttachResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 const EnvironmentControlClaimRpc = Rpc.make(WS_METHODS.environmentControlClaim, {
@@ -1418,9 +1436,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
   EnvironmentControlListRpc,
+  EnvironmentControlListProvisionedRpc,
   EnvironmentControlStartRpc,
   EnvironmentControlStopRpc,
   EnvironmentControlProvisionRpc,
+  EnvironmentControlAttachRpc,
   EnvironmentControlDisposeRpc,
   EnvironmentControlPauseRpc,
   EnvironmentControlResumeRpc,

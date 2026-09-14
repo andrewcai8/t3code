@@ -324,7 +324,7 @@ export function useThreadComposerState() {
   }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
 
   const onSendMessage = useCallback(async () => {
-    if (!selectedThreadShell) {
+    if (!selectedThreadShell || selectedThreadShell.handoff) {
       return null;
     }
     // The server has not created this thread yet. Queuing a follow-up against
@@ -751,7 +751,7 @@ export function useThreadComposerState() {
 
   const onUpdateModelSelection = useCallback(
     (value: ModelSelection) => {
-      if (!selectedThreadKey) {
+      if (!selectedThreadKey || selectedThreadShell?.handoff) {
         return;
       }
       const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
@@ -764,22 +764,22 @@ export function useThreadComposerState() {
           : {}),
       });
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey],
+    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey, selectedThreadShell?.handoff],
   );
 
   const onUpdateRuntimeMode = useCallback(
     (value: RuntimeMode) => {
-      if (!selectedThreadKey) {
+      if (!selectedThreadKey || selectedThreadShell?.handoff) {
         return;
       }
       updateComposerDraftSettings(selectedThreadKey, { runtimeMode: value });
     },
-    [selectedThreadKey],
+    [selectedThreadKey, selectedThreadShell?.handoff],
   );
 
   const onUpdateInteractionMode = useCallback(
     (value: ProviderInteractionMode) => {
-      if (!selectedThreadKey) {
+      if (!selectedThreadKey || selectedThreadShell?.handoff) {
         return;
       }
       const modelSelection =
@@ -792,7 +792,12 @@ export function useThreadComposerState() {
         interactionMode: resolveProviderInteractionMode(provider, value),
       });
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThread?.modelSelection, selectedThreadKey],
+    [
+      selectedEnvironmentRuntime?.serverConfig,
+      selectedThread?.modelSelection,
+      selectedThreadKey,
+      selectedThreadShell?.handoff,
+    ],
   );
 
   return {

@@ -14,6 +14,7 @@ import { composerFloatingLayerProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
+  disabled?: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   showInteractionModeToggle: boolean;
@@ -36,6 +37,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
       <MenuTrigger
         render={
           <ComposerControl
+            disabled={props.disabled}
             size={size}
             variant="ghost"
             className={size === "xs" ? "shrink-0" : "shrink-0 px-2"}

@@ -5,6 +5,10 @@ import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts"
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  environmentControlBodyLimitLayer,
+  environmentControlHttpApiLayer,
+} from "./environmentControl/http.ts";
+import {
   EnvironmentHttpApi,
   ProviderDriverKind,
   type RepositoryIdentity,
@@ -562,6 +566,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(authHttpApiLayer),
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(environmentControlHttpApiLayer),
       Layer.provide(pullRequestHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
@@ -581,6 +586,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(DesktopAppUpdateLayerLive))),
   Layer.provide(commandReadinessLayer),
+  Layer.provide(environmentControlBodyLimitLayer),
   Layer.provide(browserApiCorsLayer),
   Layer.provide(httpCompressionLayer),
 );

@@ -137,6 +137,14 @@ export function useSelectedThreadGitActions() {
         return null;
       }
 
+      if (selectedThread.handoff) {
+        showGitActionResult({
+          type: "error",
+          title: "Thread changes are paused for handoff",
+          description: "Resume this thread before changing its checkout.",
+        });
+        return null;
+      }
       const target = {
         environmentId: selectedThread.environmentId,
         cwd: selectedThreadCwd,

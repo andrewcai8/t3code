@@ -15,6 +15,7 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
   ThreadLinkedPullRequest,
+  ThreadHandoff,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -40,6 +41,7 @@ export const ProjectionThread = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime),
+  handoff: Schema.optional(Schema.NullOr(ThreadHandoff)),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])),
   settledAt: Schema.NullOr(IsoDateTime),
   unsettledAt: Schema.NullOr(IsoDateTime),

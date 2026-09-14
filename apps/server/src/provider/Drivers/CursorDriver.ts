@@ -177,6 +177,8 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
                 : Effect.succeed(provider),
             ),
             Effect.map(stampIdentity),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
           ),
         checkProvider,
         // Model catalog and capabilities come exclusively from Cursor's

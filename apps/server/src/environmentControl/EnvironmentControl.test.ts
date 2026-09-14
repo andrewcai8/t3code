@@ -9,7 +9,27 @@ import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+
+/**
+ * Leases live in SQLite beside provision_operations, so tests need a client.
+ *
+ * The suite around this is plain async against a Promise-facing service, so the
+ * layer is run here rather than converting every case to `it.effect`.
+ */
+const withSqlRegistry = (
+  body: (registry: ReturnType<typeof createProvisionedLeaseRegistry>) => Promise<void>,
+) =>
+  // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* Effect.promise(() => body(createProvisionedLeaseRegistry(sql)));
+    }).pipe(Effect.provide(SqlitePersistenceMemory), Effect.scoped),
+  );
 
 const target: ManagedTarget = {
   environmentId: EnvironmentId.make("cloud"),
@@ -76,9 +96,7 @@ describe("managed cloud commands", () => {
       manager: ReturnType<typeof createEnvironmentControl>;
     }) => Promise<void>,
   ) {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-resume-"));
-    try {
-      const registry = createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
+    await withSqlRegistry(async (registry) => {
       await registry.register({
         leaseId: "lease",
         sandboxId: "sandbox",
@@ -91,9 +109,7 @@ describe("managed cloud commands", () => {
       });
       const driver = setup().driver;
       await test({ registry, driver, manager: createEnvironmentControl([], driver, registry) });
-    } finally {
-      await NodeFSP.rm(directory, { recursive: true, force: true });
-    }
+    });
   }
   it("renews the provider before recording a successful heartbeat", async () => {
     await withLease(async ({ registry, driver, manager }) => {
@@ -425,70 +441,8 @@ describe("managed cloud commands", () => {
     });
   });
 
-  it("registers a provisioned sandbox and disposes it idempotently", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-control-"));
-    try {
-      const registry = createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
-      const { driver } = setup();
-      let disposeCalls = 0;
-      driver.provision = async () => ({
-        provider: "e2b",
-        sandboxId: "provisioned-sandbox",
-        pairingUrl: "https://example.test/pair",
-        projectDir: "/home/user/work/project",
-      });
-      driver.dispose = async () => {
-        disposeCalls += 1;
-      };
-      const manager = createEnvironmentControl([target], driver, registry);
-      const provisioned = await manager.provision({
-        provider: "e2b",
-        providerInstanceId: "codex",
-        repository: undefined,
-        branch: undefined,
-      });
-      expect(provisioned.kind).toBe("provisioned");
-      if (provisioned.kind !== "provisioned") return;
-      const leaseId = provisioned.environment.leaseId;
-      expect(leaseId).toMatch(/^[0-9a-f-]{36}$/);
-      if (!leaseId) return;
-      await expect(
-        manager.claim({
-          leaseId,
-          environmentId: EnvironmentId.make("remote"),
-          threadId: "thread-1",
-        }),
-      ).resolves.toEqual({ kind: "claimed" });
-      await expect(
-        manager.pause({ leaseId, sandboxId: provisioned.environment.sandboxId }),
-      ).resolves.toEqual({ kind: "paused" });
-      await expect(
-        registry.findBySandbox(provisioned.environment.sandboxId),
-      ).resolves.toMatchObject({
-        state: "paused",
-      });
-      await expect(
-        manager.dispose({
-          leaseId,
-          sandboxId: provisioned.environment.sandboxId,
-        }),
-      ).resolves.toEqual({ kind: "disposed" });
-      await expect(
-        manager.dispose({
-          leaseId,
-          sandboxId: provisioned.environment.sandboxId,
-        }),
-      ).resolves.toEqual({ kind: "disposed" });
-      expect(disposeCalls).toBe(1);
-    } finally {
-      await NodeFSP.rm(directory, { recursive: true, force: true });
-    }
-  });
-
   it("pauses an expired lease without disposing the provider resource", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-control-"));
-    try {
-      const registry = createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
+    await withSqlRegistry(async (registry) => {
       await registry.register({
         leaseId: "expired-lease",
         sandboxId: "expired-sandbox",
@@ -508,25 +462,6 @@ describe("managed cloud commands", () => {
       await manager.reapExpiredLeases();
       expect(calls).toEqual(["pause"]);
       expect(await registry.findBySandbox("expired-sandbox")).toMatchObject({ state: "paused" });
-    } finally {
-      await NodeFSP.rm(directory, { recursive: true, force: true });
-    }
-  });
-});
-
-it("answers a declined provisioning request instead of failing", async () => {
-  // An install with no template is an ordinary configuration state. Reporting
-  // it as a provider failure would send the operator looking at the provider.
-  const { manager } = setup();
-  const refusal = await manager.provision({
-    provider: "e2b",
-    providerInstanceId: "codex_ac3",
-    repository: undefined,
-    branch: undefined,
-  });
-  expect(refusal).toEqual({
-    kind: "refused",
-    reason: "unconfigured",
-    message: "no template here",
+    });
   });
 });

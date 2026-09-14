@@ -124,6 +124,7 @@ export function applyThreadDetailEvent(
           worktreePath: event.payload.worktreePath,
           branchPullRequest: null,
           latestTurn: null,
+          handoff: null,
           createdAt: event.payload.createdAt,
           updatedAt: event.payload.updatedAt,
           archivedAt: null,
@@ -141,6 +142,26 @@ export function applyThreadDetailEvent(
           checkpoints: [],
           session: null,
         },
+      };
+
+    case "thread.handoff-begun":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          handoff: {
+            status: "fenced",
+            handoffId: event.payload.handoffId,
+            admissionSequence: event.sequence,
+          },
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.handoff-canceled":
+      return {
+        kind: "updated",
+        thread: { ...thread, handoff: null, updatedAt: event.payload.updatedAt },
       };
 
     case "thread.deleted":

@@ -702,6 +702,13 @@ export const ThreadPullRequestLink = Schema.Struct({
 });
 export type ThreadPullRequestLink = typeof ThreadPullRequestLink.Type;
 
+export const ThreadHandoff = Schema.Struct({
+  status: Schema.Literal("fenced"),
+  handoffId: CommandId,
+  admissionSequence: NonNegativeInt,
+});
+export type ThreadHandoff = typeof ThreadHandoff.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -723,6 +730,7 @@ export const OrchestrationThread = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  handoff: Schema.optional(Schema.NullOr(ThreadHandoff)),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -808,6 +816,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  handoff: Schema.optional(Schema.NullOr(ThreadHandoff)),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1040,6 +1049,19 @@ const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
   commandId: CommandId,
   threadId: ThreadId,
+});
+
+const ThreadHandoffBeginCommand = Schema.Struct({
+  type: Schema.Literal("thread.handoff.begin"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+const ThreadHandoffCancelCommand = Schema.Struct({
+  type: Schema.Literal("thread.handoff.cancel"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  handoffId: CommandId,
 });
 
 const ThreadArchiveCommand = Schema.Struct({
@@ -1324,6 +1346,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
+  ThreadHandoffBeginCommand,
+  ThreadHandoffCancelCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadSettleCommand,
@@ -1357,6 +1381,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
+  ThreadHandoffBeginCommand,
+  ThreadHandoffCancelCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadSettleCommand,
@@ -1526,6 +1552,8 @@ export const OrchestrationEventType = Schema.Literals([
   "project.deleted",
   "thread.created",
   "thread.deleted",
+  "thread.handoff-begun",
+  "thread.handoff-canceled",
   "thread.archived",
   "thread.unarchived",
   "thread.settled",
@@ -1818,6 +1846,18 @@ export const ThreadTurnDiffCompletedPayload = Schema.Struct({
   completedAt: IsoDateTime,
 });
 
+export const ThreadHandoffBegunPayload = Schema.Struct({
+  threadId: ThreadId,
+  handoffId: CommandId,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadHandoffCanceledPayload = Schema.Struct({
+  threadId: ThreadId,
+  handoffId: CommandId,
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadActivityAppendedPayload = Schema.Struct({
   threadId: ThreadId,
   activity: OrchestrationThreadActivity,
@@ -1836,6 +1876,7 @@ export const OrchestrationClientOrigin = Schema.Struct({
 export type OrchestrationClientOrigin = typeof OrchestrationClientOrigin.Type;
 
 export const OrchestrationEventMetadata = Schema.Struct({
+  handoffId: Schema.optional(CommandId),
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
   adapterKey: Schema.optional(TrimmedNonEmptyString),
@@ -1859,6 +1900,16 @@ const EventBaseFields = {
 } as const;
 
 export const OrchestrationEvent = Schema.Union([
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.handoff-begun"),
+    payload: ThreadHandoffBegunPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.handoff-canceled"),
+    payload: ThreadHandoffCanceledPayload,
+  }),
   Schema.Struct({
     ...EventBaseFields,
     type: Schema.Literal("project.created"),

@@ -141,6 +141,24 @@ describe("connection onboarding", () => {
     }),
   );
 
+  it.effect("checks the discovered identity before consuming a pairing grant", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const error = yield* preparePairingRegistration({
+        host: "remote.example.test",
+        pairingCode: "pairing-token",
+        expectedEnvironmentId: EnvironmentId.make("expected-environment"),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(CLIENT_PRESENTATION_LAYER, pairingHttpLayer(calls))),
+        Effect.flip,
+      );
+      expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://remote.example.test/.well-known/t3/environment",
+      ]);
+    }),
+  );
+
   it.effect("rejects invalid pairing details before making a request", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
