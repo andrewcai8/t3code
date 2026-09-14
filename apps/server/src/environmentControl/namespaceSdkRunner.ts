@@ -10,7 +10,11 @@ import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
-import type { NamespaceResource, NamespaceRunner } from "./namespaceProvisioner.ts";
+import {
+  namespaceT3Port,
+  type NamespaceResource,
+  type NamespaceRunner,
+} from "./namespaceProvisioner.ts";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 const DEVBOX_API = "https://private-api.global.namespaceapis.com";
@@ -171,7 +175,7 @@ async function healthyT3(
 async function waitForT3(
   run: NonNullable<NamespaceSdkRunnerOptions["execute"]>,
   name: string,
-  port = 3000,
+  port: number,
   environmentId?: string,
 ): Promise<void> {
   for (let attempt = 0; attempt < 120; attempt++) {
@@ -260,6 +264,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           devboxId: created.devbox.id,
           devboxName: created.devbox.name || name,
           instanceId: created.instanceId,
+          t3Port: 3001,
           region: created.devbox.site || input.region || "iad",
           homeDir: `${volumeRoot}/.t3-home`,
           workspaceDir: input.repository
@@ -561,10 +566,10 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       const command =
         `mkdir -p ${shellQuote(projectDir)} && cd ${shellQuote(projectDir)} && ` +
         providerSetup +
-        "npx --yes t3@0.0.40 --no-browser --auto-bootstrap-project-from-cwd --host 0.0.0.0 --port 3000";
+        `npx --yes t3@0.0.40 --no-browser --auto-bootstrap-project-from-cwd --host 0.0.0.0 --port ${namespaceT3Port(resource)}`;
       const name = nameOf(resource);
       await runInHome(["exec", "-d", name, "--", "sh", "-lc", command]);
-      await waitForT3(run, name);
+      await waitForT3(run, name, namespaceT3Port(resource));
     },
     expose: async ({ resource, port }) => {
       const name = nameOf(resource);

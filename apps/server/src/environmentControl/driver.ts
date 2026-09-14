@@ -20,7 +20,7 @@ import {
   type ManagedTarget,
 } from "./config.ts";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
-import { disposeNamespace, provisionNamespace } from "./namespaceProvisioner.ts";
+import { disposeNamespace, namespaceT3Port, provisionNamespace } from "./namespaceProvisioner.ts";
 import { createNamespaceSdkRunner } from "./namespaceSdkRunner.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import {
@@ -592,7 +592,7 @@ export function createCloudDriver(
           throw new Error("Namespace recovery configuration is unavailable");
         const resumed = await namespaceRunner.resume({
           resource: namespaceResource,
-          port: 3000,
+          port: namespaceT3Port(namespaceResource),
           environmentId,
         });
         const upstream = new URL(resumed.upstreamOrigin);

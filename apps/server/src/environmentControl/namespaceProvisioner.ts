@@ -5,11 +5,14 @@ export interface NamespaceResource {
   readonly devboxId: string;
   readonly devboxName?: string | undefined;
   readonly instanceId: string;
+  readonly t3Port?: number | undefined;
   readonly region: string;
   readonly workspaceDir: string;
   /** Missing only on legacy leases whose home was not retained. */
   readonly homeDir?: string | undefined;
 }
+
+export const namespaceT3Port = (resource: NamespaceResource): number => resource.t3Port ?? 3000;
 
 export interface NamespaceRunner {
   readonly create: (input: {
@@ -114,7 +117,7 @@ export async function provisionNamespace(
         })),
       ],
     });
-    const pairingUrl = await runner.expose({ resource, port: 3000 });
+    const pairingUrl = await runner.expose({ resource, port: namespaceT3Port(resource) });
     return { resource, pairingUrl, projectDir };
   } catch (cause) {
     await disposeNamespace(runner, resource).catch(() => undefined);

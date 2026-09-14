@@ -35,6 +35,7 @@ const StoredProvisionedLease = Schema.Struct({
       region: Schema.String,
       workspaceDir: Schema.String,
       homeDir: Schema.optional(Schema.String),
+      t3Port: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
     }),
   ),
   providerInstanceId: Schema.String,
@@ -45,6 +46,7 @@ const StoredProvisionedLease = Schema.Struct({
   expiresAt: Schema.String,
 });
 const StoredProvisionedLeases = Schema.Array(StoredProvisionedLease);
+const decodeStoredProvisionedLeases = Schema.decodeUnknownSync(StoredProvisionedLeases);
 const LEASE_HEARTBEAT_TTL_MS = 15 * 60 * 1000;
 
 export type ProvisionedLease = typeof StoredProvisionedLease.Type;
@@ -94,11 +96,7 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
 
   const read = async (): Promise<ProvisionedLease[]> => {
     try {
-      return [
-        ...Schema.decodeUnknownSync(StoredProvisionedLeases)(
-          JSON.parse(await NodeFSP.readFile(path, "utf8")),
-        ),
-      ];
+      return [...decodeStoredProvisionedLeases(JSON.parse(await NodeFSP.readFile(path, "utf8")))];
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw cause;
@@ -107,7 +105,9 @@ export function createProvisionedLeaseRegistry(path: string): ProvisionedLeaseRe
   const write = async (leases: ReadonlyArray<ProvisionedLease>): Promise<void> => {
     await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
     const temporary = `${path}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
-    await NodeFSP.writeFile(temporary, JSON.stringify(leases), { mode: 0o600 });
+    await NodeFSP.writeFile(temporary, JSON.stringify(decodeStoredProvisionedLeases(leases)), {
+      mode: 0o600,
+    });
     await NodeFSP.rename(temporary, path);
   };
   const mutate = <A>(

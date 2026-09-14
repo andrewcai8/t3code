@@ -247,3 +247,49 @@ describe("ProvisionedLeaseRegistry", () => {
     expect(await registry.touch("missing")).toBeNull();
   });
 });
+
+it.each([undefined, 3001])("round-trips Namespace service port %s", async (t3Port) => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-port-"));
+  temporaryDirectories.push(directory);
+  const path = NodePath.join(directory, "leases.json");
+  const registry = createProvisionedLeaseRegistry(path);
+  await registry.register({
+    leaseId: "port-lease",
+    sandboxId: "devbox",
+    providerInstanceId: "codex",
+    namespaceResource: {
+      provider: "namespace",
+      devboxId: "devbox",
+      instanceId: "instance",
+      region: "iad",
+      workspaceDir: "/Volumes/devbox/project",
+      ...(t3Port === undefined ? {} : { t3Port }),
+    },
+  });
+  const restored = await createProvisionedLeaseRegistry(path).findById("port-lease");
+  expect(restored?.namespaceResource?.t3Port).toBe(t3Port);
+  expect(JSON.parse(await NodeFSP.readFile(path, "utf8"))[0].namespaceResource.t3Port).toBe(t3Port);
+});
+
+it.each([0, -1, 65536, 3001.5, Number.NaN])(
+  "rejects invalid Namespace service port %s before persisting",
+  async (t3Port) => {
+    const registry = await makeRegistry();
+    await expect(
+      registry.register({
+        leaseId: "invalid-port",
+        sandboxId: "devbox",
+        providerInstanceId: "codex",
+        namespaceResource: {
+          provider: "namespace",
+          devboxId: "devbox",
+          instanceId: "instance",
+          region: "iad",
+          workspaceDir: "/Volumes/devbox/project",
+          t3Port,
+        },
+      }),
+    ).rejects.toThrow();
+    expect(await registry.findById("invalid-port")).toBeNull();
+  },
+);

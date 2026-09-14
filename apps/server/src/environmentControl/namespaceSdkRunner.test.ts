@@ -17,7 +17,7 @@ import * as Option from "effect/Option";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import { resolveServerConfig } from "../cli/config.ts";
-import { provisionNamespace } from "./namespaceProvisioner.ts";
+import { namespaceT3Port, provisionNamespace } from "./namespaceProvisioner.ts";
 import { resolvePreparation } from "./ProvisioningProviderProfile.ts";
 import {
   createNamespaceSdkRunner,
@@ -76,6 +76,8 @@ function resumeFixture(input: { running?: boolean; healthy?: boolean; identity?:
   api.activate.mockReset().mockResolvedValue({ instanceId: "new-instance" });
   let healthy = input.healthy ?? false;
   const execute = vi.fn(async (args: readonly string[]) => {
+    if (args.some((arg) => arg.includes(" pair --ttl")))
+      return { stdout: "Token: ABC123", stderr: "" };
     if (args.includes("cat")) return { stdout: input.identity ?? "env-retained\n", stderr: "" };
     if (args.includes("curl")) {
       if (!healthy) throw new Error("connection refused despite stale runtime file");
@@ -312,6 +314,7 @@ describe("Namespace retained resume", () => {
     expect(await runner.create({ size: "m" })).toMatchObject({
       homeDir: "/Volumes/devbox/.t3-home",
       workspaceDir: "/Volumes/devbox/workspaces",
+      t3Port: 3001,
     });
     expect(execute.mock.calls[0]?.[0]).toContain("create");
     expect(execute.mock.calls[0]?.[0]).not.toContain("--ephemeral");
@@ -825,4 +828,47 @@ it("transfers selected auth once when a generic home file names the same destina
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
+});
+
+it.each([
+  { t3Port: undefined, expected: 3000 },
+  { t3Port: 3001, expected: 3001 },
+])("resumes the persisted service port $expected", async ({ t3Port, expected }) => {
+  const { runner, execute } = resumeFixture();
+  const resource = { ...retainedResource, t3Port };
+  await runner.resume({ resource, port: namespaceT3Port(resource), environmentId: "env-retained" });
+  const commands = execute.mock.calls.map(([args]) => args.join(" "));
+  expect(
+    commands.some((command) =>
+      command.includes(`http://127.0.0.1:${expected}/.well-known/t3/environment`),
+    ),
+  ).toBe(true);
+  expect(
+    commands.some((command) =>
+      command.includes(`serve --no-browser --host 0.0.0.0 --port ${expected}`),
+    ),
+  ).toBe(true);
+  expect(commands).toContain(`url expose retained --port ${expected} --access workspace -o json`);
+});
+
+it("starts and exposes a new Namespace server on port 3001", async () => {
+  const { runner, execute } = resumeFixture({ running: true });
+  const result = await provisionNamespace(runner, { size: "m", providerInstanceId: "codex" });
+  expect(result.resource.t3Port).toBe(3001);
+  expect(result.pairingUrl).toBe("https://resumed.devbox.so/pair#token=ABC123");
+  const commands = execute.mock.calls.map(([args]) => args.join(" "));
+  expect(
+    commands.some((command) =>
+      command.includes("--auto-bootstrap-project-from-cwd --host 0.0.0.0 --port 3001"),
+    ),
+  ).toBe(true);
+  expect(
+    commands.some((command) =>
+      command.includes("http://127.0.0.1:3001/.well-known/t3/environment"),
+    ),
+  ).toBe(true);
+  expect(commands.some((command) => command.includes("--port 3000"))).toBe(false);
+  expect(
+    commands.some((command) => /url expose .* --port 3001 --access workspace/.test(command)),
+  ).toBe(true);
 });
