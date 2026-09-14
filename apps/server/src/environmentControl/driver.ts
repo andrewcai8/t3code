@@ -403,6 +403,14 @@ export function createCloudDriver(
       )
     : undefined;
   const namespaceProxy = new NamespaceProxyManager();
+  const namespaceTokenSource = config.namespaceToken
+    ? fromBearerToken(config.namespaceToken)
+    : {
+        issueToken: async (minDuration: number, force?: boolean) =>
+          (await loadUserToken()).issueToken(minDuration, force),
+      };
+  const getNamespaceAuthorization = async () =>
+    `Bearer ${await namespaceTokenSource.issueToken(60_000)}`;
   async function e2bInfo(
     identity:
       | EnvironmentControlConfig["broker"]
@@ -459,9 +467,7 @@ export function createCloudDriver(
     observe: async (target) => {
       const machine = target.machine;
       if (machine.provider === "e2b") return observeE2b(machine);
-      const tokenSource = config.namespaceToken
-        ? fromBearerToken(config.namespaceToken)
-        : await loadUserToken();
+      const tokenSource = namespaceTokenSource;
       const devbox = createClient(
         DevBoxService,
         createGlobalTransport({
@@ -513,12 +519,6 @@ export function createCloudDriver(
             reason: "unconfigured",
             message: "Namespace provisioning is not configured on this install.",
           });
-        if (!config.namespaceIngressToken)
-          throw new ProvisionRefused({
-            reason: "credentials",
-            message:
-              "Namespace provisioning needs an ingress access token to connect the private workspace URL.",
-          });
         if (!namespaceRunner)
           throw new ProvisionRefused({
             reason: "unsupported",
@@ -534,6 +534,7 @@ export function createCloudDriver(
             reason: "unconfigured",
             message: "Provider account resolution is unavailable.",
           });
+        await getNamespaceAuthorization();
         const profile = await resolveProfile(request);
         const preparation = await buildNamespacePreparation(profile, config.provisioning);
         const prepared = await provisionNamespace(namespaceRunner, {
@@ -552,7 +553,7 @@ export function createCloudDriver(
             proxyId: NodeCrypto.randomUUID(),
             upstreamHttpBaseUrl: `${upstream.origin}/`,
             upstreamWsBaseUrl: `${upstream.protocol === "https:" ? "wss:" : "ws:"}//${upstream.host}/`,
-            upstreamAuthorization: `Bearer ${config.namespaceIngressToken}`,
+            getUpstreamAuthorization: getNamespaceAuthorization,
           });
           const pairing = new URL(prepared.pairingUrl);
           pairing.protocol = "http:";
@@ -656,7 +657,7 @@ export function createCloudDriver(
       namespaceProxy: proxy,
     }) => {
       if (namespaceResource) {
-        if (!namespaceRunner || !proxy || !config.namespaceIngressToken)
+        if (!namespaceRunner || !proxy)
           throw new Error("Namespace recovery configuration is unavailable");
         const resumed = await namespaceRunner.resume({
           resource: namespaceResource,
@@ -668,7 +669,7 @@ export function createCloudDriver(
           ...proxy,
           upstreamHttpBaseUrl: `${upstream.origin}/`,
           upstreamWsBaseUrl: `${upstream.protocol === "https:" ? "wss:" : "ws:"}//${upstream.host}/`,
-          upstreamAuthorization: `Bearer ${config.namespaceIngressToken}`,
+          getUpstreamAuthorization: getNamespaceAuthorization,
         });
         return { namespaceResource: resumed.resource, namespaceProxy: restored };
       }
