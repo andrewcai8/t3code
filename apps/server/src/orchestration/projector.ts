@@ -464,6 +464,23 @@ export function projectEvent(
         })),
       );
 
+    case "thread.handoff-begun":
+    case "thread.handoff-canceled":
+      return Effect.succeed({
+        ...nextBase,
+        threads: updateThread(nextBase.threads, event.payload.threadId, {
+          handoff:
+            event.type === "thread.handoff-begun"
+              ? {
+                  status: "fenced",
+                  handoffId: event.payload.handoffId,
+                  admissionSequence: event.sequence,
+                }
+              : null,
+          updatedAt: event.payload.updatedAt,
+        }),
+      });
+
     case "thread.archived":
       return decodeForEvent(ThreadArchivedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({

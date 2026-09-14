@@ -47,6 +47,35 @@ const baseThread: OrchestrationThread = {
 };
 
 describe("applyThreadDetailEvent", () => {
+  it("publishes the admission fence and clears it when the matching handoff is canceled", () => {
+    const handoffId = CommandId.make("handoff");
+    const fields = {
+      ...baseEventFields,
+      aggregateKind: "thread" as const,
+      aggregateId: baseThread.id,
+      occurredAt: "2026-04-01T02:00:00.000Z",
+    };
+    const payload = { threadId: baseThread.id, handoffId, updatedAt: fields.occurredAt };
+    const begun = applyThreadDetailEvent(baseThread, {
+      ...fields,
+      sequence: 10,
+      type: "thread.handoff-begun",
+      payload,
+    });
+    expect(begun.kind).toBe("updated");
+    if (begun.kind !== "updated") throw new Error("Expected fenced thread");
+    expect(begun.thread.handoff).toEqual({ status: "fenced", handoffId, admissionSequence: 10 });
+    const canceled = applyThreadDetailEvent(begun.thread, {
+      ...fields,
+      sequence: 11,
+      type: "thread.handoff-canceled",
+      payload,
+    });
+    expect(canceled).toEqual({
+      kind: "updated",
+      thread: { ...baseThread, handoff: null, updatedAt: fields.occurredAt },
+    });
+  });
   describe("project events", () => {
     it("returns unchanged for project.created", () => {
       const result = applyThreadDetailEvent(baseThread, {

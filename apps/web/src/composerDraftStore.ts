@@ -34,6 +34,7 @@ import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
+import { cancelProvisionRequest } from "./cloud/provisionRequests";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -2835,6 +2836,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 state.logicalProjectDraftThreadKeyByLogicalProjectKey,
             };
             for (const threadKey of matchingThreadKeys) {
+              cancelProvisionRequest(threadKey);
               nextState = removeDraftThreadReferences(nextState, threadKey);
             }
             return nextState;
@@ -2854,6 +2856,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             ) {
               return state;
             }
+            cancelProvisionRequest(threadKey);
             return removeDraftThreadReferences(state, threadKey);
           });
         },
@@ -2910,6 +2913,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (!hasDraftThread && !hasLogicalProjectMapping && !hasComposerDraft) {
               return state;
             }
+            cancelProvisionRequest(threadKey);
             return removeDraftThreadReferences(state, threadKey);
           });
         },

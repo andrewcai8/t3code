@@ -42,3 +42,4 @@ export * from "./usage.ts";
 export * from "./rpc.ts";
 
 export * from "./environmentControl.ts";
+export * from "./environmentProvisioning.ts";

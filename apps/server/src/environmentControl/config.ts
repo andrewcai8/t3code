@@ -31,8 +31,24 @@ const Target = Schema.Struct({
  * named targets, which is why provisioning refuses with `unconfigured` rather
  * than failing.
  */
+export const ProvisionRuntimeArtifact = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  revision: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
+  entrypoint: TrimmedNonEmptyString,
+  runtimeExecutable: TrimmedNonEmptyString,
+  /** Install package dependencies on the target platform before starting T3. */
+  install: Schema.optional(Schema.Literal("npm")),
+});
+export type ProvisionRuntimeArtifact = typeof ProvisionRuntimeArtifact.Type;
 const Provisioning = Schema.Struct({
   templateId: Schema.optional(TrimmedNonEmptyString),
+  runtimeArtifacts: Schema.optional(
+    Schema.Struct({
+      linux: Schema.optional(ProvisionRuntimeArtifact),
+      macos: Schema.optional(ProvisionRuntimeArtifact),
+    }),
+  ),
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
   /**

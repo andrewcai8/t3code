@@ -54,6 +54,7 @@ export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type DismissThreadUserInputInput = CommandInput<"thread.user-input.dismiss">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
+export type CancelThreadHandoffInput = CommandInput<"thread.handoff.cancel">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
@@ -372,5 +373,15 @@ export const stopThreadSession: (input: StopThreadSessionInput) => CommandEffect
     type: "thread.session.stop",
     commandId: metadata.commandId,
     createdAt: metadata.createdAt,
+  });
+});
+
+export const cancelThreadHandoff: (input: CancelThreadHandoffInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.cancelThreadHandoff",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.handoff.cancel",
+    commandId: yield* commandId(input),
   });
 });

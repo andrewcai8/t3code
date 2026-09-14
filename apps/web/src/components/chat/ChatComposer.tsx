@@ -998,6 +998,7 @@ function useRestingComposerControlsLayout(host: HTMLDivElement | null) {
 }
 
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
+  disabled?: boolean;
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
@@ -1032,6 +1033,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                     : "text-secondary-label hover:text-foreground",
               )}
               type="button"
+              disabled={props.disabled}
               onClick={props.onToggleInteractionMode}
               aria-label={interactionModeTooltip}
             />
@@ -1067,6 +1069,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
         <Select
           open={open}
           onOpenChange={setOpen}
+          disabled={props.disabled}
           value={props.runtimeMode}
           onValueChange={(value) => props.onRuntimeModeChange(value!)}
         >
@@ -4104,6 +4107,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       id: "mode",
       content: (
         <ComposerFooterModeControls
+          disabled={props.activeThreadShell?.handoff != null}
           showInteractionModeToggle={planModeUiEnabled}
           interactionMode={interactionMode}
           runtimeMode={runtimeMode}
@@ -4192,6 +4196,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
       {composerControlsCompact ? (
         <CompactComposerControlsMenu
+          disabled={props.activeThreadShell?.handoff != null}
           interactionMode={interactionMode}
           runtimeMode={runtimeMode}
           showInteractionModeToggle={planModeUiEnabled}
@@ -4232,6 +4237,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )}
             >
               <CompactComposerControlsMenu
+                disabled={props.activeThreadShell?.handoff != null}
                 interactionMode={interactionMode}
                 runtimeMode={runtimeMode}
                 size="xs"

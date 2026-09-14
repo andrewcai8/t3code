@@ -44,20 +44,6 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 describe("cloud SDK and controller boundary", () => {
-  it("does not silently route Namespace requests through E2B", async () => {
-    const driver = createCloudDriver({
-      ...config,
-      provisioning: { namespace: { size: "m" } },
-    });
-    await expect(
-      driver.provision({ provider: "namespace", providerInstanceId: "codex" }),
-    ).rejects.toMatchObject({
-      name: "ProvisionRefused",
-      reason: "credentials",
-    });
-    expect(sdk.connect).not.toHaveBeenCalled();
-  });
-
   it("observes paused E2B and Namespace without any controller HTTP or resume", async () => {
     const http = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected HTTP"));
     sdk.getInfo.mockResolvedValue(info("paused", "target"));

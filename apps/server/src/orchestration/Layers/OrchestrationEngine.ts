@@ -3,9 +3,14 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
   ProjectId,
-  ThreadId,
 } from "@t3tools/contracts";
-import { OrchestrationCommand } from "@t3tools/contracts";
+import {
+  OrchestrationCommand,
+  ThreadHandoff,
+  ThreadId,
+  TurnId,
+  NonNegativeInt,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
@@ -22,6 +27,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import {
   metricAttributes,
@@ -32,6 +38,8 @@ import {
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import {
   isOrchestrationCommandRejection,
   OrchestrationCommandIdConflictError,
@@ -41,6 +49,7 @@ import {
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import type { HandoffResponse } from "../ThreadHandoff.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -83,10 +92,32 @@ function commandToAggregateRef(command: OrchestrationCommand): {
 
 const makeOrchestrationEngine = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const getHandoffTurnAdmission = SqlSchema.findOneOption({
+    Request: Schema.Struct({ threadId: ThreadId, turnId: TurnId, handoff: ThreadHandoff }),
+    Result: Schema.Struct({ sequence: NonNegativeInt }),
+    execute: ({ threadId, turnId, handoff }) => sql`
+      SELECT event.sequence
+      FROM projection_turns AS turn
+      JOIN orchestration_events AS event
+        ON event.aggregate_kind = 'thread'
+        AND event.stream_id = turn.thread_id
+        AND event.event_type = 'thread.turn-start-requested'
+        AND json_extract(event.payload_json, '$.messageId') = turn.pending_message_id
+      WHERE turn.thread_id = ${threadId}
+        AND turn.turn_id = ${turnId}
+        AND (
+          event.sequence < ${handoff.admissionSequence}
+          OR json_extract(event.metadata_json, '$.handoffId') = ${handoff.handoffId}
+        )
+      LIMIT 1
+    `,
+  });
+
   const eventStore = yield* OrchestrationEventStore;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const pendingApprovals = yield* ProjectionPendingApprovalRepository;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const crypto = yield* Crypto.Crypto;
 
@@ -242,9 +273,59 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        let handoffResponse: HandoffResponse | undefined;
+        if (
+          envelope.command.type === "thread.approval.respond" ||
+          envelope.command.type === "thread.user-input.respond" ||
+          envelope.command.type === "thread.user-input.dismiss"
+        ) {
+          const command = envelope.command;
+          const handoff = commandReadModel.threads.find(
+            (thread) => thread.id === command.threadId,
+          )?.handoff;
+          if (handoff != null) {
+            const approval =
+              command.type === "thread.approval.respond"
+                ? yield* pendingApprovals.getByRequestId({ requestId: command.requestId })
+                : Option.none();
+            const turnId =
+              command.type === "thread.approval.respond"
+                ? Option.isSome(approval) &&
+                  approval.value.threadId === command.threadId &&
+                  approval.value.status === "pending"
+                  ? approval.value.turnId
+                  : null
+                : Option.isSome(userInputActivity) &&
+                    userInputActivity.value.kind === "user-input.requested"
+                  ? userInputActivity.value.turnId
+                  : null;
+            if (
+              turnId !== null &&
+              Option.isSome(
+                yield* getHandoffTurnAdmission({
+                  threadId: command.threadId,
+                  turnId,
+                  handoff,
+                }).pipe(
+                  Effect.mapError(
+                    toPersistenceSqlError("OrchestrationEngine.handoffTurnAdmission"),
+                  ),
+                ),
+              )
+            ) {
+              handoffResponse = {
+                threadId: command.threadId,
+                commandId: command.commandId,
+                requestId: command.requestId,
+                handoffId: handoff.handoffId,
+              };
+            }
+          }
+        }
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
+          ...(handoffResponse === undefined ? {} : { handoffResponse }),
           ...(Option.isSome(userInputActivity)
             ? { userInputActivity: userInputActivity.value }
             : {}),
@@ -470,4 +551,4 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 export const OrchestrationEngineLive = Layer.effect(
   OrchestrationEngineService,
   makeOrchestrationEngine,
-);
+).pipe(Layer.provide(ProjectionPendingApprovalRepositoryLive));

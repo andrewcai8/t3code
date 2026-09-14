@@ -1,13 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off cryptoRandomUUID:off
-import { execFile as execFileCallback } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeTimersPromises from "node:timers/promises";
-import { promisify } from "node:util";
+import * as NodeUtil from "node:util";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import type { NamespaceResource, NamespaceRunner } from "./namespaceProvisioner.ts";
 
-const execFile = promisify(execFileCallback);
+const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 const DEVBOX_API = "https://private-api.global.namespaceapis.com";
 
 export interface NamespaceSdkRunnerOptions {

@@ -966,6 +966,14 @@ export function createServerEnvironmentAtoms<R, E>(
     execute: (input: EnvironmentRpcInput<typeof WS_METHODS.environmentControlList>) =>
       request(WS_METHODS.environmentControlList, input).pipe(Effect.timeout("20 seconds")),
   });
+  const provisionedEnvironments = createEnvironmentQueryAtomFamily(runtime, {
+    label: "environment-data:cloud:provisioned",
+    staleTimeMs: 5_000,
+    execute: (input: EnvironmentRpcInput<typeof WS_METHODS.environmentControlListProvisioned>) =>
+      request(WS_METHODS.environmentControlListProvisioned, input).pipe(
+        Effect.timeout("20 seconds"),
+      ),
+  });
   const refreshManagedEnvironments = (
     target: { readonly environmentId: EnvironmentId },
     registry: AtomRegistry.AtomRegistry,
@@ -975,6 +983,7 @@ export function createServerEnvironmentAtoms<R, E>(
     );
   return {
     managedEnvironments,
+    provisionedEnvironments,
     startManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:start",
       tag: WS_METHODS.environmentControlStart,
@@ -984,15 +993,20 @@ export function createServerEnvironmentAtoms<R, E>(
       },
       onSettled: refreshManagedEnvironments,
     }),
-    // Provisioning creates an environment rather than controlling a declared
-    // one, so it has nothing to refresh: the result is a pairing URL the caller
-    // uses, not a change to the managed list.
     provisionEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:provision",
       tag: WS_METHODS.environmentControlProvision,
       concurrency: {
         mode: "singleFlight",
-        key: ({ environmentId, input }) => `${environmentId}:${input.providerInstanceId}`,
+        key: ({ environmentId, input }) => `${environmentId}:${input.requestId}`,
+      },
+    }),
+    attachProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:attach",
+      tag: WS_METHODS.environmentControlAttach,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.requestId}`,
       },
     }),
     disposeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
@@ -1000,7 +1014,8 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.environmentControlDispose,
       concurrency: {
         mode: "singleFlight",
-        key: ({ environmentId, input }) => `${environmentId}:${input.sandboxId}`,
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${"requestId" in input ? input.requestId : input.sandboxId}`,
       },
     }),
     claimProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {

@@ -430,6 +430,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           activeOrderKey: "hq",
           titleRegeneration: null,
           deletedAt: null,
+          handoff: null,
           messages: [
             {
               id: asMessageId("message-1"),
@@ -569,6 +570,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasActionableProposedPlan: false,
           backgroundLiveness: null,
           planProgress: null,
+          handoff: null,
         },
       ]);
 

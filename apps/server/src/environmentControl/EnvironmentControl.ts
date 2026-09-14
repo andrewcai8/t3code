@@ -1,14 +1,19 @@
 // @effect-diagnostics globalDate:off - provider control crosses a Promise boundary.
 // @effect-diagnostics nodeBuiltinImport:off - provider control resolves state in a Node filesystem boundary.
-import * as NodeCrypto from "node:crypto";
+import { ProvisionRetentionError } from "./retention.ts";
+import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import {
   EnvironmentControlError,
+  ProvisionRequestId,
   type ComputeState,
   type EnvironmentId,
   type EnvironmentControlResult,
+  type EnvironmentProvisionAttachInput,
+  type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionInput,
+  type ProvisionOperation,
   type EnvironmentProvisionResult,
   type EnvironmentProvisionDisposeInput,
   type EnvironmentProvisionDisposeResult,
@@ -17,25 +22,38 @@ import {
   type EnvironmentProvisionTouchInput,
   type EnvironmentProvisionTouchResult,
   type ManagedEnvironment,
+  type DiscoveredProvisionedEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { ALL_TRAFFIC } from "e2b";
+import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
+import { Provisioning, ProvisionProviderPorts, ProvisionProviderError } from "./Provisioning.ts";
+import { makeProvisionPreparationStore } from "./ProvisionPreparation.ts";
+import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
+import { makeProvisionControl } from "./ProvisionControl.ts";
+import { makeNamespaceAllocationPorts } from "./namespaceAllocation.ts";
+import {
+  makeNamespaceAccountSession,
+  makeNamespaceProvisionRuntime,
+} from "./NamespaceProvisionRuntime.ts";
+import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
+import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
 import * as ServerConfig from "../config.ts";
 import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
-import {
-  createCloudDriver,
-  ProvisionRefused,
-  type CloudDriver,
-  type ProvisionRequest,
-} from "./driver.ts";
+import { createCloudDriver, ProvisionRefused, type CloudDriver } from "./driver.ts";
 import {
   createProvisionedLeaseRegistry,
+  decodeLegacyLeases,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 
+const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const LEASE_REAP_INTERVAL_MS = 5 * 60 * 1000;
 
 const refusalMessages = {
@@ -120,9 +138,10 @@ export function createEnvironmentControl(
     pending.set(environmentId, { action, promise });
     return promise;
   };
-  const reapExpiredLeases = async (): Promise<void> => {
+  const reapExpiredLeases = async (only?: ReadonlySet<string>): Promise<void> => {
     if (!leaseRegistry) return;
     for (const lease of await leaseRegistry.expired()) {
+      if (only && !only.has(lease.leaseId)) continue;
       const release =
         lease.state === "releasing"
           ? "started"
@@ -147,53 +166,8 @@ export function createEnvironmentControl(
     list: () => Promise.all(targets.map(snapshot)),
     start: (id: EnvironmentId) => command(id, "start"),
     stop: (id: EnvironmentId) => command(id, "stop"),
-    // Provisioning does not touch the declared targets, so it needs none of
-    // the fencing above: there is no existing environment to race with. A
-    // declined request is an answer the caller can act on, so it is mapped
-    // here rather than collapsing into "the provider is unavailable".
-    provision: async (request: ProvisionRequest): Promise<EnvironmentProvisionResult> => {
-      try {
-        const environment = await driver.provision(request);
-        const leaseId = NodeCrypto.randomUUID();
-        if (leaseRegistry) {
-          try {
-            await leaseRegistry.register({
-              leaseId,
-              sandboxId: environment.sandboxId,
-              providerInstanceId: request.providerInstanceId,
-              provider: environment.provider,
-              ...(environment.namespaceResource
-                ? { namespaceResource: environment.namespaceResource }
-                : {}),
-              ...(environment.namespaceProxy ? { namespaceProxy: environment.namespaceProxy } : {}),
-            });
-          } catch (cause) {
-            await driver
-              .dispose({
-                sandboxId: environment.sandboxId,
-                ...(environment.namespaceResource
-                  ? { namespaceResource: environment.namespaceResource }
-                  : {}),
-                ...(environment.namespaceProxy
-                  ? { namespaceProxy: environment.namespaceProxy }
-                  : {}),
-              })
-              .catch(() => undefined);
-            throw cause;
-          }
-        }
-        return {
-          kind: "provisioned",
-          environment: { ...environment, leaseId, providerInstanceId: request.providerInstanceId },
-        };
-      } catch (cause) {
-        if (cause instanceof ProvisionRefused)
-          return { kind: "refused", reason: cause.reason, message: cause.message };
-        throw cause;
-      }
-    },
     dispose: async (
-      input: EnvironmentProvisionDisposeInput,
+      input: Extract<EnvironmentProvisionDisposeInput, { sandboxId: string }>,
     ): Promise<EnvironmentProvisionDisposeResult> => {
       try {
         if (leaseRegistry) {
@@ -280,6 +254,10 @@ export class EnvironmentControl extends Context.Service<
   EnvironmentControl,
   {
     readonly list: Effect.Effect<ReadonlyArray<ManagedEnvironment>, EnvironmentControlError>;
+    readonly listProvisioned: Effect.Effect<
+      ReadonlyArray<DiscoveredProvisionedEnvironment>,
+      EnvironmentControlError
+    >;
     readonly start: (
       id: EnvironmentId,
     ) => Effect.Effect<EnvironmentControlResult, EnvironmentControlError>;
@@ -289,6 +267,9 @@ export class EnvironmentControl extends Context.Service<
     readonly provision: (
       input: EnvironmentProvisionInput,
     ) => Effect.Effect<EnvironmentProvisionResult, EnvironmentControlError>;
+    readonly attach: (
+      input: EnvironmentProvisionAttachInput,
+    ) => Effect.Effect<EnvironmentProvisionAttachResult, EnvironmentControlError>;
     readonly dispose: (
       input: EnvironmentProvisionDisposeInput,
     ) => Effect.Effect<EnvironmentProvisionDisposeResult, EnvironmentControlError>;
@@ -305,7 +286,32 @@ export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
     const { stateDir } = yield* ServerConfig.ServerConfig;
-    let manager: Promise<ReturnType<typeof createEnvironmentControl> | null> | undefined;
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* ProvisionOperationStore;
+    const manifests = makeProvisionPreparationStore(stateDir);
+    const legacyLeases = yield* Effect.tryPromise({
+      try: () =>
+        NodeFSP.readFile(NodePath.join(stateDir, "provisioned-sandbox-leases.json"), "utf8").catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return "[]";
+            throw error;
+          },
+        ),
+      catch: () =>
+        new EnvironmentControlError({ message: "Existing cloud leases could not be loaded." }),
+    });
+    const leaseRegistry = createProvisionedLeaseRegistry(sql, legacyLeases);
+    const importedLeases = new Map(
+      decodeLegacyLeases(legacyLeases).map((lease) => [lease.leaseId, lease]),
+    );
+    let manager:
+      | Promise<
+          | (ReturnType<typeof createEnvironmentControl> & {
+              config: Awaited<ReturnType<typeof readConfig>>;
+            })
+          | null
+        >
+      | undefined;
     const resolve = () =>
       (manager ??= (async () => {
         const path = await resolveControlConfigPath({
@@ -315,17 +321,207 @@ export const layer = Layer.effect(
         });
         if (!path) return null;
         const config = await readConfig(path);
-        const leaseRegistry = createProvisionedLeaseRegistry(
-          NodePath.join(stateDir, "provisioned-sandbox-leases.json"),
-        );
         const service = createEnvironmentControl(
           config.targets,
           createCloudDriver(config),
           leaseRegistry,
         );
-        await service.reapExpiredLeases();
-        return service;
+        return { ...service, config };
       })());
+    let namespace:
+      | Promise<{
+          allocator: ReturnType<typeof makeNamespaceAllocationPorts>;
+          runtime: ReturnType<typeof makeNamespaceProvisionRuntime>;
+        }>
+      | undefined;
+    const resolveNamespace = () =>
+      (namespace ??= (async () => {
+        const manager = await resolve();
+        if (!manager?.config.namespaceIngressToken)
+          throw new ProvisionRefused(
+            "unconfigured",
+            "Namespace requires a configured private ingress token.",
+          );
+        const session = await makeNamespaceAccountSession({
+          stateDir,
+          ...(manager.config.namespaceToken ? { token: manager.config.namespaceToken } : {}),
+        });
+        return {
+          allocator: makeNamespaceAllocationPorts({
+            client: session.client,
+            identity: session.identity,
+            execute: async (args, signal) => {
+              const result = await session.run(args, signal);
+              if (result.exitCode !== 0)
+                throw new Error("Namespace allocation command did not finish.");
+            },
+          }),
+          runtime: makeNamespaceProvisionRuntime({
+            session,
+            stateDir,
+            ingressToken: manager.config.namespaceIngressToken,
+          }),
+        };
+      })());
+    const provider = (operation: ProvisionOperation) =>
+      Effect.tryPromise({
+        try: async () => {
+          const manager = await resolve();
+          if (!manager) throw new Error("Missing cloud configuration");
+          const manifest = await manifests.load(operation.request.requestId);
+          const connection = { apiKey: manager.config.e2bApiKey };
+          return {
+            manifest,
+            namespace: operation.request.provider === "namespace" ? await resolveNamespace() : null,
+            runtime: makeE2bProvisionRuntime(connection),
+            allocator: makeE2bAllocationPorts({
+              connection,
+              parentTimeoutMs: 10 * 60_000,
+              sandboxTimeoutMs: 6 * 3_600_000,
+              ...(manifest.egressAllow.length
+                ? { network: { allowOut: [...manifest.egressAllow], denyOut: [ALL_TRAFFIC] } }
+                : {}),
+            }),
+          };
+        },
+        catch: () =>
+          new ProvisionProviderError({
+            message: "The manager could not load the immutable provisioning inputs.",
+          }),
+      });
+    const ports: ProvisionProviderPorts["Service"] = {
+      create: (operation) =>
+        Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
+          (namespace?.allocator ?? allocator).create(operation),
+        ),
+      recoverCreate: (operation) =>
+        Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
+          (namespace?.allocator ?? allocator).recoverCreate(operation),
+        ),
+      fork: (operation, parent) =>
+        Effect.flatMap(provider(operation), ({ allocator }) => allocator.fork(operation, parent)),
+      recoverFork: (operation, parent) =>
+        Effect.flatMap(provider(operation), ({ allocator }) =>
+          allocator.recoverFork(operation, parent),
+        ),
+      dispose: (operation, resource) =>
+        Effect.gen(function* () {
+          const { runtime, namespace } = yield* provider(operation);
+          if (resource.provider === "namespace")
+            return yield* Effect.tryPromise({
+              try: async () => {
+                if (!namespace) throw new Error("Namespace unavailable");
+                await namespace.runtime.dispose(operation, resource);
+              },
+              catch: () =>
+                new ProvisionProviderError({
+                  message: "Namespace cleanup could not be confirmed.",
+                }),
+            });
+          const sandboxId = resource.sandboxId;
+          yield* Effect.tryPromise({
+            try: () => runtime.dispose(operation, sandboxId),
+            catch: () =>
+              new ProvisionProviderError({
+                message: "The allocated resource could not be confirmed disposed.",
+              }),
+          });
+        }),
+      prepare: (operation, allocation) =>
+        Effect.gen(function* () {
+          const { runtime, manifest, namespace } = yield* provider(operation);
+          const resource = allocation.resource;
+          if (resource.provider === "namespace")
+            return yield* Effect.tryPromise({
+              try: async () => {
+                if (!namespace) throw new Error("Namespace unavailable");
+                return namespace.runtime.prepare(operation, resource, manifest);
+              },
+              catch: (error) =>
+                new ProvisionProviderError({
+                  ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+                  message: "Namespace preparation did not finish. Retry the same request.",
+                }),
+            });
+          const sandboxId = resource.sandboxId;
+          if (allocation.kind === "fork")
+            yield* Effect.tryPromise({
+              try: () => runtime.dispose(operation, allocation.parent.sandboxId),
+              catch: () =>
+                new ProvisionProviderError({
+                  message: "The allocation parent could not be cleaned up.",
+                }),
+            });
+          return yield* Effect.tryPromise({
+            try: () => runtime.prepare(operation, sandboxId, manifest),
+            catch: (error) =>
+              new ProvisionProviderError({
+                ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+                message: "Remote preparation did not finish. Retry the same request to resume.",
+              }),
+          });
+        }),
+    };
+    const provisioning = yield* Provisioning.make.pipe(
+      Effect.provideService(ProvisionProviderPorts, ports),
+    );
+    const provisionControl = makeProvisionControl(
+      store,
+      provisioning,
+      {
+        freeze: async (input) => {
+          const manager = await resolve();
+          if (!manager)
+            throw new ProvisionRefused(
+              "unconfigured",
+              "This install has no cloud provisioning configuration.",
+            );
+          if (input.provider === "namespace") {
+            if (!manager.config.provisioning?.runtimeArtifacts?.macos)
+              throw new ProvisionRefused(
+                "unconfigured",
+                "Configure a pinned macOS runtime artifact before provisioning.",
+              );
+            await resolveNamespace();
+          }
+          return manifests.freeze(
+            input,
+            manager.config,
+            makeProvisionResolution({
+              apiKey: manager.config.e2bApiKey,
+              ...(manager.config.provisioning?.githubToken
+                ? { githubToken: manager.config.provisioning.githubToken }
+                : {}),
+            }),
+          );
+        },
+        load: manifests.load,
+        attach: async (operation, manifest) => {
+          const manager = await resolve();
+          if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
+          const resource = operation.state.allocation.resource;
+          if (resource.provider === "namespace")
+            return (await resolveNamespace()).runtime.attach(operation, resource, manifest);
+          return makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).attach(
+            operation,
+            resource.sandboxId,
+            manifest,
+          );
+        },
+        touch: async (operation) => {
+          const manager = await resolve();
+          if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
+          const resource = operation.state.allocation.resource;
+          if (resource.provider === "namespace")
+            return (await resolveNamespace()).runtime.touch(operation, resource);
+          await makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).touch(
+            operation,
+            resource.sandboxId,
+          );
+        },
+      },
+      leaseRegistry,
+    );
     const run = <A>(
       fn: (service: NonNullable<Awaited<ReturnType<typeof resolve>>>) => Promise<A>,
       absent: A,
@@ -340,39 +536,75 @@ export const layer = Layer.effect(
             message: "Cloud controls are unavailable. Check the manager's private configuration.",
           }),
       });
+    const cancelProvision = Effect.fn("EnvironmentControl.cancelProvision")(function* (
+      requestId: ProvisionRequestId,
+    ): Effect.fn.Return<EnvironmentProvisionDisposeResult, EnvironmentControlError> {
+      const operation = yield* provisioning.cancel(requestId).pipe(
+        Effect.mapError(
+          () =>
+            new EnvironmentControlError({
+              message: "Cloud cleanup could not be reconciled. Retry the same request.",
+            }),
+        ),
+      );
+      if (operation.state.kind !== "disposed")
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message:
+            operation.state.kind === "cancel_requested"
+              ? (operation.state.lastError ?? "Cleanup is still pending.")
+              : "Cleanup is still pending.",
+        };
+      yield* Effect.tryPromise({
+        try: () => leaseRegistry.markDisposed(requestId),
+        catch: () =>
+          new EnvironmentControlError({ message: "Cleanup receipt could not be saved." }),
+      });
+      return { kind: "disposed" };
+    });
     yield* Effect.gen(function* () {
       const service = yield* Effect.promise(resolve);
       if (!service) return;
-      yield* Effect.promise(async () => {
-        await service.reapExpiredLeases().catch(() => undefined);
+      yield* Effect.gen(function* () {
+        const expired = yield* Effect.promise(() => leaseRegistry.expired());
+        for (const lease of expired) {
+          if (!importedLeases.has(lease.leaseId) && isProvisionRequestId(lease.leaseId))
+            yield* cancelProvision(lease.leaseId).pipe(Effect.ignore);
+        }
+        yield* Effect.promise(() => service.reapExpiredLeases(new Set(importedLeases.keys()))).pipe(
+          Effect.ignore,
+        );
       }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
     }).pipe(Effect.forkScoped);
     return {
       list: run((service) => service.list(), []),
-      provision: (input) =>
-        run<EnvironmentProvisionResult>(
-          (service) =>
-            service.provision({
-              provider: input.provider,
-              agentDriver: input.agentDriver,
-              providerInstanceId: input.providerInstanceId,
-              repository: input.repository,
-              branch: input.branch,
-            }),
-          // An install with no provisioning template is the ordinary case for a
-          // machine that only manages named targets, not a failure.
-          {
-            kind: "refused" as const,
-            reason: "unconfigured" as const,
-            message: "This install has no cloud provisioning template configured.",
-          },
-        ),
-      dispose: (input) =>
-        run<EnvironmentProvisionDisposeResult>((service) => service.dispose(input), {
-          kind: "refused" as const,
-          reason: "unconfigured" as const,
-          message: "This install has no cloud provisioning template configured.",
-        }),
+      listProvisioned: listProvisionedEnvironments(sql),
+      provision: provisionControl.provision,
+      attach: provisionControl.attach,
+      dispose: Effect.fn("EnvironmentControl.dispose")(function* (
+        input: EnvironmentProvisionDisposeInput,
+      ) {
+        if ("requestId" in input) return yield* cancelProvision(input.requestId);
+        const lease = yield* Effect.tryPromise({
+          try: () => leaseRegistry.findBySandbox(input.sandboxId),
+          catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
+        });
+        if (lease && !importedLeases.has(lease.leaseId) && isProvisionRequestId(lease.leaseId)) {
+          if (input.leaseId && input.leaseId !== lease.leaseId)
+            return {
+              kind: "refused" as const,
+              reason: "unknown" as const,
+              message: "The lease does not match this environment.",
+            };
+          return yield* cancelProvision(lease.leaseId);
+        }
+        return yield* run<EnvironmentProvisionDisposeResult>((service) => service.dispose(input), {
+          kind: "refused",
+          reason: "unconfigured",
+          message: "This install has no cloud provisioning configuration.",
+        });
+      }),
       claim: (input) =>
         run<EnvironmentProvisionClaimResult>((service) => service.claim(input), {
           kind: "refused" as const,
@@ -380,13 +612,36 @@ export const layer = Layer.effect(
           message: "This install has no cloud provisioning template configured.",
         }),
       touch: (input) =>
-        run<EnvironmentProvisionTouchResult>((service) => service.touch(input), {
-          kind: "refused" as const,
-          reason: "unknown" as const,
-          message: "This install has no cloud provisioning template configured.",
-        }),
+        importedLeases.has(input.leaseId)
+          ? run<EnvironmentProvisionTouchResult>(
+              async (service) => {
+                const imported = importedLeases.get(input.leaseId)!;
+                const current = await leaseRegistry.findBySandbox(imported.sandboxId);
+                if (current?.state !== "active" || current.owner === null)
+                  return {
+                    kind: "refused",
+                    reason: "unknown",
+                    message: "This environment has no active claimed lease.",
+                  };
+                if (current.namespaceResource)
+                  await (
+                    await resolveNamespace()
+                  ).runtime.retainImportedLease(current.namespaceResource);
+                else
+                  await makeE2bProvisionRuntime({
+                    apiKey: service.config.e2bApiKey,
+                  }).retainImportedLease(current);
+                return service.touch(input);
+              },
+              {
+                kind: "refused",
+                reason: "unknown",
+                message: "The cloud lease manager is unavailable.",
+              },
+            )
+          : provisionControl.touch(input),
       start: (id) => run((service) => service.start(id), refused("unknown")),
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };
   }),
-);
+).pipe(Layer.provide(ProvisionOperationStore.layer));

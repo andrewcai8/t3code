@@ -32,7 +32,6 @@ const HOP_BY_HOP = new Set([
   "transfer-encoding",
   "upgrade",
   "host",
-  "authorization",
   "cookie",
 ]);
 const FETCH_DECODED = new Set(["content-encoding", "content-length"]);
@@ -52,7 +51,10 @@ const copyHeaders = (
 const joinUrl = (base: string, requestUrl: string): URL => {
   const origin = new URL(base);
   const path = requestUrl.startsWith("/") ? requestUrl : `/${requestUrl}`;
-  return new URL(path, origin);
+  const target = new URL(path, origin);
+  if (target.origin !== origin.origin || target.username || target.password)
+    throw new Error("Namespace request changed its configured upstream");
+  return target;
 };
 
 export class NamespaceProxyManager {
@@ -82,7 +84,11 @@ export class NamespaceProxyManager {
       server.on("upgrade", (request, socket) => {
         stored.sockets.add(socket);
         socket.once("close", () => stored.sockets.delete(socket));
-        this.forwardWebSocket(stored, request, socket);
+        try {
+          this.forwardWebSocket(stored, request, socket);
+        } catch {
+          socket.destroy();
+        }
       });
       return { proxyId: input.proxyId, proxyOrigin };
     } catch (error) {
@@ -112,6 +118,7 @@ export class NamespaceProxyManager {
       const requestInit: RequestInit = {
         method,
         headers: copyHeaders(request.headers, lease.upstreamAuthorization),
+        redirect: "manual",
       };
       if (method !== "GET" && method !== "HEAD") {
         requestInit.body = request;

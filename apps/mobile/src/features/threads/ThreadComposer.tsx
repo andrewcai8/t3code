@@ -1,3 +1,7 @@
+import { CommandId } from "@t3tools/contracts";
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { makeQueuedMessageMetadata } from "../../lib/commandMetadata";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useAtomValue } from "@effect/atom-react";
 import type {
@@ -282,6 +286,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
   const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
   const [previewVideo, setPreviewVideo] = useState<VideoPreviewSource | null>(null);
+  const handoff = props.selectedThread.handoff ?? null;
+  const cancelHandoff = useAtomCommand(threadEnvironment.cancelHandoff, "resume thread");
+  const cancelCommand = useMemo(
+    () => ({
+      handoffId: handoff?.handoffId,
+      commandId: CommandId.make(makeQueuedMessageMetadata().commandId),
+    }),
+    [handoff?.handoffId],
+  );
+  const [cancelingHandoff, setCancelingHandoff] = useState(false);
   const hasContent = props.draftMessage.trim().length > 0 || props.draftAttachments.length > 0;
   const showStopAction =
     !hasContent &&
@@ -383,7 +397,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     serverConfig: props.serverConfig,
     states: uploadStates,
   });
-  const sendBlockedReason = props.sendBlockedReason ?? attachmentBlockReason;
+  const sendBlockedReason = handoff
+    ? "New messages are paused for handoff"
+    : (props.sendBlockedReason ?? attachmentBlockReason);
   const canSend =
     hasContent && !voiceInput.blocksSubmission && sendBlockedReason === null && !modelUnavailable;
 
@@ -435,6 +451,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     onEditorFocusChange?.(false);
   }, [onEditorFocusChange, onExpandedChange, settingsSheetPresentation.keepsComposerExpanded]);
   const handleSend = useCallback(async () => {
+    if (props.selectedThread.handoff) return;
     // Typed out in full rather than picked from the menu. Attachments mean the
     // user is sending a prompt, so those go through as usual.
     if (
@@ -477,6 +494,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     props.environmentLabel,
     props.selectedThread.id,
     props.selectedThread.title,
+    props.selectedThread.handoff,
     voiceInput.blocksSubmission,
   ]);
 
@@ -532,9 +550,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     ],
   );
   const openSettings = useCallback(() => {
+    if (handoff) return;
     settingsRoutePresentation.present(settingsRouteSession);
     settingsSheetPresentation.open();
-  }, [settingsRoutePresentation.present, settingsRouteSession, settingsSheetPresentation.open]);
+  }, [
+    handoff,
+    settingsRoutePresentation.present,
+    settingsRouteSession,
+    settingsSheetPresentation.open,
+  ]);
 
   useEffect(() => {
     if (settingsSheetPresentation.isActive) {
@@ -609,8 +633,45 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           </View>
         ) : null}
 
+        {handoff ? (
+          <View className="gap-1 px-3 py-2">
+            <Text className="text-xs text-foreground">
+              New messages and thread changes are paused for handoff. Pending questions can still be
+              answered.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              disabled={cancelingHandoff}
+              onPress={async () => {
+                if (!cancelCommand.handoffId) return;
+                setCancelingHandoff(true);
+                try {
+                  await cancelHandoff({
+                    environmentId: props.environmentId,
+                    input: {
+                      threadId: props.selectedThread.id,
+                      handoffId: cancelCommand.handoffId,
+                      commandId: cancelCommand.commandId,
+                    },
+                  });
+                } finally {
+                  setCancelingHandoff(false);
+                }
+              }}
+            >
+              <Text className="text-sm text-foreground">
+                {cancelingHandoff ? "Resuming…" : "Resume this thread"}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
         {modelUnavailable ? (
-          <Pressable accessibilityRole="button" className="px-3 py-2" onPress={openSettings}>
+          <Pressable
+            accessibilityRole="button"
+            className="px-3 py-2"
+            disabled={handoff !== null}
+            onPress={openSettings}
+          >
             <Text className="text-xs text-foreground">Model unavailable. Open model settings.</Text>
           </Pressable>
         ) : null}
@@ -811,6 +872,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                         }
                         label={currentModelOption?.label ?? currentModelSelection.model}
                         maxWidth="100%"
+                        disabled={handoff !== null}
                         onPress={openSettings}
                       />
                     </View>

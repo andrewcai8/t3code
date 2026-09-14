@@ -8,6 +8,7 @@ import {
   createEnvironmentRpcCommand,
 } from "./runtime.ts";
 import {
+  type CancelThreadHandoffInput,
   type ArchiveThreadInput,
   type CreateThreadInput,
   type DeleteThreadInput,
@@ -32,6 +33,7 @@ import {
   type UnsettleThreadInput,
   type UnsnoozeThreadInput,
   type UpdateThreadMetadataInput,
+  cancelThreadHandoff,
   archiveThread,
   createThread,
   deleteThread,
@@ -96,6 +98,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
+    cancelHandoff: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:cancel-handoff",
+      execute: (input: CancelThreadHandoffInput) => cancelThreadHandoff(input),
+      scheduler,
+      concurrency,
+    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: (input: CreateThreadInput) => createThread(input),

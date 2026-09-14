@@ -625,6 +625,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
             archivedAt: null,
+            handoff: null,
             settledOverride: null,
             settledAt: null,
             unsettledAt: null,
@@ -642,6 +643,27 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             deletedAt: null,
           });
           return;
+
+        case "thread.handoff-begun":
+        case "thread.handoff-canceled": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            handoff:
+              event.type === "thread.handoff-begun"
+                ? {
+                    status: "fenced",
+                    handoffId: event.payload.handoffId,
+                    admissionSequence: event.sequence,
+                  }
+                : null,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
 
         case "thread.archived": {
           const existingRow = yield* projectionThreadRepository.getById({

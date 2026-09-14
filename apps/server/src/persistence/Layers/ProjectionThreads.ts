@@ -14,11 +14,12 @@ import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { ModelSelection, ThreadLinkedPullRequest } from "@t3tools/contracts";
+import { ModelSelection, ThreadLinkedPullRequest, ThreadHandoff } from "@t3tools/contracts";
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
   }),
@@ -47,6 +48,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at,
           updated_at,
           archived_at,
+          handoff_json,
           settled_override,
           settled_at,
           unsettled_at,
@@ -78,6 +80,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.createdAt},
           ${row.updatedAt},
           ${row.archivedAt},
+          ${row.handoff == null ? null : JSON.stringify(row.handoff)},
           ${row.settledOverride},
           ${row.settledAt},
           ${row.unsettledAt},
@@ -109,6 +112,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at = excluded.created_at,
           updated_at = excluded.updated_at,
           archived_at = excluded.archived_at,
+          handoff_json = excluded.handoff_json,
           settled_override = excluded.settled_override,
           settled_at = excluded.settled_at,
           unsettled_at = excluded.unsettled_at,
@@ -147,6 +151,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
+          handoff_json AS "handoff",
           settled_override AS "settledOverride",
           settled_at AS "settledAt",
           unsettled_at AS "unsettledAt",
@@ -187,6 +192,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
+          handoff_json AS "handoff",
           settled_override AS "settledOverride",
           settled_at AS "settledAt",
           unsettled_at AS "unsettledAt",

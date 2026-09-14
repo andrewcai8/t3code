@@ -1,12 +1,6 @@
 import { expect, it } from "vite-plus/test";
 
-import {
-  ProvisionRefused,
-  accountAuthPath,
-  enableChildProvider,
-  repositoryDirectory,
-  repositoryUrl,
-} from "./driver.ts";
+import { ProvisionRefused, accountAuthPath, enableChildProvider, repositoryUrl } from "./driver.ts";
 
 it("reads each account's credentials from its own shadow home", () => {
   // Every entry in a shadow home except auth.json links back to the shared
@@ -37,12 +31,6 @@ it("accepts the spellings a person actually pastes", () => {
 
 it("refuses a repository that names no owner", () => {
   expect(() => repositoryUrl("justaname")).toThrow(/owner\/name/);
-});
-
-it("checks a repository out under its own name", () => {
-  expect(repositoryDirectory("Authentic-Intelligence/megpt-mono")).toBe(
-    "/home/user/work/megpt-mono",
-  );
 });
 
 it("carries the reason a request was declined", () => {
@@ -91,4 +79,27 @@ it("enables the selected provider instance without copying local paths", () => {
     { name: "HOME", value: "/home/user", sensitive: false },
   ]);
   expect(settings).not.toContain("/Users/andrew");
+});
+
+it("uses the isolated Codex home instead of a copied manager account path", () => {
+  const settings = JSON.parse(
+    enableChildProvider(
+      JSON.stringify({
+        providerInstances: {
+          codex_work: {
+            homePath: "/Users/local/.codex",
+            shadowHomePath: "/Users/local/.codex-work",
+          },
+        },
+      }),
+      "codex",
+      "codex_work",
+      "/private/operation/home",
+    ),
+  );
+  expect(settings.providerInstances.codex_work).toMatchObject({
+    homePath: "/private/operation/home/.codex",
+    shadowHomePath: "",
+  });
+  expect(() => repositoryUrl("owner/repo/extra")).toThrow("owner/name");
 });

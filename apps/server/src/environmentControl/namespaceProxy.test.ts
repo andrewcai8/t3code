@@ -14,6 +14,47 @@ const listen = (handler: NodeHttp.RequestListener) =>
   });
 
 describe("NamespaceProxyManager", () => {
+  it("keeps ingress credentials on the configured upstream across paths and redirects", async () => {
+    const escapedRequests: string[] = [];
+    const escaped = await listen((request, response) => {
+      escapedRequests.push(request.headers["x-nsc-ingress-auth"]?.toString() ?? "missing");
+      response.end("escaped");
+    });
+    const upstream = await listen((_request, response) => {
+      response.writeHead(302, { location: `${escaped.origin}/redirected` });
+      response.end();
+    });
+    const manager = new NamespaceProxyManager();
+    try {
+      const lease = await manager.open({
+        proxyId: "restricted-origin",
+        upstreamHttpBaseUrl: upstream.origin,
+        upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
+        upstreamAuthorization: "Bearer private-ingress",
+      });
+      const statuses: Array<number | undefined> = [];
+      for (const path of [`//${new URL(escaped.origin).host}/path`, "/redirect"]) {
+        statuses.push(
+          await new Promise<number | undefined>((resolve, reject) => {
+            const request = NodeHttp.get(lease.proxyOrigin, { path }, (response) => {
+              response.resume();
+              response.once("end", () => resolve(response.statusCode));
+            });
+            request.once("error", reject);
+          }),
+        );
+      }
+      expect(escapedRequests).toEqual([]);
+      expect(statuses).toEqual([502, 302]);
+    } finally {
+      await manager.close({ proxyId: "restricted-origin" });
+      for (const { server } of [upstream, escaped]) {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  });
+
   it("forwards query and streaming response with sanitized headers", async () => {
     const seen: { url: string | undefined; headers: NodeHttp.IncomingHttpHeaders | undefined } = {
       url: undefined,
@@ -44,6 +85,7 @@ describe("NamespaceProxyManager", () => {
     expect(await response.text()).toBe("ab");
     expect(seen.url).toBe("/api/run?q=1");
     expect(seen.headers?.["x-nsc-ingress-auth"]).toBe("Bearer secret");
+    expect(seen.headers?.authorization).toBe("Bearer client");
     expect(seen.headers?.cookie).toBeUndefined();
     expect(seen.headers?.host).not.toBe("evil");
     await manager.close({ proxyId: "p1" });

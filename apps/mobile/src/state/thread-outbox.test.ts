@@ -1483,3 +1483,19 @@ describe("thread outbox", () => {
     ).toBe("restore");
   });
 });
+
+describe("fenced thread outbox", () => {
+  it("keeps a queued follow-up until the fence is canceled and still cleans up delivered creation", () => {
+    const input = {
+      isCreation: false,
+      threadExists: true,
+      shellStatus: "live" as const,
+      environmentConnected: true,
+      threadBusy: false,
+      threadHandoff: true,
+    };
+    expect(resolveThreadOutboxDeliveryAction(input)).toBe("wait");
+    expect(resolveThreadOutboxDeliveryAction({ ...input, threadHandoff: false })).toBe("send");
+    expect(resolveThreadOutboxDeliveryAction({ ...input, isCreation: true })).toBe("remove");
+  });
+});

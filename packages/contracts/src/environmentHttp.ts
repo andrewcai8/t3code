@@ -32,6 +32,19 @@ import {
 } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
+  EnvironmentProvisionInput,
+  ProvisionedEnvironmentList,
+  EnvironmentProvisionResult,
+  EnvironmentProvisionAttachInput,
+  EnvironmentProvisionAttachResult,
+  EnvironmentProvisionClaimInput,
+  EnvironmentProvisionClaimResult,
+  EnvironmentProvisionTouchInput,
+  EnvironmentProvisionTouchResult,
+  EnvironmentProvisionDisposeInput,
+  EnvironmentProvisionDisposeResult,
+} from "./environmentControl.ts";
+import {
   ClientOrchestrationCommand,
   DispatchResult,
   OrchestrationReadModel,
@@ -537,6 +550,56 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+export class EnvironmentControlHttpApi extends HttpApiGroup.make("environmentControl")
+  .add(
+    HttpApiEndpoint.post("listProvisioned", "/api/environment-control/list-provisioned", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({}),
+      success: ProvisionedEnvironmentList,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("provision", "/api/environment-control/provision", {
+      headers: OptionalBearerHeaders,
+      payload: EnvironmentProvisionInput,
+      success: EnvironmentProvisionResult,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("attach", "/api/environment-control/attach", {
+      headers: OptionalBearerHeaders,
+      payload: EnvironmentProvisionAttachInput,
+      success: EnvironmentProvisionAttachResult,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("claim", "/api/environment-control/claim", {
+      headers: OptionalBearerHeaders,
+      payload: EnvironmentProvisionClaimInput,
+      success: EnvironmentProvisionClaimResult,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("touch", "/api/environment-control/touch", {
+      headers: OptionalBearerHeaders,
+      payload: EnvironmentProvisionTouchInput,
+      success: EnvironmentProvisionTouchResult,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("dispose", "/api/environment-control/dispose", {
+      headers: OptionalBearerHeaders,
+      payload: EnvironmentProvisionDisposeInput,
+      success: EnvironmentProvisionDisposeResult,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 /** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
 class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
   HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {
@@ -618,5 +681,6 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
+  .add(EnvironmentControlHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

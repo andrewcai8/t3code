@@ -1,169 +1,157 @@
-// @effect-diagnostics nodeBuiltinImport:off - these tests use a temporary filesystem boundary.
-// @effect-diagnostics globalDate:off - these tests use fixed timestamps.
-import * as NodeFSP from "node:fs/promises";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+// @effect-diagnostics globalDate:off - lease tests use fixed timestamps.
+import { expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../persistence/Layers/Sqlite.ts";
 import {
   createProvisionedLeaseRegistry,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 
-const temporaryDirectories: string[] = [];
+const withRegistry = (
+  body: (registry: ProvisionedLeaseRegistry, second: ProvisionedLeaseRegistry) => Promise<void>,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped();
+    const database = path.join(directory, "state.sqlite");
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* Effect.promise(() =>
+        body(createProvisionedLeaseRegistry(sql), createProvisionedLeaseRegistry(sql)),
+      );
+    }).pipe(Effect.provide(makeSqlitePersistenceLive(database)));
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
-async function makeRegistry(): Promise<ProvisionedLeaseRegistry> {
-  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
-  temporaryDirectories.push(directory);
-  return createProvisionedLeaseRegistry(NodePath.join(directory, "leases.json"));
-}
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => NodeFSP.rm(directory, { recursive: true, force: true })),
-  );
-});
-
-describe("ProvisionedLeaseRegistry", () => {
-  it("persists a lease and allows the same owner to claim it after reopening", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
-    temporaryDirectories.push(directory);
-    const path = NodePath.join(directory, "leases.json");
-    const first = createProvisionedLeaseRegistry(path);
-    const created = await first.register({
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
+it.effect(
+  "concurrent registry instances retain every lease and permit only one conflicting claim",
+  () =>
+    withRegistry(async (first, second) => {
+      await Promise.all(
+        Array.from({ length: 20 }, (_, index) =>
+          (index % 2 ? first : second).register({
+            leaseId: `lease-${index}`,
+            sandboxId: `sandbox-${index}`,
+            providerInstanceId: "codex",
+          }),
+        ),
+      );
+      for (let index = 0; index < 20; index += 1)
+        expect(await second.findBySandbox(`sandbox-${index}`)).toMatchObject({
+          leaseId: `lease-${index}`,
+        });
+      const claims = await Promise.all(
+        [first, second].map((registry, index) =>
+          registry.claim({
+            leaseId: "lease-0",
+            owner: { environmentId: "remote", threadId: `thread-${index}` },
+          }),
+        ),
+      );
+      expect(claims.filter((claim) => claim !== null)).toHaveLength(1);
+      await expect(
+        first.register({ leaseId: "lease-0", sandboxId: "different", providerInstanceId: "codex" }),
+      ).rejects.toThrow("identity conflict");
+    }),
+);
+it.effect("persists proxy identity, renews a claimed lease, and gives one release winner", () =>
+  withRegistry(async (first, second) => {
+    await first.register({
+      leaseId: "lease",
+      sandboxId: "sandbox",
       providerInstanceId: "codex",
-      now: new Date("2026-01-01T00:00:00.000Z"),
+      namespaceProxy: { proxyId: "proxy", proxyOrigin: "https://proxy.example" },
+      now: new Date("2026-01-01T00:00:00Z"),
     });
-    expect(created.state).toBe("active");
-
-    const reopened = createProvisionedLeaseRegistry(path);
-    expect(
-      await reopened.claim({
-        leaseId: "lease-1",
-        owner: { environmentId: "remote", threadId: "thread-1" },
-      }),
-    ).toMatchObject({
-      sandboxId: "sandbox-1",
-      owner: { environmentId: "remote", threadId: "thread-1" },
+    expect(await second.findBySandbox("sandbox")).toMatchObject({
+      namespaceProxy: { proxyId: "proxy", proxyOrigin: "https://proxy.example" },
     });
-  });
-
-  it("persists the manager proxy identity across reopening", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
-    temporaryDirectories.push(directory);
-    const path = NodePath.join(directory, "leases.json");
-    await createProvisionedLeaseRegistry(path).register({
-      leaseId: "lease-proxy",
-      sandboxId: "sandbox-proxy",
-      providerInstanceId: "codex",
-      namespaceProxy: { proxyId: "proxy-1", proxyOrigin: "https://proxy.example" },
-    });
-    expect(await createProvisionedLeaseRegistry(path).findBySandbox("sandbox-proxy")).toMatchObject(
-      {
-        namespaceProxy: { proxyId: "proxy-1", proxyOrigin: "https://proxy.example" },
-      },
-    );
-  });
-
-  it("rejects a different owner and makes release idempotent", async () => {
-    const registry = await makeRegistry();
-    await registry.register({
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
-      providerInstanceId: "codex",
-    });
-    expect(
-      await registry.claim({
-        leaseId: "lease-1",
-        owner: { environmentId: "remote", threadId: "thread-1" },
-      }),
-    ).not.toBeNull();
-    expect(
-      await registry.claim({
-        leaseId: "lease-1",
-        owner: { environmentId: "remote", threadId: "thread-2" },
-      }),
-    ).toBeNull();
-    expect(await registry.beginRelease({ leaseId: "lease-1", sandboxId: "sandbox-1" })).toBe(
-      "started",
-    );
-    expect(await registry.beginRelease({ leaseId: "lease-1", sandboxId: "sandbox-1" })).toBe(
-      "busy",
-    );
-    await registry.markDisposed("lease-1");
-    expect(await registry.beginRelease({ leaseId: "lease-1", sandboxId: "sandbox-1" })).toBe(
-      "disposed",
-    );
-  });
-
-  it("treats owner fields as structural and rejects lease identity conflicts", async () => {
-    const registry = await makeRegistry();
-    await registry.register({
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
-      providerInstanceId: "codex",
-    });
-    expect(
-      await registry.claim({
-        leaseId: "lease-1",
-        owner: { threadId: "thread-1", environmentId: "remote" },
-      }),
-    ).not.toBeNull();
-    await expect(
-      registry.register({
-        leaseId: "lease-1",
-        sandboxId: "sandbox-2",
-        providerInstanceId: "codex",
-      }),
-    ).rejects.toThrow("identity conflict");
-  });
-
-  it("returns leases whose expiry has passed", async () => {
-    const registry = await makeRegistry();
-    await registry.register({
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
-      providerInstanceId: "codex",
-      now: new Date("2026-01-01T00:00:00.000Z"),
-    });
-    expect(await registry.expired(new Date("2026-01-01T00:14:59.000Z"))).toHaveLength(0);
-    expect(await registry.expired(new Date("2026-01-01T00:15:01.000Z"))).toHaveLength(1);
-  });
-
-  it("expires a claimed lease after its heartbeat deadline", async () => {
-    const registry = await makeRegistry();
-    await registry.register({
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
-      providerInstanceId: "codex",
-      now: new Date("2026-01-01T00:00:00.000Z"),
-    });
-    await registry.claim({
-      leaseId: "lease-1",
-      owner: { environmentId: "remote", threadId: "thread-1" },
-    });
-    expect(await registry.expired(new Date("2026-01-01T00:14:59.000Z"))).toHaveLength(0);
-    expect(await registry.expired(new Date("2026-01-01T00:15:01.000Z"))).toHaveLength(1);
-  });
-
-  it("renews a claimed lease", async () => {
-    const registry = await makeRegistry();
-    await registry.register({
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
-      providerInstanceId: "codex",
-      now: new Date("2026-01-01T00:00:00.000Z"),
-    });
-    await registry.claim({
-      leaseId: "lease-1",
-      owner: { environmentId: "remote", threadId: "thread-1" },
-    });
-    expect(await registry.touch("lease-1", new Date("2026-01-01T00:15:00.000Z"))).toMatchObject({
+    expect(await second.expired(new Date("2026-01-01T00:14:59Z"))).toHaveLength(0);
+    expect(await second.expired(new Date("2026-01-01T00:15:01Z"))).toHaveLength(1);
+    const owner = { environmentId: "remote", threadId: "thread" };
+    expect(await second.claim({ leaseId: "lease", owner })).not.toBeNull();
+    expect(await first.claim({ leaseId: "lease", owner })).not.toBeNull();
+    expect(await first.touch("lease", new Date("2026-01-01T00:15:00Z"))).toMatchObject({
       expiresAt: "2026-01-01T00:30:00.000Z",
     });
-    expect(await registry.touch("missing")).toBeNull();
-  });
-});
+    expect(await first.touch("missing")).toBeNull();
+    const releases = await Promise.all(
+      [first, second].map((registry) =>
+        registry.beginRelease({ leaseId: "lease", sandboxId: "sandbox" }),
+      ),
+    );
+    expect(releases.sort()).toEqual(["busy", "started"]);
+    await first.markDisposed("lease");
+    expect(await second.beginRelease({ leaseId: "lease", sandboxId: "sandbox" })).toBe("disposed");
+    expect(await second.touch("lease")).toBeNull();
+  }),
+);
+
+it.effect("imports existing JSON leases once without reviving a later disposal", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const legacy =
+      '[{"leaseId":"legacy","sandboxId":"legacy-sandbox","providerInstanceId":"codex","state":"active","owner":{"environmentId":"remote","threadId":"thread"},"createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z","expiresAt":"2026-01-01T00:15:00.000Z"}]';
+    const first = createProvisionedLeaseRegistry(sql, legacy);
+    expect(yield* Effect.promise(() => first.findBySandbox("legacy-sandbox"))).toMatchObject({
+      owner: { environmentId: "remote", threadId: "thread" },
+      expiresAt: "2026-01-01T00:15:00.000Z",
+    });
+    yield* Effect.promise(() => first.markDisposed("legacy"));
+    const reopened = createProvisionedLeaseRegistry(sql, legacy);
+    expect(yield* Effect.promise(() => reopened.findBySandbox("legacy-sandbox"))).toMatchObject({
+      state: "disposed",
+    });
+  }).pipe(Effect.provide(SqlitePersistenceMemory.pipe(Layer.provide(NodeServices.layer)))),
+);
+
+it.effect(
+  "immutable retention caps survive registry reload and bound every claim and heartbeat",
+  () =>
+    withRegistry(async (first, second) => {
+      const cap = "2026-01-01T00:20:00.000Z";
+      const input = {
+        leaseId: "bounded",
+        sandboxId: "bounded-box",
+        providerInstanceId: "codex",
+        retentionDeadline: cap,
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      };
+      expect(await first.register(input)).toMatchObject({
+        expiresAt: "2026-01-01T00:15:00.000Z",
+        retentionDeadline: cap,
+      });
+      await second.claim({
+        leaseId: "bounded",
+        owner: { environmentId: "env", threadId: "thread" },
+        now: input.now,
+      });
+      expect(await second.touch("bounded", new Date("2026-01-01T00:10:00.000Z"))).toMatchObject({
+        expiresAt: cap,
+      });
+      expect(await first.touch("bounded", new Date(cap))).toBeNull();
+      expect(
+        await first.claim({
+          leaseId: "bounded",
+          owner: { environmentId: "env", threadId: "thread" },
+          now: new Date(cap),
+        }),
+      ).toBeNull();
+      expect(await second.expired(new Date(cap))).toHaveLength(1);
+      await expect(
+        first.register({ ...input, retentionDeadline: "2026-01-01T00:30:00.000Z" }),
+      ).rejects.toThrow("identity conflict");
+      expect(await first.findBySandbox("bounded-box")).toMatchObject({
+        expiresAt: cap,
+        retentionDeadline: cap,
+      });
+    }),
+);

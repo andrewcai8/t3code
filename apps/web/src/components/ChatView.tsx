@@ -1,4 +1,10 @@
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
+import {
+  forgetProvisionRequest,
+  isProvisionRequestActive,
+  pollProvisionRequest,
+  reserveProvisionRequest,
+} from "../cloud/provisionRequests";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
@@ -19,6 +25,7 @@ import {
   type AssistantCitation,
   type ApprovalRequestId,
   type ChatFileAttachment,
+  CommandId,
   DEFAULT_MODEL,
   type EnvironmentId,
   type MessageId,
@@ -235,7 +242,7 @@ import {
   nextProjectScriptId,
   projectScriptIdFromCommand,
 } from "~/projectScripts";
-import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import { newDraftId, newMessageId, newThreadId, randomUUID } from "~/lib/utils";
 import { useBrowserHistoryStore } from "~/browserHistoryStore";
 import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities } from "../providerModels";
@@ -1444,6 +1451,9 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
     reportFailure: false,
   });
+  const cancelThreadHandoff = useAtomCommand(threadEnvironment.cancelHandoff, {
+    reportFailure: false,
+  });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -1828,6 +1838,12 @@ export default function ChatView(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
+  const activeHandoff = routeServerThreadShell?.handoff ?? activeThread?.handoff ?? null;
+  const handoffCancelCommand = useMemo(
+    () => ({ handoffId: activeHandoff?.handoffId, commandId: CommandId.make(randomUUID()) }),
+    [activeHandoff?.handoffId],
+  );
+  const [cancelingHandoff, setCancelingHandoff] = useState(false);
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
@@ -4074,7 +4090,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const handleRuntimeModeChange = useCallback(
     (mode: RuntimeMode) => {
-      if (mode === runtimeMode) return;
+      if (activeHandoff || mode === runtimeMode) return;
       setComposerDraftRuntimeMode(composerDraftTarget, mode);
       if (isLocalDraftThread) {
         setDraftThreadContext(composerDraftTarget, { runtimeMode: mode });
@@ -4082,6 +4098,7 @@ export default function ChatView(props: ChatViewProps) {
       scheduleComposerFocus();
     },
     [
+      activeHandoff,
       isLocalDraftThread,
       runtimeMode,
       scheduleComposerFocus,
@@ -4093,7 +4110,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const handleInteractionModeChange = useCallback(
     (mode: ProviderInteractionMode) => {
-      if (mode === "plan" && !interactionModeEnabled) return;
+      if (activeHandoff || (mode === "plan" && !interactionModeEnabled)) return;
       if (mode === interactionMode) return;
       setComposerDraftInteractionMode(composerDraftTarget, mode);
       if (isLocalDraftThread) {
@@ -4102,6 +4119,7 @@ export default function ChatView(props: ChatViewProps) {
       scheduleComposerFocus();
     },
     [
+      activeHandoff,
       interactionMode,
       interactionModeEnabled,
       isLocalDraftThread,
@@ -4242,6 +4260,9 @@ export default function ChatView(props: ChatViewProps) {
   const provisionCloudEnvironment = useAtomCommand(serverEnvironment.provisionEnvironment, {
     reportFailure: false,
   });
+  const attachCloudEnvironment = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const claimCloudLease = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
     reportFailure: false,
   });
@@ -4254,13 +4275,11 @@ export default function ChatView(props: ChatViewProps) {
     const selected =
       activeProviderInstanceId === null
         ? selectedProviderEntry
-        : (providerInstanceEntries.find(
-            (entry) => entry.instanceId === activeProviderInstanceId,
-          ) ?? selectedProviderEntry);
+        : (providerInstanceEntries.find((entry) => entry.instanceId === activeProviderInstanceId) ??
+          selectedProviderEntry);
     if (!selected) return null;
-    return (
-      selectProviderInstanceByUsage(providerInstanceEntries, selected.driverKind) ?? selected
-    ).snapshot;
+    return (selectProviderInstanceByUsage(providerInstanceEntries, selected.driverKind) ?? selected)
+      .snapshot;
   }, [activeProviderInstanceId, providerInstanceEntries, selectedProviderEntry]);
   const canCreateCloudEnvironment =
     draftId !== null &&
@@ -4280,150 +4299,183 @@ export default function ChatView(props: ChatViewProps) {
     },
     [canCreateCloudEnvironment, cloudAccount],
   );
-  const provisionCloudEnvironmentForSend = useCallback(async (handoff: {
-    readonly agentDriver: ProviderDriverKind;
-    readonly modelSelection: ModelSelection;
-  }) => {
-    if (
-      !cloudProvisioningRequested ||
-      !canCreateCloudEnvironment ||
-      primaryEnvironmentId === null ||
-      !cloudAccount ||
-      draftId === null
-    ) {
-      return false;
-    }
-    const identity = activeProject?.repositoryIdentity;
-    const repository =
-      identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
-    const cloudEnvironmentLabel =
-      cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
-    setCreatingCloudEnvironment(true);
-    setCloudProvisioningPhase("creating");
-    // The menu closes on the click that starts this, taking its pending label
-    // with it, and building takes minutes. Without a word here the app looks
-    // like it ignored the request.
-    toastManager.add({
-      type: "info",
-      title: `Preparing ${cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B"}…`,
-      description: repository ? `Setting up the environment and cloning ${repository}.` : undefined,
-    });
-    let readyForSend = false;
-    try {
-      const created = await provisionCloudEnvironment({
-        environmentId: primaryEnvironmentId,
-        input: {
-          provider: cloudProvisioningRequested,
-          providerInstanceId: cloudAccount.instanceId,
-          agentDriver: handoff.agentDriver,
-          ...(repository ? { repository } : {}),
-        },
-      });
-      // Building a machine takes minutes, so every way it can end has to say
-      // so. Reverting the label and going quiet leaves someone watching a
-      // menu, unsure whether they are waiting or have already failed.
-      if (AsyncResult.isFailure(created)) {
-        toastManager.add({
-          type: "error",
-          title: "Could not reach the manager to create a machine.",
-        });
+  const provisionCloudEnvironmentForSend = useCallback(
+    async (handoff: {
+      readonly agentDriver: ProviderDriverKind;
+      readonly modelSelection: ModelSelection;
+    }) => {
+      if (
+        !cloudProvisioningRequested ||
+        !canCreateCloudEnvironment ||
+        primaryEnvironmentId === null ||
+        !cloudAccount ||
+        draftId === null
+      ) {
         return false;
       }
-      if (created.value.kind !== "provisioned") {
-        // The refusal already explains what to configure; repeating it is more
-        // use than a generic failure.
-        toastManager.add({ type: "error", title: created.value.message });
-        return false;
-      }
-      const lease = {
-        leaseId: created.value.environment.leaseId ?? created.value.environment.sandboxId,
-        sandboxId: created.value.environment.sandboxId,
-        managerEnvironmentId: primaryEnvironmentId,
-      };
-      setCloudProvisioningPhase("pairing");
-      const paired = await connectCloudPairing({
-        pairingUrl: created.value.environment.pairingUrl,
-      });
-      if (AsyncResult.isFailure(paired)) {
-        rememberProvisionedSandbox(draftId, lease);
-        toastManager.add({
-          type: "error",
-          title: `${cloudEnvironmentLabel} was created but could not be connected.`,
-        });
-        return false;
-      }
-      // Pairing is asynchronous: the remote server must publish its cloned
-      // project before the new draft can point at it. Waiting on the project
-      // atom keeps the cloud action as one user-visible operation rather than
-      // leaving a machine stranded on an unrelated local draft.
-      setCloudProvisioningPhase("loading-project");
-      const pairedProject = await waitForProjectMatch((project) => {
-        if (project.environmentId !== paired.value) return false;
-        if (!identity) return true;
-        const candidate = project.repositoryIdentity;
-        // A freshly booted child can publish its project before the async git
-        // identity resolver fills this field. The child was created for this
-        // draft and starts with no other projects, so the first project in
-        // that environment is the safe handoff target.
-        if (candidate == null) return true;
-        return (
-          candidate?.canonicalKey === identity.canonicalKey ||
-          (candidate?.owner === identity.owner && candidate?.name === identity.name)
-        );
-      }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
-      if (pairedProject === null) {
-        // Keep the lease on the current target so deleting that draft/thread
-        // still has a path to dispose the machine if project publication was
-        // delayed or the remote checkout failed.
-        rememberProvisionedSandbox(draftId, lease);
-        toastManager.add({
-          type: "warning",
-          title: `${cloudEnvironmentLabel} ready, but its project is still loading.`,
-          description: `Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
-        });
-        return false;
-      }
-      rememberProvisionedSandbox(draftId, lease);
-      setComposerDraftModelSelection(draftId, handoff.modelSelection);
-      setDraftThreadContext(draftId, {
-        projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
-        // The sandbox itself is the isolation boundary. Do not try to create
-        // a second worktree inside its already-cloned checkout, which would
-        // require a base branch the draft does not have after pairing.
-        envMode: "local",
-        branch: null,
-        worktreePath: null,
-        startFromOrigin: false,
-        environmentSelection: "manual",
-      });
-      setCloudProvisioningRequested(null);
-      setPendingCloudSendEnvironmentId(pairedProject.environmentId);
-      setCloudProvisioningPhase("ready");
-      readyForSend = true;
+      const identity = activeProject?.repositoryIdentity;
+      const repository =
+        identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+      const cloudEnvironmentLabel =
+        cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
+      setCreatingCloudEnvironment(true);
+      setCloudProvisioningPhase("creating");
+      // The menu closes on the click that starts this, taking its pending label
+      // with it, and building takes minutes. Without a word here the app looks
+      // like it ignored the request.
       toastManager.add({
-        type: "success",
-        title: `${cloudEnvironmentLabel} ready.`,
+        type: "info",
+        title: `Preparing ${cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B"}…`,
         description: repository
-          ? `${repository} is checked out. Sending your message now.`
+          ? `Setting up the environment and cloning ${repository}.`
           : undefined,
       });
-      return true;
-    } finally {
-      setCreatingCloudEnvironment(false);
-      if (!readyForSend) setCloudProvisioningPhase(null);
-    }
-  }, [
-    activeProject,
-    canCreateCloudEnvironment,
-    cloudProvisioningRequested,
-    cloudAccount,
-    connectCloudPairing,
-    draftId,
-    primaryEnvironmentId,
-    provisionCloudEnvironment,
-    setComposerDraftModelSelection,
-    setDraftThreadContext,
-  ]);
+      let readyForSend = false;
+      try {
+        const request = reserveProvisionRequest(draftId, {
+          managerEnvironmentId: primaryEnvironmentId,
+          input: {
+            provider: cloudProvisioningRequested,
+            providerInstanceId: cloudAccount.instanceId,
+            agentDriver: handoff.agentDriver,
+            ...(repository ? { repository } : {}),
+          },
+        });
+        const created = await pollProvisionRequest(draftId, request, async (pending) => {
+          const result = await provisionCloudEnvironment({
+            environmentId: pending.managerEnvironmentId,
+            input: pending.input,
+          });
+          return AsyncResult.isSuccess(result) ? result.value : null;
+        });
+        if (created.kind === "cancelled") return false;
+        if (created.kind === "unreachable") {
+          toastManager.add({
+            type: "error",
+            title: "Could not reach the environment manager. Send again to resume.",
+          });
+          return false;
+        }
+        if (created.kind !== "ready") {
+          toastManager.add({
+            type: created.kind === "refused" ? "error" : "info",
+            title:
+              created.kind === "refused"
+                ? created.message
+                : "Environment preparation is still in progress.",
+            ...(created.kind === "refused"
+              ? {}
+              : { description: `${created.message} Send again to resume this request.` }),
+          });
+          return false;
+        }
+        const environment = created.environment;
+        const lease = {
+          leaseId: environment.leaseId,
+          sandboxId: environment.sandboxId,
+          managerEnvironmentId: request.managerEnvironmentId,
+        };
+        rememberProvisionedSandbox(draftId, lease);
+        setCloudProvisioningPhase("pairing");
+        const attached = await attachCloudEnvironment({
+          environmentId: request.managerEnvironmentId,
+          input: { requestId: request.input.requestId },
+        });
+        if (!isProvisionRequestActive(draftId)) return false;
+        if (AsyncResult.isFailure(attached) || attached.value.kind === "refused") {
+          toastManager.add({
+            type: "error",
+            title: "The environment is ready, but a connection could not be issued.",
+          });
+          return false;
+        }
+        if (attached.value.environmentId !== environment.environmentId) {
+          throw new Error("The connection belongs to another environment.");
+        }
+        const paired = await connectCloudPairing({
+          pairingUrl: attached.value.pairingUrl,
+        });
+        if (!isProvisionRequestActive(draftId)) return false;
+        if (AsyncResult.isFailure(paired)) {
+          toastManager.add({
+            type: "error",
+            title: `${cloudEnvironmentLabel} was created but could not be connected.`,
+          });
+          return false;
+        }
+        // Pairing is asynchronous: the remote server must publish its cloned
+        // project before the new draft can point at it. Waiting on the project
+        // atom keeps the cloud action as one user-visible operation rather than
+        // leaving a machine stranded on an unrelated local draft.
+        setCloudProvisioningPhase("loading-project");
+        const pairedProject = await waitForProjectMatch((project) => {
+          return (
+            project.environmentId === environment.environmentId &&
+            project.environmentId === paired.value &&
+            project.workspaceRoot === environment.projectDir
+          );
+        }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
+        if (!isProvisionRequestActive(draftId)) return false;
+        if (pairedProject === null) {
+          // Keep the lease on the current target so deleting that draft/thread
+          // still has a path to dispose the machine if project publication was
+          // delayed or the remote checkout failed.
+          toastManager.add({
+            type: "warning",
+            title: `${cloudEnvironmentLabel} ready, but its project is still loading.`,
+            description: `Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
+          });
+          return false;
+        }
+        setComposerDraftModelSelection(draftId, handoff.modelSelection);
+        setDraftThreadContext(draftId, {
+          projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
+          // The sandbox itself is the isolation boundary. Do not try to create
+          // a second worktree inside its already-cloned checkout, which would
+          // require a base branch the draft does not have after pairing.
+          envMode: "local",
+          branch: null,
+          worktreePath: null,
+          startFromOrigin: false,
+          environmentSelection: "manual",
+        });
+        setCloudProvisioningRequested(null);
+        setPendingCloudSendEnvironmentId(pairedProject.environmentId);
+        setCloudProvisioningPhase("ready");
+        readyForSend = true;
+        toastManager.add({
+          type: "success",
+          title: `${cloudEnvironmentLabel} ready.`,
+          description: repository
+            ? `${repository} is checked out. Sending your message now.`
+            : undefined,
+        });
+        return true;
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: error instanceof Error ? error.message : "Could not prepare the environment.",
+        });
+        return false;
+      } finally {
+        setCreatingCloudEnvironment(false);
+        if (!readyForSend) setCloudProvisioningPhase(null);
+      }
+    },
+    [
+      activeProject,
+      attachCloudEnvironment,
+      canCreateCloudEnvironment,
+      cloudProvisioningRequested,
+      cloudAccount,
+      connectCloudPairing,
+      draftId,
+      primaryEnvironmentId,
+      provisionCloudEnvironment,
+      setComposerDraftModelSelection,
+      setDraftThreadContext,
+    ],
+  );
   const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (cloudProvisioningPhase === null) return null;
     const copy = {
@@ -5886,6 +5938,7 @@ export default function ChatView(props: ChatViewProps) {
       !activeProjectCwd ||
       !activeThread ||
       !localCheckoutBranchMismatch ||
+      activeThread.handoff ||
       isRestoringThreadBranch
     ) {
       return;
@@ -6098,6 +6151,7 @@ export default function ChatView(props: ChatViewProps) {
       (message) => message.role === "user" && !isCompactCommandMessage(message),
     ) ?? false;
   const compactThreadUnavailable =
+    activeHandoff !== null ||
     !activeThread ||
     !activeThreadHasCompactableConversation ||
     !activeProject ||
@@ -6112,15 +6166,17 @@ export default function ChatView(props: ChatViewProps) {
     pendingUserInputs.length > 0 ||
     showPlanFollowUpPrompt;
   const compactDisabled = compactThreadUnavailable || composerHasUnsentContent;
-  const compactDisabledReason = compactDisabled
-    ? composerHasUnsentContent
-      ? "Send or clear your draft before compacting"
-      : !activeProject
-        ? "Choose a project before compacting"
-        : !manualCompactionProviderAvailable
-          ? "Compaction is unavailable for this provider"
-          : "Compacting is unavailable right now"
-    : null;
+  const compactDisabledReason = activeHandoff
+    ? "Compaction is paused for handoff"
+    : compactDisabled
+      ? composerHasUnsentContent
+        ? "Send or clear your draft before compacting"
+        : !activeProject
+          ? "Choose a project before compacting"
+          : !manualCompactionProviderAvailable
+            ? "Compaction is unavailable for this provider"
+            : "Compacting is unavailable right now"
+      : null;
   const resumeCompactionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (
       !activeThread ||
@@ -6267,7 +6323,7 @@ export default function ChatView(props: ChatViewProps) {
           <Button
             size="xs"
             variant="ghost"
-            disabled={isRestoringThreadBranch}
+            disabled={isRestoringThreadBranch || activeHandoff !== null}
             onClick={handleRestoreThreadBranch}
           >
             {isRestoringThreadBranch ? "Restoring..." : "Restore branch"}
@@ -6282,6 +6338,7 @@ export default function ChatView(props: ChatViewProps) {
       ...parkedThreadItems,
     ];
   }, [
+    activeHandoff,
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
     cloudProvisioningBannerItem,
@@ -6649,7 +6706,7 @@ export default function ChatView(props: ChatViewProps) {
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
       const localApi = readLocalApi();
-      if (!localApi || !activeThread || isRevertingCheckpoint) return;
+      if (!localApi || !activeThread || activeThread.handoff || isRevertingCheckpoint) return;
 
       if (!supportsConversationRollback) {
         setThreadError(
@@ -6723,6 +6780,7 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    if (activeHandoff && !activePendingProgress) return;
     // Typed out in full rather than picked from the menu. Attachments or contexts
     // mean the user is sending a prompt, so those go through as usual.
     if (
@@ -6999,11 +7057,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (cloudProvisioningRequested) {
-      const cloudModel =
-        cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
-          ? ctxSelectedModel
-          : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-            ctxSelectedModel);
+      const cloudModel = cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
+        ? ctxSelectedModel
+        : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
+          ctxSelectedModel);
       const cloudHandoff = {
         agentDriver: ctxSelectedProvider,
         modelSelection: createModelSelection(
@@ -7400,6 +7457,7 @@ export default function ChatView(props: ChatViewProps) {
             composerDraftTarget,
             scopeThreadRef(environmentId, threadIdForSend),
           );
+          forgetProvisionRequest(composerDraftTarget);
           if (!AsyncResult.isSuccess(claimed) || claimed.value.kind !== "claimed") {
             toastManager.add({
               type: "warning",
@@ -7816,6 +7874,7 @@ export default function ChatView(props: ChatViewProps) {
     }) => {
       if (
         !activeThread ||
+        activeThread.handoff ||
         !isServerThread ||
         isSendBusy ||
         isConnecting ||
@@ -7966,6 +8025,7 @@ export default function ChatView(props: ChatViewProps) {
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
       !activeThread ||
+      activeThread.handoff ||
       !activeProject ||
       !activeProposedPlan ||
       !isServerThread ||
@@ -8128,6 +8188,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!activeThread) {
         return null;
       }
+      if (activeThread.handoff) return "Model changes are paused for handoff";
       const reason = getStartedThreadModelChangeBlockReason({
         providers: providerStatuses,
         hasStartedSession: activeThread.session !== null,
@@ -8142,7 +8203,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const onProviderModelSelect = useCallback(
     (instanceId: ProviderInstanceId, model: string) => {
-      if (!activeThread) return;
+      if (!activeThread || activeThread.handoff) return;
       // Look up the configured instance so model normalization and custom
       // model lookup stay scoped to that exact instance. Unknown instance ids
       // are rejected by returning early; the server remains authoritative too.
@@ -8219,6 +8280,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const onEnvModeChange = useCallback(
     (mode: DraftThreadEnvMode) => {
+      if (activeHandoff) return;
       if (canOverrideServerThreadEnvMode) {
         setPendingServerThreadEnvMode(mode);
         scheduleComposerFocus();
@@ -8237,6 +8299,7 @@ export default function ChatView(props: ChatViewProps) {
       scheduleComposerFocus();
     },
     [
+      activeHandoff,
       canOverrideServerThreadEnvMode,
       composerDraftTarget,
       draftThread?.worktreePath,
@@ -8249,6 +8312,7 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const onStartFromOriginChange = (nextStartFromOrigin: boolean) => {
+    if (activeHandoff) return;
     if (canOverrideServerThreadEnvMode && activeThread) {
       setPendingServerThreadStartFromOriginByThreadId((current) =>
         current[activeThread.id] === nextStartFromOrigin
@@ -8794,6 +8858,49 @@ export default function ChatView(props: ChatViewProps) {
                     <ComposerSurface.Shell contextStrip={showComposerContextStrip}>
                       <ComposerSurface.Host>
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
+                          {activeHandoff && (
+                            <div
+                              role="status"
+                              className="flex items-center justify-between gap-3 px-3 py-2 text-sm text-muted-foreground"
+                            >
+                              <span>
+                                New messages and thread changes are paused for handoff. Pending
+                                questions can still be answered.
+                              </span>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={cancelingHandoff}
+                                onClick={async () => {
+                                  if (!activeThread) return;
+                                  setCancelingHandoff(true);
+                                  const result = await cancelThreadHandoff({
+                                    environmentId,
+                                    input: {
+                                      threadId: activeThread.id,
+                                      handoffId: activeHandoff.handoffId,
+                                      commandId: handoffCancelCommand.commandId,
+                                    },
+                                  });
+                                  setCancelingHandoff(false);
+                                  if (
+                                    result._tag === "Failure" &&
+                                    !isAtomCommandInterrupted(result)
+                                  ) {
+                                    const error = squashAtomCommandFailure(result);
+                                    setThreadError(
+                                      activeThread.id,
+                                      error instanceof Error
+                                        ? error.message
+                                        : "Could not resume this thread.",
+                                    );
+                                  }
+                                }}
+                              >
+                                {cancelingHandoff ? "Resuming…" : "Resume this thread"}
+                              </Button>
+                            </div>
+                          )}
                           <ChatComposer
                             composerRef={composerRef}
                             composerDraftTarget={composerDraftTarget}
@@ -8818,11 +8925,13 @@ export default function ChatView(props: ChatViewProps) {
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
                             sendDisabledReason={
-                              feedbackUploading
-                                ? "Sending feedback"
-                                : threadDetailLoading
-                                  ? "Messages loading"
-                                  : null
+                              activeHandoff && !activePendingProgress
+                                ? "New messages are paused for handoff"
+                                : feedbackUploading
+                                  ? "Sending feedback"
+                                  : threadDetailLoading
+                                    ? "Messages loading"
+                                    : null
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}
@@ -8845,7 +8954,9 @@ export default function ChatView(props: ChatViewProps) {
                             activePendingDraftAnswers={activePendingDraftAnswers}
                             activePendingQuestionIndex={activePendingQuestionIndex}
                             respondingRequestIds={respondingRequestIds}
-                            showPlanFollowUpPrompt={showPlanFollowUpPrompt}
+                            showPlanFollowUpPrompt={
+                              showPlanFollowUpPrompt && activeHandoff === null
+                            }
                             activeProposedPlan={activeProposedPlan}
                             activeTasksProgress={activeComposerTasksProgress}
                             activeTaskSteps={activeComposerTaskSteps}
@@ -8938,7 +9049,7 @@ export default function ChatView(props: ChatViewProps) {
                                         setPendingServerThreadBranch,
                                     }
                                   : {})}
-                                envLocked={envLocked}
+                                envLocked={envLocked || activeHandoff !== null}
                                 onComposerFocusRequest={scheduleComposerFocus}
                                 {...(canCheckoutPullRequestIntoThread
                                   ? { onCheckoutPullRequestRequest: openPullRequestDialog }

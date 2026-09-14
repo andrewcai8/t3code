@@ -1,5 +1,6 @@
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
-import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
@@ -33,6 +34,25 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
   { message: Schema.String },
 ) {}
 
+export const ProvisionRequestId = Schema.String.check(
+  Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
+).pipe(Schema.brand("ProvisionRequestId"));
+export type ProvisionRequestId = typeof ProvisionRequestId.Type;
+
+export const DiscoveredProvisionedEnvironment = Schema.Struct({
+  requestId: ProvisionRequestId,
+  environmentId: EnvironmentId,
+  provider: Schema.Literals(["e2b", "namespace"]),
+  label: TrimmedNonEmptyString,
+  repository: Schema.NullOr(TrimmedNonEmptyString),
+  projectDir: TrimmedNonEmptyString,
+  threadId: Schema.NullOr(ThreadId),
+  createdAt: Schema.String,
+  expiresAt: Schema.String,
+});
+export type DiscoveredProvisionedEnvironment = typeof DiscoveredProvisionedEnvironment.Type;
+export const ProvisionedEnvironmentList = Schema.Array(DiscoveredProvisionedEnvironment);
+
 /**
  * A cloud environment asked for on demand, rather than declared in advance.
  *
@@ -42,6 +62,15 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
  * provider vocabulary and nothing else.
  */
 export const EnvironmentProvisionInput = Schema.Struct({
+  requestId: ProvisionRequestId,
+  retentionDeadline: Schema.optional(
+    IsoDateTime.check(
+      Schema.makeFilter((value) => {
+        const millis = Date.parse(value);
+        return Number.isFinite(millis) && DateTime.formatIso(DateTime.makeUnsafe(millis)) === value;
+      }),
+    ),
+  ),
   provider: Schema.Literals(["e2b", "namespace"]),
   /** Provider driver selected in the local composer. */
   agentDriver: Schema.optional(ProviderDriverKind),
@@ -50,22 +79,50 @@ export const EnvironmentProvisionInput = Schema.Struct({
   /** `owner/name`; omitted leaves the environment with an empty workspace. */
   repository: Schema.optional(TrimmedNonEmptyString),
   branch: Schema.optional(TrimmedNonEmptyString),
+  sourceRevision: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/))),
+  workspaceFiles: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        destination: TrimmedNonEmptyString,
+        sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+        contentsBase64: Schema.String,
+      }),
+    ).check(Schema.isMaxLength(256)),
+  ),
 });
 export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
 
 export const ProvisionedEnvironment = Schema.Struct({
-  leaseId: Schema.optional(TrimmedNonEmptyString),
-  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  environmentId: EnvironmentId,
+  leaseId: TrimmedNonEmptyString,
+  provider: Schema.Literals(["e2b", "namespace"]),
   sandboxId: TrimmedNonEmptyString,
-  /** Single use, and the only way a client can reach the new environment. */
-  pairingUrl: TrimmedNonEmptyString,
   projectDir: TrimmedNonEmptyString,
   providerInstanceId: TrimmedNonEmptyString,
+  sourceRevision: Schema.NullOr(Schema.String),
+  t3Revision: Schema.String,
+  artifactSha256: Schema.String,
+  control: Schema.Struct({
+    preparationRoot: Schema.String,
+    brokerCredentialPath: Schema.String,
+    localT3Url: Schema.String,
+    runtimeExecutable: Schema.String,
+    runtimeEntrypoint: Schema.String,
+  }),
 });
 export type ProvisionedEnvironment = typeof ProvisionedEnvironment.Type;
 
 export const EnvironmentProvisionResult = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("provisioned"), environment: ProvisionedEnvironment }),
+  Schema.Struct({
+    kind: Schema.Literal("ready"),
+    requestId: ProvisionRequestId,
+    environment: ProvisionedEnvironment,
+  }),
+  Schema.Struct({
+    kind: Schema.Literals(["pending", "allocation_unknown"]),
+    requestId: ProvisionRequestId,
+    message: Schema.String,
+  }),
   Schema.Struct({
     kind: Schema.Literal("refused"),
     /**
@@ -74,18 +131,40 @@ export const EnvironmentProvisionResult = Schema.Union([
      * `credentials` means the named account has none on this machine, and
      * `failed` covers a provider that accepted the request and did not finish.
      */
-    reason: Schema.Literals(["unconfigured", "credentials", "unsupported", "failed"]),
+    reason: Schema.Literals([
+      "unconfigured",
+      "credentials",
+      "unsupported",
+      "failed",
+      "conflict",
+      "invalid",
+      "disposed",
+    ]),
     message: Schema.String,
   }),
 ]);
 export type EnvironmentProvisionResult = typeof EnvironmentProvisionResult.Type;
 
-/** A one-shot cleanup request for an environment created by provisioning. */
-export const EnvironmentProvisionDisposeInput = Schema.Struct({
-  leaseId: Schema.optional(TrimmedNonEmptyString),
-  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
-  sandboxId: TrimmedNonEmptyString,
-});
+export const EnvironmentProvisionAttachInput = Schema.Struct({ requestId: ProvisionRequestId });
+export type EnvironmentProvisionAttachInput = typeof EnvironmentProvisionAttachInput.Type;
+export const EnvironmentProvisionAttachResult = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("attached"),
+    environmentId: EnvironmentId,
+    pairingUrl: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({ kind: Schema.Literal("refused"), message: Schema.String }),
+]);
+export type EnvironmentProvisionAttachResult = typeof EnvironmentProvisionAttachResult.Type;
+
+export const EnvironmentProvisionDisposeInput = Schema.Union([
+  Schema.Struct({ requestId: ProvisionRequestId }),
+  Schema.Struct({
+    leaseId: Schema.optional(TrimmedNonEmptyString),
+    provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+    sandboxId: TrimmedNonEmptyString,
+  }),
+]);
 export type EnvironmentProvisionDisposeInput = typeof EnvironmentProvisionDisposeInput.Type;
 
 export const EnvironmentProvisionDisposeResult = Schema.Union([

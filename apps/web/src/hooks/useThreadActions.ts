@@ -467,6 +467,14 @@ export function useThreadActions() {
         return result;
       }
       const { thread, threadRef } = resolved;
+      if (thread.handoff) {
+        toastManager.add({
+          type: "warning",
+          title: "Thread changes are paused for handoff",
+          description: "Resume this thread before deleting it.",
+        });
+        return AsyncResult.success(undefined);
+      }
       const threads = readEnvironmentThreadRefs(threadRef.environmentId).flatMap((ref) => {
         const shell = readThreadShell(ref);
         return shell === null ? [] : [shell];

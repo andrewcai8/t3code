@@ -1065,6 +1065,7 @@ export function useThreadOutboxDrain(): void {
       const deliveryAction = resolveThreadOutboxDeliveryAction({
         isCreation: creation !== undefined,
         threadExists: thread !== undefined,
+        threadHandoff: thread?.handoff != null,
         shellStatus,
         environmentConnected: environment?.connectionState === "connected",
         threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",

@@ -110,6 +110,13 @@ function useThreadActionExecutor(
 
   const executeAction = useCallback(
     async (action: ThreadListAction, thread: EnvironmentThreadShell) => {
+      if (action === "delete" && thread.handoff) {
+        Alert.alert(
+          "Thread changes are paused for handoff",
+          "Resume this thread before deleting it.",
+        );
+        return false;
+      }
       const key = scopedThreadKey(thread.environmentId, thread.id);
       if (inFlightThreadKeys.current.has(key)) {
         return false;
@@ -436,6 +443,13 @@ export function useThreadListActions(): {
   const regenerateThreadTitle = useCallback(
     async (thread: EnvironmentThreadShell) => {
       const key = scopedThreadKey(thread.environmentId, thread.id);
+      if (thread.handoff) {
+        Alert.alert(
+          "Thread changes are paused for handoff",
+          "Resume this thread before regenerating its title.",
+        );
+        return false;
+      }
       if (
         thread.titleRegeneration != null ||
         titleRegenerationInFlightThreadKeys.current.has(key)

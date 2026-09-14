@@ -63,6 +63,24 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("allows provisioned environment discovery with read scope", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.environmentControlListProvisioned)).toBe(
+      AuthOrchestrationReadScope,
+    );
+  });
+
+  it("requires operate scope for provisioning, fresh attachment and lease cleanup", () => {
+    for (const method of [
+      WS_METHODS.environmentControlProvision,
+      WS_METHODS.environmentControlAttach,
+      WS_METHODS.environmentControlClaim,
+      WS_METHODS.environmentControlTouch,
+      WS_METHODS.environmentControlDispose,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+  });
+
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
       expect(() => requiredScopeForRpcMethod(method)).toThrow(
