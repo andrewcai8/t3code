@@ -61,6 +61,8 @@ it.effect(
           listProvisioned: Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),
           stop: () => Effect.die("Unused in provision HTTP proof"),
+          pause: () => Effect.die("Unused in provision HTTP proof"),
+          resume: () => Effect.die("Unused in provision HTTP proof"),
           provision: (input) =>
             Effect.sync(() => {
               calls.push({ method: "provision", input });

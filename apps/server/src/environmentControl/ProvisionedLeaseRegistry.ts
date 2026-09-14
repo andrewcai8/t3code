@@ -283,7 +283,8 @@ export function createProvisionedLeaseRegistry(
     markMissing: (leaseId, now) =>
       mutate((leases) => ({
         leases: leases.map((lease) =>
-          lease.leaseId === leaseId && (lease.state === "active" || lease.state === "paused")
+          lease.leaseId === leaseId &&
+          (lease.state === "active" || lease.state === "paused" || lease.state === "releasing")
             ? { ...lease, state: "missing" as const, updatedAt: nowIso(now) }
             : lease,
         ),
@@ -292,7 +293,8 @@ export function createProvisionedLeaseRegistry(
     markPaused: (leaseId, now) =>
       mutate((leases) => ({
         leases: leases.map((lease) =>
-          lease.leaseId === leaseId && (lease.state === "active" || lease.state === "paused")
+          lease.leaseId === leaseId &&
+          (lease.state === "active" || lease.state === "paused" || lease.state === "releasing")
             ? { ...lease, state: "paused" as const, updatedAt: nowIso(now) }
             : lease,
         ),

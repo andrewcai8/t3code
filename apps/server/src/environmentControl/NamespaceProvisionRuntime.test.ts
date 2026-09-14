@@ -318,12 +318,12 @@ describe("Namespace runtime transport", () => {
       cleanups.push(() => proxies.close({ proxyId: `provision-${requestId}` }));
       return makeNamespaceProvisionRuntime({
         session: f.session,
+        getIngressAuthorization: async () => "Bearer private-ingress",
         stateDir: f.directory,
-        ingressToken: "private-ingress",
         proxies: {
           open: async (input) => {
             opened += 1;
-            expect(input.upstreamAuthorization).toBe("Bearer private-ingress");
+            expect(await input.getUpstreamAuthorization()).toMatch(/^Bearer .+/);
             return proxies.open({
               ...input,
               upstreamHttpBaseUrl: published.origin,
@@ -366,8 +366,8 @@ describe("Namespace runtime transport", () => {
     const f = await fixture();
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     const before = DateTime.toEpochMillis(DateTime.nowUnsafe());
     await runtime.touch(f.operation, resource);
@@ -398,8 +398,8 @@ describe("Namespace runtime transport", () => {
     });
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await runtime.touch(operation, resource);
     await runtime.touch(operation, resource);
@@ -426,8 +426,8 @@ describe("Namespace runtime transport", () => {
       });
       const runtime = makeNamespaceProvisionRuntime({
         session: f.session,
+        getIngressAuthorization: async () => "Bearer private-ingress",
         stateDir: f.directory,
-        ingressToken: "ingress",
       });
       await expect(runtime.touch(operation, resource)).rejects.toThrow(ProvisionRetentionError);
     },
@@ -448,8 +448,8 @@ describe("Namespace runtime transport", () => {
     });
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await expect(runtime.touch(operation, resource)).rejects.toThrow(ProvisionRetentionError);
   });
@@ -462,8 +462,8 @@ describe("Namespace runtime transport", () => {
     });
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await expect(runtime.touch(operation, resource)).rejects.toThrow(ProvisionRetentionError);
     expect(f.apiCalls.some(({ method }) => method === "ExtendInstance")).toBe(false);
@@ -474,8 +474,8 @@ describe("Namespace runtime transport", () => {
     f.state.shortExtension = true;
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await expect(runtime.touch(f.operation, resource)).rejects.toThrow("did not extend");
   });
@@ -485,8 +485,8 @@ describe("Namespace runtime transport", () => {
     f.state.staleReadback = true;
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await expect(runtime.touch(f.operation, resource)).rejects.toThrow("readback");
   });
@@ -497,8 +497,8 @@ describe("Namespace runtime transport", () => {
     else f.state.describedInstanceId = "different-instance";
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await expect(runtime.touch(f.operation, resource)).rejects.toThrow("active deadline");
     expect(f.apiCalls.some(({ method }) => method === "ExtendInstance")).toBe(false);
@@ -531,8 +531,8 @@ describe("Namespace runtime transport", () => {
     f.state.expireOnShutdown = true;
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await runtime.dispose(f.operation, resource);
     expect(f.commands).toEqual([["shutdown", "owned-box", "--force"]]);
@@ -543,8 +543,8 @@ describe("Namespace runtime transport", () => {
     f.state.instanceId = "";
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
       stateDir: f.directory,
-      ingressToken: "ingress",
     });
     await runtime.dispose(f.operation, resource);
     await runtime.dispose(f.operation, resource);

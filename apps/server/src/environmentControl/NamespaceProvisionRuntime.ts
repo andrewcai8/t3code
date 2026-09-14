@@ -126,7 +126,16 @@ export async function makeNamespaceAccountSession(config: {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   };
-  return { identity, client, compute, run };
+  // The API clients re-verify the account on every call. The proxy does not
+  // need to: its identity was checked when this session opened, and paying for
+  // a second round trip on every proxied request is what made it time out.
+  return {
+    identity,
+    client,
+    compute,
+    run,
+    issueToken: (duration: number, force?: boolean) => source.issueToken(duration, force),
+  };
 }
 type NamespaceAccountSession = Awaited<ReturnType<typeof makeNamespaceAccountSession>>;
 
@@ -214,10 +223,14 @@ export function namespacePythonPort(config: {
 export function makeNamespaceProvisionRuntime(config: {
   readonly session: NamespaceAccountSession;
   readonly stateDir: string;
-  readonly ingressToken: string;
+  /** Supplies the proxy's upstream credential, so it can be renewed or stubbed. */
+  readonly getIngressAuthorization?: () => Promise<string>;
   readonly proxies?: Pick<NamespaceProxyManager, "open" | "close">;
 }) {
   const proxies = config.proxies ?? new NamespaceProxyManager();
+  const ingressAuthorization =
+    config.getIngressAuthorization ??
+    (async () => `Bearer ${await config.session.issueToken(60_000)}`);
   const openProxies = new Map<string, Promise<string>>();
   const retain = async (resource: NamespaceResource, retentionDeadline?: string) => {
     try {
@@ -435,10 +448,9 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps(js
               proxyId,
               upstreamHttpBaseUrl: upstream,
               upstreamWsBaseUrl: upstream.replace(/^https:/, "wss:"),
-              // Main made this a callback so a long-lived proxy can renew the
-              // credential instead of pinning the one it opened with.
-              getUpstreamAuthorization: async () =>
-                `Bearer ${config.ingressToken.replace(/^Bearer /, "")}`,
+              // A proxy outlives any single token, so it asks for one per
+              // request rather than pinning the one it opened with.
+              getUpstreamAuthorization: ingressAuthorization,
             })
           ).proxyOrigin;
         })();

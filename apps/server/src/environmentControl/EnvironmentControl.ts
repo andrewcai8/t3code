@@ -176,8 +176,14 @@ export function createEnvironmentControl(
             });
       if (release !== "started") continue;
       try {
+        // beginRelease already moved this lease to `releasing`, so the
+        // recheck confirms that and not the state it held before.
         const current = await leaseRegistry.findBySandbox(lease.sandboxId);
-        if (!current || current.state !== "active" || current.expiresAt > new Date().toISOString())
+        if (
+          !current ||
+          current.state !== "releasing" ||
+          current.expiresAt > new Date().toISOString()
+        )
           continue;
         await driver.pause({
           sandboxId: current.sandboxId,
@@ -558,10 +564,10 @@ export const layer = Layer.effect(
     const resolveNamespace = () =>
       (namespace ??= (async () => {
         const manager = await resolve();
-        if (!manager?.config.namespaceIngressToken)
+        if (!manager)
           throw new ProvisionRefused({
             reason: "unconfigured",
-            message: "Namespace requires a configured private ingress token.",
+            message: "This install has no cloud provisioning configuration.",
           });
         const session = await makeNamespaceAccountSession({
           stateDir,
@@ -577,11 +583,7 @@ export const layer = Layer.effect(
                 throw new Error("Namespace allocation command did not finish.");
             },
           }),
-          runtime: makeNamespaceProvisionRuntime({
-            session,
-            stateDir,
-            ingressToken: manager.config.namespaceIngressToken,
-          }),
+          runtime: makeNamespaceProvisionRuntime({ session, stateDir }),
         };
       })());
     const provider = (operation: ProvisionOperation) =>

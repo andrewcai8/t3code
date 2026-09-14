@@ -3,10 +3,15 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
-import { EnvironmentProvisionInput, ProvisionRequestConflict } from "@t3tools/contracts";
+import {
+  EnvironmentProvisionInput,
+  ProviderInstanceId,
+  ProvisionRequestConflict,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { makeProvisionPreparationStore, provisionDigest } from "./ProvisionPreparation.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
+import type { ProvisioningProviderProfile } from "./ProvisioningProviderProfile.ts";
 const evidence = {
   destination: ".repair/evidence.txt",
   sha256: provisionDigest("evidence"),
@@ -47,9 +52,20 @@ async function fixture() {
       },
     },
   };
+  const profile: ProvisioningProviderProfile = {
+    kind: "codex",
+    instanceId: ProviderInstanceId.make("codex"),
+    environment: [],
+    credential: {
+      kind: "file",
+      source: NodePath.join(root, ".codex/auth.json"),
+      destination: ".codex/auth.json",
+    },
+  };
   return {
     root,
     config,
+    profile,
     store: makeProvisionPreparationStore(root),
     resolver: { template: async () => "canonical-template", revision: async () => "a".repeat(40) },
     cleanup: () => NodeFSP.rm(root, { recursive: true, force: true }),
@@ -58,7 +74,7 @@ async function fixture() {
 it("freezes source, template, artifact and credentials across manager restart and rejects changed intent", async () => {
   const f = await fixture();
   try {
-    const first = await f.store.freeze(input, f.config, f.resolver, f.root);
+    const first = await f.store.freeze(input, f.config, f.resolver, f.profile);
     await NodeFSP.writeFile(NodePath.join(f.root, "runtime.tar"), "changed");
     await NodeFSP.writeFile(NodePath.join(f.root, ".codex/auth.json"), "changed");
     const again = await makeProvisionPreparationStore(f.root).freeze(
@@ -72,7 +88,7 @@ it("freezes source, template, artifact and credentials across manager restart an
           throw new Error("must not resolve");
         },
       },
-      f.root,
+      f.profile,
     );
     expect(again).toEqual(first);
     expect(first.request).toMatchObject({
@@ -91,14 +107,14 @@ it("freezes source, template, artifact and credentials across manager restart an
         0o777,
     ).toBe(0o600);
     await expect(
-      f.store.freeze({ ...input, branch: "other" }, f.config, f.resolver, f.root),
+      f.store.freeze({ ...input, branch: "other" }, f.config, f.resolver, f.profile),
     ).rejects.toBeInstanceOf(ProvisionRequestConflict);
     await expect(
       f.store.freeze(
         { ...input, retentionDeadline: "2099-01-02T00:00:00.000Z" },
         f.config,
         f.resolver,
-        f.root,
+        f.profile,
       ),
     ).rejects.toBeInstanceOf(ProvisionRequestConflict);
   } finally {
@@ -114,7 +130,7 @@ it("concurrent manager instances adopt one complete manifest when resolution dif
           input,
           f.config,
           { ...f.resolver, revision: async () => sha.repeat(40) },
-          f.root,
+          f.profile,
         ),
       ),
     );
@@ -136,7 +152,7 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
         { ...input, workspaceFiles: [{ ...evidence, sha256: "0".repeat(64) }] },
         f.config,
         f.resolver,
-        f.root,
+        f.profile,
       ),
     ).rejects.toThrow("hash check");
     await expect(
@@ -144,7 +160,7 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
         { ...input, workspaceFiles: [{ ...evidence, destination: "../secret" }] },
         f.config,
         f.resolver,
-        f.root,
+        f.profile,
       ),
     ).rejects.toThrow("relative path");
     await expect(
@@ -152,7 +168,7 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
         { ...input, workspaceFiles: [evidence, evidence] },
         f.config,
         f.resolver,
-        f.root,
+        f.profile,
       ),
     ).rejects.toThrow("duplicate");
     await expect(
@@ -160,14 +176,14 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
         input,
         { ...f.config, provisioning: { templateId: "old" } },
         f.resolver,
-        f.root,
+        f.profile,
       ),
     ).rejects.toThrow("pinned runtime artifact");
     const empty = await f.store.freeze(
       { ...input, repository: undefined },
       f.config,
       f.resolver,
-      f.root,
+      f.profile,
     );
     expect(empty.request.sourceRevision).toBeNull();
     expect(empty.preparation.repository).toBeNull();
@@ -179,12 +195,12 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
 it("refuses a modified persisted preparation manifest", async () => {
   const f = await fixture();
   try {
-    const first = await f.store.freeze(input, f.config, f.resolver, f.root);
+    const first = await f.store.freeze(input, f.config, f.resolver, f.profile);
     const path = NodePath.join(f.root, "provisioning", `${input.requestId}.json`);
     await NodeFSP.writeFile(path, JSON.stringify({ ...first, egressAllow: ["changed.example"] }), {
       mode: 0o600,
     });
-    await expect(f.store.freeze(input, f.config, f.resolver, f.root)).rejects.toThrow(
+    await expect(f.store.freeze(input, f.config, f.resolver, f.profile)).rejects.toThrow(
       "Stored preparation manifest changed",
     );
   } finally {
@@ -229,7 +245,7 @@ it("loads the configured skill bundle into the root the selected agent reads", a
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
     };
-    const manifest = await f.store.freeze(input, config, f.resolver, f.root);
+    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
     // Codex is the default driver. A bundle is copied whole, because a
     // playbook that references a nested file is useless without that file.
     expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")?.sha256).toBe(
@@ -264,7 +280,22 @@ it("follows the selected agent when the same bundle is provisioned for Cursor", 
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
     };
-    const manifest = await f.store.freeze(inputFor("cursor", "cursor"), config, f.resolver, f.root);
+    const cursorProfile: ProvisioningProviderProfile = {
+      kind: "cursor",
+      instanceId: ProviderInstanceId.make("cursor"),
+      environment: [],
+      credential: {
+        kind: "file",
+        source: NodePath.join(f.root, ".t3/userdata/cursor-homes/cursor/.cursor/auth.json"),
+        destination: ".config/cursor/auth.json",
+      },
+    };
+    const manifest = await f.store.freeze(
+      inputFor("cursor", "cursor"),
+      config,
+      f.resolver,
+      cursorProfile,
+    );
     expect(homeFile(manifest, ".cursor/skills/pstack/SKILL.md")).toBeDefined();
     expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")).toBeUndefined();
     expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
@@ -283,17 +314,34 @@ it("installs a Claude sign-in where that CLI reads it", async () => {
       NodePath.join(f.root, ".claude/.credentials.json"),
       "claude-fixture-credential",
     );
+    const source = await skillBundle(f.root);
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
+    };
+    const claudeProfile: ProvisioningProviderProfile = {
+      kind: "claudeAgent",
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      environment: [],
+      credential: {
+        kind: "file",
+        source: NodePath.join(f.root, ".claude/.credentials.json"),
+        destination: ".claude/.credentials.json",
+      },
+    };
     const manifest = await f.store.freeze(
-      inputFor("claude", "claude"),
-      f.config,
+      inputFor("claudeAgent", "claudeAgent"),
+      config,
       f.resolver,
-      f.root,
+      claudeProfile,
     );
-    // Without this the driver fell through to a blanket homeFiles copy, so a
-    // Claude sandbox was only ever usable by accident.
+    // Claude Code keeps a dotfile credential rather than the auth.json the
+    // other drivers use, and its skills follow the same profile.
     expect(homeFile(manifest, ".claude/.credentials.json")?.sha256).toBe(
       provisionDigest("claude-fixture-credential"),
     );
+    expect(homeFile(manifest, ".claude/skills/pstack/SKILL.md")).toBeDefined();
+    expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")).toBeUndefined();
   } finally {
     await f.cleanup();
   }
@@ -313,7 +361,7 @@ it("refuses a skill bundle that links out of itself", async () => {
     };
     // A bundle is copied into an environment that then holds whatever it
     // names, so a link out of it is refused rather than resolved.
-    await expect(f.store.freeze(input, config, f.resolver, f.root)).rejects.toThrow(
+    await expect(f.store.freeze(input, config, f.resolver, f.profile)).rejects.toThrow(
       /symbolic link/,
     );
   } finally {
@@ -333,7 +381,7 @@ it("lands a plugin holding many skills flat, where the CLI will find each one", 
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source }] },
     };
-    const manifest = await f.store.freeze(input, config, f.resolver, f.root);
+    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
     // Every supported CLI resolves `<root>/<directory>/SKILL.md` and looks no
     // deeper, so nesting these under a bundle name would hide all of them.
     expect(homeFile(manifest, ".codex/skills/why/SKILL.md")).toBeDefined();
