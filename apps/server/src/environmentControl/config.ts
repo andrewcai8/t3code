@@ -109,7 +109,6 @@ export const EnvironmentControlConfig = Schema.Struct({
   e2bApiKey: TrimmedNonEmptyString,
   provisioning: Schema.optional(Provisioning),
   namespaceToken: Schema.optional(TrimmedNonEmptyString),
-  namespaceIngressToken: Schema.optional(TrimmedNonEmptyString),
   broker: Schema.Struct({
     ...E2bIdentity.fields,
     url: TrimmedNonEmptyString,

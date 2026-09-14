@@ -13,7 +13,7 @@ export interface NamespaceProxyOpenInput {
   readonly proxyId: string;
   readonly upstreamHttpBaseUrl: string;
   readonly upstreamWsBaseUrl: string;
-  readonly upstreamAuthorization: string;
+  readonly getUpstreamAuthorization: () => Promise<string>;
 }
 
 type StoredLease = NamespaceProxyOpenInput & {
@@ -113,7 +113,7 @@ export class NamespaceProxyManager {
         }
         stored.sockets.add(socket);
         socket.once("close", () => stored.sockets.delete(socket));
-        this.forwardWebSocket(current, request, socket);
+        void this.forwardWebSocket(current, request, socket).catch(() => socket.destroy());
       });
       return { proxyId: input.proxyId, proxyOrigin };
     } catch (error) {
@@ -142,7 +142,7 @@ export class NamespaceProxyManager {
       const method = request.method ?? "GET";
       const requestInit: RequestInit = {
         method,
-        headers: copyHeaders(request.headers, lease.upstreamAuthorization),
+        headers: copyHeaders(request.headers, await lease.getUpstreamAuthorization()),
       };
       if (method !== "GET" && method !== "HEAD") {
         requestInit.body = request;
@@ -164,11 +164,13 @@ export class NamespaceProxyManager {
     }
   }
 
-  private forwardWebSocket(
+  private async forwardWebSocket(
     lease: StoredLease,
     request: NodeHttp.IncomingMessage,
     client: NodeStream.Duplex,
-  ): void {
+  ): Promise<void> {
+    const headers = copyHeaders(request.headers, await lease.getUpstreamAuthorization());
+    if (client.destroyed) return;
     const target = new URL(joinUrl(lease.upstreamWsBaseUrl, request.url ?? "/"));
     const port = Number(target.port || (target.protocol === "wss:" ? 443 : 80));
     const connect =
@@ -177,7 +179,6 @@ export class NamespaceProxyManager {
         : NodeNet.connect(port, target.hostname);
     const readyEvent = target.protocol === "wss:" ? "secureConnect" : "connect";
     connect.once(readyEvent, () => {
-      const headers = copyHeaders(request.headers, lease.upstreamAuthorization);
       headers.host = target.host;
       headers.connection = "Upgrade";
       headers.upgrade = "websocket";
