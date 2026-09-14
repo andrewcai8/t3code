@@ -148,8 +148,11 @@ async function prepare(
   const { profile } = preparation;
   const t3Home = "/home/user/.t3-cloud";
   const environment = [
-    ...preparation.environment.filter(({ name }) => name !== "T3CODE_HOME"),
+    ...preparation.environment.filter(
+      ({ name }) => name !== "T3CODE_HOME" && name !== "NPM_CONFIG_PREFIX",
+    ),
     { name: "T3CODE_HOME", value: t3Home, sensitive: false },
+    { name: "NPM_CONFIG_PREFIX", value: "/home/user/.local", sensitive: false },
   ];
   const envs = Object.fromEntries(environment.map(({ name, value }) => [name, value]));
   const run = async (command: string, timeoutMs = 180_000) => {
@@ -184,7 +187,7 @@ async function prepare(
       ? { homePath: "/home/user/.codex" }
       : profile.kind === "claudeAgent"
         ? { homePath: "/home/user/.claude" }
-        : {};
+        : { binaryPath: "/home/user/.local/bin/agent" };
   await write(
     `${t3Home}/userdata/settings.json`,
     JSON.stringify({
@@ -237,8 +240,20 @@ async function prepare(
       await NodeFSP.readFile(file.source, "utf8"),
     );
 
+  const providerInstall = {
+    codex:
+      'npm install --global --no-fund --no-audit @openai/codex@latest && "$HOME/.local/bin/codex" --version',
+    claudeAgent:
+      'npm install --global --no-fund --no-audit @anthropic-ai/claude-code@latest && "$HOME/.local/bin/claude" --version',
+    cursor:
+      `curl https://cursor.com/install -fsS -o ${shellQuote(`${t3Home}/cursor-install.sh`)} && ` +
+      `bash ${shellQuote(`${t3Home}/cursor-install.sh`)} && ` +
+      '"$HOME/.local/bin/agent" --version && ' +
+      'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi',
+  }[profile.kind];
   const logs = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e2b-preparation-"));
   for (const [phase, commands] of [
+    ["provider-install", [providerInstall]],
     ["prepare", preparation.prepareCommands],
     ["verify", preparation.verifyCommands],
   ] as const) {
