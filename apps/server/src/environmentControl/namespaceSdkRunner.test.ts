@@ -463,6 +463,70 @@ it("refuses creation when the persistent Devbox volume is not mounted", async ()
   expect(execute.mock.calls.at(-1)?.[0][0]).toBe("expire");
 });
 
+it.each([undefined, "owner/project"])(
+  "provisions private GitHub CLI credentials in the retained home with repository %s",
+  async (repository) => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-namespace-gh-"));
+    try {
+      const localHome = NodePath.join(directory, "home");
+      const sources: string[] = [];
+      const { execute } = resumeFixture({ healthy: true });
+      const baseExecute = execute.getMockImplementation()!;
+      execute.mockImplementation(async (args) => {
+        const command = args.at(-1) ?? "";
+        if (command.includes("chmod") && command.includes("/gh/hosts.yml"))
+          return NodeUtil.promisify(NodeChildProcess.execFile)("sh", [
+            "-c",
+            command.replaceAll(retainedResource.homeDir, localHome),
+          ]);
+        return baseExecute(args);
+      });
+      const runner = createNamespaceSdkRunner({
+        execute,
+        token: "test",
+        upload: async (_name, source, destination) => {
+          expect((await NodeFSP.stat(source)).mode & 0o777).toBe(0o600);
+          sources.push(source);
+          const localDestination = destination.replaceAll(retainedResource.homeDir, localHome);
+          await NodeFSP.mkdir(NodePath.dirname(localDestination), { recursive: true });
+          await NodeFSP.writeFile(localDestination, await NodeFSP.readFile(source), {
+            mode: 0o644,
+          });
+        },
+      });
+      await runner.bootstrap({
+        resource: retainedResource,
+        projectDir: retainedResource.workspaceDir,
+        providerInstanceId: "codex",
+        githubToken: "synthetic-github-token",
+        ...(repository ? { repository } : {}),
+      });
+      const hosts = NodePath.join(localHome, ".config/gh/hosts.yml");
+      expect(await NodeFSP.readFile(hosts, "utf8")).toBe(
+        "github.com:\n    oauth_token: synthetic-github-token\n    git_protocol: https\n",
+      );
+      expect((await NodeFSP.stat(hosts)).mode & 0o777).toBe(0o600);
+      expect(execute.mock.calls.flat(2).join(" ")).not.toContain("synthetic-github-token");
+      for (const source of sources) expect(NodeFS.existsSync(source)).toBe(false);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it("does not provision GitHub credentials without a configured token", async () => {
+  const { execute } = resumeFixture({ healthy: true });
+  const upload = vi.fn();
+  const runner = createNamespaceSdkRunner({ execute, upload, token: "test" });
+  await runner.bootstrap({
+    resource: retainedResource,
+    projectDir: retainedResource.workspaceDir,
+    providerInstanceId: "codex",
+  });
+  expect(upload).not.toHaveBeenCalled();
+  expect(execute.mock.calls.flat(2).join(" ")).not.toMatch(/hosts\.yml|git-credentials/);
+});
+
 it("uses the retained credential store without invoking an inherited system helper", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-git-helper-"));
   try {
