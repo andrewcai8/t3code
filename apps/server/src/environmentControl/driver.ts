@@ -8,18 +8,23 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import { ALL_TRAFFIC, Sandbox, SandboxNotFoundError } from "e2b";
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { loadUserToken, fromBearerToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
 import * as Schema from "effect/Schema";
-import type { EnvironmentControlConfig, ManagedTarget } from "./config.ts";
+import {
+  canonicalRepository,
+  type EnvironmentControlConfig,
+  type ManagedTarget,
+} from "./config.ts";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 import { disposeNamespace, provisionNamespace } from "./namespaceProvisioner.ts";
 import { createNamespaceSdkRunner } from "./namespaceSdkRunner.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import {
-  buildNamespacePreparation,
+  resolvePreparation,
   ProvisionRefused,
   type ProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
@@ -36,7 +41,7 @@ export const ControllerResult = Schema.Union([
 ]);
 export type ControllerResult = typeof ControllerResult.Type;
 /** The port a provisioned environment serves T3 on. */
-const PROVISIONED_PORT = 3000;
+const PROVISIONED_PORT = 3001;
 const PROVISIONED_TIMEOUT_MS = 6 * 3_600_000;
 
 export class ProvisionedSandboxMissing extends Error {
@@ -67,87 +72,11 @@ export interface Provisioned {
   readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
 }
 
-/**
- * Where a provider account keeps its credentials.
- *
- * Each Codex instance gets a shadow home, and every entry in it except
- * `auth.json` links back to the shared one, so that file alone is what
- * distinguishes one account from another.
- */
-export function accountAuthPath(providerInstanceId: string, home = NodeOS.homedir()): string {
-  if (providerInstanceId === "cursor" || providerInstanceId.startsWith("cursor_")) {
-    return NodePath.join(
-      home,
-      ".t3/userdata/cursor-homes",
-      providerInstanceId,
-      ".cursor/auth.json",
-    );
-  }
-  return providerInstanceId === "codex"
-    ? NodePath.join(home, ".codex/auth.json")
-    : NodePath.join(home, `.${providerInstanceId}/auth.json`);
-}
-
-type ChildSettings = {
-  providers?: Record<string, Record<string, unknown>>;
-  providerInstances?: Record<string, ChildProviderInstanceSettings>;
-  [key: string]: unknown;
-};
-type ChildProviderInstanceSettings = Record<string, unknown> & {
-  environment?: Array<{ name: string; value: string; sensitive?: boolean }>;
-};
-
-export function enableChildProvider(
-  existing: string,
-  agentDriver: string,
-  providerInstanceId: string,
-): string {
-  let settings: ChildSettings = {};
-  try {
-    const parsed = JSON.parse(existing);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      settings = parsed as ChildSettings;
-    }
-  } catch {}
-  const providers = settings.providers ?? {};
-  const providerInstances = settings.providerInstances ?? {};
-  const existingInstance = providerInstances[providerInstanceId] ?? {};
-  const environment =
-    agentDriver === "cursor"
-      ? [
-          ...(existingInstance.environment ?? []).filter(
-            (variable) =>
-              !["AGENT_CLI_CREDENTIAL_STORE", "CURSOR_CONFIG_DIR", "HOME"].includes(variable.name),
-          ),
-          { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
-          { name: "CURSOR_CONFIG_DIR", value: "/home/user/.config/cursor", sensitive: false },
-          { name: "HOME", value: "/home/user", sensitive: false },
-        ]
-      : existingInstance.environment;
-  return `${JSON.stringify({
-    ...settings,
-    providers: {
-      ...providers,
-      [agentDriver]: { ...(providers[agentDriver] ?? {}), enabled: true },
-    },
-    providerInstances: {
-      ...providerInstances,
-      [providerInstanceId]: {
-        ...existingInstance,
-        driver: agentDriver,
-        enabled: true,
-        ...(environment ? { environment } : {}),
-      },
-    },
-  })}\n`;
-}
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** `owner/name`, or a github.com URL in any of its usual spellings. */
 export function repositoryUrl(repository: string): string {
-  const cleaned = repository.replace(/^https?:\/\/(www\.)?github\.com\//, "").replace(/\.git$/, "");
-  const [owner, name] = cleaned.split("/");
-  if (!owner || !name) throw new Error(`Repository must look like owner/name, got '${repository}'`);
-  return `https://github.com/${owner}/${name}.git`;
+  return `https://github.com/${canonicalRepository(repository)}.git`;
 }
 
 export function repositoryDirectory(repository: string): string {
@@ -207,196 +136,181 @@ async function prepare(
   sandbox: Sandbox,
   provisioning: NonNullable<EnvironmentControlConfig["provisioning"]>,
   request: ProvisionRequest,
-  auth: string,
+  preparation: Awaited<ReturnType<typeof resolvePreparation>>,
 ): Promise<Provisioned> {
-  const run = (command: string, timeoutMs = 180_000) =>
-    sandbox.commands.run(command, { timeoutMs });
-
-  if (request.agentDriver) {
-    const settingsPath = "/home/user/.t3/userdata/settings.json";
-    const existing = await sandbox.files.read(settingsPath).catch(() => "{}");
-    await sandbox.files.write(
-      settingsPath,
-      enableChildProvider(existing, request.agentDriver, request.providerInstanceId),
-    );
-  }
-
-  const selectedCredentialTarget =
-    request.agentDriver === "cursor"
-      ? "/home/user/.config/cursor/auth.json"
-      : "/home/user/.codex/auth.json";
-  await run(`mkdir -p ${NodePath.posix.dirname(selectedCredentialTarget)}`);
-  await sandbox.files.write(selectedCredentialTarget, auth);
-  await run(`chmod 600 ${selectedCredentialTarget}`);
-
-  // Each agent CLI reads its sign-in from its own place, so copying those
-  // files is what lets an environment run more than the one agent whose
-  // credentials provisioning installs by name.
-  for (const file of provisioning.homeFiles ?? []) {
-    const target = NodePath.posix.join("/home/user", file.destination);
-    if (target === selectedCredentialTarget) continue;
-    const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
-      throw new ProvisionRefused({
-        reason: "credentials",
-        message: `Home file '${file.source}' is configured but missing on this machine.`,
-      });
-    });
-    await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
-    await sandbox.files.write(target, contents);
-    await run(`chmod 600 ${target}`);
-  }
-
-  // Written to the profile rather than exported per command: an agent runs
-  // these CLIs from its own shell, and nothing it starts would inherit a
-  // variable set around the command that provisioned the machine.
-  const shellEnvironment = provisioning.shellEnvironment ?? [];
-  if (shellEnvironment.length > 0) {
-    const lines: string[] = [];
-    for (const variable of shellEnvironment) {
-      const value = await NodeFSP.readFile(variable.source, "utf8").catch(() => {
-        throw new ProvisionRefused({
-          reason: "credentials",
-          message: `Value for '${variable.name}' is configured but missing on this machine.`,
-        });
-      });
-      lines.push(`export ${variable.name}=${JSON.stringify(value.trim())}`);
+  const { profile } = preparation;
+  const t3Home = "/home/user/.t3-cloud";
+  const environment = [
+    ...preparation.environment.filter(({ name }) => name !== "T3CODE_HOME"),
+    { name: "T3CODE_HOME", value: t3Home, sensitive: false },
+  ];
+  const envs = Object.fromEntries(environment.map(({ name, value }) => [name, value]));
+  const run = async (command: string, timeoutMs = 180_000) => {
+    try {
+      const result = await sandbox.commands.run(command, { timeoutMs, envs });
+      if (result.exitCode !== 0) throw new Error("Nonzero exit");
+      return result;
+    } catch {
+      throw new Error("E2B preparation command failed.");
     }
-    await sandbox.files.write("/home/user/.profile.d-agents.sh", `${lines.join("\n")}\n`);
-    await run("chmod 600 /home/user/.profile.d-agents.sh");
-    await run(
-      "grep -q profile.d-agents /home/user/.bashrc 2>/dev/null || " +
-        "echo '. /home/user/.profile.d-agents.sh' >> /home/user/.bashrc",
+  };
+  const write = async (path: string, contents: string) => {
+    await run(`mkdir -p ${shellQuote(NodePath.posix.dirname(path))}`);
+    await sandbox.files.write(path, contents);
+    await run(`chmod 600 ${shellQuote(path)}`);
+  };
+  for (const file of preparation.files)
+    await write(
+      NodePath.posix.join("/home/user", file.destination),
+      await NodeFSP.readFile(file.source, "utf8"),
     );
+  await write(
+    "/home/user/.profile.d-agents.sh",
+    environment.map(({ name, value }) => `export ${name}=${shellQuote(value)}`).join("\n") + "\n",
+  );
+  for (const path of ["/home/user/.bashrc", "/home/user/.profile"])
     await run(
-      "grep -q profile.d-agents /home/user/.profile 2>/dev/null || " +
-        "echo '. /home/user/.profile.d-agents.sh' >> /home/user/.profile",
+      `grep -q profile.d-agents ${shellQuote(path)} 2>/dev/null || printf '%s\\n' '. /home/user/.profile.d-agents.sh' >> ${shellQuote(path)}`,
     );
-  }
-
-  // Cloning uses a credential helper, but `gh` reads its own config, and an
-  // agent that cannot reach `gh` can commit and never open a pull request.
+  const providerConfig =
+    profile.kind === "codex"
+      ? { homePath: "/home/user/.codex" }
+      : profile.kind === "claudeAgent"
+        ? { homePath: "/home/user/.claude" }
+        : {};
+  await write(
+    `${t3Home}/userdata/settings.json`,
+    JSON.stringify({
+      providers: Object.fromEntries(
+        Object.keys(DEFAULT_SERVER_SETTINGS.providers).map((driver) => [
+          driver,
+          { enabled: false },
+        ]),
+      ),
+      providerInstances: {
+        [profile.instanceId]: {
+          driver: profile.kind,
+          enabled: true,
+          config: providerConfig,
+          environment,
+        },
+      },
+    }),
+  );
   if (provisioning.githubToken) {
-    await run("mkdir -p /home/user/.config/gh");
-    await sandbox.files.write(
+    await write(
       "/home/user/.config/gh/hosts.yml",
       `github.com:\n    oauth_token: ${provisioning.githubToken}\n    git_protocol: https\n`,
     );
-    await run("chmod 600 /home/user/.config/gh/hosts.yml");
-  }
-
-  let projectDir = "/home/user/work";
-  if (request.repository) {
-    if (!provisioning.githubToken)
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "Cloning a repository needs a configured GitHub token.",
-      });
-    // A credential file keeps the token out of the clone URL, so it never
-    // reaches the remote, `git remote -v`, or shell history.
-    await sandbox.files.write(
+    await write(
       "/home/user/.git-credentials",
       `https://x-access-token:${provisioning.githubToken}@github.com\n`,
     );
-    await run("chmod 600 /home/user/.git-credentials");
     await run(
-      "git config --global credential.helper store && " +
-        "git config --global user.email agent@t3.local && git config --global user.name t3",
+      "git config --global credential.helper store && git config --global user.email agent@t3.local && git config --global user.name t3",
     );
-    projectDir = repositoryDirectory(request.repository);
-    const branch = request.branch ? `--branch ${request.branch} ` : "";
-    const cloned = await run(
-      `mkdir -p /home/user/work && git clone --filter=blob:none ${branch}` +
-        `${repositoryUrl(request.repository)} ${projectDir}`,
+  }
+  const projectDir = request.repository
+    ? repositoryDirectory(request.repository)
+    : "/home/user/work";
+  if (request.repository) {
+    const branch = request.branch ? `--branch ${shellQuote(request.branch)} ` : "";
+    await run(
+      `mkdir -p /home/user/work && git clone --filter=blob:none ${branch}-- ${shellQuote(repositoryUrl(request.repository))} ${shellQuote(projectDir)}`,
       900_000,
     );
-    if (cloned.exitCode !== 0) throw new Error("Repository clone failed");
   } else {
-    // The template already ships an initialised workspace, so this only has to
-    // cover a template that does not.
     await run(
-      "mkdir -p /home/user/work && cd /home/user/work && " +
-        "(git rev-parse --git-dir >/dev/null 2>&1 || (git init -q && " +
-        "git config user.email agent@t3.local && git config user.name t3 && " +
-        "echo '# workspace' > README.md && git add -A && git commit -qm init))",
+      "mkdir -p /home/user/work && cd /home/user/work && (git rev-parse --git-dir >/dev/null 2>&1 || (git init -q && git config user.email agent@t3.local && git config user.name t3 && echo '# workspace' > README.md && git add -A && git commit -qm init))",
     );
   }
+  for (const file of preparation.workspaceFiles)
+    await write(
+      NodePath.posix.join(projectDir, file.destination),
+      await NodeFSP.readFile(file.source, "utf8"),
+    );
 
-  // A checkout is not a working tree: whatever the repository refuses to carry
-  // has to arrive separately or nothing in it runs.
-  for (const file of provisioning.workspaceFiles ?? []) {
-    const contents = await NodeFSP.readFile(file.source, "utf8").catch(() => {
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: `Workspace file '${file.source}' is configured but missing on this machine.`,
-      });
-    });
-    const target = NodePath.posix.join(projectDir, file.destination);
-    await run(`mkdir -p ${NodePath.posix.dirname(target)}`);
-    await sandbox.files.write(target, contents);
-    await run(`chmod 600 ${target}`);
+  const logs = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e2b-preparation-"));
+  for (const [phase, commands] of [
+    ["prepare", preparation.prepareCommands],
+    ["verify", preparation.verifyCommands],
+  ] as const) {
+    for (const [index, command] of commands.entries()) {
+      const script = `${t3Home}/${phase}-${index}.sh`;
+      const log = `${t3Home}/${phase}-${index}.log`;
+      await write(
+        script,
+        `#!/bin/sh\nset -eu\n. /home/user/.profile.d-agents.sh\ncd ${shellQuote(projectDir)}\n${command}\n`,
+      );
+      let failed = false;
+      try {
+        await run(`umask 077; sh ${shellQuote(script)} > ${shellQuote(log)} 2>&1`, 900_000);
+      } catch {
+        failed = true;
+      }
+      const output = await sandbox.files.read(log).catch(() => "Command log unavailable.\n");
+      const localLog = NodePath.join(logs, `${phase}-${index}.log`);
+      await NodeFSP.writeFile(localLog, output, { mode: 0o600 });
+      if (failed) throw new Error(`E2B ${phase} failed. Private log: ${localLog}`);
+    }
   }
-
-  // Without this every environment from the template calls itself by the
-  // sandbox image's hostname, so a list of them reads as the same name
-  // repeated and none of them can be told apart. The server prefers
-  // PRETTY_HOSTNAME on Linux, and it reads it when it starts, which the
-  // restart below is about to do anyway.
   const label = request.repository
-    ? `${repositoryUrl(request.repository)
-        .split("/")
-        .pop()!
-        .replace(/\.git$/, "")} · ${request.providerInstanceId}`
-    : request.providerInstanceId;
+    ? `${canonicalRepository(request.repository).split("/")[1]} · ${profile.instanceId}`
+    : profile.instanceId;
   await run(
-    `printf 'PRETTY_HOSTNAME=%s\\n' ${JSON.stringify(JSON.stringify(label))} | sudo tee /etc/machine-info >/dev/null`,
+    `printf 'PRETTY_HOSTNAME=%s\\n' ${shellQuote(JSON.stringify(label))} | sudo tee /etc/machine-info >/dev/null`,
   ).catch(() => undefined);
-
-  // Every sandbox from the template inherits one environment ID, and clients
-  // key environments by it, so each environment has to be given its own before
-  // anything pairs with it.
-  //
-  // The child is forked from the template's already-running server. A fork
-  // keeps the process memory and page cache, so replacing the inherited server
-  // after writing this ID takes seconds rather than rereading the install from
-  // cold disk.
-  //
-  // The bracket keeps the pattern from matching the command carrying it, which
-  // would otherwise make this kill its own shell.
-  await run("pkill -f '[t]3 serve' || true");
-  await sandbox.files.write(
-    "/home/user/.t3/userdata/environment-id",
-    `${globalThis.crypto.randomUUID()}\n`,
+  const environmentId = globalThis.crypto.randomUUID();
+  await write(`${t3Home}/userdata/environment-id`, `${environmentId}\n`);
+  await write(
+    `${t3Home}/serve.sh`,
+    `#!/bin/sh\nset -eu\n. /home/user/.profile.d-agents.sh\ncd ${shellQuote(projectDir)}\nexec t3 serve --no-browser --host 0.0.0.0 --port ${PROVISIONED_PORT}\n`,
   );
-  // Binding to every interface is what lets the sandbox's own hostname reach
-  // the server; the environment never joins a relay.
-  await sandbox.commands
-    .run(
-      `nohup sh -c 'cd ${projectDir} && exec t3 serve --no-browser --host 0.0.0.0 ` +
-        `--port ${PROVISIONED_PORT} > /tmp/serve.out 2>&1' >/dev/null 2>&1 &`,
-      { timeoutMs: 20_000, background: true },
-    )
-    .catch(() => undefined);
+  await run(
+    `umask 077; nohup sh ${shellQuote(`${t3Home}/serve.sh`)} > ${shellQuote(`${t3Home}/serve.log`)} 2>&1 < /dev/null &`,
+    20_000,
+  );
   const host = sandbox.getHost(PROVISIONED_PORT);
   const deadline = Date.now() + 600_000;
   let ready = false;
   while (!ready && Date.now() < deadline) {
-    await NodeTimersPromises.setTimeout(1_000);
-    ready = await fetch(`https://${host}/`, { signal: AbortSignal.timeout(5_000) })
-      .then((response) => response.status === 200)
+    ready = await fetch(`https://${host}/.well-known/t3/environment`, {
+      signal: AbortSignal.timeout(5_000),
+    })
+      .then(async (response) => {
+        if (!response.ok) return false;
+        const descriptor: unknown = await response.json();
+        return (
+          typeof descriptor === "object" &&
+          descriptor !== null &&
+          "environmentId" in descriptor &&
+          descriptor.environmentId === environmentId
+        );
+      })
       .catch(() => false);
+    if (!ready) await NodeTimersPromises.setTimeout(1_000);
   }
-  if (!ready) throw new Error("Provisioned environment never answered");
-  await run(`t3 project add ${projectDir}`).catch(() => undefined);
-
-  // Minted last and never spent here: the token is single use, and verifying it
-  // would hand the caller a dead link.
-  const paired = await run(`t3 pair --ttl 12h --label 'cloud-${request.providerInstanceId}'`);
+  if (!ready) {
+    const log = NodePath.join(logs, "serve.log");
+    await NodeFSP.writeFile(
+      log,
+      await sandbox.files.read(`${t3Home}/serve.log`).catch(() => "Server log unavailable.\n"),
+      { mode: 0o600 },
+    );
+    throw new Error(
+      `Provisioned environment never answered with its identity. Private log: ${log}`,
+    );
+  }
+  await run(`t3 project add ${shellQuote(projectDir)}`);
+  const paired = await run(
+    `t3 pair --ttl 12h --label ${shellQuote(`cloud-${request.providerInstanceId}`)}`,
+  );
   const token = /Token:\s*([A-Z0-9]+)/.exec(
     (paired.stdout ?? "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""),
   )?.[1];
   if (!token) throw new Error("Could not mint a pairing token");
   return {
-    provider: "e2b" as const,
+    provider: "e2b",
     sandboxId: sandbox.sandboxId,
     pairingUrl: `https://${host}/pair#token=${token}`,
     projectDir,
@@ -534,6 +448,30 @@ export function createCloudDriver(
      * processes intact.
      */
     provision: async (request) => {
+      const provisioning = config.provisioning;
+      if (!provisioning)
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "This install has no cloud provisioning template configured.",
+        });
+      if (request.repository && !provisioning.githubToken)
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "Cloning a repository needs a configured GitHub token.",
+        });
+      if (!resolveProfile)
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "Provider account resolution is unavailable.",
+        });
+      const profile = await resolveProfile(request);
+      const preparation = await resolvePreparation(
+        profile,
+        provisioning,
+        request.provider,
+        request.repository,
+      );
+
       if (request.provider === "namespace") {
         if (!config.provisioning?.namespace)
           throw new ProvisionRefused({
@@ -545,19 +483,7 @@ export function createCloudDriver(
             reason: "unsupported",
             message: "Namespace provisioning is unavailable.",
           });
-        if (request.repository && !config.provisioning.githubToken)
-          throw new ProvisionRefused({
-            reason: "unconfigured",
-            message: "Cloning a repository into Namespace needs a configured GitHub token.",
-          });
-        if (!resolveProfile)
-          throw new ProvisionRefused({
-            reason: "unconfigured",
-            message: "Provider account resolution is unavailable.",
-          });
         await getNamespaceAuthorization();
-        const profile = await resolveProfile(request);
-        const preparation = await buildNamespacePreparation(profile, config.provisioning);
         const prepared = await provisionNamespace(namespaceRunner, {
           ...config.provisioning.namespace,
           providerInstanceId: request.providerInstanceId,
@@ -566,7 +492,6 @@ export function createCloudDriver(
           branch: request.branch,
           githubToken: config.provisioning.githubToken,
           ...preparation,
-          workspaceFiles: config.provisioning.workspaceFiles ?? [],
         });
         try {
           const upstream = new URL(prepared.pairingUrl);
@@ -592,25 +517,11 @@ export function createCloudDriver(
           throw cause;
         }
       }
-      const provisioning = config.provisioning;
-      if (!provisioning)
-        throw new ProvisionRefused({
-          reason: "unconfigured",
-          message: "This install has no cloud provisioning template configured.",
-        });
       if (!provisioning.templateId)
         throw new ProvisionRefused({
           reason: "unconfigured",
           message: "E2B provisioning is not configured on this install.",
         });
-      const authPath = accountAuthPath(request.providerInstanceId);
-      const auth = await NodeFSP.readFile(authPath, "utf8").catch(() => {
-        throw new ProvisionRefused({
-          reason: "credentials",
-          message: `No credentials for '${request.providerInstanceId}' on this machine.`,
-        });
-      });
-
       const allowed = provisioning.egressAllow;
       const network =
         allowed && allowed.length > 0
@@ -634,7 +545,7 @@ export function createCloudDriver(
           throw new Error(`Could not fork the E2B template: ${String(fork)}`);
         sandbox = fork;
         await parent.kill();
-        return await prepare(sandbox, provisioning, request, auth);
+        return await prepare(sandbox, provisioning, request, preparation);
       } catch (cause) {
         // A sandbox that never finished being prepared is unreachable and
         // still billing, and nothing else knows its id to clean up later.

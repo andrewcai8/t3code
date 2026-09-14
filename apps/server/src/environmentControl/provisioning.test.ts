@@ -1,28 +1,7 @@
 import { expect, it } from "vite-plus/test";
 
-import {
-  accountAuthPath,
-  enableChildProvider,
-  repositoryDirectory,
-  repositoryUrl,
-} from "./driver.ts";
+import { repositoryDirectory, repositoryUrl } from "./driver.ts";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
-
-it("reads each account's credentials from its own shadow home", () => {
-  // Every entry in a shadow home except auth.json links back to the shared
-  // one, so that file is the whole of an account's identity.
-  expect(accountAuthPath("codex_ac3", "/home/a")).toBe("/home/a/.codex_ac3/auth.json");
-});
-
-it("leaves the default instance on the real Codex home", () => {
-  expect(accountAuthPath("codex", "/home/a")).toBe("/home/a/.codex/auth.json");
-});
-
-it("resolves Cursor accounts from their isolated homes", () => {
-  expect(accountAuthPath("cursor_work", "/home/a")).toBe(
-    "/home/a/.t3/userdata/cursor-homes/cursor_work/.cursor/auth.json",
-  );
-});
 
 it("accepts the spellings a person actually pastes", () => {
   const expected = "https://github.com/owner/name.git";
@@ -67,31 +46,4 @@ it("names a missing workspace file rather than provisioning a broken checkout", 
   });
   expect(refusal.reason).toBe("unconfigured");
   expect(refusal.message).toContain("/secrets/backend.env");
-});
-
-it("enables the selected provider instance without copying local paths", () => {
-  const settings = enableChildProvider(
-    JSON.stringify({ providers: { codex: { enabled: true } } }),
-    "cursor",
-    "cursor_work",
-  );
-  const parsed = JSON.parse(settings) as {
-    providers: Record<string, { enabled?: boolean }>;
-    providerInstances: Record<
-      string,
-      {
-        driver?: string;
-        enabled?: boolean;
-        environment?: Array<{ name: string; value: string }>;
-      }
-    >;
-  };
-  expect(parsed.providers.cursor?.enabled).toBe(true);
-  expect(parsed.providerInstances.cursor_work).toMatchObject({ driver: "cursor", enabled: true });
-  expect(parsed.providerInstances.cursor_work?.environment).toEqual([
-    { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
-    { name: "CURSOR_CONFIG_DIR", value: "/home/user/.config/cursor", sensitive: false },
-    { name: "HOME", value: "/home/user", sensitive: false },
-  ]);
-  expect(settings).not.toContain("/Users/andrew");
 });

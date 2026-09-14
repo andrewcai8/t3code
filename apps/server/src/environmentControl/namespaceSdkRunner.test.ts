@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import { resolveServerConfig } from "../cli/config.ts";
 import { provisionNamespace } from "./namespaceProvisioner.ts";
-import { buildNamespacePreparation } from "./ProvisioningProviderProfile.ts";
+import { resolvePreparation } from "./ProvisioningProviderProfile.ts";
 import {
   createNamespaceSdkRunner,
   exposedOrigin,
@@ -552,7 +552,11 @@ it.each([false, true])(
             "#!/bin/sh\nprintf installed\n",
             { mode: 0o700 },
           );
-        if (command.includes("./prepare.sh") || command.includes("./fail.sh"))
+        if (
+          command.includes("./prepare.sh") ||
+          command.includes("./fail.sh") ||
+          command.includes("printf verified")
+        )
           return await NodeUtil.promisify(NodeChildProcess.execFile)("sh", [
             "-c",
             command
@@ -561,7 +565,7 @@ it.each([false, true])(
           ]);
         if (args.includes("-d"))
           expect(await NodeFSP.readFile(NodePath.join(project, "prepared"), "utf8")).toBe(
-            "synthetic-buninstalleddone",
+            "synthetic-buninstalleddoneverified",
           );
         return baseExecute(args);
       });
@@ -580,7 +584,8 @@ it.each([false, true])(
           );
         },
       });
-      const { environment } = await buildNamespacePreparation(
+      await NodeFSP.writeFile(NodePath.join(directory, "auth.json"), "synthetic-auth");
+      const { environment } = await resolvePreparation(
         {
           kind: "codex",
           instanceId: ProviderInstanceId.make("codex"),
@@ -592,6 +597,7 @@ it.each([false, true])(
           },
         },
         {},
+        "namespace",
       );
       await runner.bootstrap({
         resource: retainedResource,
@@ -599,6 +605,7 @@ it.each([false, true])(
         providerInstanceId: "codex",
         agentDriver: "codex",
         prepareCommands: ["./prepare.sh"],
+        verifyCommands: ["printf verified >> prepared"],
         ...(withProfile ? { environment } : {}),
       });
       await NodeFSP.writeFile(NodePath.join(project, "fail.sh"), "#!/bin/sh\nexit 7\n", {
@@ -612,7 +619,8 @@ it.each([false, true])(
             size: "m",
             providerInstanceId: "codex",
             agentDriver: "codex",
-            prepareCommands: ["./fail.sh"],
+            prepareCommands: ["./prepare.sh"],
+            verifyCommands: ["./fail.sh"],
           },
         ),
       ).rejects.toThrow();
@@ -786,7 +794,7 @@ it("transfers selected auth once when a generic home file names the same destina
     const generic = NodePath.join(directory, "generic.json");
     await NodeFSP.writeFile(selected, '{"account":"selected"}');
     await NodeFSP.writeFile(generic, '{"account":"generic"}');
-    const prepared = await buildNamespacePreparation(
+    const prepared = await resolvePreparation(
       {
         kind: "cursor",
         instanceId: ProviderInstanceId.make("cursor_work"),
@@ -794,6 +802,7 @@ it("transfers selected auth once when a generic home file names the same destina
         credential: { kind: "file", source: selected, destination: ".cursor/auth.json" },
       },
       { homeFiles: [{ source: generic, destination: "/Users/runner/.cursor/./auth.json" }] },
+      "namespace",
     );
     const { execute } = resumeFixture({ healthy: true });
     const uploaded: string[] = [];

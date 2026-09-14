@@ -5,6 +5,35 @@ import * as NodePath from "node:path";
 import { EnvironmentId, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
+export function canonicalRepository(repository: string): string {
+  const cleaned = repository
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?github\.com\//i, "")
+    .replace(/\.git$/i, "");
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(cleaned))
+    throw new Error("Repository must look like owner/name");
+  return cleaned.toLowerCase();
+}
+
+const RelativeFilePath = TrimmedNonEmptyString.check(
+  Schema.makeFilter(
+    (path) =>
+      !NodePath.posix.isAbsolute(path) &&
+      !path.includes("\\") &&
+      !path.includes("\0") &&
+      path.split("/").every((part) => part !== "..") &&
+      NodePath.posix.normalize(path) !== ".",
+  ),
+);
+const WorkspaceFile = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  destination: RelativeFilePath,
+});
+const Commands = {
+  prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  verifyCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+};
+
 const E2bIdentity = Schema.Struct({
   sandboxId: TrimmedNonEmptyString,
   metadata: Schema.Record(Schema.String, Schema.String),
@@ -89,13 +118,30 @@ const Provisioning = Schema.Struct({
       }),
     ),
   ),
-  workspaceFiles: Schema.optional(
+  workspaceFiles: Schema.optional(Schema.Array(WorkspaceFile)),
+  repositories: Schema.optional(
     Schema.Array(
       Schema.Struct({
-        /** Absolute path on the machine running the server. */
-        source: TrimmedNonEmptyString,
-        /** Path relative to the checkout root. */
-        destination: TrimmedNonEmptyString,
+        repository: TrimmedNonEmptyString,
+        workspaceFiles: Schema.optional(Schema.Array(WorkspaceFile)),
+        e2b: Schema.optional(Schema.Struct(Commands)),
+        namespace: Schema.optional(
+          Schema.Struct({
+            ...Commands,
+            artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
+          }),
+        ),
+      }),
+    ).check(
+      Schema.makeFilter((entries) => {
+        try {
+          return (
+            new Set(entries.map(({ repository }) => canonicalRepository(repository))).size ===
+            entries.length
+          );
+        } catch {
+          return false;
+        }
       }),
     ),
   ),
@@ -105,7 +151,7 @@ const Provisioning = Schema.Struct({
       size: TrimmedNonEmptyString,
       region: Schema.optional(TrimmedNonEmptyString),
       idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
-      prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+      ...Commands,
       artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
     }),
   ),

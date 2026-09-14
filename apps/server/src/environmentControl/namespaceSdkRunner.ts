@@ -343,6 +343,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       files = [],
       environment = [],
       prepareCommands = [],
+      verifyCommands = [],
       artifacts = [],
     }) => {
       const homeDir = retainedHome(resource);
@@ -487,6 +488,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "CURSOR_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
           ].includes(name)
             ? value.replaceAll("/Users/runner", homeDir)
             : value;
@@ -546,7 +548,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
               : "";
       if (providerInstall)
         await runInHome(["exec", nameOf(resource), "--", "sh", "-lc", providerInstall]);
-      for (const command of prepareCommands) {
+      for (const command of [...prepareCommands, ...verifyCommands]) {
         await runInHome([
           "exec",
           nameOf(resource),

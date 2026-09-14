@@ -43,6 +43,7 @@ export interface NamespaceRunner {
       readonly sensitive?: boolean;
     }[];
     readonly prepareCommands?: readonly string[];
+    readonly verifyCommands?: readonly string[];
     readonly artifacts?: readonly NamespaceArtifact[] | undefined;
   }) => Promise<void>;
   readonly expose: (input: {
@@ -73,6 +74,7 @@ export interface NamespaceProvisionRequest {
     readonly sensitive?: boolean;
   }[];
   readonly prepareCommands?: readonly string[];
+  readonly verifyCommands?: readonly string[];
   readonly artifacts?: readonly NamespaceArtifact[] | undefined;
   readonly workspaceFiles?: readonly {
     readonly source: string;

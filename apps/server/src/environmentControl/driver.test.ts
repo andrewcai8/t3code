@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import { SandboxNotFoundError } from "e2b";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { createCloudDriver, ProvisionedSandboxMissing } from "./driver.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
 
@@ -83,7 +83,12 @@ describe("cloud SDK and controller boundary", () => {
     };
     sdk.create.mockResolvedValue(parent);
     await expect(
-      createCloudDriver({ ...config, provisioning: { templateId: "template" } }).provision({
+      createCloudDriver({ ...config, provisioning: { templateId: "template" } }, async () => ({
+        kind: "codex",
+        instanceId: ProviderInstanceId.make("codex"),
+        environment: [],
+        credential: { kind: "environment" },
+      })).provision({
         provider: "e2b",
         providerInstanceId: "codex",
       }),

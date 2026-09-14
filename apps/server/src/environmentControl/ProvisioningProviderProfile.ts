@@ -18,7 +18,7 @@ import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { cursorFileCredentialPath } from "../provider/cursorCredentialPath.ts";
-import type { Provisioning } from "./config.ts";
+import { canonicalRepository, type Provisioning } from "./config.ts";
 
 export class ProvisionRefused extends Schema.TaggedError<ProvisionRefused>()("ProvisionRefused", {
   reason: Schema.Literals(["unconfigured", "credentials", "unsupported"]),
@@ -151,37 +151,78 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
   },
 );
 
-export async function buildNamespacePreparation(
+export async function resolvePreparation(
   profile: ProvisioningProviderProfile,
   provisioning: Provisioning,
+  provider: "e2b" | "namespace",
+  repository?: string,
 ) {
+  const canonical = repository ? canonicalRepository(repository) : undefined;
+  const selected = canonical
+    ? provisioning.repositories?.find(
+        (entry) => canonicalRepository(entry.repository) === canonical,
+      )
+    : undefined;
+  const setup = selected?.[provider];
+  const defaults = provider === "namespace" ? provisioning.namespace : undefined;
+  const home = provider === "e2b" ? "/home/user" : "/Users/runner";
   const files = new Map<string, { source: string; destination: string; mode: string }>();
   for (const file of [
     ...(provisioning.homeFiles ?? []),
     ...(profile.credential.kind === "file" ? [profile.credential] : []),
   ]) {
     const destination = NodePath.posix.normalize(
-      file.destination.replace(/^\/Users\/runner\//, ""),
+      file.destination.replace(/^\/(?:Users\/runner|home\/user)\//, ""),
     );
     if (
       NodePath.posix.isAbsolute(destination) ||
       destination === ".." ||
       destination.startsWith("../") ||
-      destination === "."
+      destination === "." ||
+      file.destination.includes("\\") ||
+      file.destination.includes("\0") ||
+      file.destination.split("/").includes("..")
     )
       throw new ProvisionRefused({
         reason: "unconfigured",
         message: "A configured home file escapes the workspace home.",
       });
+    if (files.has(destination) && file !== profile.credential)
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: "Configured home file destinations must be unique.",
+      });
     files.set(destination, { source: file.source, destination, mode: "600" });
   }
+  if (profile.kind === "cursor" && provider === "e2b") {
+    const credential = files.get(".cursor/auth.json");
+    if (credential) {
+      files.delete(".cursor/auth.json");
+      files.set(".config/cursor/auth.json", {
+        ...credential,
+        destination: ".config/cursor/auth.json",
+      });
+    }
+  }
+  if (profile.credential.kind === "environment") {
+    for (const destination of profile.kind === "cursor"
+      ? [".cursor/auth.json", ".config/cursor/auth.json"]
+      : profile.kind === "claudeAgent"
+        ? [".claude/.credentials.json"]
+        : [".codex/auth.json"])
+      files.delete(destination);
+  }
   const paths = {
-    HOME: "/Users/runner",
-    PATH: "/Users/runner/.local/bin:/Users/runner/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    ...(profile.kind === "codex" ? { CODEX_HOME: "/Users/runner/.codex" } : {}),
-    ...(profile.kind === "claudeAgent" ? { CLAUDE_CONFIG_DIR: "/Users/runner/.claude" } : {}),
+    HOME: home,
+    PATH: `${home}/.local/bin:${home}/.bun/bin:${provider === "namespace" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`,
+    XDG_CONFIG_HOME: `${home}/.config`,
+    ...(profile.kind === "codex" ? { CODEX_HOME: `${home}/.codex` } : {}),
+    ...(profile.kind === "claudeAgent" ? { CLAUDE_CONFIG_DIR: `${home}/.claude` } : {}),
     ...(profile.kind === "cursor"
-      ? { AGENT_CLI_CREDENTIAL_STORE: "file", CURSOR_CONFIG_DIR: "/Users/runner/.cursor" }
+      ? {
+          AGENT_CLI_CREDENTIAL_STORE: "file",
+          CURSOR_CONFIG_DIR: `${home}/${provider === "e2b" ? ".config/cursor" : ".cursor"}`,
+        }
       : {}),
   };
   const selectedNames = new Set([
@@ -214,13 +255,51 @@ export async function buildNamespacePreparation(
   }
   for (const name of credentialVariables[profile.kind])
     environment.set(name, { name, value: "", sensitive: true });
-  for (const variable of profile.environment) environment.set(variable.name, variable);
+  for (const variable of profile.environment) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name))
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: "A selected environment variable name is invalid.",
+      });
+    environment.set(variable.name, variable);
+  }
 
   for (const [name, value] of Object.entries(paths))
     environment.set(name, { name, value, sensitive: false });
+  const workspaceFiles = selected?.workspaceFiles ?? provisioning.workspaceFiles ?? [];
+  const destinations = new Set<string>();
+  for (const file of workspaceFiles) {
+    const destination = NodePath.posix.normalize(file.destination);
+    if (
+      NodePath.posix.isAbsolute(destination) ||
+      destination === "." ||
+      file.destination.includes("\\") ||
+      file.destination.includes("\0") ||
+      file.destination.split("/").includes("..") ||
+      destinations.has(destination)
+    )
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: "Workspace file destinations must be unique paths within the checkout.",
+      });
+    destinations.add(destination);
+  }
+  for (const file of [...files.values(), ...workspaceFiles]) {
+    await NodeFSP.access(file.source).catch(() => {
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: `Configured file '${file.source}' could not be read.`,
+      });
+    });
+  }
   return {
+    profile,
     files: [...files.values()],
     environment: [...environment.values()],
-    prepareCommands: provisioning.namespace?.prepareCommands ?? [],
+    workspaceFiles,
+    prepareCommands: setup?.prepareCommands ?? defaults?.prepareCommands ?? [],
+    verifyCommands: setup?.verifyCommands ?? defaults?.verifyCommands ?? [],
+    artifacts:
+      provider === "namespace" ? (selected?.namespace?.artifacts ?? defaults?.artifacts ?? []) : [],
   };
 }

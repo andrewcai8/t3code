@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
-  buildNamespacePreparation,
+  resolvePreparation,
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
 
@@ -220,16 +220,20 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
       const independent = yield* file("independent", "independent-value\n");
       const missing = NodePath.join(directory, "missing");
       const prepared = yield* Effect.promise(() =>
-        buildNamespacePreparation(profile, {
-          shellEnvironment: [
-            { name: "ANTHROPIC_API_KEY", source: missing },
-            { name: "ANTHROPIC_AUTH_TOKEN", source: missing },
-            { name: "ACCOUNT_LABEL", source: missing },
-            { name: "PATH", source: missing },
-            { name: "HOME", source: missing },
-            { name: "INDEPENDENT", source: independent },
-          ],
-        }),
+        resolvePreparation(
+          profile,
+          {
+            shellEnvironment: [
+              { name: "ANTHROPIC_API_KEY", source: missing },
+              { name: "ANTHROPIC_AUTH_TOKEN", source: missing },
+              { name: "ACCOUNT_LABEL", source: missing },
+              { name: "PATH", source: missing },
+              { name: "HOME", source: missing },
+              { name: "INDEPENDENT", source: independent },
+            ],
+          },
+          "namespace",
+        ),
       );
       expect(prepared.environment).toContainEqual({
         name: "ANTHROPIC_API_KEY",
@@ -253,9 +257,13 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
       });
       yield* Effect.promise(() =>
         expect(
-          buildNamespacePreparation(profile, {
-            shellEnvironment: [{ name: "INDEPENDENT", source: missing }],
-          }),
+          resolvePreparation(
+            profile,
+            {
+              shellEnvironment: [{ name: "INDEPENDENT", source: missing }],
+            },
+            "namespace",
+          ),
         ).rejects.toThrow("The source for INDEPENDENT could not be read."),
       );
     }),
@@ -281,20 +289,24 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
         });
         const profile = yield* resolve(settings);
         const prepared = yield* Effect.promise(() =>
-          buildNamespacePreparation(profile, {
-            homeFiles: [
-              {
-                source: "/generic/auth.json",
-                destination: "/Users/runner/.cursor/./auth.json",
-              },
-            ],
-            shellEnvironment: [
-              { name: "CURSOR_API_KEY", source: genericToken },
-              { name: "CUSTOM_ACCOUNT", source: genericToken },
-              { name: "EXACT_BYTES", source: genericValue },
-            ],
-            namespace: { size: "m", prepareCommands: ["./prepare-native.sh"] },
-          }),
+          resolvePreparation(
+            profile,
+            {
+              homeFiles: [
+                {
+                  source: "/generic/auth.json",
+                  destination: "/Users/runner/.cursor/./auth.json",
+                },
+              ],
+              shellEnvironment: [
+                { name: "CURSOR_API_KEY", source: genericToken },
+                { name: "CUSTOM_ACCOUNT", source: genericToken },
+                { name: "EXACT_BYTES", source: genericValue },
+              ],
+              namespace: { size: "m", prepareCommands: ["./prepare-native.sh"] },
+            },
+            "namespace",
+          ),
         );
         expect(prepared.files).toEqual([{ source, destination: ".cursor/auth.json", mode: "600" }]);
         expect(prepared.environment).toContainEqual({
@@ -330,9 +342,13 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
       const profile = yield* resolve(settings);
       const generic = yield* file("generic", "generic-api");
       const prepared = yield* Effect.promise(() =>
-        buildNamespacePreparation(profile, {
-          shellEnvironment: [{ name: "ANTHROPIC_API_KEY", source: generic }],
-        }),
+        resolvePreparation(
+          profile,
+          {
+            shellEnvironment: [{ name: "ANTHROPIC_API_KEY", source: generic }],
+          },
+          "namespace",
+        ),
       );
       expect(prepared.environment.filter(({ name }) => name === "ANTHROPIC_API_KEY")).toEqual(
         environment,
@@ -353,11 +369,136 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
       const profile = yield* resolve(settings);
       yield* Effect.promise(() =>
         expect(
-          buildNamespacePreparation(profile, {
-            homeFiles: [{ source: "/source", destination: "../outside" }],
-          }),
+          resolvePreparation(
+            profile,
+            {
+              homeFiles: [{ source: "/source", destination: "../outside" }],
+            },
+            "namespace",
+          ),
         ).rejects.toThrow("escapes"),
       );
     }),
+  );
+});
+
+it.layer(NodeServices.layer)("shared preparation", (it) => {
+  it.effect(
+    "selects exact repository files and platform commands with explicit empty overrides",
+    () =>
+      Effect.gen(function* () {
+        const source = yield* file("workspace.env");
+        const profile = yield* resolve(
+          decodeSettings({
+            providerInstances: {
+              selected: {
+                driver: "claudeAgent",
+                environment: [{ name: "ANTHROPIC_API_KEY", value: "selected", sensitive: true }],
+              },
+            },
+          }),
+        );
+        const provisioning = {
+          workspaceFiles: [{ source: "/missing-global", destination: "global.env" }],
+          namespace: {
+            size: "m",
+            prepareCommands: ["global-prepare"],
+            verifyCommands: ["global-verify"],
+            artifacts: [{ path: "global", destination: ".cache", sha256: "a".repeat(64) }],
+          },
+          repositories: [
+            {
+              repository: "owner/name",
+              workspaceFiles: [{ source, destination: ".env" }],
+              e2b: { prepareCommands: ["linux-prepare"], verifyCommands: ["linux-verify"] },
+              namespace: { prepareCommands: [], artifacts: [] },
+            },
+          ],
+        };
+        const linux = yield* Effect.promise(() =>
+          resolvePreparation(profile, provisioning, "e2b", "https://github.com/OWNER/NAME.git"),
+        );
+        expect(linux.workspaceFiles).toEqual([{ source, destination: ".env" }]);
+        expect(linux.prepareCommands).toEqual(["linux-prepare"]);
+        expect(linux.verifyCommands).toEqual(["linux-verify"]);
+        expect(linux.environment).toContainEqual({
+          name: "CLAUDE_CONFIG_DIR",
+          value: "/home/user/.claude",
+          sensitive: false,
+        });
+        const mac = yield* Effect.promise(() =>
+          resolvePreparation(profile, provisioning, "namespace", "owner/name"),
+        );
+        expect(mac.prepareCommands).toEqual([]);
+        expect(mac.verifyCommands).toEqual(["global-verify"]);
+        expect(mac.artifacts).toEqual([]);
+        yield* Effect.promise(() =>
+          expect(
+            resolvePreparation(profile, provisioning, "e2b", "owner/namesake"),
+          ).rejects.toThrow("missing-global"),
+        );
+        const empty = yield* Effect.promise(() =>
+          resolvePreparation(
+            profile,
+            { ...provisioning, repositories: [{ repository: "owner/name", workspaceFiles: [] }] },
+            "e2b",
+            "owner/name",
+          ),
+        );
+        expect(empty.workspaceFiles).toEqual([]);
+      }),
+  );
+  it.effect(
+    "uses selected Cursor credentials on Linux and ignores generic Claude files for API auth",
+    () =>
+      Effect.gen(function* () {
+        const source = yield* file(cursorAuthRelative);
+        const profile = yield* resolve(
+          decodeSettings({
+            providerInstances: {
+              selected: { driver: "cursor", enabled: true, environment: cursorEnvironment() },
+            },
+          }),
+        );
+        const prepared = yield* Effect.promise(() =>
+          resolvePreparation(
+            profile,
+            {
+              homeFiles: [{ source: "/missing-generic", destination: ".config/cursor/auth.json" }],
+            },
+            "e2b",
+          ),
+        );
+        expect(prepared.files).toEqual([
+          { source, destination: ".config/cursor/auth.json", mode: "600" },
+        ]);
+        expect(prepared.environment).toContainEqual({
+          name: "CURSOR_CONFIG_DIR",
+          value: "/home/user/.config/cursor",
+          sensitive: false,
+        });
+        const claude = yield* resolve(
+          decodeSettings({
+            providerInstances: {
+              selected: {
+                driver: "claudeAgent",
+                environment: [{ name: "ANTHROPIC_API_KEY", value: "selected", sensitive: true }],
+              },
+            },
+          }),
+        );
+        const api = yield* Effect.promise(() =>
+          resolvePreparation(
+            claude,
+            {
+              homeFiles: [
+                { source: "/missing-other-account", destination: ".claude/.credentials.json" },
+              ],
+            },
+            "e2b",
+          ),
+        );
+        expect(api.files).toEqual([]);
+      }),
   );
 });

@@ -150,3 +150,59 @@ it("treats a whitespace-only override as unset", async () => {
     }),
   ).toBe(null);
 });
+
+it("matches repository configuration exactly and rejects duplicates or escaping destinations", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cloud-repositories-"));
+  const path = NodePath.join(directory, "config.json");
+  const config = {
+    e2bApiKey: "test",
+    targets: [],
+    broker: {
+      sandboxId: "broker",
+      metadata: { owner: "test" },
+      url: "https://controller.invalid",
+      ingressKey: "test",
+    },
+  };
+  const write = (repositories: unknown) =>
+    NodeFSP.writeFile(path, JSON.stringify({ ...config, provisioning: { repositories } }));
+  try {
+    await write([
+      {
+        repository: "owner/name",
+        workspaceFiles: [],
+        e2b: { prepareCommands: [], verifyCommands: ["./verify.sh"] },
+      },
+    ]);
+    expect((await readConfig(path)).provisioning?.repositories?.[0]?.e2b?.verifyCommands).toEqual([
+      "./verify.sh",
+    ]);
+    await write([
+      { repository: "Owner/Name" },
+      { repository: "https://github.com/owner/name.git" },
+    ]);
+    await expect(readConfig(path)).rejects.toThrow();
+    for (const repository of [
+      "owner/name/extra",
+      "https://other.test/owner/name",
+      "owner/name?token=x",
+      "owner/../name",
+    ]) {
+      await write([{ repository }]);
+      await expect(readConfig(path)).rejects.toThrow();
+    }
+    for (const destination of [
+      "../outside",
+      "/absolute",
+      "nested/../../outside",
+      "nested\\outside",
+    ]) {
+      await write([
+        { repository: "owner/name", workspaceFiles: [{ source: "/source", destination }] },
+      ]);
+      await expect(readConfig(path)).rejects.toThrow();
+    }
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
