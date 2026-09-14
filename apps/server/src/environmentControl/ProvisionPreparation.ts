@@ -13,15 +13,11 @@ import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Schema from "effect/Schema";
 import { resolveNamespaceIdentity, namespaceMacImage } from "./namespaceAllocation.ts";
 import { ProvisionRuntimeArtifact, type EnvironmentControlConfig } from "./config.ts";
+import { repositoryUrl } from "./driver.ts";
 import {
-  accountAuthPath,
-  carriesCredential,
-  credentialDestination,
-  enableChildProvider,
   ProvisionRefused,
-  repositoryUrl,
-  skillRoot,
-} from "./driver.ts";
+  type ProvisioningProviderProfile,
+} from "./ProvisioningProviderProfile.ts";
 
 const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
 const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
@@ -77,6 +73,76 @@ export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
 export const provisionInputLimit = 64 * 1024 * 1024;
 
+/**
+ * Where an agent CLI reads skills inside a provisioned environment, relative
+ * to its home directory.
+ *
+ * Every supported CLI resolves a user-scoped root, so skills land in the home
+ * rather than the checkout. A checkout is what the agent opens a pull request
+ * from, and a skill bundle committed by accident is worse than a missing one.
+ */
+export function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
+  if (kind === "cursor") return ".cursor/skills";
+  if (kind === "claudeAgent") return ".claude/skills";
+  return ".codex/skills";
+}
+
+type ChildSettings = {
+  providers?: Record<string, Record<string, unknown>>;
+  providerInstances?: Record<string, ChildProviderInstanceSettings>;
+  [key: string]: unknown;
+};
+type ChildProviderInstanceSettings = Record<string, unknown> & {
+  environment?: Array<{ name: string; value: string; sensitive?: boolean }>;
+};
+
+export function enableChildProvider(
+  existing: string,
+  agentDriver: string,
+  providerInstanceId: string,
+  homePath = "/home/user",
+): string {
+  let settings: ChildSettings = {};
+  try {
+    const parsed = JSON.parse(existing);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      settings = parsed as ChildSettings;
+    }
+  } catch {}
+  const providers = settings.providers ?? {};
+  const providerInstances = settings.providerInstances ?? {};
+  const existingInstance = providerInstances[providerInstanceId] ?? {};
+  const environment =
+    agentDriver === "cursor"
+      ? [
+          ...(existingInstance.environment ?? []).filter(
+            (variable) =>
+              !["AGENT_CLI_CREDENTIAL_STORE", "CURSOR_CONFIG_DIR", "HOME"].includes(variable.name),
+          ),
+          { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
+          { name: "CURSOR_CONFIG_DIR", value: `${homePath}/.config/cursor`, sensitive: false },
+          { name: "HOME", value: homePath, sensitive: false },
+        ]
+      : existingInstance.environment;
+  return `${JSON.stringify({
+    ...settings,
+    providers: {
+      ...providers,
+      [agentDriver]: { ...providers[agentDriver], enabled: true },
+    },
+    providerInstances: {
+      ...providerInstances,
+      [providerInstanceId]: {
+        ...existingInstance,
+        driver: agentDriver,
+        enabled: true,
+        ...(agentDriver === "codex" ? { homePath: `${homePath}/.codex`, shadowHomePath: "" } : {}),
+        ...(environment ? { environment } : {}),
+      },
+    },
+  })}\n`;
+}
+
 function relativePath(path: string) {
   if (
     !path ||
@@ -85,10 +151,10 @@ function relativePath(path: string) {
     NodePath.posix.isAbsolute(path) ||
     path.split("/").some((part) => part === ".." || part === "." || !part)
   )
-    throw new ProvisionRefused(
-      "unconfigured",
-      "Provisioned files require a relative path within their destination.",
-    );
+    throw new ProvisionRefused({
+      reason: "unconfigured",
+      message: "Provisioned files require a relative path within their destination.",
+    });
   return path;
 }
 function file(scope: "home" | "workspace", destination: string, data: Uint8Array) {
@@ -103,22 +169,22 @@ function submittedFiles(input: EnvironmentProvisionInput) {
   let size = 0;
   return (input.workspaceFiles ?? []).map((item) => {
     if (item.contentsBase64.length > Math.ceil(provisionInputLimit / 3) * 4)
-      throw new ProvisionRefused(
-        "unsupported",
-        "Provisioning input exceeds the 64 MiB file limit.",
-      );
+      throw new ProvisionRefused({
+        reason: "unsupported",
+        message: "Provisioning input exceeds the 64 MiB file limit.",
+      });
     const data = Buffer.from(item.contentsBase64, "base64");
     size += data.length;
     if (size > provisionInputLimit)
-      throw new ProvisionRefused(
-        "unsupported",
-        "Provisioning input exceeds the 64 MiB file limit.",
-      );
+      throw new ProvisionRefused({
+        reason: "unsupported",
+        message: "Provisioning input exceeds the 64 MiB file limit.",
+      });
     if (data.toString("base64") !== item.contentsBase64 || provisionDigest(data) !== item.sha256)
-      throw new ProvisionRefused(
-        "unsupported",
-        "A submitted provisioning file failed its content hash check.",
-      );
+      throw new ProvisionRefused({
+        reason: "unsupported",
+        message: "A submitted provisioning file failed its content hash check.",
+      });
     return file("workspace", item.destination, data);
   });
 }
@@ -138,10 +204,10 @@ async function skillFiles(source: string, limit: { remaining: number }) {
       const absolute = NodePath.join(directory, entry.name);
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink())
-        throw new ProvisionRefused(
-          "unconfigured",
-          "A configured skill bundle contains a symbolic link.",
-        );
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "A configured skill bundle contains a symbolic link.",
+        });
       if (entry.isDirectory()) {
         await walk(absolute, relative);
         continue;
@@ -150,10 +216,10 @@ async function skillFiles(source: string, limit: { remaining: number }) {
       const data = await NodeFSP.readFile(absolute);
       limit.remaining -= data.length;
       if (limit.remaining < 0)
-        throw new ProvisionRefused(
-          "unsupported",
-          "Configured skill bundles exceed the 64 MiB file limit.",
-        );
+        throw new ProvisionRefused({
+          reason: "unsupported",
+          message: "Configured skill bundles exceed the 64 MiB file limit.",
+        });
       collected.push({ path: relative, data });
     }
   };
@@ -233,7 +299,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       rawInput: EnvironmentProvisionInput,
       config: EnvironmentControlConfig,
       resolver: ProvisionPreparationResolver,
-      home = NodeOS.homedir(),
+      profile: ProvisioningProviderProfile,
     ): Promise<ProvisionPreparationManifest> => {
       const input = decodeInput(rawInput);
       const submitted = submittedFiles(input);
@@ -251,16 +317,17 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const artifact =
         provisioning?.runtimeArtifacts?.[input.provider === "e2b" ? "linux" : "macos"];
       if (!provisioning || !artifact)
-        throw new ProvisionRefused(
-          "unconfigured",
-          "Configure a pinned runtime artifact for this cloud platform before provisioning.",
-        );
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message:
+            "Configure a pinned runtime artifact for this cloud platform before provisioning.",
+        });
       relativePath(artifact.entrypoint);
       if (input.sourceRevision && !input.repository)
-        throw new ProvisionRefused(
-          "unsupported",
-          "An exact source revision requires a repository.",
-        );
+        throw new ProvisionRefused({
+          reason: "unsupported",
+          message: "An exact source revision requires a repository.",
+        });
       const repository = input.repository
         ? {
             url: repositoryUrl(input.repository),
@@ -271,10 +338,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
         : null;
       const artifactBytes = await NodeFSP.readFile(artifact.path);
       if (provisionDigest(artifactBytes) !== artifact.sha256)
-        throw new ProvisionRefused(
-          "unconfigured",
-          "The configured runtime artifact failed its content hash check.",
-        );
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "The configured runtime artifact failed its content hash check.",
+        });
       const artifactPath = NodePath.join(directory, `${artifact.sha256}.tar`);
       await writeOnce(artifactPath, artifactBytes);
       if (provisionDigest(await NodeFSP.readFile(artifactPath)) !== artifact.sha256)
@@ -288,29 +355,26 @@ export function makeProvisionPreparationStore(stateDir: string) {
           );
         }
       }
-      const driver = input.agentDriver ?? "codex";
       const skillLimit = { remaining: provisionInputLimit };
       for (const skill of provisioning.skills ?? []) {
         const prefix = skill.name ? `${relativePath(skill.name)}/` : "";
         for (const entry of await skillFiles(skill.source, skillLimit)) {
-          files.push(file("home", `${skillRoot(driver)}/${prefix}${entry.path}`, entry.data));
+          files.push(file("home", `${skillRoot(profile.kind)}/${prefix}${entry.path}`, entry.data));
         }
       }
-      const credentialTarget = credentialDestination(driver);
-      if (carriesCredential(driver)) {
-        const credential = await NodeFSP.readFile(
-          accountAuthPath(input.providerInstanceId, home),
-        ).catch(() => {
-          throw new ProvisionRefused(
-            "credentials",
-            "The selected provider account has no credentials on this manager.",
-          );
+      if (profile.credential.kind === "file") {
+        const { source, destination } = profile.credential;
+        const credential = await NodeFSP.readFile(source).catch(() => {
+          throw new ProvisionRefused({
+            reason: "credentials",
+            message: "The selected provider account has no credentials on this manager.",
+          });
         });
         const duplicate = files.findIndex(
-          (item) => item.scope === "home" && item.destination === credentialTarget,
+          (item) => item.scope === "home" && item.destination === destination,
         );
         if (duplicate !== -1) files.splice(duplicate, 1);
-        files.push(file("home", credentialTarget, credential));
+        files.push(file("home", destination, credential));
       }
       const settingsPath = ".t3/userdata/settings.json";
       const settingsIndex = files.findIndex(
@@ -325,7 +389,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const configuredSettings: unknown = JSON.parse(
         enableChildProvider(
           settings,
-          driver,
+          profile.kind,
           input.providerInstanceId,
           `/tmp/t3-provision/${input.requestId}/home`,
         ),
@@ -337,10 +401,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
           !/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name) ||
           ["HOME", "T3CODE_HOME"].includes(variable.name)
         )
-          throw new ProvisionRefused(
-            "unconfigured",
-            "A configured environment variable would change the isolated home.",
-          );
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "A configured environment variable would change the isolated home.",
+          });
         environment.push({
           name: variable.name,
           value: (await NodeFSP.readFile(variable.source, "utf8")).trim(),
@@ -357,7 +421,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
             ...selected,
             environment: [
               ...environment,
-              ...(driver === "cursor"
+              ...(profile.kind === "cursor"
                 ? [{ name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false }]
                 : []),
             ],
@@ -398,10 +462,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
       for (const item of files) {
         const destination = `${item.scope}:${item.destination}`;
         if (destinations.has(destination))
-          throw new ProvisionRefused(
-            "unconfigured",
-            "Provisioning files contain duplicate destinations.",
-          );
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Provisioning files contain duplicate destinations.",
+          });
         destinations.add(destination);
       }
       const preparation = {
@@ -436,10 +500,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
       let request: DurableProvisionRequest;
       if (input.provider === "e2b") {
         if (!provisioning.templateId)
-          throw new ProvisionRefused(
-            "unconfigured",
-            "Configure an E2B template before provisioning.",
-          );
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Configure an E2B template before provisioning.",
+          });
         request = {
           ...common,
           provider: "e2b",
@@ -448,7 +512,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
         };
       } else {
         if (!provisioning.namespace)
-          throw new ProvisionRefused("unconfigured", "Configure Namespace before provisioning.");
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Configure Namespace before provisioning.",
+          });
         request = {
           ...common,
           provider: "namespace",

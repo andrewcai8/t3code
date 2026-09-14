@@ -14,7 +14,9 @@ import * as DateTime from "effect/DateTime";
 import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { ProvisionRefused } from "./driver.ts";
+import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
+
+const isProvisionRefused = Schema.is(ProvisionRefused);
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import type { Provisioning } from "./Provisioning.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
@@ -94,7 +96,7 @@ export function makeProvisionControl(
       const frozen = yield* Effect.tryPromise({
         try: () => ports.freeze(input),
         catch: (error) =>
-          error instanceof ProvisionRefused || isRequestConflict(error) ? error : safeError(),
+          isProvisionRefused(error) || isRequestConflict(error) ? error : safeError(),
       }).pipe(Effect.result);
       if (frozen._tag === "Failure") {
         if (isRequestConflict(frozen.failure))
@@ -103,7 +105,7 @@ export function makeProvisionControl(
             reason: "conflict",
             message: "This request ID already names a different provisioning request.",
           };
-        if (frozen.failure instanceof ProvisionRefused)
+        if (isProvisionRefused(frozen.failure))
           return {
             kind: "refused",
             reason: frozen.failure.reason,

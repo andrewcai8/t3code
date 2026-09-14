@@ -48,10 +48,6 @@ import {
 } from "./NamespaceProvisionRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
-import * as ServerConfig from "../config.ts";
-import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
-import { createCloudDriver, ProvisionRefused, type CloudDriver } from "./driver.ts";
-import * as Schema from "effect/Schema";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -537,7 +533,6 @@ export const layer = Layer.effect(
             });
       return result.profile;
     };
-    let manager: Promise<ReturnType<typeof createEnvironmentControl> | null> | undefined;
     const resolve = () =>
       (manager ??= (async () => {
         const path = await resolveControlConfigPath({
@@ -564,10 +559,10 @@ export const layer = Layer.effect(
       (namespace ??= (async () => {
         const manager = await resolve();
         if (!manager?.config.namespaceIngressToken)
-          throw new ProvisionRefused(
-            "unconfigured",
-            "Namespace requires a configured private ingress token.",
-          );
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Namespace requires a configured private ingress token.",
+          });
         const session = await makeNamespaceAccountSession({
           stateDir,
           ...(manager.config.namespaceToken ? { token: manager.config.namespaceToken } : {}),
@@ -698,16 +693,16 @@ export const layer = Layer.effect(
         freeze: async (input) => {
           const manager = await resolve();
           if (!manager)
-            throw new ProvisionRefused(
-              "unconfigured",
-              "This install has no cloud provisioning configuration.",
-            );
+            throw new ProvisionRefused({
+              reason: "unconfigured",
+              message: "This install has no cloud provisioning configuration.",
+            });
           if (input.provider === "namespace") {
             if (!manager.config.provisioning?.runtimeArtifacts?.macos)
-              throw new ProvisionRefused(
-                "unconfigured",
-                "Configure a pinned macOS runtime artifact before provisioning.",
-              );
+              throw new ProvisionRefused({
+                reason: "unconfigured",
+                message: "Configure a pinned macOS runtime artifact before provisioning.",
+              });
             await resolveNamespace();
           }
           return manifests.freeze(
@@ -718,6 +713,13 @@ export const layer = Layer.effect(
               ...(manager.config.provisioning?.githubToken
                 ? { githubToken: manager.config.provisioning.githubToken }
                 : {}),
+            }),
+            // Credentials and the skill root follow the account's real settings
+            // rather than a path this module guesses from the driver name.
+            await resolveProfile({
+              provider: input.provider,
+              providerInstanceId: input.providerInstanceId,
+              ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
             }),
           );
         },
@@ -831,30 +833,6 @@ export const layer = Layer.effect(
           message: "This install has no cloud provisioning configuration.",
         });
       }),
-      provision: (input) =>
-        run<EnvironmentProvisionResult>(
-          (service) =>
-            service.provision({
-              provider: input.provider,
-              agentDriver: input.agentDriver,
-              providerInstanceId: input.providerInstanceId,
-              repository: input.repository,
-              branch: input.branch,
-            }),
-          // An install with no provisioning template is the ordinary case for a
-          // machine that only manages named targets, not a failure.
-          {
-            kind: "refused" as const,
-            reason: "unconfigured" as const,
-            message: "This install has no cloud provisioning template configured.",
-          },
-        ),
-      dispose: (input) =>
-        run<EnvironmentProvisionDisposeResult>((service) => service.dispose(input), {
-          kind: "refused" as const,
-          reason: "unconfigured" as const,
-          message: "This install has no cloud provisioning template configured.",
-        }),
       pause: (input) =>
         run<EnvironmentProvisionPauseResult>((service) => service.pause(input), {
           kind: "refused" as const,

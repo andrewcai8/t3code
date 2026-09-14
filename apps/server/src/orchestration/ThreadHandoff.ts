@@ -61,6 +61,7 @@ export function handoffRejection(
     case "thread.create":
     case "thread.delete":
     case "thread.checkpoint.revert":
+    case "thread.conversation.revert":
     case "thread.runtime-mode.set":
     case "thread.interaction-mode.set":
       return description;

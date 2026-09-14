@@ -435,7 +435,10 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps(js
               proxyId,
               upstreamHttpBaseUrl: upstream,
               upstreamWsBaseUrl: upstream.replace(/^https:/, "wss:"),
-              upstreamAuthorization: `Bearer ${config.ingressToken.replace(/^Bearer /, "")}`,
+              // Main made this a callback so a long-lived proxy can renew the
+              // credential instead of pinning the one it opened with.
+              getUpstreamAuthorization: async () =>
+                `Bearer ${config.ingressToken.replace(/^Bearer /, "")}`,
             })
           ).proxyOrigin;
         })();
