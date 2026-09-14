@@ -338,6 +338,54 @@ it("remaps provider credentials into the retained home and rejects traversal", (
   expect(() => namespaceDestination("../outside", "/Volumes/devbox/.t3-home")).toThrow("escapes");
 });
 
+it("applies private and executable permissions to uploaded files with spaces", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-file-modes-"));
+  const home = NodePath.join(directory, "home");
+  const source = NodePath.join(directory, "source");
+  await NodeFSP.writeFile(source, "uploaded bytes", { mode: 0o644 });
+  await NodeFSP.mkdir(home);
+  try {
+    const { execute } = resumeFixture({ healthy: true });
+    const baseExecute = execute.getMockImplementation()!;
+    execute.mockImplementation(async (args) => {
+      const command = args.at(-1) ?? "";
+      if (args.includes("-lc") && command.includes("chmod"))
+        return NodeUtil.promisify(NodeChildProcess.execFile)("sh", [
+          "-c",
+          command.replaceAll(retainedResource.homeDir, home),
+        ]);
+      return baseExecute(args);
+    });
+    const runner = createNamespaceSdkRunner({
+      execute,
+      token: "test",
+      upload: async (_name, input, destination) => {
+        const local = destination.replaceAll(retainedResource.homeDir, home);
+        await NodeFSP.mkdir(NodePath.dirname(local), { recursive: true });
+        await NodeFSP.copyFile(input, local);
+      },
+    });
+    await runner.bootstrap({
+      resource: retainedResource,
+      projectDir: retainedResource.workspaceDir,
+      providerInstanceId: "provider-1",
+      files: [
+        { source, destination: "private settings.json", mode: "600" },
+        { source, destination: "bin/run helper", mode: "700" },
+      ],
+    });
+    expect((await NodeFSP.stat(NodePath.join(home, "private settings.json"))).mode & 0o777).toBe(
+      0o600,
+    );
+    expect((await NodeFSP.stat(NodePath.join(home, "bin/run helper"))).mode & 0o777).toBe(0o700);
+    expect(await NodeFSP.readFile(NodePath.join(home, "bin/run helper"), "utf8")).toBe(
+      "uploaded bytes",
+    );
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
+
 it.each(["codex", "cursor", "claudeAgent"])(
   "bootstraps %s with durable home, tools, and T3 state",
   async (agentDriver) => {

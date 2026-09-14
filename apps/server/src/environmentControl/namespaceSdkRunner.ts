@@ -422,17 +422,21 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           await runInHome(["exec", nameOf(resource), "--", "sh", "-lc", command]);
         }
       }
+      const filePermissions: string[] = [];
       for (const file of files) {
         await NodeFSP.access(file.source);
         const destination = namespaceDestination(file.destination, homeDir, projectDir);
         await upload(nameOf(resource), file.source, destination);
+        filePermissions.push(`chmod ${file.mode ?? "600"} ${shellQuote(destination)}`);
+      }
+      if (filePermissions.length > 0) {
         await runInHome([
           "exec",
           nameOf(resource),
           "--",
           "sh",
           "-lc",
-          `chmod ${file.mode ?? "600"} ${shellQuote(destination)}`,
+          filePermissions.join(" && "),
         ]);
       }
       for (const artifact of artifacts) {
