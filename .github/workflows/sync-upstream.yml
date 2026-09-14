@@ -1,0 +1,35 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Merge pingdotgg/t3code into this fork
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Merge upstream into the default branch
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -eu
+          if gh api --method POST "repos/${GH_REPO}/merge-upstream" -f branch="$BRANCH"; then
+            echo "Merged pingdotgg/t3code into ${BRANCH}."
+            exit 0
+          fi
+          echo "GitHub could not merge upstream into ${BRANCH}." >&2
+          echo "This fork's ${BRANCH} has unique commits that conflict with pingdotgg/t3code." >&2
+          echo "Do not force-reset ${BRANCH}. That would drop this fork's work." >&2
+          echo "Resolve locally:" >&2
+          echo "  git fetch upstream" >&2
+          echo "  git checkout -b sync/upstream origin/${BRANCH}" >&2
+          echo "  git merge upstream/${BRANCH}" >&2
+          echo "If upstream changed GitHub Actions files, FORK_SYNC_TOKEN needs the workflow scope." >&2
+          exit 1

@@ -1018,12 +1018,29 @@ export function createServerEnvironmentAtoms<R, E>(
           `${environmentId}:${"requestId" in input ? input.requestId : input.sandboxId}`,
       },
     }),
+    pauseProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:pause",
+      tag: WS_METHODS.environmentControlPause,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.sandboxId}`,
+      },
+    }),
     claimProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:claim",
       tag: WS_METHODS.environmentControlClaim,
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
+      },
+    }),
+    resumeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:resume",
+      tag: WS_METHODS.environmentControlResume,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.leaseId}:${input.environmentId}:${input.threadId}`,
       },
     }),
     touchProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {

@@ -17,6 +17,7 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   };
   const config = {
     e2bApiKey: "test-key",
+    namespaceIngressToken: "obsolete-expired-token",
     broker: {
       sandboxId: "broker",
       metadata: { owner: "test" },
@@ -28,6 +29,18 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   try {
     await NodeFSP.writeFile(path, JSON.stringify(config), { mode: 0o600 });
     expect((await readConfig(path)).targets[0]?.environmentId).toBe("cloud");
+    expect(await readConfig(path)).not.toHaveProperty("namespaceIngressToken");
+    expect((await readConfig(path)).provisioning?.namespace?.prepareCommands).toBeUndefined();
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        ...config,
+        provisioning: { namespace: { size: "m", prepareCommands: ["./prepare-native.sh"] } },
+      }),
+    );
+    expect((await readConfig(path)).provisioning?.namespace?.prepareCommands).toEqual([
+      "./prepare-native.sh",
+    ]);
     await NodeFSP.writeFile(path, JSON.stringify({ ...config, targets: [target, target] }));
     await expect(readConfig(path)).rejects.toThrow("Duplicate managed environment");
     await NodeFSP.writeFile(
@@ -51,6 +64,48 @@ it("resolves cloud control configuration from the state directory by default", a
   });
   expect(path).toBe("/state/environment-control.json");
   expect(seen).toEqual(["/state/environment-control.json"]);
+});
+
+it("loads Namespace preparation artifacts and rejects invalid SHA256 digests", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-artifact-config-"));
+  const path = NodePath.join(directory, "config.json");
+  const artifact = {
+    path: "t3/ios/baseline.tar.gz",
+    destination: ".t3/ios-baseline.tar.gz",
+    sha256: "a".repeat(64),
+  };
+  const config = {
+    e2bApiKey: "test-key",
+    broker: {
+      sandboxId: "broker",
+      metadata: { owner: "test" },
+      url: "https://controller.invalid",
+      ingressKey: "test-ingress",
+    },
+    targets: [],
+  };
+  try {
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        ...config,
+        provisioning: { namespace: { size: "m", artifacts: [artifact] } },
+      }),
+    );
+    expect((await readConfig(path)).provisioning?.namespace?.artifacts).toEqual([artifact]);
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        ...config,
+        provisioning: {
+          namespace: { size: "m", artifacts: [{ ...artifact, sha256: "not-a-digest" }] },
+        },
+      }),
+    );
+    await expect(readConfig(path)).rejects.toThrow();
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
 });
 
 it("reports no cloud control configuration rather than failing when the default is absent", async () => {
@@ -94,4 +149,60 @@ it("treats a whitespace-only override as unset", async () => {
       exists: async () => false,
     }),
   ).toBe(null);
+});
+
+it("matches repository configuration exactly and rejects duplicates or escaping destinations", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cloud-repositories-"));
+  const path = NodePath.join(directory, "config.json");
+  const config = {
+    e2bApiKey: "test",
+    targets: [],
+    broker: {
+      sandboxId: "broker",
+      metadata: { owner: "test" },
+      url: "https://controller.invalid",
+      ingressKey: "test",
+    },
+  };
+  const write = (repositories: unknown) =>
+    NodeFSP.writeFile(path, JSON.stringify({ ...config, provisioning: { repositories } }));
+  try {
+    await write([
+      {
+        repository: "owner/name",
+        workspaceFiles: [],
+        e2b: { prepareCommands: [], verifyCommands: ["./verify.sh"] },
+      },
+    ]);
+    expect((await readConfig(path)).provisioning?.repositories?.[0]?.e2b?.verifyCommands).toEqual([
+      "./verify.sh",
+    ]);
+    await write([
+      { repository: "Owner/Name" },
+      { repository: "https://github.com/owner/name.git" },
+    ]);
+    await expect(readConfig(path)).rejects.toThrow();
+    for (const repository of [
+      "owner/name/extra",
+      "https://other.test/owner/name",
+      "owner/name?token=x",
+      "owner/../name",
+    ]) {
+      await write([{ repository }]);
+      await expect(readConfig(path)).rejects.toThrow();
+    }
+    for (const destination of [
+      "../outside",
+      "/absolute",
+      "nested/../../outside",
+      "nested\\outside",
+    ]) {
+      await write([
+        { repository: "owner/name", workspaceFiles: [{ source: "/source", destination }] },
+      ]);
+      await expect(readConfig(path)).rejects.toThrow();
+    }
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
 });

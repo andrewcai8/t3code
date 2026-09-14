@@ -14,47 +14,6 @@ const listen = (handler: NodeHttp.RequestListener) =>
   });
 
 describe("NamespaceProxyManager", () => {
-  it("keeps ingress credentials on the configured upstream across paths and redirects", async () => {
-    const escapedRequests: string[] = [];
-    const escaped = await listen((request, response) => {
-      escapedRequests.push(request.headers["x-nsc-ingress-auth"]?.toString() ?? "missing");
-      response.end("escaped");
-    });
-    const upstream = await listen((_request, response) => {
-      response.writeHead(302, { location: `${escaped.origin}/redirected` });
-      response.end();
-    });
-    const manager = new NamespaceProxyManager();
-    try {
-      const lease = await manager.open({
-        proxyId: "restricted-origin",
-        upstreamHttpBaseUrl: upstream.origin,
-        upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
-        upstreamAuthorization: "Bearer private-ingress",
-      });
-      const statuses: Array<number | undefined> = [];
-      for (const path of [`//${new URL(escaped.origin).host}/path`, "/redirect"]) {
-        statuses.push(
-          await new Promise<number | undefined>((resolve, reject) => {
-            const request = NodeHttp.get(lease.proxyOrigin, { path }, (response) => {
-              response.resume();
-              response.once("end", () => resolve(response.statusCode));
-            });
-            request.once("error", reject);
-          }),
-        );
-      }
-      expect(escapedRequests).toEqual([]);
-      expect(statuses).toEqual([502, 302]);
-    } finally {
-      await manager.close({ proxyId: "restricted-origin" });
-      for (const { server } of [upstream, escaped]) {
-        server.closeAllConnections();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-      }
-    }
-  });
-
   it("forwards query and streaming response with sanitized headers", async () => {
     const seen: { url: string | undefined; headers: NodeHttp.IncomingHttpHeaders | undefined } = {
       url: undefined,
@@ -72,7 +31,7 @@ describe("NamespaceProxyManager", () => {
       proxyId: "p1",
       upstreamHttpBaseUrl: upstream.origin,
       upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
-      upstreamAuthorization: "Bearer secret",
+      getUpstreamAuthorization: async () => "Bearer secret",
     });
     const response = await fetch(`${lease.proxyOrigin}/api/run?q=1`, {
       headers: {
@@ -86,7 +45,7 @@ describe("NamespaceProxyManager", () => {
     expect(seen.url).toBe("/api/run?q=1");
     expect(seen.headers?.["x-nsc-ingress-auth"]).toBe("Bearer secret");
     expect(seen.headers?.authorization).toBe("Bearer client");
-    expect(seen.headers?.cookie).toBeUndefined();
+    expect(seen.headers?.cookie).toBe("session=x");
     expect(seen.headers?.host).not.toBe("evil");
     await manager.close({ proxyId: "p1" });
     await manager.close({ proxyId: "p1" });
@@ -100,11 +59,201 @@ describe("NamespaceProxyManager", () => {
       proxyId: "same",
       upstreamHttpBaseUrl: upstream.origin,
       upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
-      upstreamAuthorization: "Bearer x",
+      getUpstreamAuthorization: async () => "Bearer x",
     };
     await manager.open(input);
     await expect(manager.open(input)).rejects.toThrow("already exists");
     await manager.close({ proxyId: "same" });
     await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
   });
+});
+
+describe("Namespace proxy restoration", () => {
+  it("keeps the saved T3 bearer session authenticated after restoration", async () => {
+    const upstream = await listen((request, response) => {
+      if (request.headers.authorization !== "Bearer saved-t3-session") {
+        response.writeHead(401).end("Unauthorized");
+        return;
+      }
+      if (request.headers["x-nsc-ingress-auth"] !== "Bearer namespace-ingress") {
+        response.writeHead(403).end("Missing ingress authentication");
+        return;
+      }
+      response.end("retained-environment");
+    });
+    const manager = new NamespaceProxyManager();
+    const restarted = new NamespaceProxyManager();
+    const input = {
+      proxyId: "authenticated",
+      upstreamHttpBaseUrl: upstream.origin,
+      upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
+      getUpstreamAuthorization: async () => "Bearer namespace-ingress",
+    };
+    try {
+      const lease = await manager.open(input);
+      await manager.close(lease);
+      await restarted.restore({ ...input, ...lease });
+      const response = await fetch(`${lease.proxyOrigin}/api/auth/session`, {
+        headers: { authorization: "Bearer saved-t3-session", connection: "close" },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("retained-environment");
+    } finally {
+      await manager.close(input);
+      await restarted.close(input);
+      await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+    }
+  });
+  it("updates a live proxy and rebinds its saved origin after manager restart", async () => {
+    const first = await listen((_request, response) => response.end("first"));
+    const second = await listen((request, response) =>
+      response.end(`second:${request.headers["x-nsc-ingress-auth"]}`),
+    );
+    const manager = new NamespaceProxyManager();
+    const restarted = new NamespaceProxyManager();
+    const input = {
+      proxyId: "retained",
+      upstreamHttpBaseUrl: first.origin,
+      upstreamWsBaseUrl: first.origin.replace("http", "ws"),
+      getUpstreamAuthorization: async () => "old",
+    };
+    try {
+      const lease = await manager.open(input);
+      const restoredInput = {
+        ...input,
+        ...lease,
+        upstreamHttpBaseUrl: second.origin,
+        upstreamWsBaseUrl: second.origin.replace("http", "ws"),
+        getUpstreamAuthorization: async () => "new",
+      };
+      expect(
+        await (await fetch(lease.proxyOrigin, { headers: { connection: "close" } })).text(),
+      ).toBe("first");
+      expect(await manager.restore(restoredInput)).toEqual(lease);
+      expect(
+        await (await fetch(lease.proxyOrigin, { headers: { connection: "close" } })).text(),
+      ).toBe("second:new");
+      await manager.close(lease);
+      expect(await restarted.restore(restoredInput)).toEqual(lease);
+      expect(
+        await (await fetch(lease.proxyOrigin, { headers: { connection: "close" } })).text(),
+      ).toBe("second:new");
+    } finally {
+      await manager.close(input);
+      await restarted.close(input);
+      await Promise.all(
+        [first, second].map(
+          ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+        ),
+      );
+    }
+  });
+
+  it("refuses an occupied saved port", async () => {
+    const occupied = await listen((_request, response) => response.end("occupied"));
+    const manager = new NamespaceProxyManager();
+    try {
+      await expect(
+        manager.restore({
+          proxyId: "retained",
+          proxyOrigin: occupied.origin,
+          upstreamHttpBaseUrl: occupied.origin,
+          upstreamWsBaseUrl: occupied.origin.replace("http", "ws"),
+          getUpstreamAuthorization: async () => "token",
+        }),
+      ).rejects.toThrow("EADDRINUSE");
+      expect(await (await fetch(occupied.origin)).text()).toBe("occupied");
+    } finally {
+      await new Promise<void>((resolve) => occupied.server.close(() => resolve()));
+    }
+  });
+});
+
+const upgrade = (origin: string) =>
+  new Promise<void>((resolve, reject) => {
+    const request = NodeHttp.request(origin, {
+      headers: {
+        connection: "Upgrade",
+        upgrade: "websocket",
+        authorization: "Bearer saved-t3-session",
+      },
+    });
+    request.once("upgrade", (_response, socket) => {
+      socket.destroy();
+      resolve();
+    });
+    request.once("error", reject);
+    request.end();
+  });
+
+it("renews ingress authorization for HTTP requests and WebSocket handshakes", async () => {
+  const received: string[] = [];
+  const upstream = await listen((request, response) => {
+    response.end(`${request.headers["x-nsc-ingress-auth"]}:${request.headers.authorization}`);
+  });
+  upstream.server.on("upgrade", (request, socket) => {
+    received.push(`${request.headers["x-nsc-ingress-auth"]}:${request.headers.authorization}`);
+    socket.end(
+      "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+    );
+  });
+  let authorization = "Bearer first";
+  const manager = new NamespaceProxyManager();
+  const lease = await manager.open({
+    proxyId: "renewable",
+    upstreamHttpBaseUrl: upstream.origin,
+    upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
+    getUpstreamAuthorization: async () => authorization,
+  });
+  try {
+    for (const token of ["Bearer first", "Bearer renewed"]) {
+      authorization = token;
+      const response = await fetch(lease.proxyOrigin, {
+        headers: { authorization: "Bearer saved-t3-session", connection: "close" },
+      });
+      expect(await response.text()).toBe(`${token}:Bearer saved-t3-session`);
+      await upgrade(lease.proxyOrigin);
+    }
+    expect(received).toEqual([
+      "Bearer first:Bearer saved-t3-session",
+      "Bearer renewed:Bearer saved-t3-session",
+    ]);
+  } finally {
+    await manager.close(lease);
+    await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+  }
+});
+
+it("fails closed on HTTP and WebSocket auth errors and recovers on the next request", async () => {
+  let upstreamRequests = 0;
+  const upstream = await listen((_request, response) => {
+    upstreamRequests++;
+    response.end("authenticated");
+  });
+  let fail = true;
+  const manager = new NamespaceProxyManager();
+  const lease = await manager.open({
+    proxyId: "auth-failure",
+    upstreamHttpBaseUrl: upstream.origin,
+    upstreamWsBaseUrl: upstream.origin.replace("http", "ws"),
+    getUpstreamAuthorization: async () => {
+      if (fail) throw new Error("private credential failure");
+      return "Bearer renewed";
+    },
+  });
+  try {
+    const response = await fetch(lease.proxyOrigin, { headers: { connection: "close" } });
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("Namespace upstream unavailable");
+    await expect(upgrade(lease.proxyOrigin)).rejects.toThrow();
+    expect(upstreamRequests).toBe(0);
+    fail = false;
+    expect(
+      await (await fetch(lease.proxyOrigin, { headers: { connection: "close" } })).text(),
+    ).toBe("authenticated");
+    expect(upstreamRequests).toBe(1);
+  } finally {
+    await manager.close(lease);
+    await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+  }
 });

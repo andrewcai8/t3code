@@ -10,6 +10,10 @@ import {
   EnvironmentProvisionAttachResult,
   EnvironmentProvisionDisposeInput,
   EnvironmentProvisionDisposeResult,
+  EnvironmentProvisionPauseInput,
+  EnvironmentProvisionPauseResult,
+  EnvironmentProvisionResumeInput,
+  EnvironmentProvisionResumeResult,
   EnvironmentProvisionClaimInput,
   EnvironmentProvisionClaimResult,
   EnvironmentProvisionTouchInput,
@@ -63,6 +67,12 @@ import {
   AttachmentDeleteInput,
   AttachmentUploadSigningKeyError,
 } from "./assets.ts";
+import {
+  WorktreeSetupCancelInput,
+  WorktreeSetupCancelResult,
+  WorktreeSetupStreamEvent,
+  WorktreeSetupSubscribeInput,
+} from "./worktreeSetup.ts";
 import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
@@ -132,6 +142,9 @@ import {
   PullRequestOperationError,
   PullRequestReactionInput,
   PullRequestRef,
+  PullRequestRoutingResult,
+  PullRequestRoutingIdentityInput,
+  PullRequestRoutingIdentityResult,
   PullRequestStack,
   PullRequestLinkedThreadsResult,
   PullRequestSummary,
@@ -384,6 +397,8 @@ export const WS_METHODS = {
   environmentControlProvision: "environmentControl.provision",
   environmentControlAttach: "environmentControl.attach",
   environmentControlDispose: "environmentControl.dispose",
+  environmentControlPause: "environmentControl.pause",
+  environmentControlResume: "environmentControl.resume",
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
   serverGetUsageSummary: "server.getUsageSummary",
@@ -397,6 +412,8 @@ export const WS_METHODS = {
   pullRequestsList: "pullRequests.list",
   pullRequestsListStats: "pullRequests.listStats",
   pullRequestsSummary: "pullRequests.summary",
+  pullRequestsRouting: "pullRequests.routing",
+  pullRequestsRoutingIdentity: "pullRequests.routingIdentity",
   pullRequestsStack: "pullRequests.stack",
   pullRequestsLinkedThreads: "pullRequests.linkedThreads",
   pullRequestsDetail: "pullRequests.detail",
@@ -425,6 +442,8 @@ export const WS_METHODS = {
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
+  subscribeWorktreeSetup: "subscribeWorktreeSetup",
+  worktreeSetupCancel: "worktreeSetup.cancel",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribePreviewEvents: "subscribePreviewEvents",
@@ -658,6 +677,11 @@ const EnvironmentControlDisposeRpc = Rpc.make(WS_METHODS.environmentControlDispo
   success: EnvironmentProvisionDisposeResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
+const EnvironmentControlPauseRpc = Rpc.make(WS_METHODS.environmentControlPause, {
+  payload: EnvironmentProvisionPauseInput,
+  success: EnvironmentProvisionPauseResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
 const EnvironmentControlAttachRpc = Rpc.make(WS_METHODS.environmentControlAttach, {
   payload: EnvironmentProvisionAttachInput,
   success: EnvironmentProvisionAttachResult,
@@ -666,6 +690,11 @@ const EnvironmentControlAttachRpc = Rpc.make(WS_METHODS.environmentControlAttach
 const EnvironmentControlClaimRpc = Rpc.make(WS_METHODS.environmentControlClaim, {
   payload: EnvironmentProvisionClaimInput,
   success: EnvironmentProvisionClaimResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlResumeRpc = Rpc.make(WS_METHODS.environmentControlResume, {
+  payload: EnvironmentProvisionResumeInput,
+  success: EnvironmentProvisionResumeResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 const EnvironmentControlTouchRpc = Rpc.make(WS_METHODS.environmentControlTouch, {
@@ -745,6 +774,18 @@ const WsPullRequestsListRpc = Rpc.make(WS_METHODS.pullRequestsList, {
 const WsPullRequestsListStatsRpc = Rpc.make(WS_METHODS.pullRequestsListStats, {
   payload: PullRequestListStatsInput,
   success: PullRequestListStatsResult,
+  error: PullRequestRpcError,
+});
+
+const WsPullRequestsRoutingRpc = Rpc.make(WS_METHODS.pullRequestsRouting, {
+  payload: PullRequestRef,
+  success: PullRequestRoutingResult,
+  error: PullRequestRpcError,
+});
+
+const WsPullRequestsRoutingIdentityRpc = Rpc.make(WS_METHODS.pullRequestsRoutingIdentity, {
+  payload: PullRequestRoutingIdentityInput,
+  success: PullRequestRoutingIdentityResult,
   error: PullRequestRpcError,
 });
 
@@ -997,6 +1038,19 @@ const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
   payload: VcsStatusInput,
   success: VcsStatusResult,
   error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+});
+
+const WsSubscribeWorktreeSetupRpc = Rpc.make(WS_METHODS.subscribeWorktreeSetup, {
+  payload: WorktreeSetupSubscribeInput,
+  success: WorktreeSetupStreamEvent,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsWorktreeSetupCancelRpc = Rpc.make(WS_METHODS.worktreeSetupCancel, {
+  payload: WorktreeSetupCancelInput,
+  success: WorktreeSetupCancelResult,
+  error: EnvironmentAuthorizationError,
 });
 
 const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
@@ -1388,6 +1442,8 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlProvisionRpc,
   EnvironmentControlAttachRpc,
   EnvironmentControlDisposeRpc,
+  EnvironmentControlPauseRpc,
+  EnvironmentControlResumeRpc,
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
   WsServerGetUsageSummaryRpc,
@@ -1401,6 +1457,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPullRequestsListRpc,
   WsPullRequestsListStatsRpc,
   WsPullRequestsSummaryRpc,
+  WsPullRequestsRoutingRpc,
+  WsPullRequestsRoutingIdentityRpc,
   WsPullRequestsStackRpc,
   WsPullRequestsLinkedThreadsRpc,
   WsPullRequestsDetailRpc,
@@ -1438,6 +1496,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAttachmentsDeleteRpc,
   WsProviderUploadFeedbackRpc,
   WsSubscribeVcsStatusRpc,
+  WsSubscribeWorktreeSetupRpc,
+  WsWorktreeSetupCancelRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,

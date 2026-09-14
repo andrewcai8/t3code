@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - credential fixtures use isolated temporary homes.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { UsageDay } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -251,6 +255,7 @@ describe("Cursor dashboard", () => {
     const files: string[] = [];
     const calls: { url: string; authorization: string | null; redirect: string | undefined }[] = [];
     const read = makeCursorDashboardReader({
+      platform: "darwin",
       readFile: async (file) => {
         files.push(file);
         if (file.startsWith("/absent/")) throw new Error("secret");
@@ -283,10 +288,10 @@ describe("Cursor dashboard", () => {
       })
     ).identify();
     expect(custom.sourceId).not.toBe(first.sourceId);
-    expect(files).toEqual(["/first/.cursor/auth.json", "/profile/auth.json"]);
+    expect(files).toEqual(["/first/.cursor/auth.json", "/second/.cursor/auth.json"]);
     expect(calls.map((call) => call.authorization)).toEqual([
       "Bearer /first/.cursor/auth.json",
-      "Bearer /profile/auth.json",
+      "Bearer /second/.cursor/auth.json",
       "Bearer explicit-token",
     ]);
     expect(calls.every((call) => call.redirect === "error")).toBe(true);
@@ -298,6 +303,43 @@ describe("Cursor dashboard", () => {
       read({ CURSOR_AUTH_TOKEN: "secret", CURSOR_API_ENDPOINT: "http://example.com" }),
     ).rejects.toThrow("HTTPS origin");
     expect(calls).toHaveLength(3);
+  });
+
+  it("identifies the Darwin home account when an unrelated CLI config has valid generic auth", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cursor-dashboard-"));
+    try {
+      const configDir = NodePath.join(directory, ".config/cursor");
+      await NodeFSP.mkdir(configDir, { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(directory, ".cursor"));
+      await NodeFSP.writeFile(
+        NodePath.join(directory, ".cursor/auth.json"),
+        '{"accessToken":"selected-token"}',
+      );
+      await NodeFSP.writeFile(
+        NodePath.join(configDir, "auth.json"),
+        '{"accessToken":"generic-token"}',
+      );
+      const read = makeCursorDashboardReader({
+        platform: "darwin",
+        readFile: (path) => NodeFSP.readFile(path, "utf8"),
+        fetch: async (_url, options) =>
+          Response.json({
+            ...me,
+            email:
+              new Headers(options.headers).get("Authorization") === "Bearer selected-token"
+                ? "selected@example.test"
+                : "generic@example.test",
+          }),
+      });
+      const dashboard = await read({
+        HOME: directory,
+        CURSOR_CONFIG_DIR: configDir,
+        AGENT_CLI_CREDENTIAL_STORE: "file",
+      });
+      expect((await dashboard.identify()).email).toBe("selected@example.test");
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("does not refresh expired auth and distinguishes account team contexts", async () => {

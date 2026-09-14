@@ -6,6 +6,8 @@ import { type ServerProviderUsageLimits, type UsageSummaryInput } from "@t3tools
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { cursorFileCredentialPath } from "./cursorCredentialPath.ts";
 
 const NonNegative = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const Count = NonNegative.check(Schema.isInt());
@@ -118,9 +120,11 @@ export function makeCursorDashboardReader(
   dependencies: {
     readonly fetch?: (url: string, options: RequestInit) => Promise<Response>;
     readonly readFile?: (path: string) => Promise<string>;
+    readonly platform?: NodeJS.Platform;
   } = {},
 ) {
   const fetchApi = dependencies.fetch ?? fetch;
+  const platform = dependencies.platform ?? HostProcessPlatform.defaultValue();
   const identities = requestCache<CursorAccount>();
   const periods = requestCache<ServerProviderUsageLimits>();
   const histories = requestCache<CursorHistory>((history) => history.status === "ok");
@@ -153,18 +157,12 @@ export function makeCursorDashboardReader(
           "Cursor usage requires the file credential store or an explicit access token.",
         );
       }
-      const configDir =
-        environment.CURSOR_CONFIG_DIR ||
-        (environment.XDG_CONFIG_HOME
-          ? NodePath.join(environment.XDG_CONFIG_HOME, "cursor")
-          : environment.HOME
-            ? NodePath.join(environment.HOME, ".cursor")
-            : undefined);
-      if (!configDir || !NodePath.isAbsolute(configDir))
+      const authPath = cursorFileCredentialPath(environment, platform);
+      if (!NodePath.isAbsolute(authPath))
         throw new Error("Cursor credential directory is unavailable.");
       try {
         if (!read) throw new Error();
-        token = decodeAuth(await read(NodePath.join(configDir, "auth.json"))).accessToken;
+        token = decodeAuth(await read(authPath)).accessToken;
       } catch {
         throw new Error("Cursor credentials could not be read for this instance.");
       }

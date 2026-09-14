@@ -1,4 +1,4 @@
-import { EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 export interface ProvisionedSandboxLease {
@@ -73,8 +73,16 @@ export function provisionedSandboxFor(
   return leases.get(key(target)) ?? null;
 }
 
-export function allProvisionedSandboxes(): ReadonlyArray<ProvisionedSandboxLease> {
-  return [...leases.values()];
+export function provisionedSandboxForEnvironment(environmentId: EnvironmentId) {
+  const prefix = `thread:${environmentId}:`;
+  for (const [entryKey, lease] of leases) {
+    if (entryKey.startsWith(prefix))
+      return {
+        lease,
+        threadRef: { environmentId, threadId: ThreadId.make(entryKey.slice(prefix.length)) },
+      };
+  }
+  return null;
 }
 
 export function forgetProvisionedSandbox(target: string | ScopedThreadRef): void {
