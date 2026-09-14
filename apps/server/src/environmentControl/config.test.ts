@@ -66,6 +66,48 @@ it("resolves cloud control configuration from the state directory by default", a
   expect(seen).toEqual(["/state/environment-control.json"]);
 });
 
+it("loads Namespace preparation artifacts and rejects invalid SHA256 digests", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-artifact-config-"));
+  const path = NodePath.join(directory, "config.json");
+  const artifact = {
+    path: "t3/ios/baseline.tar.gz",
+    destination: ".t3/ios-baseline.tar.gz",
+    sha256: "a".repeat(64),
+  };
+  const config = {
+    e2bApiKey: "test-key",
+    broker: {
+      sandboxId: "broker",
+      metadata: { owner: "test" },
+      url: "https://controller.invalid",
+      ingressKey: "test-ingress",
+    },
+    targets: [],
+  };
+  try {
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        ...config,
+        provisioning: { namespace: { size: "m", artifacts: [artifact] } },
+      }),
+    );
+    expect((await readConfig(path)).provisioning?.namespace?.artifacts).toEqual([artifact]);
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        ...config,
+        provisioning: {
+          namespace: { size: "m", artifacts: [{ ...artifact, sha256: "not-a-digest" }] },
+        },
+      }),
+    );
+    await expect(readConfig(path)).rejects.toThrow();
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
+
 it("reports no cloud control configuration rather than failing when the default is absent", async () => {
   expect(await resolveControlConfigPath({ stateDir: "/state", exists: async () => false })).toBe(
     null,
