@@ -8,7 +8,7 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
-import type { CloudDriver, Observation } from "./driver.ts";
+import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 
 const target: ManagedTarget = {
@@ -38,6 +38,7 @@ function setup(initial: Observation = { kind: "stopped" }) {
       calls.push("resume");
       return {};
     },
+    renew: async () => "running",
     observe: async () => {
       calls.push("observe");
       return state;
@@ -94,6 +95,135 @@ describe("managed cloud commands", () => {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   }
+  it("renews the provider before recording a successful heartbeat", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      const started = Promise.withResolvers<void>();
+      const renewed = Promise.withResolvers<void>();
+      driver.renew = vi.fn<CloudDriver["renew"]>(async () => {
+        started.resolve();
+        await renewed.promise;
+        return "running";
+      });
+      const touched = manager.touch({ leaseId: "lease" });
+      await started.promise;
+      expect(await registry.findById("lease")).toMatchObject({
+        expiresAt: "2026-01-01T00:15:00.000Z",
+      });
+      expect(await manager.pause(resumeInput)).toMatchObject({ kind: "refused" });
+      expect(await manager.resume(resumeInput)).toMatchObject({ kind: "refused" });
+      expect(await manager.dispose(resumeInput)).toMatchObject({ kind: "refused" });
+      await manager.reapExpiredLeases();
+      renewed.resolve();
+      expect(await touched).toEqual({ kind: "touched" });
+      expect(driver.renew).toHaveBeenCalledWith({
+        sandboxId: "sandbox",
+        providerInstanceId: "codex",
+      });
+      expect(await registry.expired()).toEqual([]);
+    });
+  });
+  it("does not extend the local lease when provider renewal fails", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.renew = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("secret-provider-token"))
+        .mockResolvedValue("running");
+      expect(await manager.touch({ leaseId: "lease" })).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "The cloud sandbox deadline could not be renewed. Retry shortly.",
+      });
+      expect(await registry.findById("lease")).toMatchObject({
+        expiresAt: "2026-01-01T00:15:00.000Z",
+      });
+      expect(await manager.touch({ leaseId: "lease" })).toEqual({ kind: "touched" });
+    });
+  });
+  it("records a provider pause without renewing or resuming the workspace", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.renew = vi.fn().mockResolvedValue("paused");
+      driver.resume = vi.fn();
+      expect(await manager.touch({ leaseId: "lease" })).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "The workspace is paused. Reconnect to continue.",
+      });
+      expect(await registry.findById("lease")).toMatchObject({
+        state: "paused",
+        expiresAt: "2026-01-01T00:15:00.000Z",
+      });
+      expect(driver.resume).not.toHaveBeenCalled();
+    });
+  });
+  it("remembers a missing provider workspace and refuses subsequent reconnects", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.renew = vi.fn().mockResolvedValue("missing");
+      driver.resume = vi.fn();
+      const expected = {
+        kind: "refused",
+        reason: "unknown",
+        message: "E2B no longer has this workspace. It cannot be reconnected.",
+      };
+      expect(await manager.touch({ leaseId: "lease" })).toEqual(expected);
+      expect(await registry.findById("lease")).toMatchObject({ state: "missing" });
+      expect(await manager.touch({ leaseId: "lease" })).toEqual(expected);
+      expect(await manager.resume(resumeInput)).toEqual(expected);
+      expect(driver.renew).toHaveBeenCalledTimes(1);
+      expect(driver.resume).not.toHaveBeenCalled();
+      expect(await registry.expired()).toEqual([]);
+    });
+  });
+  it("records a missing workspace discovered during explicit reconnect", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.resume = vi.fn().mockRejectedValue(new ProvisionedSandboxMissing());
+      const expected = {
+        kind: "refused",
+        reason: "unknown",
+        message: "E2B no longer has this workspace. It cannot be reconnected.",
+      };
+      expect(await manager.resume(resumeInput)).toEqual(expected);
+      expect(await manager.resume(resumeInput)).toEqual(expected);
+      expect(driver.resume).toHaveBeenCalledTimes(1);
+      expect(await registry.findById("lease")).toMatchObject({ state: "missing" });
+    });
+  });
+  it("does not renew unclaimed or unknown workspaces", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.register({
+        leaseId: "unclaimed",
+        sandboxId: "other",
+        providerInstanceId: "codex",
+      });
+      driver.renew = vi.fn();
+      for (const leaseId of ["unclaimed", "unknown"]) {
+        expect(await manager.touch({ leaseId })).toMatchObject({ kind: "refused" });
+      }
+      expect(driver.renew).not.toHaveBeenCalled();
+    });
+  });
+  it("keeps Namespace heartbeats independent of E2B", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.register({
+        leaseId: "namespace",
+        sandboxId: "devbox",
+        providerInstanceId: "codex",
+        namespaceResource: {
+          provider: "namespace",
+          devboxId: "devbox",
+          instanceId: "instance",
+          region: "us",
+          workspaceDir: "/Volumes/devbox/work",
+        },
+      });
+      await registry.claim({
+        leaseId: "namespace",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      driver.renew = vi.fn();
+      expect(await manager.touch({ leaseId: "namespace" })).toEqual({ kind: "touched" });
+      expect(driver.renew).not.toHaveBeenCalled();
+    });
+  });
   it("resumes the retained owned workspace and renews its lease only after provider readiness", async () => {
     await withLease(async ({ registry, driver, manager }) => {
       await registry.markPaused("lease");

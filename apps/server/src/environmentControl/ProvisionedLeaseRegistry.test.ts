@@ -79,6 +79,33 @@ describe("ProvisionedLeaseRegistry", () => {
     await registry.markPaused("lease");
     expect(await registry.findBySandbox("devbox")).toMatchObject({ state: "disposed" });
   });
+  it("persists missing workspaces without making them eligible for heartbeat, resume, or pause", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
+    temporaryDirectories.push(directory);
+    const path = NodePath.join(directory, "leases.json");
+    const registry = createProvisionedLeaseRegistry(path);
+    await registry.register({
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      providerInstanceId: "codex",
+    });
+    await registry.claim({
+      leaseId: "lease",
+      owner: { environmentId: "child", threadId: "thread" },
+    });
+    await registry.markMissing("lease");
+    const reopened = createProvisionedLeaseRegistry(path);
+    expect(await reopened.findById("lease")).toMatchObject({ state: "missing" });
+    expect(await reopened.touch("lease")).toBeNull();
+    expect(await reopened.markActive({ leaseId: "lease" })).toBeNull();
+    await reopened.markPaused("lease");
+    expect(await reopened.findBySandbox("sandbox")).toMatchObject({ state: "missing" });
+    expect(await reopened.expired(new Date("2100-01-01"))).toEqual([]);
+    expect(await reopened.beginRelease({ leaseId: "lease", sandboxId: "sandbox" })).toBe("started");
+    await reopened.markDisposed("lease");
+    await reopened.markMissing("lease");
+    expect(await reopened.findById("lease")).toMatchObject({ state: "disposed" });
+  });
   it("persists a lease and allows the same owner to claim it after reopening", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-"));
     temporaryDirectories.push(directory);

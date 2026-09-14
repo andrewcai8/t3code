@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
+import { SandboxNotFoundError } from "e2b";
 import { EnvironmentId } from "@t3tools/contracts";
-import { createCloudDriver } from "./driver.ts";
+import { createCloudDriver, ProvisionedSandboxMissing } from "./driver.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
 
 const sdk = vi.hoisted(() => ({
   getInfo: vi.fn(),
+  setTimeout: vi.fn(),
+  create: vi.fn(),
+  readFile: vi.fn(),
   connect: vi.fn(),
   fetch: vi.fn(),
   describe: vi.fn(),
@@ -12,7 +17,19 @@ const sdk = vi.hoisted(() => ({
   loadUserToken: vi.fn(),
   fromBearerToken: vi.fn(),
 }));
-vi.mock("e2b", () => ({ Sandbox: { getInfo: sdk.getInfo, connect: sdk.connect } }));
+vi.mock("node:fs/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs/promises")>()),
+  readFile: sdk.readFile,
+}));
+vi.mock("e2b", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("e2b")>()),
+  Sandbox: {
+    getInfo: sdk.getInfo,
+    connect: sdk.connect,
+    setTimeout: sdk.setTimeout,
+    create: sdk.create,
+  },
+}));
 vi.mock("@namespacelabs/sdk/auth", () => ({
   loadUserToken: sdk.loadUserToken.mockImplementation(async () => ({ issueToken: sdk.issueToken })),
   fromBearerToken: sdk.fromBearerToken.mockImplementation((token: string) => ({
@@ -58,6 +75,109 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 describe("cloud SDK and controller boundary", () => {
+  it("creates fork parents with a persistent timeout and cleans them up when a fork fails", async () => {
+    sdk.readFile.mockResolvedValue("{}\n");
+    const parent = {
+      fork: vi.fn().mockRejectedValue(new Error("fork unavailable")),
+      kill: vi.fn().mockResolvedValue(undefined),
+    };
+    sdk.create.mockResolvedValue(parent);
+    await expect(
+      createCloudDriver({ ...config, provisioning: { templateId: "template" } }).provision({
+        provider: "e2b",
+        providerInstanceId: "codex",
+      }),
+    ).rejects.toThrow("fork unavailable");
+    expect(sdk.create).toHaveBeenCalledWith(
+      "template",
+      expect.objectContaining({
+        lifecycle: { onTimeout: "pause", autoResume: false },
+      }),
+    );
+    expect(parent.fork).toHaveBeenCalledWith({ count: 1, timeoutMs: 6 * 3_600_000 });
+    expect(parent.kill).toHaveBeenCalledTimes(1);
+  });
+  it("renews an owned running workspace without connecting or shortening a longer deadline", async () => {
+    const retained = {
+      sandboxId: "retained",
+      state: "running",
+      metadata: { purpose: "t3-environment", account: "codex" },
+    };
+    sdk.getInfo
+      .mockResolvedValueOnce({
+        ...retained,
+        endAt: DateTime.toDateUtc(DateTime.makeUnsafe("2000-01-01T00:00:00Z")),
+      })
+      .mockResolvedValueOnce({
+        ...retained,
+        endAt: DateTime.toDateUtc(DateTime.makeUnsafe("2100-01-01T00:00:00Z")),
+      });
+    const driver = createCloudDriver(config);
+    const input = { sandboxId: "retained", providerInstanceId: "codex" };
+    expect(await driver.renew(input)).toBe("running");
+    expect(await driver.renew(input)).toBe("running");
+    expect(sdk.setTimeout).toHaveBeenCalledExactlyOnceWith(
+      "retained",
+      6 * 3_600_000,
+      expect.objectContaining({ apiKey: "secret-key" }),
+    );
+    expect(sdk.connect).not.toHaveBeenCalled();
+  });
+  it("observes a paused workspace without waking it or updating its timeout", async () => {
+    sdk.getInfo.mockResolvedValue({
+      sandboxId: "retained",
+      state: "paused",
+      metadata: { purpose: "t3-environment", account: "codex" },
+    });
+    expect(
+      await createCloudDriver(config).renew({ sandboxId: "retained", providerInstanceId: "codex" }),
+    ).toBe("paused");
+    expect(sdk.connect).not.toHaveBeenCalled();
+    expect(sdk.setTimeout).not.toHaveBeenCalled();
+  });
+  it("distinguishes a pause racing renewal from a missing workspace", async () => {
+    sdk.getInfo
+      .mockResolvedValueOnce({
+        sandboxId: "retained",
+        state: "running",
+        endAt: DateTime.toDateUtc(DateTime.makeUnsafe("2000-01-01T00:00:00Z")),
+        metadata: { purpose: "t3-environment", account: "codex" },
+      })
+      .mockResolvedValueOnce({
+        sandboxId: "retained",
+        state: "paused",
+        metadata: { purpose: "t3-environment", account: "codex" },
+      });
+    sdk.setTimeout.mockRejectedValueOnce(new SandboxNotFoundError("not running"));
+    expect(
+      await createCloudDriver(config).renew({ sandboxId: "retained", providerInstanceId: "codex" }),
+    ).toBe("paused");
+    expect(sdk.connect).not.toHaveBeenCalled();
+  });
+  it("distinguishes missing workspaces from provider availability failures", async () => {
+    const driver = createCloudDriver(config);
+    const input = { sandboxId: "retained", providerInstanceId: "codex" };
+    sdk.getInfo.mockRejectedValue(new SandboxNotFoundError("not found"));
+    expect(await driver.renew(input)).toBe("missing");
+    await expect(driver.resume({ ...input, environmentId: "child" })).rejects.toBeInstanceOf(
+      ProvisionedSandboxMissing,
+    );
+    sdk.getInfo.mockRejectedValue(new Error("temporary provider failure"));
+    await expect(driver.renew(input)).rejects.toThrow("temporary provider failure");
+    expect(sdk.connect).not.toHaveBeenCalled();
+    expect(sdk.setTimeout).not.toHaveBeenCalled();
+  });
+  it("refuses to extend another account's workspace", async () => {
+    sdk.getInfo.mockResolvedValue({
+      sandboxId: "retained",
+      state: "running",
+      metadata: { purpose: "t3-environment", account: "other" },
+    });
+    await expect(
+      createCloudDriver(config).renew({ sandboxId: "retained", providerInstanceId: "codex" }),
+    ).rejects.toThrow("ownership");
+    expect(sdk.setTimeout).not.toHaveBeenCalled();
+  });
   it("resumes the same E2B sandbox even with the legacy inherited kill timeout", async () => {
     const retained = {
       sandboxId: "retained",
@@ -77,7 +197,7 @@ describe("cloud SDK and controller boundary", () => {
     ).toEqual({});
     expect(sdk.connect).toHaveBeenCalledWith(
       "retained",
-      expect.objectContaining({ timeoutMs: 3_600_000 }),
+      expect.objectContaining({ timeoutMs: 6 * 3_600_000 }),
     );
   });
   it("refuses a provisioned sandbox owned by another account", async () => {
