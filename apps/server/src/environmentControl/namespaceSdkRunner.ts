@@ -8,11 +8,13 @@ import * as NodeUtil from "node:util";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
+import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import type { NamespaceResource, NamespaceRunner } from "./namespaceProvisioner.ts";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 const DEVBOX_API = "https://private-api.global.namespaceapis.com";
+const ARTIFACTS_API = "https://ord.storage.namespaceapis.com";
 
 export interface NamespaceSdkRunnerOptions {
   readonly token?: string;
@@ -204,6 +206,17 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
     DevBoxService,
     createGlobalTransport({ tokenSource, baseUrl: DEVBOX_API }),
   );
+  const resolveArtifact = async (path: string) => {
+    const artifacts = createClient(
+      ArtifactsService,
+      createGlobalTransport({ tokenSource, baseUrl: ARTIFACTS_API }),
+    );
+    const result = await artifacts.resolveArtifact(
+      { namespace: "main", path },
+      { timeoutMs: 30_000 },
+    );
+    return result.signedDownloadUrl;
+  };
   return {
     create: async (input) => {
       const name = `t3-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
@@ -330,6 +343,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       files = [],
       environment = [],
       prepareCommands = [],
+      artifacts = [],
     }) => {
       const homeDir = retainedHome(resource);
       const runInHome = (args: readonly string[]) => {
@@ -414,6 +428,54 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
           "-lc",
           `chmod ${file.mode ?? "600"} ${shellQuote(destination)}`,
         ]);
+      }
+      for (const artifact of artifacts) {
+        const destination = namespaceDestination(artifact.destination, homeDir, projectDir);
+        let url: URL;
+        try {
+          url = new URL(await resolveArtifact(artifact.path));
+        } catch {
+          throw new Error("Namespace preparation artifact could not be resolved");
+        }
+        if (url.protocol !== "https:" || url.username || url.password)
+          throw new Error("Namespace preparation artifact requires a private HTTPS download URL");
+        const temporaryDir = await NodeFSP.mkdtemp(
+          NodePath.join(NodeOS.tmpdir(), "t3-namespace-artifact-"),
+        );
+        const guestDirectory = `${homeDir}/.t3/artifact-${crypto.randomUUID()}`;
+        const guestConfig = `${guestDirectory}/download.curl`;
+        const partial = `${destination}.t3-${crypto.randomUUID()}`;
+        const localConfig = NodePath.join(temporaryDir, "download.curl");
+        try {
+          await NodeFSP.writeFile(
+            localConfig,
+            `url = ${JSON.stringify(url.href)}\nfail\nsilent\nlocation\nproto = "=https"\nproto-redir = "=https"\nconnect-timeout = 30\nmax-time = 1800\n`,
+            { mode: 0o600 },
+          );
+          await run([
+            "exec",
+            nameOf(resource),
+            "--",
+            "sh",
+            "-lc",
+            `mkdir -p ${shellQuote(guestDirectory)} && chmod 700 ${shellQuote(guestDirectory)}`,
+          ]);
+          await upload(nameOf(resource), localConfig, guestConfig);
+          const cleanup = `rm -rf ${shellQuote(guestDirectory)}; rm -f ${shellQuote(partial)}`;
+          const download =
+            `set -eu; umask 077; trap ${shellQuote(cleanup)} EXIT; ` +
+            `chmod 600 ${shellQuote(guestConfig)}; mkdir -p ${shellQuote(NodePath.posix.dirname(destination))}; ` +
+            `curl --disable --config ${shellQuote(guestConfig)} --output ${shellQuote(partial)} || { echo 'Namespace artifact download failed' >&2; exit 1; }; ` +
+            `actual=$(shasum -a 256 ${shellQuote(partial)}); ` +
+            `test "\${actual%% *}" = ${shellQuote(artifact.sha256)} || { echo 'Namespace artifact SHA256 mismatch' >&2; exit 1; }; ` +
+            `test ! -d ${shellQuote(destination)}; mv -f ${shellQuote(partial)} ${shellQuote(destination)}`;
+          await run(["exec", nameOf(resource), "--", "sh", "-lc", download]);
+        } finally {
+          await Promise.all([
+            NodeFSP.rm(temporaryDir, { recursive: true, force: true }),
+            run(["exec", nameOf(resource), "--", "rm", "-rf", guestDirectory, partial]),
+          ]);
+        }
       }
       if (environment.length > 0) {
         const retainedEnvironment = environment.map(({ name, value, sensitive }) => {

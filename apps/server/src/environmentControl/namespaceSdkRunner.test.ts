@@ -6,6 +6,8 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeCrypto from "node:crypto";
+import * as NodeHttps from "node:https";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import { ProviderInstanceId } from "@t3tools/contracts";
@@ -50,7 +52,7 @@ describe("Namespace runner boundary parsing", () => {
   });
 });
 
-const api = vi.hoisted(() => ({ fetch: vi.fn(), activate: vi.fn() }));
+const api = vi.hoisted(() => ({ fetch: vi.fn(), activate: vi.fn(), resolveArtifact: vi.fn() }));
 vi.mock("@namespacelabs/sdk/api", () => ({
   createClient: () => api,
   createGlobalTransport: vi.fn(),
@@ -84,6 +86,180 @@ function resumeFixture(input: { running?: boolean; healthy?: boolean; identity?:
   });
   return { runner: createNamespaceSdkRunner({ execute, upload: vi.fn(), token: "test" }), execute };
 }
+
+async function artifactFixture() {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-artifact-download-"));
+  const home = NodePath.join(directory, "home");
+  const project = NodePath.join(directory, "project");
+  const certificate = NodePath.join(directory, "certificate.pem");
+  const key = NodePath.join(directory, "key.pem");
+  const config = NodePath.join(directory, "certificate.conf");
+  await NodeFSP.writeFile(
+    config,
+    "[req]\ndistinguished_name=dn\nx509_extensions=extensions\nprompt=no\n[dn]\nCN=127.0.0.1\n[extensions]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\n",
+  );
+  await NodeUtil.promisify(NodeChildProcess.execFile)("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "1",
+    "-keyout",
+    key,
+    "-out",
+    certificate,
+    "-config",
+    config,
+  ]);
+  const body = "verified iOS baseline bytes";
+  let status = 200;
+  const server = NodeHttps.createServer(
+    { key: await NodeFSP.readFile(key), cert: await NodeFSP.readFile(certificate) },
+    (_request, response) => {
+      response.writeHead(status);
+      response.end(body);
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("HTTPS fixture has no TCP address");
+  let signedUrls = 0;
+  api.resolveArtifact.mockReset().mockImplementation(async () => ({
+    signedDownloadUrl: `https://127.0.0.1:${address.port}/artifact?signature=private-signature-${++signedUrls}`,
+  }));
+  await NodeFSP.mkdir(NodePath.join(home, ".t3"), { recursive: true });
+  await NodeFSP.mkdir(project);
+  await NodeFSP.writeFile(
+    NodePath.join(project, "prepare-artifact.sh"),
+    '#!/bin/sh\ncp "$HOME/.t3/baseline.tar.gz" prepared\n',
+    { mode: 0o700 },
+  );
+  const { execute } = resumeFixture({ healthy: true });
+  const baseExecute = execute.getMockImplementation()!;
+  const local = (value: string) =>
+    value
+      .replaceAll(retainedResource.homeDir, home)
+      .replaceAll(retainedResource.workspaceDir, project);
+  const localConfigs: string[] = [];
+  let failUpload = false;
+  execute.mockImplementation(async (args) => {
+    expect(args.join(" ")).not.toContain("private-signature-");
+    const command = args.at(-1) ?? "";
+    if (
+      args.includes("-lc") &&
+      (command.includes("artifact-") || command.includes("prepare-artifact.sh"))
+    )
+      return NodeUtil.promisify(NodeChildProcess.execFile)("sh", ["-c", local(command)], {
+        env: { ...process.env, CURL_CA_BUNDLE: certificate },
+      });
+    if (args.includes("rm")) {
+      await NodeFSP.rm(local(args.at(-2)!), { recursive: true, force: true });
+      await NodeFSP.rm(local(args.at(-1)!), { force: true });
+      return { stdout: "", stderr: "" };
+    }
+    return baseExecute(args);
+  });
+  const runner = createNamespaceSdkRunner({
+    execute,
+    token: "controller-token-stays-local",
+    upload: async (_name, source, destination) => {
+      localConfigs.push(source);
+      expect((await NodeFSP.stat(source)).mode & 0o777).toBe(0o600);
+      const contents = await NodeFSP.readFile(source, "utf8");
+      expect(contents).not.toContain("controller-token-stays-local");
+      await NodeFSP.copyFile(source, local(destination));
+      if (failUpload) throw new Error("upload failed after copying private config");
+    },
+  });
+  const input = {
+    resource: retainedResource,
+    projectDir: retainedResource.workspaceDir,
+    providerInstanceId: "codex",
+    artifacts: [
+      {
+        path: "t3/ios/baseline.tar.gz",
+        destination: ".t3/baseline.tar.gz",
+        sha256: NodeCrypto.createHash("sha256").update(body).digest("hex"),
+      },
+    ],
+    prepareCommands: ["./prepare-artifact.sh"],
+  };
+  return {
+    runner,
+    input,
+    execute,
+    home,
+    project,
+    failDownload: () => {
+      status = 503;
+    },
+    failUpload: () => {
+      failUpload = true;
+    },
+    assertClean: async () => {
+      expect(
+        (await NodeFSP.readdir(NodePath.join(home, ".t3"))).filter(
+          (name) => name !== "baseline.tar.gz",
+        ),
+      ).toEqual([]);
+      for (const path of localConfigs) await expect(NodeFSP.access(path)).rejects.toThrow();
+    },
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+it("downloads verified artifacts before preparation and resolves fresh credentials for each bootstrap", async () => {
+  const fixture = await artifactFixture();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await fixture.runner.bootstrap(fixture.input);
+      expect(await NodeFSP.readFile(NodePath.join(fixture.project, "prepared"), "utf8")).toBe(
+        "verified iOS baseline bytes",
+      );
+      await fixture.assertClean();
+    }
+    expect(api.resolveArtifact.mock.calls).toEqual([
+      [{ namespace: "main", path: "t3/ios/baseline.tar.gz" }, { timeoutMs: 30_000 }],
+      [{ namespace: "main", path: "t3/ios/baseline.tar.gz" }, { timeoutMs: 30_000 }],
+    ]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+it.each(["digest", "download", "upload"])(
+  "preserves the previous artifact and cleans private files after %s failure",
+  async (failure) => {
+    const fixture = await artifactFixture();
+    try {
+      await NodeFSP.writeFile(
+        NodePath.join(fixture.home, ".t3/baseline.tar.gz"),
+        "previous verified baseline",
+      );
+      if (failure === "digest") fixture.input.artifacts[0]!.sha256 = "0".repeat(64);
+      if (failure === "download") fixture.failDownload();
+      if (failure === "upload") fixture.failUpload();
+      await expect(fixture.runner.bootstrap(fixture.input)).rejects.toThrow();
+      expect(
+        await NodeFSP.readFile(NodePath.join(fixture.home, ".t3/baseline.tar.gz"), "utf8"),
+      ).toBe("previous verified baseline");
+      await expect(NodeFSP.access(NodePath.join(fixture.project, "prepared"))).rejects.toThrow();
+      expect(fixture.execute.mock.calls.filter(([args]) => args.includes("-d"))).toEqual([]);
+      await fixture.assertClean();
+    } finally {
+      await fixture.close();
+    }
+  },
+);
 
 describe("Namespace retained resume", () => {
   it("activates the existing Devbox and restarts T3 after stale runtime files", async () => {

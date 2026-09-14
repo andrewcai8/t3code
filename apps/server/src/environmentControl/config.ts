@@ -25,6 +25,12 @@ const Target = Schema.Struct({
     }),
   ]),
 });
+export const NamespaceArtifact = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  destination: TrimmedNonEmptyString,
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export type NamespaceArtifact = typeof NamespaceArtifact.Type;
 /**
  * What an install needs to create environments on demand, as opposed to
  * controlling ones it already declares. Absent on a machine that only manages
@@ -100,6 +106,7 @@ const Provisioning = Schema.Struct({
       region: Schema.optional(TrimmedNonEmptyString),
       idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
       prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+      artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
     }),
   ),
 });

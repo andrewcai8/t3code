@@ -1,3 +1,5 @@
+import type { NamespaceArtifact } from "./config.ts";
+
 export interface NamespaceResource {
   readonly provider: "namespace";
   readonly devboxId: string;
@@ -41,6 +43,7 @@ export interface NamespaceRunner {
       readonly sensitive?: boolean;
     }[];
     readonly prepareCommands?: readonly string[];
+    readonly artifacts?: readonly NamespaceArtifact[] | undefined;
   }) => Promise<void>;
   readonly expose: (input: {
     readonly resource: NamespaceResource;
@@ -70,6 +73,7 @@ export interface NamespaceProvisionRequest {
     readonly sensitive?: boolean;
   }[];
   readonly prepareCommands?: readonly string[];
+  readonly artifacts?: readonly NamespaceArtifact[] | undefined;
   readonly workspaceFiles?: readonly {
     readonly source: string;
     readonly destination: string;
