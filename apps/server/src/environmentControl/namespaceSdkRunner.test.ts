@@ -522,12 +522,24 @@ it("uses the retained credential store without invoking an inherited system help
         .trim()
         .split("\n"),
     ).toEqual(["git@github.com:", "ssh://git@github.com/"]);
+    await run(
+      "sh",
+      [
+        "-c",
+        "printf 'protocol=https\\nhost=fixture.invalid\\nusername=selected\\npassword=synthetic-refreshed\\n\\n' | git credential approve",
+      ],
+      { env: environment },
+    );
+    expect(NodeFS.existsSync(marker)).toBe(false);
+    expect(await NodeFSP.readFile(NodePath.join(localHome, ".git-credentials"), "utf8")).toBe(
+      "https://selected:synthetic-refreshed@fixture.invalid\n",
+    );
     const result = await run(
       "sh",
       ["-c", "printf 'protocol=https\\nhost=fixture.invalid\\n\\n' | git credential fill"],
       { env: environment },
     );
-    expect(result.stdout).toContain("username=selected\npassword=synthetic");
+    expect(result.stdout).toContain("username=selected\npassword=synthetic-refreshed");
     expect(
       await NodeFSP.stat(marker).then(
         () => true,
