@@ -339,6 +339,30 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
         );
       };
       await run(["exec", nameOf(resource), "--", "mkdir", "-p", homeDir]);
+      if (githubToken) {
+        const temporaryDir = await NodeFSP.mkdtemp(
+          NodePath.join(NodeOS.tmpdir(), "t3-namespace-gh-"),
+        );
+        const credentials = NodePath.join(temporaryDir, "hosts.yml");
+        try {
+          await NodeFSP.writeFile(
+            credentials,
+            `github.com:\n    oauth_token: ${githubToken}\n    git_protocol: https\n`,
+            { mode: 0o600 },
+          );
+          await upload(nameOf(resource), credentials, `${homeDir}/.config/gh/hosts.yml`);
+        } finally {
+          await NodeFSP.rm(temporaryDir, { recursive: true, force: true });
+        }
+        await runInHome([
+          "exec",
+          nameOf(resource),
+          "--",
+          "sh",
+          "-lc",
+          'chmod 600 "$HOME/.config/gh/hosts.yml"',
+        ]);
+      }
       if (repository === undefined) {
         const command = `mkdir -p ${shellQuote(projectDir)}`;
         await runInHome(["exec", nameOf(resource), "--", "sh", "-lc", command]);
