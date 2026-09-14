@@ -149,10 +149,12 @@ async function prepare(
   const t3Home = "/home/user/.t3-cloud";
   const environment = [
     ...preparation.environment.filter(
-      ({ name }) => name !== "T3CODE_HOME" && name !== "NPM_CONFIG_PREFIX",
+      ({ name }) =>
+        name !== "T3CODE_HOME" && name !== "NPM_CONFIG_PREFIX" && name !== "NODE_OPTIONS",
     ),
     { name: "T3CODE_HOME", value: t3Home, sensitive: false },
     { name: "NPM_CONFIG_PREFIX", value: "/home/user/.local", sensitive: false },
+    { name: "NODE_OPTIONS", value: "--max-old-space-size=4096", sensitive: false },
   ];
   const envs = Object.fromEntries(environment.map(({ name, value }) => [name, value]));
   const run = async (command: string, timeoutMs = 180_000) => {

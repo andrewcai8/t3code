@@ -4,6 +4,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
@@ -134,10 +135,27 @@ function retainedHome(resource: NamespaceResource): string {
 
 function runtimeShell(homeDir: string, command: string): string {
   return (
-    `export HOME=${shellQuote(homeDir)} PATH=${shellQuote(runtimePath(homeDir))} NPM_CONFIG_PREFIX=${shellQuote(`${homeDir}/.local`)}; ` +
+    `export HOME=${shellQuote(homeDir)} PATH=${shellQuote(runtimePath(homeDir))} NPM_CONFIG_PREFIX=${shellQuote(`${homeDir}/.local`)} NODE_OPTIONS=${shellQuote("--max-old-space-size=4096")}; ` +
     `if [ -f "$HOME/.profile.d-agents.sh" ]; then . "$HOME/.profile.d-agents.sh"; fi; ` +
     command
   );
+}
+
+async function readRetainedCliInstaller(): Promise<string> {
+  const candidates = [
+    NodeURL.fileURLToPath(
+      new URL("../../../../scripts/cloud/install-retained-cli.sh", import.meta.url),
+    ),
+    NodePath.resolve(process.cwd(), "scripts/cloud/install-retained-cli.sh"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return await NodeFSP.readFile(candidate, "utf8");
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("Namespace retained CLI installer is missing");
 }
 
 async function healthyT3(
@@ -557,6 +575,42 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
               : "";
       if (providerInstall)
         await runInHome(["exec", nameOf(resource), "--", "sh", "-lc", providerInstall]);
+      const retainedCliInstaller = `${homeDir}/.t3/install-retained-cli.sh`;
+      const retainedPrefix = `${homeDir}/.local`;
+      const installerDir = await NodeFSP.mkdtemp(
+        NodePath.join(NodeOS.tmpdir(), "t3-namespace-retained-cli-"),
+      );
+      const installerSource = NodePath.join(installerDir, "install-retained-cli.sh");
+      try {
+        await NodeFSP.writeFile(installerSource, await readRetainedCliInstaller(), { mode: 0o600 });
+        await runInHome([
+          "exec",
+          nameOf(resource),
+          "--",
+          "sh",
+          "-lc",
+          `mkdir -p ${shellQuote(`${homeDir}/.t3`)} ${shellQuote(`${retainedPrefix}/bin`)}`,
+        ]);
+        await upload(nameOf(resource), installerSource, retainedCliInstaller);
+      } finally {
+        await NodeFSP.rm(installerDir, { recursive: true, force: true });
+      }
+      await runInHome([
+        "exec",
+        nameOf(resource),
+        "--",
+        "sh",
+        "-lc",
+        `chmod 700 ${shellQuote(retainedCliInstaller)}`,
+      ]);
+      await runInHome([
+        "exec",
+        nameOf(resource),
+        "--",
+        "sh",
+        "-lc",
+        `PREFIX=${shellQuote(retainedPrefix)} ${shellQuote(retainedCliInstaller)}`,
+      ]);
       for (const command of [...prepareCommands, ...verifyCommands]) {
         await runInHome([
           "exec",

@@ -204,7 +204,7 @@ async function artifactFixture() {
     assertClean: async () => {
       expect(
         (await NodeFSP.readdir(NodePath.join(home, ".t3"))).filter(
-          (name) => name !== "baseline.tar.gz",
+          (name) => name !== "baseline.tar.gz" && name !== "install-retained-cli.sh",
         ),
       ).toEqual([]);
       for (const path of localConfigs) await expect(NodeFSP.access(path)).rejects.toThrow();
@@ -399,9 +399,17 @@ it.each(["codex", "cursor", "claudeAgent"])(
     const launch = execute.mock.calls.find(([args]) => args.includes("-d"))?.[0].at(-1);
     expect(launch).toContain("export HOME='/Volumes/devbox/.t3-home'");
     expect(launch).toContain("NPM_CONFIG_PREFIX='/Volumes/devbox/.t3-home/.local'");
+    expect(launch).toContain("NODE_OPTIONS='--max-old-space-size=4096'");
     expect(launch).toContain("/Volumes/devbox/.t3-home/.local/bin");
     expect(launch).toContain("npx --yes t3@0.0.40 --no-browser --auto-bootstrap-project-from-cwd");
     expect(launch).not.toContain("/Users/runner");
+    const install = execute.mock.calls
+      .map(([args]) => args.join(" "))
+      .find(
+        (command) => command.includes("install-retained-cli.sh") && command.includes("PREFIX="),
+      );
+    expect(install).toContain("PREFIX='/Volumes/devbox/.t3-home/.local'");
+    expect(install).not.toMatch(/brew install/);
   },
 );
 
@@ -758,7 +766,9 @@ it("does not provision GitHub credentials without a configured token", async () 
     projectDir: retainedResource.workspaceDir,
     providerInstanceId: "codex",
   });
-  expect(upload).not.toHaveBeenCalled();
+  expect(upload.mock.calls.map(([, , destination]) => destination)).toEqual([
+    "/Volumes/devbox/.t3-home/.t3/install-retained-cli.sh",
+  ]);
   expect(execute.mock.calls.flat(2).join(" ")).not.toMatch(/hosts\.yml|git-credentials/);
 });
 
@@ -897,6 +907,41 @@ it.each([
     ),
   ).toBe(true);
   expect(commands).toContain(`url expose retained --port ${expected} --access workspace -o json`);
+});
+
+it("installs retained CLI tools into the Namespace home prefix without Homebrew", async () => {
+  const { execute } = resumeFixture({ healthy: true });
+  const uploaded = new Map<string, string>();
+  const runner = createNamespaceSdkRunner({
+    execute,
+    token: "test",
+    upload: async (_name, source, destination) => {
+      expect((await NodeFSP.stat(source)).mode & 0o777).toBe(0o600);
+      uploaded.set(destination, await NodeFSP.readFile(source, "utf8"));
+    },
+  });
+  await runner.bootstrap({
+    resource: retainedResource,
+    projectDir: retainedResource.workspaceDir,
+    providerInstanceId: "codex",
+  });
+  const installer = uploaded.get("/Volumes/devbox/.t3-home/.t3/install-retained-cli.sh");
+  expect(installer).toContain('PREFIX="${PREFIX:-$HOME/.local}"');
+  expect(installer).toContain("ripgrep-15.2.0-aarch64-apple-darwin.tar.gz");
+  expect(installer).toContain('PREFIX="$PREFIX" MALLOC=libc BUILD_TLS=no');
+  expect(installer).toContain("expected under $BIN");
+  expect(installer).not.toMatch(/brew install/);
+  const recorded = execute.mock.calls.map(([args]) => args.join(" "));
+  expect(
+    recorded.some(
+      (command) =>
+        command.includes("PREFIX='/Volumes/devbox/.t3-home/.local'") &&
+        command.includes("/Volumes/devbox/.t3-home/.t3/install-retained-cli.sh"),
+    ),
+  ).toBe(true);
+  expect(recorded.join("\n")).not.toMatch(/brew install/);
+  const launch = execute.mock.calls.find(([args]) => args.includes("-d"))?.[0].at(-1);
+  expect(launch).toContain("NODE_OPTIONS='--max-old-space-size=4096'");
 });
 
 it("starts and exposes a new Namespace server on port 3001", async () => {

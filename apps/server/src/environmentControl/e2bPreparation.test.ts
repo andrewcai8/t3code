@@ -256,6 +256,23 @@ it.each([
   },
 );
 
+it("forces NODE_OPTIONS in the guest profile so install can use a 4 GiB heap", async () => {
+  const driver = createCloudDriver(config, async () => ({
+    ...(await profile()),
+    environment: [
+      ...(await profile()).environment,
+      { name: "NODE_OPTIONS", value: "--max-old-space-size=512", sensitive: false },
+    ],
+  }));
+  await driver.provision({ provider: "e2b", providerInstanceId: "selected" });
+  const value = await exec(
+    "/bin/sh",
+    ["-c", `. "$HOME/.profile.d-agents.sh"; printf '%s' "$NODE_OPTIONS"`],
+    { env: { HOME: directory, PATH: "/usr/bin:/bin" } },
+  );
+  expect(value.stdout).toBe("--max-old-space-size=4096");
+});
+
 it("prepares and verifies before pairing with isolated T3 state and literal selected environment", async () => {
   const driver = createCloudDriver(
     {
