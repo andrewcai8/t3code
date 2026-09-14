@@ -5,7 +5,8 @@ set -eu
 
 cd "$(git rev-parse --show-toplevel)"
 git remote show upstream >/dev/null 2>&1 || git remote add upstream https://github.com/pingdotgg/t3code.git
-git fetch --prune origin upstream
+git fetch --prune origin
+git fetch --prune upstream
 
 base=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
 base=${base#origin/}
