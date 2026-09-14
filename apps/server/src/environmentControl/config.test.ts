@@ -17,6 +17,7 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   };
   const config = {
     e2bApiKey: "test-key",
+    namespaceIngressToken: "obsolete-expired-token",
     broker: {
       sandboxId: "broker",
       metadata: { owner: "test" },
@@ -28,6 +29,7 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   try {
     await NodeFSP.writeFile(path, JSON.stringify(config), { mode: 0o600 });
     expect((await readConfig(path)).targets[0]?.environmentId).toBe("cloud");
+    expect(await readConfig(path)).not.toHaveProperty("namespaceIngressToken");
     expect((await readConfig(path)).provisioning?.namespace?.prepareCommands).toBeUndefined();
     await NodeFSP.writeFile(
       path,
