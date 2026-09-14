@@ -13,7 +13,15 @@ import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Schema from "effect/Schema";
 import { resolveNamespaceIdentity, namespaceMacImage } from "./namespaceAllocation.ts";
 import { ProvisionRuntimeArtifact, type EnvironmentControlConfig } from "./config.ts";
-import { accountAuthPath, enableChildProvider, ProvisionRefused, repositoryUrl } from "./driver.ts";
+import {
+  accountAuthPath,
+  carriesCredential,
+  credentialDestination,
+  enableChildProvider,
+  ProvisionRefused,
+  repositoryUrl,
+  skillRoot,
+} from "./driver.ts";
 
 const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
 const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
@@ -113,6 +121,44 @@ function submittedFiles(input: EnvironmentProvisionInput) {
       );
     return file("workspace", item.destination, data);
   });
+}
+
+/**
+ * Every file in a skill bundle, by path within it.
+ *
+ * Directory symlinks are followed by neither `readdir` nor this walk. A
+ * bundle is configuration a manager operator points at, but it lands in an
+ * environment that then holds whatever it names, so a link out of the bundle
+ * is refused rather than resolved.
+ */
+async function skillFiles(source: string, limit: { remaining: number }) {
+  const collected: Array<{ path: string; data: Uint8Array }> = [];
+  const walk = async (directory: string, prefix: string) => {
+    for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
+      const absolute = NodePath.join(directory, entry.name);
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink())
+        throw new ProvisionRefused(
+          "unconfigured",
+          "A configured skill bundle contains a symbolic link.",
+        );
+      if (entry.isDirectory()) {
+        await walk(absolute, relative);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const data = await NodeFSP.readFile(absolute);
+      limit.remaining -= data.length;
+      if (limit.remaining < 0)
+        throw new ProvisionRefused(
+          "unsupported",
+          "Configured skill bundles exceed the 64 MiB file limit.",
+        );
+      collected.push({ path: relative, data });
+    }
+  };
+  await walk(source, "");
+  return collected;
 }
 
 async function privateDirectory(path: string) {
@@ -243,9 +289,15 @@ export function makeProvisionPreparationStore(stateDir: string) {
         }
       }
       const driver = input.agentDriver ?? "codex";
-      const credentialTarget =
-        driver === "cursor" ? ".config/cursor/auth.json" : ".codex/auth.json";
-      if (driver === "codex" || driver === "cursor") {
+      const skillLimit = { remaining: provisionInputLimit };
+      for (const skill of provisioning.skills ?? []) {
+        const prefix = skill.name ? `${relativePath(skill.name)}/` : "";
+        for (const entry of await skillFiles(skill.source, skillLimit)) {
+          files.push(file("home", `${skillRoot(driver)}/${prefix}${entry.path}`, entry.data));
+        }
+      }
+      const credentialTarget = credentialDestination(driver);
+      if (carriesCredential(driver)) {
         const credential = await NodeFSP.readFile(
           accountAuthPath(input.providerInstanceId, home),
         ).catch(() => {

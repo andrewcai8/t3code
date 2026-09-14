@@ -109,6 +109,32 @@ const Provisioning = Schema.Struct({
       }),
     ),
   ),
+  /**
+   * Skill bundles copied into a new environment, by directory.
+   *
+   * An agent that reaches a prepared sandbox without its playbooks will
+   * improvise, which is the opposite of why a bug is routed to one. Each CLI
+   * reads skills from a different place, so a bundle is named once here and
+   * the selected driver decides where it lands.
+   */
+  skills: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        /** Absolute directory on the machine running the server. */
+        source: TrimmedNonEmptyString,
+        /**
+         * Directory name within the environment's skill root, for a source
+         * that is one skill.
+         *
+         * Omitted, the source is read as a directory of skills and its
+         * children land in the root directly. Every supported CLI resolves a
+         * skill as `<root>/<directory>/SKILL.md` and looks no deeper, so a
+         * plugin holding many skills needs the flat form to be found at all.
+         */
+        name: Schema.optional(TrimmedNonEmptyString),
+      }),
+    ),
+  ),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
   namespace: Schema.optional(
     Schema.Struct({

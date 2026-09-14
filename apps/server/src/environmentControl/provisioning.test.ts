@@ -1,6 +1,14 @@
 import { expect, it } from "vite-plus/test";
 
-import { ProvisionRefused, accountAuthPath, enableChildProvider, repositoryUrl } from "./driver.ts";
+import {
+  ProvisionRefused,
+  accountAuthPath,
+  carriesCredential,
+  credentialDestination,
+  enableChildProvider,
+  repositoryUrl,
+  skillRoot,
+} from "./driver.ts";
 
 it("reads each account's credentials from its own shadow home", () => {
   // Every entry in a shadow home except auth.json links back to the shared
@@ -102,4 +110,33 @@ it("uses the isolated Codex home instead of a copied manager account path", () =
     shadowHomePath: "",
   });
   expect(() => repositoryUrl("owner/repo/extra")).toThrow("owner/name");
+});
+
+it("sends each agent's skills to the root that agent actually reads", () => {
+  // A bundle placed where the CLI does not look is indistinguishable from no
+  // bundle at all, and every supported CLI spells the location differently.
+  expect(skillRoot("codex")).toBe(".codex/skills");
+  expect(skillRoot("cursor")).toBe(".cursor/skills");
+  expect(skillRoot("claude")).toBe(".claude/skills");
+});
+
+it("keeps skills out of the checkout an agent opens a pull request from", () => {
+  // Home-relative roots, never workspace-relative. A bundle committed by
+  // accident is a worse failure than a missing one.
+  for (const driver of ["codex", "cursor", "claude"])
+    expect(skillRoot(driver).startsWith("."), driver).toBe(true);
+});
+
+it("finds a Claude sign-in where the CLI writes it", () => {
+  // Claude Code keeps a dotfile credential rather than the auth.json the
+  // other drivers use, so the generic shadow-home rule would miss it.
+  expect(accountAuthPath("claude", "/home/a")).toBe("/home/a/.claude/.credentials.json");
+  expect(accountAuthPath("claude_work", "/home/a")).toBe("/home/a/.claude/.credentials.json");
+});
+
+it("installs a sign-in for every agent a sandbox can be asked to run", () => {
+  expect(carriesCredential("claude")).toBe(true);
+  expect(credentialDestination("claude")).toBe(".claude/.credentials.json");
+  expect(credentialDestination("cursor")).toBe(".config/cursor/auth.json");
+  expect(credentialDestination("codex")).toBe(".codex/auth.json");
 });

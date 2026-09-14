@@ -65,9 +65,37 @@ export function accountAuthPath(providerInstanceId: string, home = NodeOS.homedi
       ".cursor/auth.json",
     );
   }
+  if (providerInstanceId === "claude" || providerInstanceId.startsWith("claude_"))
+    return NodePath.join(home, ".claude/.credentials.json");
   return providerInstanceId === "codex"
     ? NodePath.join(home, ".codex/auth.json")
     : NodePath.join(home, `.${providerInstanceId}/auth.json`);
+}
+
+/**
+ * Where an agent CLI reads skills inside a provisioned environment, relative
+ * to its home directory.
+ *
+ * Every supported CLI resolves a user-scoped root, so skills land in the home
+ * rather than the checkout. A checkout is what the agent opens a pull request
+ * from, and a skill bundle committed by accident is worse than a missing one.
+ */
+export function skillRoot(driver: string): string {
+  if (driver === "cursor") return ".cursor/skills";
+  if (driver === "claude") return ".claude/skills";
+  return ".codex/skills";
+}
+
+/** Agent CLIs whose sign-in provisioning knows how to install. */
+export function carriesCredential(driver: string): boolean {
+  return driver === "codex" || driver === "cursor" || driver === "claude";
+}
+
+/** Where a driver expects its sign-in inside a provisioned environment. */
+export function credentialDestination(driver: string): string {
+  if (driver === "cursor") return ".config/cursor/auth.json";
+  if (driver === "claude") return ".claude/.credentials.json";
+  return ".codex/auth.json";
 }
 
 type ChildSettings = {

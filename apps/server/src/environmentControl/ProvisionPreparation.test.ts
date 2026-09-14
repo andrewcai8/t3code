@@ -191,3 +191,154 @@ it("refuses a modified persisted preparation manifest", async () => {
     await f.cleanup();
   }
 });
+
+const decodeProvisionInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
+/** The same request, aimed at a different agent CLI and account. */
+const inputFor = (agentDriver: string, providerInstanceId: string) =>
+  decodeProvisionInput({
+    requestId: "05d43b4e-0b92-477b-9503-31a377147fb0",
+    provider: "e2b",
+    providerInstanceId,
+    agentDriver,
+    repository: "example/repo",
+    workspaceFiles: [evidence],
+    retentionDeadline: "2099-01-01T00:00:00.000Z",
+  });
+
+/** A skill bundle with nested content, as a real playbook directory has. */
+async function skillBundle(root: string) {
+  const source = NodePath.join(root, "bundles/pstack");
+  await NodeFSP.mkdir(NodePath.join(source, "skills/why"), { recursive: true });
+  await NodeFSP.writeFile(NodePath.join(source, "SKILL.md"), "---\nname: pstack\n---\n");
+  await NodeFSP.writeFile(NodePath.join(source, "skills/why/SKILL.md"), "why\n");
+  return source;
+}
+const homeFile = (
+  manifest: Awaited<ReturnType<ReturnType<typeof makeProvisionPreparationStore>["freeze"]>>,
+  destination: string,
+) =>
+  manifest.preparation.files.find(
+    (item) => item.scope === "home" && item.destination === destination,
+  );
+
+it("loads the configured skill bundle into the root the selected agent reads", async () => {
+  const f = await fixture();
+  try {
+    const source = await skillBundle(f.root);
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, f.root);
+    // Codex is the default driver. A bundle is copied whole, because a
+    // playbook that references a nested file is useless without that file.
+    expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")?.sha256).toBe(
+      provisionDigest("---\nname: pstack\n---\n"),
+    );
+    expect(homeFile(manifest, ".codex/skills/pstack/skills/why/SKILL.md")?.sha256).toBe(
+      provisionDigest("why\n"),
+    );
+    // Never the checkout, which is what the agent opens a pull request from.
+    expect(
+      manifest.preparation.files.some(
+        (item) => item.scope === "workspace" && item.destination.includes("skills"),
+      ),
+    ).toBe(false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("follows the selected agent when the same bundle is provisioned for Cursor", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.mkdir(NodePath.join(f.root, ".t3/userdata/cursor-homes/cursor/.cursor"), {
+      recursive: true,
+    });
+    await NodeFSP.writeFile(
+      NodePath.join(f.root, ".t3/userdata/cursor-homes/cursor/.cursor/auth.json"),
+      "cursor-fixture-credential",
+    );
+    const source = await skillBundle(f.root);
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
+    };
+    const manifest = await f.store.freeze(inputFor("cursor", "cursor"), config, f.resolver, f.root);
+    expect(homeFile(manifest, ".cursor/skills/pstack/SKILL.md")).toBeDefined();
+    expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")).toBeUndefined();
+    expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
+      provisionDigest("cursor-fixture-credential"),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("installs a Claude sign-in where that CLI reads it", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.mkdir(NodePath.join(f.root, ".claude"), { recursive: true });
+    await NodeFSP.writeFile(
+      NodePath.join(f.root, ".claude/.credentials.json"),
+      "claude-fixture-credential",
+    );
+    const manifest = await f.store.freeze(
+      inputFor("claude", "claude"),
+      f.config,
+      f.resolver,
+      f.root,
+    );
+    // Without this the driver fell through to a blanket homeFiles copy, so a
+    // Claude sandbox was only ever usable by accident.
+    expect(homeFile(manifest, ".claude/.credentials.json")?.sha256).toBe(
+      provisionDigest("claude-fixture-credential"),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("refuses a skill bundle that links out of itself", async () => {
+  const f = await fixture();
+  try {
+    const source = await skillBundle(f.root);
+    await NodeFSP.symlink(
+      NodePath.join(f.root, ".codex/auth.json"),
+      NodePath.join(source, "escape.json"),
+    );
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
+    };
+    // A bundle is copied into an environment that then holds whatever it
+    // names, so a link out of it is refused rather than resolved.
+    await expect(f.store.freeze(input, config, f.resolver, f.root)).rejects.toThrow(
+      /symbolic link/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("lands a plugin holding many skills flat, where the CLI will find each one", async () => {
+  const f = await fixture();
+  try {
+    const source = NodePath.join(f.root, "bundles/pstack-skills");
+    for (const name of ["why", "interrogate"]) {
+      await NodeFSP.mkdir(NodePath.join(source, name), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(source, name, "SKILL.md"), `---\nname: ${name}\n---\n`);
+    }
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source }] },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, f.root);
+    // Every supported CLI resolves `<root>/<directory>/SKILL.md` and looks no
+    // deeper, so nesting these under a bundle name would hide all of them.
+    expect(homeFile(manifest, ".codex/skills/why/SKILL.md")).toBeDefined();
+    expect(homeFile(manifest, ".codex/skills/interrogate/SKILL.md")).toBeDefined();
+  } finally {
+    await f.cleanup();
+  }
+});
