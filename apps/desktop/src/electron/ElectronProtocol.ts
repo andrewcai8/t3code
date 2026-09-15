@@ -101,10 +101,31 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
   ].join("; ");
 }
 
-function withContentSecurityPolicy(response: Response, policy: string): Response {
+const HOP_BY_HOP_RESPONSE_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-connection",
+  "transfer-encoding",
+  "content-encoding",
+] as const;
+
+const TRANSIENT_HTTP_STATUSES = new Set([502, 503, 504]);
+
+// Chromium's module map clones protocol.handle responses. Passing through a
+// one-shot net.fetch stream — especially a brotli body — fails that clone with
+// "Failed to fetch dynamically imported module". Buffer the decoded bytes and
+// drop hop-by-hop headers so `import()` can load Vite modules.
+async function withContentSecurityPolicy(response: Response, policy: string): Promise<Response> {
   const headers = new Headers(response.headers);
+  for (const name of HOP_BY_HOP_RESPONSE_HEADERS) {
+    headers.delete(name);
+  }
   headers.set("Content-Security-Policy", policy);
-  return new Response(response.body, {
+  const body = response.body === null ? null : await response.arrayBuffer();
+  if (body !== null) {
+    headers.set("Content-Length", String(body.byteLength));
+  }
+  return new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers,
@@ -175,6 +196,10 @@ async function proxyRequest(
   for (const name of headersToRemove) {
     headers.delete(name);
   }
+  // net.fetch reintroduces Accept-Encoding: br unless we pin identity. Vite's
+  // compression plugin would then return brotli, which Chromium cannot clone
+  // through this custom protocol.
+  headers.set("accept-encoding", "identity");
   const init: RequestInit = {
     method: request.method,
     headers,
@@ -234,13 +259,18 @@ const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
 async function fetchWithTransientRetry(url: string, init: RequestInit): Promise<Response> {
   let lastError: unknown;
 
-  for (const delayMs of TRANSIENT_FETCH_RETRY_DELAYS_MS) {
+  for (const [index, delayMs] of TRANSIENT_FETCH_RETRY_DELAYS_MS.entries()) {
     if (delayMs > 0) {
       await NodeTimersPromises.setTimeout(delayMs);
     }
 
     try {
-      return await Electron.net.fetch(url, init);
+      const response = await Electron.net.fetch(url, init);
+      const isLastAttempt = index === TRANSIENT_FETCH_RETRY_DELAYS_MS.length - 1;
+      if (!TRANSIENT_HTTP_STATUSES.has(response.status) || isLastAttempt) {
+        return response;
+      }
+      await response.body?.cancel();
     } catch (error) {
       lastError = error;
     }
@@ -266,7 +296,7 @@ export const make = Effect.gen(function* () {
           try: () => {
             Electron.protocol.handle(input.scheme, async (request) => {
               if ("assetDirectory" in input) {
-                return withContentSecurityPolicy(
+                return await withContentSecurityPolicy(
                   await runPromise(serveDesktopAsset(request, input.assetDirectory)),
                   contentSecurityPolicy,
                 );

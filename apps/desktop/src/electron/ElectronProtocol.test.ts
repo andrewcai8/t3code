@@ -125,6 +125,7 @@ describe("ElectronProtocol", () => {
       assert.equal(netFetchMock.mock.calls[0]?.[0], "http://127.0.0.1:3773/api/health?verbose=1");
       const forwardedHeaders = new Headers(netFetchMock.mock.calls[0]?.[1]?.headers);
       assert.equal(forwardedHeaders.get("accept"), "application/json");
+      assert.equal(forwardedHeaders.get("accept-encoding"), "identity");
       assert.isNull(forwardedHeaders.get("origin"));
       assert.isNull(forwardedHeaders.get("referer"));
       assert.isNull(forwardedHeaders.get("sec-fetch-site"));
@@ -180,6 +181,87 @@ describe("ElectronProtocol", () => {
 
       assert.equal(yield* Effect.promise(() => response.text()), "ready");
       assert.equal(netFetchMock.mock.calls.length, 2);
+    }).pipe(Effect.provide(protocolLayer)),
+  );
+
+  it.effect("retries transient renderer HTTP statuses", () =>
+    Effect.gen(function* () {
+      let handler: ((request: Request) => Promise<Response>) | undefined;
+      handleMock.mockImplementation((_scheme, nextHandler) => {
+        handler = nextHandler;
+      });
+      netFetchMock
+        .mockResolvedValueOnce(new Response("optimizing", { status: 504 }))
+        .mockResolvedValueOnce(new Response("export const startup = Promise.resolve();"));
+
+      const response = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const protocol = yield* ElectronProtocol.ElectronProtocol;
+          yield* protocol.registerDesktopProtocol({
+            scheme: "t3code-dev",
+            targetOrigin: new URL("http://127.0.0.1:5733/"),
+            clerkFrontendApiHostname: undefined,
+          });
+          return yield* Effect.promise(() =>
+            handler!(new Request("t3code-dev://app/src/main.tsx")),
+          );
+        }),
+      );
+
+      assert.equal(
+        yield* Effect.promise(() => response.text()),
+        "export const startup = Promise.resolve();",
+      );
+      assert.equal(netFetchMock.mock.calls.length, 2);
+    }).pipe(Effect.provide(protocolLayer)),
+  );
+
+  it.effect("buffers proxied modules so Chromium can clone them", () =>
+    Effect.gen(function* () {
+      let handler: ((request: Request) => Promise<Response>) | undefined;
+      handleMock.mockImplementation((_scheme, nextHandler) => {
+        handler = nextHandler;
+      });
+      const body = "export const startup = Promise.resolve();";
+      netFetchMock.mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(body));
+              controller.close();
+            },
+          }),
+          {
+            headers: {
+              "content-type": "text/javascript",
+              "content-encoding": "br",
+              connection: "keep-alive",
+            },
+          },
+        ),
+      );
+
+      const response = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const protocol = yield* ElectronProtocol.ElectronProtocol;
+          yield* protocol.registerDesktopProtocol({
+            scheme: "t3code-dev",
+            targetOrigin: new URL("http://127.0.0.1:5733/"),
+            clerkFrontendApiHostname: undefined,
+          });
+          return yield* Effect.promise(() =>
+            handler!(new Request("t3code-dev://app/src/main.tsx")),
+          );
+        }),
+      );
+
+      const clone = response.clone();
+      assert.equal(yield* Effect.promise(() => response.text()), body);
+      assert.equal(yield* Effect.promise(() => clone.text()), body);
+      assert.equal(response.headers.get("content-type"), "text/javascript");
+      assert.isNull(response.headers.get("content-encoding"));
+      assert.isNull(response.headers.get("connection"));
+      assert.include(response.headers.get("content-security-policy") ?? "", "default-src 'self'");
     }).pipe(Effect.provide(protocolLayer)),
   );
 
