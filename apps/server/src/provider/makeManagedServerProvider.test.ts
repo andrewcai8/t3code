@@ -655,4 +655,79 @@ describe("makeManagedServerProvider", () => {
       }),
     ).pipe(Effect.provide(AlwaysRunTestLayer)),
   );
+
+  it.effect("lets enrichment fill usage the base check omitted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const releaseEnrichment = yield* Deferred.make<void>();
+        const probedLimits = {
+          checkedAt: "2026-04-10T00:00:02.000Z",
+          windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 10 }],
+        } as const;
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Effect.succeed(refreshedSnapshot),
+          enrichSnapshot: ({ publishSnapshot }) =>
+            Deferred.await(releaseEnrichment).pipe(
+              Effect.flatMap(() =>
+                publishSnapshot({
+                  ...enrichedSnapshot,
+                  usageLimits: probedLimits,
+                }),
+              ),
+            ),
+          refreshInterval: "1 hour",
+        });
+
+        const first = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.map((chunk) => Array.from(chunk)[0]!),
+        );
+        assert.strictEqual(first.usageLimits, undefined);
+
+        yield* Deferred.succeed(releaseEnrichment, undefined);
+        const enriched = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.map((chunk) => Array.from(chunk)[0]!),
+        );
+        assert.deepStrictEqual(enriched.usageLimits, probedLimits);
+      }),
+    ).pipe(Effect.provide(AlwaysRunTestLayer)),
+  );
+
+  it.effect("keeps published usage when a later probe omits usageLimits", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const refreshCount = yield* Ref.make(0);
+        const probedLimits = {
+          checkedAt: "2026-04-10T00:00:01.000Z",
+          windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 10 }],
+        } as const;
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(refreshCount, (count) => count + 1).pipe(
+            Effect.map((count) =>
+              count === 1
+                ? { ...refreshedSnapshot, usageLimits: probedLimits }
+                : refreshedSnapshotSecond,
+            ),
+          ),
+          refreshInterval: "1 hour",
+        });
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+
+        const refreshed = yield* provider.refresh;
+        assert.strictEqual(refreshed.message, refreshedSnapshotSecond.message);
+        assert.deepStrictEqual(refreshed.usageLimits, probedLimits);
+      }),
+    ).pipe(Effect.provide(AlwaysRunTestLayer)),
+  );
 });

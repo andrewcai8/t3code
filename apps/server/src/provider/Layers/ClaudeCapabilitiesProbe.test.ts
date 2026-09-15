@@ -16,10 +16,43 @@ import * as Schema from "effect/Schema";
 import {
   buildClaudeCapabilitiesProbeQueryOptions,
   CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES,
+  CLAUDE_USAGE_PROBE_TIMEOUT_MS,
+  parseClaudeAuthStatusOutput,
   probeClaudeCapabilities,
 } from "./ClaudeProvider.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
+
+it("parses claude auth status JSON with a top-level email", () => {
+  assert.deepEqual(
+    parseClaudeAuthStatusOutput(
+      'Logged in as user@example.com\n{"loggedIn":true,"email":"user@example.com","subscriptionType":"max","authMethod":"claude.ai"}\n',
+    ),
+    {
+      loggedIn: true,
+      email: "user@example.com",
+      subscriptionType: "max",
+      authMethod: "claude.ai",
+    },
+  );
+});
+
+it("parses nested account.email from older claude auth status fixtures", () => {
+  assert.deepEqual(
+    parseClaudeAuthStatusOutput(
+      '{"loggedIn":true,"authMethod":"claude.ai","account":{"email":"claude@example.com"}}',
+    ),
+    {
+      loggedIn: true,
+      email: "claude@example.com",
+      authMethod: "claude.ai",
+    },
+  );
+});
+
+it("returns undefined for non-JSON claude auth status output", () => {
+  assert.equal(parseClaudeAuthStatusOutput("Not logged in"), undefined);
+});
 
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -212,6 +245,8 @@ it.effect("preserves initialized capabilities when optional usage times out", ()
     ).pipe(Effect.forkChild);
     yield* Deferred.await(usageStarted);
     yield* TestClock.adjust("4 seconds");
+    assert.equal(probe.pollUnsafe(), undefined);
+    yield* TestClock.adjust(`${CLAUDE_USAGE_PROBE_TIMEOUT_MS / 1000 - 4} seconds`);
     const capabilities = yield* Fiber.join(probe);
     assert.equal(capabilities?.email, "dev@example.com");
     assert.equal(capabilities?.subscriptionType, "pro");

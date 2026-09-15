@@ -114,6 +114,9 @@ function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageW
  * established, so the last good snapshot stays; `unsupported` is
  * authoritative and replaces them.
  *
+ * A probe that omitted usage (Claude's fast `auth status` path) also keeps
+ * the last good snapshot: usage is filled in later by enrichment.
+ *
  * A successful probe replaces the published windows outright, including any
  * runtime update that landed while it was running. That is a deliberate
  * trade-off: the Codex and Claude reads take a few seconds at most, the
@@ -127,8 +130,33 @@ export function resolveUsageLimitsAfterProbe(input: {
   readonly probed: ServerProviderUsageLimits | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
-  if (probed?.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
+  if (probed === undefined) {
+    return published;
+  }
+  if (probed.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
     return published;
   }
   return probed;
+}
+
+/**
+ * Choose what to publish after a background snapshot enrichment. Live windows
+ * a probe or a turn already established beat a later failed or stale enrich;
+ * usage the base check omitted is filled in from the enrich when it arrives.
+ *
+ * `unsupported` stays authoritative: an account that cannot have subscription
+ * windows will not start reporting them from enrichment.
+ */
+export function resolveUsageLimitsAfterEnrichment(input: {
+  readonly published: ServerProviderUsageLimits | undefined;
+  readonly probed: ServerProviderUsageLimits | undefined;
+}): ServerProviderUsageLimits | undefined {
+  const { published, probed } = input;
+  if (published?.unavailable?.reason === "unsupported") {
+    return published;
+  }
+  if (published && !published.unavailable) {
+    return published;
+  }
+  return probed ?? published;
 }

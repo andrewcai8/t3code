@@ -1,6 +1,7 @@
 import {
   type ClaudeSettings,
   type ModelCapabilities,
+  type ServerProvider,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -23,6 +24,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import {
+  AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   DEFAULT_TIMEOUT_MS,
@@ -163,6 +165,55 @@ function apiProviderAuthMetadata(
   return apiProvider === "bedrock" ? { type: "bedrock", label: "Amazon Bedrock" } : undefined;
 }
 
+function readNonEmptyJsonString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+export type ClaudeCliAuthStatus = {
+  readonly loggedIn: boolean;
+  readonly email?: string;
+  readonly subscriptionType?: string;
+  readonly authMethod?: string;
+  readonly apiProvider?: string;
+};
+
+/**
+ * Parse `claude auth status` JSON. Email may be top-level (current CLI) or
+ * nested under `account` (older fixtures). Extra log lines around the object
+ * are ignored.
+ */
+export function parseClaudeAuthStatusOutput(output: string): ClaudeCliAuthStatus | undefined {
+  const trimmed = output.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start < 0 || end <= start) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed.slice(start, end + 1));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  const account =
+    typeof record.account === "object" && record.account !== null && !Array.isArray(record.account)
+      ? (record.account as Record<string, unknown>)
+      : undefined;
+  const email = readNonEmptyJsonString(record.email) ?? readNonEmptyJsonString(account?.email);
+  const subscriptionType = readNonEmptyJsonString(record.subscriptionType);
+  const authMethod = readNonEmptyJsonString(record.authMethod);
+  const apiProvider = readNonEmptyJsonString(record.apiProvider);
+  return {
+    loggedIn: record.loggedIn === true,
+    ...(email ? { email } : {}),
+    ...(subscriptionType ? { subscriptionType } : {}),
+    ...(authMethod ? { authMethod } : {}),
+    ...(apiProvider ? { apiProvider } : {}),
+  };
+}
+
 // ── SDK capability probe ────────────────────────────────────────────
 
 // Amazon Bedrock initializes far slower than first-party auth: the SDK boots the
@@ -170,6 +221,12 @@ function apiProviderAuthMetadata(
 // account info. The previous 8s budget expired mid-init, so the probe returned
 // `undefined` and left the provider unverified and unselectable in the picker.
 const CAPABILITIES_PROBE_TIMEOUT_MS = 25_000;
+
+// `get_usage` is a network round trip on the CLI we just spawned. The generic
+// 4s CLI budget expires after cold init and the UI then shows "Could not read
+// limits." even though the account probe succeeded. Keep this below the
+// remaining process lifetime so a hang still cannot discard initialization.
+export const CLAUDE_USAGE_PROBE_TIMEOUT_MS = 15_000;
 
 /**
  * Keep workspace-scoped command discovery intact while isolating the periodic
@@ -224,7 +281,7 @@ function nonEmptyProbeString(value: string): string | undefined {
   return candidate ? candidate : undefined;
 }
 
-type ClaudeCapabilitiesProbe = {
+export type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
@@ -316,7 +373,7 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Probe account information by spawning a lightweight Claude Agent SDK
+ * Probe slash commands and usage by spawning a lightweight Claude Agent SDK
  * session and reading the initialization result.
  *
  * We pass a never-yielding AsyncIterable as the prompt so that no user
@@ -325,8 +382,8 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * account info and slash commands) but never starts an API request to
  * Anthropic. We read the init data and then abort the subprocess.
  *
- * This is used as a fallback when `claude auth status` does not include
- * subscription type information.
+ * The picker ready-path uses `claude auth status` instead of this spawn.
+ * Overlay the result onto a ready snapshot once it lands.
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -365,7 +422,7 @@ const probeClaudeCapabilities = (
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         const usageResult = yield* Effect.tryPromise(() =>
           q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(),
-        ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result);
+        ).pipe(Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS), Effect.result);
         const usage = Result.isSuccess(usageResult)
           ? {
               rate_limits_available: usageResult.success.rate_limits_available,
@@ -418,6 +475,10 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
 
 export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(function* (
   claudeSettings: ClaudeSettings,
+  /**
+   * Tests and the background overlay pass this. The picker-ready path omits it
+   * so `claude auth status` can mark the instance ready without an SDK spawn.
+   */
   resolveCapabilities?: (
     claudeSettings: ClaudeSettings,
   ) => Effect.Effect<ClaudeCapabilitiesProbe | undefined>,
@@ -530,20 +591,38 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   );
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
+  const [authProbe, skills] = yield* Effect.all(
+    [
+      runClaudeCommand(claudeSettings, ["auth", "status"], resolvedEnvironment).pipe(
+        Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS),
+        Effect.result,
+      ),
+      discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment),
+    ],
+    { concurrency: "unbounded" },
+  );
+  const cliAuth =
+    Result.isSuccess(authProbe) && Option.isSome(authProbe.success)
+      ? parseClaudeAuthStatusOutput(
+          `${authProbe.success.value.stdout}\n${authProbe.success.value.stderr}`,
+        )
+      : undefined;
+
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
     : undefined;
-  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
-  const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
-  const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
+  const slashCommands = dedupeSlashCommands([
+    COMPACT_SLASH_COMMAND,
+    ...(capabilities?.slashCommands ?? []),
+  ]);
 
-  if (!capabilities) {
+  if (!capabilities && cliAuth?.loggedIn !== true) {
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
       checkedAt,
       models,
-      slashCommands: dedupedSlashCommands,
+      slashCommands,
       skills,
       probe: {
         installed: true,
@@ -555,25 +634,26 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
+  const email = capabilities?.email ?? cliAuth?.email;
   const authMetadata =
     claudeAuthMetadata({
-      subscriptionType: capabilities.subscriptionType,
-      authMethod: capabilities.tokenSource,
-    }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
-  const usageLimits = !capabilities.usage
-    ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
-    : scopedLimitNames
+      subscriptionType: capabilities?.subscriptionType ?? cliAuth?.subscriptionType,
+      authMethod: capabilities?.tokenSource ?? cliAuth?.authMethod,
+    }) ?? apiProviderAuthMetadata(capabilities?.apiProvider ?? cliAuth?.apiProvider);
+  const usageLimits = capabilities?.usage
+    ? scopedLimitNames
       ? yield* recordClaudeUsageResponse(scopedLimitNames, {
           response: capabilities.usage,
           checkedAt,
         })
-      : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
+      : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits
+    : undefined;
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
     checkedAt,
     models,
-    slashCommands: dedupedSlashCommands,
+    slashCommands,
     skills,
     probe: {
       installed: true,
@@ -581,14 +661,68 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       status: "ready",
       auth: {
         status: "authenticated",
-        ...(capabilities.email ? { email: capabilities.email } : {}),
+        ...(email ? { email } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
-      usageLimits,
+      ...(usageLimits ? { usageLimits } : {}),
     },
   });
 });
+
+/**
+ * Apply an SDK capabilities probe onto a snapshot that already became ready
+ * from `claude auth status`. Usage that never arrived is `probeFailed`; the
+ * picker does not wait on this overlay.
+ */
+export const overlayClaudeCapabilitiesOnSnapshot = Effect.fn("overlayClaudeCapabilitiesOnSnapshot")(
+  function* (
+    snapshot: ServerProvider,
+    capabilities: ClaudeCapabilitiesProbe,
+    scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>,
+  ): Effect.fn.Return<ServerProvider> {
+    const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const previousEmail =
+      snapshot.auth.status === "authenticated" ? snapshot.auth.email : undefined;
+    const previousAuthMeta =
+      snapshot.auth.status === "authenticated" && snapshot.auth.type
+        ? { type: snapshot.auth.type, label: snapshot.auth.label }
+        : undefined;
+    const authMetadata =
+      claudeAuthMetadata({
+        subscriptionType: capabilities.subscriptionType,
+        authMethod: capabilities.tokenSource,
+      }) ??
+      apiProviderAuthMetadata(capabilities.apiProvider) ??
+      previousAuthMeta;
+    const email = capabilities.email ?? previousEmail;
+    const usageLimits = !capabilities.usage
+      ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
+      : scopedLimitNames
+        ? yield* recordClaudeUsageResponse(scopedLimitNames, {
+            response: capabilities.usage,
+            checkedAt,
+          })
+        : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
+
+    return {
+      ...snapshot,
+      slashCommands: dedupeSlashCommands([
+        COMPACT_SLASH_COMMAND,
+        ...snapshot.slashCommands,
+        ...capabilities.slashCommands,
+      ]),
+      auth: {
+        status: "authenticated",
+        ...(email ? { email } : {}),
+        ...(authMetadata ? authMetadata : {}),
+      },
+      status: snapshot.enabled ? "ready" : "disabled",
+      usageLimits,
+      checkedAt,
+    };
+  },
+);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 

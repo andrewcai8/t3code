@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./providerUsageLimits.ts";
+import {
+  applyUsageLimitsUpdate,
+  resolveUsageLimitsAfterEnrichment,
+  resolveUsageLimitsAfterProbe,
+} from "./providerUsageLimits.ts";
 
 const checkedAt = "2026-09-03T12:00:00.000Z";
 const session = {
@@ -85,5 +89,27 @@ describe("resolveUsageLimitsAfterProbe", () => {
     expect(resolveUsageLimitsAfterProbe({ published, probed: failed })).toBe(published);
     expect(resolveUsageLimitsAfterProbe({ published, probed: unsupported })).toBe(unsupported);
     expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: failed })).toBe(failed);
+  });
+
+  it("keeps published windows when the probe omitted usage", () => {
+    expect(resolveUsageLimitsAfterProbe({ published, probed: undefined })).toBe(published);
+    expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: undefined })).toBe(
+      undefined,
+    );
+  });
+});
+
+describe("resolveUsageLimitsAfterEnrichment", () => {
+  it("fills omitted usage from enrichment and keeps live windows over a failed enrich", () => {
+    const failed = { checkedAt, windows: [], unavailable: { reason: "probeFailed" as const } };
+    const unsupported = { checkedAt, windows: [], unavailable: { reason: "unsupported" as const } };
+    const probed = {
+      checkedAt: "2026-09-03T12:00:05.000Z",
+      windows: [session],
+    };
+    expect(resolveUsageLimitsAfterEnrichment({ published: undefined, probed })).toBe(probed);
+    expect(resolveUsageLimitsAfterEnrichment({ published, probed: failed })).toBe(published);
+    expect(resolveUsageLimitsAfterEnrichment({ published: failed, probed })).toBe(probed);
+    expect(resolveUsageLimitsAfterEnrichment({ published: unsupported, probed })).toBe(unsupported);
   });
 });

@@ -160,6 +160,27 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
 const noClaudeCapabilities = () =>
   Effect.sync(() => undefined as TestClaudeCapabilities | undefined);
 
+function claudeCliHandler(
+  handler?: (
+    args: ReadonlyArray<string>,
+  ) => { stdout: string; stderr: string; code: number } | undefined,
+) {
+  return (args: ReadonlyArray<string>) => {
+    const custom = handler?.(args);
+    if (custom) return custom;
+    const joined = args.join(" ");
+    if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+    if (joined === "auth status") {
+      return {
+        stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
+        stderr: "",
+        code: 0,
+      };
+    }
+    throw new Error(`Unexpected args: ${joined}`);
+  };
+}
+
 function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
@@ -2684,15 +2705,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "bedrock");
           assert.strictEqual(status.auth.label, "Amazon Bedrock");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
+        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
       );
 
       it.effect("returns a display label for claude subscription types", () =>
@@ -2733,15 +2746,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "Claude Max Subscription");
           assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
+        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
       );
 
       it.effect("does not duplicate Claude in provider-prefixed subscription names", () =>
@@ -2755,15 +2760,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "Claude Max");
           assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
+        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
       );
 
       it.effect("returns claude auth email from initialization result", () =>
@@ -2815,10 +2812,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             claudeCapabilities(),
           );
           assert.strictEqual(status.status, "ready");
-          // The home is resolved through the host Path before it reaches the env.
-          assert.deepStrictEqual(
-            recorded.commands.map((command) => command.env?.CLAUDE_CONFIG_DIR),
-            [(yield* Path.Path).resolve(claudeConfigDir)],
+          const resolvedConfigDir = (yield* Path.Path).resolve(claudeConfigDir);
+          assert.ok(recorded.commands.length >= 2);
+          assert.ok(
+            recorded.commands.every(
+              (command) => command.env?.CLAUDE_CONFIG_DIR === resolvedConfigDir,
+            ),
           );
         }).pipe(Effect.provide(recorded.layer));
       });
@@ -3002,6 +3001,44 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             }),
           ),
         ),
+      );
+
+      it.effect("returns ready from claude auth status without waiting on the SDK", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(defaultClaudeSettings);
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.installed, true);
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.email, "user@example.com");
+          assert.strictEqual(status.auth.type, "maxplan");
+          assert.strictEqual(status.auth.label, "Claude Max Subscription");
+          assert.strictEqual(status.usageLimits, undefined);
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer(
+              claudeCliHandler((args) => {
+                if (args.join(" ") !== "auth status") return undefined;
+                return {
+                  stdout:
+                    '{"loggedIn":true,"email":"user@example.com","subscriptionType":"maxplan","authMethod":"claude.ai"}\n',
+                  stderr: "",
+                  code: 0,
+                };
+              }),
+            ),
+          ),
+        ),
+      );
+
+      it.effect("does not publish probeFailed usage when capabilities omit usage", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          );
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.usageLimits, undefined);
+        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
       );
     });
   },

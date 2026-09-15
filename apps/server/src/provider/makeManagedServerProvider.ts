@@ -17,7 +17,11 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./providerUsageLimits.ts";
+import {
+  applyUsageLimitsUpdate,
+  resolveUsageLimitsAfterEnrichment,
+  resolveUsageLimitsAfterProbe,
+} from "./providerUsageLimits.ts";
 import type { ServerProviderShape } from "./Services/ServerProvider.ts";
 
 interface ProviderSnapshotState {
@@ -84,9 +88,15 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       if (state.enrichmentGeneration !== generation) {
         return [null, state] as const;
       }
-      // Enrichment derives from the snapshot it was handed; a runtime usage
-      // update that landed since must not be reverted by it.
-      const merged = withUsageLimits(nextSnapshot, state.snapshot.usageLimits);
+      // Enrichment derives from the snapshot it was handed. Keep live
+      // windows a turn already published; fill usage the base check omitted.
+      const merged = withUsageLimits(
+        nextSnapshot,
+        resolveUsageLimitsAfterEnrichment({
+          published: state.snapshot.usageLimits,
+          probed: nextSnapshot.usageLimits,
+        }),
+      );
       if (Equal.equals(state.snapshot, merged)) {
         return [null, state] as const;
       }
