@@ -33,11 +33,52 @@ export interface ProvisionControlPorts {
 }
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
+/**
+ * The message crosses a trust boundary so it stays deliberately vague, but the
+ * cause is attached to the instance so the host-side boundary that already logs
+ * `cause` reports something usable. `Effect.mapError(safeError)` and
+ * `catch: safeError` both hand it the original error, so most sites carry it
+ * without changing.
+ */
 const safeError = () =>
   new EnvironmentControlError({
     message: "Cloud provisioning could not be reconciled. Retry the same request.",
   });
-const promise = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: safeError });
+/**
+ * Keeps the cause of a failure in the host log.
+ *
+ * The message that leaves this module stays deliberately vague because it
+ * crosses a trust boundary, but every redaction below discards the cause
+ * entirely, which leaves nothing to debug from — a provisioning failure becomes
+ * indistinguishable from any other. This only taps, so it cannot change what a
+ * caller sees or the error type it sees it as.
+ */
+const logCause = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.tapError(effect, (cause) => Effect.logError("provisioning failed", { cause }));
+/**
+ * Carries a cause past a `catch` that has to keep the contract errors typed.
+ *
+ * Those catches must return `ProvisionRefused`, `ProvisionRequestConflict` and
+ * `ProvisionRetentionError` unchanged so the narrowing below still works, which
+ * leaves nowhere to log from — wrapping instead keeps the cause until a tap can
+ * read it, and unwrapping restores exactly the error the callers already expect.
+ */
+class UnexpectedCause {
+  constructor(readonly cause: unknown) {}
+}
+const reportUnexpected = <A, E, R>(effect: Effect.Effect<A, E | UnexpectedCause, R>) =>
+  effect.pipe(
+    Effect.tapError((error) =>
+      error instanceof UnexpectedCause
+        ? Effect.logError("provisioning failed", { cause: error.cause })
+        : Effect.void,
+    ),
+    Effect.mapError((error): E | EnvironmentControlError =>
+      error instanceof UnexpectedCause ? safeError() : error,
+    ),
+  );
+const promise = <A>(run: () => Promise<A>) =>
+  logCause(Effect.tryPromise({ try: run, catch: safeError }));
 
 export function makeProvisionControl(
   store: ProvisionOperationStore["Service"],
@@ -71,20 +112,24 @@ export function makeProvisionControl(
       )
     )
       return false;
-    yield* provisioning.cancel(operation.request.requestId).pipe(Effect.mapError(safeError));
+    yield* provisioning
+      .cancel(operation.request.requestId)
+      .pipe(logCause, Effect.mapError(safeError));
     return true;
   });
   const remote = <A>(operation: ProvisionOperation, run: () => Promise<A>) =>
     Effect.tryPromise({
       try: run,
-      catch: (error) => (error instanceof ProvisionRetentionError ? error : safeError()),
+      catch: (error) =>
+        error instanceof ProvisionRetentionError ? error : new UnexpectedCause(error),
     }).pipe(
+      reportUnexpected,
       Effect.catch((error) =>
         Effect.gen(function* () {
           if (error instanceof ProvisionRetentionError)
             yield* provisioning
               .cancel(operation.request.requestId)
-              .pipe(Effect.mapError(safeError));
+              .pipe(logCause, Effect.mapError(safeError));
           return yield* safeError();
         }),
       ),
@@ -96,8 +141,10 @@ export function makeProvisionControl(
       const frozen = yield* Effect.tryPromise({
         try: () => ports.freeze(input),
         catch: (error) =>
-          isProvisionRefused(error) || isRequestConflict(error) ? error : safeError(),
-      }).pipe(Effect.result);
+          isProvisionRefused(error) || isRequestConflict(error)
+            ? error
+            : new UnexpectedCause(error),
+      }).pipe(reportUnexpected, Effect.result);
       if (frozen._tag === "Failure") {
         if (isRequestConflict(frozen.failure))
           return {
@@ -115,7 +162,7 @@ export function makeProvisionControl(
       }
       const operation = yield* provisioning
         .ensure(frozen.success.request)
-        .pipe(Effect.mapError(safeError));
+        .pipe(logCause, Effect.mapError(safeError));
       const state = operation.state;
       if (state.kind === "ready") {
         if (yield* expired(operation))
@@ -173,7 +220,9 @@ export function makeProvisionControl(
     attach: Effect.fn("EnvironmentControl.attach")(function* (
       input: EnvironmentProvisionAttachInput,
     ): Effect.fn.Return<EnvironmentProvisionAttachResult, EnvironmentControlError> {
-      const operation = yield* store.get(input.requestId).pipe(Effect.mapError(safeError));
+      const operation = yield* store
+        .get(input.requestId)
+        .pipe(logCause, Effect.mapError(safeError));
       if ((yield* expired(operation)) || operation.state.kind !== "ready")
         return { kind: "refused", message: "This environment is not ready to attach." };
       const lease = yield* activeLease(operation);
@@ -189,8 +238,8 @@ export function makeProvisionControl(
     touch: Effect.fn("EnvironmentControl.touchProvision")(function* (
       input: EnvironmentProvisionTouchInput,
     ): Effect.fn.Return<EnvironmentProvisionTouchResult, EnvironmentControlError> {
-      const id = yield* decodeRequestId(input.leaseId).pipe(Effect.mapError(safeError));
-      const operation = yield* store.get(id).pipe(Effect.mapError(safeError));
+      const id = yield* decodeRequestId(input.leaseId).pipe(logCause, Effect.mapError(safeError));
+      const operation = yield* store.get(id).pipe(logCause, Effect.mapError(safeError));
       if (yield* expired(operation))
         return {
           kind: "refused",

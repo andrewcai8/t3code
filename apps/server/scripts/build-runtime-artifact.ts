@@ -32,6 +32,29 @@ const workspace = Schema.decodeUnknownSync(fromYaml(WorkspaceConfig))(
 );
 const stage = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-runtime-artifact-"));
 try {
+  // This script packages `dist`, it does not build it. Shipping a dist older
+  // than the sources it came from produces a manager that silently does not
+  // match the code you are reading, which is indistinguishable from a bug in
+  // the code itself.
+  const distEntry = NodePath.join(repoRoot, "apps/server/dist/bin.mjs");
+  const builtAt = (await NodeFSP.stat(distEntry)).mtimeMs;
+  const sourceRoot = NodePath.join(repoRoot, "apps/server/src");
+  const newestSource = async (directory: string): Promise<number> => {
+    let newest = 0;
+    for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const full = NodePath.join(directory, entry.name);
+      const at = entry.isDirectory()
+        ? await newestSource(full)
+        : (await NodeFSP.stat(full)).mtimeMs;
+      if (at > newest) newest = at;
+    }
+    return newest;
+  };
+  if ((await newestSource(sourceRoot)) > builtAt)
+    throw new Error(
+      "apps/server/dist is older than apps/server/src; run `vp run --filter t3 build` first",
+    );
   await NodeFSP.cp(NodePath.join(repoRoot, "apps/server/dist"), NodePath.join(stage, "dist"), {
     recursive: true,
   });

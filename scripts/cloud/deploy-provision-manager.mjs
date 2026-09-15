@@ -126,6 +126,16 @@ const managerConfig = {
     templateId,
     ...(config.provisioning?.githubToken ? { githubToken: config.provisioning.githubToken } : {}),
     ...(config.provisioning?.namespace ? { namespace: config.provisioning.namespace } : {}),
+    // Carry the host's provisioning policy through. Dropping egressAllow left
+    // provisioned environments without the allowlist their preparation needs,
+    // which fails far from here as an unreachable package host.
+    ...(config.provisioning?.egressAllow ? { egressAllow: config.provisioning.egressAllow } : {}),
+    // `shellEnvironment` is deliberately not carried over. Its entries name a
+    // `source` path on the host's filesystem, which does not exist in the
+    // sandbox, and freezing a manifest reads every one of them — so copying it
+    // makes every provision fail with an ENOENT naming a path from another
+    // machine. Secrets the guest needs have to be delivered to the guest.
+
     runtimeArtifacts: {
       linux: {
         path: "/home/user/runtime-linux.tar",
@@ -174,6 +184,15 @@ const install = await sandbox.commands.run(
 );
 if (!install.stdout.includes("installed")) throw new Error("Runtime artifact install failed");
 
+// A reused sandbox is already serving on this port, and the replacement would
+// fail to bind and die silently, leaving the previous build answering requests.
+// Deploying then looked like a no-op: new artifact on disk, old code running.
+// The bracket keeps the pattern from matching the shell that carries it.
+await sandbox.commands.run(
+  "pkill -f '[m]anager/dist/bin.mjs' || true; " +
+    "for _ in $(seq 1 30); do pgrep -f '[m]anager/dist/bin.mjs' >/dev/null || break; sleep 1; done; exit 0",
+  { timeoutMs: 120_000 },
+);
 await sandbox.commands.run(
   `nohup env T3CODE_ENVIRONMENT_CONTROL_CONFIG=/home/user/environment-control.json ` +
     `node /home/user/manager/dist/bin.mjs serve --mode web --host 0.0.0.0 --port ${port} ` +

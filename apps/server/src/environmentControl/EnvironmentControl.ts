@@ -617,31 +617,35 @@ export const layer = Layer.effect(
       return namespace;
     };
     const provider = (operation: ProvisionOperation) =>
-      Effect.tryPromise({
-        try: async () => {
-          const manager = await resolve();
-          if (!manager) throw new Error("Missing cloud configuration");
-          const manifest = await manifests.load(operation.request.requestId);
-          const connection = { apiKey: manager.config.e2bApiKey };
-          return {
-            manifest,
-            namespace: operation.request.provider === "namespace" ? await resolveNamespace() : null,
-            runtime: makeE2bProvisionRuntime(connection),
-            allocator: makeE2bAllocationPorts({
-              connection,
-              parentTimeoutMs: 10 * 60_000,
-              sandboxTimeoutMs: 6 * 3_600_000,
-              ...(manifest.egressAllow.length
-                ? { network: { allowOut: [...manifest.egressAllow], denyOut: [ALL_TRAFFIC] } }
-                : {}),
-            }),
-          };
-        },
-        catch: () =>
-          new ProvisionProviderError({
-            message: "The manager could not load the immutable provisioning inputs.",
+      Effect.tryPromise(async () => {
+        const manager = await resolve();
+        if (!manager) throw new Error("Missing cloud configuration");
+        const manifest = await manifests.load(operation.request.requestId);
+        const connection = { apiKey: manager.config.e2bApiKey };
+        return {
+          manifest,
+          namespace: operation.request.provider === "namespace" ? await resolveNamespace() : null,
+          runtime: makeE2bProvisionRuntime(connection),
+          allocator: makeE2bAllocationPorts({
+            connection,
+            parentTimeoutMs: 10 * 60_000,
+            sandboxTimeoutMs: 6 * 3_600_000,
+            ...(manifest.egressAllow.length
+              ? { network: { allowOut: [...manifest.egressAllow], denyOut: [ALL_TRAFFIC] } }
+              : {}),
           }),
-      });
+        };
+      }).pipe(
+        Effect.tapError((cause) =>
+          Effect.logError("provisioning inputs could not be loaded", { cause }),
+        ),
+        Effect.mapError(
+          () =>
+            new ProvisionProviderError({
+              message: "The manager could not load the immutable provisioning inputs.",
+            }),
+        ),
+      );
     const ports: ProvisionProviderPorts["Service"] = {
       create: (operation) =>
         Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
