@@ -38,6 +38,12 @@ function metadata(operation: ProvisionOperation, templateId: string) {
     provision_request_hash: operation.requestHash,
     provision_template_id: templateId,
     preparation_hash: operation.request.preparationHash,
+    // Which machine this sandbox is, as opposed to who asked for it. Recorded
+    // so that two allocations wanting the same disk are visible as such on the
+    // resource itself; reusing one still requires ownership and recovery to
+    // stop being per-request, so nothing matches on it yet. Create and discovery
+    // share this function, so both sides always agree on what ownership means.
+    ...(operation.request.buildHash ? { build_hash: operation.request.buildHash } : {}),
   };
 }
 function owned(info: SandboxInfo, operation: ProvisionOperation, templateId: string) {
