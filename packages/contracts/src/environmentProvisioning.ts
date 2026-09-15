@@ -14,6 +14,14 @@ const requestFields = {
   branch: EnvironmentProvisionInput.fields.branch,
   sourceRevision: Schema.NullOr(GitRevision),
   preparationHash: Sha256,
+  /**
+   * Identity of the machine this request describes, ignoring anything specific
+   * to the request itself. Two requests sharing it want the same disk, which is
+   * what a reusable prepared parent, a snapshot, or a baked base image are each
+   * a way of providing. Distinct from `preparationHash`, which also covers the
+   * request id and the files this one carries and so is unique every time.
+   */
+  buildHash: Schema.optional(Sha256),
 };
 export const DurableProvisionRequest = Schema.Union([
   Schema.Struct({

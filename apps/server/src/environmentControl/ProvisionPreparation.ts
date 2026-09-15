@@ -468,9 +468,20 @@ export function makeProvisionPreparationStore(stateDir: string) {
           });
         destinations.add(destination);
       }
-      const preparation = {
-        requestId: input.requestId,
-        root: `/tmp/t3-provision/${input.requestId}`,
+      // A prepared environment has two halves, and only one of them is about
+      // this request.
+      //
+      // `build` is what the disk would contain for anyone asking the same
+      // thing: the repository at a revision, the runtime artifact, and how it
+      // is started. Identical inputs describe an identical machine, so it is
+      // the identity a prepared parent, a snapshot, or a baked base image can
+      // all be keyed on — the same idea whichever provider realises it.
+      //
+      // The overlay below is what only this request wants: its id, the root
+      // named after it, and the files it carries. Those are why every request
+      // currently hashes differently even when the machine is the same, and
+      // why nothing prepared can be shared yet.
+      const build = {
         repository,
         artifact: {
           archivePath: `/tmp/t3-runtime-${artifact.sha256}.tar`,
@@ -483,6 +494,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
         port: 3773,
         readinessTimeoutSeconds: 180,
         brokerTtl: "7d",
+      };
+      const preparation = {
+        ...build,
+        requestId: input.requestId,
+        root: `/tmp/t3-provision/${input.requestId}`,
         files,
       };
       const common = {
@@ -495,6 +511,12 @@ export function makeProvisionPreparationStore(stateDir: string) {
         sourceRevision: repository?.revision ?? null,
         preparationHash: provisionDigest(
           stableStringify({ preparation, egressAllow: provisioning.egressAllow ?? [] }),
+        ),
+        // Reusing a prepared environment means recognising that two requests
+        // describe the same machine. Recorded now so that identity exists and
+        // is observable; nothing keys off it yet.
+        buildHash: provisionDigest(
+          stableStringify({ build, egressAllow: provisioning.egressAllow ?? [] }),
         ),
       };
       let request: DurableProvisionRequest;
