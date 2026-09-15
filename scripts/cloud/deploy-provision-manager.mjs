@@ -24,6 +24,7 @@ const { values } = NodeUtil.parseArgs({
     auth: { type: "string", default: NodePath.join(NodeOS.homedir(), ".codex/auth.json") },
     port: { type: "string", default: "3775" },
     account: { type: "string", default: "provision-manager" },
+    sandbox: { type: "string" },
     help: { type: "boolean", default: false },
   },
 });
@@ -94,13 +95,21 @@ for (const [index, skill] of (config.provisioning?.skills ?? []).entries()) {
   });
 }
 
-console.log(`creating a manager from template ${templateId}`);
-const sandbox = await Sandbox.create(templateId, {
-  apiKey,
-  timeoutMs: 3_600_000,
-  lifecycle: { onTimeout: "pause" },
-  metadata: { purpose: "t3-environment", account: values.account },
-});
+// Reusing a sandbox matters on a retry: the artifact upload is the slow step,
+// and a failure part way through would otherwise strand the box it created.
+const sandbox = values.sandbox
+  ? await Sandbox.connect(values.sandbox, { apiKey })
+  : await Sandbox.create(templateId, {
+      apiKey,
+      timeoutMs: 3_600_000,
+      lifecycle: { onTimeout: "pause" },
+      metadata: { purpose: "t3-environment", account: values.account },
+    });
+console.log(
+  values.sandbox
+    ? `reusing manager sandbox ${sandbox.sandboxId}`
+    : `created a manager from template ${templateId}`,
+);
 const port = Number(values.port);
 const host = sandbox.getHost(port);
 
@@ -136,7 +145,11 @@ const managerConfig = {
 
 await sandbox.files.write("/home/user/environment-control.json", JSON.stringify(managerConfig));
 await sandbox.files.write("/home/user/.codex/auth.json", await NodeFSP.readFile(values.auth));
-await sandbox.files.write("/home/user/runtime-linux.tar", artifact);
+// The runtime artifact is hundreds of megabytes; the SDK's default request
+// timeout aborts the upload part way and leaves the sandbox half-built.
+await sandbox.files.write("/home/user/runtime-linux.tar", artifact, {
+  requestTimeoutMs: 1_800_000,
+});
 for (const bundle of bundles)
   await sandbox.files.write(
     `/home/user/skills-${bundle.index}.tgz`,

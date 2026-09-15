@@ -13,8 +13,18 @@ const WorkspaceConfig = Schema.Struct({
   catalog: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 
-const output = process.argv[2];
-if (!output) throw new Error("Usage: build-runtime-artifact.ts <output.tar>");
+const args = process.argv.slice(2);
+const output = args.find((arg) => !arg.startsWith("--"));
+const install = args.includes("--install");
+const platform = args.find((arg) => arg.startsWith("--platform="))?.slice("--platform=".length);
+if (!output) {
+  throw new Error(
+    "Usage: build-runtime-artifact.ts <output.tar> [--install] [--platform=<docker platform>]",
+  );
+}
+if (platform && !install) {
+  throw new Error("--platform requires --install so native addons can be compiled for that OS");
+}
 
 const repoRoot = NodePath.resolve(new URL("../../..", import.meta.url).pathname);
 const workspace = Schema.decodeUnknownSync(fromYaml(WorkspaceConfig))(
@@ -48,11 +58,60 @@ try {
     { cwd: stage, stdio: "inherit" },
   );
   if (lock.status !== 0) throw new Error("npm could not resolve the runtime artifact lockfile");
+  if (install) {
+    if (platform) {
+      // E2B templates are linux/amd64. Compile node-pty here so the sandbox
+      // never fetches Node headers from nodejs.org (often egress-blocked).
+      const docker = NodeChildProcess.spawnSync(
+        "docker",
+        [
+          "run",
+          "--rm",
+          `--platform=${platform}`,
+          "-v",
+          `${stage}:/src`,
+          "-w",
+          "/src",
+          "-e",
+          "npm_config_update_notifier=false",
+          "-e",
+          "npm_config_ignore_scripts=false",
+          "node:24.20.0-bookworm",
+          "bash",
+          "-lc",
+          [
+            "set -euo pipefail",
+            "apt-get update -qq",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 make g++",
+            "npm ci --omit=dev --no-audit --no-fund --foreground-scripts",
+            "rm -rf node_modules/node-pty/prebuilds/darwin-* node_modules/node-pty/prebuilds/win32-*",
+            "rm -rf node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl",
+            "rm -rf node_modules/@ff-labs/fff-bin-linux-x64-musl",
+            "rm -rf node_modules/@yuuang/ffi-rs-linux-x64-musl",
+            "find . -name '*.map' -delete",
+            "test -f node_modules/node-pty/build/Release/pty.node",
+          ].join("; "),
+        ],
+        { stdio: "inherit" },
+      );
+      if (docker.status !== 0) {
+        throw new Error(`docker could not install the runtime artifact for ${platform}`);
+      }
+    } else {
+      const ci = NodeChildProcess.spawnSync(
+        "npm",
+        ["ci", "--omit=dev", "--no-audit", "--no-fund"],
+        { cwd: stage, stdio: "inherit" },
+      );
+      if (ci.status !== 0) throw new Error("npm could not install the runtime artifact");
+    }
+  }
   const archive = NodeChildProcess.spawnSync(
     "tar",
     ["-cf", NodePath.resolve(output), "-C", stage, "."],
     {
       stdio: "inherit",
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
     },
   );
   if (archive.status !== 0) throw new Error("tar could not write the runtime artifact");

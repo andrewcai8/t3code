@@ -17,6 +17,7 @@ import { ProvisionRetentionError } from "./retention.ts";
 import { namespaceResourceMatches, resolveNamespaceIdentity } from "./namespaceAllocation.ts";
 import type { NamespaceResource as ImportedNamespaceResource } from "./namespaceProvisioner.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
+import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
 import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 
@@ -26,7 +27,7 @@ interface CliCommand {
   readonly env: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
 }
-type CliResult = { readonly exitCode: number; readonly stdout: string };
+type CliResult = { readonly exitCode: number; readonly stdout: string; readonly stderr?: string };
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodePairing = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ credential: Schema.String })),
@@ -56,15 +57,18 @@ function executeCli(binary: string, command: CliCommand): Promise<CliResult> {
     command.signal?.addEventListener("abort", abort, { once: true });
     if (command.signal?.aborted) abort();
     let stdout = "";
+    let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (data: string) => {
       stdout += data;
     });
-    child.stderr.resume();
+    child.stderr.setEncoding("utf8").on("data", (data: string) => {
+      stderr += data;
+    });
     child.once("error", reject);
     child.once("close", (code) => {
       command.signal?.removeEventListener("abort", abort);
       if (aborted) reject(new Error("Namespace CLI command aborted or timed out"));
-      else resolve({ exitCode: code ?? 1, stdout });
+      else resolve({ exitCode: code ?? 1, stdout, stderr });
     });
   });
 }
@@ -103,7 +107,7 @@ export async function makeNamespaceAccountSession(config: {
       ...(config.computeApiUrl ? { baseUrl: config.computeApiUrl } : {}),
     }),
   );
-  const run = async (args: ReadonlyArray<string>, signal?: AbortSignal) => {
+  const run = async (args: ReadonlyArray<string>, signal?: AbortSignal, timeoutMs?: number) => {
     await NodeFSP.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
     const directory = await NodeFSP.mkdtemp(NodePath.join(config.stateDir, "namespace-cli-"));
     try {
@@ -113,7 +117,7 @@ export async function makeNamespaceAccountSession(config: {
         encodeJson({ bearer_token: await verifiedToken(60_000) }),
         { mode: 0o600 },
       );
-      const timeout = AbortSignal.timeout(config.commandTimeoutMs ?? 300_000);
+      const timeout = AbortSignal.timeout(timeoutMs ?? config.commandTimeoutMs ?? 300_000);
       const command = {
         args,
         env: { ...process.env, NSC_TOKEN_FILE: tokenFile },
@@ -161,7 +165,10 @@ const removeStaging = "import shutil,sys; shutil.rmtree(sys.argv[1])";
 
 async function successful(session: NamespaceAccountSession, args: ReadonlyArray<string>) {
   const result = await session.run(args);
-  if (result.exitCode !== 0) throw new Error("Namespace CLI command failed");
+  if (result.exitCode !== 0)
+    throw new Error(
+      result.stderr?.trim() || result.stdout?.trim() || "Namespace CLI command failed",
+    );
   return result.stdout;
 }
 
@@ -199,16 +206,20 @@ export function namespacePythonPort(config: {
           await NodeFSP.writeFile(file, contents, { mode: 0o600 });
           await successful(config.session, ["upload", id, file, `${remote}/${name}`]);
         }
-        return await config.session.run([
-          "exec",
-          id,
-          "--",
-          "python3",
-          "-c",
-          runUploadedPython,
-          `${remote}/script.py`,
-          `${remote}/input.json`,
-        ]);
+        return await config.session.run(
+          [
+            "exec",
+            id,
+            "--",
+            "python3",
+            "-c",
+            runUploadedPython,
+            `${remote}/script.py`,
+            `${remote}/input.json`,
+          ],
+          undefined,
+          1_200_000,
+        );
       } finally {
         if (staged)
           await config.session
@@ -382,12 +393,18 @@ except FileExistsError:
           .run(["exec", id, "--", "python3", "-c", removeStaging, staged])
           .catch(() => undefined);
       }
-      const ready = await prepareRemoteHost(port(resource, manifest), {
-        ...manifest.preparation,
-        resourceIdentity: `namespace:${resource.devboxId}`,
-        requestHash: operation.requestHash,
-        preparationHash: operation.request.preparationHash,
-      });
+      const ready = await prepareRemoteHost(
+        port(resource, manifest),
+        withGuestProviderInstall(
+          {
+            ...manifest.preparation,
+            resourceIdentity: `namespace:${resource.devboxId}`,
+            requestHash: operation.requestHash,
+            preparationHash: operation.request.preparationHash,
+          },
+          operation.request.agentDriver,
+        ),
+      );
       if (
         ready.artifactSha256 !== manifest.localArtifact.sha256 ||
         ready.t3Revision !== manifest.localArtifact.revision ||

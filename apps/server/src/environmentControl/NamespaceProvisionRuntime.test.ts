@@ -188,7 +188,7 @@ async function fixture() {
             executable,
             args.slice(separator + 2),
             { encoding: "utf8" },
-            (error, stdout) => resolve({ exitCode: error ? 1 : 0, stdout }),
+            (error, stdout, stderr) => resolve({ exitCode: error ? 1 : 0, stdout, stderr }),
           );
         });
       }
@@ -259,6 +259,22 @@ describe("Namespace runtime transport", () => {
     expect(encodeJson(f.commands)).not.toContain("private-payload");
     expect(await NodeFSP.readdir(f.root)).toEqual([]);
     for (const file of f.tokenFiles) await expect(NodeFSP.stat(file)).rejects.toThrow();
+  });
+
+  it("returns remote python stderr when the uploaded script fails", async () => {
+    const f = await fixture();
+    const port = namespacePythonPort({
+      session: f.session,
+      resource,
+      root: f.root,
+      localDir: f.directory,
+    });
+    const result = await port.executePython({
+      script: "import sys; sys.stderr.write('Remote preparation failed: boom\\n'); sys.exit(1)",
+      stdin: "{}",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Remote preparation failed: boom");
   });
 
   it("issues separate grants for the same environment and reconstructs its proxy after manager restart", async () => {

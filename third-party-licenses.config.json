@@ -473,6 +473,46 @@
         "licenseId": "MIT",
         "copyrights": ["Copyright (c) 2025 opencode"]
       }
+    },
+    {
+      "name": "@namespacelabs/sdk",
+      "sourceUrl": "https://github.com/namespacelabs/typescript-sdk",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright Namespace Labs"]
+      }
+    },
+    {
+      "name": "@bufbuild/protobuf",
+      "sourceUrl": "https://github.com/bufbuild/protobuf-es/tree/main/packages/protobuf",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 Buf Technologies, Inc."]
+      }
+    },
+    {
+      "name": "@connectrpc/connect",
+      "sourceUrl": "https://github.com/connectrpc/connect-es/tree/main/packages/connect",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 The Connect Authors"]
+      }
+    },
+    {
+      "name": "@connectrpc/connect-web",
+      "sourceUrl": "https://github.com/connectrpc/connect-es/tree/main/packages/connect-web",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 The Connect Authors"]
+      }
+    },
+    {
+      "name": "@connectrpc/connect-node",
+      "sourceUrl": "https://github.com/connectrpc/connect-es/tree/main/packages/connect-node",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 The Connect Authors"]
+      }
     }
   ]
 }

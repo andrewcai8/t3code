@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   prepareRemoteHost,
+  remotePreparationScript,
   type RemotePreparationInput,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
@@ -32,10 +33,11 @@ const localPort: RemotePreparationPort = {
         stdio: ["pipe", "pipe", "pipe"],
       });
       let stdout = "";
+      let stderr = "";
       child.stdout.setEncoding("utf8").on("data", (data: string) => (stdout += data));
-      child.stderr.resume();
+      child.stderr.setEncoding("utf8").on("data", (data: string) => (stderr += data));
       child.once("error", reject);
-      child.once("close", (code) => resolve({ exitCode: code ?? 1, stdout }));
+      child.once("close", (code) => resolve({ exitCode: code ?? 1, stdout, stderr }));
       child.stdin.end(stdin);
     }),
 };
@@ -54,6 +56,8 @@ if (args[0] === 'auth') {
   }
   fs.appendFileSync(path.join(root, 'issued'), 'issue\n');
   process.stdout.write('test-private-broker');
+} else if (args[0] === 'project') {
+  process.exit(0);
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
   const server = http.createServer((request, response) => {
@@ -360,5 +364,178 @@ describe("remote preparation subprocess", () => {
     expect(await NodeFSP.readFile(NodePath.join(first.projectDir, "work.txt"), "utf8")).toBe(
       "keep",
     );
+  });
+
+  it("closes stdin and disables git prompts so a private clone cannot hang the preparer", () => {
+    expect(remotePreparationScript).toContain("stdin=subprocess.DEVNULL");
+    expect(remotePreparationScript).toContain("'GIT_TERMINAL_PROMPT': '0'");
+    expect(remotePreparationScript).toContain("except subprocess.TimeoutExpired");
+  });
+
+  it("fetches the workspace as a shallow partial clone instead of downloading every blob", () => {
+    expect(remotePreparationScript).toContain("'protocol.version=2'");
+    expect(remotePreparationScript).toContain("'--filter=blob:none'");
+    expect(remotePreparationScript).toContain("'--depth=1'");
+    expect(remotePreparationScript).toContain("'GIT_LFS_SKIP_SMUDGE': '1'");
+    expect(remotePreparationScript).toContain("if not (stage / '.git').is_dir():");
+    expect(remotePreparationScript).toContain(
+      "run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)",
+    );
+  });
+
+  it("starts the guest so it publishes the cloned workspace as a project", () => {
+    expect(remotePreparationScript).toContain("'start'");
+    expect(remotePreparationScript).toContain("'--auto-bootstrap-project-from-cwd'");
+    expect(remotePreparationScript).toContain("'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '1'");
+    expect(remotePreparationScript).toContain("['project', 'add'");
+    expect(remotePreparationScript).not.toContain("['serve'");
+  });
+
+  it("rebuilds native runtime addons with node-gyp 11 instead of the Node 24-incompatible default", () => {
+    expect(remotePreparationScript).toContain("'node-gyp@11'");
+    expect(remotePreparationScript).toContain("'build-essential'");
+    expect(remotePreparationScript).toContain("hasInstallScript");
+    expect(remotePreparationScript).toContain("npm_config_nodedir");
+    expect(remotePreparationScript).toContain("node.h");
+  });
+
+  it("extracts contained relative artifact symlinks", async () => {
+    const input = await fixture();
+    const unpacked = NodePath.join(NodePath.dirname(input.artifact.archivePath), "with-link");
+    await NodeFSP.mkdir(unpacked);
+    NodeChildProcess.execFileSync("tar", ["-xf", input.artifact.archivePath, "-C", unpacked]);
+    await NodeFSP.symlink("cli.mjs", NodePath.join(unpacked, "runtime"));
+    const archivePath = NodePath.join(NodePath.dirname(input.artifact.archivePath), "linked.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archivePath, "-C", unpacked, "."]);
+    const ready = await prepareRemoteHost(localPort, {
+      ...input,
+      artifact: {
+        ...input.artifact,
+        archivePath,
+        sha256: sha256(await NodeFSP.readFile(archivePath)),
+      },
+    });
+    pids.add(ready.serverPid);
+    expect(await NodeFSP.readlink(NodePath.join(input.root, "artifact/runtime"))).toBe("cli.mjs");
+  });
+
+  it("rejects artifact symlinks that point outside the archive", async () => {
+    const input = await fixture();
+    const unpacked = NodePath.join(NodePath.dirname(input.artifact.archivePath), "escape");
+    await NodeFSP.mkdir(unpacked);
+    NodeChildProcess.execFileSync("tar", ["-xf", input.artifact.archivePath, "-C", unpacked]);
+    await NodeFSP.symlink("/etc/passwd", NodePath.join(unpacked, "evil"));
+    const archivePath = NodePath.join(NodePath.dirname(input.artifact.archivePath), "escape.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archivePath, "-C", unpacked, "."]);
+    await expect(
+      prepareRemoteHost(localPort, {
+        ...input,
+        artifact: {
+          ...input.artifact,
+          archivePath,
+          sha256: sha256(await NodeFSP.readFile(archivePath)),
+        },
+      }),
+    ).rejects.toThrow("Symlink destinations are not supported");
+  });
+
+  it("does not run npm ci when the archive already contains node_modules", async () => {
+    const input = await fixture(true);
+    const unpacked = NodePath.join(NodePath.dirname(input.artifact.archivePath), "prebuilt");
+    await NodeFSP.mkdir(unpacked);
+    NodeChildProcess.execFileSync("tar", ["-xf", input.artifact.archivePath, "-C", unpacked]);
+    await NodeFSP.mkdir(NodePath.join(unpacked, "node_modules/prebuilt"), { recursive: true });
+    await NodeFSP.writeFile(
+      NodePath.join(unpacked, "node_modules/prebuilt/index.js"),
+      "export default 1;\n",
+    );
+    const archivePath = NodePath.join(NodePath.dirname(input.artifact.archivePath), "prebuilt.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archivePath, "-C", unpacked, "."]);
+    const fakeBin = NodePath.join(NodePath.dirname(input.artifact.archivePath), "fake-bin");
+    await NodeFSP.mkdir(fakeBin);
+    const npmShim = NodePath.join(fakeBin, "npm");
+    await NodeFSP.writeFile(
+      npmShim,
+      `#!/bin/sh\necho invoked > "$(dirname "$0")/invoked"\nexit 1\n`,
+    );
+    await NodeFSP.chmod(npmShim, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${NodePath.delimiter}${previousPath}`;
+    try {
+      const ready = await prepareRemoteHost(localPort, {
+        ...input,
+        artifact: {
+          ...input.artifact,
+          archivePath,
+          sha256: sha256(await NodeFSP.readFile(archivePath)),
+        },
+      });
+      pids.add(ready.serverPid);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+    await expect(NodeFSP.stat(NodePath.join(fakeBin, "invoked"))).rejects.toThrow();
+    expect(
+      await NodeFSP.readFile(
+        NodePath.join(input.root, "artifact/node_modules/prebuilt/index.js"),
+        "utf8",
+      ),
+    ).toBe("export default 1;\n");
+  });
+
+  it("resumes a leftover workspace.partial clone instead of deleting it", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const response = await fetch(`http://127.0.0.1:${input.port}/stop`);
+    expect(await response.text()).toBe("stopped");
+    const released = await localPort.executePython({
+      script:
+        "import fcntl,sys\nwith open(sys.stdin.read(), 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+      stdin: NodePath.join(input.root, "server.lock"),
+    });
+    expect(released.exitCode).toBe(0);
+    pids.delete(first.serverPid);
+    const stage = NodePath.join(input.root, "workspace.partial");
+    await NodeFSP.rename(first.projectDir, stage);
+    await NodeFSP.writeFile(NodePath.join(stage, "partial-marker"), "keep");
+    const retry = await prepareRemoteHost(localPort, input);
+    pids.add(retry.serverPid);
+    expect(retry.environmentId).toBe(first.environmentId);
+    expect(await NodeFSP.readFile(NodePath.join(retry.projectDir, "partial-marker"), "utf8")).toBe(
+      "keep",
+    );
+  });
+
+  it("installs the selected provider CLI into the isolated home before starting T3", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, {
+      ...input,
+      providerInstall:
+        'printf "$NPM_CONFIG_PREFIX\\n$PATH" > "$HOME/install-env" && ' +
+        'printf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/codex" && chmod 700 "$HOME/.local/bin/codex"',
+    });
+    pids.add(ready.serverPid);
+    const recorded = (
+      await NodeFSP.readFile(NodePath.join(input.root, "home/install-env"), "utf8")
+    ).split("\n");
+    expect(recorded[0]).toBe(NodePath.join(input.root, "home/.local"));
+    expect(recorded[1]?.split(NodePath.delimiter)[0]).toBe(
+      NodePath.join(input.root, "home/.local/bin"),
+    );
+    await expect(
+      NodeFSP.access(NodePath.join(input.root, "home/.local/bin/codex")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not start T3 when guest provider install fails", async () => {
+    const input = await fixture();
+    await expect(
+      prepareRemoteHost(localPort, {
+        ...input,
+        providerInstall: "printf 'install failed' >&2; exit 7",
+      }),
+    ).rejects.toThrow("install failed");
+    await expect(NodeFSP.access(NodePath.join(input.root, "started"))).rejects.toThrow();
   });
 });

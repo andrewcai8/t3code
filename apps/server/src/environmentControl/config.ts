@@ -72,7 +72,11 @@ export const ProvisionRuntimeArtifact = Schema.Struct({
   revision: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
   entrypoint: TrimmedNonEmptyString,
   runtimeExecutable: TrimmedNonEmptyString,
-  /** Install package dependencies on the target platform before starting T3. */
+  /**
+   * Install package dependencies on the target platform before starting T3.
+   * Linux/E2B artifacts should omit this and ship `node_modules`; sandboxes
+   * often cannot reach nodejs.org to compile native addons.
+   */
   install: Schema.optional(Schema.Literal("npm")),
 });
 export type ProvisionRuntimeArtifact = typeof ProvisionRuntimeArtifact.Type;
@@ -248,13 +252,37 @@ const onDisk = async (path: string) => {
 /**
  * Where to read cloud control configuration, or `null` when it is not set up.
  *
- * The default lives beside `settings.json` in the state directory, with the
- * machine-level `~/.t3` location as a fallback for desktop dev runs that use an
- * isolated state directory. An explicit override is returned even when the file
- * is missing: naming a path that does not exist is a misconfiguration and has to
- * fail loudly, whereas the default being absent just means a machine has no
- * cloud controls.
+ * Prefer the file beside `settings.json` in the state directory, then the T3
+ * home that owns that userdata directory (`--home-dir ~/.t3/dev` pins
+ * `~/.t3/dev/environment-control.json`), then the machine-level `~/.t3` file.
+ * An explicit override is returned even when the file is missing: naming a
+ * path that does not exist is a misconfiguration and has to fail loudly,
+ * whereas the default being absent just means a machine has no cloud controls.
  */
+export function controlConfigCandidates(input: {
+  readonly stateDir: string;
+  readonly fallback?: string | undefined;
+}): string[] {
+  const fallback =
+    input.fallback ?? NodePath.join(NodeOS.homedir(), ".t3", CONTROL_CONFIG_FILENAME);
+  const paths = [NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME)];
+  // `--home-dir ~/.t3/dev` stores sqlite in userdata/ but operators put the
+  // pin next to the home, not inside userdata. Skipping this step made Dev
+  // silently use Alpha's ~/.t3/environment-control.json.
+  if (NodePath.basename(input.stateDir) === "userdata")
+    paths.push(NodePath.join(NodePath.dirname(input.stateDir), CONTROL_CONFIG_FILENAME));
+  paths.push(fallback);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const path of paths) {
+    const key = NodePath.normalize(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(path);
+  }
+  return unique;
+}
+
 export async function resolveControlConfigPath(input: {
   readonly explicit?: string | undefined;
   readonly stateDir: string;
@@ -263,12 +291,8 @@ export async function resolveControlConfigPath(input: {
 }): Promise<string | null> {
   const explicit = input.explicit?.trim();
   if (explicit) return explicit;
-  const candidates = [
-    NodePath.join(input.stateDir, CONTROL_CONFIG_FILENAME),
-    input.fallback ?? NodePath.join(NodeOS.homedir(), ".t3", CONTROL_CONFIG_FILENAME),
-  ];
   const exists = input.exists ?? onDisk;
-  for (const path of candidates) {
+  for (const path of controlConfigCandidates(input)) {
     if (await exists(path)) return path;
   }
   return null;

@@ -48,6 +48,7 @@ import {
 } from "./NamespaceProvisionRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
+import { provisionFailureMessage } from "./provisionFailure.ts";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -510,13 +511,21 @@ export const layer = Layer.effect(
     const importedLeases = new Map(
       decodeLegacyLeases(legacyLeases).map((lease) => [lease.leaseId, lease]),
     );
-    let manager:
-      | Promise<
-          | (ReturnType<typeof createEnvironmentControl> & {
-              config: Awaited<ReturnType<typeof readConfig>>;
-            })
-          | null
-        >
+    type ManagerService = ReturnType<typeof createEnvironmentControl> & {
+      config: Awaited<ReturnType<typeof readConfig>>;
+    };
+    let loaded:
+      | {
+          readonly path: string;
+          readonly mtimeMs: number;
+          readonly service: Promise<ManagerService | null>;
+        }
+      | undefined;
+    let namespace:
+      | Promise<{
+          allocator: ReturnType<typeof makeNamespaceAllocationPorts>;
+          runtime: ReturnType<typeof makeNamespaceProvisionRuntime>;
+        }>
       | undefined;
     const settings = yield* ServerSettingsService;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
@@ -540,29 +549,40 @@ export const layer = Layer.effect(
       return result.profile;
     };
     const resolve = () =>
-      (manager ??= (async () => {
+      (async () => {
         const path = await resolveControlConfigPath({
           explicit: process.env.T3CODE_ENVIRONMENT_CONTROL_CONFIG,
           stateDir,
           fallback: NodePath.join(NodeOS.homedir(), ".t3", "environment-control.json"),
         });
-        if (!path) return null;
-        const config = await readConfig(path);
-        const service = createEnvironmentControl(
-          config.targets,
-          createCloudDriver(config, resolveProfile),
-          leaseRegistry,
-        );
-        return { ...service, config };
-      })());
-    let namespace:
-      | Promise<{
-          allocator: ReturnType<typeof makeNamespaceAllocationPorts>;
-          runtime: ReturnType<typeof makeNamespaceProvisionRuntime>;
-        }>
-      | undefined;
-    const resolveNamespace = () =>
-      (namespace ??= (async () => {
+        if (!path) {
+          loaded = undefined;
+          namespace = undefined;
+          return null;
+        }
+        const mtimeMs = await NodeFSP.stat(path)
+          .then((stats) => stats.mtimeMs)
+          .catch(() => null);
+        if (mtimeMs === null) return null;
+        if (loaded?.path === path && loaded.mtimeMs === mtimeMs) return loaded.service;
+        namespace = undefined;
+        const service = (async () => {
+          const config = await readConfig(path);
+          const control = createEnvironmentControl(
+            config.targets,
+            createCloudDriver(config, resolveProfile),
+            leaseRegistry,
+          );
+          return { ...control, config };
+        })();
+        loaded = { path, mtimeMs, service };
+        return service.catch((error: unknown) => {
+          if (loaded?.path === path && loaded.mtimeMs === mtimeMs) loaded = undefined;
+          throw error;
+        });
+      })();
+    const resolveNamespace = () => {
+      namespace ??= (async () => {
         const manager = await resolve();
         if (!manager)
           throw new ProvisionRefused({
@@ -580,12 +600,22 @@ export const layer = Layer.effect(
             execute: async (args, signal) => {
               const result = await session.run(args, signal);
               if (result.exitCode !== 0)
-                throw new Error("Namespace allocation command did not finish.");
+                throw new Error(
+                  provisionFailureMessage(
+                    new Error(result.stderr?.trim() || result.stdout?.trim() || ""),
+                    "Namespace allocation command did not finish.",
+                  ),
+                );
             },
           }),
           runtime: makeNamespaceProvisionRuntime({ session, stateDir }),
         };
-      })());
+      })();
+      void namespace.catch(() => {
+        namespace = undefined;
+      });
+      return namespace;
+    };
     const provider = (operation: ProvisionOperation) =>
       Effect.tryPromise({
         try: async () => {
@@ -663,7 +693,10 @@ export const layer = Layer.effect(
               catch: (error) =>
                 new ProvisionProviderError({
                   ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
-                  message: "Namespace preparation did not finish. Retry the same request.",
+                  message: provisionFailureMessage(
+                    error,
+                    "Namespace preparation did not finish. Retry the same request.",
+                  ),
                 }),
             });
           const sandboxId = resource.sandboxId;
@@ -680,7 +713,10 @@ export const layer = Layer.effect(
             catch: (error) =>
               new ProvisionProviderError({
                 ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
-                message: "Remote preparation did not finish. Retry the same request to resume.",
+                message: provisionFailureMessage(
+                  error,
+                  "Remote preparation did not finish. Retry the same request to resume.",
+                ),
               }),
           });
         }),
@@ -705,7 +741,18 @@ export const layer = Layer.effect(
                 reason: "unconfigured",
                 message: "Configure a pinned macOS runtime artifact before provisioning.",
               });
-            await resolveNamespace();
+            try {
+              await resolveNamespace();
+            } catch (error) {
+              if (isProvisionRefused(error)) throw error;
+              throw new ProvisionRefused({
+                reason: "credentials",
+                message: provisionFailureMessage(
+                  error,
+                  "Log in with nsc login, or set namespaceToken in environment-control.json.",
+                ),
+              });
+            }
           }
           return manifests.freeze(
             input,

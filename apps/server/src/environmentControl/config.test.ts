@@ -126,7 +126,27 @@ it("falls back to the machine-level configuration for isolated state directories
     },
   });
   expect(path).toBe(fallback);
-  expect(seen).toEqual(["/worktree/.t3/userdata/environment-control.json", fallback]);
+  expect(seen).toEqual([
+    "/worktree/.t3/userdata/environment-control.json",
+    "/worktree/.t3/environment-control.json",
+    fallback,
+  ]);
+});
+
+it("prefers a home-dir pin over the machine-level fallback", async () => {
+  const fallback = "/Users/andrew/.t3/environment-control.json";
+  const home = "/Users/andrew/.t3/dev/environment-control.json";
+  const seen: string[] = [];
+  const path = await resolveControlConfigPath({
+    stateDir: "/Users/andrew/.t3/dev/userdata",
+    fallback,
+    exists: async (candidate) => {
+      seen.push(candidate);
+      return candidate === home;
+    },
+  });
+  expect(path).toBe(home);
+  expect(seen).toEqual(["/Users/andrew/.t3/dev/userdata/environment-control.json", home]);
 });
 
 it("keeps an explicit path even when it is missing, so the mistake surfaces", async () => {

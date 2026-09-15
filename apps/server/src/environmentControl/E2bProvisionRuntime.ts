@@ -1,19 +1,39 @@
 // @effect-diagnostics globalFetch:off - Promise SDK adapters perform provider resolution and private remote HTTP.
 // @effect-diagnostics nodeBuiltinImport:off - SDK transfers read immutable local artifacts at the provider boundary.
 import * as NodeFSP from "node:fs/promises";
-import { E2B, SandboxNotFoundError, type E2BClientOpts, type Sandbox } from "e2b";
+import {
+  CommandExitError,
+  E2B,
+  SandboxNotFoundError,
+  type CommandResult,
+  type E2BClientOpts,
+  type Sandbox,
+} from "e2b";
 import type { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import {
-  prepareRemoteHost,
-  type RemotePreparationInput,
-  type RemotePreparationPort,
-} from "./remotePreparation.ts";
+import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
+import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 
 import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+/** Whole-host prepare: npm install + shallow clone + start T3. */
+const PREPARE_COMMAND_TIMEOUT_MS = 1_200_000;
+
+/** E2B's wait() throws on any non-zero exit, hiding python stderr unless we unwrap it. */
+export async function e2bPythonResult(
+  run: Promise<CommandResult>,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  try {
+    const result = await run;
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    if (error instanceof CommandExitError)
+      return { exitCode: error.exitCode, stdout: error.stdout, stderr: error.stderr };
+    throw error;
+  }
+}
 const pairingResponse = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ credential: Schema.String })),
 );
@@ -60,23 +80,22 @@ export function makeProvisionResolution(config: {
 export function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
   return {
     executePython: async ({ script, stdin }) => {
-      if (stdin.length === 0) {
-        const result = await sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
-          timeoutMs: 900_000,
-        });
-        return { exitCode: result.exitCode, stdout: result.stdout };
-      }
+      if (stdin.length === 0)
+        return e2bPythonResult(
+          sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
+            timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
+          }),
+        );
       const command = await sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
         background: true,
         stdin: true,
-        timeoutMs: 900_000,
+        timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
       });
       try {
         for (let offset = 0; offset < stdin.length; offset += 256 * 1024)
           await command.sendStdin(stdin.slice(offset, offset + 256 * 1024));
         await command.closeStdin();
-        const result = await command.wait();
-        return { exitCode: result.exitCode, stdout: result.stdout };
+        return await e2bPythonResult(command.wait());
       } finally {
         await command.disconnect();
       }
@@ -171,14 +190,21 @@ else:
         await sandbox.files.write(
           manifest.preparation.artifact.archivePath,
           new Uint8Array(archive).buffer,
+          // E2B files.write uses AbortSignal.timeout(60_000) unless overridden.
+          { requestTimeoutMs: PREPARE_COMMAND_TIMEOUT_MS },
         );
-      const input: RemotePreparationInput = {
-        ...manifest.preparation,
-        resourceIdentity: `e2b:${sandboxId}`,
-        requestHash: operation.requestHash,
-        preparationHash: operation.request.preparationHash,
-      };
-      const result = await prepareRemoteHost(transport, input);
+      const result = await prepareRemoteHost(
+        transport,
+        withGuestProviderInstall(
+          {
+            ...manifest.preparation,
+            resourceIdentity: `e2b:${sandboxId}`,
+            requestHash: operation.requestHash,
+            preparationHash: operation.request.preparationHash,
+          },
+          operation.request.agentDriver,
+        ),
+      );
       if (
         result.artifactSha256 !== manifest.localArtifact.sha256 ||
         result.t3Revision !== manifest.localArtifact.revision ||
