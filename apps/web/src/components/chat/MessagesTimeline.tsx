@@ -190,6 +190,7 @@ import {
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
+import { EnvironmentSetupCard, type CloudEnvironmentSetupSnapshot } from "./EnvironmentSetupCard";
 import {
   ContextChipPopover as UserMessageContextPopover,
   ContextChipShell,
@@ -280,6 +281,7 @@ interface TimelineRowSharedState {
   onCancelWorktreeSetup: (() => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
+  onCancelEnvironmentSetup: (() => void) | null;
 }
 
 interface TimelineRowActivityState {
@@ -384,6 +386,8 @@ interface MessagesTimelineProps {
   onCancelWorktreeSetup?: () => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
+  environmentSetup?: CloudEnvironmentSetupSnapshot | null;
+  onCancelEnvironmentSetup?: () => void;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   latestTurn: TimelineLatestTurn | null;
@@ -447,6 +451,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onCancelWorktreeSetup,
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
+  environmentSetup = null,
+  onCancelEnvironmentSetup,
   isPreparingWorktree = false,
   isCompacting = false,
   activeTurnStartedAt,
@@ -707,6 +713,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         supportsConversationRollback,
         liveAgentTaskIds,
         worktreeSetup,
+        environmentSetup,
       },
       previous?.threadKey === listIdentityKey && previous.workspaceRoot === workspaceRoot
         ? previous.projection
@@ -729,6 +736,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     supportsConversationRollback,
     liveAgentTaskIds,
     worktreeSetup,
+    environmentSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
@@ -924,6 +932,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onCancelWorktreeSetup: onCancelWorktreeSetup ?? null,
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
+      onCancelEnvironmentSetup: onCancelEnvironmentSetup ?? null,
     }),
     [
       readyCitationRequest,
@@ -954,6 +963,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onCancelWorktreeSetup,
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
+      onCancelEnvironmentSetup,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1409,7 +1419,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
                   row.kind === "work-live" ||
                   row.kind === "work-toggle" ||
                   row.kind === "thinking" ||
-                  row.kind === "worktree-setup"
+                  row.kind === "worktree-setup" ||
+                  row.kind === "environment-setup"
                 ? "pb-2"
                 : "pb-4",
         (row.kind === "message" && row.message.role === "assistant") ||
@@ -1445,9 +1456,24 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "thinking" ? <ThinkingTimelineRow /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
+      {row.kind === "environment-setup" ? <EnvironmentSetupTimelineRow row={row} /> : null}
     </div>
   );
 });
+
+function EnvironmentSetupTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "environment-setup" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  return (
+    <EnvironmentSetupCard
+      snapshot={row.snapshot}
+      onCancel={row.snapshot.phase === "ready" ? null : ctx.onCancelEnvironmentSetup}
+    />
+  );
+}
 
 function WorktreeSetupTimelineRow({
   row,

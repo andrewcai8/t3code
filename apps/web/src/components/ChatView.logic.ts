@@ -59,6 +59,21 @@ import {
 } from "../providerInstances";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
+
+/** A just-paired cloud environment owns its checkout; bind by environment, not path. */
+export function isCloudHandoffProject(
+  project: { readonly environmentId: string },
+  input: {
+    readonly environmentId: string;
+    readonly pairedEnvironmentId: string;
+  },
+): boolean {
+  return (
+    project.environmentId === input.environmentId &&
+    project.environmentId === input.pairedEnvironmentId
+  );
+}
+
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
@@ -259,8 +274,10 @@ export function resolveDraftHeroState(input: {
   backgroundSubmissionPending: boolean;
   /** A worktree setup card is on the timeline, so the timeline must stay visible. */
   hasWorktreeSetupCard?: boolean;
+  /** A cloud environment setup card is on the timeline, so the timeline must stay visible. */
+  hasEnvironmentSetupCard?: boolean;
 }): boolean {
-  if (input.hasWorktreeSetupCard) {
+  if (input.hasWorktreeSetupCard || input.hasEnvironmentSetupCard) {
     return false;
   }
   if (input.backgroundSubmissionPending) {

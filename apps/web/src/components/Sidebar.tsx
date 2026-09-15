@@ -18,6 +18,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   canSnooze,
   effectiveSnoozed,
+  environmentAllowsThreadSettlement,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
@@ -236,7 +237,7 @@ import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarT
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import {
-  composerDraftHasUserContent,
+  draftSessionHasInvestedWork,
   DraftId,
   useComposerDraftStore,
   useThreadHasUnsentDraft,
@@ -251,6 +252,21 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
+
+const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
+  prompt: "",
+  images: [],
+  files: [],
+  nonPersistedImageIds: [],
+  persistedAttachments: [],
+  terminalContexts: [],
+  previewAnnotations: [],
+  reviewComments: [],
+  modelSelectionByProvider: {},
+  activeProvider: null,
+  runtimeMode: null,
+  interactionMode: null,
+};
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -721,7 +737,9 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   const preview =
     promptPreview.length > 0
       ? promptPreview
-      : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
+      : session.pendingEnvironmentSend?.preview.trim()
+        ? session.pendingEnvironmentSend.preview.trim()
+        : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
   const handleActivate = useCallback(() => onNavigate(draftId), [draftId, onNavigate]);
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
@@ -814,9 +832,11 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
   // types. A draft that was never navigated away from has no snapshot to
-  // freeze, so a fresh typing session shows no row at all. Captured
-  // synchronously on route change (setState-during-render derived state) so
-  // the row never flickers out for a frame between route change and capture.
+  // freeze, so a fresh typing session shows no row at all. A started
+  // first-send still gets a live row so it appears as soon as Enter docks
+  // the chat. Captured synchronously on route change (setState-during-render
+  // derived state) so the row never flickers out for a frame between route
+  // change and capture.
   const [frozenActive, setFrozenActive] = useState<{
     routeDraftId: string | null;
     row: SidebarDraftRowData | null;
@@ -829,8 +849,8 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
       const session = store.getDraftSession(draftId);
       const composer = store.getComposerDraft(draftId);
       row =
-        session && session.promotedTo == null && composer && composerDraftHasUserContent(composer)
-          ? { draftId, session, composer }
+        session && session.promotedTo == null && draftSessionHasInvestedWork(session, composer)
+          ? { draftId, session, composer: composer ?? EMPTY_SIDEBAR_COMPOSER }
           : null;
     }
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
@@ -851,19 +871,29 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
         continue;
       }
       if (draftKey === props.routeDraftId) {
-        // Open draft: render the frozen entry snapshot, or nothing for a
-        // draft that has never been left. Gated on the LIVE session above so
-        // send/discard still removes the row immediately.
+        // Open draft: render the frozen entry snapshot, or a live row for a
+        // started first-send that has not been left yet. Gated on the LIVE
+        // session above so send/discard still removes the row immediately.
         if (frozenActive.routeDraftId === draftKey && frozenActive.row !== null) {
           rows.push(frozenActive.row);
+        } else if (session.pendingEnvironmentSend != null) {
+          rows.push({
+            draftId: DraftId.make(draftKey),
+            session,
+            composer: draftsByThreadKey[draftKey] ?? EMPTY_SIDEBAR_COMPOSER,
+          });
         }
         continue;
       }
       const composer = draftsByThreadKey[draftKey];
-      if (!composer || !composerDraftHasUserContent(composer)) {
+      if (!draftSessionHasInvestedWork(session, composer)) {
         continue;
       }
-      rows.push({ draftId: DraftId.make(draftKey), session, composer });
+      rows.push({
+        draftId: DraftId.make(draftKey),
+        session,
+        composer: composer ?? EMPTY_SIDEBAR_COMPOSER,
+      });
     }
     rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
     return rows;
@@ -2419,8 +2449,8 @@ export default function Sidebar() {
   // empty state, while SidebarDraftBlock owns the per-keystroke content
   // subscription. Selecting a number keeps typing in a draft composer from
   // re-rendering the whole sidebar. Approximates the block's row filter
-  // (every non-promoted session with content); it can overcount by one for
-  // an open never-left draft, which only softens the empty state.
+  // (every non-promoted invested session). An open never-left typing draft
+  // can overcount by one, which only softens the empty state.
   const routeDraftIdForRows = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
   const visibleDraftSessionCount = useComposerDraftStore((store) => {
     let count = 0;
@@ -2428,7 +2458,7 @@ export default function Sidebar() {
       if (session.promotedTo != null) {
         continue;
       }
-      if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
+      if (!draftSessionHasInvestedWork(session, store.draftsByThreadKey[draftKey])) {
         continue;
       }
       if (
@@ -2529,7 +2559,7 @@ export default function Sidebar() {
       // or descriptor not loaded yet) never classify as settled: the user
       // could neither un-settle nor pin them, so auto-settling them would
       // strand rows in a tail with no working affordances.
-      const supportsSettlement = capabilities?.threadSettlement === true;
+      const supportsSettlement = environmentAllowsThreadSettlement(capabilities);
       const supportsSnooze = capabilities?.threadSnooze === true;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
       if (capabilities?.threadActiveReorder === true) activeReorderable.add(threadKey);
@@ -3459,9 +3489,9 @@ export default function Sidebar() {
             activeSection: draggedFromSection,
             activePinned: source.pinnedAt != null,
             activeSettled: source.settledOverride === "settled",
-            supportsSettlement:
-              serverConfigs.get(source.environmentId)?.environment.capabilities.threadSettlement ===
-              true,
+            supportsSettlement: environmentAllowsThreadSettlement(
+              serverConfigs.get(source.environmentId)?.environment.capabilities,
+            ),
             target,
             pinnedOrder: pinnedKeys,
             pinnedKeysById,
@@ -3507,9 +3537,9 @@ export default function Sidebar() {
         activeSection,
         activePinned: activeThread.pinnedAt != null,
         activeSettled: activeThread.settledOverride === "settled",
-        supportsSettlement:
-          serverConfigs.get(activeThread.environmentId)?.environment.capabilities
-            .threadSettlement === true,
+        supportsSettlement: environmentAllowsThreadSettlement(
+          serverConfigs.get(activeThread.environmentId)?.environment.capabilities,
+        ),
         target,
         pinnedOrder: pinnedKeys,
         pinnedKeysById,
@@ -3982,9 +4012,9 @@ export default function Sidebar() {
         // Un-settle pins the thread active until real activity clears the pin.
         // Environments without
         // the settlement capability get no lifecycle items at all.
-        const supportsSettlement =
-          serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSettlement ===
-          true;
+        const supportsSettlement = environmentAllowsThreadSettlement(
+          serverConfigs.get(thread.environmentId)?.environment.capabilities,
+        );
         const supportsSnooze =
           serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true;
         const supportsPinning =
@@ -4611,10 +4641,9 @@ export default function Sidebar() {
                                   ? "unsettle"
                                   : "settle"
                             }
-                            settlementSupported={
-                              serverConfigs.get(thread.environmentId)?.environment.capabilities
-                                .threadSettlement === true
-                            }
+                            settlementSupported={environmentAllowsThreadSettlement(
+                              serverConfigs.get(thread.environmentId)?.environment.capabilities,
+                            )}
                             snoozeSupported={
                               serverConfigs.get(thread.environmentId)?.environment.capabilities
                                 .threadSnooze === true

@@ -33,6 +33,7 @@ import {
   type MessagesTimelineRow,
   type MessagesTimelineRowsProjection,
   WORKTREE_SETUP_ROW_ID,
+  ENVIRONMENT_SETUP_ROW_ID,
   workEntryDisplayLabel,
 } from "./MessagesTimeline.logic";
 import {
@@ -1166,6 +1167,54 @@ describe("deriveMessagesTimelineRows", () => {
       "working",
       "message",
     ]);
+  });
+
+  it("places an environment setup card under the first user message", () => {
+    const snapshot = {
+      provider: "e2b" as const,
+      phase: "creating" as const,
+      startedAt: "2026-01-01T00:00:00Z",
+      repository: "example/megpt-mono",
+    };
+    const userEntry = {
+      id: "user-entry",
+      kind: "message",
+      createdAt: "2026-01-01T00:00:00Z",
+      message: {
+        id: "user-1" as never,
+        role: "user",
+        text: "Build it",
+        turnId: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        streaming: false,
+      },
+    } as const;
+    const withoutMessages = deriveMessagesTimelineRows({
+      timelineEntries: [],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      environmentSetup: snapshot,
+    });
+    expect(withoutMessages).toEqual([
+      {
+        kind: "environment-setup",
+        id: ENVIRONMENT_SETUP_ROW_ID,
+        createdAt: "2026-01-01T00:00:00Z",
+        snapshot,
+      },
+    ]);
+    const withUser = deriveMessagesTimelineRows({
+      timelineEntries: [userEntry],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      environmentSetup: snapshot,
+    });
+    expect(withUser.map((row) => row.kind)).toEqual(["message", "environment-setup"]);
   });
 
   it("keeps context compaction visible outside folded work", () => {

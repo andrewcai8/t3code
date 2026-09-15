@@ -10,6 +10,8 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { threadLifecycleOverlayAtom } from "@t3tools/client-runtime/state/threads";
 import {
   EnvironmentId,
   type EnvironmentProvisionDisposeResult,
@@ -53,6 +55,8 @@ import { useClientSettings } from "./useSettings";
 import { useAtomCommand } from "../state/use-atom-command";
 import { forgetProvisionedSandbox, provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { environmentPresentations } from "../state/presentation";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -694,7 +698,10 @@ export function useThreadActions() {
         environmentId: target.environmentId,
         input: { threadId: target.threadId },
       });
-      if (result._tag === "Success") await pauseProvisionedSandboxForThread(target);
+      const connected =
+        appAtomRegistry.get(environmentPresentations.presentationAtom(target.environmentId))
+          ?.connection.phase === "connected";
+      if (result._tag === "Success" && connected) await pauseProvisionedSandboxForThread(target);
       if (result._tag === "Success" && wokeAt !== null) {
         markThreadVisited(scopedThreadKey(target), wokeAt);
       }
@@ -710,9 +717,13 @@ export function useThreadActions() {
 
   const unsettleThread = useCallback(
     async (target: ScopedThreadRef) => {
-      const recovery = await recoverEnvironment(target.environmentId);
-      if (recovery.kind === "failed")
-        return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
+      const pendingLocalSettle =
+        appAtomRegistry.get(threadLifecycleOverlayAtom).get(threadKey(target))?.kind === "settled";
+      if (!pendingLocalSettle) {
+        const recovery = await recoverEnvironment(target.environmentId);
+        if (recovery.kind === "failed")
+          return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
+      }
       if (!readEnvironmentSupportsSettlement(target.environmentId)) {
         return AsyncResult.failure(
           Cause.fail(

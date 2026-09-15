@@ -8,7 +8,7 @@ import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
-  composerDraftHasUserContent,
+  draftSessionHasInvestedWork,
   markPromotedDraftThreadByRef,
   type DraftId,
   type DraftThreadEnvMode,
@@ -188,14 +188,17 @@ export function useNewThreadHandler() {
         markPromotedDraftThreadByRef(storedDraftThreadRef);
       }
       // New-thread surfaces (button, hotkeys, "/" landing, palette) only
-      // ever reuse a draft the user has NOT invested in. A draft with typed
-      // text or attachments is work in progress: it stays alive where it is
+      // ever reuse a draft the user has NOT invested in. Typed content,
+      // attachments, or an in-flight first-send stay alive where they are
       // (reachable from the sidebar draft rows) and this request mints a
       // fresh draft instead — the remap in the store preserves invested
       // drafts rather than deleting them.
       const emptyStoredDraftThread =
         reusableStoredDraftThread &&
-        !composerDraftHasUserContent(getComposerDraft(reusableStoredDraftThread.draftId))
+        !draftSessionHasInvestedWork(
+          reusableStoredDraftThread,
+          getComposerDraft(reusableStoredDraftThread.draftId),
+        )
           ? reusableStoredDraftThread
           : null;
       const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
@@ -248,7 +251,8 @@ export function useNewThreadHandler() {
             const remappedMeanwhile =
               getDraftSessionByLogicalProjectKey(logicalProjectKey)?.draftId !==
               emptyStoredDraftThread.draftId;
-            const investedMeanwhile = composerDraftHasUserContent(
+            const investedMeanwhile = draftSessionHasInvestedWork(
+              getDraftSession(emptyStoredDraftThread.draftId),
               getComposerDraft(emptyStoredDraftThread.draftId),
             );
             if (openedMeanwhile || promotedMeanwhile || remappedMeanwhile || investedMeanwhile) {
@@ -338,7 +342,10 @@ export function useNewThreadHandler() {
         latestActiveDraftThread.promotedTo == null &&
         // Same content rule as above: a new-thread request while viewing an
         // invested draft mints a fresh one instead of repurposing it.
-        !composerDraftHasUserContent(getComposerDraft(currentRouteTarget.draftId))
+        !draftSessionHasInvestedWork(
+          latestActiveDraftThread,
+          getComposerDraft(currentRouteTarget.draftId),
+        )
       ) {
         if (
           hasBranchOption ||

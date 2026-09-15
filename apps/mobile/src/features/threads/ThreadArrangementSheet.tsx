@@ -1,7 +1,11 @@
 import { appAtomRegistry } from "../../state/atom-registry";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  collectSettlementEnvironmentIds,
+  effectiveSnoozed,
+  environmentAllowsThreadSettlement,
+} from "@t3tools/client-runtime/state/thread-settled";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Animated, FlatList, Modal, Pressable, View } from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
@@ -176,10 +180,9 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       now,
       queuedThreadKeys,
       pendingOrder,
-      settlementEnvironmentIds: new Set(
-        [...configs].flatMap(([id, config]) =>
-          config.environment.capabilities.threadSettlement ? [id] : [],
-        ),
+      settlementEnvironmentIds: collectSettlementEnvironmentIds(
+        configs,
+        threads.map((thread) => thread.environmentId),
       ),
       snoozeEnvironmentIds: new Set(
         [...configs].flatMap(([id, config]) =>
@@ -290,7 +293,9 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       if (target.section === "settled") {
         if (
           current.sourceSection !== "settled" &&
-          configs.get(current.thread.environmentId)?.environment.capabilities.threadSettlement
+          environmentAllowsThreadSettlement(
+            configs.get(current.thread.environmentId)?.environment.capabilities,
+          )
         )
           destination = { section: "settled", targetId: null, placement: "before" };
       } else if (latest.current.planners[target.section](keyOf(current.thread), candidate) !== null)
@@ -424,13 +429,15 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                       const label = threadDragAction(item.section, section);
                       if (!label) return [];
                       if (section === "settled")
-                        return capabilities?.threadSettlement ? [{ name: section, label }] : [];
+                        return environmentAllowsThreadSettlement(capabilities)
+                          ? [{ name: section, label }]
+                          : [];
                       if (
                         ((section === "pinned" || thread.pinnedAt != null) &&
                           !capabilities?.threadPinning) ||
                         (section === "active" &&
                           item.section === "settled" &&
-                          !capabilities?.threadSettlement) ||
+                          !environmentAllowsThreadSettlement(capabilities)) ||
                         (section === "active" &&
                           item.section === "snoozed" &&
                           !capabilities?.threadSnooze)

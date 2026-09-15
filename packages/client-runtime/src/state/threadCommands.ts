@@ -1,6 +1,7 @@
 import * as Crypto from "effect/Crypto";
-import { Atom } from "effect/unstable/reactivity";
-import { WS_METHODS } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 
 import {
   createAtomCommandScheduler,
@@ -60,6 +61,31 @@ import {
   updateThreadMetadata,
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import {
+  isThreadLifecycleOfflineFailure,
+  OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT,
+  queueOfflineThreadLifecycleOverlay,
+  type ThreadLifecycleOverlayKind,
+} from "./threadLifecycleOverlay.ts";
+
+function recoverOfflineThreadLifecycle(kind: ThreadLifecycleOverlayKind) {
+  return (
+    error: unknown,
+    context: {
+      readonly input: { readonly threadId: SettleThreadInput["threadId"] };
+      readonly environmentId: EnvironmentId;
+      readonly registry: AtomRegistry.AtomRegistry;
+    },
+  ) => {
+    if (!isThreadLifecycleOfflineFailure(error)) return undefined;
+    queueOfflineThreadLifecycleOverlay(
+      context.registry,
+      { environmentId: context.environmentId, threadId: context.input.threadId },
+      kind,
+    );
+    return Effect.succeed(OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT);
+  };
+}
 
 export type {
   ArchiveThreadInput,
@@ -131,12 +157,14 @@ export function createThreadEnvironmentAtoms<R, E>(
     settle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:settle",
       execute: (input: SettleThreadInput) => settleThread(input),
+      recover: recoverOfflineThreadLifecycle("settled"),
       scheduler,
       concurrency,
     }),
     unsettle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unsettle",
       execute: (input: UnsettleThreadInput) => unsettleThread(input),
+      recover: recoverOfflineThreadLifecycle("unsettled"),
       scheduler,
       concurrency,
     }),

@@ -1,6 +1,11 @@
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  canSnooze,
+  collectSettlementEnvironmentIds,
+  effectiveSnoozed,
+  environmentAllowsThreadSettlement,
+} from "@t3tools/client-runtime/state/thread-settled";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
 import { useCallback, useRef } from "react";
@@ -31,9 +36,8 @@ import { getThreadListV2OrderedSection } from "../threads/threadListV2";
 /** Version skew: never send settle/unsettle to a server that predates them
     (capability defaults false on decode for older servers). */
 function environmentSupportsSettlement(environmentId: EnvironmentThreadShell["environmentId"]) {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadSettlement === true
+  return environmentAllowsThreadSettlement(
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities,
   );
 }
 
@@ -539,10 +543,9 @@ export function useThreadListActions(): {
         section,
         now: new Date().toISOString(),
         queuedThreadKeys: appAtomRegistry.get(queuedThreadKeysAtom),
-        settlementEnvironmentIds: new Set(
-          [...configs].flatMap(([id, config]) =>
-            config.environment.capabilities.threadSettlement === true ? [id] : [],
-          ),
+        settlementEnvironmentIds: collectSettlementEnvironmentIds(
+          configs,
+          shells.map((thread) => thread.environmentId),
         ),
         snoozeEnvironmentIds: new Set(
           [...configs].flatMap(([id, config]) =>

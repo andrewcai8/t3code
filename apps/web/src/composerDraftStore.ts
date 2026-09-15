@@ -310,6 +310,22 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
 
+const PendingCloudEnvironmentSend = Schema.Struct({
+  provider: Schema.Literals(["e2b", "namespace"]),
+  preview: Schema.String,
+  messageId: Schema.String,
+  createdAt: Schema.String,
+  prompt: Schema.String,
+  outgoingMessageText: Schema.String,
+  phase: Schema.Literals(["creating", "pairing", "loading-project", "ready", "failed"]),
+  startedAt: Schema.String,
+  endedAt: Schema.optionalKey(Schema.String),
+  error: Schema.optionalKey(Schema.String),
+  repository: Schema.optionalKey(Schema.String),
+  readyEnvironmentId: Schema.optionalKey(Schema.String),
+});
+export type PendingCloudEnvironmentSend = typeof PendingCloudEnvironmentSend.Type;
+
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
   environmentId: Schema.String,
@@ -332,6 +348,7 @@ const PersistedDraftThreadState = Schema.Struct({
       }),
     ),
   ),
+  pendingEnvironmentSend: Schema.optionalKey(PendingCloudEnvironmentSend),
 });
 type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
 
@@ -432,6 +449,18 @@ export function composerDraftHasUserContent(
 }
 
 /**
+ * A first send can clear the composer while the sandbox is still preparing.
+ * That draft is still invested work: it belongs in the sidebar, must survive
+ * remap, and must not be reused as an empty new-thread target.
+ */
+export function draftSessionHasInvestedWork(
+  session: DraftSessionState | null | undefined,
+  composer?: ComposerThreadDraftState | null,
+): boolean {
+  return session?.pendingEnvironmentSend != null || composerDraftHasUserContent(composer);
+}
+
+/**
  * Mutable routing and execution context for a pre-thread draft session.
  *
  * Unlike a real server thread, a draft session can still change target
@@ -452,6 +481,7 @@ export interface DraftSessionState {
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
   promotedTo?: ScopedThreadRef | null;
+  pendingEnvironmentSend?: PendingCloudEnvironmentSend | null;
 }
 
 export type DraftThreadState = DraftSessionState;
@@ -557,6 +587,15 @@ interface ComposerDraftStoreState {
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
     },
+  ) => void;
+  /**
+   * First-send cloud setup that has already left the composer. Survives an
+   * empty prompt so the sidebar and new-thread remap treat the draft as
+   * invested work until the turn lands or the user cancels.
+   */
+  setDraftPendingEnvironmentSend: (
+    target: ComposerThreadTarget,
+    pending: PendingCloudEnvironmentSend | null,
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
   clearProjectDraftThreadById: (
@@ -1560,6 +1599,9 @@ function createDraftThreadState(
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
     promotedTo: null,
+    ...(existingThread?.pendingEnvironmentSend
+      ? { pendingEnvironmentSend: existingThread.pendingEnvironmentSend }
+      : {}),
   };
 }
 
@@ -1593,7 +1635,34 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
-    scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
+    scopedThreadRefsEqual(left.promotedTo, right.promotedTo) &&
+    pendingEnvironmentSendsEqual(left.pendingEnvironmentSend, right.pendingEnvironmentSend)
+  );
+}
+
+function pendingEnvironmentSendsEqual(
+  left: PendingCloudEnvironmentSend | null | undefined,
+  right: PendingCloudEnvironmentSend | null | undefined,
+): boolean {
+  if (left == null && right == null) {
+    return true;
+  }
+  if (left == null || right == null) {
+    return false;
+  }
+  return (
+    left.provider === right.provider &&
+    left.preview === right.preview &&
+    left.messageId === right.messageId &&
+    left.createdAt === right.createdAt &&
+    left.prompt === right.prompt &&
+    left.outgoingMessageText === right.outgoingMessageText &&
+    left.phase === right.phase &&
+    left.startedAt === right.startedAt &&
+    left.endedAt === right.endedAt &&
+    left.error === right.error &&
+    left.repository === right.repository &&
+    left.readyEnvironmentId === right.readyEnvironmentId
   );
 }
 
@@ -1629,6 +1698,59 @@ function removeDraftThreadReferences(
     draftsByThreadKey: restDraftsByThreadKey,
     draftThreadsByThreadKey: restDraftThreadsByThreadKey,
     logicalProjectDraftThreadKeyByLogicalProjectKey: nextLogicalMappings,
+  };
+}
+
+function parsePendingEnvironmentSend(value: unknown): PendingCloudEnvironmentSend | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const pending = value as Record<string, unknown>;
+  if (pending.provider !== "e2b" && pending.provider !== "namespace") {
+    return undefined;
+  }
+  if (typeof pending.preview !== "string") {
+    return undefined;
+  }
+  if (typeof pending.messageId !== "string" || pending.messageId.length === 0) {
+    return undefined;
+  }
+  if (typeof pending.createdAt !== "string" || pending.createdAt.length === 0) {
+    return undefined;
+  }
+  if (typeof pending.prompt !== "string") {
+    return undefined;
+  }
+  if (typeof pending.outgoingMessageText !== "string") {
+    return undefined;
+  }
+  if (
+    pending.phase !== "creating" &&
+    pending.phase !== "pairing" &&
+    pending.phase !== "loading-project" &&
+    pending.phase !== "ready" &&
+    pending.phase !== "failed"
+  ) {
+    return undefined;
+  }
+  if (typeof pending.startedAt !== "string" || pending.startedAt.length === 0) {
+    return undefined;
+  }
+  return {
+    provider: pending.provider,
+    preview: pending.preview,
+    messageId: pending.messageId,
+    createdAt: pending.createdAt,
+    prompt: pending.prompt,
+    outgoingMessageText: pending.outgoingMessageText,
+    phase: pending.phase,
+    startedAt: pending.startedAt,
+    ...(typeof pending.endedAt === "string" ? { endedAt: pending.endedAt } : {}),
+    ...(typeof pending.error === "string" ? { error: pending.error } : {}),
+    ...(typeof pending.repository === "string" ? { repository: pending.repository } : {}),
+    ...(typeof pending.readyEnvironmentId === "string" && pending.readyEnvironmentId.length > 0
+      ? { readyEnvironmentId: pending.readyEnvironmentId }
+      : {}),
   };
 }
 
@@ -1710,6 +1832,9 @@ function normalizePersistedDraftThreads(
               promotedToRecord.threadId as ThreadId,
             )
           : null;
+      const pendingEnvironmentSend = parsePendingEnvironmentSend(
+        candidateDraftThread.pendingEnvironmentSend,
+      );
       if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
         continue;
       }
@@ -1752,6 +1877,7 @@ function normalizePersistedDraftThreads(
             ? { loadBalancedEnvironmentId: null }
             : {}),
         promotedTo,
+        ...(pendingEnvironmentSend ? { pendingEnvironmentSend } : {}),
       };
     }
   }
@@ -2091,10 +2217,10 @@ export function partializeComposerDraftStoreState(
   state: ComposerDraftStoreState,
 ): PersistedComposerDraftStoreState {
   // Draft sessions worth persisting: mapped (a new-thread flow targets
-  // them), promoting (mid-send), or holding real user content (they back a
-  // sidebar row). Everything else is a zombie — and its composer blob must
-  // be dropped WITH it, or model/mode-only entries would persist forever
-  // keyed to a session that no longer exists.
+  // them), promoting (mid-send), or holding invested work (composer
+  // content or an in-flight first-send). Everything else is a zombie — and
+  // its composer blob must be dropped WITH it, or model/mode-only entries
+  // would persist forever keyed to a session that no longer exists.
   const mappedDraftKeys = new Set(
     Object.values(state.logicalProjectDraftThreadKeyByLogicalProjectKey),
   );
@@ -2104,7 +2230,7 @@ export function partializeComposerDraftStoreState(
         ([threadKey, draftThread]) =>
           mappedDraftKeys.has(threadKey) ||
           isDraftThreadPromoting(draftThread) ||
-          composerDraftHasUserContent(state.draftsByThreadKey[threadKey]),
+          draftSessionHasInvestedWork(draftThread, state.draftsByThreadKey[threadKey]),
       )
       .map(([threadKey]) => threadKey),
   );
@@ -2501,6 +2627,9 @@ function toHydratedDraftThreadState(
           persistedDraftThread.promotedTo.threadId as ThreadId,
         )
       : null,
+    ...(persistedDraftThread.pendingEnvironmentSend
+      ? { pendingEnvironmentSend: persistedDraftThread.pendingEnvironmentSend }
+      : {}),
   };
 }
 
@@ -2670,10 +2799,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 ? undefined
                 : nextDraftThreadsByThreadKey[previousThreadKeyForLogicalProject];
             // A remap only garbage-collects the previous draft when the user
-            // never invested content in it. A draft with typed text or
-            // attachments stays alive unmapped — the sidebar draft rows list
-            // every such session, so "new thread" can mint a fresh draft
-            // without destroying the one the user walked away from.
+            // never invested in it. Typed content, attachments, or an
+            // in-flight first-send (composer already cleared) stay alive
+            // unmapped so the sidebar can surface them.
             if (
               previousThreadKeyForLogicalProject &&
               previousThreadKeyForLogicalProject !== draftId &&
@@ -2682,7 +2810,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 previousThreadKeyForLogicalProject,
               ) &&
               !isDraftThreadPromoting(previousDraftThread) &&
-              !composerDraftHasUserContent(
+              !draftSessionHasInvestedWork(
+                previousDraftThread,
                 state.draftsByThreadKey[previousThreadKeyForLogicalProject],
               )
             ) {
@@ -2779,6 +2908,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
               promotedTo: existing.promotedTo ?? null,
+              ...(existing.pendingEnvironmentSend
+                ? { pendingEnvironmentSend: existing.pendingEnvironmentSend }
+                : {}),
             };
             const isUnchanged =
               nextDraftThread.environmentId === existing.environmentId &&
@@ -2796,6 +2928,34 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;
+            }
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [threadKey]: nextDraftThread,
+              },
+            };
+          });
+        },
+        setDraftPendingEnvironmentSend: (threadRef, pending) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftThreadsByThreadKey[threadKey];
+            if (!existing) {
+              return state;
+            }
+            const nextPending = pending ?? undefined;
+            if (pendingEnvironmentSendsEqual(existing.pendingEnvironmentSend, nextPending)) {
+              return state;
+            }
+            const nextDraftThread: DraftThreadState = { ...existing };
+            if (nextPending === undefined) {
+              delete nextDraftThread.pendingEnvironmentSend;
+            } else {
+              nextDraftThread.pendingEnvironmentSend = nextPending;
             }
             return {
               draftThreadsByThreadKey: {

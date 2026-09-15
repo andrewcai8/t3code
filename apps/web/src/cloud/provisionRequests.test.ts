@@ -14,6 +14,7 @@ import {
   forgetProvisionRequest,
   isProvisionRequestActive,
   pollProvisionRequest,
+  PROVISION_IN_PROGRESS_MESSAGE,
   reserveProvisionRequest,
 } from "./provisionRequests";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -62,6 +63,9 @@ beforeEach(() => {
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => persisted.get(key) ?? null,
     setItem: (key: string, value: string) => persisted.set(key, value),
+    removeItem: (key: string) => {
+      persisted.delete(key);
+    },
   });
 });
 afterEach(() => {
@@ -135,7 +139,7 @@ describe("provision request polling and cancellation", () => {
     vi.useFakeTimers();
     const saved = reserveProvisionRequest("polling-draft", request);
     const results: Array<EnvironmentProvisionResult | null> = [
-      { kind: "pending", requestId: saved.input.requestId, message: "Preparing" },
+      { kind: "pending", requestId: saved.input.requestId, message: PROVISION_IN_PROGRESS_MESSAGE },
       {
         kind: "allocation_unknown",
         requestId: saved.input.requestId,
@@ -166,13 +170,29 @@ describe("provision request polling and cancellation", () => {
     expect(reserveProvisionRequest("bounded-draft", request)).toEqual(saved);
   });
 
+  it("stops polling when preparation reports a lastError instead of retrying for minutes", async () => {
+    const saved = reserveProvisionRequest("failed-draft", request);
+    const dispatch = vi.fn(async () => ({
+      kind: "pending" as const,
+      requestId: saved.input.requestId,
+      message: "Remote preparation failed: Preparation command timed out: git fetch",
+    }));
+    await expect(pollProvisionRequest("failed-draft", saved, dispatch)).resolves.toEqual({
+      kind: "pending",
+      requestId: saved.input.requestId,
+      message: "Remote preparation failed: Preparation command timed out: git fetch",
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(reserveProvisionRequest("failed-draft", request)).toEqual(saved);
+  });
+
   it("stops waiting immediately when the draft is cancelled", async () => {
     vi.useFakeTimers();
     const saved = reserveProvisionRequest("waiting-draft", request);
     const dispatch = vi.fn(async () => ({
       kind: "pending" as const,
       requestId: saved.input.requestId,
-      message: "Preparing",
+      message: PROVISION_IN_PROGRESS_MESSAGE,
     }));
     const result = pollProvisionRequest("waiting-draft", saved, dispatch);
     await vi.advanceTimersByTimeAsync(0);
@@ -196,7 +216,6 @@ describe("provision request polling and cancellation", () => {
     release(readyResult(saved.input.requestId));
     expect(await result).toEqual({ kind: "cancelled" });
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(() => reserveProvisionRequest("cancelled-draft", request)).toThrow("cancelled");
     const observed: Array<unknown> = [];
     expect(
       await drainProvisionCancellations(async (pending) => {
@@ -221,6 +240,40 @@ describe("provision request polling and cancellation", () => {
       { manager: "manager", requestId: saved.input.requestId },
     ]);
     expect([...persisted.values()].map((value) => JSON.parse(value))).toEqual([{}]);
+  });
+
+  it("starts a fresh request after cancel while disposing the cancelled one", async () => {
+    const saved = reserveProvisionRequest("retry-draft", request);
+    cancelProvisionRequest("retry-draft");
+    const retried = reserveProvisionRequest("retry-draft", request);
+    expect(retried.input.requestId).not.toBe(saved.input.requestId);
+    expect(isProvisionRequestActive("retry-draft")).toBe(true);
+    const observed: string[] = [];
+    expect(
+      await drainProvisionCancellations(async (pending) => {
+        observed.push(pending.input.requestId);
+        return { kind: "disposed" };
+      }),
+    ).toEqual([]);
+    expect(observed).toEqual([saved.input.requestId]);
+    expect(isProvisionRequestActive("retry-draft")).toBe(true);
+    expect(reserveProvisionRequest("retry-draft", request)).toEqual(retried);
+  });
+
+  it("abandons an in-flight poll when a later send replaces the cancelled request", async () => {
+    const saved = reserveProvisionRequest("replaced-draft", request);
+    let release: (value: EnvironmentProvisionResult) => void = () => {
+      throw new Error("Receipt barrier not initialized");
+    };
+    const receipt = new Promise<EnvironmentProvisionResult>((resolve) => {
+      release = resolve;
+    });
+    const result = pollProvisionRequest("replaced-draft", saved, () => receipt);
+    cancelProvisionRequest("replaced-draft");
+    const retried = reserveProvisionRequest("replaced-draft", request);
+    release(readyResult(saved.input.requestId));
+    expect(await result).toEqual({ kind: "cancelled" });
+    expect(retried.input.requestId).not.toBe(saved.input.requestId);
   });
 
   it.each([

@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { environmentAllowsThreadSettlement } from "@t3tools/client-runtime/state/thread-settled";
 import type {
   EnvironmentProject,
   EnvironmentThread,
@@ -210,12 +211,12 @@ export function readThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell | 
 }
 
 /** Whether the environment's server understands thread.settle/unsettle.
-    False for pre-settlement servers (capability defaults false on decode),
-    so clients under version skew fall back instead of erroring. */
+    Missing config (disconnected, not yet loaded) still allows a local settle.
+    False for pre-settlement servers so clients under version skew fall back
+    instead of erroring. */
 export function readEnvironmentSupportsSettlement(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadSettlement === true
+  return environmentAllowsThreadSettlement(
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities,
   );
 }
 

@@ -34,6 +34,7 @@ import {
   type TurnId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
+import type { CloudEnvironmentSetupSnapshot } from "./EnvironmentSetupCard";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 
 const TIMELINE_MINIMAP_ITEM_SPACING = 8;
@@ -400,6 +401,12 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string | null;
       snapshot: WorktreeSetupSnapshot;
+    }
+  | {
+      kind: "environment-setup";
+      id: string;
+      createdAt: string | null;
+      snapshot: CloudEnvironmentSetupSnapshot;
     };
 
 export interface StableMessagesTimelineRowsState {
@@ -870,6 +877,8 @@ export function deriveMessagesTimelineRows(input: {
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
   /** Live bootstrap progress. Renders a stage card under the first user message. */
   worktreeSetup?: WorktreeSetupSnapshot | null;
+  /** Cloud sandbox / environment provisioning for the first send. */
+  environmentSetup?: CloudEnvironmentSetupSnapshot | null;
 }): MessagesTimelineRow[] {
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
@@ -1284,6 +1293,24 @@ export function deriveMessagesTimelineRows(input: {
     return attachTrailingToolGroupsToAssistant(nextRows);
   }
 
+  if (input.environmentSetup) {
+    const setupRow = {
+      kind: "environment-setup",
+      id: ENVIRONMENT_SETUP_ROW_ID,
+      createdAt: input.environmentSetup.startedAt,
+      snapshot: input.environmentSetup,
+    } as const;
+    const firstUserRowIndex = nextRows.findIndex(
+      (row) => row.kind === "message" && row.message.role === "user",
+    );
+    if (firstUserRowIndex >= 0) {
+      nextRows.splice(firstUserRowIndex + 1, 0, setupRow);
+    } else {
+      nextRows.push(setupRow);
+    }
+    return attachTrailingToolGroupsToAssistant(nextRows);
+  }
+
   if (input.isWorking && activeTurnHeaderIndex === input.timelineEntries.length) {
     appendWorkingRow();
   }
@@ -1299,6 +1326,7 @@ export function deriveMessagesTimelineRows(input: {
 }
 
 export const WORKTREE_SETUP_ROW_ID = "worktree-setup-row";
+export const ENVIRONMENT_SETUP_ROW_ID = "environment-setup-row";
 
 type MessagesTimelineRowsInput = Parameters<typeof deriveMessagesTimelineRows>[0];
 
@@ -1403,6 +1431,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "thinking":
       return a.createdAt === (b as typeof a).createdAt;
     case "worktree-setup":
+      return a.snapshot === (b as typeof a).snapshot;
+    case "environment-setup":
       return a.snapshot === (b as typeof a).snapshot;
 
     case "assistant-meta": {

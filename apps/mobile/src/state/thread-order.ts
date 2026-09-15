@@ -6,6 +6,7 @@ import {
   reconcilePendingThreadOrder,
   type PendingThreadOrder,
 } from "../features/threads/threadOrder";
+import { collectSettlementEnvironmentIds } from "@t3tools/client-runtime/state/thread-settled";
 import { getThreadListV2OrderedSection } from "../features/threads/threadListV2";
 import { appAtomRegistry } from "./atom-registry";
 import { environmentServerConfigsAtom } from "./server";
@@ -52,15 +53,15 @@ export function beginPendingThreadOrder(pending: PendingThreadOrder) {
     const current = appAtomRegistry.get(pendingThreadOrderAtom);
     if (current === null) return;
     const configs = appAtomRegistry.get(environmentServerConfigsAtom);
+    const threads = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
     const ordered = getThreadListV2OrderedSection({
-      threads: appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
+      threads,
       section: current.section,
       now: new Date().toISOString(),
       queuedThreadKeys: appAtomRegistry.get(queuedThreadKeysAtom),
-      settlementEnvironmentIds: new Set(
-        [...configs].flatMap(([id, config]) =>
-          config.environment.capabilities.threadSettlement === true ? [id] : [],
-        ),
+      settlementEnvironmentIds: collectSettlementEnvironmentIds(
+        configs,
+        threads.map((thread) => thread.environmentId),
       ),
       snoozeEnvironmentIds: new Set(
         [...configs].flatMap(([id, config]) =>

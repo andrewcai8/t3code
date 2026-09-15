@@ -127,6 +127,7 @@ vi.mock("../composerDraftStore", () => {
   });
   return {
     composerDraftHasUserContent: () => false,
+    draftSessionHasInvestedWork: () => false,
     markPromotedDraftThreadByRef: vi.fn(),
     useComposerDraftStore,
   };

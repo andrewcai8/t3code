@@ -21,11 +21,58 @@ const decodeRequest = Schema.decodeUnknownSync(DraftProvisionRequest);
 const encodeRequest = Schema.encodeSync(Schema.fromJsonString(DraftProvisionRequest));
 const encodeRequests = Schema.encodeSync(Schema.fromJsonString(DraftProvisionRequests));
 const STORAGE_KEY = "t3code:draft-provision-requests:v1";
+const DISPOSAL_STORAGE_KEY = "t3code:draft-provision-disposals:v1";
 const cancellationListeners = new Set<() => void>();
 
+const DraftProvisionDisposal = Schema.Struct({
+  draftId: Schema.String,
+  request: DraftProvisionRequest,
+});
+const DraftProvisionDisposals = Schema.Array(DraftProvisionDisposal);
+const decodeDisposals = Schema.decodeUnknownSync(Schema.fromJsonString(DraftProvisionDisposals));
+const encodeDisposals = Schema.encodeSync(Schema.fromJsonString(DraftProvisionDisposals));
+
+function readStorageItem(key: string): string | null {
+  try {
+    if (typeof localStorage === "undefined" || typeof localStorage.getItem !== "function") {
+      return null;
+    }
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 function readRequests() {
-  const stored = typeof localStorage === "undefined" ? null : localStorage.getItem(STORAGE_KEY);
+  const stored = readStorageItem(STORAGE_KEY);
   return stored === null ? {} : decodeRequests(stored);
+}
+
+function readDisposals() {
+  const stored = readStorageItem(DISPOSAL_STORAGE_KEY);
+  return stored === null ? [] : decodeDisposals(stored);
+}
+
+function notifyProvisionCancellations() {
+  for (const listener of cancellationListeners) listener();
+}
+
+function enqueueDisposal(draftId: string, request: DraftProvisionRequest) {
+  localStorage.setItem(
+    DISPOSAL_STORAGE_KEY,
+    encodeDisposals([...readDisposals(), { draftId, request }]),
+  );
+}
+
+function forgetDisposal(draftId: string, requestId: string): void {
+  const remaining = readDisposals().filter(
+    (pending) => pending.draftId !== draftId || pending.request.input.requestId !== requestId,
+  );
+  if (remaining.length === 0) {
+    localStorage.removeItem(DISPOSAL_STORAGE_KEY);
+    return;
+  }
+  localStorage.setItem(DISPOSAL_STORAGE_KEY, encodeDisposals(remaining));
 }
 
 export function reserveProvisionRequest(
@@ -37,15 +84,20 @@ export function reserveProvisionRequest(
 ): DraftProvisionRequest {
   const requests = readRequests();
   const existing = requests[draftId];
+  if (existing?.cancelRequested) {
+    enqueueDisposal(draftId, existing);
+  }
   const candidate = decodeRequest({
     ...request,
     input: {
       ...request.input,
-      requestId: existing?.input.requestId ?? ProvisionRequestId.make(randomUUID()),
+      requestId:
+        existing && !existing.cancelRequested
+          ? existing.input.requestId
+          : ProvisionRequestId.make(randomUUID()),
     },
   });
-  if (existing) {
-    if (existing.cancelRequested) throw new Error("This environment request was cancelled.");
+  if (existing && !existing.cancelRequested) {
     if (encodeRequest(candidate) !== encodeRequest(existing)) {
       throw new Error(
         "This draft already requested an environment. Retry its original provider and account, or start a new draft.",
@@ -54,6 +106,7 @@ export function reserveProvisionRequest(
     return existing;
   }
   localStorage.setItem(STORAGE_KEY, encodeRequests({ ...requests, [draftId]: candidate }));
+  if (existing?.cancelRequested) notifyProvisionCancellations();
   return candidate;
 }
 
@@ -75,6 +128,11 @@ export function isProvisionRequestActive(draftId: string): boolean {
   return request !== undefined && !request.cancelRequested;
 }
 
+export function isProvisionRequestCurrent(draftId: string, requestId: string): boolean {
+  const request = readRequests()[draftId];
+  return request !== undefined && !request.cancelRequested && request.input.requestId === requestId;
+}
+
 export function cancelProvisionRequest(draftId: string): void {
   const requests = readRequests();
   const request = requests[draftId];
@@ -86,7 +144,7 @@ export function cancelProvisionRequest(draftId: string): void {
       [draftId]: { ...request, cancelRequested: true },
     }),
   );
-  for (const listener of cancellationListeners) listener();
+  notifyProvisionCancellations();
 }
 
 export function subscribeProvisionCancellations(listener: () => void): () => void {
@@ -100,12 +158,30 @@ export async function drainProvisionCancellations(
   dispose: (request: DraftProvisionRequest) => Promise<EnvironmentProvisionDisposeResult | null>,
 ): Promise<string[]> {
   const disposed: string[] = [];
-  for (const [draftId, request] of Object.entries(readRequests())) {
-    if (!request.cancelRequested) continue;
+  const pending: Array<{
+    draftId: string;
+    request: DraftProvisionRequest;
+    stored: "draft" | "disposal";
+  }> = [
+    ...Object.entries(readRequests()).flatMap(([draftId, request]) =>
+      request.cancelRequested ? [{ draftId, request, stored: "draft" as const }] : [],
+    ),
+    ...readDisposals().map((pending) => ({ ...pending, stored: "disposal" as const })),
+  ];
+  for (const { draftId, request, stored } of pending) {
     try {
       const result = await dispose(request);
-      if (result?.kind === "disposed") {
+      if (result?.kind !== "disposed") continue;
+      if (stored === "disposal") {
+        forgetDisposal(draftId, request.input.requestId);
+      } else {
         forgetProvisionRequest(draftId);
+      }
+      const current = readRequests()[draftId];
+      if (
+        (!current || current.input.requestId === request.input.requestId) &&
+        !disposed.includes(draftId)
+      ) {
         disposed.push(draftId);
       }
     } catch {
@@ -115,7 +191,7 @@ export async function drainProvisionCancellations(
   return disposed;
 }
 
-function waitForProvisionRetry(draftId: string): Promise<void> {
+function waitForProvisionRetry(draftId: string, requestId: string): Promise<void> {
   return new Promise((resolve) => {
     const finish = () => {
       globalThis.clearTimeout(timer);
@@ -124,10 +200,20 @@ function waitForProvisionRetry(draftId: string): Promise<void> {
     };
     const timer = globalThis.setTimeout(finish, 2_000);
     const unsubscribe = subscribeProvisionCancellations(() => {
-      if (!isProvisionRequestActive(draftId)) finish();
+      if (!isProvisionRequestCurrent(draftId, requestId)) finish();
     });
-    if (!isProvisionRequestActive(draftId)) finish();
+    if (!isProvisionRequestCurrent(draftId, requestId)) finish();
   });
+}
+
+/** Must match ProvisionControl's in-progress pending message. */
+export const PROVISION_IN_PROGRESS_MESSAGE =
+  "The environment is still being prepared. Retry the same request to continue.";
+
+function shouldKeepPolling(result: EnvironmentProvisionResult | null): boolean {
+  if (result === null) return true;
+  if (result.kind === "allocation_unknown") return true;
+  return result.kind === "pending" && result.message === PROVISION_IN_PROGRESS_MESSAGE;
 }
 
 export async function pollProvisionRequest(
@@ -137,15 +223,20 @@ export async function pollProvisionRequest(
 ): Promise<EnvironmentProvisionResult | { kind: "cancelled" } | { kind: "unreachable" }> {
   let result: EnvironmentProvisionResult | null = null;
   for (let attempt = 0; attempt < 60; attempt++) {
-    if (!isProvisionRequestActive(draftId)) return { kind: "cancelled" };
+    if (!isProvisionRequestCurrent(draftId, request.input.requestId)) {
+      return { kind: "cancelled" };
+    }
     try {
       result = await dispatch(request);
     } catch {
       result = null;
     }
-    if (!isProvisionRequestActive(draftId)) return { kind: "cancelled" };
+    if (!isProvisionRequestCurrent(draftId, request.input.requestId)) {
+      return { kind: "cancelled" };
+    }
     if (result?.kind === "ready" || result?.kind === "refused") return result;
-    if (attempt < 59) await waitForProvisionRetry(draftId);
+    if (!shouldKeepPolling(result) && result !== null) return result;
+    if (attempt < 59) await waitForProvisionRetry(draftId, request.input.requestId);
   }
   return result ?? { kind: "unreachable" };
 }

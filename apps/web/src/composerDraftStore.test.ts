@@ -68,10 +68,12 @@ import {
   COMPOSER_DRAFT_STORAGE_KEY,
   clearComposerDraftsEnvironment,
   composerDraftHasUserContent,
+  draftSessionHasInvestedWork,
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThreadByRef,
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type PendingCloudEnvironmentSend,
   composerFileNeedsReattach,
   partializeComposerDraftStoreState,
   useComposerDraftStore,
@@ -1434,6 +1436,57 @@ describe("composerDraftStore project draft thread mapping", () => {
     // draft rows to surface.
     expect(useComposerDraftStore.getState().getDraftThread(draftId)?.threadId).toBe(threadId);
     expect(draftByKey(draftId)?.prompt).toBe("keep me around");
+  });
+
+  it("keeps a pending environment send after composer clear and remap", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "start the sandbox");
+    const pending: PendingCloudEnvironmentSend = {
+      provider: "e2b",
+      preview: "start the sandbox",
+      messageId: "msg-pending",
+      createdAt: "2026-09-14T00:00:00.000Z",
+      prompt: "start the sandbox",
+      outgoingMessageText: "start the sandbox",
+      phase: "creating",
+      startedAt: "2026-09-14T00:00:01.000Z",
+    };
+    store.setDraftPendingEnvironmentSend(draftId, pending);
+    store.clearComposerContent(draftId);
+
+    expect(
+      composerDraftHasUserContent(useComposerDraftStore.getState().getComposerDraft(draftId)),
+    ).toBe(false);
+    expect(
+      draftSessionHasInvestedWork(
+        useComposerDraftStore.getState().getDraftSession(draftId),
+        useComposerDraftStore.getState().getComposerDraft(draftId),
+      ),
+    ).toBe(true);
+
+    store.setProjectDraftThreadId(projectRef, otherDraftId, { threadId: otherThreadId });
+
+    expect(useComposerDraftStore.getState().getDraftSessionByProjectRef(projectRef)?.draftId).toBe(
+      otherDraftId,
+    );
+    expect(
+      useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend,
+    ).toEqual(pending);
+
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    expect(persisted.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
+
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const hydrated = persistApi.getOptions().merge(persisted, useComposerDraftStore.getState());
+    expect(hydrated.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
   });
 
   it("clears every session for a project, including unmapped invested drafts", () => {
