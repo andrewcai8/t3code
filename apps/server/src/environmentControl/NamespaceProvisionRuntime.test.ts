@@ -95,7 +95,6 @@ async function fixture() {
       DateTime.makeUnsafe(DateTime.toEpochMillis(DateTime.nowUnsafe()) + 60_000),
     ),
     staleReadback: false,
-    shortExtension: false,
     capOffset: 0,
     lifetimeCap: Number.POSITIVE_INFINITY,
     destroyed: false,
@@ -138,8 +137,7 @@ async function fixture() {
               ? DateTime.toEpochMillis(DateTime.makeUnsafe(requested))
               : Math.min(
                   state.lifetimeCap,
-                  DateTime.toEpochMillis(DateTime.nowUnsafe()) +
-                    (state.shortExtension ? 60_000 : 21_600_000),
+                  DateTime.toEpochMillis(DateTime.nowUnsafe()) + 21_600_000,
                 )) + state.capOffset,
           ),
         );
@@ -578,9 +576,11 @@ describe("Namespace runtime transport", () => {
     expect(f.state.deadline).toBe(DateTime.formatIso(DateTime.makeUnsafe(created + 18_000_000)));
   });
 
-  it("rejects a provider acknowledgment below the requested lifetime", async () => {
+  it("rejects a provider acknowledgment that shortens the captured deadline", async () => {
     const f = await fixture();
-    f.state.shortExtension = true;
+    const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
+    f.state.deadline = DateTime.formatIso(DateTime.makeUnsafe(now + 18_000_000));
+    f.state.lifetimeCap = now + 14_400_000;
     const runtime = makeNamespaceProvisionRuntime({
       session: f.session,
       getIngressAuthorization: async () => "Bearer private-ingress",

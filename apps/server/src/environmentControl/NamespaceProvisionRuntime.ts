@@ -289,7 +289,8 @@ export function makeNamespaceProvisionRuntime(config: {
         if ((await describe()) !== deadline)
           throw new Error("Namespace instance deadline readback differs from its retention cap");
       } else {
-        if (acknowledged < now + 21_600_000 || acknowledged < before)
+        // Namespace caps an instance at creation + 5h, so accept any deadline that did not shrink.
+        if (acknowledged <= now || acknowledged < before)
           throw new Error("Namespace did not extend the captured instance deadline");
         if ((await describe()) < acknowledged)
           throw new Error("Namespace instance deadline readback did not confirm extension");
