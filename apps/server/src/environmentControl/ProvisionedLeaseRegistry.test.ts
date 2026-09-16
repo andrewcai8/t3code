@@ -95,6 +95,29 @@ it.effect("persists proxy identity, renews a claimed lease, and gives one releas
   }),
 );
 
+it.effect("records the proxy an attach opened after registration and never lets it change", () =>
+  withRegistry(async (first, second) => {
+    const registration = { leaseId: "lease", sandboxId: "sandbox", providerInstanceId: "codex" };
+    const proxy = { proxyId: "proxy", proxyOrigin: "http://127.0.0.1:50766" };
+    const other = { ...proxy, proxyOrigin: "http://127.0.0.1:50767" };
+    await first.register(registration);
+    expect(await first.markActive({ leaseId: "lease", namespaceProxy: proxy })).toMatchObject({
+      namespaceProxy: proxy,
+    });
+    expect(await second.register(registration)).toMatchObject({ namespaceProxy: proxy });
+    expect(await second.markActive({ leaseId: "lease", namespaceProxy: proxy })).toMatchObject({
+      namespaceProxy: proxy,
+    });
+    await expect(second.markActive({ leaseId: "lease", namespaceProxy: other })).rejects.toThrow(
+      "identity conflict",
+    );
+    await expect(second.register({ ...registration, namespaceProxy: other })).rejects.toThrow(
+      "identity conflict",
+    );
+    expect(await first.findBySandbox("sandbox")).toMatchObject({ namespaceProxy: proxy });
+  }),
+);
+
 it.effect("imports existing JSON leases once without reviving a later disposal", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;

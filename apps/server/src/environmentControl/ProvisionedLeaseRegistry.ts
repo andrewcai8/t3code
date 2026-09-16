@@ -156,13 +156,17 @@ export function createProvisionedLeaseRegistry(
       mutate((leases) => {
         const existing = leases.find((lease) => lease.leaseId === input.leaseId);
         if (existing) {
+          // A provisioned lease learns its proxy from the attach that opened
+          // it, after registration, so a re-registration without one is not
+          // a conflict.
           if (
             existing.sandboxId !== input.sandboxId ||
             existing.retentionDeadline !== input.retentionDeadline ||
             existing.providerInstanceId !== input.providerInstanceId ||
             existing.provider !== input.provider ||
-            existing.namespaceProxy?.proxyId !== input.namespaceProxy?.proxyId ||
-            existing.namespaceProxy?.proxyOrigin !== input.namespaceProxy?.proxyOrigin
+            (input.namespaceProxy &&
+              (existing.namespaceProxy?.proxyId !== input.namespaceProxy.proxyId ||
+                existing.namespaceProxy?.proxyOrigin !== input.namespaceProxy.proxyOrigin))
           ) {
             throw new Error("Provisioned lease identity conflict");
           }
@@ -305,12 +309,15 @@ export function createProvisionedLeaseRegistry(
         const current = leases.find((lease) => lease.leaseId === input.leaseId);
         if (!current || (current.state !== "active" && current.state !== "paused"))
           return { leases, value: null };
+        // A proxy origin is recorded once, by the attach that opened it, and
+        // never replaced: the paired client keeps connecting to that origin.
         if (
           (input.namespaceResource &&
             input.namespaceResource.devboxId !== current.namespaceResource?.devboxId) ||
           (input.namespaceProxy &&
-            (input.namespaceProxy.proxyId !== current.namespaceProxy?.proxyId ||
-              input.namespaceProxy.proxyOrigin !== current.namespaceProxy?.proxyOrigin))
+            current.namespaceProxy &&
+            (input.namespaceProxy.proxyId !== current.namespaceProxy.proxyId ||
+              input.namespaceProxy.proxyOrigin !== current.namespaceProxy.proxyOrigin))
         )
           throw new Error("Provisioned lease identity conflict");
         const now = input.now ?? new Date();

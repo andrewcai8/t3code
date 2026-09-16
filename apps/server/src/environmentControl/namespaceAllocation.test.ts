@@ -147,7 +147,6 @@ describe("Namespace durable allocation through the SDK", () => {
             "create",
             "--name",
             "t3-7314a443-30af-4c88-bc3a-9b70940eb563",
-            "--ephemeral",
             "--activate",
             "--platform",
             "macos/arm64",

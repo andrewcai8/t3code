@@ -69,6 +69,16 @@ const decodeSettings = Schema.decodeUnknownSync(
   }),
 );
 const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
+/**
+ * Where a guest keeps everything T3 prepares: the checkout, the isolated home
+ * with credentials and T3 state, the runtime archive.
+ *
+ * A Namespace Mac wipes /tmp and the runner home on shutdown but keeps its
+ * Devbox volume, so only a root on that volume lets a paused Mac resume as the
+ * same environment. E2B pauses memory and disk together, so its root stays
+ * where every existing manifest already put it.
+ */
+const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
 export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
 const provisionInputLimit = 64 * 1024 * 1024;
@@ -352,6 +362,8 @@ export function makeProvisionPreparationStore(stateDir: string) {
             ...(provisioning.githubToken ? { accessToken: provisioning.githubToken } : {}),
           }
         : null;
+      const volume = guestVolume[input.provider];
+      const root = `${volume}/t3-provision/${input.requestId}`;
       const artifactBytes = await NodeFSP.readFile(artifact.path);
       if (provisionDigest(artifactBytes) !== artifact.sha256)
         throw new ProvisionRefused({
@@ -403,12 +415,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       if (settingsIndex !== -1) files.splice(settingsIndex, 1);
       // Environment entries reach the provider's child process without shell interpolation.
       const configuredSettings: unknown = JSON.parse(
-        enableChildProvider(
-          settings,
-          profile.kind,
-          input.providerInstanceId,
-          `/tmp/t3-provision/${input.requestId}/home`,
-        ),
+        enableChildProvider(settings, profile.kind, input.providerInstanceId, `${root}/home`),
       );
       const parsedSettings = decodeSettings(configuredSettings);
       const environment = [];
@@ -500,7 +507,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const build = {
         repository,
         artifact: {
-          archivePath: `/tmp/t3-runtime-${artifact.sha256}.tar`,
+          archivePath: `${volume}/t3-runtime-${artifact.sha256}.tar`,
           sha256: artifact.sha256,
           revision: artifact.revision,
           entrypoint: artifact.entrypoint,
@@ -514,7 +521,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const preparation = {
         ...build,
         requestId: input.requestId,
-        root: `/tmp/t3-provision/${input.requestId}`,
+        root,
         files,
       };
       const common = {

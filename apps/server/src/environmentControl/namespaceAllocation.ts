@@ -171,12 +171,13 @@ export function makeNamespaceAllocationPorts(
       const request = yield* namespaceRequest(operation, config.identity);
       return yield* Effect.tryPromise({
         try: async (signal) => {
+          // Not ephemeral: shutdown must keep the Devbox record and its volume
+          // so a paused Mac resumes with everything T3 prepared on it.
           await config.execute(
             [
               "create",
               "--name",
               `t3-${request.requestId}`,
-              "--ephemeral",
               "--activate",
               "--platform",
               "macos/arm64",

@@ -21,14 +21,24 @@ import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import type { Provisioning } from "./Provisioning.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import type { ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import type { NamespaceProxyLease } from "./namespaceProxy.ts";
 
 export interface ProvisionControlPorts {
   readonly freeze: (input: EnvironmentProvisionInput) => Promise<ProvisionPreparationManifest>;
   readonly load: (id: ProvisionRequestId) => Promise<ProvisionPreparationManifest>;
+  /**
+   * Publishes the environment and mints a pairing grant. A Namespace runtime
+   * serves it through a loopback proxy and hands that origin back; passing the
+   * lease's recorded proxy re-binds the same origin a client already holds.
+   */
   readonly attach: (
     operation: ProvisionOperation,
     manifest: ProvisionPreparationManifest,
-  ) => Promise<string>;
+    recordedProxy?: NamespaceProxyLease,
+  ) => Promise<{
+    readonly pairingUrl: string;
+    readonly namespaceProxy?: NamespaceProxyLease;
+  }>;
   readonly touch: (operation: ProvisionOperation) => Promise<void>;
 }
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
@@ -229,10 +239,21 @@ export function makeProvisionControl(
       if (lease?.state !== "active")
         return { kind: "refused", message: "This environment's lease has ended." };
       const manifest = yield* promise(() => ports.load(input.requestId));
+      const attached = yield* remote(operation, () =>
+        ports.attach(operation, manifest, lease.namespaceProxy),
+      );
+      // Recorded so a resume after a manager restart can re-bind the origin
+      // the paired client saved, instead of a fresh port nobody knows.
+      const namespaceProxy = attached.namespaceProxy;
+      if (namespaceProxy)
+        yield* promise(async () => {
+          if (!(await leases.markActive({ leaseId: lease.leaseId, namespaceProxy })))
+            throw new Error("The lease ended while its environment was being published");
+        });
       return {
         kind: "attached",
         environmentId: operation.state.readiness.environmentId,
-        pairingUrl: yield* remote(operation, () => ports.attach(operation, manifest)),
+        pairingUrl: attached.pairingUrl,
       };
     }),
     touch: Effect.fn("EnvironmentControl.touchProvision")(function* (

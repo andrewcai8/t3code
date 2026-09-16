@@ -103,6 +103,7 @@ export interface CloudDriver {
     readonly namespaceResource?: NamespaceResource;
   }): Promise<void>;
   resume(input: {
+    readonly leaseId: string;
     readonly sandboxId: string;
     readonly environmentId: string;
     readonly providerInstanceId: string;

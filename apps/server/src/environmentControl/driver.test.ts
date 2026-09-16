@@ -79,6 +79,7 @@ afterEach(() => {
 
 describe("E2B resume network reconciliation", () => {
   const input = {
+    leaseId: "retained",
     sandboxId: "retained",
     providerInstanceId: "codex",
     environmentId: "child",
@@ -312,9 +313,9 @@ describe("cloud SDK and controller boundary", () => {
     const input = { sandboxId: "retained", providerInstanceId: "codex" };
     sdk.getInfo.mockRejectedValue(new SandboxNotFoundError("not found"));
     expect(await driver.renew(input)).toBe("missing");
-    await expect(driver.resume({ ...input, environmentId: "child" })).rejects.toBeInstanceOf(
-      ProvisionedSandboxMissing,
-    );
+    await expect(
+      driver.resume({ ...input, leaseId: "retained", environmentId: "child" }),
+    ).rejects.toBeInstanceOf(ProvisionedSandboxMissing);
     sdk.getInfo.mockRejectedValue(new Error("temporary provider failure"));
     await expect(driver.renew(input)).rejects.toThrow("temporary provider failure");
     expect(sdk.connect).not.toHaveBeenCalled();
@@ -343,6 +344,7 @@ describe("cloud SDK and controller boundary", () => {
     sdk.connect.mockResolvedValue({ sandboxId: "retained" });
     expect(
       await createCloudDriver(config).resume({
+        leaseId: "retained",
         sandboxId: "retained",
         providerInstanceId: "codex",
         environmentId: "child",
@@ -361,6 +363,7 @@ describe("cloud SDK and controller boundary", () => {
     });
     await expect(
       createCloudDriver(config).resume({
+        leaseId: "retained",
         sandboxId: "retained",
         providerInstanceId: "codex",
         environmentId: "child",
@@ -376,6 +379,7 @@ describe("cloud SDK and controller boundary", () => {
     });
     await expect(
       createCloudDriver(config).resume({
+        leaseId: "retained",
         sandboxId: "retained",
         providerInstanceId: "codex",
         environmentId: "child",

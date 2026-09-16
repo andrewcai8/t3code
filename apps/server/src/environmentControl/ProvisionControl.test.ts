@@ -110,7 +110,7 @@ it.effect(
           {
             freeze: async () => manifest,
             load: async () => manifest,
-            attach: async () => `https://remote/pair#token=grant-${++grants}`,
+            attach: async () => ({ pairingUrl: `https://remote/pair#token=grant-${++grants}` }),
             touch: async () => {
               calls.push("touch-provider");
               if (rejectTouch) throw new Error("provider unavailable");
@@ -159,6 +159,99 @@ it.effect(
       expect(yield* make().attach({ requestId: input.requestId })).toMatchObject({
         kind: "refused",
       });
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+const namespaceInput = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+  requestId: "9c1f2d6e-7d0a-4a7f-9d4e-2b1c3a5e7f90",
+  provider: "namespace",
+  providerInstanceId: "codex",
+});
+const namespaceManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)({
+  ...manifest,
+  input: namespaceInput,
+  request: {
+    ...namespaceInput,
+    sourceRevision: null,
+    preparationHash: "a".repeat(64),
+    creator: "user",
+    tenantId: "tenant",
+    size: "m",
+    image: "tahoe",
+    region: "iad",
+    idleTimeoutMinutes: 30,
+  },
+  preparation: { ...manifest.preparation, requestId: namespaceInput.requestId },
+});
+
+it.effect(
+  "records the loopback origin a Namespace attach published and hands it to the next attach",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      const resource = {
+        provider: "namespace" as const,
+        devboxId: "box",
+        devboxName: `t3-${namespaceInput.requestId}`,
+        instanceId: "instance",
+        region: "iad",
+        workspaceDir: "/Users/runner/workspaces",
+      };
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, {
+          create: () => Effect.succeed(resource),
+          recoverCreate: () => Effect.succeed([]),
+          fork: () => Effect.die("unexpected fork"),
+          recoverFork: () => Effect.succeed([]),
+          dispose: () => Effect.void,
+          prepare: () =>
+            Effect.succeed({
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/private/operation/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: "c".repeat(40),
+              artifactSha256: "b".repeat(64),
+            }),
+        }),
+      );
+      const received: Array<unknown> = [];
+      const namespaceProxy = { proxyId: "provision-box", proxyOrigin: "http://127.0.0.1:50766" };
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          freeze: async () => namespaceManifest,
+          load: async () => namespaceManifest,
+          attach: async (_operation, _manifest, recordedProxy) => {
+            received.push(recordedProxy);
+            return { pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=grant`, namespaceProxy };
+          },
+          touch: async () => undefined,
+        },
+        leases,
+      );
+      expect(yield* control.provision(namespaceInput)).toMatchObject({ kind: "ready" });
+      expect(yield* control.attach({ requestId: namespaceInput.requestId })).toEqual({
+        kind: "attached",
+        environmentId: "remote",
+        pairingUrl: "http://127.0.0.1:50766/pair#token=grant",
+      });
+      expect(yield* Effect.promise(() => leases.findById(namespaceInput.requestId))).toMatchObject({
+        state: "active",
+        namespaceProxy,
+      });
+      yield* control.attach({ requestId: namespaceInput.requestId });
+      expect(received).toEqual([undefined, namespaceProxy]);
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(

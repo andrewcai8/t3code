@@ -410,3 +410,56 @@ it("lands a plugin holding many skills flat, where the CLI will find each one", 
     await f.cleanup();
   }
 });
+const namespaceToken = `e30.${Buffer.from(
+  JSON.stringify({ actor_id: "user-test", tenant_id: "tenant-test", exp: 4102444800 }),
+).toString("base64url")}.signature`;
+it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in /tmp", async () => {
+  const f = await fixture();
+  try {
+    const e2b = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    expect(e2b.preparation.root).toBe("/tmp/t3-provision/05d43b4e-0b92-477b-9503-31a377147fb0");
+    expect(e2b.preparation.artifact.archivePath).toBe(
+      `/tmp/t3-runtime-${provisionDigest("artifact")}.tar`,
+    );
+    const artifact = f.config.provisioning?.runtimeArtifacts?.linux;
+    if (!artifact) throw new Error("Fixture has no runtime artifact");
+    const namespace = await f.store.freeze(
+      decodeProvisionInput({
+        ...input,
+        requestId: "6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f",
+        provider: "namespace",
+      }),
+      {
+        ...f.config,
+        namespaceToken,
+        provisioning: {
+          ...f.config.provisioning,
+          namespace: { size: "m" },
+          runtimeArtifacts: { macos: artifact },
+        },
+      },
+      f.resolver,
+      f.profile,
+    );
+    expect(namespace.preparation.root).toBe(
+      "/Volumes/devbox/t3-provision/6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f",
+    );
+    expect(namespace.preparation.artifact.archivePath).toBe(
+      `/Volumes/devbox/t3-runtime-${provisionDigest("artifact")}.tar`,
+    );
+    const settings = namespace.preparation.files.find(
+      (file) => file.destination === ".t3/userdata/settings.json",
+    );
+    expect(
+      JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()),
+    ).toMatchObject({
+      providerInstances: {
+        codex: {
+          homePath: "/Volumes/devbox/t3-provision/6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f/home/.codex",
+        },
+      },
+    });
+  } finally {
+    await f.cleanup();
+  }
+});

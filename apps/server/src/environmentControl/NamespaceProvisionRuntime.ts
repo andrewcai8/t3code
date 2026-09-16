@@ -16,7 +16,7 @@ import * as Effect from "effect/Effect";
 import { ProvisionRetentionError } from "./retention.ts";
 import { namespaceResourceMatches, resolveNamespaceIdentity } from "./namespaceAllocation.ts";
 import type { NamespaceResource as ImportedNamespaceResource } from "./namespaceProvisioner.ts";
-import { NamespaceProxyManager } from "./namespaceProxy.ts";
+import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
 import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
@@ -236,24 +236,23 @@ export function makeNamespaceProvisionRuntime(config: {
   readonly stateDir: string;
   /** Supplies the proxy's upstream credential, so it can be renewed or stubbed. */
   readonly getIngressAuthorization?: () => Promise<string>;
-  readonly proxies?: Pick<NamespaceProxyManager, "open" | "close">;
+  readonly proxies?: Pick<NamespaceProxyManager, "open" | "restore" | "close">;
 }) {
   const proxies = config.proxies ?? new NamespaceProxyManager();
   const ingressAuthorization =
     config.getIngressAuthorization ??
     (async () => `Bearer ${await config.session.issueToken(60_000)}`);
-  const openProxies = new Map<string, Promise<string>>();
-  const retain = async (resource: NamespaceResource, retentionDeadline?: string) => {
+  /** Origins this process handed out, so a repeat attach keeps the one a client already holds. */
+  const published = new Map<string, NamespaceProxyLease>();
+  const publishing = new Map<string, Promise<NamespaceProxyLease>>();
+  const retain = async (instanceId: string, retentionDeadline?: string) => {
     try {
       const compute = config.session.compute;
       const describe = async () => {
-        const { metadata } = await compute.describeInstance(
-          { instanceId: resource.instanceId },
-          { timeoutMs: 30_000 },
-        );
+        const { metadata } = await compute.describeInstance({ instanceId }, { timeoutMs: 30_000 });
         if (
           !metadata ||
-          metadata.instanceId !== resource.instanceId ||
+          metadata.instanceId !== instanceId ||
           metadata.destroyedAt ||
           !metadata.deadline
         )
@@ -269,7 +268,7 @@ export function makeNamespaceProvisionRuntime(config: {
         throw new Error("Namespace retention deadline has expired");
       const { newDeadline } = await compute.extendInstance(
         {
-          instanceId: resource.instanceId,
+          instanceId,
           ...(deadline === undefined
             ? { ensureMinimum: { seconds: 21_600n } }
             : {
@@ -300,11 +299,12 @@ export function makeNamespaceProvisionRuntime(config: {
       throw error;
     }
   };
-  const assertResource = async (
-    operation: ProvisionOperation,
-    resource: NamespaceResource,
-    allowStopped = false,
-  ) => {
+  /**
+   * The Devbox record is the durable identity. Its instance is whichever
+   * activation is running now: a shutdown destroys one and the next exec
+   * starts another, so the instance captured at allocation is not compared.
+   */
+  const assertResource = async (operation: ProvisionOperation, resource: NamespaceResource) => {
     const request = operation.request;
     if (
       request.provider !== "namespace" ||
@@ -322,11 +322,22 @@ export function makeNamespaceProvisionRuntime(config: {
       (resource.devboxName !== undefined && response.devbox.name !== resource.devboxName) ||
       !namespaceResourceMatches(response.devbox, request) ||
       response.devbox.site !== resource.region ||
-      response.devbox.workspaceDir !== resource.workspaceDir ||
-      (response.instanceId !== resource.instanceId && !(allowStopped && !response.instanceId))
+      response.devbox.workspaceDir !== resource.workspaceDir
     )
       throw new Error("Namespace resource no longer matches the persisted allocation");
-    return { devbox: response.devbox, instanceId: response.instanceId };
+    return { devbox: response.devbox, instanceId: response.instanceId || undefined };
+  };
+  const running = async (operation: ProvisionOperation, resource: NamespaceResource) => {
+    const { instanceId } = await assertResource(operation, resource);
+    if (!instanceId) throw new Error("Namespace instance is not running");
+    return instanceId;
+  };
+  /** A shut-down Devbox keeps its record and volume; any exec activates it again. */
+  const wake = async (operation: ProvisionOperation, resource: NamespaceResource) => {
+    const observed = await assertResource(operation, resource);
+    if (observed.instanceId) return observed.instanceId;
+    await successful(config.session, ["exec", resource.devboxId, "--", "true"]);
+    return running(operation, resource);
   };
   const port = (resource: NamespaceResource, manifest: ProvisionPreparationManifest) =>
     namespacePythonPort({
@@ -335,44 +346,59 @@ export function makeNamespaceProvisionRuntime(config: {
       root: manifest.preparation.root,
       localDir: config.stateDir,
     });
-  return {
-    prepare: async (
-      operation: ProvisionOperation,
-      resource: NamespaceResource,
-      manifest: ProvisionPreparationManifest,
-    ) => {
-      await assertResource(operation, resource);
-      if (operation.request.retentionDeadline)
-        await retain(resource, operation.request.retentionDeadline);
-      const archive = await NodeFSP.readFile(manifest.localArtifact.path);
-      if (provisionDigest(archive) !== manifest.localArtifact.sha256)
-        throw new Error("The stored runtime artifact changed");
-      const staged = `${manifest.preparation.root}/artifact-${NodeCrypto.randomUUID()}`;
-      const id = resource.devboxId;
+  const stageArtifact = async (
+    resource: NamespaceResource,
+    manifest: ProvisionPreparationManifest,
+  ) => {
+    const archive = await NodeFSP.readFile(manifest.localArtifact.path);
+    if (provisionDigest(archive) !== manifest.localArtifact.sha256)
+      throw new Error("The stored runtime artifact changed");
+    const id = resource.devboxId;
+    // The archive lives on the retained volume, so a resume or a retried
+    // preparation skips the upload once its digest checks out.
+    const presence = await successful(config.session, [
+      "exec",
+      id,
+      "--",
+      "python3",
+      "-c",
+      String.raw`
+import hashlib,pathlib,sys
+target,expected=sys.argv[1:]
+target=pathlib.Path(target)
+if not target.exists(): print('missing')
+elif target.is_symlink() or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest()!=expected: raise RuntimeError('Existing artifact conflicts')
+else: print('present')
+`,
+      manifest.preparation.artifact.archivePath,
+      manifest.localArtifact.sha256,
+    ]);
+    if (presence.trim() === "present") return;
+    const staged = `${manifest.preparation.root}/artifact-${NodeCrypto.randomUUID()}`;
+    await successful(config.session, [
+      "exec",
+      id,
+      "--",
+      "python3",
+      "-c",
+      prepareDirectory,
+      manifest.preparation.root,
+      staged,
+    ]);
+    try {
+      await successful(config.session, [
+        "upload",
+        id,
+        manifest.localArtifact.path,
+        `${staged}/runtime.tar`,
+      ]);
       await successful(config.session, [
         "exec",
         id,
         "--",
         "python3",
         "-c",
-        prepareDirectory,
-        manifest.preparation.root,
-        staged,
-      ]);
-      try {
-        await successful(config.session, [
-          "upload",
-          id,
-          manifest.localArtifact.path,
-          `${staged}/runtime.tar`,
-        ]);
-        await successful(config.session, [
-          "exec",
-          id,
-          "--",
-          "python3",
-          "-c",
-          String.raw`
+        String.raw`
 import hashlib,os,pathlib,sys
 source,target,expected=sys.argv[1:]
 source=pathlib.Path(source)
@@ -384,43 +410,128 @@ try:
 except FileExistsError:
     if target.is_symlink() or hashlib.sha256(target.read_bytes()).hexdigest()!=expected: raise RuntimeError('Existing artifact conflicts')
 `,
-          `${staged}/runtime.tar`,
-          manifest.preparation.artifact.archivePath,
-          manifest.localArtifact.sha256,
-        ]);
-      } finally {
-        await config.session
-          .run(["exec", id, "--", "python3", "-c", removeStaging, staged])
-          .catch(() => undefined);
+        `${staged}/runtime.tar`,
+        manifest.preparation.artifact.archivePath,
+        manifest.localArtifact.sha256,
+      ]);
+    } finally {
+      await config.session
+        .run(["exec", id, "--", "python3", "-c", removeStaging, staged])
+        .catch(() => undefined);
+    }
+  };
+  /**
+   * Converges the Mac on the manifest: wakes it if shut down, stages the
+   * archive once, and runs the remote preparation, which keeps an intact root's
+   * environment ID and files and relaunches the server only when it is down.
+   */
+  const prepare = async (
+    operation: ProvisionOperation,
+    resource: NamespaceResource,
+    manifest: ProvisionPreparationManifest,
+  ) => {
+    const instanceId = await wake(operation, resource);
+    if (operation.request.retentionDeadline)
+      await retain(instanceId, operation.request.retentionDeadline);
+    await stageArtifact(resource, manifest);
+    const ready = await prepareRemoteHost(
+      port(resource, manifest),
+      withGuestProviderInstall(
+        {
+          ...manifest.preparation,
+          resourceIdentity: `namespace:${resource.devboxId}`,
+          requestHash: operation.requestHash,
+          preparationHash: operation.request.preparationHash,
+        },
+        operation.request.agentDriver,
+      ),
+    );
+    if (
+      ready.artifactSha256 !== manifest.localArtifact.sha256 ||
+      ready.t3Revision !== manifest.localArtifact.revision ||
+      ready.projectDir !== `${manifest.preparation.root}/workspace`
+    )
+      throw new Error("Prepared Namespace runtime differs from its pinned inputs");
+    if (operation.request.retentionDeadline)
+      await retain(instanceId, operation.request.retentionDeadline);
+    return ready;
+  };
+  /**
+   * Exposes the guest's T3 port and serves it on a loopback proxy. A recorded
+   * lease re-binds the origin a client already holds; the exposure is fetched
+   * fresh every time because a woken Mac may publish a new upstream.
+   */
+  const publish = (
+    operation: ProvisionOperation,
+    resource: NamespaceResource,
+    manifest: ProvisionPreparationManifest,
+    recorded?: NamespaceProxyLease,
+  ) => {
+    if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
+    const environmentId = operation.state.readiness.environmentId;
+    const proxyId = `provision-${operation.request.requestId}`;
+    let pending = publishing.get(proxyId);
+    if (pending) return pending;
+    pending = (async () => {
+      const output = await successful(config.session, [
+        "url",
+        "expose",
+        resource.devboxId,
+        "--port",
+        String(manifest.preparation.port),
+        "--access",
+        "workspace",
+        "-o",
+        "json",
+      ]);
+      const upstream = decodeExposure(output).urls[0]?.url;
+      if (!upstream || new URL(upstream).protocol !== "https:")
+        throw new Error("Namespace exposure did not return a private HTTPS endpoint");
+      const input = {
+        proxyId,
+        upstreamHttpBaseUrl: upstream,
+        upstreamWsBaseUrl: upstream.replace(/^https:/, "wss:"),
+        // A proxy outlives any single token, so it asks for one per request
+        // rather than pinning the one it opened with.
+        getUpstreamAuthorization: ingressAuthorization,
+      };
+      const retained = recorded ?? published.get(proxyId);
+      const lease = retained
+        ? await proxies.restore({ ...input, ...retained })
+        : await proxies.open(input);
+      published.set(proxyId, lease);
+      try {
+        const response = await fetch(`${lease.proxyOrigin}/.well-known/t3/environment`, {
+          signal: AbortSignal.timeout(30_000),
+          redirect: "error",
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(
+            `Namespace published endpoint returned HTTP ${response.status} before T3 identity verification`,
+          );
+        }
+        const descriptor = decodeDescriptor(await response.json());
+        if (descriptor.environmentId !== environmentId)
+          throw new Error("Namespace published endpoint returned a different T3 environment");
+      } catch (error) {
+        await proxies.close({ proxyId });
+        throw error;
       }
-      const ready = await prepareRemoteHost(
-        port(resource, manifest),
-        withGuestProviderInstall(
-          {
-            ...manifest.preparation,
-            resourceIdentity: `namespace:${resource.devboxId}`,
-            requestHash: operation.requestHash,
-            preparationHash: operation.request.preparationHash,
-          },
-          operation.request.agentDriver,
-        ),
-      );
-      if (
-        ready.artifactSha256 !== manifest.localArtifact.sha256 ||
-        ready.t3Revision !== manifest.localArtifact.revision ||
-        ready.projectDir !== `${manifest.preparation.root}/workspace`
-      )
-        throw new Error("Prepared Namespace runtime differs from its pinned inputs");
-      if (operation.request.retentionDeadline)
-        await retain(resource, operation.request.retentionDeadline);
-      return ready;
-    },
+      return lease;
+    })().finally(() => publishing.delete(proxyId));
+    publishing.set(proxyId, pending);
+    return pending;
+  };
+  return {
+    prepare,
     attach: async (
       operation: ProvisionOperation,
       resource: NamespaceResource,
       manifest: ProvisionPreparationManifest,
+      recordedProxy?: NamespaceProxyLease,
     ) => {
-      await assertResource(operation, resource);
+      await running(operation, resource);
       if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
       const environmentId = operation.state.readiness.environmentId;
       const result = await port(resource, manifest).executePython({
@@ -442,63 +553,30 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps(js
       });
       if (result.exitCode !== 0) throw new Error("Namespace pairing failed");
       const { credential } = decodePairing(result.stdout);
-      const proxyId = `provision-${operation.request.requestId}`;
-      let origin = openProxies.get(proxyId);
-      if (!origin) {
-        origin = (async () => {
-          const output = await successful(config.session, [
-            "url",
-            "expose",
-            resource.devboxId,
-            "--port",
-            String(manifest.preparation.port),
-            "--access",
-            "workspace",
-            "-o",
-            "json",
-          ]);
-          const upstream = decodeExposure(output).urls[0]?.url;
-          if (!upstream || new URL(upstream).protocol !== "https:")
-            throw new Error("Namespace exposure did not return a private HTTPS endpoint");
-          return (
-            await proxies.open({
-              proxyId,
-              upstreamHttpBaseUrl: upstream,
-              upstreamWsBaseUrl: upstream.replace(/^https:/, "wss:"),
-              // A proxy outlives any single token, so it asks for one per
-              // request rather than pinning the one it opened with.
-              getUpstreamAuthorization: ingressAuthorization,
-            })
-          ).proxyOrigin;
-        })();
-        openProxies.set(proxyId, origin);
-        void origin.catch(() => openProxies.delete(proxyId));
-      }
-      const proxyOrigin = await origin;
-      try {
-        const response = await fetch(`${proxyOrigin}/.well-known/t3/environment`, {
-          signal: AbortSignal.timeout(30_000),
-          redirect: "error",
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
-          throw new Error(
-            `Namespace published endpoint returned HTTP ${response.status} before T3 identity verification`,
-          );
-        }
-        const descriptor = decodeDescriptor(await response.json());
-        if (descriptor.environmentId !== environmentId)
-          throw new Error("Namespace published endpoint returned a different T3 environment");
-      } catch (error) {
-        await proxies.close({ proxyId });
-        openProxies.delete(proxyId);
-        throw error;
-      }
-      return `${proxyOrigin}/pair#token=${encodeURIComponent(credential)}`;
+      const namespaceProxy = await publish(operation, resource, manifest, recordedProxy);
+      return {
+        pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=${encodeURIComponent(credential)}`,
+        namespaceProxy,
+      };
+    },
+    /**
+     * Brings a paused or orphaned environment back at the origin its client
+     * saved: wake, converge the retained root, then publish through the proxy.
+     */
+    resume: async (
+      operation: ProvisionOperation,
+      resource: NamespaceResource,
+      manifest: ProvisionPreparationManifest,
+      recordedProxy?: NamespaceProxyLease,
+    ) => {
+      if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
+      const ready = await prepare(operation, resource, manifest);
+      if (ready.environmentId !== operation.state.readiness.environmentId)
+        throw new Error("Namespace retained environment identity changed");
+      return publish(operation, resource, manifest, recordedProxy);
     },
     touch: async (operation: ProvisionOperation, resource: NamespaceResource) => {
-      await assertResource(operation, resource);
-      await retain(resource, operation.request.retentionDeadline);
+      await retain(await running(operation, resource), operation.request.retentionDeadline);
     },
     /** Only the registry's imported legacy lease IDs may call this operation-independent path. */
     retainImportedLease: async (resource: ImportedNamespaceResource) => {
@@ -515,22 +593,22 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps(js
         response.instanceId !== resource.instanceId
       )
         throw new Error("Imported Namespace lease no longer belongs to the configured account");
-      await retain({ ...resource, devboxName: response.devbox.name });
+      await retain(response.instanceId);
     },
     dispose: async (operation: ProvisionOperation, resource: NamespaceResource) => {
       const proxyId = `provision-${operation.request.requestId}`;
-      await openProxies.get(proxyId)?.catch(() => undefined);
+      await publishing.get(proxyId)?.catch(() => undefined);
       await proxies.close({ proxyId });
-      openProxies.delete(proxyId);
-      const observed = await assertResource(operation, resource, true).catch((error: unknown) => {
+      published.delete(proxyId);
+      const observed = await assertResource(operation, resource).catch((error: unknown) => {
         if (isNotFound(error)) return null;
         throw error;
       });
       if (observed === null) return;
       if (observed.instanceId)
         await successful(config.session, ["shutdown", resource.devboxId, "--force"]);
-      // Shutting down an ephemeral Devbox may already remove it.
-      const remaining = await assertResource(operation, resource, true).catch((error: unknown) => {
+      // The provider may already have removed the Devbox with its shutdown.
+      const remaining = await assertResource(operation, resource).catch((error: unknown) => {
         if (isNotFound(error)) return null;
         throw error;
       });

@@ -69,6 +69,7 @@ import {
   decodeLegacyLeases,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
+import type { NamespaceProxyLease } from "./namespaceProxy.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const isProvisionRefused = Schema.is(ProvisionRefused);
@@ -331,6 +332,7 @@ export function createEnvironmentControl(
           };
         if (lease.state === "missing") throw new ProvisionedSandboxMissing();
         const resumed = await driver.resume({
+          leaseId: lease.leaseId,
           sandboxId: lease.sandboxId,
           environmentId: input.environmentId,
           providerInstanceId: lease.providerInstanceId,
@@ -568,9 +570,20 @@ export const layer = Layer.effect(
         namespace = undefined;
         const service = (async () => {
           const config = await readConfig(path);
+          const cloud = createCloudDriver(config, resolveProfile);
           const control = createEnvironmentControl(
             config.targets,
-            createCloudDriver(config, resolveProfile),
+            {
+              ...cloud,
+              // A Mac this manager provisioned resumes through the runtime that
+              // prepared it. Imported leases keep the legacy runner.
+              resume: (input) =>
+                input.namespaceResource &&
+                !importedLeases.has(input.leaseId) &&
+                isProvisionRequestId(input.leaseId)
+                  ? resumeProvisionedNamespace(input.leaseId, input.namespaceProxy)
+                  : cloud.resume(input),
+            },
             leaseRegistry,
           );
           return { ...control, config };
@@ -615,6 +628,27 @@ export const layer = Layer.effect(
         namespace = undefined;
       });
       return namespace;
+    };
+    const resumeProvisionedNamespace = async (
+      requestId: ProvisionRequestId,
+      recordedProxy?: NamespaceProxyLease,
+    ) => {
+      const operation = await Effect.runPromise(store.get(requestId));
+      if (
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "namespace"
+      )
+        throw new Error("No ready Namespace runtime");
+      const manifest = await manifests.load(requestId);
+      const { runtime } = await resolveNamespace();
+      return {
+        namespaceProxy: await runtime.resume(
+          operation,
+          operation.state.allocation.resource,
+          manifest,
+          recordedProxy,
+        ),
+      };
     };
     const provider = (operation: ProvisionOperation) =>
       Effect.tryPromise(async () => {
@@ -777,17 +811,24 @@ export const layer = Layer.effect(
           );
         },
         load: manifests.load,
-        attach: async (operation, manifest) => {
+        attach: async (operation, manifest, recordedProxy) => {
           const manager = await resolve();
           if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
           const resource = operation.state.allocation.resource;
           if (resource.provider === "namespace")
-            return (await resolveNamespace()).runtime.attach(operation, resource, manifest);
-          return makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).attach(
-            operation,
-            resource.sandboxId,
-            manifest,
-          );
+            return (await resolveNamespace()).runtime.attach(
+              operation,
+              resource,
+              manifest,
+              recordedProxy,
+            );
+          return {
+            pairingUrl: await makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).attach(
+              operation,
+              resource.sandboxId,
+              manifest,
+            ),
+          };
         },
         touch: async (operation) => {
           const manager = await resolve();

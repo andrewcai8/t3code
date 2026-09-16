@@ -1,8 +1,9 @@
 import { ProvisionRetentionError } from "./retention.ts";
-// @effect-diagnostics nodeBuiltinImport:off - these tests execute the uploaded Python files and SDK HTTP requests locally.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - these tests execute the uploaded Python files, SDK HTTP requests and loopback proxy probes locally.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
@@ -17,7 +18,7 @@ import {
 } from "./NamespaceProvisionRuntime.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import { namespaceMacImage } from "./namespaceAllocation.ts";
-import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
+import { ProvisionPreparationManifest, provisionDigest } from "./ProvisionPreparation.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
@@ -180,6 +181,11 @@ async function fixture() {
         return { exitCode: 0, stdout: "" };
       }
       if (args[0] === "exec") {
+        // Any exec activates a shut-down Devbox again, on a fresh instance.
+        if (state.instanceId === "") {
+          state.instanceId = "woken-instance";
+          state.describedInstanceId = "woken-instance";
+        }
         const separator = args.indexOf("--");
         const executable = args[separator + 1];
         if (!executable) throw new Error("Missing remote executable");
@@ -238,6 +244,66 @@ async function fixture() {
     },
   });
   return { directory, root, session, commands, tokenFiles, apiCalls, state, operation, request };
+}
+
+const decodeServerPid = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ pid: Schema.Int })),
+);
+/** A stand-in for the pinned T3 runtime: it answers the probes the preparation script and the proxy make. */
+const fixtureCli = String.raw`
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+const args = process.argv.slice(2);
+const home = args[args.indexOf('--base-dir') + 1];
+const root = path.dirname(path.dirname(home));
+if (args[0] === 'auth') {
+  process.stdout.write('fixture-broker');
+} else if (args[0] === 'project') {
+  process.exit(0);
+} else {
+  fs.appendFileSync(path.join(root, 'started'), 'start\n');
+  const server = http.createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/.well-known/t3/environment') {
+      response.end(JSON.stringify({ environmentId: fs.readFileSync(path.join(home, 'userdata/environment-id'), 'utf8').trim() }));
+    } else if (request.url === '/api/auth/session') {
+      response.end(JSON.stringify({ authenticated: request.headers.authorization === 'Bearer fixture-broker', sessionMethod: 'bearer-access-token', scopes: ['access:write'] }));
+    } else if (request.url === '/api/auth/pairing-token') {
+      response.end(JSON.stringify({ credential: 'grant' }));
+    } else if (request.url === '/stop') {
+      response.end('stopped');
+      server.close();
+    } else {
+      response.end('{}');
+    }
+  });
+  server.listen(Number(args[args.indexOf('--port') + 1]), '127.0.0.1');
+}
+`;
+
+async function freePort() {
+  const server = NodeNet.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No fixture port");
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return address.port;
+}
+
+/** The supervisor holds this lock until the server it launched exits. */
+function serverLockReleased(root: string) {
+  return new Promise<void>((resolve, reject) => {
+    NodeChildProcess.execFile(
+      "python3",
+      [
+        "-c",
+        "import fcntl,sys\nwith open(sys.argv[1], 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+        NodePath.join(root, "server.lock"),
+      ],
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
 }
 
 describe("Namespace runtime transport", () => {
@@ -346,19 +412,26 @@ describe("Namespace runtime transport", () => {
               upstreamWsBaseUrl: published.origin.replace("http:", "ws:"),
             });
           },
+          restore: (input) =>
+            proxies.restore({
+              ...input,
+              upstreamHttpBaseUrl: published.origin,
+              upstreamWsBaseUrl: published.origin.replace("http:", "ws:"),
+            }),
           close: (input) => proxies.close(input),
         },
       });
     };
     const first = makeRuntime();
-    expect(await first.attach(f.operation, resource, manifest)).toMatch(
-      /http:\/\/127.0.0.1:\d+\/pair#token=grant-1$/,
-    );
-    expect(await first.attach(f.operation, resource, manifest)).toMatch(
-      /http:\/\/127.0.0.1:\d+\/pair#token=grant-2$/,
-    );
+    const attached = await first.attach(f.operation, resource, manifest);
+    expect(attached.pairingUrl).toBe(`${attached.namespaceProxy.proxyOrigin}/pair#token=grant-1`);
+    expect(attached.namespaceProxy.proxyId).toBe(`provision-${requestId}`);
+    expect(await first.attach(f.operation, resource, manifest)).toEqual({
+      pairingUrl: `${attached.namespaceProxy.proxyOrigin}/pair#token=grant-2`,
+      namespaceProxy: attached.namespaceProxy,
+    });
     expect(opened).toBe(1);
-    expect(await makeRuntime().attach(f.operation, resource, manifest)).toMatch(
+    expect((await makeRuntime().attach(f.operation, resource, manifest)).pairingUrl).toMatch(
       /http:\/\/127.0.0.1:\d+\/pair#token=grant-3$/,
     );
     expect(opened).toBe(2);
@@ -372,7 +445,9 @@ describe("Namespace runtime transport", () => {
       "different T3 environment",
     );
     publishedEnvironmentId = "test-environment";
-    expect(await first.attach(f.operation, resource, manifest)).toMatch(/\/pair#token=grant-6$/);
+    expect((await first.attach(f.operation, resource, manifest)).pairingUrl).toBe(
+      `${attached.namespaceProxy.proxyOrigin}/pair#token=grant-6`,
+    );
     expect(await NodeFSP.readFile(NodePath.join(f.root, "broker-token"), "utf8")).toBe(
       "private-broker",
     );
@@ -542,7 +617,157 @@ describe("Namespace runtime transport", () => {
     expect(await NodeFSP.readdir(directory)).toEqual(["child.pid"]);
   });
 
-  it("accepts provider auto-removal of an ephemeral devbox during shutdown", async () => {
+  it("resumes a shut-down Devbox from its retained volume at the origin its client saved", async () => {
+    const f = await fixture();
+    const volume = NodePath.join(f.directory, "volume");
+    const root = NodePath.join(volume, "t3-provision", requestId);
+    const bundle = NodePath.join(f.directory, "bundle");
+    await NodeFSP.mkdir(bundle);
+    await NodeFSP.writeFile(NodePath.join(bundle, "cli.mjs"), fixtureCli);
+    const archive = NodePath.join(f.directory, "runtime.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archive, "-C", bundle, "cli.mjs"]);
+    const sha256 = provisionDigest(await NodeFSP.readFile(archive));
+    const port = await freePort();
+    cleanups.push(async () => {
+      const pid = await NodeFSP.readFile(NodePath.join(root, "server.json"), "utf8")
+        .then((json) => decodeServerPid(json).pid)
+        .catch(() => undefined);
+      if (pid !== undefined)
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          /* The server already stopped. */
+        }
+    });
+    const deadline = DateTime.formatIso(
+      DateTime.makeUnsafe(DateTime.toEpochMillis(DateTime.nowUnsafe()) + 3_600_000),
+    );
+    const request = { ...f.request, retentionDeadline: deadline };
+    const manifest = decodeManifest({
+      input: {
+        requestId,
+        provider: "namespace",
+        providerInstanceId: "codex",
+        retentionDeadline: deadline,
+      },
+      request,
+      preparation: {
+        requestId,
+        root,
+        repository: null,
+        artifact: {
+          archivePath: `${volume}/t3-runtime-${sha256}.tar`,
+          sha256,
+          revision: "c".repeat(40),
+          entrypoint: "cli.mjs",
+        },
+        runtimeExecutable: process.execPath,
+        port,
+        readinessTimeoutSeconds: 30,
+        brokerTtl: "1h",
+        files: [],
+      },
+      localArtifact: {
+        path: archive,
+        sha256,
+        revision: "c".repeat(40),
+        entrypoint: "cli.mjs",
+        runtimeExecutable: process.execPath,
+      },
+      egressAllow: [],
+    });
+    const upstream = `http://127.0.0.1:${port}`;
+    const proxyId = `provision-${requestId}`;
+    const makeRuntime = (proxies: NamespaceProxyManager) => {
+      cleanups.push(() => proxies.close({ proxyId }));
+      const toUpstream = <T extends object>(input: T) => ({
+        ...input,
+        upstreamHttpBaseUrl: upstream,
+        upstreamWsBaseUrl: upstream.replace("http:", "ws:"),
+      });
+      return makeNamespaceProvisionRuntime({
+        session: f.session,
+        getIngressAuthorization: async () => "Bearer private-ingress",
+        stateDir: f.directory,
+        proxies: {
+          open: (input) => proxies.open(toUpstream(input)),
+          restore: (input) => proxies.restore(toUpstream(input)),
+          close: (input) => proxies.close(input),
+        },
+      });
+    };
+    const environmentAt = async (origin: string) =>
+      decodeJson(await (await fetch(`${origin}/.well-known/t3/environment`)).text());
+    const started = () => NodeFSP.readFile(NodePath.join(root, "started"), "utf8");
+    const archiveUploads = () =>
+      f.commands.filter((args) => args[0] === "upload" && args[3]?.endsWith("/runtime.tar"));
+    const extensions = () =>
+      f.apiCalls.filter(({ method }) => method === "ExtendInstance").map(({ body }) => body);
+
+    const firstProxies = new NamespaceProxyManager();
+    const first = makeRuntime(firstProxies);
+    const ready = await first.prepare(
+      decodeOperation({ ...f.operation, request }),
+      resource,
+      manifest,
+    );
+    const operation = decodeOperation({
+      ...f.operation,
+      request,
+      state: {
+        kind: "ready",
+        allocation: { kind: "direct", resource },
+        readiness: {
+          environmentId: ready.environmentId,
+          projectDir: `${root}/workspace`,
+          sourceRevision: null,
+          preparationHash: "a".repeat(64),
+          t3Revision: "c".repeat(40),
+          artifactSha256: sha256,
+        },
+      },
+    });
+    const attached = await first.attach(operation, resource, manifest);
+    const origin = attached.namespaceProxy.proxyOrigin;
+    expect(attached.pairingUrl).toBe(`${origin}/pair#token=grant`);
+    expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
+    expect(archiveUploads()).toHaveLength(1);
+
+    // Pause: the Mac shuts down, taking its instance and server with it. The
+    // volume, and everything T3 prepared on it, stays.
+    expect(await (await fetch(`${upstream}/stop`)).text()).toBe("stopped");
+    await serverLockReleased(root);
+    f.state.instanceId = "";
+
+    expect(await first.resume(operation, resource, manifest, attached.namespaceProxy)).toEqual(
+      attached.namespaceProxy,
+    );
+    expect(f.commands).toContainEqual(["exec", "owned-box", "--", "true"]);
+    expect(f.state.instanceId).toBe("woken-instance");
+    expect(await started()).toBe("start\nstart\n");
+    expect(archiveUploads()).toHaveLength(1);
+    expect(extensions()).toEqual([
+      { instanceId: "owned-instance", newDeadline: deadline },
+      { instanceId: "owned-instance", newDeadline: deadline },
+      { instanceId: "woken-instance", newDeadline: deadline },
+      { instanceId: "woken-instance", newDeadline: deadline },
+    ]);
+    expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
+
+    // The manager restarts: its loopback proxy is gone, the Mac keeps running,
+    // and the client still holds the origin it saved.
+    await firstProxies.close({ proxyId });
+    await expect(environmentAt(origin)).rejects.toThrow();
+    const second = makeRuntime(new NamespaceProxyManager());
+    expect(await second.resume(operation, resource, manifest, attached.namespaceProxy)).toEqual(
+      attached.namespaceProxy,
+    );
+    expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
+    expect(await started()).toBe("start\nstart\n");
+    expect(archiveUploads()).toHaveLength(1);
+  });
+
+  it("accepts provider removal of the devbox during shutdown", async () => {
     const f = await fixture();
     f.state.expireOnShutdown = true;
     const runtime = makeNamespaceProvisionRuntime({

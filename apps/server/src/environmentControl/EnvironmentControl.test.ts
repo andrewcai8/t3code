@@ -264,6 +264,7 @@ describe("managed cloud commands", () => {
       expect(await resumed).toEqual({ kind: "resumed" });
       expect(driver.resume).toHaveBeenCalledTimes(1);
       expect(driver.resume).toHaveBeenCalledWith({
+        leaseId: "lease",
         sandboxId: "sandbox",
         environmentId: "child",
         providerInstanceId: "codex",
