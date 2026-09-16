@@ -183,6 +183,17 @@ const makeTildeProviderFixtures = Effect.fn(
       '  process.stdout.write("claude 2.1.219\\n");',
       "  process.exit(0);",
       "}",
+      // Picker-ready snapshots spawn `claude auth status` and do not wait
+      // for an SDK initialize. Without this, the probe times out as warning.
+      'if (process.argv.includes("auth") && process.argv.includes("status")) {',
+      "  process.stdout.write(JSON.stringify({",
+      "    loggedIn: true,",
+      '    email: "test@example.com",',
+      '    subscriptionType: "pro",',
+      '    authMethod: "claude.ai",',
+      '  }) + "\\n");',
+      "  process.exit(0);",
+      "}",
       "const lines = NodeReadline.createInterface({ input: process.stdin });",
       'lines.on("line", (line) => {',
       "  const message = JSON.parse(line);",

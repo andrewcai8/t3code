@@ -50,12 +50,12 @@ export type LaneCapacity =
 const MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;
 
 /** The family a window is scoped to, or `null` when it constrains everything. */
-export function windowFamily(windowId: string): string | null {
+function windowFamily(windowId: string): string | null {
   return MODEL_FAMILIES.find((family) => windowId.endsWith(`_${family}`)) ?? null;
 }
 
 /** The family a model belongs to, or `null` when it names none. */
-export function modelFamily(model: string): string | null {
+function modelFamily(model: string): string | null {
   const lowered = model.toLowerCase();
   return MODEL_FAMILIES.find((family) => lowered.includes(family)) ?? null;
 }

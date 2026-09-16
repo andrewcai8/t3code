@@ -77,7 +77,7 @@ export function makeProvisionResolution(config: {
   };
 }
 
-export function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
+function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
   return {
     executePython: async ({ script, stdin }) => {
       if (stdin.length === 0)

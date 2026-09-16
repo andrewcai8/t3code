@@ -14,7 +14,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { waitForThreadShell } from "../../state/waitForThreadShell";
 import { Button } from "../ui/button";
 
-export function ProvisionedEnvironmentRow({
+function ProvisionedEnvironmentRow({
   environment,
   pending,
   disabled,

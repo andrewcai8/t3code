@@ -31,10 +31,9 @@ export interface ThreadLifecycleOverlay {
   readonly at: string;
 }
 
-export const EMPTY_THREAD_LIFECYCLE_OVERLAYS: ReadonlyMap<string, ThreadLifecycleOverlay> =
-  new Map();
+const EMPTY_THREAD_LIFECYCLE_OVERLAYS: ReadonlyMap<string, ThreadLifecycleOverlay> = new Map();
 
-export const THREAD_LIFECYCLE_OVERLAY_STORAGE_KEY = "t3code:thread-lifecycle-overlay:v1";
+const THREAD_LIFECYCLE_OVERLAY_STORAGE_KEY = "t3code:thread-lifecycle-overlay:v1";
 
 export const threadLifecycleOverlayAtom = Atom.make<ReadonlyMap<string, ThreadLifecycleOverlay>>(
   hydrateThreadLifecycleOverlays(),
@@ -288,7 +287,7 @@ export function persistThreadLifecycleOverlays(
   }
 }
 
-export function hydrateThreadLifecycleOverlays(): ReadonlyMap<string, ThreadLifecycleOverlay> {
+function hydrateThreadLifecycleOverlays(): ReadonlyMap<string, ThreadLifecycleOverlay> {
   if (typeof localStorage === "undefined") return EMPTY_THREAD_LIFECYCLE_OVERLAYS;
   try {
     const raw = localStorage.getItem(THREAD_LIFECYCLE_OVERLAY_STORAGE_KEY);

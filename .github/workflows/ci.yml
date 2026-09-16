@@ -59,7 +59,13 @@ jobs:
 
       - name: Install browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/ubuntu-latest.txt /etc/apt/sources.list.d/ubuntu.sources
+          # setup-apt-mirrors writes this list on every runner; GitHub-hosted
+          # images have no /etc/apt/ubuntu-latest.txt.
+          for f in /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$f" ]; then
+              sudo sed -i 's|http://|https://|g' "$f"
+            fi
+          done
           sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Build desktop pipeline
@@ -100,7 +106,13 @@ jobs:
 
       - name: Install browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/ubuntu-latest.txt /etc/apt/sources.list.d/ubuntu.sources
+          # setup-apt-mirrors writes this list on every runner; GitHub-hosted
+          # images have no /etc/apt/ubuntu-latest.txt.
+          for f in /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$f" ]; then
+              sudo sed -i 's|http://|https://|g' "$f"
+            fi
+          done
           sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Test nightly release checks

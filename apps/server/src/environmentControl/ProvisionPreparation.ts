@@ -71,7 +71,7 @@ const decodeSettings = Schema.decodeUnknownSync(
 const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
 export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
-export const provisionInputLimit = 64 * 1024 * 1024;
+const provisionInputLimit = 64 * 1024 * 1024;
 
 /**
  * Where an agent CLI reads skills inside a provisioned environment, relative
@@ -81,7 +81,7 @@ export const provisionInputLimit = 64 * 1024 * 1024;
  * rather than the checkout. A checkout is what the agent opens a pull request
  * from, and a skill bundle committed by accident is worse than a missing one.
  */
-export function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
+function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
   if (kind === "cursor") return ".cursor/skills";
   if (kind === "claudeAgent") return ".claude/skills";
   return ".codex/skills";
@@ -96,7 +96,7 @@ type ChildProviderInstanceSettings = Record<string, unknown> & {
   environment?: Array<{ name: string; value: string; sensitive?: boolean }>;
 };
 
-export function enableChildProvider(
+function enableChildProvider(
   existing: string,
   agentDriver: string,
   providerInstanceId: string,

@@ -238,7 +238,7 @@ export async function readConfig(path: string): Promise<EnvironmentControlConfig
   return config;
 }
 
-export const CONTROL_CONFIG_FILENAME = "environment-control.json";
+const CONTROL_CONFIG_FILENAME = "environment-control.json";
 
 const onDisk = async (path: string) => {
   try {
@@ -259,7 +259,7 @@ const onDisk = async (path: string) => {
  * path that does not exist is a misconfiguration and has to fail loudly,
  * whereas the default being absent just means a machine has no cloud controls.
  */
-export function controlConfigCandidates(input: {
+function controlConfigCandidates(input: {
   readonly stateDir: string;
   readonly fallback?: string | undefined;
 }): string[] {
