@@ -52,7 +52,7 @@ case "${1:-}" in
   tools)
     test "$HOME" = /home/user
     npm install --global --no-fund --no-audit \
-      t3@0.0.40 vite-plus@0.3.0 @openai/codex@0.154.0 @anthropic-ai/claude-code@2.1.270
+      t3@0.0.40 vite-plus@0.3.0 pnpm@11.10.0 @openai/codex@0.154.0 @anthropic-ai/claude-code@2.1.270
     temporary=$(mktemp -d)
     trap 'rm -rf "$temporary"' EXIT
     download \
@@ -118,6 +118,9 @@ case "${1:-}" in
     agent --version
     t3 --version
     vp --version
+    # The repository pins pnpm as its package manager, and corepack on this
+    # image is too old to install it on Node 24.
+    test "$(pnpm --version)" = 11.10.0
     swift --version
     swiftlint version
     temporary=$(mktemp -d)
