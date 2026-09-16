@@ -192,38 +192,54 @@ function submittedFiles(input: EnvironmentProvisionInput) {
 /**
  * Every file in a skill bundle, by path within it.
  *
- * Directory symlinks are followed by neither `readdir` nor this walk. A
- * bundle is configuration a manager operator points at, but it lands in an
+ * A bundle is configuration a manager operator points at, but it lands in an
  * environment that then holds whatever it names, so a link out of the bundle
- * is refused rather than resolved.
+ * is refused rather than resolved. A link that stays inside it is carried as
+ * an ordinary file, which is the shape npm leaves behind in a skill that has
+ * its own scripts.
  */
 async function skillFiles(source: string, limit: { remaining: number }) {
   const collected: Array<{ path: string; data: Uint8Array }> = [];
+  const root = await NodeFSP.realpath(source);
+  const inside = (resolved: string) =>
+    resolved === root || resolved.startsWith(`${root}${NodePath.sep}`);
+  const add = async (absolute: string, relative: string) => {
+    const data = await NodeFSP.readFile(absolute);
+    limit.remaining -= data.length;
+    if (limit.remaining < 0)
+      throw new ProvisionRefused({
+        reason: "unsupported",
+        message: "Configured skill bundles exceed the 64 MiB file limit.",
+      });
+    collected.push({ path: relative, data });
+  };
   const walk = async (directory: string, prefix: string) => {
     for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
       const absolute = NodePath.join(directory, entry.name);
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink())
-        throw new ProvisionRefused({
-          reason: "unconfigured",
-          message: "A configured skill bundle contains a symbolic link.",
-        });
+      if (entry.isSymbolicLink()) {
+        const resolved = await NodeFSP.realpath(absolute).catch(() => undefined);
+        // A dangling link names nothing that could land in the environment.
+        if (resolved === undefined) continue;
+        if (!inside(resolved))
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: `A configured skill bundle links outside itself at ${relative}.`,
+          });
+        // A link to a directory inside the bundle only repeats files this walk
+        // already reaches, and can cycle.
+        if ((await NodeFSP.stat(resolved)).isFile()) await add(resolved, relative);
+        continue;
+      }
       if (entry.isDirectory()) {
         await walk(absolute, relative);
         continue;
       }
       if (!entry.isFile()) continue;
-      const data = await NodeFSP.readFile(absolute);
-      limit.remaining -= data.length;
-      if (limit.remaining < 0)
-        throw new ProvisionRefused({
-          reason: "unsupported",
-          message: "Configured skill bundles exceed the 64 MiB file limit.",
-        });
-      collected.push({ path: relative, data });
+      await add(absolute, relative);
     }
   };
-  await walk(source, "");
+  await walk(root, "");
   return collected;
 }
 
