@@ -199,6 +199,19 @@ export const RepositoryIdentity = Schema.Struct({
   provider: Schema.optionalKey(TrimmedNonEmptyString),
   owner: Schema.optionalKey(TrimmedNonEmptyString),
   name: Schema.optionalKey(TrimmedNonEmptyString),
+  /**
+   * The `origin` remote, when the identity came from a different one. A fork
+   * targets its upstream for pull requests but only its own remote holds its
+   * commits, so anything cloning this checkout needs this rather than the
+   * canonical repository.
+   */
+  origin: Schema.optionalKey(
+    Schema.Struct({
+      owner: TrimmedNonEmptyString,
+      name: TrimmedNonEmptyString,
+      remoteUrl: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type RepositoryIdentity = typeof RepositoryIdentity.Type;
 

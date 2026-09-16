@@ -68,10 +68,22 @@ function pickPrimaryRemote(
   return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
 }
 
+/** `owner/name` for a remote, when its URL names both. */
+function remoteRepository(remoteUrl: string) {
+  const segments = normalizeGitRemoteUrl(remoteUrl)
+    .split("/")
+    .slice(1)
+    .filter((segment) => segment.length > 0);
+  const owner = segments[0];
+  const name = segments.at(-1);
+  return owner && name ? { owner, name, remoteUrl } : undefined;
+}
+
 function buildRepositoryIdentity(input: {
   readonly remoteName: string;
   readonly remoteUrl: string;
   readonly rootPath: string;
+  readonly originRemoteUrl?: string | undefined;
 }): RepositoryIdentity {
   const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
@@ -79,6 +91,8 @@ function buildRepositoryIdentity(input: {
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
+  const origin =
+    input.originRemoteUrl === undefined ? undefined : remoteRepository(input.originRemoteUrl);
 
   return {
     canonicalKey,
@@ -92,6 +106,7 @@ function buildRepositoryIdentity(input: {
     ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
     ...(owner ? { owner } : {}),
     ...(repositoryName ? { name: repositoryName } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
 
@@ -134,8 +149,15 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     return null;
   }
 
-  const remote = pickPrimaryRemote(parseRemoteFetchUrls(remoteResult.value.stdout));
-  return remote ? buildRepositoryIdentity({ ...remote, rootPath: cacheKey }) : null;
+  const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
+  const remote = pickPrimaryRemote(remotes);
+  if (!remote) return null;
+  const originRemoteUrl = remote.remoteName === "origin" ? undefined : remotes.get("origin");
+  return buildRepositoryIdentity({
+    ...remote,
+    rootPath: cacheKey,
+    ...(originRemoteUrl === undefined ? {} : { originRemoteUrl }),
+  });
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (

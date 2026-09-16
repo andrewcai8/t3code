@@ -4707,8 +4707,13 @@ export default function ChatView(props: ChatViewProps) {
       }
       const viewingStartedDraft = () => currentDraftIdRef.current === startedDraftId;
       const identity = activeProject?.repositoryIdentity;
+      // A fork's identity names the upstream it targets with pull requests, but
+      // only its own remote holds its commits, so clone that one.
+      const cloneSource = identity?.origin ?? identity;
       const repository =
-        identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+        cloneSource?.owner && cloneSource.name
+          ? `${cloneSource.owner}/${cloneSource.name}`
+          : undefined;
       const cloudEnvironmentLabel =
         cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
       const failProvisioning = (message: string) => {
