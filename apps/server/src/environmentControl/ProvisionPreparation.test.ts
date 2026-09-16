@@ -362,7 +362,27 @@ it("refuses a skill bundle that links out of itself", async () => {
     // A bundle is copied into an environment that then holds whatever it
     // names, so a link out of it is refused rather than resolved.
     await expect(f.store.freeze(input, config, f.resolver, f.profile)).rejects.toThrow(
-      /symbolic link/,
+      /escape\.json/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("carries a link that stays inside the bundle", async () => {
+  const f = await fixture();
+  try {
+    const source = await skillBundle(f.root);
+    await NodeFSP.mkdir(NodePath.join(source, "skills/.bin"), { recursive: true });
+    // The shape npm leaves behind in a skill that has its own scripts.
+    await NodeFSP.symlink("../why/SKILL.md", NodePath.join(source, "skills/.bin/why"));
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
+    expect(homeFile(manifest, ".codex/skills/pstack/skills/.bin/why")?.sha256).toBe(
+      provisionDigest("why\n"),
     );
   } finally {
     await f.cleanup();
