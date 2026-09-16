@@ -848,14 +848,11 @@ export const layer = Layer.effect(
       const service = yield* Effect.promise(resolve);
       if (!service) return;
       yield* Effect.gen(function* () {
-        const expired = yield* Effect.promise(() => leaseRegistry.expired());
-        for (const lease of expired) {
-          if (!importedLeases.has(lease.leaseId) && isProvisionRequestId(lease.leaseId))
-            yield* cancelProvision(lease.leaseId).pipe(Effect.ignore);
-        }
-        yield* Effect.promise(() => service.reapExpiredLeases(new Set(importedLeases.keys()))).pipe(
-          Effect.ignore,
-        );
+        // A lease is only registered once its provision reached ready, so an
+        // expired heartbeat means a finished machine nobody is watching. Pause
+        // it and leave it reconnectable. A provision that never reached ready
+        // holds no lease and is disposed by its retention deadline instead.
+        yield* Effect.promise(() => service.reapExpiredLeases()).pipe(Effect.ignore);
       }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
     }).pipe(Effect.forkScoped);
     return {
