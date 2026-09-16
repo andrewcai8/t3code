@@ -111,6 +111,7 @@ function enableChildProvider(
   agentDriver: string,
   providerInstanceId: string,
   homePath = "/home/user",
+  devices = false,
 ): string {
   let settings: ChildSettings = {};
   try {
@@ -136,6 +137,9 @@ function enableChildProvider(
       : existingInstance.environment;
   return `${JSON.stringify({
     ...settings,
+    // Namespace children are macOS Macs used for iOS work; nobody opens
+    // settings on a cloud Mac to flip device access on by hand.
+    ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
     providers: {
       ...providers,
       [agentDriver]: { ...providers[agentDriver], enabled: true },
@@ -415,7 +419,13 @@ export function makeProvisionPreparationStore(stateDir: string) {
       if (settingsIndex !== -1) files.splice(settingsIndex, 1);
       // Environment entries reach the provider's child process without shell interpolation.
       const configuredSettings: unknown = JSON.parse(
-        enableChildProvider(settings, profile.kind, input.providerInstanceId, `${root}/home`),
+        enableChildProvider(
+          settings,
+          profile.kind,
+          input.providerInstanceId,
+          `${root}/home`,
+          input.provider === "namespace",
+        ),
       );
       const parsedSettings = decodeSettings(configuredSettings);
       const environment = [];

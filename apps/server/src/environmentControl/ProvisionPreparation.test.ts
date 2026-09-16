@@ -453,12 +453,26 @@ it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in
     expect(
       JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()),
     ).toMatchObject({
+      enableDeviceSupport: true,
+      enableAgentDeviceAccess: true,
       providerInstances: {
         codex: {
           homePath: "/Volumes/devbox/t3-provision/6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f/home/.codex",
         },
       },
     });
+    const e2bSettings = e2b.preparation.files.find(
+      (file) => file.destination === ".t3/userdata/settings.json",
+    );
+    const parsedE2bSettings = JSON.parse(
+      Buffer.from(e2bSettings?.contentsBase64 ?? "", "base64").toString(),
+    );
+    expect(Object.prototype.hasOwnProperty.call(parsedE2bSettings, "enableDeviceSupport")).toBe(
+      false,
+    );
+    expect(Object.prototype.hasOwnProperty.call(parsedE2bSettings, "enableAgentDeviceAccess")).toBe(
+      false,
+    );
   } finally {
     await f.cleanup();
   }
