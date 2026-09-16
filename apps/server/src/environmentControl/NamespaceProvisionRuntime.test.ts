@@ -97,6 +97,7 @@ async function fixture() {
     staleReadback: false,
     shortExtension: false,
     capOffset: 0,
+    lifetimeCap: Number.POSITIVE_INFINITY,
     destroyed: false,
     expireOnShutdown: false,
     describedInstanceId: "owned-instance",
@@ -135,8 +136,11 @@ async function fixture() {
           DateTime.makeUnsafe(
             (requested
               ? DateTime.toEpochMillis(DateTime.makeUnsafe(requested))
-              : DateTime.toEpochMillis(DateTime.nowUnsafe()) +
-                (state.shortExtension ? 60_000 : 21_600_000)) + state.capOffset,
+              : Math.min(
+                  state.lifetimeCap,
+                  DateTime.toEpochMillis(DateTime.nowUnsafe()) +
+                    (state.shortExtension ? 60_000 : 21_600_000),
+                )) + state.capOffset,
           ),
         );
         if (!state.staleReadback) state.deadline = newDeadline;
@@ -558,6 +562,20 @@ describe("Namespace runtime transport", () => {
     });
     await expect(runtime.touch(operation, resource)).rejects.toThrow(ProvisionRetentionError);
     expect(f.apiCalls.some(({ method }) => method === "ExtendInstance")).toBe(false);
+  });
+
+  it("accepts a heartbeat extension clamped to the provider's lifetime cap", async () => {
+    const f = await fixture();
+    const created = DateTime.toEpochMillis(DateTime.nowUnsafe()) - 3_600_000;
+    f.state.deadline = DateTime.formatIso(DateTime.makeUnsafe(created + 14_400_000));
+    f.state.lifetimeCap = created + 18_000_000;
+    const runtime = makeNamespaceProvisionRuntime({
+      session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
+      stateDir: f.directory,
+    });
+    await runtime.touch(f.operation, resource);
+    expect(f.state.deadline).toBe(DateTime.formatIso(DateTime.makeUnsafe(created + 18_000_000)));
   });
 
   it("rejects a provider acknowledgment below the requested lifetime", async () => {
