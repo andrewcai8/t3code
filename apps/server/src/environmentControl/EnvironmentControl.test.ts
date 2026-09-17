@@ -466,3 +466,97 @@ describe("managed cloud commands", () => {
     });
   });
 });
+
+describe("a cloud machine whose agent is working", () => {
+  const pauseInput = { leaseId: "lease", sandboxId: "sandbox" };
+  async function withExpiredLease(
+    activity: "busy" | "idle" | "unknown",
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      checked: string[];
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+    retentionDeadline?: string,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "codex",
+        ...(retentionDeadline ? { retentionDeadline } : {}),
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      await registry.claim({
+        leaseId: "lease",
+        owner: { environmentId: "child", threadId: "thread" },
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const calls: string[] = [];
+      const checked: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        calls.push(`pause:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl([], driver, registry, async (lease) => {
+        checked.push(lease.leaseId);
+        return activity;
+      });
+      await test({ registry, calls, checked, manager });
+    });
+  }
+
+  it("keeps an expired lease running and renews it while its agent is busy", async () => {
+    await withExpiredLease("busy", async ({ registry, calls, checked, manager }) => {
+      await manager.reapExpiredLeases();
+      expect(calls).toEqual([]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+      expect(await registry.expired()).toEqual([]);
+      expect(checked).toEqual(["lease"]);
+    });
+  });
+
+  it.each(["idle", "unknown"] as const)(
+    "pauses an expired lease when its agent is %s",
+    async (activity) => {
+      await withExpiredLease(activity, async ({ registry, calls, manager }) => {
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["pause:sandbox"]);
+        expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+      });
+    },
+  );
+
+  it("pauses a busy machine whose retention deadline has passed", async () => {
+    await withExpiredLease(
+      "busy",
+      async ({ registry, calls, manager }) => {
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["pause:sandbox"]);
+        expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+      },
+      "2026-01-01T00:10:00.000Z",
+    );
+  });
+
+  it("refuses to pause for one chat while the machine's agent is busy", async () => {
+    await withExpiredLease("busy", async ({ registry, calls, manager }) => {
+      expect(await manager.pause(pauseInput)).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "Another chat on this machine is still working.",
+      });
+      expect(calls).toEqual([]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+    });
+  });
+
+  it("pauses on request when the machine's activity cannot be read", async () => {
+    await withExpiredLease("unknown", async ({ registry, calls, manager }) => {
+      expect(await manager.pause(pauseInput)).toEqual({ kind: "paused" });
+      expect(calls).toEqual(["pause:sandbox"]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+    });
+  });
+});
