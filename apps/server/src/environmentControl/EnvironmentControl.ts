@@ -49,6 +49,7 @@ import {
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
 import { provisionFailureMessage } from "./provisionFailure.ts";
+import { logProvisionPhases, type ProvisionPhase } from "./provisionTiming.ts";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -751,15 +752,22 @@ export const layer = Layer.effect(
               }),
           });
         }),
-      prepare: (operation, allocation) =>
-        Effect.gen(function* () {
+      prepare: (operation, allocation) => {
+        // Sub-phases are collected rather than logged as they happen because the
+        // provider runtimes are Promise-side with no Effect runtime in scope, so
+        // their log timestamps cluster at the drain while the durations stay exact.
+        const phases: ProvisionPhase[] = [];
+        const record = (phase: ProvisionPhase) => {
+          phases.push(phase);
+        };
+        return Effect.gen(function* () {
           const { runtime, manifest, namespace } = yield* provider(operation);
           const resource = allocation.resource;
           if (resource.provider === "namespace")
             return yield* Effect.tryPromise({
               try: async () => {
                 if (!namespace) throw new Error("Namespace unavailable");
-                return namespace.runtime.prepare(operation, resource, manifest);
+                return namespace.runtime.prepare(operation, resource, manifest, record);
               },
               catch: (error) =>
                 new ProvisionProviderError({
@@ -772,7 +780,7 @@ export const layer = Layer.effect(
             });
           const sandboxId = resource.sandboxId;
           return yield* Effect.tryPromise({
-            try: () => runtime.prepare(operation, sandboxId, manifest),
+            try: () => runtime.prepare(operation, sandboxId, manifest, record),
             catch: (error) =>
               new ProvisionProviderError({
                 ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
@@ -782,7 +790,18 @@ export const layer = Layer.effect(
                 ),
               }),
           });
-        }),
+        }).pipe(
+          Effect.ensuring(
+            logProvisionPhases(
+              {
+                requestId: operation.request.requestId,
+                provider: allocation.resource.provider,
+              },
+              phases,
+            ),
+          ),
+        );
+      },
     };
     const provisioning = yield* Provisioning.make.pipe(
       Effect.provideService(ProvisionProviderPorts, ports),
@@ -839,7 +858,7 @@ export const layer = Layer.effect(
           );
         },
         load: manifests.load,
-        attach: async (operation, manifest, recordedProxy) => {
+        attach: async (operation, manifest, recordedProxy, record) => {
           const manager = await resolve();
           if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
           const resource = operation.state.allocation.resource;
@@ -849,11 +868,13 @@ export const layer = Layer.effect(
               resource,
               manifest,
               recordedProxy,
+              record,
             );
           return makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).attach(
             operation,
             resource.sandboxId,
             manifest,
+            record,
           );
         },
         touch: async (operation) => {

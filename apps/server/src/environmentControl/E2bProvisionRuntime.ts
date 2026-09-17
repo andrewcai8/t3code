@@ -12,6 +12,7 @@ import {
 import type { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
+import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 
@@ -155,12 +156,16 @@ export function makeE2bProvisionRuntime(connection: E2BClientOpts) {
       operation: ProvisionOperation,
       sandboxId: string,
       manifest: ProvisionPreparationManifest,
+      record?: RecordProvisionPhase,
     ) => {
       const sandbox = await connect(operation, sandboxId);
+      const stopDigest = startProvisionPhase(record);
       const archive = await NodeFSP.readFile(manifest.localArtifact.path);
       if (provisionDigest(archive) !== manifest.localArtifact.sha256)
         throw new Error("The stored runtime artifact changed.");
+      stopDigest("artifact.digest", { bytes: archive.byteLength });
       const transport = e2bPythonPort(sandbox);
+      const stopPresence = startProvisionPhase(record);
       const existingArchive = await transport.executePython({
         script: String.raw`
 import hashlib, json, pathlib, stat, sys
@@ -186,13 +191,18 @@ else:
           sha256: manifest.localArtifact.sha256,
         }),
       });
-      if (!archivePresence(existingArchive.stdout))
+      stopPresence("artifact.presence");
+      if (!archivePresence(existingArchive.stdout)) {
+        const stopUpload = startProvisionPhase(record);
         await sandbox.files.write(
           manifest.preparation.artifact.archivePath,
           new Uint8Array(archive).buffer,
           // E2B files.write uses AbortSignal.timeout(60_000) unless overridden.
           { requestTimeoutMs: PREPARE_COMMAND_TIMEOUT_MS },
         );
+        stopUpload("artifact.upload", { bytes: archive.byteLength });
+      }
+      const stopPrepare = startProvisionPhase(record);
       const result = await prepareRemoteHost(
         transport,
         withGuestProviderInstall(
@@ -204,7 +214,9 @@ else:
           },
           operation.request.agentDriver,
         ),
+        record,
       );
+      stopPrepare("remote.prepare");
       if (
         result.artifactSha256 !== manifest.localArtifact.sha256 ||
         result.t3Revision !== manifest.localArtifact.revision ||
@@ -221,8 +233,10 @@ else:
       operation: ProvisionOperation,
       sandboxId: string,
       manifest: ProvisionPreparationManifest,
+      record?: RecordProvisionPhase,
     ) => {
       const sandbox = await connect(operation, sandboxId);
+      const stopPairing = startProvisionPhase(record);
       const result = await e2bPythonPort(sandbox).executePython({
         script: String.raw`
 import json, pathlib, sys, urllib.request
@@ -234,6 +248,7 @@ with urllib.request.urlopen(request, timeout=30) as response:
 `,
         stdin: JSON.stringify({ root: manifest.preparation.root, port: manifest.preparation.port }),
       });
+      stopPairing("attach.pairing");
       const { credential, brokerToken } = pairingResponse(result.stdout);
       const origin = `https://${sandbox.getHost(manifest.preparation.port)}`;
       return {

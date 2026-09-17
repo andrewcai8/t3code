@@ -22,6 +22,12 @@ import type { Provisioning } from "./Provisioning.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import type { ProvisionedLeaseRegistry, RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 import type { NamespaceProxyLease } from "./namespaceProxy.ts";
+import {
+  logProvisionPhases,
+  timeProvisionPhase,
+  type ProvisionPhase,
+  type RecordProvisionPhase,
+} from "./provisionTiming.ts";
 
 export interface ProvisionControlPorts {
   readonly freeze: (input: EnvironmentProvisionInput) => Promise<ProvisionPreparationManifest>;
@@ -35,6 +41,7 @@ export interface ProvisionControlPorts {
     operation: ProvisionOperation,
     manifest: ProvisionPreparationManifest,
     recordedProxy?: NamespaceProxyLease,
+    record?: RecordProvisionPhase,
   ) => Promise<{
     readonly pairingUrl: string;
     readonly namespaceProxy?: NamespaceProxyLease;
@@ -155,7 +162,11 @@ export function makeProvisionControl(
           isProvisionRefused(error) || isRequestConflict(error)
             ? error
             : new UnexpectedCause(error),
-      }).pipe(reportUnexpected, Effect.result);
+      }).pipe(
+        timeProvisionPhase("freeze", { requestId: input.requestId, provider: input.provider }),
+        reportUnexpected,
+        Effect.result,
+      );
       if (frozen._tag === "Failure") {
         if (isRequestConflict(frozen.failure))
           return {
@@ -240,8 +251,19 @@ export function makeProvisionControl(
       if (lease?.state !== "active")
         return { kind: "refused", message: "This environment's lease has ended." };
       const manifest = yield* promise(() => ports.load(input.requestId));
+      const context = {
+        requestId: operation.request.requestId,
+        provider: operation.state.allocation.resource.provider,
+      };
+      const phases: ProvisionPhase[] = [];
+      const record = (phase: ProvisionPhase) => {
+        phases.push(phase);
+      };
       const attached = yield* remote(operation, () =>
-        ports.attach(operation, manifest, lease.namespaceProxy),
+        ports.attach(operation, manifest, lease.namespaceProxy, record),
+      ).pipe(
+        timeProvisionPhase("attach", context),
+        Effect.ensuring(logProvisionPhases(context, phases)),
       );
       // The proxy is recorded so a resume after a manager restart can re-bind
       // the origin the paired client saved, instead of a fresh port nobody

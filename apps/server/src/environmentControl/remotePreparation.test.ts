@@ -14,6 +14,7 @@ import {
   type RemotePreparationInput,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
+import type { ProvisionPhase } from "./provisionTiming.ts";
 
 const roots: string[] = [];
 const pids = new Set<number>();
@@ -198,6 +199,29 @@ describe("remote preparation subprocess", () => {
     );
     expect(journal.artifactLinks["node_modules/fixture-dependency"]).toBe("../dependency");
     expect((await prepareRemoteHost(localPort, input)).serverPid).toBe(ready.serverPid);
+  });
+
+  it("reports how long each remote step took and skips the clone once the workspace exists", async () => {
+    const input = await fixture();
+    const first: ProvisionPhase[] = [];
+    const ready = await prepareRemoteHost(localPort, input, (phase) => {
+      first.push(phase);
+    });
+    pids.add(ready.serverPid);
+    expect(first.map((phase) => phase.phase)).toEqual(
+      expect.arrayContaining([
+        "remote.repositoryClone",
+        "remote.serverStart",
+        "remote.brokerToken",
+      ]),
+    );
+    expect(first.every((phase) => typeof phase.durationMs === "number")).toBe(true);
+    const converged: ProvisionPhase[] = [];
+    await prepareRemoteHost(localPort, input, (phase) => {
+      converged.push(phase);
+    });
+    expect(converged.map((phase) => phase.phase)).toContain("remote.projectAdd");
+    expect(converged.map((phase) => phase.phase)).not.toContain("remote.repositoryClone");
   });
 
   it("serializes concurrent retries and preserves agent commits, credentials and environment identity", async () => {

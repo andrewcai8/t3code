@@ -19,6 +19,7 @@ import type { NamespaceResource as ImportedNamespaceResource } from "./namespace
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
+import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 
 type NamespaceResource = Extract<ProvisionResource, { provider: "namespace" }>;
@@ -350,13 +351,17 @@ export function makeNamespaceProvisionRuntime(config: {
   const stageArtifact = async (
     resource: NamespaceResource,
     manifest: ProvisionPreparationManifest,
+    record?: RecordProvisionPhase,
   ) => {
+    const stopDigest = startProvisionPhase(record);
     const archive = await NodeFSP.readFile(manifest.localArtifact.path);
     if (provisionDigest(archive) !== manifest.localArtifact.sha256)
       throw new Error("The stored runtime artifact changed");
+    stopDigest("artifact.digest", { bytes: archive.byteLength });
     const id = resource.devboxId;
     // The archive lives on the retained volume, so a resume or a retried
     // preparation skips the upload once its digest checks out.
+    const stopPresence = startProvisionPhase(record);
     const presence = await successful(config.session, [
       "exec",
       id,
@@ -374,6 +379,7 @@ else: print('present')
       manifest.preparation.artifact.archivePath,
       manifest.localArtifact.sha256,
     ]);
+    stopPresence("artifact.presence");
     if (presence.trim() === "present") return;
     const staged = `${manifest.preparation.root}/artifact-${NodeCrypto.randomUUID()}`;
     await successful(config.session, [
@@ -387,12 +393,15 @@ else: print('present')
       staged,
     ]);
     try {
+      const stopUpload = startProvisionPhase(record);
       await successful(config.session, [
         "upload",
         id,
         manifest.localArtifact.path,
         `${staged}/runtime.tar`,
       ]);
+      stopUpload("artifact.upload", { bytes: archive.byteLength });
+      const stopLink = startProvisionPhase(record);
       await successful(config.session, [
         "exec",
         id,
@@ -415,6 +424,7 @@ except FileExistsError:
         manifest.preparation.artifact.archivePath,
         manifest.localArtifact.sha256,
       ]);
+      stopLink("artifact.link");
     } finally {
       await config.session
         .run(["exec", id, "--", "python3", "-c", removeStaging, staged])
@@ -430,11 +440,18 @@ except FileExistsError:
     operation: ProvisionOperation,
     resource: NamespaceResource,
     manifest: ProvisionPreparationManifest,
+    record?: RecordProvisionPhase,
   ) => {
+    const stopWake = startProvisionPhase(record);
     const instanceId = await wake(operation, resource);
-    if (operation.request.retentionDeadline)
+    stopWake("allocate.wake");
+    if (operation.request.retentionDeadline) {
+      const stopRetain = startProvisionPhase(record);
       await retain(instanceId, operation.request.retentionDeadline);
-    await stageArtifact(resource, manifest);
+      stopRetain("allocate.retain");
+    }
+    await stageArtifact(resource, manifest, record);
+    const stopPrepare = startProvisionPhase(record);
     const ready = await prepareRemoteHost(
       port(resource, manifest),
       withGuestProviderInstall(
@@ -446,15 +463,20 @@ except FileExistsError:
         },
         operation.request.agentDriver,
       ),
+      record,
     );
+    stopPrepare("remote.prepare");
     if (
       ready.artifactSha256 !== manifest.localArtifact.sha256 ||
       ready.t3Revision !== manifest.localArtifact.revision ||
       ready.projectDir !== `${manifest.preparation.root}/workspace`
     )
       throw new Error("Prepared Namespace runtime differs from its pinned inputs");
-    if (operation.request.retentionDeadline)
+    if (operation.request.retentionDeadline) {
+      const stopRetain = startProvisionPhase(record);
       await retain(instanceId, operation.request.retentionDeadline);
+      stopRetain("allocate.retain");
+    }
     return ready;
   };
   /**
@@ -467,6 +489,7 @@ except FileExistsError:
     resource: NamespaceResource,
     manifest: ProvisionPreparationManifest,
     recorded?: NamespaceProxyLease,
+    record?: RecordProvisionPhase,
   ) => {
     if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
     const environmentId = operation.state.readiness.environmentId;
@@ -474,6 +497,7 @@ except FileExistsError:
     let pending = publishing.get(proxyId);
     if (pending) return pending;
     pending = (async () => {
+      const stopExpose = startProvisionPhase(record);
       const output = await successful(config.session, [
         "url",
         "expose",
@@ -485,6 +509,7 @@ except FileExistsError:
         "-o",
         "json",
       ]);
+      stopExpose("attach.expose");
       const upstream = decodeExposure(output).urls[0]?.url;
       if (!upstream || new URL(upstream).protocol !== "https:")
         throw new Error("Namespace exposure did not return a private HTTPS endpoint");
@@ -497,11 +522,14 @@ except FileExistsError:
         getUpstreamAuthorization: ingressAuthorization,
       };
       const retained = recorded ?? published.get(proxyId);
+      const stopProxy = startProvisionPhase(record);
       const lease = retained
         ? await proxies.restore({ ...input, ...retained })
         : await proxies.open(input);
+      stopProxy("attach.proxy");
       published.set(proxyId, lease);
       try {
+        const stopVerify = startProvisionPhase(record);
         const response = await fetch(`${lease.proxyOrigin}/.well-known/t3/environment`, {
           signal: AbortSignal.timeout(30_000),
           redirect: "error",
@@ -513,6 +541,7 @@ except FileExistsError:
           );
         }
         const descriptor = decodeDescriptor(await response.json());
+        stopVerify("attach.verify");
         if (descriptor.environmentId !== environmentId)
           throw new Error("Namespace published endpoint returned a different T3 environment");
       } catch (error) {
@@ -531,10 +560,12 @@ except FileExistsError:
       resource: NamespaceResource,
       manifest: ProvisionPreparationManifest,
       recordedProxy?: NamespaceProxyLease,
+      record?: RecordProvisionPhase,
     ) => {
       await running(operation, resource);
       if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
       const environmentId = operation.state.readiness.environmentId;
+      const stopPairing = startProvisionPhase(record);
       const result = await port(resource, manifest).executePython({
         script: String.raw`
 import json,pathlib,sys,urllib.request
@@ -552,9 +583,10 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
           environmentId,
         }),
       });
+      stopPairing("attach.pairing");
       if (result.exitCode !== 0) throw new Error("Namespace pairing failed");
       const { credential, brokerToken } = decodePairing(result.stdout);
-      const namespaceProxy = await publish(operation, resource, manifest, recordedProxy);
+      const namespaceProxy = await publish(operation, resource, manifest, recordedProxy, record);
       return {
         pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=${encodeURIComponent(credential)}`,
         namespaceProxy,

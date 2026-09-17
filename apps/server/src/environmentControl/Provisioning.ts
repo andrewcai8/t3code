@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { ProvisionOperationStore, type ProvisionStoreError } from "./ProvisionOperationStore.ts";
+import { timeProvisionPhase } from "./provisionTiming.ts";
 
 export class ProvisionProviderError extends Schema.TaggedError<ProvisionProviderError>()(
   "ProvisionProviderError",
@@ -64,6 +65,11 @@ function allocatedState(
   return { kind: "allocated", allocation: { kind: "direct", resource } };
 }
 
+const phaseContext = (request: DurableProvisionRequest) => ({
+  requestId: request.requestId,
+  provider: request.provider,
+});
+
 export class Provisioning extends Context.Service<
   Provisioning,
   {
@@ -92,7 +98,10 @@ export class Provisioning extends Context.Service<
         allocation.kind === "create"
           ? ports.recoverCreate(operation)
           : ports.recoverFork(operation, allocation.parent)
-      ).pipe(Effect.result);
+      ).pipe(
+        timeProvisionPhase("allocate.recover", phaseContext(operation.request)),
+        Effect.result,
+      );
       if (found._tag === "Failure")
         return yield* save(operation, {
           kind: "allocation_unknown",
@@ -125,6 +134,7 @@ export class Provisioning extends Context.Service<
     });
     const ensure = Effect.fn("Provisioning.ensure")(function* (request: DurableProvisionRequest) {
       let operation = yield* store.accept(request);
+      const context = phaseContext(request);
       for (let step = 0; step < 8; step += 1) {
         if (
           retentionExpired(request.retentionDeadline, DateTime.toEpochMillis(yield* DateTime.now))
@@ -136,7 +146,11 @@ export class Provisioning extends Context.Service<
             const issued = yield* store.advance(operation, { kind: "create_issued" });
             operation = issued.operation;
             if (!issued.changed) continue;
-            const created = yield* ports.create(operation).pipe(Effect.result);
+            // An E2B fork request reaches create for its parent and fork for the
+            // child, so the two E2B allocation costs are already separate phases.
+            const created = yield* ports
+              .create(operation)
+              .pipe(timeProvisionPhase("allocate.create", context), Effect.result);
             operation = yield* save(
               operation,
               created._tag === "Success"
@@ -162,7 +176,9 @@ export class Provisioning extends Context.Service<
             });
             operation = issued.operation;
             if (!issued.changed) continue;
-            const forked = yield* ports.fork(operation, state.parent).pipe(Effect.result);
+            const forked = yield* ports
+              .fork(operation, state.parent)
+              .pipe(timeProvisionPhase("allocate.fork", context), Effect.result);
             operation = yield* save(
               operation,
               forked._tag === "Success"
@@ -199,14 +215,15 @@ export class Provisioning extends Context.Service<
             // A paused parent never expires, so kill it on every attempt. Dispose
             // still lists the parent, which covers a kill that fails here.
             if (state.allocation.kind === "fork")
-              yield* ports
-                .dispose(operation, state.allocation.parent)
-                .pipe(
-                  Effect.catch((error) =>
-                    Effect.logWarning("fork parent could not be killed", { error: error.message }),
-                  ),
-                );
-            const prepared = yield* ports.prepare(operation, state.allocation).pipe(Effect.result);
+              yield* ports.dispose(operation, state.allocation.parent).pipe(
+                timeProvisionPhase("allocate.disposeParent", context),
+                Effect.catch((error) =>
+                  Effect.logWarning("fork parent could not be killed", { error: error.message }),
+                ),
+              );
+            const prepared = yield* ports
+              .prepare(operation, state.allocation)
+              .pipe(timeProvisionPhase("prepare", context), Effect.result);
             if (
               retentionExpired(
                 request.retentionDeadline,

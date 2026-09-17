@@ -14,7 +14,9 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
@@ -163,6 +165,38 @@ describe("durable cloud provisioning", () => {
         forks: state.kind === "create_issued" || state.kind === "parent_allocated" ? 1 : 0,
       });
       expect(p.resources).toEqual([parent, child]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reports how long each provisioning phase took", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const p = provider();
+      const logs: { message: unknown; annotations: Readonly<Record<string, unknown>> }[] = [];
+      const logger = Logger.make(({ fiber, message }) => {
+        logs.push({ message, annotations: fiber.getRef(References.CurrentLogAnnotations) });
+      });
+      const result = yield* ensure().pipe(
+        Effect.provide(
+          Layer.merge(
+            makeLayer(file, p.ports),
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
+        Effect.scoped,
+      );
+      expect(result.state.kind).toBe("ready");
+      const phases = logs
+        .filter((log) => Array.isArray(log.message) && log.message[0] === "provision phase")
+        .map((log) => log.annotations);
+      expect(phases.map((phase) => phase.phase)).toEqual(
+        expect.arrayContaining(["allocate.create", "allocate.fork", "prepare"]),
+      );
+      for (const phase of phases) {
+        expect(phase.requestId).toBe(request.requestId);
+        expect(phase.provider).toBe("e2b");
+        expect(typeof phase.durationMs).toBe("number");
+      }
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

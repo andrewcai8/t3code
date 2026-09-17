@@ -1,5 +1,6 @@
 import { AuthAccessWriteScope, ProvisionReadiness } from "@t3tools/contracts";
 import { Schema } from "effect";
+import type { RecordProvisionPhase } from "./provisionTiming.ts";
 
 /** Trusted host-local inputs. Package dependencies are installed on the target host when requested. */
 export interface RemotePreparationInput {
@@ -44,6 +45,20 @@ export const RemotePreparationReady = Schema.Struct({
 });
 export type RemotePreparationReady = typeof RemotePreparationReady.Type;
 const decodeReady = Schema.decodeUnknownSync(Schema.fromJsonString(RemotePreparationReady));
+// Decoded apart from RemotePreparationReady because that type flows into the
+// persisted ProvisionReadiness state. RemotePreparationInput stays unchanged for
+// a similar reason: the Python hashes the whole spec into `intent` and compares
+// it against a journal on the guest, so adding an input field would invalidate
+// every in-flight preparation root.
+const decodePhases = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      phases: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ phase: Schema.String, durationMs: Schema.Number })),
+      ),
+    }),
+  ),
+);
 
 /** The transport must send stdin privately and must not log it or remote private files. */
 export interface RemotePreparationPort {
@@ -56,6 +71,7 @@ export interface RemotePreparationPort {
 export async function prepareRemoteHost(
   port: RemotePreparationPort,
   input: RemotePreparationInput,
+  record?: RecordProvisionPhase,
 ): Promise<RemotePreparationReady> {
   const result = await port.executePython({
     script: remotePreparationScript,
@@ -65,12 +81,15 @@ export async function prepareRemoteHost(
     const detail = result.stderr?.trim();
     throw new Error(detail && detail.length > 0 ? detail : "Remote preparation failed.");
   }
-  return decodeReady(result.stdout);
+  const ready = decodeReady(result.stdout);
+  for (const entry of decodePhases(result.stdout).phases ?? [])
+    record?.({ phase: `remote.${entry.phase}`, durationMs: entry.durationMs });
+  return ready;
 }
 
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
-import base64, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, time, urllib.request, uuid
+import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, time, urllib.request, uuid
 
 os.umask(0o077)
 
@@ -131,6 +150,14 @@ def artifact_snapshot(root):
     return files, links
 
 def prepare(spec):
+    phases = []
+    @contextlib.contextmanager
+    def step(name):
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            phases.append({'phase': name, 'durationMs': round((time.monotonic() - started) * 1000)})
     root = pathlib.Path(spec['root'])
     if not root.is_absolute() or root.is_symlink():
         raise RuntimeError('Preparation requires a private absolute root')
@@ -236,82 +263,85 @@ def prepare(spec):
         })
         artifact = root / 'artifact'
         if not artifact.exists():
-            if digest(spec['artifact']['archivePath']) != spec['artifact']['sha256']:
-                raise RuntimeError('Artifact digest mismatch')
-            stage = root / 'artifact.partial'
-            if stage.exists():
-                shutil.rmtree(stage)
-            stage.mkdir()
-            with tarfile.open(spec['artifact']['archivePath']) as archive:
-                members = []
-                links = []
-                for member in archive.getmembers():
-                    if member.isdir() and pathlib.PurePosixPath(member.name) in (pathlib.PurePosixPath('.'), pathlib.PurePosixPath('./')):
-                        continue
-                    if member.issym() or member.islnk():
-                        links.append(member)
-                    else:
-                        members.append(member)
-                for member in members:
-                    target = contained(stage, member.name)
-                    if member.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                    elif member.isfile():
+            with step('artifactExtract'):
+                if digest(spec['artifact']['archivePath']) != spec['artifact']['sha256']:
+                    raise RuntimeError('Artifact digest mismatch')
+                stage = root / 'artifact.partial'
+                if stage.exists():
+                    shutil.rmtree(stage)
+                stage.mkdir()
+                with tarfile.open(spec['artifact']['archivePath']) as archive:
+                    members = []
+                    links = []
+                    for member in archive.getmembers():
+                        if member.isdir() and pathlib.PurePosixPath(member.name) in (pathlib.PurePosixPath('.'), pathlib.PurePosixPath('./')):
+                            continue
+                        if member.issym() or member.islnk():
+                            links.append(member)
+                        else:
+                            members.append(member)
+                    for member in members:
+                        target = contained(stage, member.name)
+                        if member.isdir():
+                            target.mkdir(parents=True, exist_ok=True)
+                        elif member.isfile():
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            with archive.extractfile(member) as source, open(target, 'wb') as destination:
+                                shutil.copyfileobj(source, destination)
+                            target.chmod(0o700 if member.mode & 0o111 else 0o600)
+                        else:
+                            raise RuntimeError('Artifact must contain only regular files and directories')
+                    for member in links:
+                        target = contained(stage, member.name)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        with archive.extractfile(member) as source, open(target, 'wb') as destination:
-                            shutil.copyfileobj(source, destination)
-                        target.chmod(0o700 if member.mode & 0o111 else 0o600)
-                    else:
-                        raise RuntimeError('Artifact must contain only regular files and directories')
-                for member in links:
-                    target = contained(stage, member.name)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if member.islnk():
-                        source = contained(stage, member.linkname)
-                        if not source.is_file() or source.is_symlink():
-                            raise RuntimeError('Artifact hard links must point at extracted files')
-                        os.link(source, target)
-                    else:
-                        contained_link(stage, target, member.linkname)
-                        os.symlink(member.linkname, target)
-            install = spec['artifact'].get('install')
-            if install is not None and install != 'npm':
-                raise RuntimeError('Unsupported runtime artifact installer')
-            if install == 'npm':
-                if not (stage / 'package.json').is_file() or not (stage / 'package-lock.json').is_file():
-                    raise RuntimeError('npm runtime artifact requires package.json and package-lock.json')
-                npm = shutil.which('npm')
-                if npm is None:
-                    raise RuntimeError('npm runtime artifact requires npm on the target host')
-                npm_env = dict(env)
-                # A tarball that already has node_modules was built for this OS.
-                # Lockfile-only artifacts compile node-pty on the guest; Node 24
-                # cannot rebuild it with the node-gyp 9 that install scripts find.
-                if not (stage / 'node_modules').is_dir():
-                    package_lock = json.loads((stage / 'package-lock.json').read_text())
-                    needs_native = any((pkg or {}).get('hasInstallScript') for pkg in (package_lock.get('packages') or {}).values())
-                    if needs_native:
-                        ensure_native_toolchain(npm_env)
-                        gyp_prefix = pathlib.Path(env.get('TMPDIR', '/tmp')) / 't3-node-gyp'
-                        gyp_js = gyp_prefix / 'lib' / 'node_modules' / 'node-gyp' / 'bin' / 'node-gyp.js'
-                        if not gyp_js.is_file():
-                            run([npm, 'install', '--global', '--prefix', str(gyp_prefix), '--no-audit', '--no-fund', 'node-gyp@11'], stage, npm_env, timeout=180)
-                        npm_env['PATH'] = str(gyp_prefix / 'bin') + os.pathsep + npm_env.get('PATH', '')
-                        npm_env['npm_config_node_gyp'] = str(gyp_js)
-                        python = shutil.which('python3', path=npm_env.get('PATH'))
-                        if python:
-                            npm_env['npm_config_python'] = python
-                        # E2B egress often blocks nodejs.org; official Node installs already have headers.
-                        nodedir = resolve_nodedir(npm_env)
-                        if nodedir:
-                            npm_env['npm_config_nodedir'] = nodedir
-                    run([npm, 'ci', '--omit=dev', '--no-audit', '--no-fund'], stage, npm_env, timeout=600)
-            journal['artifactFiles'], journal['artifactLinks'] = artifact_snapshot(stage)
-            atomic(journal_path, json.dumps(journal))
-            os.rename(stage, artifact)
-        actual_files, actual_links = artifact_snapshot(artifact)
-        if actual_files != journal.get('artifactFiles') or actual_links != journal.get('artifactLinks', {}):
-            raise RuntimeError('Installed artifact changed')
+                        if member.islnk():
+                            source = contained(stage, member.linkname)
+                            if not source.is_file() or source.is_symlink():
+                                raise RuntimeError('Artifact hard links must point at extracted files')
+                            os.link(source, target)
+                        else:
+                            contained_link(stage, target, member.linkname)
+                            os.symlink(member.linkname, target)
+                install = spec['artifact'].get('install')
+                if install is not None and install != 'npm':
+                    raise RuntimeError('Unsupported runtime artifact installer')
+                if install == 'npm':
+                    if not (stage / 'package.json').is_file() or not (stage / 'package-lock.json').is_file():
+                        raise RuntimeError('npm runtime artifact requires package.json and package-lock.json')
+                    npm = shutil.which('npm')
+                    if npm is None:
+                        raise RuntimeError('npm runtime artifact requires npm on the target host')
+                    npm_env = dict(env)
+                    # A tarball that already has node_modules was built for this OS.
+                    # Lockfile-only artifacts compile node-pty on the guest; Node 24
+                    # cannot rebuild it with the node-gyp 9 that install scripts find.
+                    if not (stage / 'node_modules').is_dir():
+                        package_lock = json.loads((stage / 'package-lock.json').read_text())
+                        needs_native = any((pkg or {}).get('hasInstallScript') for pkg in (package_lock.get('packages') or {}).values())
+                        if needs_native:
+                            ensure_native_toolchain(npm_env)
+                            gyp_prefix = pathlib.Path(env.get('TMPDIR', '/tmp')) / 't3-node-gyp'
+                            gyp_js = gyp_prefix / 'lib' / 'node_modules' / 'node-gyp' / 'bin' / 'node-gyp.js'
+                            if not gyp_js.is_file():
+                                run([npm, 'install', '--global', '--prefix', str(gyp_prefix), '--no-audit', '--no-fund', 'node-gyp@11'], stage, npm_env, timeout=180)
+                            npm_env['PATH'] = str(gyp_prefix / 'bin') + os.pathsep + npm_env.get('PATH', '')
+                            npm_env['npm_config_node_gyp'] = str(gyp_js)
+                            python = shutil.which('python3', path=npm_env.get('PATH'))
+                            if python:
+                                npm_env['npm_config_python'] = python
+                            # E2B egress often blocks nodejs.org; official Node installs already have headers.
+                            nodedir = resolve_nodedir(npm_env)
+                            if nodedir:
+                                npm_env['npm_config_nodedir'] = nodedir
+                        with step('npmInstall'):
+                            run([npm, 'ci', '--omit=dev', '--no-audit', '--no-fund'], stage, npm_env, timeout=600)
+                journal['artifactFiles'], journal['artifactLinks'] = artifact_snapshot(stage)
+                atomic(journal_path, json.dumps(journal))
+                os.rename(stage, artifact)
+        with step('artifactVerify'):
+            actual_files, actual_links = artifact_snapshot(artifact)
+            if actual_files != journal.get('artifactFiles') or actual_links != journal.get('artifactLinks', {}):
+                raise RuntimeError('Installed artifact changed')
         entrypoint = contained(artifact, spec['artifact']['entrypoint'])
         command = [spec['runtimeExecutable'], str(entrypoint)]
         userdata = t3home / 'userdata'
@@ -358,28 +388,29 @@ def prepare(spec):
                 atomic(journal_path, json.dumps(journal))
         install_files('home')
         if not project.exists():
-            stage = root / 'workspace.partial'
-            if repository is None:
-                if stage.exists():
-                    shutil.rmtree(stage)
-                stage.mkdir()
-                run(['git', 'init', '-q', str(stage)], root, env)
-                run(['git', '-c', 'user.name=T3', '-c', 'user.email=agent@t3.local', 'commit', '--allow-empty', '-qm', 'Initialize workspace'], stage, git_env)
-            else:
-                # Keep a partial clone across retries. Wiping it restarts a
-                # large fetch from zero after every timeout.
-                if not (stage / '.git').is_dir():
+            with step('repositoryClone'):
+                stage = root / 'workspace.partial'
+                if repository is None:
                     if stage.exists():
                         shutil.rmtree(stage)
                     stage.mkdir()
                     run(['git', 'init', '-q', str(stage)], root, env)
-                    run(['git', 'remote', 'add', 'origin', repository['url']], stage, git_env)
-                elif run(['git', 'remote', 'get-url', 'origin'], stage, env) != repository['url']:
-                    raise RuntimeError('Repository identity conflict')
-                # Shallow + blobless: one commit's trees, blobs on checkout.
-                run(['git', '-c', 'protocol.version=2', 'fetch', '--filter=blob:none', '--depth=1', '--no-tags', 'origin', repository['revision']], stage, git_env, timeout=600)
-                run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)
-            os.rename(stage, project)
+                    run(['git', '-c', 'user.name=T3', '-c', 'user.email=agent@t3.local', 'commit', '--allow-empty', '-qm', 'Initialize workspace'], stage, git_env)
+                else:
+                    # Keep a partial clone across retries. Wiping it restarts a
+                    # large fetch from zero after every timeout.
+                    if not (stage / '.git').is_dir():
+                        if stage.exists():
+                            shutil.rmtree(stage)
+                        stage.mkdir()
+                        run(['git', 'init', '-q', str(stage)], root, env)
+                        run(['git', 'remote', 'add', 'origin', repository['url']], stage, git_env)
+                    elif run(['git', 'remote', 'get-url', 'origin'], stage, env) != repository['url']:
+                        raise RuntimeError('Repository identity conflict')
+                    # Shallow + blobless: one commit's trees, blobs on checkout.
+                    run(['git', '-c', 'protocol.version=2', 'fetch', '--filter=blob:none', '--depth=1', '--no-tags', 'origin', repository['revision']], stage, git_env, timeout=600)
+                    run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)
+                os.rename(stage, project)
         if repository is not None:
             if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
                 raise RuntimeError('Repository identity conflict')
@@ -389,13 +420,15 @@ def prepare(spec):
         if install:
             if not isinstance(install, str) or not install.strip() or '\0' in install:
                 raise RuntimeError('Invalid provider install command')
-            run(['sh', '-c', install], home, env, timeout=900)
+            with step('providerInstall'):
+                run(['sh', '-c', install], home, env, timeout=900)
         credential_path = root / 'broker-token'
         if not credential_path.exists():
-            token = run(command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', spec['brokerTtl'], '--subject', 'provision-broker', '--token-only'], project, env)
-            if not token or any(c.isspace() for c in token):
-                raise RuntimeError('Invalid broker credential output')
-            atomic(credential_path, token)
+            with step('brokerToken'):
+                token = run(command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', spec['brokerTtl'], '--subject', 'provision-broker', '--token-only'], project, env)
+                if not token or any(c.isspace() for c in token):
+                    raise RuntimeError('Invalid broker credential output')
+                atomic(credential_path, token)
         token = credential_path.read_text()
         origin = 'http://127.0.0.1:' + str(spec['port'])
         def probe():
@@ -414,36 +447,38 @@ def prepare(spec):
             except (OSError, ValueError):
                 return False
         if not probe():
-            # serve is headless and forces auto-bootstrap off, so the client
-            # pairs to an empty environment. start --no-browser keeps the same
-            # bind, and the cwd argument is the path we report as projectDir.
-            config = {'root': str(root), 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--auto-bootstrap-project-from-cwd', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
-            with open(root / 'server.log', 'a') as log:
-                subprocess.Popen([sys.executable, '-c', SUPERVISOR, json.dumps(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-            deadline = time.monotonic() + spec['readinessTimeoutSeconds']
-            while not probe():
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('Prepared server did not become authenticated and ready')
-                time.sleep(0.1)
+            with step('serverStart'):
+                # serve is headless and forces auto-bootstrap off, so the client
+                # pairs to an empty environment. start --no-browser keeps the same
+                # bind, and the cwd argument is the path we report as projectDir.
+                config = {'root': str(root), 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--auto-bootstrap-project-from-cwd', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
+                with open(root / 'server.log', 'a') as log:
+                    subprocess.Popen([sys.executable, '-c', SUPERVISOR, json.dumps(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                deadline = time.monotonic() + spec['readinessTimeoutSeconds']
+                while not probe():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Prepared server did not become authenticated and ready')
+                    time.sleep(0.1)
         # t3 serve never creates a project. Add the checkout explicitly so
         # pairing can hand off even when an older guest is already running.
-        added = subprocess.run(
-            command + ['project', 'add', '--base-dir', str(t3home), str(project)],
-            cwd=str(project),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            pass_fds=(lock.fileno(),),
-            timeout=30,
-        )
+        with step('projectAdd'):
+            added = subprocess.run(
+                command + ['project', 'add', '--base-dir', str(t3home), str(project)],
+                cwd=str(project),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                pass_fds=(lock.fileno(),),
+                timeout=30,
+            )
         if added.returncode != 0:
             detail = (added.stderr or added.stdout or '').strip()
             if 'already exists' not in detail.lower():
                 raise RuntimeError('Could not add the workspace as a project' + ((': ' + detail[-1500:]) if detail else ''))
         process = json.loads((root / 'server.json').read_text())
-        return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': spec['artifact']['revision'], 'artifactSha256': spec['artifact']['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path)}
+        return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': spec['artifact']['revision'], 'artifactSha256': spec['artifact']['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 
 SUPERVISOR = r"""
 import fcntl,json,os,pathlib,sys
