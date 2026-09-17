@@ -53,6 +53,7 @@ import {
   RuntimeMode,
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
+  cloneRepository,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
@@ -4706,14 +4707,7 @@ export default function ChatView(props: ChatViewProps) {
         return false;
       }
       const viewingStartedDraft = () => currentDraftIdRef.current === startedDraftId;
-      const identity = activeProject?.repositoryIdentity;
-      // A fork's identity names the upstream it targets with pull requests, but
-      // only its own remote holds its commits, so clone that one.
-      const cloneSource = identity?.origin ?? identity;
-      const repository =
-        cloneSource?.owner && cloneSource.name
-          ? `${cloneSource.owner}/${cloneSource.name}`
-          : undefined;
+      const repository = cloneRepository(activeProject?.repositoryIdentity);
       const cloudEnvironmentLabel =
         cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
       const failProvisioning = (message: string) => {
@@ -7932,9 +7926,7 @@ export default function ChatView(props: ChatViewProps) {
           streaming: false,
         },
       ]);
-      const identity = activeProject.repositoryIdentity;
-      const repository =
-        identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+      const repository = cloneRepository(activeProject.repositoryIdentity);
       const startedAt = new Date().toISOString();
       useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, {
         provider: cloudProvisioningRequested,
