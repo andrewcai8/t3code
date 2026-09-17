@@ -30,7 +30,7 @@ interface CliCommand {
 type CliResult = { readonly exitCode: number; readonly stdout: string; readonly stderr?: string };
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodePairing = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ credential: Schema.String })),
+  Schema.fromJsonString(Schema.Struct({ credential: Schema.String, brokerToken: Schema.String })),
 );
 const decodeExposure = Schema.decodeUnknownSync(
   Schema.fromJsonString(
@@ -544,7 +544,7 @@ with urllib.request.urlopen(origin+'/.well-known/t3/environment',timeout=10) as 
     if json.load(response)['environmentId']!=spec['environmentId']: raise RuntimeError('Environment identity changed')
 token=pathlib.Path(spec['root'],'broker-token').read_text()
 request=urllib.request.Request(origin+'/api/auth/pairing-token',data=json.dumps({'label':'Cloud environment client'}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps(json.load(response)))
+with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'credential':json.load(response)['credential'],'brokerToken':token}))
 `,
         stdin: encodeJson({
           root: manifest.preparation.root,
@@ -553,11 +553,12 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps(js
         }),
       });
       if (result.exitCode !== 0) throw new Error("Namespace pairing failed");
-      const { credential } = decodePairing(result.stdout);
+      const { credential, brokerToken } = decodePairing(result.stdout);
       const namespaceProxy = await publish(operation, resource, manifest, recordedProxy);
       return {
         pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=${encodeURIComponent(credential)}`,
         namespaceProxy,
+        remoteAccess: { origin: namespaceProxy.proxyOrigin, brokerToken },
       };
     },
     /**

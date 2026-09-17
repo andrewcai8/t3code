@@ -35,7 +35,7 @@ export async function e2bPythonResult(
   }
 }
 const pairingResponse = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ credential: Schema.String })),
+  Schema.fromJsonString(Schema.Struct({ credential: Schema.String, brokerToken: Schema.String })),
 );
 const templateResponse = Schema.decodeUnknownSync(Schema.Struct({ templateID: Schema.String }));
 const revisionResponse = Schema.decodeUnknownSync(
@@ -230,12 +230,16 @@ spec = json.load(sys.stdin)
 token = pathlib.Path(spec['root'], 'broker-token').read_text()
 request = urllib.request.Request('http://127.0.0.1:' + str(spec['port']) + '/api/auth/pairing-token', data=json.dumps({'label':'Cloud environment client'}).encode(), headers={'Authorization':'Bearer ' + token, 'Content-Type':'application/json'})
 with urllib.request.urlopen(request, timeout=30) as response:
-    print(json.dumps(json.load(response)))
+    print(json.dumps({'credential': json.load(response)['credential'], 'brokerToken': token}))
 `,
         stdin: JSON.stringify({ root: manifest.preparation.root, port: manifest.preparation.port }),
       });
-      const credential = pairingResponse(result.stdout);
-      return `https://${sandbox.getHost(manifest.preparation.port)}/pair#token=${encodeURIComponent(credential.credential)}`;
+      const { credential, brokerToken } = pairingResponse(result.stdout);
+      const origin = `https://${sandbox.getHost(manifest.preparation.port)}`;
+      return {
+        pairingUrl: `${origin}/pair#token=${encodeURIComponent(credential)}`,
+        remoteAccess: { origin, brokerToken },
+      };
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       await connect(operation, sandboxId);

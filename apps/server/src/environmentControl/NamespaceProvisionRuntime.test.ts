@@ -431,6 +431,7 @@ describe("Namespace runtime transport", () => {
     expect(await first.attach(f.operation, resource, manifest)).toEqual({
       pairingUrl: `${attached.namespaceProxy.proxyOrigin}/pair#token=grant-2`,
       namespaceProxy: attached.namespaceProxy,
+      remoteAccess: { origin: attached.namespaceProxy.proxyOrigin, brokerToken: "private-broker" },
     });
     expect(opened).toBe(1);
     expect((await makeRuntime().attach(f.operation, resource, manifest)).pairingUrl).toMatch(

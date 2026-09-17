@@ -67,9 +67,11 @@ import {
 import {
   createProvisionedLeaseRegistry,
   decodeLegacyLeases,
+  type ProvisionedLease,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 import type { NamespaceProxyLease } from "./namespaceProxy.ts";
+import { readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const isProvisionRefused = Schema.is(ProvisionRefused);
@@ -94,6 +96,7 @@ export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
   driver: CloudDriver,
   leaseRegistry?: ProvisionedLeaseRegistry,
+  activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = readLeaseActivity,
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -169,6 +172,15 @@ export function createEnvironmentControl(
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
       if (only && !only.has(lease.leaseId)) continue;
+      // An expired heartbeat means no client is watching, not that the agent
+      // stopped. Only a machine confirmed busy stays awake; one that cannot be
+      // read is paused, so a broken machine is never kept alive.
+      if (
+        lease.state === "active" &&
+        (await activity(lease)) === "busy" &&
+        (await leaseRegistry.touch(lease.leaseId))
+      )
+        continue;
       const release =
         lease.state === "releasing"
           ? "started"
@@ -287,6 +299,12 @@ export function createEnvironmentControl(
             kind: "refused",
             reason: "unknown",
             message: "The cloud sandbox lease is unknown.",
+          };
+        if (lease.state === "active" && (await activity(lease)) === "busy")
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "Another chat on this machine is still working.",
           };
         await driver.pause({
           sandboxId: input.sandboxId,
@@ -814,13 +832,11 @@ export const layer = Layer.effect(
               manifest,
               recordedProxy,
             );
-          return {
-            pairingUrl: await makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).attach(
-              operation,
-              resource.sandboxId,
-              manifest,
-            ),
-          };
+          return makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).attach(
+            operation,
+            resource.sandboxId,
+            manifest,
+          );
         },
         touch: async (operation) => {
           const manager = await resolve();

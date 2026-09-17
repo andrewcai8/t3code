@@ -110,7 +110,10 @@ it.effect(
           {
             freeze: async () => manifest,
             load: async () => manifest,
-            attach: async () => ({ pairingUrl: `https://remote/pair#token=grant-${++grants}` }),
+            attach: async () => ({
+              pairingUrl: `https://remote/pair#token=grant-${++grants}`,
+              remoteAccess: { origin: "https://remote", brokerToken: "private-broker" },
+            }),
             touch: async () => {
               calls.push("touch-provider");
               if (rejectTouch) throw new Error("provider unavailable");
@@ -225,6 +228,7 @@ it.effect(
         }),
       );
       const received: Array<unknown> = [];
+      let grants = 0;
       const namespaceProxy = { proxyId: "provision-box", proxyOrigin: "http://127.0.0.1:50766" };
       const control = makeProvisionControl(
         store,
@@ -234,7 +238,14 @@ it.effect(
           load: async () => namespaceManifest,
           attach: async (_operation, _manifest, recordedProxy) => {
             received.push(recordedProxy);
-            return { pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=grant`, namespaceProxy };
+            return {
+              pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=grant`,
+              namespaceProxy,
+              remoteAccess: {
+                origin: namespaceProxy.proxyOrigin,
+                brokerToken: `broker-${++grants}`,
+              },
+            };
           },
           touch: async () => undefined,
         },
@@ -249,9 +260,13 @@ it.effect(
       expect(yield* Effect.promise(() => leases.findById(namespaceInput.requestId))).toMatchObject({
         state: "active",
         namespaceProxy,
+        remoteAccess: { origin: "http://127.0.0.1:50766", brokerToken: "broker-1" },
       });
       yield* control.attach({ requestId: namespaceInput.requestId });
       expect(received).toEqual([undefined, namespaceProxy]);
+      expect(yield* Effect.promise(() => leases.findById(namespaceInput.requestId))).toMatchObject({
+        remoteAccess: { origin: "http://127.0.0.1:50766", brokerToken: "broker-2" },
+      });
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(

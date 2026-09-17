@@ -20,7 +20,7 @@ const isProvisionRefused = Schema.is(ProvisionRefused);
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import type { Provisioning } from "./Provisioning.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
-import type { ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import type { ProvisionedLeaseRegistry, RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 import type { NamespaceProxyLease } from "./namespaceProxy.ts";
 
 export interface ProvisionControlPorts {
@@ -38,6 +38,7 @@ export interface ProvisionControlPorts {
   ) => Promise<{
     readonly pairingUrl: string;
     readonly namespaceProxy?: NamespaceProxyLease;
+    readonly remoteAccess: RemoteAccess;
   }>;
   readonly touch: (operation: ProvisionOperation) => Promise<void>;
 }
@@ -242,14 +243,20 @@ export function makeProvisionControl(
       const attached = yield* remote(operation, () =>
         ports.attach(operation, manifest, lease.namespaceProxy),
       );
-      // Recorded so a resume after a manager restart can re-bind the origin
-      // the paired client saved, instead of a fresh port nobody knows.
-      const namespaceProxy = attached.namespaceProxy;
-      if (namespaceProxy)
-        yield* promise(async () => {
-          if (!(await leases.markActive({ leaseId: lease.leaseId, namespaceProxy })))
-            throw new Error("The lease ended while its environment was being published");
-        });
+      // The proxy is recorded so a resume after a manager restart can re-bind
+      // the origin the paired client saved, instead of a fresh port nobody
+      // knows. Remote access lets the manager ask whether the agent is working.
+      const { namespaceProxy, remoteAccess } = attached;
+      yield* promise(async () => {
+        if (
+          !(await leases.markActive({
+            leaseId: lease.leaseId,
+            ...(namespaceProxy ? { namespaceProxy } : {}),
+            remoteAccess,
+          }))
+        )
+          throw new Error("The lease ended while its environment was being published");
+      });
       return {
         kind: "attached",
         environmentId: operation.state.readiness.environmentId,

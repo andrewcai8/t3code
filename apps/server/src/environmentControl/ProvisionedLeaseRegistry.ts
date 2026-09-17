@@ -26,6 +26,13 @@ export const StoredProvisionedLease = Schema.Struct({
   namespaceProxy: Schema.optional(
     Schema.Struct({ proxyId: Schema.String, proxyOrigin: Schema.String }),
   ),
+  /**
+   * Where the manager reads the remote agent's activity. The broker token is
+   * an admin credential: keep it in this private record, never in RPC or logs.
+   */
+  remoteAccess: Schema.optional(
+    Schema.Struct({ origin: Schema.String, brokerToken: Schema.String }),
+  ),
   namespaceResource: Schema.optional(
     Schema.Struct({
       provider: Schema.Literal("namespace"),
@@ -53,6 +60,7 @@ const LEASE_HEARTBEAT_TTL_MS = 15 * 60 * 1000;
 
 export type ProvisionedLease = typeof StoredProvisionedLease.Type;
 export type ProvisionedLeaseOwner = typeof ProvisionedLeaseOwner.Type;
+export type RemoteAccess = NonNullable<ProvisionedLease["remoteAccess"]>;
 
 export interface ProvisionedLeaseRegistry {
   readonly register: (input: {
@@ -85,6 +93,7 @@ export interface ProvisionedLeaseRegistry {
     readonly leaseId: string;
     readonly namespaceResource?: NamespaceResource;
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
+    readonly remoteAccess?: RemoteAccess;
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly expired: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
@@ -325,6 +334,7 @@ export function createProvisionedLeaseRegistry(
           ...current,
           ...(input.namespaceResource ? { namespaceResource: input.namespaceResource } : {}),
           ...(input.namespaceProxy ? { namespaceProxy: input.namespaceProxy } : {}),
+          ...(input.remoteAccess ? { remoteAccess: input.remoteAccess } : {}),
           state: "active",
           updatedAt: now.toISOString(),
           expiresAt: new Date(now.getTime() + LEASE_HEARTBEAT_TTL_MS).toISOString(),
