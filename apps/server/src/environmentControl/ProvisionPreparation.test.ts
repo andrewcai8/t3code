@@ -347,6 +347,35 @@ it("installs a Claude sign-in where that CLI reads it", async () => {
   }
 });
 
+it("gives a Claude account with a setup-token that token instead of a credential file", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(
+      inputFor("claudeAgent", "claude_personal"),
+      f.config,
+      f.resolver,
+      {
+        kind: "claudeAgent",
+        instanceId: ProviderInstanceId.make("claude_personal"),
+        environment: [
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+        ],
+        credential: { kind: "environment" },
+      },
+    );
+    const settings = homeFile(manifest, ".t3/userdata/settings.json");
+    expect(
+      JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()).providerInstances
+        .claude_personal.environment,
+    ).toEqual([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+    ]);
+    expect(homeFile(manifest, ".claude/.credentials.json")).toBeUndefined();
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("refuses a skill bundle that links out of itself", async () => {
   const f = await fixture();
   try {

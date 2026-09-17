@@ -171,8 +171,21 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
     }),
   );
 
+  it.effect("refuses keychain-only Claude accounts with the command that makes them portable", () =>
+    Effect.gen(function* () {
+      const settings = decodeSettings({
+        providerInstances: {
+          selected: { driver: "claudeAgent", config: { homePath: directory } },
+        },
+      });
+      expect((yield* Effect.flip(resolve(settings))).message).toBe(
+        `This Claude account stores its login in the macOS keychain, which can't be copied safely. Run \`CLAUDE_CONFIG_DIR=${directory} claude setup-token\` and add the token under provisioning.claudeOAuthTokens.selected in environment-control.json.`,
+      );
+    }),
+  );
+
   it.effect(
-    "refuses keychain-only Claude accounts instead of substituting generic credentials",
+    "starts a keychain-only Claude account in the cloud with its configured setup-token",
     () =>
       Effect.gen(function* () {
         const settings = decodeSettings({
@@ -180,9 +193,18 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
             selected: { driver: "claudeAgent", config: { homePath: directory } },
           },
         });
-        expect((yield* Effect.flip(resolve(settings))).message).toContain(
-          "Local keychain credentials cannot be copied",
+        const profile = yield* resolveProvisioningProviderProfile(
+          settings,
+          { providerInstanceId: "selected" },
+          { selected: "sk-ant-oat01-cloud-only" },
         );
+        const prepared = yield* Effect.promise(() => resolvePreparation(profile, {}, "e2b"));
+        expect(prepared.environment).toContainEqual({
+          name: "CLAUDE_CODE_OAUTH_TOKEN",
+          value: "sk-ant-oat01-cloud-only",
+          sensitive: true,
+        });
+        expect(prepared.files).toEqual([]);
       }),
   );
 
