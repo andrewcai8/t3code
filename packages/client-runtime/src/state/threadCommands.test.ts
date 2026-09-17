@@ -14,6 +14,7 @@ import {
   PrimaryConnectionTarget,
   type PreparedConnection,
 } from "../connection/model.ts";
+import { workspaceMissingError } from "../connection/errors.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { runAtomCommand } from "./runtime.ts";
@@ -146,5 +147,40 @@ describe("offline thread.settle", () => {
 
     expect(AsyncResult.isFailure(result)).toBe(true);
     expect(harness.registry.get(threadLifecycleOverlayAtom).size).toBe(0);
+  });
+});
+
+describe("offline thread.delete", () => {
+  const key = threadKey({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID });
+
+  it("deletes the thread on this device when the environment has no RPC session", async () => {
+    const harness = await makeHarness();
+    const result = await runAtomCommand(harness.registry, harness.commands.delete, {
+      environmentId: ENVIRONMENT_ID,
+      input: { threadId: THREAD_ID },
+    });
+
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
+    expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
+  });
+
+  it("deletes the thread on this device when its workspace no longer exists", async () => {
+    const harness = await makeHarness({
+      run: (() =>
+        Effect.fail(
+          workspaceMissingError(),
+        )) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"],
+    });
+    const result = await runAtomCommand(harness.registry, harness.commands.delete, {
+      environmentId: ENVIRONMENT_ID,
+      input: { threadId: THREAD_ID },
+    });
+
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
+    expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
   });
 });

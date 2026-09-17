@@ -26,6 +26,7 @@ import { createEnvironmentSnapshotAtom } from "./snapshots.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
 import { mergeEnvironmentThread } from "./threadDetail.ts";
 import { createEnvironmentThreadShellAtoms } from "./threadShell.ts";
+import { setThreadLifecycleOverlay } from "./threadLifecycleOverlay.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
@@ -380,6 +381,33 @@ describe("environment entity projections", () => {
     expect(
       harness.registry.get(harness.projects.environmentProjectsAtom(offEnvironmentId)),
     ).toHaveLength(2);
+  });
+
+  it("hides a thread deleted on this device until the delete is undone", () => {
+    const harness = makeHarness();
+    const ref = { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID };
+    const titles = () =>
+      harness.registry.get(harness.threadShells.threadShellsAtom).map((thread) => thread.title);
+
+    setThreadLifecycleOverlay(harness.registry, ref, {
+      kind: "deleted",
+      at: "2026-06-02T00:00:00.000Z",
+    });
+    expect(titles()).toEqual(["Other thread"]);
+    expect(harness.registry.get(harness.threadShells.threadShellAtom(ref))).toBeNull();
+    expect(
+      harness.registry
+        .get(
+          harness.threadShells.threadShellsForProjectRefsAtom([
+            { environmentId: ENVIRONMENT_ID, projectId: PROJECT_ID },
+          ]),
+        )
+        .map((thread) => thread.title),
+    ).toEqual([]);
+
+    setThreadLifecycleOverlay(harness.registry, ref, undefined);
+    expect(titles()).toEqual(["Thread", "Other thread"]);
+    expect(harness.registry.get(harness.threadShells.threadShellAtom(ref))?.title).toBe("Thread");
   });
 
   it("keeps scoped identities and list order across project and environment changes", () => {

@@ -2,6 +2,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { AtomRegistry } from "effect/unstable/reactivity";
 
+import { workspaceMissingError } from "../connection/errors.ts";
 import { EnvironmentNotRegisteredError } from "../connection/registry.ts";
 import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import { threadKey } from "./entities.ts";
@@ -85,6 +86,10 @@ describe("isThreadLifecycleOfflineFailure", () => {
     ).toBe(true);
   });
 
+  it("treats a workspace that no longer exists as offline", () => {
+    expect(isThreadLifecycleOfflineFailure(workspaceMissingError())).toBe(true);
+  });
+
   it("ignores business-logic settle failures", () => {
     expect(isThreadLifecycleOfflineFailure(new Error("Thread is still working."))).toBe(false);
   });
@@ -110,6 +115,16 @@ describe("thread lifecycle overlay persistence", () => {
     });
   });
 
+  it("round-trips a pending delete", () => {
+    const encoded = encodeThreadLifecycleOverlays(
+      new Map([[KEY, { kind: "deleted", at: SETTLED_AT }]]),
+    );
+    expect(decodeThreadLifecycleOverlays(encoded).get(KEY)).toEqual({
+      kind: "deleted",
+      at: SETTLED_AT,
+    });
+  });
+
   it("drops malformed persisted records", () => {
     expect(decodeThreadLifecycleOverlays(JSON.stringify([{ kind: "settled" }])).size).toBe(0);
   });
@@ -122,6 +137,18 @@ describe("queueOfflineThreadLifecycleOverlay", () => {
     expect(registry.get(threadLifecycleOverlayAtom).get(KEY)?.kind).toBe("settled");
     queueOfflineThreadLifecycleOverlay(registry, REF, "unsettled", "2026-09-15T12:01:00.000Z");
     expect(registry.get(threadLifecycleOverlayAtom).size).toBe(0);
+  });
+
+  it("lets a pending delete replace a pending settle and outlast a later settle", () => {
+    const registry = AtomRegistry.make();
+    queueOfflineThreadLifecycleOverlay(registry, REF, "settled", SETTLED_AT);
+    queueOfflineThreadLifecycleOverlay(registry, REF, "deleted", "2026-09-15T12:01:00.000Z");
+    queueOfflineThreadLifecycleOverlay(registry, REF, "settled", "2026-09-15T12:02:00.000Z");
+    queueOfflineThreadLifecycleOverlay(registry, REF, "unsettled", "2026-09-15T12:03:00.000Z");
+    expect(registry.get(threadLifecycleOverlayAtom).get(KEY)).toEqual({
+      kind: "deleted",
+      at: "2026-09-15T12:01:00.000Z",
+    });
   });
 
   it("keeps the original overlay when the same kind is queued again", () => {
@@ -193,6 +220,37 @@ describe("planThreadLifecycleOverlaySync", () => {
     expect(planned.overlays).toBe(overlays);
     expect(planned.jobs).toEqual([
       { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID, kind: "settled" },
+    ]);
+  });
+
+  it("replays a pending delete once the environment is live, whatever its settlement support", () => {
+    const overlays = new Map([[KEY, { kind: "deleted" as const, at: SETTLED_AT }]]);
+    const offline = planThreadLifecycleOverlaySync({
+      overlays,
+      environments: [
+        {
+          environmentId: ENVIRONMENT_ID,
+          live: false,
+          capabilities: undefined,
+          snapshot: { threads: [{ id: THREAD_ID, settledOverride: null }] },
+        },
+      ],
+    });
+    expect(offline.jobs).toEqual([]);
+    const planned = planThreadLifecycleOverlaySync({
+      overlays,
+      environments: [
+        {
+          environmentId: ENVIRONMENT_ID,
+          live: true,
+          capabilities: { threadSettlement: false },
+          snapshot: { threads: [] },
+        },
+      ],
+    });
+    expect(planned.overlays).toBe(overlays);
+    expect(planned.jobs).toEqual([
+      { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID, kind: "deleted" },
     ]);
   });
 

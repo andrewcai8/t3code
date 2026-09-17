@@ -311,6 +311,20 @@ describe("managed cloud commands", () => {
       expect(driver.resume).not.toHaveBeenCalled();
     });
   });
+  it("disposes a lease whose provider resource is already gone", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.resume = async () => {
+        throw new ProvisionedSandboxMissing();
+      };
+      expect(await manager.resume(resumeInput)).toMatchObject({ reason: "missing" });
+      driver.dispose = async () => {
+        throw new Error("Sandbox sandbox not reachable");
+      };
+      expect(await manager.dispose(resumeInput)).toEqual({ kind: "disposed" });
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "disposed" });
+      expect(await manager.dispose(resumeInput)).toEqual({ kind: "disposed" });
+    });
+  });
   it.each(["releasing", "disposed"] as const)("cannot revive a %s lease", async (state) => {
     await withLease(async ({ registry, driver, manager }) => {
       await registry.beginRelease(resumeInput);
