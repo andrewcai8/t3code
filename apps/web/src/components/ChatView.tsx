@@ -4891,9 +4891,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [cloudProvisioningPhase, draftId, isDraftHeroState, routeThreadKey]);
   const environmentSetup = useMemo<CloudEnvironmentSetupSnapshot | null>(() => {
     if (cloudProvisioningPhase === null) return null;
-    const identity = activeProject?.repositoryIdentity;
-    const repository =
-      identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
+    const repository = cloneRepository(activeProject?.repositoryIdentity);
     return {
       provider: cloudProvisioningRequested ?? cloudSetupProviderRef.current,
       phase: cloudProvisioningPhase,
