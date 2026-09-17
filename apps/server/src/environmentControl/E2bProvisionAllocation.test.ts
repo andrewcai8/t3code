@@ -19,7 +19,7 @@ import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { makeE2bProvisionRuntime } from "./E2bProvisionRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
-import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
+import { Provisioning, ProvisionProviderError, ProvisionProviderPorts } from "./Provisioning.ts";
 
 const request = Schema.decodeUnknownSync(DurableProvisionRequest)({
   requestId: "26d53765-3f84-4688-90f6-7c7d26b890cc",
@@ -54,6 +54,7 @@ const decodeCreate = Schema.decodeUnknownSync(
       metadata: Schema.Record(Schema.String, Schema.String),
       timeout: Schema.Int,
       network: Schema.optional(Schema.Unknown),
+      autoPause: Schema.optional(Schema.Boolean),
     }),
   ),
 );
@@ -165,6 +166,12 @@ async function providerHttp(drop?: "create" | "fork") {
         res.end(url.pathname.endsWith("/timeout") ? undefined : JSON.stringify(parent));
         return;
       }
+      if (req.method === "DELETE" && parent) {
+        resources.splice(resources.indexOf(parent), 1);
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       if (req.method === "GET" && parent) {
         res.end(JSON.stringify(parent));
         return;
@@ -236,6 +243,7 @@ it.effect("actual SDK binds allocation identity and validates every recovery pag
           preparation_hash: "b".repeat(64),
         },
         network: { denyOut: ["0.0.0.0/0"], allowOut: ["github.com"] },
+        autoPause: true,
       },
     ]);
     expect(f.forks).toEqual([{ count: 1, timeout: 21_600 }]);
@@ -277,6 +285,7 @@ it.effect("direct allocation uses the sandbox lifetime and refuses a fork", () =
     const created = yield* ports.create(direct);
     expect(created).toEqual({ provider: "e2b", sandboxId: "parent-1" });
     expect(f.creates[0]?.timeout).toBe(21_600);
+    expect(f.creates[0]?.autoPause).toBe(true);
     if (created.provider !== "e2b") throw new Error("Expected E2B fixture");
     const refused = yield* ports.fork(direct, created).pipe(Effect.flip);
     expect(refused.message).toBe("Direct E2B allocation cannot fork");
@@ -285,7 +294,7 @@ it.effect("direct allocation uses the sandbox lifetime and refuses a fork", () =
 );
 
 it.effect.each(["create", "fork"] as const)(
-  "recovers a lost SDK %s response through the durable service",
+  "recovers a lost SDK %s response through the durable service and kills only the parent",
   (drop) =>
     Effect.gen(function* () {
       const f = yield* fixture(drop);
@@ -297,7 +306,15 @@ it.effect.each(["create", "fork"] as const)(
       );
       const ports: ProvisionProviderPorts["Service"] = {
         ...makeE2bAllocationPorts(f.config),
-        dispose: () => Effect.void,
+        dispose: (disposed, resource) =>
+          Effect.tryPromise({
+            try: () =>
+              makeE2bProvisionRuntime(f.config.connection).dispose(
+                disposed,
+                resource.provider === "e2b" ? resource.sandboxId : "",
+              ),
+            catch: () => new ProvisionProviderError({ message: "Fixture dispose failed" }),
+          }),
         prepare: () => Effect.succeed(readiness),
       };
       const makeLayer = () =>
@@ -324,7 +341,7 @@ it.effect.each(["create", "fork"] as const)(
       });
       expect(f.creates).toHaveLength(1);
       expect(f.forks).toHaveLength(1);
-      expect(f.resources.map((resource) => resource.sandboxID)).toEqual(["parent-1", "child-1"]);
+      expect(f.resources.map((resource) => resource.sandboxID)).toEqual(["child-1"]);
       expect(f.errors).toEqual([]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );

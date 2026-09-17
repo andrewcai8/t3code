@@ -166,6 +166,24 @@ describe("durable cloud provisioning", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("a fork parent that cannot be killed does not block the ready child", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const p = provider();
+      const disposed: ProvisionResource[] = [];
+      const ports = {
+        ...p.ports,
+        dispose: (_op: ProvisionOperation, resource: ProvisionResource) =>
+          Effect.sync(() => disposed.push(resource)).pipe(
+            Effect.andThen(Effect.fail(new ProvisionProviderError({ message: "Kill failed" }))),
+          ),
+      };
+      const result = yield* ensure().pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
+      expect(result.state).toEqual({ kind: "ready", allocation, readiness });
+      expect(disposed).toEqual([parent]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps an uncertain create unresolved through empty and ambiguous discovery", () =>
     Effect.gen(function* () {
       const file = yield* temporaryDatabase;
