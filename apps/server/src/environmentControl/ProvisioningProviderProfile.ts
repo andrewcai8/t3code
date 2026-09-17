@@ -39,6 +39,20 @@ export const credentialVariables = {
   cursor: ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"],
   claudeAgent: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
 };
+
+/**
+ * Where each driver reads its login inside a provisioned home, relative to it.
+ *
+ * The counterpart of `credentialVariables`: whichever of these a provisioned
+ * environment gets, it must not get both. A CLI that finds a credential file
+ * prefers it over the variables, so a file left behind by a home-file copy
+ * silently replaces the credential provisioning selected.
+ */
+export const credentialDestinations = {
+  codex: [".codex/auth.json"],
+  cursor: [".cursor/auth.json", ".config/cursor/auth.json"],
+  claudeAgent: [".claude/.credentials.json"],
+};
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
 const decodeCursorSettings = Schema.decodeUnknownEffect(CursorSettings);
@@ -219,14 +233,8 @@ export async function resolvePreparation(
       });
     }
   }
-  if (profile.credential.kind === "environment") {
-    for (const destination of profile.kind === "cursor"
-      ? [".cursor/auth.json", ".config/cursor/auth.json"]
-      : profile.kind === "claudeAgent"
-        ? [".claude/.credentials.json"]
-        : [".codex/auth.json"])
-      files.delete(destination);
-  }
+  if (profile.credential.kind === "environment")
+    for (const destination of credentialDestinations[profile.kind]) files.delete(destination);
   const paths = {
     HOME: home,
     PATH: `${home}/.local/bin:${home}/.bun/bin:${provider === "namespace" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`,

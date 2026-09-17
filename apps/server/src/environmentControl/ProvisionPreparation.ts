@@ -15,6 +15,7 @@ import { resolveNamespaceIdentity, namespaceMacImage } from "./namespaceAllocati
 import { ProvisionRuntimeArtifact, type EnvironmentControlConfig } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import {
+  credentialDestinations,
   credentialVariables,
   ProvisionRefused,
   type ProvisioningProviderProfile,
@@ -379,7 +380,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       await writeOnce(artifactPath, artifactBytes);
       if (provisionDigest(await NodeFSP.readFile(artifactPath)) !== artifact.sha256)
         throw new Error("Stored runtime artifact changed.");
-      const files: Array<typeof File.Type> = [...submitted];
+      let files: Array<typeof File.Type> = [...submitted];
       for (const scope of ["home", "workspace"] as const) {
         for (const configured of provisioning[scope === "home" ? "homeFiles" : "workspaceFiles"] ??
           []) {
@@ -395,6 +396,16 @@ export function makeProvisionPreparationStore(stateDir: string) {
           files.push(file("home", `${skillRoot(profile.kind)}/${prefix}${entry.path}`, entry.data));
         }
       }
+      // A configured home file never decides which login the selected account
+      // uses. A CLI handed a stale credentials file prefers it over the token
+      // and fails the turn refreshing a login this manager no longer keeps,
+      // so the credential provisioning resolved replaces any copy of it.
+      const replaced = new Set(
+        profile.credential.kind === "file"
+          ? [profile.credential.destination]
+          : credentialDestinations[profile.kind],
+      );
+      files = files.filter((item) => !(item.scope === "home" && replaced.has(item.destination)));
       if (profile.credential.kind === "file") {
         const { source, destination } = profile.credential;
         const credential = await NodeFSP.readFile(source).catch(() => {
@@ -403,10 +414,6 @@ export function makeProvisionPreparationStore(stateDir: string) {
             message: "The selected provider account has no credentials on this manager.",
           });
         });
-        const duplicate = files.findIndex(
-          (item) => item.scope === "home" && item.destination === destination,
-        );
-        if (duplicate !== -1) files.splice(duplicate, 1);
         files.push(file("home", destination, credential));
       }
       const settingsPath = ".t3/userdata/settings.json";
