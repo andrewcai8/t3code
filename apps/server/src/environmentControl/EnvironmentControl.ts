@@ -232,6 +232,8 @@ export function createEnvironmentControl(
       leaseOperations.set(input.sandboxId, { action: "dispose" });
       try {
         if (leaseRegistry) {
+          const knownMissing =
+            (await leaseRegistry.findBySandbox(input.sandboxId))?.state === "missing";
           const release = await leaseRegistry.beginRelease(input);
           if (release === "disposed") return { kind: "disposed" };
           if (release === "missing")
@@ -247,22 +249,25 @@ export function createEnvironmentControl(
               message: "Another cleanup is already in progress.",
             };
           if (release === "started") {
+            const lease = await leaseRegistry.findBySandbox(input.sandboxId);
             try {
-              const lease = await leaseRegistry.findBySandbox(input.sandboxId);
               await driver.dispose({
                 sandboxId: input.sandboxId,
                 ...(lease?.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
                 ...(lease?.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
               });
-              if (lease) await leaseRegistry.markDisposed(lease.leaseId);
-              return { kind: "disposed" };
             } catch {
-              return {
-                kind: "refused",
-                reason: "unknown",
-                message: "The cloud sandbox could not be disposed.",
-              };
+              // The provider already reported this resource gone, so a failed
+              // cleanup leaves nothing running. Otherwise keep the lease to retry.
+              if (!knownMissing)
+                return {
+                  kind: "refused",
+                  reason: "unknown",
+                  message: "The cloud sandbox could not be disposed.",
+                };
             }
+            if (lease) await leaseRegistry.markDisposed(lease.leaseId);
+            return { kind: "disposed" };
           }
         }
         await driver.dispose({ sandboxId: input.sandboxId });
