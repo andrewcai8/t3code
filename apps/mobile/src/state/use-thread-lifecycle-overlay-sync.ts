@@ -21,11 +21,12 @@ import { environmentSnapshotAtom } from "./shell";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 
-/** Persist local settle/un-settle and flush those commands once the environment reconnects. */
+/** Persist local settle/un-settle/delete and flush those commands once the environment reconnects. */
 export function useThreadLifecycleOverlaySync() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const settle = useAtomCommand(threadEnvironment.settle, { reportFailure: false });
   const unsettle = useAtomCommand(threadEnvironment.unsettle, { reportFailure: false });
+  const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const flushedKeys = useRef(new Set<string>());
   const inFlight = useRef(new Set<string>());
 
@@ -57,16 +58,14 @@ export function useThreadLifecycleOverlaySync() {
         if (inFlight.current.has(key) || flushedKeys.current.has(key)) continue;
         inFlight.current.add(key);
         flushedKeys.current.add(key);
+        const target = { environmentId: job.environmentId };
+        const input = { threadId: job.threadId };
         void (
-          job.kind === "settled"
-            ? settle({
-                environmentId: job.environmentId,
-                input: { threadId: job.threadId },
-              })
-            : unsettle({
-                environmentId: job.environmentId,
-                input: { threadId: job.threadId, reason: "user" },
-              })
+          job.kind === "deleted"
+            ? deleteThread({ ...target, input })
+            : job.kind === "settled"
+              ? settle({ ...target, input })
+              : unsettle({ ...target, input: { ...input, reason: "user" } })
         )
           .then((result) => {
             if (result._tag === "Failure") {
@@ -78,6 +77,10 @@ export function useThreadLifecycleOverlaySync() {
             }
             if (isOfflineThreadLifecycleDispatchResult(result.value)) {
               flushedKeys.current.delete(key);
+            } else if (job.kind === "deleted") {
+              // The server confirmed the delete; the snapshot cannot, since
+              // archived threads are absent from it too.
+              setThreadLifecycleOverlay(appAtomRegistry, job, undefined);
             }
           })
           .finally(() => {
@@ -100,5 +103,5 @@ export function useThreadLifecycleOverlaySync() {
       cancelled = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [catalog, settle, unsettle]);
+  }, [catalog, deleteThread, settle, unsettle]);
 }

@@ -196,10 +196,18 @@ describe("reconcileThreadLifecycleOverlays", () => {
 describe("pendingThreadLifecycleFlushJobs", () => {
   it("only flushes overlays for connected servers that understand settlement", () => {
     const overlays = new Map([[KEY, { kind: "settled" as const, at: SETTLED_AT }]]);
-    expect(pendingThreadLifecycleFlushJobs(overlays, new Set()).length).toBe(0);
-    expect(pendingThreadLifecycleFlushJobs(overlays, new Set([ENVIRONMENT_ID]))).toEqual([
-      { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID, kind: "settled" },
-    ]);
+    expect(
+      pendingThreadLifecycleFlushJobs(overlays, {
+        liveEnvironmentIds: new Set([ENVIRONMENT_ID]),
+        liveCapableEnvironmentIds: new Set(),
+      }).length,
+    ).toBe(0);
+    expect(
+      pendingThreadLifecycleFlushJobs(overlays, {
+        liveEnvironmentIds: new Set([ENVIRONMENT_ID]),
+        liveCapableEnvironmentIds: new Set([ENVIRONMENT_ID]),
+      }),
+    ).toEqual([{ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID, kind: "settled" }]);
   });
 });
 

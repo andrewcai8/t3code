@@ -139,6 +139,7 @@ export function createThreadEnvironmentAtoms<R, E>(
     delete: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:delete",
       execute: (input: DeleteThreadInput) => deleteThread(input),
+      recover: recoverOfflineThreadLifecycle("deleted"),
       scheduler,
       concurrency,
     }),

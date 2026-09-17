@@ -7,12 +7,15 @@ import {
 import * as Schema from "effect/Schema";
 import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
+import { ConnectionBlockedError } from "../connection/model.ts";
+
 import { isTransportConnectionErrorMessage } from "../errors/transport.ts";
 import { EnvironmentRpcUnavailableError, isRpcClientError } from "../rpc/client.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { environmentAllowsThreadSettlement } from "./threadSettled.ts";
 
 const isEnvironmentRpcUnavailable = Schema.is(EnvironmentRpcUnavailableError);
+const isConnectionBlocked = Schema.is(ConnectionBlockedError);
 
 function isEnvironmentNotRegistered(error: unknown): boolean {
   return (
@@ -23,8 +26,8 @@ function isEnvironmentNotRegistered(error: unknown): boolean {
   );
 }
 
-/** Park or restore a thread while its environment has no live RPC session. */
-export type ThreadLifecycleOverlayKind = "settled" | "unsettled";
+/** Park, restore, or delete a thread while its environment has no live RPC session. */
+export type ThreadLifecycleOverlayKind = "settled" | "unsettled" | "deleted";
 
 export interface ThreadLifecycleOverlay {
   readonly kind: ThreadLifecycleOverlayKind;
@@ -72,7 +75,8 @@ export function applyThreadLifecycleOverlay<
     "settledOverride" | "settledAt" | "unsettledAt" | "activeOrderKey"
   >,
 >(thread: T, overlay: ThreadLifecycleOverlay | undefined): T {
-  if (overlay === undefined) return thread;
+  // A deleted thread is dropped from the lists instead; see withoutDeletedThreads.
+  if (overlay === undefined || overlay.kind === "deleted") return thread;
   if (overlay.kind === "settled") {
     if (
       thread.settledOverride === "settled" &&
@@ -101,8 +105,24 @@ export function applyThreadLifecycleOverlay<
   };
 }
 
+/** Drop threads deleted on this device from one environment's thread list. */
+export function withoutDeletedThreads<T extends { readonly id: ThreadId }>(
+  environmentId: EnvironmentId,
+  threads: ReadonlyArray<T>,
+  overlays: ReadonlyMap<string, ThreadLifecycleOverlay>,
+): ReadonlyArray<T> {
+  let deleted: Set<ThreadId> | undefined;
+  for (const [key, overlay] of overlays) {
+    if (overlay.kind !== "deleted") continue;
+    const ref = parseThreadKey(key);
+    if (ref.environmentId === environmentId) (deleted ??= new Set()).add(ref.threadId);
+  }
+  return deleted === undefined ? threads : threads.filter((thread) => !deleted.has(thread.id));
+}
+
 export function isThreadLifecycleOfflineFailure(error: unknown): boolean {
   if (isEnvironmentRpcUnavailable(error)) return true;
+  if (isConnectionBlocked(error) && error.reason === "workspace-missing") return true;
   if (isEnvironmentNotRegistered(error)) return true;
   if (isRpcClientError(error) && isTransportConnectionErrorMessage(error.message)) return true;
   const message = errorMessage(error);
@@ -146,6 +166,8 @@ export function queueOfflineThreadLifecycleOverlay(
   at: string = new Date().toISOString(),
 ): void {
   const existing = registry.get(threadLifecycleOverlayAtom).get(threadKey(ref));
+  // A pending delete outranks settlement: the thread is gone from this device.
+  if (existing?.kind === "deleted" && kind !== "deleted") return;
   if (kind === "unsettled") {
     // A pending settle never reached the server: dropping it restores the
     // cached shell instead of leaving a local un-settle that would flush.
@@ -165,15 +187,25 @@ export interface ThreadLifecycleOverlayFlushJob {
   readonly kind: ThreadLifecycleOverlayKind;
 }
 
-/** Overlays that can be dispatched now that the environment is connected. */
+/**
+ * Overlays that can be dispatched now that the environment is connected.
+ * A delete needs no settlement support, only a connection.
+ */
 export function pendingThreadLifecycleFlushJobs(
   overlays: ReadonlyMap<string, ThreadLifecycleOverlay>,
-  connectedCapableEnvironmentIds: ReadonlySet<EnvironmentId>,
+  environments: {
+    readonly liveEnvironmentIds: ReadonlySet<EnvironmentId>;
+    readonly liveCapableEnvironmentIds: ReadonlySet<EnvironmentId>;
+  },
 ): ReadonlyArray<ThreadLifecycleOverlayFlushJob> {
   const jobs: ThreadLifecycleOverlayFlushJob[] = [];
   for (const [key, overlay] of overlays) {
     const ref = parseThreadKey(key);
-    if (!connectedCapableEnvironmentIds.has(ref.environmentId)) continue;
+    const ready =
+      overlay.kind === "deleted"
+        ? environments.liveEnvironmentIds
+        : environments.liveCapableEnvironmentIds;
+    if (!ready.has(ref.environmentId)) continue;
     jobs.push({
       environmentId: ref.environmentId,
       threadId: ref.threadId,
@@ -200,11 +232,13 @@ export function planThreadLifecycleOverlaySync(input: {
   readonly overlays: ReadonlyMap<string, ThreadLifecycleOverlay>;
   readonly jobs: ReadonlyArray<ThreadLifecycleOverlayFlushJob>;
 } {
+  const liveEnvironmentIds = new Set<EnvironmentId>();
   const liveCapableEnvironmentIds = new Set<EnvironmentId>();
   const liveIncapableEnvironmentIds = new Set<EnvironmentId>();
   const rawThreadsByKey = new Map<string, Pick<OrchestrationThreadShell, "settledOverride">>();
   for (const environment of input.environments) {
     const allows = environmentAllowsThreadSettlement(environment.capabilities);
+    if (environment.live) liveEnvironmentIds.add(environment.environmentId);
     if (environment.live && environment.capabilities?.threadSettlement === true) {
       liveCapableEnvironmentIds.add(environment.environmentId);
     }
@@ -226,13 +260,18 @@ export function planThreadLifecycleOverlaySync(input: {
   });
   return {
     overlays,
-    jobs: pendingThreadLifecycleFlushJobs(overlays, liveCapableEnvironmentIds),
+    jobs: pendingThreadLifecycleFlushJobs(overlays, {
+      liveEnvironmentIds,
+      liveCapableEnvironmentIds,
+    }),
   };
 }
 
 /**
- * Drop overlays the live snapshot has confirmed, and overlays that cannot
- * be flushed because this server predates settlement.
+ * Drop settle overlays the live snapshot has confirmed, and those that cannot
+ * be flushed because this server predates settlement. A delete overlay stays
+ * until its replay settles: archived threads are absent from the snapshot too,
+ * so absence cannot confirm a delete.
  */
 export function reconcileThreadLifecycleOverlays(
   overlays: ReadonlyMap<string, ThreadLifecycleOverlay>,
@@ -249,6 +288,7 @@ export function reconcileThreadLifecycleOverlays(
   let changed = false;
   const next = new Map(overlays);
   for (const [key, overlay] of overlays) {
+    if (overlay.kind === "deleted") continue;
     const environmentId = parseThreadKey(key).environmentId;
     if (input.liveIncapableEnvironmentIds.has(environmentId)) {
       next.delete(key);
@@ -346,7 +386,7 @@ function decodePersistedOverlay(entry: unknown): {
     record.environmentId.length === 0 ||
     typeof record.threadId !== "string" ||
     record.threadId.length === 0 ||
-    (record.kind !== "settled" && record.kind !== "unsettled") ||
+    (record.kind !== "settled" && record.kind !== "unsettled" && record.kind !== "deleted") ||
     typeof record.at !== "string" ||
     !Number.isFinite(Date.parse(record.at))
   ) {

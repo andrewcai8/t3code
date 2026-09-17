@@ -25,6 +25,7 @@ import {
   threadLifecycleOverlayAtom,
   threadLifecycleOverlaysEqual,
   type ThreadLifecycleOverlay,
+  withoutDeletedThreads,
 } from "./threadLifecycleOverlay.ts";
 
 const EMPTY_THREADS: ReadonlyArray<OrchestrationThreadShell> = Object.freeze([]);
@@ -89,9 +90,12 @@ export function createEnvironmentThreadShellAtoms(input: {
   };
 
   const environmentThreadsAtom = Atom.family((environmentId: EnvironmentId) =>
-    Atom.make(
-      (get): ReadonlyArray<OrchestrationThreadShell> =>
+    Atom.make((get): ReadonlyArray<OrchestrationThreadShell> =>
+      withoutDeletedThreads(
+        environmentId,
         get(input.snapshotAtom(environmentId))?.threads ?? EMPTY_THREADS,
+        get(overlayAtom),
+      ),
     ).pipe(Atom.withLabel(`environment-threads:${environmentId}`)),
   );
 
