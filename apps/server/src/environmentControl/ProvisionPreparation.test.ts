@@ -9,9 +9,12 @@ import {
   ProvisionRequestConflict,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { ServerSettings } from "@t3tools/contracts";
+import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { makeProvisionPreparationStore, provisionDigest } from "./ProvisionPreparation.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
 import type { ProvisioningProviderProfile } from "./ProvisioningProviderProfile.ts";
+const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const evidence = {
   destination: ".repair/evidence.txt",
   sha256: provisionDigest("evidence"),
@@ -547,6 +550,93 @@ it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in
     expect(Object.prototype.hasOwnProperty.call(parsedE2bSettings, "enableAgentDeviceAccess")).toBe(
       false,
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/**
+ * Every account the guest could run a turn on, as its own provider registry
+ * resolves them from the settings this preparation wrote. An enabled driver
+ * contributes an implicit instance keyed by its driver kind, so reading the
+ * written `providerInstances` map alone would miss an account the guest offers.
+ */
+function guestAccounts(
+  manifest: Awaited<ReturnType<ReturnType<typeof makeProvisionPreparationStore>["freeze"]>>,
+  driver: string,
+) {
+  const written = homeFile(manifest, ".t3/userdata/settings.json");
+  const settings = decodeServerSettings(
+    JSON.parse(Buffer.from(written?.contentsBase64 ?? "", "base64").toString()),
+  );
+  return Object.entries(deriveProviderInstanceConfigMap(settings))
+    .filter(
+      ([, instance]) =>
+        instance.driver === driver &&
+        (instance.enabled ?? (instance.config as { enabled?: boolean } | undefined)?.enabled),
+    )
+    .map(([instanceId, instance]) => ({
+      instanceId,
+      config: instance.config as Record<string, unknown> | undefined,
+      environment: (instance.environment ?? []).map(({ name }) => name),
+    }));
+}
+
+it("runs a named Claude account's chat on the token it installed, and carries no other account's key", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.writeFile(NodePath.join(f.root, "cursor-key"), "cursor-api-key\n");
+    await NodeFSP.writeFile(NodePath.join(f.root, "linear-key"), "linear-api-key\n");
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        shellEnvironment: [
+          { name: "CURSOR_API_KEY", source: NodePath.join(f.root, "cursor-key") },
+          { name: "LINEAR_API_KEY", source: NodePath.join(f.root, "linear-key") },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(
+      inputFor("claudeAgent", "claude_acai13"),
+      config,
+      f.resolver,
+      {
+        kind: "claudeAgent",
+        instanceId: ProviderInstanceId.make("claude_acai13"),
+        environment: [
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+        ],
+        credential: { kind: "environment" },
+      },
+    );
+    // A guest holds one account. Offering a second, credential-less one is how
+    // a turn reached the CLI with no login and failed on "Not logged in".
+    expect(guestAccounts(manifest, "claudeAgent")).toEqual([
+      {
+        instanceId: "claudeAgent",
+        config: undefined,
+        // Another driver's key is not this account's to carry.
+        environment: ["LINEAR_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+      },
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("runs a named Codex account's chat on the provisioned home", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(
+      inputFor("codex", "codex_andrewca78"),
+      f.config,
+      f.resolver,
+      { ...f.profile, instanceId: ProviderInstanceId.make("codex_andrewca78") },
+    );
+    const accounts = guestAccounts(manifest, "codex");
+    expect(accounts.length).toBe(1);
+    expect(accounts[0]?.config?.homePath).toBe(`${manifest.preparation.root}/home/.codex`);
   } finally {
     await f.cleanup();
   }
