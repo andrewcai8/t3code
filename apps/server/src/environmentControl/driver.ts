@@ -19,6 +19,7 @@ import {
   canonicalRepository,
   type EnvironmentControlConfig,
   type ManagedTarget,
+  type Provisioning,
 } from "./config.ts";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 import { disposeNamespace, namespaceT3Port, provisionNamespace } from "./namespaceProvisioner.ts";
@@ -344,7 +345,10 @@ async function prepare(
 
 export function createCloudDriver(
   config: EnvironmentControlConfig,
-  resolveProfile?: (request: ProvisionRequest) => Promise<ProvisioningProviderProfile>,
+  resolveProfile?: (
+    request: ProvisionRequest,
+    claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
+  ) => Promise<ProvisioningProviderProfile>,
 ): CloudDriver {
   const api = { apiKey: config.e2bApiKey, requestTimeoutMs: 15_000 };
   const namespaceRunner = config.provisioning?.namespace
@@ -489,7 +493,7 @@ export function createCloudDriver(
           reason: "unconfigured",
           message: "Provider account resolution is unavailable.",
         });
-      const profile = await resolveProfile(request);
+      const profile = await resolveProfile(request, provisioning.claudeOAuthTokens);
       const preparation = await resolvePreparation(
         profile,
         provisioning,

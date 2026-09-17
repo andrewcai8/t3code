@@ -91,6 +91,16 @@ const Provisioning = Schema.Struct({
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
   /**
+   * `claude setup-token` values by Claude provider instance id, installed only
+   * in cloud environments.
+   *
+   * A keychain login cannot be copied: Claude Code rotates its refresh token,
+   * so two machines holding one login fork the chain and one is signed out.
+   * A setup-token does not rotate, and keeping it here rather than in the
+   * instance environment leaves local runs on the keychain login.
+   */
+  claudeOAuthTokens: Schema.optional(Schema.Record(Schema.String, TrimmedNonEmptyString)),
+  /**
    * Hosts a new environment may reach. Everything else is denied.
    *
    * An agent with a shell can read any credential the environment holds, so

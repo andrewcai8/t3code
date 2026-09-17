@@ -57,7 +57,12 @@ import {
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
 import * as ServerConfig from "../config.ts";
-import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
+import {
+  readConfig,
+  resolveControlConfigPath,
+  type ManagedTarget,
+  type Provisioning as ProvisioningConfig,
+} from "./config.ts";
 import {
   createCloudDriver,
   ProvisionedSandboxMissing,
@@ -549,10 +554,15 @@ export const layer = Layer.effect(
       | undefined;
     const settings = yield* ServerSettingsService;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
-    const resolveProfile = async (request: ProvisionRequest) => {
+    const resolveProfile = async (
+      request: ProvisionRequest,
+      claudeOAuthTokens?: ProvisioningConfig["claudeOAuthTokens"],
+    ) => {
       const result = await Effect.runPromiseWith(profileContext)(
         settings.getSettings.pipe(
-          Effect.flatMap((current) => resolveProvisioningProviderProfile(current, request)),
+          Effect.flatMap((current) =>
+            resolveProvisioningProviderProfile(current, request, claudeOAuthTokens),
+          ),
           Effect.match({
             onSuccess: (profile) => ({ kind: "resolved" as const, profile }),
             onFailure: (error) => ({ kind: "refused" as const, error }),
@@ -813,11 +823,14 @@ export const layer = Layer.effect(
             }),
             // Credentials and the skill root follow the account's real settings
             // rather than a path this module guesses from the driver name.
-            await resolveProfile({
-              provider: input.provider,
-              providerInstanceId: input.providerInstanceId,
-              ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
-            }),
+            await resolveProfile(
+              {
+                provider: input.provider,
+                providerInstanceId: input.providerInstanceId,
+                ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
+              },
+              manager.config.provisioning?.claudeOAuthTokens,
+            ),
           );
         },
         load: manifests.load,

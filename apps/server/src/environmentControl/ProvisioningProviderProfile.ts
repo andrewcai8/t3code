@@ -34,7 +34,7 @@ export interface ProvisioningProviderProfile {
     | { readonly kind: "environment" };
 }
 
-const credentialVariables = {
+export const credentialVariables = {
   codex: ["OPENAI_API_KEY"],
   cursor: ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"],
   claudeAgent: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
@@ -47,6 +47,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
   function* (
     settings: ServerSettings,
     input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
+    claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
   ) {
     const instanceId = ProviderInstanceId.make(input.providerInstanceId);
     const instance = deriveProviderInstanceConfigMap(settings)[instanceId];
@@ -67,6 +68,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
     let source: string;
     let destination: string;
     let enabled: boolean;
+    let claudeLoginDirectory: string | undefined;
     switch (instance.driver) {
       case "codex": {
         kind = "codex";
@@ -100,6 +102,8 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
           ? home
           : effectiveEnvironment.CLAUDE_CONFIG_DIR || NodePath.join(home, ".claude");
         source = NodePath.join(configDir, ".credentials.json");
+        claudeLoginDirectory =
+          config.homePath.trim() || effectiveEnvironment.CLAUDE_CONFIG_DIR ? configDir : undefined;
         destination = ".claude/.credentials.json";
         break;
       }
@@ -124,6 +128,17 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
         environment,
         credential: { kind: "environment" },
       } satisfies ProvisioningProviderProfile;
+    const cloudToken = kind === "claudeAgent" ? claudeOAuthTokens?.[instanceId] : undefined;
+    if (cloudToken)
+      return {
+        kind,
+        instanceId,
+        environment: [
+          ...environment,
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: cloudToken, sensitive: true },
+        ],
+        credential: { kind: "environment" },
+      } satisfies ProvisioningProviderProfile;
     const fs = yield* FileSystem.FileSystem;
     const exists = yield* fs.exists(source).pipe(
       Effect.mapError(
@@ -139,7 +154,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
         reason: "credentials",
         message:
           kind === "claudeAgent"
-            ? "This Claude account needs portable credentials for cloud use. Local keychain credentials cannot be copied."
+            ? `This Claude account stores its login in the macOS keychain, which can't be copied safely. Run \`${claudeLoginDirectory ? `CLAUDE_CONFIG_DIR=${claudeLoginDirectory} ` : ""}claude setup-token\` and add the token under provisioning.claudeOAuthTokens.${instanceId} in environment-control.json.`
             : "The selected account credentials could not be found on this machine.",
       });
     return {

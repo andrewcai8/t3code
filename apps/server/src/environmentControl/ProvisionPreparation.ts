@@ -15,6 +15,7 @@ import { resolveNamespaceIdentity, namespaceMacImage } from "./namespaceAllocati
 import { ProvisionRuntimeArtifact, type EnvironmentControlConfig } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import {
+  credentialVariables,
   ProvisionRefused,
   type ProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
@@ -444,6 +445,12 @@ export function makeProvisionPreparationStore(stateDir: string) {
           sensitive: true,
         });
       }
+      const credentials =
+        profile.credential.kind === "environment"
+          ? profile.environment.filter(
+              ({ name, value }) => credentialVariables[profile.kind].includes(name) && value.trim(),
+            )
+          : [];
       const selected = parsedSettings.providerInstances[input.providerInstanceId] ?? {};
       const resultSettings = {
         ...decodeSettingsRecord(configuredSettings),
@@ -453,7 +460,8 @@ export function makeProvisionPreparationStore(stateDir: string) {
           [input.providerInstanceId]: {
             ...selected,
             environment: [
-              ...environment,
+              ...environment.filter(({ name }) => !credentials.some((c) => c.name === name)),
+              ...credentials,
               ...(profile.kind === "cursor"
                 ? [{ name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false }]
                 : []),

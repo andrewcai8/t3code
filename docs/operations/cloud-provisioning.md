@@ -17,6 +17,22 @@ Provisioning reads `~/.t3/environment-control.json`. Four things matter:
 
 Skills land in the home directory and follow the selected driver. Codex reads `.codex/skills`, Cursor reads `.cursor/skills`, Claude reads `.claude/skills`. They never land in the checkout, which is what the agent opens a pull request from.
 
+## Sign in Claude accounts
+
+A Claude account on macOS keeps its login in the keychain, and that login cannot be copied. Claude Code rotates its refresh token, so two machines sharing one login fork the chain and one of them is signed out. Give each Claude account a setup-token for cloud use instead:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude_personal claude setup-token
+```
+
+Use the account's config directory, or drop `CLAUDE_CONFIG_DIR=` for the default account. Put the printed token under `provisioning.claudeOAuthTokens`, keyed by the provider instance id:
+
+```json
+{ "provisioning": { "claudeOAuthTokens": { "claude_personal": "sk-ant-oat01-..." } } }
+```
+
+Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. Local runs keep using the keychain login. A credential set in the instance's own environment variables still wins, and an account with a `.credentials.json` file needs no token.
+
 ## Stand up a manager
 
 ```
