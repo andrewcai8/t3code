@@ -369,7 +369,7 @@ it("gives a Claude account with a setup-token that token instead of a credential
     const settings = homeFile(manifest, ".t3/userdata/settings.json");
     expect(
       JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()).providerInstances
-        .claude_personal.environment,
+        .claudeAgent.environment,
     ).toEqual([
       { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
     ]);
@@ -534,7 +534,10 @@ it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in
       enableAgentDeviceAccess: true,
       providerInstances: {
         codex: {
-          homePath: "/Volumes/devbox/t3-provision/6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f/home/.codex",
+          config: {
+            homePath:
+              "/Volumes/devbox/t3-provision/6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f/home/.codex",
+          },
         },
       },
     });
@@ -620,6 +623,8 @@ it("runs a named Claude account's chat on the token it installed, and carries no
         environment: ["LINEAR_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
       },
     ]);
+    // One agent CLI is installed, so any other driver is a dead account.
+    expect(guestAccounts(manifest, "codex")).toEqual([]);
   } finally {
     await f.cleanup();
   }

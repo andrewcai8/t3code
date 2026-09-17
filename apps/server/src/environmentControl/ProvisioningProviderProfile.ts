@@ -53,6 +53,22 @@ export const credentialDestinations = {
   cursor: [".cursor/auth.json", ".config/cursor/auth.json"],
   claudeAgent: [".claude/.credentials.json"],
 };
+
+/**
+ * Whether a variable is some other driver's login.
+ *
+ * An operator's `shellEnvironment` holds a key per account they provision
+ * with, and a cloud environment runs one agent on one account, so another
+ * driver's credential has nothing to do there.
+ */
+export const isForeignCredentialVariable = (
+  kind: ProvisioningProviderProfile["kind"],
+  name: string,
+) =>
+  Object.entries(credentialVariables).some(
+    ([driver, names]) => driver !== kind && names.includes(name),
+  );
+
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
 const decodeCursorSettings = Schema.decodeUnknownEffect(CursorSettings);
@@ -260,7 +276,11 @@ export async function resolvePreparation(
         reason: "unconfigured",
         message: "A configured environment variable name is invalid.",
       });
-    if (selectedNames.has(variable.name)) continue;
+    if (
+      selectedNames.has(variable.name) ||
+      isForeignCredentialVariable(profile.kind, variable.name)
+    )
+      continue;
     const value = (
       await NodeFSP.readFile(variable.source, "utf8").catch(() => {
         throw new ProvisionRefused({

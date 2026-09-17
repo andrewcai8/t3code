@@ -4,8 +4,11 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import {
+  DEFAULT_SERVER_SETTINGS,
   DurableProvisionRequest,
+  defaultInstanceIdForDriver,
   EnvironmentProvisionInput,
+  ProviderDriverKind,
   ProvisionRequestConflict,
   type ProvisionRequestId,
 } from "@t3tools/contracts";
@@ -17,6 +20,7 @@ import { repositoryUrl } from "./driver.ts";
 import {
   credentialDestinations,
   credentialVariables,
+  isForeignCredentialVariable,
   ProvisionRefused,
   type ProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
@@ -105,13 +109,25 @@ type ChildSettings = {
   [key: string]: unknown;
 };
 type ChildProviderInstanceSettings = Record<string, unknown> & {
+  config?: Record<string, unknown>;
   environment?: Array<{ name: string; value: string; sensitive?: boolean }>;
 };
+
+/**
+ * The instance id a provisioned environment keys its one account by.
+ *
+ * An enabled driver already contributes an implicit instance under this id, so
+ * an account keyed by the manager's own slug leaves that implicit instance
+ * enabled with no credentials for a guest client to pick. A guest holds exactly
+ * one account and the manager's slug is not a routing key there, so the account
+ * takes the id the guest would have synthesized anyway.
+ */
+const guestInstanceId = (agentDriver: string) =>
+  defaultInstanceIdForDriver(ProviderDriverKind.make(agentDriver));
 
 function enableChildProvider(
   existing: string,
   agentDriver: string,
-  providerInstanceId: string,
   homePath = "/home/user",
   devices = false,
 ): string {
@@ -124,7 +140,8 @@ function enableChildProvider(
   } catch {}
   const providers = settings.providers ?? {};
   const providerInstances = settings.providerInstances ?? {};
-  const existingInstance = providerInstances[providerInstanceId] ?? {};
+  const instanceId = guestInstanceId(agentDriver);
+  const existingInstance = providerInstances[instanceId] ?? {};
   const environment =
     agentDriver === "cursor"
       ? [
@@ -144,15 +161,31 @@ function enableChildProvider(
     ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
     providers: {
       ...providers,
+      // Only one agent CLI is installed here, so every other driver offers an
+      // account no turn can run on.
+      ...Object.fromEntries(
+        Object.keys(DEFAULT_SERVER_SETTINGS.providers)
+          .filter((driver) => driver !== agentDriver)
+          .map((driver) => [driver, { ...providers[driver], enabled: false }]),
+      ),
       [agentDriver]: { ...providers[agentDriver], enabled: true },
     },
     providerInstances: {
       ...providerInstances,
-      [providerInstanceId]: {
+      [instanceId]: {
         ...existingInstance,
         driver: agentDriver,
         enabled: true,
-        ...(agentDriver === "codex" ? { homePath: `${homePath}/.codex`, shadowHomePath: "" } : {}),
+        // Driver settings live under `config`; the contract drops them anywhere else.
+        ...(agentDriver === "codex"
+          ? {
+              config: {
+                ...existingInstance.config,
+                homePath: `${homePath}/.codex`,
+                shadowHomePath: "",
+              },
+            }
+          : {}),
         ...(environment ? { environment } : {}),
       },
     },
@@ -427,13 +460,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       if (settingsIndex !== -1) files.splice(settingsIndex, 1);
       // Environment entries reach the provider's child process without shell interpolation.
       const configuredSettings: unknown = JSON.parse(
-        enableChildProvider(
-          settings,
-          profile.kind,
-          input.providerInstanceId,
-          `${root}/home`,
-          input.provider === "namespace",
-        ),
+        enableChildProvider(settings, profile.kind, `${root}/home`, input.provider === "namespace"),
       );
       const parsedSettings = decodeSettings(configuredSettings);
       const environment = [];
@@ -446,6 +473,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
             reason: "unconfigured",
             message: "A configured environment variable would change the isolated home.",
           });
+        if (isForeignCredentialVariable(profile.kind, variable.name)) continue;
         environment.push({
           name: variable.name,
           value: (await NodeFSP.readFile(variable.source, "utf8")).trim(),
@@ -458,13 +486,14 @@ export function makeProvisionPreparationStore(stateDir: string) {
               ({ name, value }) => credentialVariables[profile.kind].includes(name) && value.trim(),
             )
           : [];
-      const selected = parsedSettings.providerInstances[input.providerInstanceId] ?? {};
+      const instanceId = guestInstanceId(profile.kind);
+      const selected = parsedSettings.providerInstances[instanceId] ?? {};
       const resultSettings = {
         ...decodeSettingsRecord(configuredSettings),
         ...parsedSettings,
         providerInstances: {
           ...parsedSettings.providerInstances,
-          [input.providerInstanceId]: {
+          [instanceId]: {
             ...selected,
             environment: [
               ...environment.filter(({ name }) => !credentials.some((c) => c.name === name)),

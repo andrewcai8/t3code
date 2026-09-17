@@ -248,6 +248,7 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
             shellEnvironment: [
               { name: "ANTHROPIC_API_KEY", source: missing },
               { name: "ANTHROPIC_AUTH_TOKEN", source: missing },
+              { name: "CURSOR_API_KEY", source: missing },
               { name: "ACCOUNT_LABEL", source: missing },
               { name: "PATH", source: missing },
               { name: "HOME", source: missing },
@@ -277,6 +278,8 @@ it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
         value: "independent-value",
         sensitive: true,
       });
+      // Another driver's login is not this account's to carry.
+      expect(prepared.environment.map(({ name }) => name)).not.toContain("CURSOR_API_KEY");
       yield* Effect.promise(() =>
         expect(
           resolvePreparation(
