@@ -54,7 +54,13 @@ const decodePhases = Schema.decodeUnknownSync(
   Schema.fromJsonString(
     Schema.Struct({
       phases: Schema.optionalKey(
-        Schema.Array(Schema.Struct({ phase: Schema.String, durationMs: Schema.Number })),
+        Schema.Array(
+          Schema.Struct({
+            phase: Schema.String,
+            durationMs: Schema.Number,
+            bytes: Schema.optionalKey(Schema.Number),
+          }),
+        ),
       ),
     }),
   ),
@@ -73,17 +79,30 @@ export async function prepareRemoteHost(
   input: RemotePreparationInput,
   record?: RecordProvisionPhase,
 ): Promise<RemotePreparationReady> {
+  const startedAt = performance.now();
   const result = await port.executePython({
     script: remotePreparationScript,
     stdin: JSON.stringify(input),
   });
+  const roundTripMs = performance.now() - startedAt;
   if (result.exitCode !== 0) {
     const detail = result.stderr?.trim();
     throw new Error(detail && detail.length > 0 ? detail : "Remote preparation failed.");
   }
   const ready = decodeReady(result.stdout);
-  for (const entry of decodePhases(result.stdout).phases ?? [])
-    record?.({ phase: `remote.${entry.phase}`, durationMs: entry.durationMs });
+  const phases = decodePhases(result.stdout).phases ?? [];
+  for (const entry of phases)
+    record?.({
+      phase: `remote.${entry.phase}`,
+      durationMs: entry.durationMs,
+      ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }),
+    });
+  // What the guest never sees: staging the script, streaming stdin, and the
+  // transport's own round trip. Reported so a slow channel cannot hide inside
+  // an untimed remainder.
+  const guestMs = phases.find((entry) => entry.phase === "prepareTotal")?.durationMs;
+  if (guestMs !== undefined)
+    record?.({ phase: "remote.transport", durationMs: Math.max(0, roundTripMs - guestMs) });
   return ready;
 }
 
@@ -91,6 +110,8 @@ export async function prepareRemoteHost(
 export const remotePreparationScript = String.raw`
 import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, time, urllib.request, uuid
 
+INTERPRETER_START = time.monotonic()
+STARTUP = []
 os.umask(0o077)
 
 def atomic(path, value):
@@ -151,6 +172,7 @@ def artifact_snapshot(root):
 
 def prepare(spec):
     phases = []
+    entered = time.monotonic()
     @contextlib.contextmanager
     def step(name):
         started = time.monotonic()
@@ -158,6 +180,9 @@ def prepare(spec):
             yield
         finally:
             phases.append({'phase': name, 'durationMs': round((time.monotonic() - started) * 1000)})
+    def mark(name, since):
+        phases.append({'phase': name, 'durationMs': round((time.monotonic() - since) * 1000)})
+    phases.extend(STARTUP)
     root = pathlib.Path(spec['root'])
     if not root.is_absolute() or root.is_symlink():
         raise RuntimeError('Preparation requires a private absolute root')
@@ -165,7 +190,9 @@ def prepare(spec):
     if root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise RuntimeError('Preparation root must be private to its owner')
     with open(root / 'prepare.lock', 'a') as lock:
+        locking = time.monotonic()
         fcntl.flock(lock, fcntl.LOCK_EX)
+        mark('lockWait', locking)
         def run(args, cwd, env, timeout=300):
             # A surviving Git or auth child retains the lock if its preparer dies.
             # Close stdin and disable terminal prompts so a private clone cannot
@@ -246,7 +273,9 @@ def prepare(spec):
         local_bin.mkdir(parents=True, exist_ok=True)
         # nsc exec python3 is not a login shell. Capture the guest login PATH
         # before HOME is remapped, so npm and curl stay resolvable.
+        probing = time.monotonic()
         login = subprocess.run(['sh', '-lc', 'printf %s "$PATH"'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        mark('loginPath', probing)
         base_path = login.stdout.strip() if login.returncode == 0 and login.stdout.strip() else os.environ.get('PATH', '')
         env = {key: os.environ[key] for key in ['LANG', 'TMPDIR', 'SYSTEMROOT'] if key in os.environ}
         env.update({
@@ -386,7 +415,8 @@ def prepare(spec):
                 target.chmod(0o600)
                 journal['installedFiles'].append(index)
                 atomic(journal_path, json.dumps(journal))
-        install_files('home')
+        with step('homeFiles'):
+            install_files('home')
         if not project.exists():
             with step('repositoryClone'):
                 stage = root / 'workspace.partial'
@@ -412,10 +442,12 @@ def prepare(spec):
                     run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)
                 os.rename(stage, project)
         if repository is not None:
-            if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
-                raise RuntimeError('Repository identity conflict')
-            run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
-        install_files('workspace')
+            with step('repositoryVerify'):
+                if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
+                    raise RuntimeError('Repository identity conflict')
+                run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
+        with step('workspaceFiles'):
+            install_files('workspace')
         install = spec.get('providerInstall')
         if install:
             if not isinstance(install, str) or not install.strip() or '\0' in install:
@@ -478,6 +510,7 @@ def prepare(spec):
             if 'already exists' not in detail.lower():
                 raise RuntimeError('Could not add the workspace as a project' + ((': ' + detail[-1500:]) if detail else ''))
         process = json.loads((root / 'server.json').read_text())
+        mark('prepareTotal', entered)
         return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': spec['artifact']['revision'], 'artifactSha256': spec['artifact']['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 
 SUPERVISOR = r"""
@@ -501,7 +534,11 @@ with open(root / 'server.lock', 'a') as lock:
 """
 
 try:
-    print(json.dumps(prepare(json.load(sys.stdin))))
+    reading = time.monotonic()
+    STARTUP.append({'phase': 'moduleInit', 'durationMs': round((reading - INTERPRETER_START) * 1000)})
+    payload = sys.stdin.read()
+    STARTUP.append({'phase': 'stdinRead', 'durationMs': round((time.monotonic() - reading) * 1000), 'bytes': len(payload)})
+    print(json.dumps(prepare(json.loads(payload))))
 except Exception as error:
     sys.stderr.write('Remote preparation failed: ' + str(error) + '\n')
     sys.exit(1)
