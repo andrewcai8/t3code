@@ -738,14 +738,6 @@ export const layer = Layer.effect(
                 }),
             });
           const sandboxId = resource.sandboxId;
-          if (allocation.kind === "fork")
-            yield* Effect.tryPromise({
-              try: () => runtime.dispose(operation, allocation.parent.sandboxId),
-              catch: () =>
-                new ProvisionProviderError({
-                  message: "The allocation parent could not be cleaned up.",
-                }),
-            });
           return yield* Effect.tryPromise({
             try: () => runtime.prepare(operation, sandboxId, manifest),
             catch: (error) =>

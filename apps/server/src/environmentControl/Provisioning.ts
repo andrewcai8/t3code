@@ -196,6 +196,16 @@ export class Provisioning extends Context.Service<
             });
             break;
           case "preparing": {
+            // A paused parent never expires, so kill it on every attempt. Dispose
+            // still lists the parent, which covers a kill that fails here.
+            if (state.allocation.kind === "fork")
+              yield* ports
+                .dispose(operation, state.allocation.parent)
+                .pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning("fork parent could not be killed", { error: error.message }),
+                  ),
+                );
             const prepared = yield* ports.prepare(operation, state.allocation).pipe(Effect.result);
             if (
               retentionExpired(

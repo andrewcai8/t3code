@@ -98,7 +98,10 @@ export function makeE2bAllocationPorts(config: E2bAllocationConfig): E2bAllocati
               request.retentionDeadline,
               request.strategy === "fork" ? config.parentTimeoutMs : config.sandboxTimeoutMs,
             ),
-            lifecycle: { onTimeout: "kill" },
+            // Pause, never delete, at timeout: an idle chat must survive until
+            // someone reconnects. Forks inherit this, so a fork parent is killed
+            // explicitly once its child is allocated.
+            lifecycle: { onTimeout: "pause" },
             ...(config.network ? { network: config.network } : {}),
           });
           await verifyRetentionDeadline(request.retentionDeadline, {

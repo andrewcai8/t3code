@@ -448,7 +448,7 @@ it.effect(
     Effect.gen(function* () {
       const file = yield* temporaryDatabase;
       const p = provider();
-      let fail = true;
+      let fail = false;
       const disposed = new Set<string>();
       const ports = {
         ...p.ports,
@@ -464,6 +464,8 @@ it.effect(
       yield* Effect.gen(function* () {
         const service = yield* Provisioning;
         yield* service.ensure(request);
+        disposed.clear();
+        fail = true;
         expect((yield* service.cancel(request.requestId)).state).toMatchObject({
           kind: "cancel_requested",
           lastError: "Cleanup reply lost",
@@ -596,6 +598,6 @@ it.effect(
       expect(
         (yield* ensure().pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped)).state,
       ).toEqual({ kind: "disposed" });
-      expect(disposed).toEqual([child, parent]);
+      expect(disposed).toEqual([parent, child, parent]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
