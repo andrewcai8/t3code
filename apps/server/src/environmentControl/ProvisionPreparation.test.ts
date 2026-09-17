@@ -376,6 +376,51 @@ it("gives a Claude account with a setup-token that token instead of a credential
   }
 });
 
+it("drops a copied credential file that the cloud token replaces", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.mkdir(NodePath.join(f.root, ".claude"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(f.root, ".claude/.credentials.json"), "stale-login");
+    await NodeFSP.writeFile(NodePath.join(f.root, ".gitignore-global"), "node_modules\n");
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        homeFiles: [
+          {
+            source: NodePath.join(f.root, ".claude/.credentials.json"),
+            destination: ".claude/.credentials.json",
+          },
+          { source: NodePath.join(f.root, ".codex/auth.json"), destination: ".codex/auth.json" },
+          { source: NodePath.join(f.root, ".gitignore-global"), destination: ".gitignore-global" },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(
+      inputFor("claudeAgent", "claude_personal"),
+      config,
+      f.resolver,
+      {
+        kind: "claudeAgent",
+        instanceId: ProviderInstanceId.make("claude_personal"),
+        environment: [
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+        ],
+        credential: { kind: "environment" },
+      },
+    );
+    expect(homeFile(manifest, ".claude/.credentials.json")).toBeUndefined();
+    // Only the selected driver's login is replaced. Copying the others is why
+    // homeFiles exists.
+    expect(homeFile(manifest, ".codex/auth.json")?.sha256).toBe(
+      provisionDigest("private-fixture-credential"),
+    );
+    expect(homeFile(manifest, ".gitignore-global")?.sha256).toBe(provisionDigest("node_modules\n"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("refuses a skill bundle that links out of itself", async () => {
   const f = await fixture();
   try {
