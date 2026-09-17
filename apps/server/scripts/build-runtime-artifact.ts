@@ -55,8 +55,12 @@ try {
     throw new Error(
       "apps/server/dist is older than apps/server/src; run `vp run --filter t3 build` first",
     );
+  // Source maps are two thirds of the archive and nothing on a provisioned
+  // guest reads them: the stack traces we debug come from the manager's own
+  // dist. Every megabyte here is uploaded again on every cold start.
   await NodeFSP.cp(NodePath.join(repoRoot, "apps/server/dist"), NodePath.join(stage, "dist"), {
     recursive: true,
+    filter: (source) => !source.endsWith(".map"),
   });
   const runtimePackage = {
     name: packageJson.name,
@@ -129,9 +133,12 @@ try {
       if (ci.status !== 0) throw new Error("npm could not install the runtime artifact");
     }
   }
+  // A `.gz` output is gzipped. Python's tarfile sniffs compression, so a guest
+  // extracts either form unchanged, and the compressed one crosses a home
+  // upstream several times faster.
   const archive = NodeChildProcess.spawnSync(
     "tar",
-    ["-cf", NodePath.resolve(output), "-C", stage, "."],
+    [output.endsWith(".gz") ? "-czf" : "-cf", NodePath.resolve(output), "-C", stage, "."],
     {
       stdio: "inherit",
       env: { ...process.env, COPYFILE_DISABLE: "1" },
