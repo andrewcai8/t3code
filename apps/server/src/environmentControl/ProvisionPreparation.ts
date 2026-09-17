@@ -281,6 +281,11 @@ async function skillFiles(source: string, limit: { remaining: number }) {
         continue;
       }
       if (entry.isDirectory()) {
+        // A skill is its prompts and scripts. Installed dependencies and Git
+        // history are host-shaped and enormous next to that: one checked-in
+        // node_modules turned a 850 KiB bundle into a 37 MiB one that every
+        // cold start re-encoded, shipped, and wrote out file by file.
+        if (entry.name === "node_modules" || entry.name === ".git") continue;
         await walk(absolute, relative);
         continue;
       }

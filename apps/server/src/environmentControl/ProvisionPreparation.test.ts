@@ -240,6 +240,38 @@ const homeFile = (
     (item) => item.scope === "home" && item.destination === destination,
   );
 
+it("leaves installed dependencies and Git history out of a skill bundle", async () => {
+  const f = await fixture();
+  try {
+    const source = await skillBundle(f.root);
+    await NodeFSP.mkdir(NodePath.join(source, "scripts/node_modules/typescript/lib"), {
+      recursive: true,
+    });
+    await NodeFSP.writeFile(
+      NodePath.join(source, "scripts/node_modules/typescript/lib/tsc"),
+      "a host binary\n",
+    );
+    await NodeFSP.mkdir(NodePath.join(source, ".git"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(source, ".git/HEAD"), "ref: refs/heads/main\n");
+    await NodeFSP.writeFile(NodePath.join(source, "scripts/run.sh"), "echo hi\n");
+    const config = {
+      ...f.config,
+      provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
+    expect(homeFile(manifest, ".codex/skills/pstack/scripts/run.sh")?.sha256).toBe(
+      provisionDigest("echo hi\n"),
+    );
+    expect(
+      manifest.preparation.files.filter(
+        (item) => item.destination.includes("node_modules") || item.destination.includes(".git/"),
+      ),
+    ).toEqual([]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("loads the configured skill bundle into the root the selected agent reads", async () => {
   const f = await fixture();
   try {
