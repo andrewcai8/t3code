@@ -1,8 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_MODEL,
+  DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_SERVER_SETTINGS,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -149,6 +151,35 @@ it.effect("resolveWelcomeBase derives cwd and project name from server config", 
     });
   }),
 );
+
+it("getAutoBootstrapThreadModelSelection prefers codex when it is enabled", () => {
+  const selection =
+    ServerRuntimeStartup.getAutoBootstrapThreadModelSelection(DEFAULT_SERVER_SETTINGS);
+
+  assert.deepStrictEqual(selection, {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: DEFAULT_MODEL,
+  });
+});
+
+it("getAutoBootstrapThreadModelSelection falls back to the enabled instance on a provisioned box", () => {
+  // The shape a cloud box provisioned for Claude ends up with: codex
+  // disabled, only the claudeAgent driver enabled.
+  const claudeOnlySettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    providers: {
+      ...DEFAULT_SERVER_SETTINGS.providers,
+      codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+    },
+  };
+
+  const selection = ServerRuntimeStartup.getAutoBootstrapThreadModelSelection(claudeOnlySettings);
+
+  assert.deepStrictEqual(selection, {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")]!,
+  });
+});
 
 it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and thread ids", () => {
   const bootstrapProjectId = ProjectId.make("project-startup-bootstrap");

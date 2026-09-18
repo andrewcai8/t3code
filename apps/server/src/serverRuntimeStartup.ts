@@ -1,6 +1,7 @@
 import {
   CommandId,
   DEFAULT_MODEL,
+  DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_SERVER_SETTINGS,
   type ServerSettings as ServerSettingsValue,
@@ -8,6 +9,7 @@ import {
   type OrchestrationProjectShell,
   ProjectId,
   ProviderInstanceId,
+  resolveProviderInstanceEnabled,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -39,6 +41,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import { deriveProviderInstanceConfigMap } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
@@ -171,10 +174,40 @@ const recordStartupHeartbeat = Effect.gen(function* () {
   });
 });
 
-const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
+const AUTO_BOOTSTRAP_FALLBACK_MODEL_SELECTION: ModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: DEFAULT_MODEL,
-});
+};
+
+/**
+ * A provisioned cloud box enables exactly one driver and disables the rest,
+ * so a selection hardcoded to the `codex` instance points a fresh box at a
+ * provider it just disabled. Prefer codex when it's actually enabled, which
+ * is every local install today, then fall back to whichever instance the
+ * box's settings did enable.
+ */
+export const getAutoBootstrapThreadModelSelection = (
+  settings: ServerSettingsValue,
+): ModelSelection => {
+  const instances = deriveProviderInstanceConfigMap(settings);
+  const codexInstanceId = ProviderInstanceId.make("codex");
+  const codexInstance = instances[codexInstanceId];
+
+  const chosen =
+    codexInstance !== undefined && resolveProviderInstanceEnabled(codexInstance)
+      ? ([codexInstanceId, codexInstance] as const)
+      : Object.entries(instances).find(([, instance]) => resolveProviderInstanceEnabled(instance));
+
+  if (chosen === undefined) {
+    return AUTO_BOOTSTRAP_FALLBACK_MODEL_SELECTION;
+  }
+
+  const [chosenInstanceId, chosenInstance] = chosen;
+  return {
+    instanceId: ProviderInstanceId.make(chosenInstanceId),
+    model: DEFAULT_MODEL_BY_PROVIDER[chosenInstance.driver] ?? DEFAULT_MODEL,
+  };
+};
 
 export const resolveWelcomeBase = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
@@ -203,7 +236,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   if (serverConfig.autoBootstrapProjectFromCwd) {
     const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
     const defaultModelSelection =
-      settings.defaultModelSelection ?? getAutoBootstrapThreadModelSelection();
+      settings.defaultModelSelection ?? getAutoBootstrapThreadModelSelection(settings);
     yield* Effect.gen(function* () {
       const existingProject = yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
         serverConfig.cwd,
