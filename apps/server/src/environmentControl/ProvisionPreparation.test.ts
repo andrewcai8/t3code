@@ -322,7 +322,7 @@ it("follows the selected agent when the same bundle is provisioned for Cursor", 
       credential: {
         kind: "file",
         source: NodePath.join(f.root, ".t3/userdata/cursor-homes/cursor/.cursor/auth.json"),
-        destination: ".config/cursor/auth.json",
+        destination: ".cursor/auth.json",
       },
     };
     const manifest = await f.store.freeze(
@@ -336,6 +336,50 @@ it("follows the selected agent when the same bundle is provisioned for Cursor", 
     expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
       provisionDigest("cursor-fixture-credential"),
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("runs a Cursor guest on the selected account, not a copied credential", async () => {
+  const f = await fixture();
+  try {
+    const selected = NodePath.join(f.root, ".t3/userdata/cursor-homes/cursor_other/.cursor");
+    await NodeFSP.mkdir(selected, { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(selected, "auth.json"), "selected-account");
+    await NodeFSP.mkdir(NodePath.join(f.root, ".cursor"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(f.root, ".cursor/auth.json"), "install-wide-account");
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        // An operator who once pinned one account leaves this behind, and a
+        // Linux guest reads exactly this path.
+        homeFiles: [
+          {
+            source: NodePath.join(f.root, ".cursor/auth.json"),
+            destination: ".config/cursor/auth.json",
+          },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(inputFor("cursor", "cursor_other"), config, f.resolver, {
+      kind: "cursor",
+      instanceId: ProviderInstanceId.make("cursor_other"),
+      environment: [],
+      credential: {
+        kind: "file",
+        source: NodePath.join(selected, "auth.json"),
+        // The manager resolves its own platform's path; the guest is Linux.
+        destination: ".cursor/auth.json",
+      },
+    });
+    expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
+      provisionDigest("selected-account"),
+    );
+    // A file at the macOS path is one the Linux CLI never reads, and one more
+    // copy of a live login on the machine.
+    expect(homeFile(manifest, ".cursor/auth.json")).toBeUndefined();
   } finally {
     await f.cleanup();
   }

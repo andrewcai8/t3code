@@ -55,6 +55,20 @@ export const credentialDestinations = {
 };
 
 /**
+ * Where the selected account's credential file belongs inside a guest home.
+ *
+ * Cursor's file credential store is platform-specific: a Linux guest reads
+ * `.config/cursor/auth.json` while a macOS one reads `.cursor/auth.json`. The
+ * manager resolves the source path from its own platform, so the destination
+ * has to be restated for the machine the credential is going to.
+ */
+export const guestCredentialDestination = (
+  kind: keyof typeof credentialDestinations,
+  destination: string,
+  provider: "e2b" | "namespace",
+) => (kind === "cursor" && provider === "e2b" ? ".config/cursor/auth.json" : destination);
+
+/**
  * Whether a variable is some other driver's login.
  *
  * An operator's `shellEnvironment` holds a key per account they provision
@@ -239,14 +253,13 @@ export async function resolvePreparation(
       });
     files.set(destination, { source: file.source, destination, mode: "600" });
   }
-  if (profile.kind === "cursor" && provider === "e2b") {
-    const credential = files.get(".cursor/auth.json");
-    if (credential) {
-      files.delete(".cursor/auth.json");
-      files.set(".config/cursor/auth.json", {
-        ...credential,
-        destination: ".config/cursor/auth.json",
-      });
+  if (profile.credential.kind === "file") {
+    const from = profile.credential.destination;
+    const to = guestCredentialDestination(profile.kind, from, provider);
+    const credential = files.get(from);
+    if (to !== from && credential) {
+      files.delete(from);
+      files.set(to, { ...credential, destination: to });
     }
   }
   if (profile.credential.kind === "environment")

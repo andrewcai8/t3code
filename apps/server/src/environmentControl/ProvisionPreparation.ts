@@ -20,6 +20,7 @@ import { repositoryUrl } from "./driver.ts";
 import {
   credentialDestinations,
   credentialVariables,
+  guestCredentialDestination,
   isForeignCredentialVariable,
   ProvisionRefused,
   type ProvisioningProviderProfile,
@@ -437,15 +438,18 @@ export function makeProvisionPreparationStore(stateDir: string) {
       // A configured home file never decides which login the selected account
       // uses. A CLI handed a stale credentials file prefers it over the token
       // and fails the turn refreshing a login this manager no longer keeps,
-      // so the credential provisioning resolved replaces any copy of it.
-      const replaced = new Set(
-        profile.credential.kind === "file"
-          ? [profile.credential.destination]
-          : credentialDestinations[profile.kind],
-      );
+      // so the credential provisioning resolved replaces every copy of it --
+      // including the ones a file credential does not itself write, which a
+      // guest on another platform would read first.
+      const replaced = new Set(credentialDestinations[profile.kind]);
       files = files.filter((item) => !(item.scope === "home" && replaced.has(item.destination)));
       if (profile.credential.kind === "file") {
-        const { source, destination } = profile.credential;
+        const { source } = profile.credential;
+        const destination = guestCredentialDestination(
+          profile.kind,
+          profile.credential.destination,
+          input.provider,
+        );
         const credential = await NodeFSP.readFile(source).catch(() => {
           throw new ProvisionRefused({
             reason: "credentials",
