@@ -257,7 +257,13 @@ with urllib.request.urlopen(request, timeout=30) as response:
       };
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
-      await connect(operation, sandboxId);
+      try {
+        await connect(operation, sandboxId);
+        return "running" as const;
+      } catch (error) {
+        if (error instanceof SandboxNotFoundError) return "missing" as const;
+        throw error;
+      }
     },
   };
 }

@@ -883,7 +883,7 @@ export const layer = Layer.effect(
           const resource = operation.state.allocation.resource;
           if (resource.provider === "namespace")
             return (await resolveNamespace()).runtime.touch(operation, resource);
-          await makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).touch(
+          return makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }).touch(
             operation,
             resource.sandboxId,
           );

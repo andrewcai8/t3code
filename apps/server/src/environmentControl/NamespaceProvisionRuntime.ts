@@ -644,7 +644,15 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       return publish(operation, resource, manifest, recordedProxy);
     },
     touch: async (operation: ProvisionOperation, resource: NamespaceResource) => {
-      await retain(await running(operation, resource), operation.request.retentionDeadline);
+      // Only a vanished Devbox record is "missing". A record with no instance
+      // is a shutdown machine, which is an error here as it always was.
+      const instanceId = await running(operation, resource).catch((error: unknown) => {
+        if (isNotFound(error)) return null;
+        throw error;
+      });
+      if (instanceId === null) return "missing" as const;
+      await retain(instanceId, operation.request.retentionDeadline);
+      return "running" as const;
     },
     /** Only the registry's imported legacy lease IDs may call this operation-independent path. */
     retainImportedLease: async (resource: ImportedNamespaceResource) => {

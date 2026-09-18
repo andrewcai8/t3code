@@ -454,6 +454,21 @@ it.effect("expired requests never allocate, fork or reconnect", () =>
   }),
 );
 
+it.effect("actual SDK heartbeat reports a sandbox E2B no longer has as missing", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const ports = makeE2bAllocationPorts(f.config);
+    const parent = yield* ports.create(operation);
+    if (parent.provider !== "e2b") throw new Error("Expected E2B parent");
+    const runtime = makeE2bProvisionRuntime(f.config.connection);
+    expect(yield* Effect.promise(() => runtime.touch(operation, parent.sandboxId))).toBe("running");
+    f.resources.splice(0);
+    expect(yield* Effect.promise(() => runtime.touch(operation, parent.sandboxId))).toBe("missing");
+    expect(f.connects).toHaveLength(1);
+    expect(f.errors).toEqual([]);
+  }),
+);
+
 it.effect(
   "actual SDK refuses a reconnect whose deadline remains above the cap after correction",
   () =>

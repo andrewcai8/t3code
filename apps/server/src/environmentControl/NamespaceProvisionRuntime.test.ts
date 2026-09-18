@@ -479,7 +479,7 @@ describe("Namespace runtime transport", () => {
       stateDir: f.directory,
     });
     const before = DateTime.toEpochMillis(DateTime.nowUnsafe());
-    await runtime.touch(f.operation, resource);
+    expect(await runtime.touch(f.operation, resource)).toBe("running");
     expect(DateTime.toEpochMillis(DateTime.makeUnsafe(f.state.deadline))).toBeGreaterThanOrEqual(
       before + 21_600_000,
     );
@@ -491,6 +491,21 @@ describe("Namespace runtime transport", () => {
     f.state.creator = "another-owner";
     await expect(runtime.retainImportedLease(resource)).rejects.toThrow("configured account");
     expect(f.apiCalls.filter(({ method }) => method === "ExtendInstance")).toHaveLength(1);
+  });
+
+  it("reports a Devbox the provider no longer has as missing instead of failing", async () => {
+    const f = await fixture();
+    const runtime = makeNamespaceProvisionRuntime({
+      session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
+      stateDir: f.directory,
+    });
+    f.state.expired = true;
+    expect(await runtime.touch(f.operation, resource)).toBe("missing");
+    expect(f.apiCalls.filter(({ method }) => method === "ExtendInstance")).toEqual([]);
+    f.state.expired = false;
+    f.state.instanceId = "";
+    await expect(runtime.touch(f.operation, resource)).rejects.toThrow("not running");
   });
 
   it("sets the immutable cap even when the existing provider deadline is later", async () => {

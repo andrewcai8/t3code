@@ -47,7 +47,11 @@ export interface ProvisionControlPorts {
     readonly namespaceProxy?: NamespaceProxyLease;
     readonly remoteAccess: RemoteAccess;
   }>;
-  readonly touch: (operation: ProvisionOperation) => Promise<void>;
+  /**
+   * Extends the provider's deadline and reports whether the resource is still
+   * there. The runtime that owns the provider decides what "gone" looks like.
+   */
+  readonly touch: (operation: ProvisionOperation) => Promise<"running" | "missing">;
 }
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
@@ -100,6 +104,11 @@ const reportUnexpected = <A, E, R>(effect: Effect.Effect<A, E | UnexpectedCause,
   );
 const promise = <A>(run: () => Promise<A>) =>
   logCause(Effect.tryPromise({ try: run, catch: safeError }));
+const missing: EnvironmentProvisionTouchResult = {
+  kind: "refused",
+  reason: "missing",
+  message: "The provider no longer has this workspace. It cannot be reconnected.",
+};
 
 export function makeProvisionControl(
   store: ProvisionOperationStore["Service"],
@@ -300,13 +309,17 @@ export function makeProvisionControl(
           message: "This environment's retention deadline has ended.",
         };
       const lease = yield* activeLease(operation);
+      if (lease?.state === "missing") return missing;
       if (lease?.state !== "active" || lease.owner === null)
         return {
           kind: "refused",
           reason: "unknown",
           message: "This environment has no active claimed lease.",
         };
-      yield* remote(operation, () => ports.touch(operation));
+      if ((yield* remote(operation, () => ports.touch(operation))) === "missing") {
+        yield* promise(() => leases.markMissing(input.leaseId));
+        return missing;
+      }
       const touched = yield* promise(() => leases.touch(input.leaseId));
       return touched
         ? { kind: "touched" }

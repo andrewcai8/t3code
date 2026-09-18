@@ -117,6 +117,7 @@ it.effect(
             touch: async () => {
               calls.push("touch-provider");
               if (rejectTouch) throw new Error("provider unavailable");
+              return "running" as const;
             },
           },
           leases,
@@ -247,7 +248,7 @@ it.effect(
               },
             };
           },
-          touch: async () => undefined,
+          touch: async () => "running" as const,
         },
         leases,
       );
@@ -266,6 +267,78 @@ it.effect(
       expect(received).toEqual([undefined, namespaceProxy]);
       expect(yield* Effect.promise(() => leases.findById(namespaceInput.requestId))).toMatchObject({
         remoteAccess: { origin: "http://127.0.0.1:50766", brokerToken: "broker-2" },
+      });
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "a heartbeat the provider answers with a gone box refuses as missing and marks the lease",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      let provider: "running" | "missing" = "running";
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, {
+          create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
+          recoverCreate: () => Effect.succeed([]),
+          fork: () => Effect.die("unexpected fork"),
+          recoverFork: () => Effect.succeed([]),
+          dispose: () => Effect.void,
+          prepare: () =>
+            Effect.succeed({
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/private/operation/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: "c".repeat(40),
+              artifactSha256: "b".repeat(64),
+            }),
+        }),
+      );
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          freeze: async () => manifest,
+          load: async () => manifest,
+          attach: async () => ({
+            pairingUrl: "https://remote/pair#token=grant",
+            remoteAccess: { origin: "https://remote", brokerToken: "private-broker" },
+          }),
+          touch: async () => provider,
+        },
+        leases,
+      );
+      expect(yield* control.provision(input)).toMatchObject({ kind: "ready" });
+      yield* Effect.promise(() =>
+        leases.claim({
+          leaseId: input.requestId,
+          owner: { environmentId: "remote", threadId: "thread" },
+        }),
+      );
+      expect(yield* control.touch({ leaseId: input.requestId })).toEqual({ kind: "touched" });
+      provider = "missing";
+      const missing = {
+        kind: "refused",
+        reason: "missing",
+        message: "The provider no longer has this workspace. It cannot be reconnected.",
+      };
+      expect(yield* control.touch({ leaseId: input.requestId })).toEqual(missing);
+      expect(yield* Effect.promise(() => leases.findById(input.requestId))).toMatchObject({
+        state: "missing",
+      });
+      expect(yield* control.touch({ leaseId: input.requestId })).toEqual(missing);
+      expect(yield* control.attach({ requestId: input.requestId })).toMatchObject({
+        kind: "refused",
       });
     }).pipe(
       Effect.provide(
