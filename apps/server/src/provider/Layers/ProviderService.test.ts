@@ -827,7 +827,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
     );
 
     assert.instanceOf(failure, ProviderValidationError);
-    assert.include(failure.issue, "Provider instance 'claudeAgent' is disabled");
+    assert.equal(failure.issue, "Claude is not available in this environment. Use Codex instead.");
     assert.equal(claude.startSession.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
@@ -981,7 +981,10 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     );
 
     assert.instanceOf(failure, ProviderValidationError);
-    assert.include(failure.issue, "Provider instance 'codex_personal' is disabled");
+    assert.equal(
+      failure.issue,
+      "Codex Personal is not available in this environment, and no other agent is enabled. Enable one in Settings to continue.",
+    );
     assert.equal(codex.startSession.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

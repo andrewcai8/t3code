@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  isProviderAvailable,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -33,12 +34,12 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
-import {
-  ProviderAdapterRequestError,
-  ProviderAdapterValidationError,
-  ProviderWorkspaceMissingError,
-} from "../../provider/Errors.ts";
+import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
+import {
+  describeUnavailableProviderInstance,
+  providerFailureDetail,
+} from "../../provider/providerFailureDetail.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -64,8 +65,6 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 // update, so a revived thread reads the same to the provider either way.
 const REVIVAL_CONTINUATION_PROMPT = "Continue where you left off.";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
-const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
-const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
 type ProviderIntentEvent = Extract<
@@ -488,20 +487,6 @@ const make = Effect.gen(function* () {
     if (turnsAfterCompaction.get(threadId) === queued) turnsAfterCompaction.delete(threadId);
   });
 
-  const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
-    const failReason = cause.reasons.find(Cause.isFailReason);
-    if (isProviderAdapterRequestError(failReason?.error)) {
-      return failReason.error.detail;
-    }
-    if (isProviderAdapterValidationError(failReason?.error)) {
-      return failReason.error.issue;
-    }
-    if (isProviderWorkspaceMissingError(failReason?.error)) {
-      return failReason.error.message;
-    }
-    return Cause.pretty(cause);
-  };
-
   const setThreadSession = (input: {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
@@ -807,15 +792,24 @@ const make = Effect.gen(function* () {
       ),
     );
     const desiredInfo = yield* providerService.getInstanceInfo(desiredInstanceId).pipe(
-      Effect.mapError(
-        () =>
-          new ProviderAdapterRequestError({
-            provider: providerErrorLabelFromInstanceHint({
-              instanceId: String(desiredModelSelection.instanceId),
-            }),
-            method: "thread.turn.start",
-            detail: `Requested provider instance '${desiredInstanceId}' is not configured in this build.`,
-          }),
+      Effect.catch(() =>
+        providerRegistry.getProviders.pipe(
+          Effect.flatMap(
+            (providers) =>
+              new ProviderAdapterRequestError({
+                provider: providerErrorLabelFromInstanceHint({
+                  instanceId: String(desiredModelSelection.instanceId),
+                }),
+                method: "thread.turn.start",
+                detail: describeUnavailableProviderInstance({
+                  requested: { instanceId: desiredInstanceId },
+                  offered: providers.filter(
+                    (snapshot) => snapshot.enabled && isProviderAvailable(snapshot),
+                  ),
+                }),
+              }),
+          ),
+        ),
       ),
     );
     const desiredDriverKind = desiredInfo.driverKind;
@@ -1409,12 +1403,18 @@ const make = Effect.gen(function* () {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
-      const detail = formatFailureDetail(cause);
-      return setThreadSessionErrorOnTurnStartFailure({
+      const detail = providerFailureDetail(cause);
+      return Effect.logWarning("provider turn start failed", {
         threadId: event.payload.threadId,
-        detail,
-        createdAt: event.payload.createdAt,
+        cause: Cause.pretty(cause),
       }).pipe(
+        Effect.andThen(
+          setThreadSessionErrorOnTurnStartFailure({
+            threadId: event.payload.threadId,
+            detail,
+            createdAt: event.payload.createdAt,
+          }),
+        ),
         Effect.flatMap(() => appendTurnStartFailure("Provider turn start failed", detail)),
         Effect.asVoid,
       );
@@ -1520,7 +1520,7 @@ const make = Effect.gen(function* () {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
-      const detail = formatFailureDetail(cause);
+      const detail = providerFailureDetail(cause);
       if (!compactionSessionEnsured) {
         return setThreadSessionErrorOnTurnStartFailure({
           threadId: event.payload.threadId,
@@ -1686,7 +1686,7 @@ const make = Effect.gen(function* () {
         return Effect.interrupt;
       }
 
-      const detail = formatFailureDetail(cause);
+      const detail = providerFailureDetail(cause);
       return Effect.gen(function* () {
         const latestThread = yield* resolveThreadShell(event.payload.threadId);
         const latestSession = latestThread?.session;
@@ -1874,7 +1874,7 @@ const make = Effect.gen(function* () {
           if (Cause.hasInterruptsOnly(cause)) {
             return Effect.interrupt;
           }
-          const detail = formatFailureDetail(cause);
+          const detail = providerFailureDetail(cause);
           return Effect.sync(() => {
             stoppingThreadIds.delete(thread.id);
             return wasCompacting && !compactingThreadIds.has(thread.id);

@@ -53,6 +53,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Stream from "effect/Stream";
 
+import { describeUnavailableProviderInstance } from "../providerFailureDetail.ts";
 import { appendUserInputAttachmentPaths } from "../userInputAttachments.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
@@ -1429,9 +1430,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           provider: resolvedProvider,
         };
         if (!instanceInfo.enabled) {
+          const instanceIds = yield* registry.listInstances();
+          const instances = yield* Effect.forEach(instanceIds, (instanceId) =>
+            registry.getInstanceInfo(instanceId).pipe(Effect.option),
+          );
           return yield* toValidationError(
             "ProviderService.startSession",
-            `Provider instance '${resolvedInstanceId}' is disabled in T3 Code settings.`,
+            describeUnavailableProviderInstance({
+              requested: {
+                instanceId: resolvedInstanceId,
+                driver: instanceInfo.driverKind,
+                displayName: instanceInfo.displayName,
+              },
+              offered: instances.flatMap((info) =>
+                Option.isSome(info) && info.value.enabled
+                  ? [
+                      {
+                        instanceId: info.value.instanceId,
+                        driver: info.value.driverKind,
+                        displayName: info.value.displayName,
+                      },
+                    ]
+                  : [],
+              ),
+            }),
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
