@@ -25,6 +25,9 @@ const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown
 const decodeExtensionRequest = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ newDeadline: Schema.optional(Schema.String) })),
 );
+const decodeArtifactRequest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ path: Schema.String })),
+);
 const decodeToken = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ bearer_token: Schema.String })),
 );
@@ -100,6 +103,8 @@ async function fixture() {
     destroyed: false,
     expireOnShutdown: false,
     describedInstanceId: "owned-instance",
+    resolved: 0,
+    artifactOrigin: "https://artifacts.invalid",
   };
   const apiCalls: Array<{ method: string; body: unknown }> = [];
   const api = await listen((request, response) => {
@@ -125,6 +130,15 @@ async function fixture() {
               deadline: state.deadline,
               ...(state.destroyed ? { destroyedAt: DateTime.formatIso(DateTime.nowUnsafe()) } : {}),
             },
+          }),
+        );
+        return;
+      }
+      if (method === "ResolveArtifact") {
+        state.resolved += 1;
+        response.end(
+          encodeJson({
+            signedDownloadUrl: `${state.artifactOrigin}/${decodeArtifactRequest(body).path}?attempt=${state.resolved}`,
           }),
         );
         return;
@@ -167,6 +181,7 @@ async function fixture() {
     token,
     apiUrl: api.origin,
     computeApiUrl: api.origin,
+    artifactsApiUrl: api.origin,
     execute: async ({ args, env }) => {
       const tokenFile = env.NSC_TOKEN_FILE;
       if (!tokenFile) throw new Error("CLI had no explicit credential file");
@@ -784,6 +799,70 @@ describe("Namespace runtime transport", () => {
     expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
     expect(await started()).toBe("start\nstart\n");
     expect(archiveUploads()).toHaveLength(1);
+  });
+
+  it("resolves a fresh artifact URL on every convergence and refuses one that is not private HTTPS", async () => {
+    const f = await fixture();
+    const bundle = NodePath.join(f.directory, "bundle");
+    await NodeFSP.mkdir(bundle);
+    await NodeFSP.writeFile(NodePath.join(bundle, "cli.mjs"), fixtureCli);
+    const archive = NodePath.join(f.directory, "runtime.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archive, "-C", bundle, "cli.mjs"]);
+    const sha256 = provisionDigest(await NodeFSP.readFile(archive));
+    const volume = NodePath.join(f.directory, "volume");
+    const manifest = decodeManifest({
+      input: { requestId, provider: "namespace", providerInstanceId: "codex" },
+      request: f.request,
+      preparation: {
+        requestId,
+        root: NodePath.join(volume, "t3-provision", requestId),
+        repository: null,
+        artifact: {
+          archivePath: `${volume}/t3-runtime-${sha256}.tar`,
+          sha256,
+          revision: "c".repeat(40),
+          entrypoint: "cli.mjs",
+        },
+        runtimeExecutable: process.execPath,
+        port: await freePort(),
+        readinessTimeoutSeconds: 2,
+        brokerTtl: "1h",
+        artifacts: [
+          { path: "baseline/xcode.bin", destination: "baseline.bin", sha256: "1".repeat(64) },
+        ],
+        files: [],
+      },
+      localArtifact: {
+        path: archive,
+        sha256,
+        revision: "c".repeat(40),
+        entrypoint: "cli.mjs",
+        runtimeExecutable: process.execPath,
+      },
+      egressAllow: [],
+    });
+    const runtime = makeNamespaceProvisionRuntime({ session: f.session, stateDir: f.directory });
+    const resolutions = () =>
+      f.apiCalls.filter(({ method }) => method === "ResolveArtifact").map(({ body }) => body);
+    // A signed URL the direct path would download from. Nothing on this
+    // machine serves it, so the guest's download is what fails, after the
+    // manager resolved it and handed it over.
+    await expect(runtime.prepare(f.operation, resource, manifest)).rejects.toThrow(
+      "Artifact download failed",
+    );
+    expect(resolutions()).toEqual([{ namespace: "main", path: "baseline/xcode.bin" }]);
+    await expect(runtime.prepare(f.operation, resource, manifest)).rejects.toThrow(
+      "Artifact download failed",
+    );
+    expect(resolutions()).toHaveLength(2);
+    const attempts = () =>
+      f.commands.filter((args) => args[0] === "upload" && args[3]?.endsWith("/input.json"));
+    expect(attempts()).toHaveLength(2);
+    f.state.artifactOrigin = "http://artifacts.invalid";
+    await expect(runtime.prepare(f.operation, resource, manifest)).rejects.toThrow(
+      "private HTTPS download URL",
+    );
+    expect(attempts()).toHaveLength(2);
   });
 
   it("accepts provider removal of the devbox during shutdown", async () => {

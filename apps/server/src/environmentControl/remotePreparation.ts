@@ -39,6 +39,23 @@ export interface RemotePreparationInput {
    * otherwise, so the first thing every agent does is install one.
    */
   readonly prepareCommands?: ReadonlyArray<string> | undefined;
+  /** Artifacts fetched by the guest into the isolated home before setup runs. */
+  readonly artifacts?:
+    | ReadonlyArray<{
+        readonly path: string;
+        readonly destination: string;
+        readonly sha256: string;
+      }>
+    | undefined;
+  /**
+   * Where each artifact is fetched from, by `path`. Kept apart from the frozen
+   * descriptors because a signed URL expires in minutes while a manifest is
+   * replayed for as long as its environment lives, so a URL is resolved per
+   * attempt and never becomes part of the preparation's identity.
+   */
+  readonly artifactSources?:
+    | ReadonlyArray<{ readonly path: string; readonly url: string }>
+    | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
@@ -263,7 +280,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key != 'artifactSources'}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
@@ -454,6 +471,40 @@ def prepare(spec):
                 run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
         with step('workspaceFiles'):
             install_files('workspace')
+        def fetch_artifact(url, target, expected):
+            temp = target.with_name(target.name + '.preparing')
+            try:
+                result = hashlib.sha256()
+                with urllib.request.urlopen(url, timeout=60) as response, open(temp, 'wb') as output:
+                    for chunk in iter(lambda: response.read(1024 * 1024), b''):
+                        result.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if result.hexdigest() != expected:
+                    raise RuntimeError('Artifact download digest mismatch')
+                os.replace(temp, target)
+            except OSError as error:
+                raise RuntimeError('Artifact download failed: ' + str(error))
+            finally:
+                if temp.exists():
+                    temp.unlink()
+            target.chmod(0o600)
+        artifacts = spec.get('artifacts') or []
+        if artifacts:
+            sources = {source['path']: source['url'] for source in spec.get('artifactSources') or []}
+            with step('artifacts'):
+                for entry in artifacts:
+                    url = sources.get(entry['path'])
+                    if not url:
+                        raise RuntimeError('Artifact has no download source: ' + entry['path'])
+                    target = contained(home, entry['destination'])
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists():
+                        if digest(target) != entry['sha256']:
+                            raise RuntimeError('Refusing to overwrite an existing artifact')
+                        continue
+                    fetch_artifact(url, target, entry['sha256'])
         install = spec.get('providerInstall')
         if install:
             if not isinstance(install, str) or not install.strip() or '\0' in install:

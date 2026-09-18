@@ -52,6 +52,13 @@ async function fixture() {
           entrypoint: "dist/bin.mjs",
           runtimeExecutable: "node",
         },
+        macos: {
+          path: NodePath.join(root, "runtime.tar"),
+          sha256: provisionDigest("artifact"),
+          revision: "c".repeat(40),
+          entrypoint: "dist/bin.mjs",
+          runtimeExecutable: "node",
+        },
       },
     },
   };
@@ -668,6 +675,62 @@ it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in
       false,
     );
   } finally {
+    await f.cleanup();
+  }
+});
+
+it("hands a cloud Mac the artifacts configured for it, by identity rather than by URL", async () => {
+  const f = await fixture();
+  try {
+    const baseline = {
+      path: "baseline/xcode.tar.zst",
+      destination: "baseline.tar.zst",
+      sha256: "1".repeat(64),
+    };
+    const override = {
+      path: "baseline/repo.tar.zst",
+      destination: "repo.tar.zst",
+      sha256: "2".repeat(64),
+    };
+    const config = {
+      ...f.config,
+      namespaceToken,
+      provisioning: {
+        ...f.config.provisioning!,
+        namespace: { size: "m", artifacts: [baseline] },
+        repositories: [{ repository: "example/other", namespace: { artifacts: [override] } }],
+      },
+    };
+    const platform = await f.store.freeze(
+      decodeProvisionInput({ ...input, provider: "namespace" }),
+      config,
+      f.resolver,
+      f.profile,
+    );
+    expect(platform.preparation.artifacts).toEqual([baseline]);
+    const repository = await makeProvisionPreparationStore(f.root + "-repo").freeze(
+      decodeProvisionInput({
+        ...input,
+        requestId: "6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f",
+        provider: "namespace",
+        repository: "example/other",
+      }),
+      config,
+      f.resolver,
+      f.profile,
+    );
+    expect(repository.preparation.artifacts).toEqual([override]);
+    expect(repository.request.buildHash).not.toBe(platform.request.buildHash);
+    const e2b = await makeProvisionPreparationStore(f.root + "-e2b").freeze(
+      input,
+      config,
+      f.resolver,
+      f.profile,
+    );
+    expect(e2b.preparation.artifacts).toBeUndefined();
+  } finally {
+    for (const suffix of ["-repo", "-e2b"])
+      await NodeFSP.rm(f.root + suffix, { recursive: true, force: true });
     await f.cleanup();
   }
 });

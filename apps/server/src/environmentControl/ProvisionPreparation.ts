@@ -60,6 +60,11 @@ const Preparation = Schema.Struct({
   readinessTimeoutSeconds: Schema.Int,
   brokerTtl: Schema.String,
   prepareCommands: Schema.optional(Schema.Array(Schema.String)),
+  artifacts: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ path: Schema.String, destination: Schema.String, sha256: Sha256 }),
+    ),
+  ),
   files: Schema.Array(File),
 });
 export const ProvisionPreparationManifest = Schema.Struct({
@@ -575,16 +580,24 @@ export function makeProvisionPreparationStore(stateDir: string) {
       // What an operator configured for this repository on this platform, the
       // same precedence the direct preparation path applies: a repository
       // entry replaces the platform default rather than adding to it.
-      const repositorySetup = input.repository
+      const repositoryEntry = input.repository
         ? provisioning.repositories?.find(
             (entry) =>
               canonicalRepository(entry.repository) === canonicalRepository(input.repository!),
-          )?.[input.provider]
+          )
         : undefined;
+      const repositorySetup = repositoryEntry?.[input.provider];
       const prepareCommands =
         repositorySetup?.prepareCommands ??
         (input.provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
         [];
+      // Identity only. The download URL Namespace signs for an artifact
+      // expires long before this manifest stops being replayed, so each
+      // convergence resolves one afresh.
+      const artifacts =
+        input.provider === "namespace"
+          ? (repositoryEntry?.namespace?.artifacts ?? provisioning.namespace?.artifacts ?? [])
+          : [];
       const build = {
         repository,
         artifact: {
@@ -601,6 +614,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         // Part of `build`: a checkout nobody prepared is a different machine
         // from one that was, so two requests only match when these match.
         ...(prepareCommands.length ? { prepareCommands } : {}),
+        ...(artifacts.length ? { artifacts } : {}),
       };
       const preparation = {
         ...build,

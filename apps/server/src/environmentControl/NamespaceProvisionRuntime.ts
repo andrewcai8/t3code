@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
+import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import type { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -81,6 +82,7 @@ export async function makeNamespaceAccountSession(config: {
   readonly cli?: string;
   readonly apiUrl?: string;
   readonly computeApiUrl?: string;
+  readonly artifactsApiUrl?: string;
   readonly commandTimeoutMs?: number;
   readonly execute?: (command: CliCommand) => Promise<CliResult>;
 }) {
@@ -106,6 +108,13 @@ export async function makeNamespaceAccountSession(config: {
     createRegionTransport("eu", {
       tokenSource: { issueToken: verifiedToken },
       ...(config.computeApiUrl ? { baseUrl: config.computeApiUrl } : {}),
+    }),
+  );
+  const artifacts = createClient(
+    ArtifactsService,
+    createGlobalTransport({
+      tokenSource: { issueToken: verifiedToken },
+      baseUrl: config.artifactsApiUrl ?? "https://ord.storage.namespaceapis.com",
     }),
   );
   const run = async (args: ReadonlyArray<string>, signal?: AbortSignal, timeoutMs?: number) => {
@@ -138,6 +147,7 @@ export async function makeNamespaceAccountSession(config: {
     identity,
     client,
     compute,
+    artifacts,
     run,
     issueToken: (duration: number, force?: boolean) => source.issueToken(duration, force),
   };
@@ -431,6 +441,28 @@ except FileExistsError:
         .catch(() => undefined);
     }
   };
+  /** A signed download URL per configured artifact, fresh for this attempt; the guest fetches the bytes itself. */
+  const resolveArtifactSources = async (
+    manifest: ProvisionPreparationManifest,
+    record?: RecordProvisionPhase,
+  ) => {
+    const artifacts = manifest.preparation.artifacts ?? [];
+    if (artifacts.length === 0) return [];
+    const stopResolve = startProvisionPhase(record);
+    const sources = [];
+    for (const { path } of artifacts) {
+      const { signedDownloadUrl } = await config.session.artifacts.resolveArtifact(
+        { namespace: "main", path },
+        { timeoutMs: 30_000 },
+      );
+      const url = URL.parse(signedDownloadUrl);
+      if (!url || url.protocol !== "https:" || url.username || url.password)
+        throw new Error("Namespace artifact requires a private HTTPS download URL");
+      sources.push({ path, url: url.href });
+    }
+    stopResolve("artifact.resolve", { count: sources.length });
+    return sources;
+  };
   /**
    * Converges the Mac on the manifest: wakes it if shut down, stages the
    * archive once, and runs the remote preparation, which keeps an intact root's
@@ -451,6 +483,7 @@ except FileExistsError:
       stopRetain("allocate.retain");
     }
     await stageArtifact(resource, manifest, record);
+    const artifactSources = await resolveArtifactSources(manifest, record);
     const stopPrepare = startProvisionPhase(record);
     const ready = await prepareRemoteHost(
       port(resource, manifest),
@@ -460,6 +493,7 @@ except FileExistsError:
           resourceIdentity: `namespace:${resource.devboxId}`,
           requestHash: operation.requestHash,
           preparationHash: operation.request.preparationHash,
+          ...(artifactSources.length ? { artifactSources } : {}),
         },
         operation.request.agentDriver,
       ),

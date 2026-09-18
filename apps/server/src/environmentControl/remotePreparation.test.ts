@@ -2,6 +2,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -586,5 +587,110 @@ describe("remote preparation subprocess", () => {
       }),
     ).rejects.toThrow("install failed");
     await expect(NodeFSP.access(NodePath.join(input.root, "started"))).rejects.toThrow();
+  });
+});
+
+/** Serves one artifact the way a signed Namespace download does: a URL, no other credential. */
+async function artifactServer(body: Buffer) {
+  let requests = 0;
+  const server = NodeHttp.createServer((request, response) => {
+    requests += 1;
+    if (request.url !== "/baseline.bin") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/octet-stream" });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No artifact port");
+  return {
+    url: `http://127.0.0.1:${address.port}/baseline.bin`,
+    requests: () => requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  };
+}
+
+describe("remote preparation artifacts", () => {
+  it("fetches a configured artifact into the isolated home once, before setup consumes it", async () => {
+    const body = NodeCrypto.randomBytes(3 * 1024 * 1024 + 17);
+    const served = await artifactServer(body);
+    try {
+      const input = await fixture();
+      const withArtifact: RemotePreparationInput = {
+        ...input,
+        artifacts: [
+          { path: "baseline/xcode.bin", destination: "baseline/xcode.bin", sha256: sha256(body) },
+        ],
+        artifactSources: [{ path: "baseline/xcode.bin", url: served.url }],
+        prepareCommands: ['test -s "$HOME/baseline/xcode.bin" && echo consumed > consumed.txt'],
+      };
+      const phases: ProvisionPhase[] = [];
+      const ready = await prepareRemoteHost(localPort, withArtifact, (phase) => {
+        phases.push(phase);
+      });
+      pids.add(ready.serverPid);
+      const landed = NodePath.join(input.root, "home/baseline/xcode.bin");
+      expect((await NodeFSP.readFile(landed)).equals(body)).toBe(true);
+      expect((await NodeFSP.stat(landed)).mode & 0o777).toBe(0o600);
+      expect(await NodeFSP.readFile(NodePath.join(ready.projectDir, "consumed.txt"), "utf8")).toBe(
+        "consumed\n",
+      );
+      expect(phases.map((phase) => phase.phase)).toContain("remote.artifacts");
+      expect(served.requests()).toBe(1);
+      await served.close();
+      // A resumed Mac keeps its volume, so the bytes it already holds are not
+      // fetched again, whatever URL this attempt resolved.
+      const resumed = await prepareRemoteHost(localPort, {
+        ...withArtifact,
+        artifactSources: [{ path: "baseline/xcode.bin", url: "http://127.0.0.1:1/expired" }],
+      });
+      expect(resumed.environmentId).toBe(ready.environmentId);
+      expect((await NodeFSP.readFile(landed)).equals(body)).toBe(true);
+    } finally {
+      await served.close();
+    }
+  });
+
+  it("refuses an artifact whose bytes do not match the descriptor and leaves nothing behind", async () => {
+    const served = await artifactServer(Buffer.from("not the baseline"));
+    try {
+      const input = await fixture();
+      await expect(
+        prepareRemoteHost(localPort, {
+          ...input,
+          artifacts: [
+            { path: "baseline/xcode.bin", destination: "baseline.bin", sha256: "0".repeat(64) },
+          ],
+          artifactSources: [{ path: "baseline/xcode.bin", url: served.url }],
+        }),
+      ).rejects.toThrow("Artifact download digest mismatch");
+      await expect(NodeFSP.readdir(NodePath.join(input.root, "home"))).resolves.not.toContain(
+        "baseline.bin.preparing",
+      );
+      await expect(
+        NodeFSP.access(NodePath.join(input.root, "home/baseline.bin")),
+      ).rejects.toThrow();
+      await expect(NodeFSP.access(NodePath.join(input.root, "started"))).rejects.toThrow();
+    } finally {
+      await served.close();
+    }
+  });
+
+  it("refuses an artifact this attempt resolved no source for", async () => {
+    const input = await fixture();
+    await expect(
+      prepareRemoteHost(localPort, {
+        ...input,
+        artifacts: [
+          { path: "baseline/xcode.bin", destination: "baseline.bin", sha256: "0".repeat(64) },
+        ],
+      }),
+    ).rejects.toThrow("Artifact has no download source");
   });
 });
