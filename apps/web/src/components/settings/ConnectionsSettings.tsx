@@ -3775,7 +3775,7 @@ export function ConnectionsSettings() {
               managerLabel={environment.label}
               onStarted={(id) => {
                 if (!environments.some((entry) => entry.environmentId === id)) return false;
-                void handleConnectSavedBackend(id);
+                void handleSetSavedBackendEnabled(id, true);
                 return true;
               }}
             />
