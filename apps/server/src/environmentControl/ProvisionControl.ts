@@ -82,7 +82,10 @@ const logCause = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
  * read it, and unwrapping restores exactly the error the callers already expect.
  */
 class UnexpectedCause {
-  constructor(readonly cause: unknown) {}
+  readonly cause: unknown;
+  constructor(cause: unknown) {
+    this.cause = cause;
+  }
 }
 const reportUnexpected = <A, E, R>(effect: Effect.Effect<A, E | UnexpectedCause, R>) =>
   effect.pipe(
