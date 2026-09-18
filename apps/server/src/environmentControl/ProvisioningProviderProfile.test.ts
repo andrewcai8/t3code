@@ -84,6 +84,28 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
       }),
   );
 
+  it.effect("carries the selected account's display name, omitting it when unset", () =>
+    Effect.gen(function* () {
+      const source = yield* file("named/auth.json");
+      const settings = decodeSettings({
+        providerInstances: {
+          selected: {
+            driver: "codex",
+            displayName: "Codex · andrewcai083@gmail.com",
+            config: { homePath: NodePath.dirname(source) },
+          },
+        },
+      });
+      expect((yield* resolve(settings)).displayName).toBe("Codex · andrewcai083@gmail.com");
+      const unnamed = decodeSettings({
+        providerInstances: {
+          selected: { driver: "codex", config: { homePath: NodePath.dirname(source) } },
+        },
+      });
+      expect((yield* resolve(unnamed)).displayName).toBeUndefined();
+    }),
+  );
+
   it.effect("resolves a legacy default account from its configured Codex home", () =>
     Effect.gen(function* () {
       const source = yield* file("custom/auth.json");

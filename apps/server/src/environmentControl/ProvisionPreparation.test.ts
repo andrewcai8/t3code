@@ -823,3 +823,37 @@ it("runs a named Codex account's chat on the provisioned home", async () => {
     await f.cleanup();
   }
 });
+
+it("names the guest's provider instance after the account the manager selected", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(input, f.config, f.resolver, {
+      ...f.profile,
+      displayName: "Codex · andrewcai083@gmail.com",
+    });
+    const settings = homeFile(manifest, ".t3/userdata/settings.json");
+    expect(
+      JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()).providerInstances
+        .codex.displayName,
+    ).toBe("Codex · andrewcai083@gmail.com");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("leaves the guest's provider instance unnamed when the manager has no display name for it", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const settings = homeFile(manifest, ".t3/userdata/settings.json");
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString())
+          .providerInstances.codex,
+        "displayName",
+      ),
+    ).toBe(false);
+  } finally {
+    await f.cleanup();
+  }
+});

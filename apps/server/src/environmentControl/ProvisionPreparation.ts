@@ -141,6 +141,7 @@ function enableChildProvider(
   agentDriver: string,
   homePath = "/home/user",
   devices = false,
+  displayName?: string,
 ): string {
   let settings: ChildSettings = {};
   try {
@@ -187,6 +188,10 @@ function enableChildProvider(
         ...existingInstance,
         driver: agentDriver,
         enabled: true,
+        // Carried from the manager rather than left for the guest to discover:
+        // a Claude guest authenticates with a bare OAuth token, which carries
+        // no account profile, so no on-box probe could ever recover this name.
+        ...(displayName ? { displayName } : {}),
         // Driver settings live under `config`; the contract drops them anywhere else.
         ...(agentDriver === "codex"
           ? {
@@ -479,7 +484,13 @@ export function makeProvisionPreparationStore(stateDir: string) {
       if (settingsIndex !== -1) files.splice(settingsIndex, 1);
       // Environment entries reach the provider's child process without shell interpolation.
       const configuredSettings: unknown = JSON.parse(
-        enableChildProvider(settings, profile.kind, `${root}/home`, input.provider === "namespace"),
+        enableChildProvider(
+          settings,
+          profile.kind,
+          `${root}/home`,
+          input.provider === "namespace",
+          profile.displayName,
+        ),
       );
       const parsedSettings = decodeSettings(configuredSettings);
       const environment = [];

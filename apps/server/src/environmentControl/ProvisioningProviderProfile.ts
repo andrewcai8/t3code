@@ -28,6 +28,7 @@ export class ProvisionRefused extends Schema.TaggedError<ProvisionRefused>()("Pr
 export interface ProvisioningProviderProfile {
   readonly kind: "codex" | "cursor" | "claudeAgent";
   readonly instanceId: ProviderInstanceId;
+  readonly displayName?: string;
   readonly environment: ProviderInstanceEnvironment;
   readonly credential:
     | { readonly kind: "file"; readonly source: string; readonly destination: string }
@@ -101,6 +102,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
         message: "The selected provider account is unavailable on this machine.",
       });
     const environment = instance.environment ?? [];
+    const named = instance.displayName ? { displayName: instance.displayName } : {};
     const selectedEnvironment = mergeProviderInstanceEnvironment(environment, {});
     const effectiveEnvironment = mergeProviderInstanceEnvironment(environment);
     const invalidConfig = () =>
@@ -169,6 +171,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
       return {
         kind,
         instanceId,
+        ...named,
         environment,
         credential: { kind: "environment" },
       } satisfies ProvisioningProviderProfile;
@@ -177,6 +180,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
       return {
         kind,
         instanceId,
+        ...named,
         environment: [
           ...environment,
           { name: "CLAUDE_CODE_OAUTH_TOKEN", value: cloudToken, sensitive: true },
@@ -204,6 +208,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
     return {
       kind,
       instanceId,
+      ...named,
       environment,
       credential: { kind: "file", source, destination },
     } satisfies ProvisioningProviderProfile;
