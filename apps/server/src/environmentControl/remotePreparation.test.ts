@@ -224,6 +224,31 @@ describe("remote preparation subprocess", () => {
     expect(converged.map((phase) => phase.phase)).not.toContain("remote.repositoryClone");
   });
 
+  it("runs the repository's setup in the checkout before the server answers", async () => {
+    const input = await fixture();
+    const prepared: RemotePreparationInput = {
+      ...input,
+      prepareCommands: ["pwd > prepared-in.txt", "echo toolchain > toolchain.txt"],
+    };
+    const ready = await prepareRemoteHost(localPort, prepared);
+    pids.add(ready.serverPid);
+    // Setup belongs to the checkout, not the isolated home: a repository's
+    // install command means nothing anywhere else.
+    expect(
+      (await NodeFSP.readFile(NodePath.join(ready.projectDir, "prepared-in.txt"), "utf8")).trim(),
+    ).toBe(await NodeFSP.realpath(ready.projectDir));
+    expect(await NodeFSP.readFile(NodePath.join(ready.projectDir, "toolchain.txt"), "utf8")).toBe(
+      "toolchain\n",
+    );
+  });
+
+  it("refuses to call a box ready when its setup failed", async () => {
+    const input = await fixture();
+    await expect(
+      prepareRemoteHost(localPort, { ...input, prepareCommands: ["exit 3"] }),
+    ).rejects.toThrow(/Preparation command failed/);
+  });
+
   it("serializes concurrent retries and preserves agent commits, credentials and environment identity", async () => {
     const input = await fixture();
     const [first, concurrent] = await Promise.all([

@@ -33,6 +33,12 @@ export interface RemotePreparationInput {
   }>;
   /** Closed-set shell command from guestProviderInstallCommand. Runs in the isolated home. */
   readonly providerInstall?: string | undefined;
+  /**
+   * Operator-configured setup for this repository, run in the checkout once it
+   * exists. A cloud box arrives with the repository but none of its toolchain
+   * otherwise, so the first thing every agent does is install one.
+   */
+  readonly prepareCommands?: ReadonlyArray<string> | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
@@ -454,6 +460,15 @@ def prepare(spec):
                 raise RuntimeError('Invalid provider install command')
             with step('providerInstall'):
                 run(['sh', '-c', install], home, env, timeout=900)
+        prepare = spec.get('prepareCommands') or []
+        if prepare:
+            if not isinstance(prepare, list):
+                raise RuntimeError('Invalid prepare commands')
+            with step('prepareCommands'):
+                for command_line in prepare:
+                    if not isinstance(command_line, str) or not command_line.strip() or '\0' in command_line:
+                        raise RuntimeError('Invalid prepare command')
+                    run(['sh', '-lc', command_line], project, env, timeout=1800)
         credential_path = root / 'broker-token'
         if not credential_path.exists():
             with step('brokerToken'):

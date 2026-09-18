@@ -15,7 +15,11 @@ import {
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Schema from "effect/Schema";
 import { resolveNamespaceIdentity, namespaceMacImage } from "./namespaceAllocation.ts";
-import { ProvisionRuntimeArtifact, type EnvironmentControlConfig } from "./config.ts";
+import {
+  canonicalRepository,
+  ProvisionRuntimeArtifact,
+  type EnvironmentControlConfig,
+} from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import {
   credentialDestinations,
@@ -55,6 +59,7 @@ const Preparation = Schema.Struct({
   port: Schema.Int,
   readinessTimeoutSeconds: Schema.Int,
   brokerTtl: Schema.String,
+  prepareCommands: Schema.optional(Schema.Array(Schema.String)),
   files: Schema.Array(File),
 });
 export const ProvisionPreparationManifest = Schema.Struct({
@@ -567,6 +572,19 @@ export function makeProvisionPreparationStore(stateDir: string) {
       // named after it, and the files it carries. Those are why every request
       // currently hashes differently even when the machine is the same, and
       // why nothing prepared can be shared yet.
+      // What an operator configured for this repository on this platform, the
+      // same precedence the direct preparation path applies: a repository
+      // entry replaces the platform default rather than adding to it.
+      const repositorySetup = input.repository
+        ? provisioning.repositories?.find(
+            (entry) =>
+              canonicalRepository(entry.repository) === canonicalRepository(input.repository!),
+          )?.[input.provider]
+        : undefined;
+      const prepareCommands =
+        repositorySetup?.prepareCommands ??
+        (input.provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
+        [];
       const build = {
         repository,
         artifact: {
@@ -580,6 +598,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         port: 3773,
         readinessTimeoutSeconds: 180,
         brokerTtl: "7d",
+        // Part of `build`: a checkout nobody prepared is a different machine
+        // from one that was, so two requests only match when these match.
+        ...(prepareCommands.length ? { prepareCommands } : {}),
       };
       const preparation = {
         ...build,

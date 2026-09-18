@@ -500,6 +500,44 @@ it("drops a copied credential file that the cloud token replaces", async () => {
   }
 });
 
+it("hands a cloud box the setup its repository needs", async () => {
+  const f = await fixture();
+  try {
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [
+          {
+            repository: "example/repo",
+            e2b: { prepareCommands: ["npm install --global vite-plus"] },
+          },
+          { repository: "example/other", e2b: { prepareCommands: ["never"] } },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(
+      inputFor("codex", "codex"),
+      config,
+      f.resolver,
+      f.profile,
+    );
+    expect(manifest.preparation.prepareCommands).toEqual(["npm install --global vite-plus"]);
+    // A prepared checkout is a different machine from an unprepared one, so
+    // two requests only match when their setup matches.
+    const bare = await makeProvisionPreparationStore(f.root + "-bare").freeze(
+      inputFor("codex", "codex"),
+      f.config,
+      f.resolver,
+      f.profile,
+    );
+    expect(bare.request.buildHash).not.toBe(manifest.request.buildHash);
+    await NodeFSP.rm(f.root + "-bare", { recursive: true, force: true });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("refuses a skill bundle that links out of itself", async () => {
   const f = await fixture();
   try {
