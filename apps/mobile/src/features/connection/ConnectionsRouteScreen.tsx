@@ -3,7 +3,7 @@ import { NativeHeaderToolbar } from "../../native/StackHeader";
 import { useNavigation } from "@react-navigation/native";
 import { SymbolView } from "../../components/AppSymbol";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useState } from "react";
+import { Fragment, useCallback, useState } from "react";
 import { Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -13,6 +13,7 @@ import { cn } from "../../lib/cn";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { ConnectionEnvironmentRow } from "./ConnectionEnvironmentRow";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { ProvisionedEnvironmentRows } from "./ProvisionedEnvironmentRows";
 
 export function ConnectionsRouteScreen() {
   const {
@@ -102,17 +103,24 @@ export function ConnectionsRouteScreen() {
         {connectedEnvironments
           .filter((environment) => environment.connectionState === "connected")
           .map((environment) => (
-            <CloudComputeControls
-              key={environment.environmentId}
-              managerId={environment.environmentId}
-              managerLabel={environment.environmentLabel}
-              onStarted={(id) => {
-                if (!connectedEnvironments.some((entry) => entry.environmentId === id))
-                  return false;
-                onReconnectEnvironment(id);
-                return true;
-              }}
-            />
+            <Fragment key={environment.environmentId}>
+              <ProvisionedEnvironmentRows
+                managerId={environment.environmentId}
+                managerLabel={environment.environmentLabel}
+                connectedEnvironments={connectedEnvironments}
+                onLeave={onRemoveEnvironmentPress}
+              />
+              <CloudComputeControls
+                managerId={environment.environmentId}
+                managerLabel={environment.environmentLabel}
+                onStarted={(id) => {
+                  if (!connectedEnvironments.some((entry) => entry.environmentId === id))
+                    return false;
+                  onReconnectEnvironment(id);
+                  return true;
+                }}
+              />
+            </Fragment>
           ))}
         <GitHubRoutingSettings />
       </ScrollView>

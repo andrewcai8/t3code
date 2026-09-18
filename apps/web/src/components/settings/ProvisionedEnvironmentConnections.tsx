@@ -1,3 +1,4 @@
+import { isOffDeviceReachablePairingUrl } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -16,7 +17,6 @@ import { waitForThreadShell } from "../../state/waitForThreadShell";
 import { Button } from "../ui/button";
 import { QRCodeSvg } from "../ui/qr-code";
 import { toastManager } from "../ui/toast";
-import { isOffDeviceReachablePairingUrl } from "./pairingUrls";
 
 type DevicePairing =
   | { readonly kind: "minting" }

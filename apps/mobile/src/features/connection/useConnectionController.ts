@@ -12,10 +12,7 @@ import * as Option from "effect/Option";
 import { useCallback, useMemo } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
-import {
-  connectPairingUrl as connectPairingUrlAtom,
-  updateBearerConnection,
-} from "../../connection/onboarding";
+import { connectPairing, updateBearerConnection } from "../../connection/onboarding";
 import { useEnvironments } from "../../state/environments";
 import { relayEnvironmentDiscovery } from "../../state/relay";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -33,9 +30,7 @@ export interface RelayEnvironmentView {
 export function useConnectionController() {
   const { environments } = useEnvironments();
   const discovery = useAtomValue(relayEnvironmentDiscovery.stateValueAtom);
-  const connectPairingUrlMutation = useAtomCommand(connectPairingUrlAtom, {
-    reportFailure: false,
-  });
+  const connectPairingMutation = useAtomCommand(connectPairing, { reportFailure: false });
   const updateBearer = useAtomCommand(updateBearerConnection, { reportFailure: false });
   const registerEnvironment = useAtomCommand(environmentCatalog.register, "environment register");
   const removeEnvironmentMutation = useAtomCommand(environmentCatalog.remove, "environment remove");
@@ -74,8 +69,8 @@ export function useConnectionController() {
   );
 
   const connectPairingUrl = useCallback(
-    (pairingUrl: string) => connectPairingUrlMutation(pairingUrl),
-    [connectPairingUrlMutation],
+    (pairingUrl: string) => connectPairingMutation({ pairingUrl }),
+    [connectPairingMutation],
   );
   const connectRelayEnvironment = useCallback(
     (environment: RelayClientEnvironmentRecord) =>
