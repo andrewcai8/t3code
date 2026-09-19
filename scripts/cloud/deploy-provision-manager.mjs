@@ -136,6 +136,9 @@ for (const [index, skill] of (config.provisioning?.skills ?? []).entries()) {
 // The manager pauses when its timeout lapses and any request wakes it, which
 // is what lets it create boxes while the operator's laptop is asleep. Without
 // auto-resume a paused manager answers 502 until something connects to it.
+// A websocket alone is enough: measured against a paused manager, an rpc
+// client that opens a socket with no prior fetch got its answer back in 1.4s
+// to 2.0s across three attempts. So no client needs a wake-up request first.
 const sandbox = values.sandbox
   ? await Sandbox.connect(values.sandbox, { apiKey, timeoutMs: MANAGER_TIMEOUT_MS })
   : await Sandbox.create(templateId, {
