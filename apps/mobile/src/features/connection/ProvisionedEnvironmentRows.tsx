@@ -21,6 +21,7 @@ import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-typ
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
+import { NewCloudMachineSheet } from "./NewCloudMachineSheet";
 import {
   presentProvisionedEnvironment,
   provisionedEnvironmentRows,
@@ -54,6 +55,7 @@ export function ProvisionedEnvironmentRows(props: {
   });
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
   const [joinStates, setJoinStates] = useState<Readonly<Record<string, ProvisionedJoinState>>>({});
+  const [creating, setCreating] = useState(false);
   const rows = useMemo(
     () => provisionedEnvironmentRows(query.data ?? [], props.connectedEnvironments),
     [query.data, props.connectedEnvironments],
@@ -108,7 +110,7 @@ export function ProvisionedEnvironmentRows(props: {
     [attach, connectedEnvironments, managerId, pair],
   );
 
-  if (!supported || (!query.error && rows.length === 0)) return null;
+  if (!supported) return null;
   return (
     <View collapsable={false} className="mt-5 gap-3">
       <View className="flex-row items-center justify-between gap-3 px-1">
@@ -118,29 +120,50 @@ export function ProvisionedEnvironmentRows(props: {
         >
           Cloud machines · {props.managerLabel}
         </Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Refresh cloud machines"
-          disabled={query.isPending}
-          onPress={query.refresh}
-          className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70 disabled:opacity-50"
-        >
-          {query.isPending ? (
-            <ActivityIndicator colorClassName={"accent-icon"} size="small" />
-          ) : (
+        <View className="flex-row items-center gap-2">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="New cloud machine"
+            onPress={() => setCreating(true)}
+            className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70"
+          >
             <SymbolView
-              name="arrow.clockwise"
+              name="plus"
               size={14}
               tintColorClassName={"accent-icon"}
               type="monochrome"
             />
-          )}
-        </Pressable>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Refresh cloud machines"
+            disabled={query.isPending}
+            onPress={query.refresh}
+            className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70 disabled:opacity-50"
+          >
+            {query.isPending ? (
+              <ActivityIndicator colorClassName={"accent-icon"} size="small" />
+            ) : (
+              <SymbolView
+                name="arrow.clockwise"
+                size={14}
+                tintColorClassName={"accent-icon"}
+                type="monochrome"
+              />
+            )}
+          </Pressable>
+        </View>
       </View>
       {query.error ? (
         <View collapsable={false} className="rounded-[24px] bg-card p-5">
           <Text className="text-sm text-foreground-muted">
             Cloud machines could not be loaded. Refresh to try again.
+          </Text>
+        </View>
+      ) : rows.length === 0 ? (
+        <View collapsable={false} className="rounded-[24px] bg-card p-5">
+          <Text className="text-sm text-foreground-muted">
+            No cloud machines yet. Start one and it keeps running after you close the app.
           </Text>
         </View>
       ) : (
@@ -160,6 +183,17 @@ export function ProvisionedEnvironmentRows(props: {
           ))}
         </View>
       )}
+      {creating ? (
+        <NewCloudMachineSheet
+          managerId={props.managerId}
+          managerLabel={props.managerLabel}
+          connectedEnvironments={props.connectedEnvironments}
+          onClose={() => {
+            setCreating(false);
+            query.refresh();
+          }}
+        />
+      ) : null}
     </View>
   );
 }
