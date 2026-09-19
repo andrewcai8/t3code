@@ -36,7 +36,7 @@ export type ProvisionedJoinOutcome =
  * actually reach it.
  */
 export async function joinProvisionedEnvironment(
-  environment: DiscoveredProvisionedEnvironment,
+  environment: Pick<DiscoveredProvisionedEnvironment, "environmentId">,
   ports: ProvisionedJoinPorts,
 ): Promise<ProvisionedJoinOutcome> {
   if (ports.isConnected(environment.environmentId)) return { kind: "joined" };

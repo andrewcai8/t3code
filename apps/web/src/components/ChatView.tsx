@@ -2,11 +2,12 @@ import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment"
 import {
   cancelProvisionRequest,
   forgetProvisionRequest,
-  isProvisionRequestActive,
-  isProvisionRequestCurrent,
-  pollProvisionRequest,
-  reserveProvisionRequest,
+  provisionRequests,
 } from "../cloud/provisionRequests";
+import {
+  type CloudProvisioningProgressPhase,
+  provisionCloudEnvironment,
+} from "@t3tools/client-runtime/cloud";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
@@ -337,7 +338,7 @@ import {
 import { connectPairing } from "../connection/onboarding";
 import {
   provisionedSandboxFor,
-  rememberProvisionedSandbox,
+  provisionedSandboxLeases,
   transferProvisionedSandboxLease,
 } from "../cloud/provisionedSandboxLeases";
 import { terminalEnvironment } from "../state/terminal";
@@ -357,6 +358,7 @@ import {
   useThreadShell,
   waitForProjectMatch,
 } from "../state/entities";
+import { environmentPresentations } from "../state/presentation";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
@@ -454,7 +456,6 @@ import {
   resolveComposerProviderSelection,
   resolveDraftHeroState,
   restorePlanFollowUpComposer,
-  isCloudHandoffProject,
   isPaintOnlyThreadTimeline,
   peekHeldThreadTimeline,
   peekRememberedThreadTimeline,
@@ -1467,7 +1468,6 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
-const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
 const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
 const noopHeldTurnDiff = (_turnId: TurnId, _filePath?: string) => {};
 const noopHeldRevert = (_targetTurnCount: number) => {};
@@ -4660,7 +4660,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectRepository = activeProject?.repositoryIdentity?.displayName ?? null;
 
   /** Provisioning is reserved by the draft, then committed when its first message is sent. */
-  const provisionCloudEnvironment = useAtomCommand(serverEnvironment.provisionEnvironment, {
+  const requestCloudProvision = useAtomCommand(serverEnvironment.provisionEnvironment, {
     reportFailure: false,
   });
   const attachCloudEnvironment = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
@@ -4708,8 +4708,12 @@ export default function ChatView(props: ChatViewProps) {
       }
       const viewingStartedDraft = () => currentDraftIdRef.current === startedDraftId;
       const repository = cloneRepository(activeProject?.repositoryIdentity);
-      const cloudEnvironmentLabel =
-        cloudProvisioningRequested === "namespace" ? "Namespace Mac" : "E2B";
+      const showPhase = (phase: CloudProvisioningProgressPhase) => {
+        patchDraftPendingEnvironmentSend(startedDraftId, { phase });
+        if (viewingStartedDraft()) {
+          setCloudProvisioningPhase(phase);
+        }
+      };
       const failProvisioning = (message: string) => {
         const endedAt = new Date().toISOString();
         patchDraftPendingEnvironmentSend(startedDraftId, {
@@ -4728,96 +4732,62 @@ export default function ChatView(props: ChatViewProps) {
         setCreatingCloudEnvironment(true);
       }
       try {
-        const request = reserveProvisionRequest(startedDraftId, {
-          managerEnvironmentId: primaryEnvironmentId,
-          input: {
-            provider: cloudProvisioningRequested,
-            providerInstanceId: cloudAccount.instanceId,
-            agentDriver: handoff.agentDriver,
-            ...(repository ? { repository } : {}),
+        const outcome = await provisionCloudEnvironment(
+          {
+            draftId: startedDraftId,
+            managerEnvironmentId: primaryEnvironmentId,
+            input: {
+              provider: cloudProvisioningRequested,
+              providerInstanceId: cloudAccount.instanceId,
+              agentDriver: handoff.agentDriver,
+              ...(repository ? { repository } : {}),
+            },
           },
-        });
-        const stillThisRequest = () =>
-          isProvisionRequestCurrent(startedDraftId, request.input.requestId);
-        const created = await pollProvisionRequest(startedDraftId, request, async (pending) => {
-          const result = await provisionCloudEnvironment({
-            environmentId: pending.managerEnvironmentId,
-            input: pending.input,
-          });
-          return AsyncResult.isSuccess(result) ? result.value : null;
-        });
-        if (created.kind === "cancelled" || !stillThisRequest()) return false;
-        if (created.kind === "unreachable") {
-          failProvisioning("Could not reach the environment manager. Send again to resume.");
-          return false;
-        }
-        if (created.kind !== "ready") {
-          failProvisioning(
-            created.kind === "refused"
-              ? created.message
-              : `${created.message} Send again to resume this request.`,
-          );
-          return false;
-        }
-        const environment = created.environment;
-        const lease = {
-          leaseId: environment.leaseId,
-          sandboxId: environment.sandboxId,
-          managerEnvironmentId: request.managerEnvironmentId,
-        };
-        rememberProvisionedSandbox(startedDraftId, lease);
-        if (!stillThisRequest()) return false;
-        patchDraftPendingEnvironmentSend(startedDraftId, { phase: "pairing" });
-        if (viewingStartedDraft()) {
-          setCloudProvisioningPhase("pairing");
-        }
-        const attached = await attachCloudEnvironment({
-          environmentId: request.managerEnvironmentId,
-          input: { requestId: request.input.requestId },
-        });
-        if (!stillThisRequest()) return false;
-        if (AsyncResult.isFailure(attached) || attached.value.kind === "refused") {
-          failProvisioning("The environment is ready, but a connection could not be issued.");
-          return false;
-        }
-        if (attached.value.environmentId !== environment.environmentId) {
-          throw new Error("The connection belongs to another environment.");
-        }
-        const paired = await connectCloudPairing({
-          pairingUrl: attached.value.pairingUrl,
-        });
-        if (!stillThisRequest()) return false;
-        if (AsyncResult.isFailure(paired)) {
-          failProvisioning(`${cloudEnvironmentLabel} was created but could not be connected.`);
-          return false;
-        }
-        // Pairing is asynchronous: the remote server must publish its cloned
-        // project before the new draft can point at it. Waiting on the project
-        // atom keeps the cloud action as one user-visible operation rather than
-        // leaving a machine stranded on an unrelated local draft.
-        patchDraftPendingEnvironmentSend(startedDraftId, { phase: "loading-project" });
-        if (viewingStartedDraft()) {
-          setCloudProvisioningPhase("loading-project");
-        }
-        const pairedProject = await waitForProjectMatch((project) => {
-          return isCloudHandoffProject(project, {
-            environmentId: environment.environmentId,
-            pairedEnvironmentId: paired.value,
-          });
-        }, CLOUD_PROJECT_HANDOFF_TIMEOUT_MS).catch(() => null);
-        if (!stillThisRequest()) return false;
-        if (pairedProject === null) {
-          // Keep the lease on the current target so deleting that draft/thread
-          // still has a path to dispose the machine if project publication was
-          // delayed or the remote checkout failed.
-          failProvisioning(
-            `${cloudEnvironmentLabel} ready, but its project is still loading. Open a new ${cloudEnvironmentLabel} chat after the project appears.`,
-          );
+          {
+            requests: provisionRequests,
+            leases: provisionedSandboxLeases,
+            provision: async (request) => {
+              const result = await requestCloudProvision({
+                environmentId: request.managerEnvironmentId,
+                input: request.input,
+              });
+              return AsyncResult.isSuccess(result) ? result.value : null;
+            },
+            attach: async (request) => {
+              const result = await attachCloudEnvironment({
+                environmentId: request.managerEnvironmentId,
+                input: { requestId: request.input.requestId },
+              });
+              return AsyncResult.isSuccess(result) ? result.value : null;
+            },
+            pair: async (pairingUrl) => {
+              const result = await connectCloudPairing({ pairingUrl });
+              return AsyncResult.isSuccess(result) ? result.value : null;
+            },
+            isConnected: (environmentId) =>
+              appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId)
+                ?.connection.phase === "connected",
+            // The browser may be running on the manager itself, where even a loopback link works.
+            canReach: () => true,
+            waitForProject: (environmentId, timeoutMs) =>
+              waitForProjectMatch(
+                (project) => project.environmentId === environmentId,
+                timeoutMs,
+              ).then(
+                (project) => project.id,
+                () => null,
+              ),
+            onPhase: showPhase,
+          },
+        );
+        if (outcome.kind === "cancelled") return false;
+        if (outcome.kind === "failed") {
+          failProvisioning(outcome.message);
           return false;
         }
         setComposerDraftModelSelection(startedDraftId, handoff.modelSelection);
         setDraftThreadContext(startedDraftId, {
-          projectRef: scopeProjectRef(pairedProject.environmentId, pairedProject.id),
+          projectRef: outcome.projectRef,
           // The sandbox itself is the isolation boundary. Do not try to create
           // a second worktree inside its already-cloned checkout, which would
           // require a base branch the draft does not have after pairing.
@@ -4827,23 +4797,16 @@ export default function ChatView(props: ChatViewProps) {
           startFromOrigin: false,
           environmentSelection: "manual",
         });
-        if (!stillThisRequest()) return false;
         patchDraftPendingEnvironmentSend(startedDraftId, {
           phase: "ready",
-          readyEnvironmentId: pairedProject.environmentId,
+          readyEnvironmentId: outcome.projectRef.environmentId,
         });
         if (viewingStartedDraft()) {
           setCloudProvisioningRequested(null);
-          setPendingCloudSendEnvironmentId(pairedProject.environmentId);
+          setPendingCloudSendEnvironmentId(outcome.projectRef.environmentId);
           setCloudProvisioningPhase("ready");
         }
         return true;
-      } catch (error) {
-        if (!isProvisionRequestActive(startedDraftId)) return false;
-        failProvisioning(
-          error instanceof Error ? error.message : "Could not prepare the environment.",
-        );
-        return false;
       } finally {
         if (viewingStartedDraft()) {
           setCreatingCloudEnvironment(false);
@@ -4858,7 +4821,7 @@ export default function ChatView(props: ChatViewProps) {
       cloudAccount,
       connectCloudPairing,
       primaryEnvironmentId,
-      provisionCloudEnvironment,
+      requestCloudProvision,
       setComposerDraftModelSelection,
       setDraftThreadContext,
     ],

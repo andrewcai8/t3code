@@ -65,7 +65,6 @@ import {
   resolveSendEnvMode,
   threadShellHasStarted,
   resolveDraftHeroState,
-  isCloudHandoffProject,
   isPaintOnlyThreadTimeline,
   peekHeldThreadTimeline,
   peekRememberedThreadTimeline,
@@ -90,23 +89,6 @@ import {
   waitForRevertedMessage,
   prepareRevertedMessageAttachments,
 } from "./ChatView.logic";
-
-describe("cloud handoff project matching", () => {
-  it("binds the paired environment's project even when checkout paths disagree", () => {
-    expect(
-      isCloudHandoffProject(
-        { environmentId: "cloud-env" },
-        { environmentId: "cloud-env", pairedEnvironmentId: "cloud-env" },
-      ),
-    ).toBe(true);
-    expect(
-      isCloudHandoffProject(
-        { environmentId: "cloud-env" },
-        { environmentId: "cloud-env", pairedEnvironmentId: "other-env" },
-      ),
-    ).toBe(false);
-  });
-});
 
 describe("agent browser close confirmation", () => {
   const surfaces = [

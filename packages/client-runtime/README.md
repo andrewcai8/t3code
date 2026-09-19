@@ -9,6 +9,7 @@ subpath. The package intentionally has no root export.
 | --------------------- | ----------------------------------------------------------------- |
 | `authorization`       | Bearer and DPoP authorization plus token persistence contracts    |
 | `connection`          | Targets, catalog, supervision, retries, registry, and onboarding  |
+| `cloud`               | Draft cloud provisioning: the flow, its request and lease records |
 | `environment`         | Environment identity, descriptors, endpoints, and scoped keys     |
 | `errors`              | Shared client error inspection                                    |
 | `operations`          | Multi-step application workflows                                  |
