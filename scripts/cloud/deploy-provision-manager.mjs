@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 import * as NodeChildProcess from "node:child_process";
+import { planManagerAccounts } from "./provision-manager-accounts.ts";
 
 const require = NodeModule.createRequire(
   new URL("../../apps/server/package.json", import.meta.url),
@@ -19,9 +20,13 @@ const { values } = NodeUtil.parseArgs({
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
     },
+    settings: {
+      type: "string",
+      default: NodePath.join(NodeOS.homedir(), ".t3/userdata/settings.json"),
+    },
+    accounts: { type: "string" },
     output: { type: "string" },
     artifact: { type: "string" },
-    auth: { type: "string", default: NodePath.join(NodeOS.homedir(), ".codex/auth.json") },
     port: { type: "string", default: "3775" },
     account: { type: "string", default: "provision-manager" },
     sandbox: { type: "string" },
@@ -31,11 +36,13 @@ const { values } = NodeUtil.parseArgs({
 if (values.help) {
   console.log(
     "Usage: node scripts/cloud/deploy-provision-manager.mjs --output DIRECTORY [--config FILE]\n" +
-      "       [--artifact FILE] [--auth FILE] [--port PORT] [--account NAME]\n\n" +
+      "       [--settings FILE] [--accounts ID,ID,...] [--artifact FILE] [--port PORT]\n" +
+      "       [--account NAME] [--sandbox ID]\n\n" +
       "Stands up a provisioning manager in E2B. The manager runs the pinned runtime\n" +
       "artifact, never the template's published t3, which is upstream's build and does\n" +
       "not carry this fork's provisioning code. Builds the artifact when --artifact is\n" +
-      "absent. Writes a descriptor and the manager's own config to --output.",
+      "absent. Carries every provider account the host can provision on, or only those\n" +
+      "named by --accounts. Writes a descriptor and the manager's own config to --output.",
   );
   process.exit(0);
 }
@@ -50,6 +57,35 @@ const apiKey = config.e2bApiKey;
 if (typeof apiKey !== "string" || !apiKey) throw new Error("E2B API key is missing");
 const templateId = config.provisioning?.templateId;
 if (!templateId) throw new Error("Configure provisioning.templateId before deploying a manager");
+
+const MANAGER_BASE_DIR = "/home/user/manager-state";
+// A TTL, not an idle timer: E2B pauses the manager this long after creation
+// and again after each auto-resume, however busy it is. Long enough that one
+// wake covers a provision (about a minute) and a child's bootstrap with room
+// to spare; short enough that a manager nobody is using pauses within the
+// hour instead of billing for a day. Paused, it costs nothing and the next
+// request wakes it in well under a second.
+const MANAGER_TIMEOUT_MS = 30 * 60_000;
+
+const plan = planManagerAccounts({
+  settings: JSON.parse(await NodeFSP.readFile(values.settings, "utf8")),
+  provisioning: config.provisioning ?? {},
+  accounts: values.accounts
+    ?.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean),
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Deploy script has no Effect runtime.
+  host: { homedir: NodeOS.homedir(), platform: process.platform, environment: process.env },
+  managerBaseDir: MANAGER_BASE_DIR,
+});
+for (const { id, reason } of plan.skipped) console.log(`skipping ${id}: ${reason}`);
+if (plan.accounts.length === 0) throw new Error("No provider account can travel");
+console.log(`carrying accounts ${plan.accounts.join(", ")}`);
+// Read every credential before paying for a sandbox, so a missing file fails
+// here rather than stranding a half-built box.
+const credentialFiles = [];
+for (const file of plan.files)
+  credentialFiles.push({ path: file.destination, data: await NodeFSP.readFile(file.source) });
 
 const run = (command, args) => {
   const result = NodeChildProcess.spawnSync(command, args, {
@@ -97,14 +133,26 @@ for (const [index, skill] of (config.provisioning?.skills ?? []).entries()) {
 
 // Reusing a sandbox matters on a retry: the artifact upload is the slow step,
 // and a failure part way through would otherwise strand the box it created.
+// The manager pauses when its timeout lapses and any request wakes it, which
+// is what lets it create boxes while the operator's laptop is asleep. Without
+// auto-resume a paused manager answers 502 until something connects to it.
 const sandbox = values.sandbox
-  ? await Sandbox.connect(values.sandbox, { apiKey })
+  ? await Sandbox.connect(values.sandbox, { apiKey, timeoutMs: MANAGER_TIMEOUT_MS })
   : await Sandbox.create(templateId, {
       apiKey,
-      timeoutMs: 3_600_000,
-      lifecycle: { onTimeout: "pause" },
+      timeoutMs: MANAGER_TIMEOUT_MS,
+      lifecycle: { onTimeout: "pause", autoResume: true },
       metadata: { purpose: "t3-environment", account: values.account },
     });
+if (values.sandbox) {
+  // Lifecycle is fixed at creation; a box from before auto-resume existed
+  // would deploy fine and then sleep through every request.
+  const info = await sandbox.getInfo();
+  if (info.lifecycle?.onTimeout !== "pause" || !info.lifecycle.autoResume)
+    throw new Error(
+      `Sandbox ${sandbox.sandboxId} cannot auto-resume; create a new manager instead`,
+    );
+}
 console.log(
   values.sandbox
     ? `reusing manager sandbox ${sandbox.sandboxId}`
@@ -130,12 +178,12 @@ const managerConfig = {
     // provisioned environments without the allowlist their preparation needs,
     // which fails far from here as an unreachable package host.
     ...(config.provisioning?.egressAllow ? { egressAllow: config.provisioning.egressAllow } : {}),
-    // `shellEnvironment` is deliberately not carried over. Its entries name a
-    // `source` path on the host's filesystem, which does not exist in the
-    // sandbox, and freezing a manifest reads every one of them — so copying it
-    // makes every provision fail with an ENOENT naming a path from another
-    // machine. Secrets the guest needs have to be delivered to the guest.
-
+    ...(plan.claudeOAuthTokens ? { claudeOAuthTokens: plan.claudeOAuthTokens } : {}),
+    // The host's `shellEnvironment` names source paths on the host, and
+    // freezing a manifest reads every one of them, so the entries the manager
+    // gets point at copies it owns. Carrying the host's paths verbatim made
+    // every provision fail with an ENOENT naming another machine.
+    ...(plan.shellEnvironment ? { shellEnvironment: plan.shellEnvironment } : {}),
     runtimeArtifacts: {
       linux: {
         path: "/home/user/runtime-linux.tar",
@@ -153,8 +201,17 @@ const managerConfig = {
   },
 };
 
-await sandbox.files.write("/home/user/environment-control.json", JSON.stringify(managerConfig));
-await sandbox.files.write("/home/user/.codex/auth.json", await NodeFSP.readFile(values.auth));
+// A previous deploy's accounts must not outlive the settings that named them.
+await sandbox.commands.run(
+  `rm -rf ${MANAGER_BASE_DIR}/codex-homes ${MANAGER_BASE_DIR}/cursor-homes ${MANAGER_BASE_DIR}/shell-environment`,
+  { timeoutMs: 30_000 },
+);
+const privateFiles = [
+  { path: "/home/user/environment-control.json", data: JSON.stringify(managerConfig) },
+  { path: plan.settingsPath, data: JSON.stringify({ providerInstances: plan.providerInstances }) },
+  ...credentialFiles,
+];
+await sandbox.files.write(privateFiles);
 // The runtime artifact is hundreds of megabytes; the SDK's default request
 // timeout aborts the upload part way and leaves the sandbox half-built.
 await sandbox.files.write("/home/user/runtime-linux.tar", artifact, {
@@ -170,7 +227,7 @@ console.log("installing the runtime artifact");
 const install = await sandbox.commands.run(
   [
     "set -eu",
-    "chmod 600 /home/user/environment-control.json /home/user/.codex/auth.json",
+    `chmod 600 ${privateFiles.map((file) => `'${file.path}'`).join(" ")}`,
     ...bundles.map(
       (bundle) =>
         `mkdir -p /home/user/skills/${bundle.index} && tar -xzf /home/user/skills-${bundle.index}.tgz -C /home/user/skills/${bundle.index}`,
@@ -196,7 +253,7 @@ await sandbox.commands.run(
 await sandbox.commands.run(
   `nohup env T3CODE_ENVIRONMENT_CONTROL_CONFIG=/home/user/environment-control.json ` +
     `node /home/user/manager/dist/bin.mjs serve --mode web --host 0.0.0.0 --port ${port} ` +
-    `--base-dir /home/user/manager-state --no-browser >/home/user/manager.log 2>&1 </dev/null & disown`,
+    `--base-dir ${MANAGER_BASE_DIR} --no-browser >/home/user/manager.log 2>&1 </dev/null & disown`,
   { background: true },
 );
 
@@ -214,15 +271,37 @@ if (!ready) {
   throw new Error(`Manager did not become ready:\n${log.stdout}`);
 }
 
-const descriptor = { sandboxId: sandbox.sandboxId, host, port, sha256, revision, templateId };
+const descriptor = {
+  sandboxId: sandbox.sandboxId,
+  host,
+  port,
+  sha256,
+  revision,
+  templateId,
+  accounts: plan.accounts,
+};
 await NodeFSP.writeFile(
   NodePath.join(output, "manager.json"),
   `${JSON.stringify(descriptor, null, 2)}\n`,
   { mode: 0o600 },
 );
+const redacted = {
+  ...managerConfig,
+  e2bApiKey: "[redacted]",
+  provisioning: {
+    ...managerConfig.provisioning,
+    ...(plan.claudeOAuthTokens
+      ? {
+          claudeOAuthTokens: Object.fromEntries(
+            Object.keys(plan.claudeOAuthTokens).map((id) => [id, "[redacted]"]),
+          ),
+        }
+      : {}),
+  },
+};
 await NodeFSP.writeFile(
   NodePath.join(output, "manager-config.json"),
-  `${JSON.stringify({ ...managerConfig, e2bApiKey: "[redacted]" }, null, 2)}\n`,
+  `${JSON.stringify(redacted, null, 2)}\n`,
   { mode: 0o600 },
 );
 console.log(`manager ready ${sandbox.sandboxId} https://${host}`);
