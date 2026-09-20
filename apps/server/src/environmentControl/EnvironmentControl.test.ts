@@ -1,8 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - these tests use a temporary filesystem boundary.
 // @effect-diagnostics globalDate:off - these tests use fixed registry timestamps.
-import * as NodeFSP from "node:fs/promises";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";

@@ -105,6 +105,16 @@ const serviceLayers = (input: {
     ),
   );
 
+/**
+ * Only the file-backed fingerprints carry a home path; the Cursor account ones do not. Narrowing
+ * here keeps each assertion reading like the value it checks.
+ */
+function resolvedHomePathOf(fingerprint: object): string | undefined {
+  return "resolvedHomePath" in fingerprint && typeof fingerprint.resolvedHomePath === "string"
+    ? fingerprint.resolvedHomePath
+    : undefined;
+}
+
 function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens: number } }[] }) {
   return summary.buckets.reduce((sum, bucket) => sum + bucket.totals.outputTokens, 0);
 }
@@ -242,7 +252,7 @@ describe("UsageService", () => {
           const first = yield* service.readSummary(WINDOW);
           assert.strictEqual(totalOutputTokens(first), 7);
           assert.include(
-            first.sources.map((source) => source.fingerprint.resolvedHomePath),
+            first.sources.map((source) => resolvedHomePathOf(source.fingerprint)),
             NodePath.join(configured, "projects"),
           );
           yield* settingsService.updateSettings({
@@ -259,7 +269,7 @@ describe("UsageService", () => {
           const second = yield* service.readSummary(WINDOW);
           assert.strictEqual(totalOutputTokens(second), 8);
           assert.include(
-            second.sources.map((source) => source.fingerprint.resolvedHomePath),
+            second.sources.map((source) => resolvedHomePathOf(source.fingerprint)),
             NodePath.join(environmentHome, "projects"),
           );
         }).pipe(
@@ -320,13 +330,17 @@ describe("UsageService", () => {
         const summary = yield* service.readSummary(WINDOW);
         assert.strictEqual(totalOutputTokens(summary), 5);
         assert.strictEqual(
-          summary.sources.find((source) => source.fingerprint.provider === "codex")?.fingerprint
-            .resolvedHomePath,
+          resolvedHomePathOf(
+            summary.sources.find((source) => source.fingerprint.provider === "codex")
+              ?.fingerprint ?? {},
+          ),
           NodePath.join(home, "inherited-codex", "sessions"),
         );
         assert.strictEqual(
-          summary.sources.find((source) => source.fingerprint.provider === "grok")?.fingerprint
-            .resolvedHomePath,
+          resolvedHomePathOf(
+            summary.sources.find((source) => source.fingerprint.provider === "grok")?.fingerprint ??
+              {},
+          ),
           NodePath.join(home, "grok", "sessions"),
         );
       }).pipe(Effect.scoped),

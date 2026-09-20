@@ -2,7 +2,6 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeOS from "node:os";
 import {
   DEFAULT_SERVER_SETTINGS,
   DurableProvisionRequest,

@@ -1,5 +1,5 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -17,6 +17,7 @@ import {
 import { workspaceMissingError } from "../connection/errors.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import * as RpcSession from "../rpc/session.ts";
 import { runAtomCommand } from "./runtime.ts";
 import { threadKey } from "./entities.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
@@ -49,18 +50,16 @@ class ThreadStillWorkingError extends Schema.TaggedError<ThreadStillWorkingError
   },
 ) {}
 
-async function makeHarness(
+const makeHarness = Effect.fn("makeHarness")(function* (
   input: {
     readonly run?: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"];
   } = {},
 ) {
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: TARGET,
-    state: await Effect.runPromise(SubscriptionRef.make(AVAILABLE_CONNECTION_STATE)),
-    session: await Effect.runPromise(SubscriptionRef.make(Option.none())),
-    prepared: await Effect.runPromise(
-      SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none()),
-    ),
+    state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+    session: yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(Option.none()),
+    prepared: yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none()),
     connect: Effect.void,
     disconnect: Effect.void,
     retryNow: Effect.void,
@@ -86,101 +85,112 @@ async function makeHarness(
     commands: createThreadEnvironmentAtoms(runtime),
     registry: AtomRegistry.make(),
   };
-}
+});
+
+const failingRun = <E>(error: E): EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] =>
+  (() => Effect.fail(error)) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"];
 
 describe("offline thread.settle", () => {
-  it("parks the thread locally when the environment has no RPC session", async () => {
-    const harness = await makeHarness();
-    const result = await runAtomCommand(harness.registry, harness.commands.settle, {
-      environmentId: ENVIRONMENT_ID,
-      input: { threadId: THREAD_ID },
-    });
-
-    expect(result._tag).toBe("Success");
-    if (result._tag !== "Success") return;
-    expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
-    expect(
-      harness.registry.get(threadLifecycleOverlayAtom).get(
-        threadKey({
+  it.effect("parks the thread locally when the environment has no RPC session", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const result = yield* Effect.promise(() =>
+        runAtomCommand(harness.registry, harness.commands.settle, {
           environmentId: ENVIRONMENT_ID,
-          threadId: THREAD_ID,
+          input: { threadId: THREAD_ID },
         }),
-      )?.kind,
-    ).toBe("settled");
-  });
+      );
 
-  it("parks the thread locally when the environment is not registered", async () => {
-    const harness = await makeHarness({
-      run: (() =>
-        Effect.fail(
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
+      expect(
+        harness.registry
+          .get(threadLifecycleOverlayAtom)
+          .get(threadKey({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID }))?.kind,
+      ).toBe("settled");
+    }),
+  );
+
+  it.effect("parks the thread locally when the environment is not registered", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        run: failingRun(
           new EnvironmentRegistry.EnvironmentNotRegisteredError({
             environmentId: ENVIRONMENT_ID,
           }),
-        )) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"],
-    });
-    const result = await runAtomCommand(harness.registry, harness.commands.settle, {
-      environmentId: ENVIRONMENT_ID,
-      input: { threadId: THREAD_ID },
-    });
+        ),
+      });
+      const result = yield* Effect.promise(() =>
+        runAtomCommand(harness.registry, harness.commands.settle, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID },
+        }),
+      );
 
-    expect(result._tag).toBe("Success");
-    if (result._tag !== "Success") return;
-    expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
-    expect(
-      harness.registry
-        .get(threadLifecycleOverlayAtom)
-        .get(threadKey({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID }))?.kind,
-    ).toBe("settled");
-  });
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
+      expect(
+        harness.registry
+          .get(threadLifecycleOverlayAtom)
+          .get(threadKey({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID }))?.kind,
+      ).toBe("settled");
+    }),
+  );
 
-  it("still reports business-logic settle failures", async () => {
-    const harness = await makeHarness({
-      run: (() =>
-        Effect.fail(
-          new ThreadStillWorkingError({ message: "Thread is still working." }),
-        )) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"],
-    });
-    const result = await runAtomCommand(harness.registry, harness.commands.settle, {
-      environmentId: ENVIRONMENT_ID,
-      input: { threadId: THREAD_ID },
-    });
+  it.effect("still reports business-logic settle failures", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        run: failingRun(new ThreadStillWorkingError({ message: "Thread is still working." })),
+      });
+      const result = yield* Effect.promise(() =>
+        runAtomCommand(harness.registry, harness.commands.settle, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID },
+        }),
+      );
 
-    expect(AsyncResult.isFailure(result)).toBe(true);
-    expect(harness.registry.get(threadLifecycleOverlayAtom).size).toBe(0);
-  });
+      expect(AsyncResult.isFailure(result)).toBe(true);
+      expect(harness.registry.get(threadLifecycleOverlayAtom).size).toBe(0);
+    }),
+  );
 });
 
 describe("offline thread.delete", () => {
   const key = threadKey({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID });
 
-  it("deletes the thread on this device when the environment has no RPC session", async () => {
-    const harness = await makeHarness();
-    const result = await runAtomCommand(harness.registry, harness.commands.delete, {
-      environmentId: ENVIRONMENT_ID,
-      input: { threadId: THREAD_ID },
-    });
+  it.effect("deletes the thread on this device when the environment has no RPC session", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const result = yield* Effect.promise(() =>
+        runAtomCommand(harness.registry, harness.commands.delete, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID },
+        }),
+      );
 
-    expect(result._tag).toBe("Success");
-    if (result._tag !== "Success") return;
-    expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
-    expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
-  });
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
+      expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
+    }),
+  );
 
-  it("deletes the thread on this device when its workspace no longer exists", async () => {
-    const harness = await makeHarness({
-      run: (() =>
-        Effect.fail(
-          workspaceMissingError(),
-        )) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"],
-    });
-    const result = await runAtomCommand(harness.registry, harness.commands.delete, {
-      environmentId: ENVIRONMENT_ID,
-      input: { threadId: THREAD_ID },
-    });
+  it.effect("deletes the thread on this device when its workspace no longer exists", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ run: failingRun(workspaceMissingError()) });
+      const result = yield* Effect.promise(() =>
+        runAtomCommand(harness.registry, harness.commands.delete, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID },
+        }),
+      );
 
-    expect(result._tag).toBe("Success");
-    if (result._tag !== "Success") return;
-    expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
-    expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
-  });
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
+      expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
+    }),
+  );
 });
