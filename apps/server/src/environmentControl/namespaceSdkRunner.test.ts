@@ -566,9 +566,11 @@ effectIt.effect(
             ? { startupPresentation: "headless", forceAutoBootstrapProjectFromCwd: false }
             : undefined,
         ).pipe(
-          Effect.provide(NodeServices.layer),
-          Effect.provide(NetService.layer),
-          Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+          Effect.provide([
+            NodeServices.layer,
+            NetService.layer,
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          ]),
         );
         expect(config.autoBootstrapProjectFromCwd).toBe(true);
         expect(config.cwd).toBe(NodePath.join(directory, "project"));

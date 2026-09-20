@@ -52,12 +52,13 @@ const WINDOW: UsageSummaryInput = {
 };
 
 const setup = Effect.gen(function* () {
-  const home = yield* Effect.promise(() =>
+  const directory = yield* Effect.promise(() =>
     NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "usage-service-test-")),
   );
   yield* Effect.addFinalizer(() =>
-    Effect.promise(() => NodeFSP.rm(home, { recursive: true, force: true })),
+    Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })),
   );
+  const home = yield* Effect.promise(() => NodeFSP.realpath(directory));
   const transcriptDir = NodePath.join(home, "claude", "projects", "proj");
   yield* Effect.promise(() => NodeFSP.mkdir(transcriptDir, { recursive: true }));
   return {
