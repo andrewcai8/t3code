@@ -1,5 +1,4 @@
 import {
-  cloudEnvironmentLabel,
   provisionCloudEnvironment,
   type CloudProvisioningProgressPhase,
 } from "@t3tools/client-runtime/cloud";
@@ -16,7 +15,11 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { hydrateProvisionStorage } from "../cloud/provisionStorage";
 import { provisionRequests, provisionedSandboxLeases } from "../cloud/provisionStores";
-import type { CloudMachineAccountOption, CloudMachineProvider } from "./cloudMachineOptions";
+import {
+  CLOUD_MACHINE_PROVIDER_LABELS,
+  type CloudMachineAccountOption,
+  type CloudMachineProvider,
+} from "./cloudMachineOptions";
 
 export type CreateCloudMachineState =
   | { readonly kind: "idle" }
@@ -30,7 +33,7 @@ export function createCloudMachineProgressText(
   phase: CloudProvisioningProgressPhase,
   provider: CloudMachineProvider,
 ): string {
-  const label = cloudEnvironmentLabel(provider);
+  const label = CLOUD_MACHINE_PROVIDER_LABELS[provider];
   switch (phase) {
     case "creating":
       return `Starting your ${label} machine…`;

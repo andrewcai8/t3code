@@ -10,9 +10,12 @@ import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import {
   CLOUD_MACHINE_PROVIDER_LABELS,
+  cloudMachineAccountDetail,
   cloudMachineAccountOptions,
   cloudMachineBlockReason,
   cloudMachineRepositoryOptions,
+  defaultCloudMachineAccount,
+  defaultCloudMachineRepository,
   type CloudMachineAccountOption,
   type CloudMachineProvider,
 } from "./cloudMachineOptions";
@@ -48,8 +51,9 @@ export function NewCloudMachineSheet(props: {
   const [repository, setRepository] = useState<string | null>(null);
   const [provider, setProvider] = useState<CloudMachineProvider>("e2b");
   const [account, setAccount] = useState<CloudMachineAccountOption | null>(null);
-  const selectedAccount = account ?? accounts[0] ?? null;
-  const selection = { repository, provider, account: selectedAccount };
+  const selectedAccount = account ?? defaultCloudMachineAccount(accounts);
+  const selectedRepository = repository ?? defaultCloudMachineRepository(repositories);
+  const selection = { repository: selectedRepository, provider, account: selectedAccount };
   const blockReason = cloudMachineBlockReason(selection);
   const { state, create, dismissError } = useCreateCloudMachine({
     managerId: props.managerId,
@@ -93,7 +97,7 @@ export function NewCloudMachineSheet(props: {
                   key={option.repository}
                   title={option.repository}
                   subtitle={option.projectTitles.join(", ")}
-                  selected={repository === option.repository}
+                  selected={selectedRepository === option.repository}
                   borderTop={index !== 0}
                   disabled={working}
                   onPress={() => setRepository(option.repository)}
@@ -124,6 +128,9 @@ export function NewCloudMachineSheet(props: {
                 <Choice
                   key={option.instanceId}
                   title={option.label}
+                  {...(cloudMachineAccountDetail(option)
+                    ? { subtitle: cloudMachineAccountDetail(option) as string }
+                    : {})}
                   selected={selectedAccount?.instanceId === option.instanceId}
                   borderTop={index !== 0}
                   disabled={working}

@@ -59,6 +59,19 @@ export interface CloudMachineAccountOption {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
   readonly label: string;
+  /**
+   * The tightest window the manager last saw on this account, or null when the account cannot
+   * report usage at all. An account this device is about to hand a machine to is worth choosing
+   * by headroom: a guest signed in as an exhausted account boots fine and then cannot answer.
+   */
+  readonly usedPercent: number | null;
+}
+
+function tightestWindow(provider: ServerProvider): number | null {
+  const limits = provider.usageLimits;
+  if (!limits || limits.unavailable) return null;
+  const used = limits.windows.map((window) => window.usedPercent);
+  return used.length === 0 ? null : Math.max(...used);
 }
 
 /**
@@ -75,7 +88,39 @@ export function cloudMachineAccountOptions(
       instanceId: provider.instanceId,
       driver: provider.driver,
       label: provider.displayName ?? provider.instanceId,
+      usedPercent: tightestWindow(provider),
     }));
+}
+
+/**
+ * Which account a fresh sheet starts on: the one with the most headroom. Order in settings says
+ * nothing about which account can still do work, and starting on an exhausted one wastes the
+ * minute a machine takes to build. Accounts that cannot report usage are a fallback, not a
+ * preference, since nothing is known about them.
+ */
+export function defaultCloudMachineAccount(
+  options: ReadonlyArray<CloudMachineAccountOption>,
+): CloudMachineAccountOption | null {
+  const measured = options.filter((option) => option.usedPercent !== null);
+  if (measured.length === 0) return options[0] ?? null;
+  return measured.reduce((best, option) =>
+    (option.usedPercent ?? 100) < (best.usedPercent ?? 100) ? option : best,
+  );
+}
+
+/** The usage line under an account row, or null when the account reports none. */
+export function cloudMachineAccountDetail(option: CloudMachineAccountOption): string | null {
+  return option.usedPercent === null ? null : `${Math.round(option.usedPercent)}% used`;
+}
+
+/**
+ * The repository a fresh sheet starts on. One repository is not a choice, and making the person
+ * tap it only to enable the button is friction; more than one has no defensible default.
+ */
+export function defaultCloudMachineRepository(
+  options: ReadonlyArray<CloudMachineRepositoryOption>,
+): string | null {
+  return options.length === 1 ? (options[0]?.repository ?? null) : null;
 }
 
 export interface CloudMachineSelection {
