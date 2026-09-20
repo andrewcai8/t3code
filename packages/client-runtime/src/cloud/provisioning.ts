@@ -22,9 +22,9 @@ export type CloudProvisioningPhase =
 export type CloudProvisioningProgressPhase = Exclude<CloudProvisioningPhase, "ready" | "failed">;
 
 /** How long a freshly paired environment gets to publish its cloned project. */
-export const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
+const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
 
-export function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
+function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
   return provider === "namespace" ? "Namespace Mac" : "E2B";
 }
 

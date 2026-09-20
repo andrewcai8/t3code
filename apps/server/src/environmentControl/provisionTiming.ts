@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 
 /** The stable log message every provisioning phase shares, so one grep reads a whole provision back. */
-export const PROVISION_PHASE_MESSAGE = "provision phase";
+const PROVISION_PHASE_MESSAGE = "provision phase";
 
 /** One completed provisioning phase. `bytes`/`count` are set only where a size is meaningful. */
 export interface ProvisionPhase {

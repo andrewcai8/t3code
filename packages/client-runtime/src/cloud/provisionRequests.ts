@@ -30,7 +30,7 @@ const decodeDisposals = Schema.decodeUnknownSync(Schema.fromJsonString(DraftProv
 const encodeDisposals = Schema.encodeSync(Schema.fromJsonString(DraftProvisionDisposals));
 
 export const PROVISION_REQUESTS_STORAGE_KEY = "t3code:draft-provision-requests:v1";
-export const PROVISION_DISPOSALS_STORAGE_KEY = "t3code:draft-provision-disposals:v1";
+const PROVISION_DISPOSALS_STORAGE_KEY = "t3code:draft-provision-disposals:v1";
 
 /** Must match ProvisionControl's in-progress pending message. */
 export const PROVISION_IN_PROGRESS_MESSAGE =
