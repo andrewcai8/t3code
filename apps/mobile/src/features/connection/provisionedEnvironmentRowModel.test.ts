@@ -5,7 +5,7 @@ import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-typ
 import {
   presentProvisionedEnvironment,
   provisionedEnvironmentRows,
-} from "./provisionedEnvironmentRows";
+} from "./provisionedEnvironmentRowModel";
 
 const machine = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
   requestId: "11111111-1111-4111-a111-111111111111",

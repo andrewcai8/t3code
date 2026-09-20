@@ -26,7 +26,7 @@ import {
   provisionedEnvironmentRows,
   type ProvisionedEnvironmentRow,
   type ProvisionedJoinState,
-} from "./provisionedEnvironmentRows";
+} from "./provisionedEnvironmentRowModel";
 
 const IDLE: ProvisionedJoinState = { kind: "idle" };
 
