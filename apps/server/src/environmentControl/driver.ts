@@ -332,6 +332,7 @@ async function prepare(
     `t3 pair --ttl 12h --label ${shellQuote(`cloud-${request.providerInstanceId}`)}`,
   );
   const token = /Token:\s*([A-Z0-9]+)/.exec(
+    // oxlint-disable-next-line eslint/no-control-regex -- ESC is the character an ANSI sequence starts with; stripping them needs it.
     (paired.stdout ?? "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""),
   )?.[1];
   if (!token) throw new Error("Could not mint a pairing token");

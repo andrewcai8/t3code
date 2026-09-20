@@ -30,7 +30,6 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   resolveEnvironmentMachineKind,
-  type EnvironmentId,
 } from "@t3tools/contracts";
 
 import {

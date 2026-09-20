@@ -37,6 +37,7 @@ const shapeFor = (size: string) => ({
 });
 
 const pairToken = (output: string): string => {
+  // oxlint-disable-next-line eslint/no-control-regex -- ESC is the character an ANSI sequence starts with; stripping them needs it.
   const clean = output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
   const token = clean.match(/^Token:\s*([A-Z0-9]+)\s*$/im)?.[1];
   if (!token) throw new Error("Namespace T3 pairing did not return a token");

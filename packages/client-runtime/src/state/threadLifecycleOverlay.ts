@@ -4,6 +4,7 @@ import {
   type OrchestrationThreadShell,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
@@ -163,7 +164,7 @@ export function queueOfflineThreadLifecycleOverlay(
   registry: AtomRegistry.AtomRegistry,
   ref: ScopedThreadRef,
   kind: ThreadLifecycleOverlayKind,
-  at: string = new Date().toISOString(),
+  at: string = DateTime.formatIso(DateTime.nowUnsafe()),
 ): void {
   const existing = registry.get(threadLifecycleOverlayAtom).get(threadKey(ref));
   // A pending delete outranks settlement: the thread is gone from this device.

@@ -481,7 +481,7 @@ export interface DraftSessionState {
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
   promotedTo?: ScopedThreadRef | null;
-  pendingEnvironmentSend?: PendingCloudEnvironmentSend | null;
+  pendingEnvironmentSend?: PendingCloudEnvironmentSend;
 }
 
 export type DraftThreadState = DraftSessionState;
