@@ -49,6 +49,11 @@ jobs:
       - name: Check unused code
         run: vp run knip:check
 
+      # Linux resolves the colliding spellings as separate modules, so this check is the only
+      # thing in the pipeline that can see what breaks a macOS or Windows checkout.
+      - name: Check case-only module collisions
+        run: vp run case:check
+
       - name: Check
         run: vp check
 
