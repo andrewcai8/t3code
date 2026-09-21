@@ -29,6 +29,7 @@ import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -167,6 +168,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   async function createHarness(input?: {
+    readonly logger?: Logger.Logger<unknown, void>;
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
@@ -264,7 +266,7 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
+    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((_) =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
@@ -493,7 +495,11 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    runtime = ManagedRuntime.make(
+      input?.logger
+        ? layer.pipe(Layer.provide(Logger.layer([input.logger], { mergeWithExisting: false })))
+        : layer,
+    );
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
@@ -3369,6 +3375,72 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       threadId: "thread-1",
     });
+  });
+
+  it("settles a revived turn when its provider request fails", async () => {
+    const revivalFailed = Promise.withResolvers<void>();
+    const harness = await createHarness({
+      logger: Logger.make(({ message }) => {
+        if (String(message).includes("failed to revive provider session")) revivalFailed.resolve();
+      }),
+    });
+    const threadId = ThreadId.make("thread-1");
+    const revivedTurnId = asTurnId("revived-turn");
+    const detail = "Cursor reported a transport failure.";
+    const failure = new ProviderAdapterRequestError({
+      provider: "cursor",
+      method: "session/prompt",
+      detail,
+      cause: "Error: RetriableError: [resource_exhausted] Error",
+    });
+    harness.sendTurn
+      .mockImplementationOnce(() => Effect.fail(failure))
+      .mockImplementationOnce(() =>
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-revival-running"),
+          threadId,
+          session: {
+            threadId,
+            providerName: "cursor",
+            providerInstanceId: ProviderInstanceId.make("cursor"),
+            runtimeMode: "full-access",
+            status: "running",
+            activeTurnId: revivedTurnId,
+            lastError: detail,
+            updatedAt: "2026-01-01T00:00:02.000Z",
+          },
+          createdAt: "2026-01-01T00:00:02.000Z",
+        }).pipe(Effect.andThen(Effect.fail(failure))),
+      );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-failed-revival"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-failed-revival"),
+          role: "user",
+          text: "continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await revivalFailed.promise;
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session).toMatchObject({
+      status: "error",
+      activeTurnId: null,
+      lastError: detail,
+    });
+    expect(thread?.latestTurn).toMatchObject({ turnId: revivedTurnId, state: "error" });
+    expect(thread?.latestTurn?.completedAt).not.toBeNull();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
   });
 
   it("rejects provider changes after a thread is already bound to a session provider", async () => {
