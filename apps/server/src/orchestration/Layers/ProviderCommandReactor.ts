@@ -512,7 +512,7 @@ const make = Effect.gen(function* () {
       );
     });
 
-  const setThreadSessionErrorOnTurnStartFailure = Effect.fnUntraced(function* (input: {
+  const setThreadSessionError = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly detail: string;
     readonly createdAt: string;
@@ -538,7 +538,6 @@ const make = Effect.gen(function* () {
       },
       createdAt: input.createdAt,
     });
-    yield* considerRevival({ threadId: input.threadId, detail: input.detail });
   });
 
   const restoreCompaction = Effect.fnUntraced(function* (threadId: ThreadId, fromRunning = false) {
@@ -687,14 +686,20 @@ const make = Effect.gen(function* () {
           interactionMode: current.interactionMode,
         });
       }).pipe(
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause)
-            ? Effect.void
-            : Effect.logWarning("failed to revive provider session", {
-                threadId: input.threadId,
-                attempt: decision.attempt,
-                cause,
-              }),
+        Effect.catchCause(
+          Effect.fnUntraced(function* (cause) {
+            if (Cause.hasInterrupts(cause)) return;
+            yield* setThreadSessionError({
+              threadId: input.threadId,
+              detail: providerFailureDetail(cause),
+              createdAt: DateTime.formatIso(yield* DateTime.now),
+            });
+            yield* Effect.logWarning("failed to revive provider session", {
+              threadId: input.threadId,
+              attempt: decision.attempt,
+              cause,
+            });
+          }),
         ),
       ),
     );
@@ -1409,12 +1414,13 @@ const make = Effect.gen(function* () {
         cause: Cause.pretty(cause),
       }).pipe(
         Effect.andThen(
-          setThreadSessionErrorOnTurnStartFailure({
+          setThreadSessionError({
             threadId: event.payload.threadId,
             detail,
             createdAt: event.payload.createdAt,
           }),
         ),
+        Effect.andThen(considerRevival({ threadId: event.payload.threadId, detail })),
         Effect.flatMap(() => appendTurnStartFailure("Provider turn start failed", detail)),
         Effect.asVoid,
       );
@@ -1522,11 +1528,12 @@ const make = Effect.gen(function* () {
       }
       const detail = providerFailureDetail(cause);
       if (!compactionSessionEnsured) {
-        return setThreadSessionErrorOnTurnStartFailure({
+        return setThreadSessionError({
           threadId: event.payload.threadId,
           detail,
           createdAt: event.payload.createdAt,
         }).pipe(
+          Effect.andThen(considerRevival({ threadId: event.payload.threadId, detail })),
           Effect.flatMap(() => appendTurnStartFailure("Context compaction failed", detail)),
           Effect.asVoid,
         );
