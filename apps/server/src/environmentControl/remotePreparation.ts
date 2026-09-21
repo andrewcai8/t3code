@@ -300,7 +300,7 @@ def prepare(spec):
         login = subprocess.run(['sh', '-lc', 'printf %s "$PATH"'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
         mark('loginPath', probing)
         base_path = login.stdout.strip() if login.returncode == 0 and login.stdout.strip() else os.environ.get('PATH', '')
-        env = {key: os.environ[key] for key in ['LANG', 'TMPDIR', 'SYSTEMROOT'] if key in os.environ}
+        env = {key: os.environ[key] for key in ['LANG', 'TMPDIR', 'SYSTEMROOT', 'DEVELOPER_DIR'] if key in os.environ}
         env.update({
             'HOME': str(home),
             'T3CODE_HOME': str(t3home),
