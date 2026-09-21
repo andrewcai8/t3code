@@ -41,6 +41,9 @@ export type ProvisionRequestId = typeof ProvisionRequestId.Type;
 
 export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
+  leaseId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  lifecycle: Schema.Literals(["active", "paused", "missing"]),
   environmentId: EnvironmentId,
   provider: Schema.Literals(["e2b", "namespace"]),
   label: TrimmedNonEmptyString,
