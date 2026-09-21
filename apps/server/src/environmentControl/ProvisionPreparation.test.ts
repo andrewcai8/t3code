@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - tests exercise private immutable filesystem inputs.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeUtil from "node:util";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
@@ -246,6 +248,61 @@ const homeFile = (
   manifest.preparation.files.find(
     (item) => item.scope === "home" && item.destination === destination,
   );
+
+it("uses staged HTTPS credentials for GitHub SSH dependency URLs", async () => {
+  const f = await fixture();
+  try {
+    const token = "github-fixture-token";
+    const manifest = await f.store.freeze(
+      input,
+      { ...f.config, provisioning: { ...f.config.provisioning, githubToken: token } },
+      f.resolver,
+      f.profile,
+    );
+    const configFile = homeFile(manifest, ".gitconfig");
+    if (!configFile) throw new Error("GitHub config was not staged");
+    const config = Buffer.from(configFile.contentsBase64, "base64").toString("utf8");
+    expect(config).not.toContain(token);
+    const configPath = NodePath.join(f.root, "guest.gitconfig");
+    await NodeFSP.writeFile(configPath, config);
+    const git = NodeUtil.promisify(NodeChildProcess.execFile);
+    for (const [url, expected] of [
+      ["git@github.com:example/private.git", "https://github.com/example/private.git"],
+      ["ssh://git@github.com/example/private.git", "https://github.com/example/private.git"],
+      ["https://github.com/example/private.git", "https://github.com/example/private.git"],
+      ["git@gitlab.com:example/private.git", "git@gitlab.com:example/private.git"],
+      ["ssh://git@gitlab.com/example/private.git", "ssh://git@gitlab.com/example/private.git"],
+      [
+        "ssh://git@github.com.evil.test/example/private.git",
+        "ssh://git@github.com.evil.test/example/private.git",
+      ],
+    ] as const) {
+      // --get-url resolves insteadOf locally without contacting a remote.
+      const result = await git("git", ["ls-remote", "--get-url", url], {
+        cwd: f.root,
+        env: {
+          PATH: process.env.PATH,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: configPath,
+        },
+      });
+      expect(result.stdout.trim()).toBe(expected);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("does not install GitHub URL rewrites without a staged token", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    expect(homeFile(manifest, ".gitconfig")).toBeUndefined();
+    expect(homeFile(manifest, ".git-credentials")).toBeUndefined();
+  } finally {
+    await f.cleanup();
+  }
+});
 
 it("leaves installed dependencies and Git history out of a skill bundle", async () => {
   const f = await fixture();
