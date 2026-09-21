@@ -217,6 +217,17 @@ it("shares a scannable pairing link for a machine reachable off this computer", 
   expect(state.pair).not.toHaveBeenCalled();
   expect(state.navigate).not.toHaveBeenCalled();
 });
+it("rewrites a manager-local pairing link before showing the device QR", async () => {
+  state.managerHttpBaseUrl = "https://manager.invalid/base/";
+  state.attach.mockResolvedValue(attached("http://127.0.0.1:50766/pair#token=fresh"));
+  const view = await mount();
+  await click(view, "Pair device");
+  const pairingUrl =
+    "https://manager.invalid/base/api/provisioned-environment/11111111-1111-4111-a111-111111111112/pair#token=fresh";
+  expect(view.root.findByType("img").props.src).toBe(pairingUrl);
+  await click(view, "Copy link");
+  expect(state.copy.mock.calls[0]?.[0]).toBe(pairingUrl);
+});
 it("mints a fresh pairing link every time the panel is opened", async () => {
   state.attach
     .mockResolvedValueOnce(attached("https://remote.invalid/pair#token=first"))

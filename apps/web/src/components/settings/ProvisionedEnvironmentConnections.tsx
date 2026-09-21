@@ -186,6 +186,10 @@ export function ProvisionedEnvironmentConnections({
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
   const { environments } = useEnvironments();
   const managerHttpBaseUrl = useEnvironmentHttpBaseUrl(managerId);
+  const rewritePairingUrl = (pairingUrl: string, leaseId: string) =>
+    managerHttpBaseUrl
+      ? provisionedGatewayPairingUrl(managerHttpBaseUrl, leaseId, pairingUrl)
+      : pairingUrl;
   const navigate = useNavigate();
   const [pending, setPending] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -234,7 +238,7 @@ export function ProvisionedEnvironmentConnections({
   }
   async function mintPairingUrl(environment: DiscoveredProvisionedEnvironment): Promise<string> {
     const result = await attachForClient(environment);
-    return result.pairingUrl;
+    return rewritePairingUrl(result.pairingUrl, environment.leaseId);
   }
   async function open(environment: DiscoveredProvisionedEnvironment) {
     setPending(environment.requestId);
@@ -255,12 +259,7 @@ export function ProvisionedEnvironmentConnections({
             throw new Error("The environment could not be connected. Try again.");
           return result.value;
         },
-        ...(managerHttpBaseUrl
-          ? {
-              rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
-                provisionedGatewayPairingUrl(managerHttpBaseUrl, lease.leaseId, pairingUrl),
-            }
-          : {}),
+        rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
         waitForThread: waitForThreadShell,
       });
       if (ref) await navigate({ to: "/$environmentId/$threadId", params: ref });
