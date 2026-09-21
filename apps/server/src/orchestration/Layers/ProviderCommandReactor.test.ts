@@ -266,7 +266,7 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((_) =>
+    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>(() =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
@@ -357,7 +357,7 @@ describe("ProviderCommandReactor", () => {
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
-      sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
+      sendTurn,
       compactThread,
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
@@ -3380,6 +3380,7 @@ describe("ProviderCommandReactor", () => {
   it("settles a revived turn when its provider request fails", async () => {
     const revivalFailed = Promise.withResolvers<void>();
     const harness = await createHarness({
+      threadModelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
       logger: Logger.make(({ message }) => {
         if (String(message).includes("failed to revive provider session")) revivalFailed.resolve();
       }),
@@ -3396,22 +3397,24 @@ describe("ProviderCommandReactor", () => {
     harness.sendTurn
       .mockImplementationOnce(() => Effect.fail(failure))
       .mockImplementationOnce(() =>
-        harness.engine.dispatch({
-          type: "thread.session.set",
-          commandId: CommandId.make("cmd-revival-running"),
-          threadId,
-          session: {
+        harness.engine
+          .dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-revival-running"),
             threadId,
-            providerName: "cursor",
-            providerInstanceId: ProviderInstanceId.make("cursor"),
-            runtimeMode: "full-access",
-            status: "running",
-            activeTurnId: revivedTurnId,
-            lastError: detail,
-            updatedAt: "2026-01-01T00:00:02.000Z",
-          },
-          createdAt: "2026-01-01T00:00:02.000Z",
-        }).pipe(Effect.andThen(Effect.fail(failure))),
+            session: {
+              threadId,
+              providerName: "cursor",
+              providerInstanceId: ProviderInstanceId.make("cursor"),
+              runtimeMode: "full-access",
+              status: "running",
+              activeTurnId: revivedTurnId,
+              lastError: detail,
+              updatedAt: "2026-01-01T00:00:02.000Z",
+            },
+            createdAt: "2026-01-01T00:00:02.000Z",
+          })
+          .pipe(Effect.orDie, Effect.andThen(Effect.fail(failure))),
       );
 
     await harness.runEffect(
