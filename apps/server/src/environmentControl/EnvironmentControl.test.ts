@@ -108,6 +108,25 @@ describe("managed cloud commands", () => {
       await test({ registry, driver, manager: createEnvironmentControl([], driver, registry) });
     });
   }
+  it("records a missing workspace on settle and keeps repeat settles idempotent", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.pause = vi.fn().mockResolvedValue("missing");
+      expect(await manager.pause(resumeInput)).toEqual({ kind: "missing" });
+      expect(await registry.findById("lease")).toMatchObject({ state: "missing" });
+      expect(await manager.pause(resumeInput)).toEqual({ kind: "missing" });
+      expect(driver.pause).toHaveBeenCalledTimes(1);
+      expect(await manager.resume(resumeInput)).toMatchObject({ reason: "missing" });
+    });
+  });
+
+  it("keeps the lease active when pause fails without confirming absence", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      driver.pause = vi.fn().mockRejectedValue(new Error("permission denied"));
+      expect(await manager.pause(resumeInput)).toMatchObject({ kind: "refused" });
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+    });
+  });
+
   it("renews the provider before recording a successful heartbeat", async () => {
     await withLease(async ({ registry, driver, manager }) => {
       const started = Promise.withResolvers<void>();
@@ -175,7 +194,7 @@ describe("managed cloud commands", () => {
       const expected = {
         kind: "refused",
         reason: "missing",
-        message: "E2B no longer has this workspace. It cannot be reconnected.",
+        message: "The cloud provider no longer has this workspace. It cannot be reconnected.",
       };
       expect(await manager.touch({ leaseId: "lease" })).toEqual(expected);
       expect(await registry.findById("lease")).toMatchObject({ state: "missing" });
@@ -192,7 +211,7 @@ describe("managed cloud commands", () => {
       const expected = {
         kind: "refused",
         reason: "missing",
-        message: "E2B no longer has this workspace. It cannot be reconnected.",
+        message: "The cloud provider no longer has this workspace. It cannot be reconnected.",
       };
       expect(await manager.resume(resumeInput)).toEqual(expected);
       expect(await manager.resume(resumeInput)).toEqual(expected);
@@ -450,6 +469,25 @@ describe("managed cloud commands", () => {
       kind: "refused",
       reason: "unknown",
       message: "The cloud sandbox could not be disposed.",
+    });
+  });
+
+  it("records provider absence while reaping an expired lease", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "expired-lease",
+        sandboxId: "expired-sandbox",
+        provider: "e2b",
+        providerInstanceId: "codex",
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const driver = setup().driver;
+      driver.pause = vi.fn().mockResolvedValue("missing");
+      const manager = createEnvironmentControl([], driver, registry);
+      await manager.reapExpiredLeases();
+      expect(await registry.findById("expired-lease")).toMatchObject({ state: "missing" });
+      await manager.reapExpiredLeases();
+      expect(driver.pause).toHaveBeenCalledTimes(1);
     });
   });
 

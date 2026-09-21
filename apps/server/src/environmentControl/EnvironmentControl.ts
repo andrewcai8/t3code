@@ -205,11 +205,12 @@ export function createEnvironmentControl(
           current.expiresAt > new Date().toISOString()
         )
           continue;
-        await driver.pause({
+        const result = await driver.pause({
           sandboxId: current.sandboxId,
           ...(current.namespaceResource ? { namespaceResource: current.namespaceResource } : {}),
         });
-        await leaseRegistry.markPaused(lease.leaseId);
+        if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
+        else await leaseRegistry.markPaused(lease.leaseId);
       } catch {
         // Keep the lease eligible for another pause attempt on the next sweep.
       } finally {
@@ -304,23 +305,28 @@ export function createEnvironmentControl(
         if (
           !lease ||
           (input.leaseId !== undefined && lease.leaseId !== input.leaseId) ||
-          (lease.state !== "active" && lease.state !== "paused")
+          (lease.state !== "active" && lease.state !== "paused" && lease.state !== "missing")
         )
           return {
             kind: "refused",
             reason: "unknown",
             message: "The cloud sandbox lease is unknown.",
           };
+        if (lease.state === "missing") return { kind: "missing" };
         if (lease.state === "active" && (await activity(lease)) === "busy")
           return {
             kind: "refused",
             reason: "unknown",
             message: "Another chat on this machine is still working.",
           };
-        await driver.pause({
+        const result = await driver.pause({
           sandboxId: input.sandboxId,
           ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
         });
+        if (result === "missing") {
+          await leaseRegistry.markMissing(lease.leaseId);
+          return { kind: "missing" };
+        }
         await leaseRegistry.markPaused(lease.leaseId);
         return { kind: "paused" };
       } catch {

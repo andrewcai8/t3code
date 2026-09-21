@@ -53,7 +53,7 @@ export interface NamespaceRunner {
     readonly resource: NamespaceResource;
     readonly port: number;
   }) => Promise<string>;
-  readonly destroyInstance: (resource: NamespaceResource) => Promise<void>;
+  readonly destroyInstance: (resource: NamespaceResource) => Promise<void | "missing">;
   readonly expireDevbox: (resource: NamespaceResource) => Promise<void>;
 }
 

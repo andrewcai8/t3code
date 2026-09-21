@@ -48,7 +48,7 @@ const PROVISIONED_TIMEOUT_MS = 6 * 3_600_000;
 
 export class ProvisionedSandboxMissing extends Error {
   constructor() {
-    super("E2B no longer has this workspace. It cannot be reconnected.");
+    super("The cloud provider no longer has this workspace. It cannot be reconnected.");
   }
 }
 
@@ -102,7 +102,7 @@ export interface CloudDriver {
   pause(input: {
     readonly sandboxId: string;
     readonly namespaceResource?: NamespaceResource;
-  }): Promise<void>;
+  }): Promise<void | "missing">;
   resume(input: {
     readonly leaseId: string;
     readonly sandboxId: string;
@@ -706,14 +706,13 @@ export function createCloudDriver(
         if (!namespaceRunner) throw new Error("Namespace runner is unavailable");
         // Shutdown stops the active instance but retains the Devbox record and
         // workspace, so reconnect can resume it without reprovisioning.
-        await namespaceRunner.destroyInstance(namespaceResource);
-        return;
+        return namespaceRunner.destroyInstance(namespaceResource);
       }
       try {
         const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
         await sandbox.pause();
       } catch (cause) {
-        if (isMissingSandbox(cause)) return;
+        if (cause instanceof SandboxNotFoundError) return "missing";
         throw cause;
       }
     },
