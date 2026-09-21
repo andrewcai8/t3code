@@ -1051,6 +1051,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(UsageService.layerTest),
       Layer.provide(
         Layer.succeed(EnvironmentControl.EnvironmentControl, {
+          namespaceProxyOrigin: () => Effect.succeed(null),
           list: Effect.succeed([]),
           listProvisioned: Effect.succeed([]),
           provision: () =>
@@ -1073,6 +1074,8 @@ const buildAppUnderTest = (options?: {
               message: "Not configured",
             }),
           resume: () =>
+            Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
+          resumeUnclaimed: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           claim: () =>
             Effect.succeed({

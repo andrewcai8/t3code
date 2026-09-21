@@ -106,7 +106,7 @@ export interface CloudDriver {
   resume(input: {
     readonly leaseId: string;
     readonly sandboxId: string;
-    readonly environmentId: string;
+    readonly environmentId?: string;
     readonly providerInstanceId: string;
     readonly namespaceResource?: NamespaceResource;
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
@@ -620,6 +620,7 @@ export function createCloudDriver(
       if (namespaceResource) {
         if (!namespaceRunner || !proxy)
           throw new Error("Namespace recovery configuration is unavailable");
+        if (!environmentId) throw new Error("Namespace recovery needs an environment identity");
         const resumed = await namespaceRunner.resume({
           resource: namespaceResource,
           port: namespaceT3Port(namespaceResource),

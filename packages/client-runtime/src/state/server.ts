@@ -1043,6 +1043,14 @@ export function createServerEnvironmentAtoms<R, E>(
           `${environmentId}:${input.leaseId}:${input.environmentId}:${input.threadId}`,
       },
     }),
+    resumeUnclaimedProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:resume-unclaimed",
+      tag: WS_METHODS.environmentControlResumeUnclaimed,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}:${input.sandboxId}`,
+      },
+    }),
     touchProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:touch",
       tag: WS_METHODS.environmentControlTouch,

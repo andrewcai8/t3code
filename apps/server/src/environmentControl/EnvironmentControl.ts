@@ -21,6 +21,7 @@ import {
   type EnvironmentProvisionPauseResult,
   type EnvironmentProvisionResumeInput,
   type EnvironmentProvisionResumeResult,
+  type EnvironmentProvisionResumeUnclaimedInput,
   type EnvironmentProvisionClaimInput,
   type EnvironmentProvisionClaimResult,
   type EnvironmentProvisionTouchInput,
@@ -394,6 +395,62 @@ export function createEnvironmentControl(
       leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
       return promise;
     },
+    resumeUnclaimed: (
+      input: EnvironmentProvisionResumeUnclaimedInput,
+    ): Promise<EnvironmentProvisionResumeResult> => {
+      const ownerKey = JSON.stringify([input.leaseId, input.sandboxId, "unclaimed"]);
+      const existing = leaseOperations.get(input.sandboxId);
+      if (existing)
+        return existing.action === "resume" && existing.ownerKey === ownerKey
+          ? existing.promise
+          : Promise.resolve({
+              kind: "refused",
+              reason: "unknown",
+              message: "Another workspace operation is in progress. Retry shortly.",
+            });
+      const promise = (async (): Promise<EnvironmentProvisionResumeResult> => {
+        const lease = await leaseRegistry?.findBySandbox(input.sandboxId);
+        if (
+          !leaseRegistry ||
+          !lease ||
+          lease.leaseId !== input.leaseId ||
+          lease.owner !== null ||
+          (lease.state !== "active" && lease.state !== "paused" && lease.state !== "missing")
+        )
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "This workspace could not be found. Reconnect was refused.",
+          };
+        if (lease.state === "missing") throw new ProvisionedSandboxMissing();
+        const resumed = await driver.resume({
+          leaseId: lease.leaseId,
+          sandboxId: lease.sandboxId,
+          environmentId: input.environmentId,
+          providerInstanceId: lease.providerInstanceId,
+          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+          ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
+        });
+        if (!(await leaseRegistry.markActive({ leaseId: lease.leaseId, ...resumed })))
+          throw new Error("Lease could not be resumed");
+        return { kind: "resumed" };
+      })()
+        .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
+          if (cause instanceof ProvisionedSandboxMissing)
+            await leaseRegistry?.markMissing(input.leaseId);
+          return {
+            kind: "refused",
+            reason: cause instanceof ProvisionedSandboxMissing ? "missing" : "unknown",
+            message:
+              cause instanceof ProvisionedSandboxMissing
+                ? cause.message
+                : "The workspace could not be reconnected. Retry shortly.",
+          };
+        })
+        .finally(() => leaseOperations.delete(input.sandboxId));
+      leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
+      return promise;
+    },
     claim: async (
       input: EnvironmentProvisionClaimInput,
     ): Promise<EnvironmentProvisionClaimResult> => {
@@ -491,6 +548,10 @@ export function createEnvironmentControl(
 export class EnvironmentControl extends Context.Service<
   EnvironmentControl,
   {
+    /** Resolve the manager-local namespace proxy for guest gateway traffic. */
+    readonly namespaceProxyOrigin: (
+      leaseId: string,
+    ) => Effect.Effect<string | null, EnvironmentControlError>;
     readonly list: Effect.Effect<ReadonlyArray<ManagedEnvironment>, EnvironmentControlError>;
     readonly listProvisioned: Effect.Effect<
       ReadonlyArray<DiscoveredProvisionedEnvironment>,
@@ -519,6 +580,9 @@ export class EnvironmentControl extends Context.Service<
     ) => Effect.Effect<EnvironmentProvisionClaimResult, EnvironmentControlError>;
     readonly resume: (
       input: EnvironmentProvisionResumeInput,
+    ) => Effect.Effect<EnvironmentProvisionResumeResult, EnvironmentControlError>;
+    readonly resumeUnclaimed: (
+      input: EnvironmentProvisionResumeUnclaimedInput,
     ) => Effect.Effect<EnvironmentProvisionResumeResult, EnvironmentControlError>;
     readonly touch: (
       input: EnvironmentProvisionTouchInput,
@@ -951,6 +1015,20 @@ export const layer = Layer.effect(
       }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
     }).pipe(Effect.forkScoped);
     return {
+      namespaceProxyOrigin: (leaseId) =>
+        Effect.tryPromise({
+          try: async () => {
+            const lease = await leaseRegistry.findById(leaseId);
+            if (
+              !lease ||
+              (lease.state !== "active" && lease.state !== "paused") ||
+              !lease.namespaceProxy
+            )
+              return null;
+            return lease.namespaceProxy.proxyOrigin;
+          },
+          catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
+        }),
       list: run((service) => service.list(), []),
       listProvisioned: listProvisionedEnvironments(sql),
       provision: provisionControl.provision,
@@ -992,6 +1070,12 @@ export const layer = Layer.effect(
         }),
       resume: (input) =>
         run<EnvironmentProvisionResumeResult>((service) => service.resume(input), {
+          kind: "refused",
+          reason: "unknown",
+          message: "This install has no provisioning template configured.",
+        }),
+      resumeUnclaimed: (input) =>
+        run<EnvironmentProvisionResumeResult>((service) => service.resumeUnclaimed(input), {
           kind: "refused",
           reason: "unknown",
           message: "This install has no provisioning template configured.",

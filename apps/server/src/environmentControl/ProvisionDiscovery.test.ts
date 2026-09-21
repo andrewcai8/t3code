@@ -33,7 +33,7 @@ it.effect(
       yield* Effect.gen(function* () {
         const store = yield* ProvisionOperationStore;
         const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-        for (let index = 1; index <= 9; index++) {
+        for (let index = 1; index <= 11; index++) {
           const operation = yield* store.accept(
             decodeRequest({
               requestId: id(index),
@@ -93,14 +93,26 @@ it.effect(
             retainedExpiry = current.expiresAt;
           }
           if (index === 7) yield* Effect.promise(() => registry.markDisposed(id(index)));
+          if (index === 10) yield* Effect.promise(() => registry.markPaused(id(index)));
+          if (index === 11) yield* Effect.promise(() => registry.markMissing(id(index)));
         }
       }).pipe(Effect.provide(layer), Effect.scoped);
       yield* Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         const listed = yield* listProvisionedEnvironments(sql);
-        expect(listed.map((row) => row.requestId).toSorted()).toEqual([id(1), id(2), id(9)]);
+        expect(listed.map((row) => row.requestId).toSorted()).toEqual([
+          id(1),
+          id(2),
+          id(4),
+          id(9),
+          id(10),
+          id(11),
+        ]);
         expect(listed.find((row) => row.requestId === id(1))).toEqual({
           requestId: id(1),
+          leaseId: id(1),
+          sandboxId: "sandbox-1",
+          lifecycle: "active",
           environmentId: "environment-1",
           provider: "e2b",
           label: "proof/repository",
@@ -111,9 +123,31 @@ it.effect(
           expiresAt: retainedExpiry,
         });
         expect(listed.find((row) => row.requestId === id(2))?.threadId).toBeNull();
+        expect(listed.find((row) => row.requestId === id(2))).toMatchObject({
+          leaseId: id(2),
+          sandboxId: "sandbox-2",
+          lifecycle: "active",
+        });
+        expect(listed.find((row) => row.requestId === id(4))).toMatchObject({
+          leaseId: id(4),
+          sandboxId: "sandbox-4",
+          lifecycle: "active",
+        });
         expect(listed.find((row) => row.requestId === id(9))?.expiresAt).toBe(
           "1970-01-01T00:01:00.000Z",
         );
+        expect(listed.find((row) => row.requestId === id(10))).toMatchObject({
+          leaseId: id(10),
+          sandboxId: "sandbox-10",
+          lifecycle: "paused",
+          threadId: "thread-10",
+        });
+        expect(listed.find((row) => row.requestId === id(11))).toMatchObject({
+          leaseId: id(11),
+          sandboxId: "sandbox-11",
+          lifecycle: "missing",
+          threadId: "thread-11",
+        });
         expect(yield* listProvisionedEnvironments(sql)).toEqual(listed);
         expect(
           (yield* Effect.promise(() =>

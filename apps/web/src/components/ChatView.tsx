@@ -56,7 +56,10 @@ import {
   type WorktreeSetupSnapshot,
   cloneRepository,
 } from "@t3tools/contracts";
-import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import {
+  provisionedGatewayPairingUrl,
+  type EnvironmentConnectionPresentation,
+} from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import { readPastedComposerContext } from "./composerInlineTokenPaste";
 import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
@@ -349,7 +352,11 @@ import {
 } from "@t3tools/client-runtime/state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
-import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
+import {
+  useEnvironments,
+  useEnvironmentHttpBaseUrl,
+  usePrimaryEnvironment,
+} from "../state/environments";
 import {
   useProject,
   useProjects,
@@ -2248,6 +2255,7 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useProjects();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  const primaryEnvironmentHttpBaseUrl = useEnvironmentHttpBaseUrl(primaryEnvironmentId);
   useEffect(() => {
     if (!activeThreadRef || !activeProjectRef) return;
     registerFaviconProjectForThread(activeThreadRef, activeProjectRef);
@@ -4764,6 +4772,16 @@ export default function ChatView(props: ChatViewProps) {
               const result = await connectCloudPairing({ pairingUrl });
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
+            ...(primaryEnvironmentHttpBaseUrl === null
+              ? {}
+              : {
+                  rewritePairingUrl: (pairingUrl: string, leaseId: string) =>
+                    provisionedGatewayPairingUrl(
+                      primaryEnvironmentHttpBaseUrl,
+                      leaseId,
+                      pairingUrl,
+                    ),
+                }),
             isConnected: (environmentId) =>
               appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId)
                 ?.connection.phase === "connected",
@@ -4821,6 +4839,7 @@ export default function ChatView(props: ChatViewProps) {
       cloudAccount,
       connectCloudPairing,
       primaryEnvironmentId,
+      primaryEnvironmentHttpBaseUrl,
       requestCloudProvision,
       setComposerDraftModelSelection,
       setDraftThreadContext,

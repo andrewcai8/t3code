@@ -41,6 +41,9 @@ export type ProvisionRequestId = typeof ProvisionRequestId.Type;
 
 export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
+  leaseId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  lifecycle: Schema.Literals(["active", "paused", "missing"]),
   environmentId: EnvironmentId,
   provider: Schema.Literals(["e2b", "namespace"]),
   label: TrimmedNonEmptyString,
@@ -204,6 +207,15 @@ export const EnvironmentProvisionResumeInput = Schema.Struct({
 });
 export type EnvironmentProvisionResumeInput = typeof EnvironmentProvisionResumeInput.Type;
 
+/** Resume a retained provisioned workspace before it has been claimed by a thread. */
+export const EnvironmentProvisionResumeUnclaimedInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+});
+export type EnvironmentProvisionResumeUnclaimedInput =
+  typeof EnvironmentProvisionResumeUnclaimedInput.Type;
+
 export const EnvironmentProvisionResumeResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("resumed") }),
   Schema.Struct({
@@ -213,6 +225,9 @@ export const EnvironmentProvisionResumeResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionResumeResult = typeof EnvironmentProvisionResumeResult.Type;
+
+export const EnvironmentProvisionResumeUnclaimedResult = EnvironmentProvisionResumeResult;
+export type EnvironmentProvisionResumeUnclaimedResult = EnvironmentProvisionResumeResult;
 
 export const EnvironmentProvisionClaimInput = Schema.Struct({
   leaseId: TrimmedNonEmptyString,

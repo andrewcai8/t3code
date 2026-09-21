@@ -31,8 +31,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     FROM provision_operations AS operations
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
     WHERE json_extract(operations.state_json, '$.kind') = 'ready'
-      AND json_extract(leases.lease_json, '$.state') = 'active'
-      AND json_extract(leases.lease_json, '$.expiresAt') > ${now}
+      AND json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
     ORDER BY operations.created_at DESC, operations.request_id
   `;
     const result: Array<DiscoveredProvisionedEnvironment> = [];
@@ -41,6 +40,8 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         state.kind !== "ready" ||
         (request.retentionDeadline !== undefined && request.retentionDeadline <= now)
       )
+        continue;
+      if (lease.state !== "active" && lease.state !== "paused" && lease.state !== "missing")
         continue;
       const resource = state.allocation.resource;
       const sandboxId = resource.provider === "e2b" ? resource.sandboxId : resource.devboxId;
@@ -55,6 +56,9 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
       result.push(
         yield* decodeDiscovery({
           requestId: request.requestId,
+          leaseId: lease.leaseId,
+          sandboxId: lease.sandboxId,
+          lifecycle: lease.state,
           environmentId: state.readiness.environmentId,
           provider: resource.provider,
           label:

@@ -14,6 +14,8 @@ import {
   EnvironmentProvisionPauseResult,
   EnvironmentProvisionResumeInput,
   EnvironmentProvisionResumeResult,
+  EnvironmentProvisionResumeUnclaimedInput,
+  EnvironmentProvisionResumeUnclaimedResult,
   EnvironmentProvisionClaimInput,
   EnvironmentProvisionClaimResult,
   EnvironmentProvisionTouchInput,
@@ -399,6 +401,7 @@ export const WS_METHODS = {
   environmentControlDispose: "environmentControl.dispose",
   environmentControlPause: "environmentControl.pause",
   environmentControlResume: "environmentControl.resume",
+  environmentControlResumeUnclaimed: "environmentControl.resumeUnclaimed",
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
   serverGetUsageSummary: "server.getUsageSummary",
@@ -697,6 +700,14 @@ const EnvironmentControlResumeRpc = Rpc.make(WS_METHODS.environmentControlResume
   success: EnvironmentProvisionResumeResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
+const EnvironmentControlResumeUnclaimedRpc = Rpc.make(
+  WS_METHODS.environmentControlResumeUnclaimed,
+  {
+    payload: EnvironmentProvisionResumeUnclaimedInput,
+    success: EnvironmentProvisionResumeUnclaimedResult,
+    error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+  },
+);
 const EnvironmentControlTouchRpc = Rpc.make(WS_METHODS.environmentControlTouch, {
   payload: EnvironmentProvisionTouchInput,
   success: EnvironmentProvisionTouchResult,
@@ -1444,6 +1455,7 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlDisposeRpc,
   EnvironmentControlPauseRpc,
   EnvironmentControlResumeRpc,
+  EnvironmentControlResumeUnclaimedRpc,
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
   WsServerGetUsageSummaryRpc,

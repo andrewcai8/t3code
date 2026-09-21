@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   isOffDeviceReachablePairingUrl,
   joinProvisionedEnvironment,
+  provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
@@ -25,6 +26,7 @@ import { NewCloudMachineSheet } from "./NewCloudMachineSheet";
 import {
   presentProvisionedEnvironment,
   provisionedEnvironmentRows,
+  isProvisionedEnvironmentConnected,
   type ProvisionedEnvironmentRow,
   type ProvisionedJoinState,
 } from "./provisionedEnvironmentRowModel";
@@ -53,6 +55,12 @@ export function ProvisionedEnvironmentRows(props: {
   const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
     reportFailure: false,
   });
+  const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const resumeUnclaimed = useAtomCommand(serverEnvironment.resumeUnclaimedProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
   const [joinStates, setJoinStates] = useState<Readonly<Record<string, ProvisionedJoinState>>>({});
   const [creating, setCreating] = useState(false);
@@ -61,6 +69,7 @@ export function ProvisionedEnvironmentRows(props: {
     [query.data, props.connectedEnvironments],
   );
   const { connectedEnvironments, managerId } = props;
+  const manager = connectedEnvironments.find((entry) => entry.environmentId === managerId);
   const join = useCallback(
     async (environment: DiscoveredProvisionedEnvironment) => {
       const setJoinState = (state: ProvisionedJoinState) =>
@@ -68,8 +77,39 @@ export function ProvisionedEnvironmentRows(props: {
       setJoinState({ kind: "joining" });
       try {
         const outcome = await joinProvisionedEnvironment(environment, {
-          isConnected: (id) => connectedEnvironments.some((entry) => entry.environmentId === id),
+          isConnected: (id) => isProvisionedEnvironmentConnected(id, connectedEnvironments),
           attach: async () => {
+            if (environment.lifecycle === "paused") {
+              const resumed =
+                environment.threadId === null
+                  ? await resumeUnclaimed({
+                      environmentId: managerId,
+                      input: {
+                        leaseId: environment.leaseId,
+                        sandboxId: environment.sandboxId,
+                        environmentId: environment.environmentId,
+                      },
+                    })
+                  : await resume({
+                      environmentId: managerId,
+                      input: {
+                        leaseId: environment.leaseId,
+                        sandboxId: environment.sandboxId,
+                        environmentId: environment.environmentId,
+                        threadId: environment.threadId,
+                      },
+                    });
+              if (AsyncResult.isFailure(resumed) || resumed.value.kind !== "resumed") {
+                return {
+                  kind: "refused" as const,
+                  message: AsyncResult.isFailure(resumed)
+                    ? "The manager could not resume this environment. Try again."
+                    : resumed.value.kind === "refused"
+                      ? resumed.value.message
+                      : "The manager could not resume this environment. Try again.",
+                };
+              }
+            }
             const result = await attach({
               environmentId: managerId,
               input: { requestId: environment.requestId },
@@ -91,6 +131,12 @@ export function ProvisionedEnvironmentRows(props: {
             }
             return result.value;
           },
+          ...(manager?.displayUrl
+            ? {
+                rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
+                  provisionedGatewayPairingUrl(manager.displayUrl, lease.leaseId, pairingUrl),
+              }
+            : {}),
           canReach: isOffDeviceReachablePairingUrl,
         });
         setJoinState(
@@ -107,7 +153,7 @@ export function ProvisionedEnvironmentRows(props: {
         });
       }
     },
-    [attach, connectedEnvironments, managerId, pair],
+    [attach, connectedEnvironments, manager, managerId, pair, resume, resumeUnclaimed],
   );
 
   if (!supported) return null;
