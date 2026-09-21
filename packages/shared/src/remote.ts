@@ -100,7 +100,9 @@ const normalizeRemoteBaseUrl = (
       protocol: url.protocol,
     });
   }
-  url.pathname = "/";
+  // A manager-origin gateway carries the guest server below an opaque path.
+  // Keep that prefix when the caller supplies host + pairing code separately.
+  url.pathname = url.pathname.replace(/\/pair\/?$/, "/") || "/";
   url.search = "";
   url.hash = "";
   return url;
