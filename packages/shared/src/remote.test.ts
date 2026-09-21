@@ -9,6 +9,19 @@ import {
 } from "./remote.ts";
 
 describe("remote", () => {
+  it("retains a manager gateway path while removing the pairing segment", () => {
+    expect(
+      resolveRemotePairingTarget({
+        pairingUrl:
+          "https://manager.example/base/api/provisioned-environment/lease-1/pair#token=pairing-token",
+      }),
+    ).toEqual({
+      credential: "pairing-token",
+      httpBaseUrl: "https://manager.example/base/api/provisioned-environment/lease-1/",
+      wsBaseUrl: "wss://manager.example/base/api/provisioned-environment/lease-1/",
+    });
+  });
+
   it("derives backend urls and token from a pairing url", () => {
     expect(
       resolveRemotePairingTarget({

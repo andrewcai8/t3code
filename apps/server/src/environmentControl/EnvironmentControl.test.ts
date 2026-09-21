@@ -294,6 +294,80 @@ describe("managed cloud commands", () => {
       expect(driver.resume).toHaveBeenCalledTimes(2);
     });
   });
+  it.each(["active", "paused"] as const)(
+    "resumes an unclaimed retained workspace from the %s state without assigning an owner",
+    async (state) => {
+      await withSqlRegistry(async (registry) => {
+        await registry.register({
+          leaseId: "unclaimed",
+          sandboxId: "unclaimed-sandbox",
+          providerInstanceId: "codex",
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        });
+        if (state === "paused") await registry.markPaused("unclaimed");
+        const driver = setup().driver;
+        driver.resume = vi.fn().mockResolvedValue({});
+        const manager = createEnvironmentControl([], driver, registry);
+
+        expect(
+          await manager.resumeUnclaimed({
+            leaseId: "unclaimed",
+            sandboxId: "unclaimed-sandbox",
+            environmentId: "child",
+          }),
+        ).toEqual({ kind: "resumed" });
+        expect(driver.resume).toHaveBeenCalledWith({
+          leaseId: "unclaimed",
+          sandboxId: "unclaimed-sandbox",
+          environmentId: "child",
+          providerInstanceId: "codex",
+        });
+        expect(await registry.findById("unclaimed")).toMatchObject({
+          state: "active",
+          owner: null,
+        });
+      });
+    },
+  );
+  it("reports a missing unclaimed workspace without contacting the provider", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "unclaimed",
+        sandboxId: "unclaimed-sandbox",
+        providerInstanceId: "codex",
+      });
+      await registry.markMissing("unclaimed");
+      const driver = setup().driver;
+      driver.resume = vi.fn();
+      const manager = createEnvironmentControl([], driver, registry);
+
+      expect(
+        await manager.resumeUnclaimed({
+          leaseId: "unclaimed",
+          sandboxId: "unclaimed-sandbox",
+          environmentId: "child",
+        }),
+      ).toMatchObject({ kind: "refused", reason: "missing" });
+      expect(driver.resume).not.toHaveBeenCalled();
+    });
+  });
+  it("refuses unclaimed resume after a lease has been claimed", async () => {
+    await withLease(async ({ driver, manager }) => {
+      driver.resume = vi.fn();
+      expect(
+        await manager.resumeUnclaimed({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          environmentId: "child",
+        }),
+      ).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "This workspace could not be found. Reconnect was refused.",
+      });
+      expect(driver.resume).not.toHaveBeenCalled();
+    });
+  });
   it("leaves failed recovery paused and allows another attempt", async () => {
     await withLease(async ({ registry, driver, manager }) => {
       await registry.markPaused("lease");

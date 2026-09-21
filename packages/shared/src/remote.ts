@@ -5,6 +5,9 @@ const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
+/** Manager-origin prefix for guest traffic to a retained provisioned environment. */
+export const PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX = "/api/provisioned-environment";
+
 export const readHashParams = (url: URL): URLSearchParams =>
   new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
 
@@ -110,7 +113,10 @@ const toHttpBaseUrl = (url: URL): string => {
   } else if (next.protocol === "wss:") {
     next.protocol = "https:";
   }
-  next.pathname = "/";
+  // A manager-origin gateway prefixes the guest server with an opaque route.
+  // Pairing URLs end in `/pair`; retain everything before that segment so all
+  // subsequent descriptor, auth, and RPC requests stay inside the gateway.
+  next.pathname = next.pathname.replace(/\/pair\/?$/, "/") || "/";
   next.search = "";
   next.hash = "";
   return next.toString();
@@ -123,7 +129,7 @@ const toWsBaseUrl = (url: URL): string => {
   } else if (next.protocol === "https:") {
     next.protocol = "wss:";
   }
-  next.pathname = "/";
+  next.pathname = next.pathname.replace(/\/pair\/?$/, "/") || "/";
   next.search = "";
   next.hash = "";
   return next.toString();
