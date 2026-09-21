@@ -4,6 +4,16 @@
 
 This document covers the unified release workflow for stable and nightly desktop releases.
 
+## Enable publication and deployment on a fork
+
+Mobile production, relay deployment, and release jobs skip by default outside `pingdotgg/t3code`. Manual dispatch does not bypass these gates. Mobile fingerprint checks use GitHub-hosted Ubuntu runners on forks.
+
+Before enabling a workflow, configure your fork's own publication or deployment targets, credentials, and required runners. In the fork's **Settings > Secrets and variables > Actions > Variables**, set the corresponding repository variable to `true`:
+
+- `ENABLE_MOBILE_PRODUCTION` for mobile production builds and OTA updates.
+- `ENABLE_RELAY_DEPLOY` for production relay deployment.
+- `ENABLE_RELEASE_WORKFLOW` for stable, nightly, and preview releases.
+
 ## What the workflow does
 
 - Workflow: `.github/workflows/release.yml`
