@@ -2,10 +2,17 @@ import { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contra
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
-import { isOffDeviceReachablePairingUrl, joinProvisionedEnvironment } from "./provisioned.ts";
+import {
+  isOffDeviceReachablePairingUrl,
+  joinProvisionedEnvironment,
+  provisionedGatewayPairingUrl,
+} from "./provisioned.ts";
 
 const environment = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
   requestId: "11111111-1111-4111-a111-111111111111",
+  leaseId: "11111111-1111-4111-a111-111111111112",
+  sandboxId: "sandbox-1",
+  lifecycle: "active",
   environmentId: "remote",
   provider: "namespace",
   label: "proof/repo",
@@ -61,6 +68,28 @@ describe("isOffDeviceReachablePairingUrl", () => {
 });
 
 describe("joinProvisionedEnvironment", () => {
+  it("rewrites a loopback pairing URL through the manager gateway", async () => {
+    expect(
+      provisionedGatewayPairingUrl(
+        "https://manager.example/base/",
+        environment.leaseId,
+        "http://127.0.0.1:50766/pair#token=fresh",
+      ),
+    ).toBe(
+      "https://manager.example/base/api/provisioned-environment/11111111-1111-4111-a111-111111111112/pair#token=fresh",
+    );
+  });
+
+  it("leaves a provider-hosted pairing URL untouched", () => {
+    expect(
+      provisionedGatewayPairingUrl(
+        "https://manager.example",
+        environment.leaseId,
+        "https://3001-sandbox.e2b.app/pair#token=fresh",
+      ),
+    ).toBe("https://3001-sandbox.e2b.app/pair#token=fresh");
+  });
+
   it("pairs with the URL attach just minted when this client can reach it", async () => {
     const { calls, ports: joinPorts } = ports({
       pairingUrl: () => "https://3001-sandbox.e2b.app/pair#token=fresh",
@@ -81,6 +110,23 @@ describe("joinProvisionedEnvironment", () => {
       kind: "unreachable",
     });
     expect(calls).toEqual(["attach:1"]);
+  });
+
+  it("applies a caller rewrite before reachability and pairing", async () => {
+    const { calls, ports: joinPorts } = ports({
+      pairingUrl: () => "http://127.0.0.1:50766/pair#token=fresh",
+      canReach: isOffDeviceReachablePairingUrl,
+    });
+    const outcome = await joinProvisionedEnvironment(environment, {
+      ...joinPorts,
+      rewritePairingUrl: (pairingUrl, lease) =>
+        provisionedGatewayPairingUrl("https://manager.example", lease.leaseId, pairingUrl),
+    });
+    expect(outcome).toEqual({ kind: "joined" });
+    expect(calls).toEqual([
+      "attach:1",
+      "pair:https://manager.example/api/provisioned-environment/11111111-1111-4111-a111-111111111112/pair#token=fresh",
+    ]);
   });
 
   it("mints a fresh pairing URL on every join rather than reusing the last one", async () => {

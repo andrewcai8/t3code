@@ -47,6 +47,7 @@ export interface CloudProvisionPorts {
   ) => Promise<EnvironmentProvisionAttachResult | null>;
   /** Registers the pairing URL; resolves with the paired environment's id, or null on failure. */
   readonly pair: (pairingUrl: string) => Promise<EnvironmentId | null>;
+  readonly rewritePairingUrl?: (pairingUrl: string, leaseId: string) => string;
   readonly isConnected: (environmentId: EnvironmentId) => boolean;
   /** See `ProvisionedJoinPorts.canReach`. */
   readonly canReach: (pairingUrl: string) => boolean;
@@ -126,6 +127,12 @@ export async function provisionCloudEnvironment(
         if (paired === null) throw new Error(`${label} was created but could not be connected.`);
         return paired;
       },
+      ...(ports.rewritePairingUrl
+        ? {
+            rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
+              ports.rewritePairingUrl!(pairingUrl, lease.leaseId),
+          }
+        : {}),
       canReach: ports.canReach,
     });
     if (!stillThisRequest()) return { kind: "cancelled" };

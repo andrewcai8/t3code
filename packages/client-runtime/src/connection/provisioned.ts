@@ -3,6 +3,7 @@ import type {
   EnvironmentId,
   EnvironmentProvisionAttachResult,
 } from "@t3tools/contracts";
+import { PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX } from "@t3tools/shared/remote";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 
 /** False for a loopback pairing URL: another device dialing it would reach itself, not the machine that minted it. */
@@ -18,11 +19,32 @@ export interface ProvisionedJoinPorts {
   readonly isConnected: (environmentId: EnvironmentId) => boolean;
   readonly attach: () => Promise<EnvironmentProvisionAttachResult>;
   readonly pair: (pairingUrl: string) => Promise<EnvironmentId>;
+  /** Rewrite a manager-local pairing URL to a reachable manager-origin gateway. */
+  readonly rewritePairingUrl?: (
+    pairingUrl: string,
+    environment: Pick<DiscoveredProvisionedEnvironment, "leaseId">,
+  ) => string;
   /**
    * Whether this client can dial a minted pairing URL. A phone never reaches the manager's
    * loopback proxy; a browser running on the manager itself can.
    */
   readonly canReach: (pairingUrl: string) => boolean;
+}
+
+/** Replace a loopback Namespace proxy origin with the manager-origin guest gateway. */
+export function provisionedGatewayPairingUrl(
+  managerHttpBaseUrl: string,
+  leaseId: string,
+  pairingUrl: string,
+): string {
+  const source = new URL(pairingUrl);
+  if (!isLoopbackHost(source.hostname)) return pairingUrl;
+  const manager = new URL(managerHttpBaseUrl);
+  const prefix = manager.pathname.endsWith("/") ? manager.pathname.slice(0, -1) : manager.pathname;
+  manager.pathname = `${prefix}${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/${encodeURIComponent(leaseId)}/pair`;
+  manager.search = source.search;
+  manager.hash = source.hash;
+  return manager.toString();
 }
 
 export type ProvisionedJoinOutcome =
@@ -36,7 +58,7 @@ export type ProvisionedJoinOutcome =
  * actually reach it.
  */
 export async function joinProvisionedEnvironment(
-  environment: Pick<DiscoveredProvisionedEnvironment, "environmentId">,
+  environment: Pick<DiscoveredProvisionedEnvironment, "environmentId" | "leaseId">,
   ports: ProvisionedJoinPorts,
 ): Promise<ProvisionedJoinOutcome> {
   if (ports.isConnected(environment.environmentId)) return { kind: "joined" };
@@ -44,8 +66,10 @@ export async function joinProvisionedEnvironment(
   if (attached.kind === "refused") return { kind: "refused", message: attached.message };
   if (attached.environmentId !== environment.environmentId)
     return { kind: "refused", message: "The connection belongs to another environment." };
-  if (!ports.canReach(attached.pairingUrl)) return { kind: "unreachable" };
-  const pairedId = await ports.pair(attached.pairingUrl);
+  const pairingUrl =
+    ports.rewritePairingUrl?.(attached.pairingUrl, environment) ?? attached.pairingUrl;
+  if (!ports.canReach(pairingUrl)) return { kind: "unreachable" };
+  const pairedId = await ports.pair(pairingUrl);
   if (pairedId !== environment.environmentId)
     return { kind: "refused", message: "The paired server does not match this environment." };
   return { kind: "joined" };
