@@ -12,10 +12,13 @@ const state = vi.hoisted(() => ({
   error: null as string | null,
   refresh: vi.fn(),
   attach: vi.fn(),
+  resume: vi.fn(),
+  resumeUnclaimed: vi.fn(),
   pair: vi.fn(),
   navigate: vi.fn(),
   wait: vi.fn(),
   copy: vi.fn(),
+  managerHttpBaseUrl: null as string | null,
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => ({ environmentControl: true }) }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
@@ -23,7 +26,10 @@ vi.mock("../../connection/onboarding", () => ({ connectPairing: "pair" }));
 vi.mock("../../state/entities", () => ({
   useThreadShell: () => (state.title ? { title: state.title } : null),
 }));
-vi.mock("../../state/environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("../../state/environments", () => ({
+  useEnvironments: () => ({ environments: [] }),
+  useEnvironmentHttpBaseUrl: () => state.managerHttpBaseUrl,
+}));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: () => ({
     data: state.rows,
@@ -37,10 +43,19 @@ vi.mock("../../state/server", () => ({
     configValueAtom: () => "config",
     provisionedEnvironments: () => "discovery",
     attachProvisionedEnvironment: "attach",
+    resumeProvisionedEnvironment: "resume",
+    resumeUnclaimedProvisionedEnvironment: "resume-unclaimed",
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (command: string) => (command === "attach" ? state.attach : state.pair),
+  useAtomCommand: (command: string) =>
+    command === "attach"
+      ? state.attach
+      : command === "resume"
+        ? state.resume
+        : command === "resume-unclaimed"
+          ? state.resumeUnclaimed
+          : state.pair,
 }));
 vi.mock("../../state/waitForThreadShell", () => ({
   waitForThreadShell: (...args: unknown[]) => state.wait(...args),
@@ -76,6 +91,7 @@ beforeEach(() => {
   state.rows = [environment];
   state.title = null;
   state.error = null;
+  state.managerHttpBaseUrl = null;
   state.attach.mockResolvedValue(
     AsyncResult.success({
       kind: "attached",
@@ -85,6 +101,8 @@ beforeEach(() => {
   );
   state.pair.mockResolvedValue(AsyncResult.success(environment.environmentId));
   state.wait.mockResolvedValue(true);
+  state.resume.mockResolvedValue(AsyncResult.success({ kind: "resumed" }));
+  state.resumeUnclaimed.mockResolvedValue(AsyncResult.success({ kind: "resumed" }));
 });
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -147,6 +165,28 @@ it("shows the remote thread title and repository after connection", async () => 
   expect(view.root.findAllByType("p").some((p) => p.children.join("").includes("proof/repo"))).toBe(
     true,
   );
+});
+
+it("resumes a paused environment and routes its pairing through the manager", async () => {
+  state.rows = [{ ...environment, lifecycle: "paused" }];
+  state.managerHttpBaseUrl = "https://manager.invalid/base/";
+  state.attach.mockResolvedValue(attached("http://127.0.0.1:50766/pair#token=fresh"));
+  const view = await mount();
+  await click(view, "Open thread");
+  expect(state.resume).toHaveBeenCalledWith({
+    environmentId: environment.environmentId,
+    input: {
+      leaseId: environment.leaseId,
+      sandboxId: environment.sandboxId,
+      environmentId: environment.environmentId,
+      threadId: environment.threadId,
+    },
+  });
+  expect(state.pair).toHaveBeenCalledWith({
+    pairingUrl:
+      "https://manager.invalid/base/api/provisioned-environment/11111111-1111-4111-a111-111111111112/pair#token=fresh",
+    expectedEnvironmentId: environment.environmentId,
+  });
 });
 it("keeps attachment refusal visible without pairing or navigation", async () => {
   state.attach.mockResolvedValue(

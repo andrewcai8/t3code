@@ -1,4 +1,7 @@
-import { isOffDeviceReachablePairingUrl } from "@t3tools/client-runtime/connection";
+import {
+  isOffDeviceReachablePairingUrl,
+  provisionedGatewayPairingUrl,
+} from "@t3tools/client-runtime/connection";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -9,7 +12,7 @@ import { connectPairing } from "../../connection/onboarding";
 import { openProvisionedEnvironment } from "../../connection/provisioned";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useThreadShell } from "../../state/entities";
-import { useEnvironments } from "../../state/environments";
+import { useEnvironmentHttpBaseUrl, useEnvironments } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -174,8 +177,15 @@ export function ProvisionedEnvironmentConnections({
   const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
     reportFailure: false,
   });
+  const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const resumeUnclaimed = useAtomCommand(serverEnvironment.resumeUnclaimedProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
   const { environments } = useEnvironments();
+  const managerHttpBaseUrl = useEnvironmentHttpBaseUrl(managerId);
   const navigate = useNavigate();
   const [pending, setPending] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -191,12 +201,40 @@ export function ProvisionedEnvironmentConnections({
       environmentId: managerId,
       input: { requestId: environment.requestId },
     });
-  async function mintPairingUrl(environment: DiscoveredProvisionedEnvironment): Promise<string> {
+  async function attachForClient(environment: DiscoveredProvisionedEnvironment) {
+    if (environment.lifecycle === "paused") {
+      const resumed =
+        environment.threadId === null
+          ? await resumeUnclaimed({
+              environmentId: managerId,
+              input: {
+                leaseId: environment.leaseId,
+                sandboxId: environment.sandboxId,
+                environmentId: environment.environmentId,
+              },
+            })
+          : await resume({
+              environmentId: managerId,
+              input: {
+                leaseId: environment.leaseId,
+                sandboxId: environment.sandboxId,
+                environmentId: environment.environmentId,
+                threadId: environment.threadId,
+              },
+            });
+      if (AsyncResult.isFailure(resumed))
+        throw new Error("The manager could not resume this environment. Try again.");
+      if (resumed.value.kind === "refused") throw new Error(resumed.value.message);
+    }
     const result = await requestAttach(environment);
     if (AsyncResult.isFailure(result))
-      throw new Error("The manager could not issue a pairing link. Try again.");
+      throw new Error("The manager could not issue a connection. Try again.");
     if (result.value.kind === "refused") throw new Error(result.value.message);
-    return result.value.pairingUrl;
+    return result.value;
+  }
+  async function mintPairingUrl(environment: DiscoveredProvisionedEnvironment): Promise<string> {
+    const result = await attachForClient(environment);
+    return result.pairingUrl;
   }
   async function open(environment: DiscoveredProvisionedEnvironment) {
     setPending(environment.requestId);
@@ -207,12 +245,7 @@ export function ProvisionedEnvironmentConnections({
           environments.some(
             (entry) => entry.environmentId === id && entry.connection.phase === "connected",
           ),
-        attach: async () => {
-          const result = await requestAttach(environment);
-          if (AsyncResult.isFailure(result))
-            throw new Error("The manager could not issue a connection. Try again.");
-          return result.value;
-        },
+        attach: () => attachForClient(environment),
         pair: async (pairingUrl) => {
           const result = await pair({
             pairingUrl,
@@ -222,6 +255,12 @@ export function ProvisionedEnvironmentConnections({
             throw new Error("The environment could not be connected. Try again.");
           return result.value;
         },
+        ...(managerHttpBaseUrl
+          ? {
+              rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
+                provisionedGatewayPairingUrl(managerHttpBaseUrl, lease.leaseId, pairingUrl),
+            }
+          : {}),
         waitForThread: waitForThreadShell,
       });
       if (ref) await navigate({ to: "/$environmentId/$threadId", params: ref });

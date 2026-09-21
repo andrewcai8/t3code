@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import {
+  isProvisionedEnvironmentConnected,
   presentProvisionedEnvironment,
   provisionedEnvironmentRows,
 } from "./provisionedEnvironmentRowModel";
@@ -40,6 +41,19 @@ function connectedEnvironment(
 }
 
 describe("provisionedEnvironmentRows", () => {
+  it("only treats a live connection as joined for resume decisions", () => {
+    expect(
+      isProvisionedEnvironmentConnected("box-1", [
+        connectedEnvironment({ environmentId: "box-1", connectionState: "reconnecting" }),
+      ]),
+    ).toBe(false);
+    expect(
+      isProvisionedEnvironmentConnected("box-1", [
+        connectedEnvironment({ environmentId: "box-1" }),
+      ]),
+    ).toBe(true);
+  });
+
   it("pairs each machine with this device's record of it when one exists", () => {
     const joined = connectedEnvironment({ environmentId: "box-1" });
     const other = {

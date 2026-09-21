@@ -26,6 +26,7 @@ import { NewCloudMachineSheet } from "./NewCloudMachineSheet";
 import {
   presentProvisionedEnvironment,
   provisionedEnvironmentRows,
+  isProvisionedEnvironmentConnected,
   type ProvisionedEnvironmentRow,
   type ProvisionedJoinState,
 } from "./provisionedEnvironmentRowModel";
@@ -76,7 +77,7 @@ export function ProvisionedEnvironmentRows(props: {
       setJoinState({ kind: "joining" });
       try {
         const outcome = await joinProvisionedEnvironment(environment, {
-          isConnected: (id) => connectedEnvironments.some((entry) => entry.environmentId === id),
+          isConnected: (id) => isProvisionedEnvironmentConnected(id, connectedEnvironments),
           attach: async () => {
             if (environment.lifecycle === "paused") {
               const resumed =

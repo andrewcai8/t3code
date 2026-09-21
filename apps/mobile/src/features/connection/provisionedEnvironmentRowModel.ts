@@ -14,6 +14,16 @@ export interface ProvisionedEnvironmentRow {
   readonly joined: ConnectedEnvironmentSummary | null;
 }
 
+export function isProvisionedEnvironmentConnected(
+  environmentId: string,
+  connectedEnvironments: ReadonlyArray<ConnectedEnvironmentSummary>,
+): boolean {
+  return connectedEnvironments.some(
+    (environment) =>
+      environment.environmentId === environmentId && environment.connectionState === "connected",
+  );
+}
+
 export function provisionedEnvironmentRows(
   provisioned: ReadonlyArray<DiscoveredProvisionedEnvironment>,
   connectedEnvironments: ReadonlyArray<ConnectedEnvironmentSummary>,
