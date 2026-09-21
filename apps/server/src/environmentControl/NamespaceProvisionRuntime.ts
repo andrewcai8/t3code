@@ -164,8 +164,19 @@ if root.is_symlink() or root.stat().st_uid != os.getuid() or root.stat().st_mode
 pathlib.Path(sys.argv[2]).mkdir(mode=0o700)
 `;
 const runUploadedPython = String.raw`
-import os,sys
-script,payload=sys.argv[1:]
+import os,pathlib,re,sys
+script,payload,applications=sys.argv[1:]
+# The qualified image includes a beta, which can be the machine-wide default.
+# Keep preparation and its backend/provider children on the qualified Xcode.
+xcodes=[]
+for app in pathlib.Path(applications).glob('Xcode_26.4*.app'):
+    match=re.fullmatch(r'Xcode_(26\.4(?:\.\d+)?)\.app',app.name)
+    developer=app/'Contents/Developer'
+    if match and (developer/'Library/PrivateFrameworks/SimulatorKit.framework').is_dir():
+        xcodes.append((tuple(map(int,match.group(1).split('.'))),developer))
+if not xcodes:
+    raise RuntimeError('Namespace image is missing the qualified Xcode 26.4.x simulator toolchain')
+os.environ['DEVELOPER_DIR']=str(max(xcodes)[1])
 os.chmod(script,0o600)
 os.chmod(payload,0o600)
 with open(payload,'rb') as data:
@@ -227,6 +238,7 @@ export function namespacePythonPort(config: {
             runUploadedPython,
             `${remote}/script.py`,
             `${remote}/input.json`,
+            "/Applications",
           ],
           undefined,
           1_200_000,

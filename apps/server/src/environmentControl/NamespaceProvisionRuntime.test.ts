@@ -7,6 +7,7 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import { afterEach, describe, expect, it } from "vite-plus/test";
@@ -89,6 +90,26 @@ async function listen(handler: NodeHttp.RequestListener) {
 async function fixture() {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-runtime-"));
   cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));
+  const applications = NodePath.join(directory, "Applications");
+  const hostDeveloper =
+    HostProcessPlatform.defaultValue() === "darwin"
+      ? NodeChildProcess.execFileSync("xcode-select", ["-p"], { encoding: "utf8" }).trim()
+      : undefined;
+  for (const version of ["26.4", "26.4.1", "26.4.9-Beta", "27.1-Beta"]) {
+    await NodeFSP.mkdir(
+      NodePath.join(
+        applications,
+        `Xcode_${version}.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework`,
+      ),
+      { recursive: true },
+    );
+    // Apple's git/python shims resolve through DEVELOPER_DIR on macOS.
+    if (hostDeveloper)
+      await NodeFSP.symlink(
+        NodePath.join(hostDeveloper, "usr"),
+        NodePath.join(applications, `Xcode_${version}.app/Contents/Developer/usr`),
+      );
+  }
   const state = {
     creator: "user-test",
     instanceId: "owned-instance",
@@ -209,7 +230,7 @@ async function fixture() {
         return await new Promise((resolve) => {
           NodeChildProcess.execFile(
             executable,
-            args.slice(separator + 2),
+            args.slice(separator + 2).map((arg) => (arg === "/Applications" ? applications : arg)),
             { encoding: "utf8" },
             (error, stdout, stderr) => resolve({ exitCode: error ? 1 : 0, stdout, stderr }),
           );
@@ -260,7 +281,18 @@ async function fixture() {
       },
     },
   });
-  return { directory, root, session, commands, tokenFiles, apiCalls, state, operation, request };
+  return {
+    directory,
+    applications,
+    root,
+    session,
+    commands,
+    tokenFiles,
+    apiCalls,
+    state,
+    operation,
+    request,
+  };
 }
 
 const decodeServerPid = Schema.decodeUnknownSync(
@@ -280,6 +312,7 @@ if (args[0] === 'auth') {
   process.exit(0);
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
+  fs.writeFileSync(path.join(root, 'developer-directory'), process.env.DEVELOPER_DIR ?? '');
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url === '/.well-known/t3/environment') {
@@ -324,6 +357,40 @@ function serverLockReleased(root: string) {
 }
 
 describe("Namespace runtime transport", () => {
+  it("selects the qualified stable Xcode for uploaded preparation and its children", async () => {
+    const f = await fixture();
+    const port = namespacePythonPort({
+      session: f.session,
+      resource,
+      root: f.root,
+      localDir: f.directory,
+    });
+    const result = await port.executePython({
+      script:
+        "import subprocess; subprocess.run(['python3', '-c', 'import os; print(os.environ[\"DEVELOPER_DIR\"])'], check=True)",
+      stdin: "{}",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe(
+      NodePath.join(f.applications, "Xcode_26.4.1.app/Contents/Developer"),
+    );
+  });
+
+  it("refuses preparation when the qualified simulator toolchain is absent", async () => {
+    const f = await fixture();
+    await NodeFSP.rm(f.applications, { recursive: true });
+    const port = namespacePythonPort({
+      session: f.session,
+      resource,
+      root: f.root,
+      localDir: f.directory,
+    });
+    const result = await port.executePython({ script: "print('must not execute')", stdin: "{}" });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).not.toContain("must not execute");
+    expect(result.stderr).toContain("missing the qualified Xcode 26.4.x simulator toolchain");
+  });
+
   it("uploads private input and executes it through captured resource ID without CLI stdin", async () => {
     const f = await fixture();
     const port = namespacePythonPort({
@@ -759,6 +826,9 @@ describe("Namespace runtime transport", () => {
       decodeOperation({ ...f.operation, request }),
       resource,
       manifest,
+    );
+    expect(await NodeFSP.readFile(NodePath.join(root, "developer-directory"), "utf8")).toBe(
+      NodePath.join(f.applications, "Xcode_26.4.1.app/Contents/Developer"),
     );
     const operation = decodeOperation({
       ...f.operation,
