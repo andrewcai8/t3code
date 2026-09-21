@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
+import * as Schema from "effect/Schema";
 import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
@@ -18,6 +19,7 @@ import {
 } from "./namespaceProvisioner.ts";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+const isNotFound = Schema.is(Schema.Struct({ code: Schema.Literal(5) }));
 const DEVBOX_API = "https://private-api.global.namespaceapis.com";
 const ARTIFACTS_API = "https://ord.storage.namespaceapis.com";
 
@@ -661,7 +663,19 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
       return `${origin}/pair#token=${encodeURIComponent(pairToken(pair.stdout))}`;
     },
     destroyInstance: async (resource) => {
-      await run(["shutdown", nameOf(resource), "--force"]);
+      try {
+        await run(["shutdown", nameOf(resource), "--force"]);
+      } catch (cause) {
+        // CLI failures have no structured status. Confirm absence through the
+        // provider API rather than treating any shutdown failure as success.
+        try {
+          await client.fetch({ id: resource.devboxId }, { timeoutMs: 30_000 });
+        } catch (observedCause) {
+          if (isNotFound(observedCause)) return "missing";
+          throw observedCause;
+        }
+        throw cause;
+      }
     },
     expireDevbox: async (resource) => {
       await run(["expire", nameOf(resource), "--force"]);

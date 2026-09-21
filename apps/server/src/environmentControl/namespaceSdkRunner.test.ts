@@ -967,3 +967,29 @@ it("starts and exposes a new Namespace server on port 3001", async () => {
     commands.some((command) => /url expose .* --port 3001 --access workspace/.test(command)),
   ).toBe(true);
 });
+
+describe("Namespace pause after provider expiry", () => {
+  it("reports missing only after the provider confirms the Devbox is gone", async () => {
+    const { runner, execute } = resumeFixture();
+    execute.mockRejectedValue(new Error("shutdown failed"));
+    api.fetch.mockRejectedValue({ code: 5 });
+    expect(await runner.destroyInstance(retainedResource)).toBe("missing");
+    expect(api.fetch).toHaveBeenCalledWith(
+      { id: retainedResource.devboxId },
+      { timeoutMs: 30_000 },
+    );
+  });
+
+  it("preserves shutdown failure for an existing Devbox", async () => {
+    const { runner, execute } = resumeFixture();
+    execute.mockRejectedValue(new Error("shutdown failed"));
+    await expect(runner.destroyInstance(retainedResource)).rejects.toThrow("shutdown failed");
+  });
+
+  it("does not mistake failed provider lookup for absence", async () => {
+    const { runner, execute } = resumeFixture();
+    execute.mockRejectedValue(new Error("shutdown failed"));
+    api.fetch.mockRejectedValue({ code: 7 });
+    await expect(runner.destroyInstance(retainedResource)).rejects.toEqual({ code: 7 });
+  });
+});

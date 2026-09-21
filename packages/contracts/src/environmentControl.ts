@@ -186,6 +186,7 @@ export const EnvironmentProvisionPauseInput = Schema.Struct({
 export type EnvironmentProvisionPauseInput = typeof EnvironmentProvisionPauseInput.Type;
 
 export const EnvironmentProvisionPauseResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("missing") }),
   Schema.Struct({ kind: Schema.Literal("paused") }),
   Schema.Struct({
     kind: Schema.Literal("refused"),

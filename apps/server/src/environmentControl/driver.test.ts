@@ -467,6 +467,18 @@ describe("cloud SDK and controller boundary", () => {
     expect(http.mock.calls[1]?.[1]?.body).toBe('{"instanceId":"observed-instance"}');
   });
 
+  it("reports missing when E2B no longer has the sandbox", async () => {
+    sdk.connect.mockRejectedValue(new SandboxNotFoundError("gone"));
+    expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBe("missing");
+  });
+
+  it("does not classify untyped pause errors as missing", async () => {
+    sdk.connect.mockRejectedValue(new Error("proxy status 404"));
+    await expect(createCloudDriver(config).pause({ sandboxId: "target" })).rejects.toThrow(
+      "proxy status 404",
+    );
+  });
+
   it("pauses an E2B sandbox without killing it", async () => {
     const pause = vi.fn().mockResolvedValue(true);
     sdk.connect.mockResolvedValue({ pause });
