@@ -9,6 +9,9 @@ import {
 
 const machine = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
   requestId: "11111111-1111-4111-a111-111111111111",
+  leaseId: "11111111-1111-4111-a111-111111111112",
+  sandboxId: "sandbox-1",
+  lifecycle: "active",
   environmentId: "box-1",
   provider: "e2b",
   label: "proof/repo",

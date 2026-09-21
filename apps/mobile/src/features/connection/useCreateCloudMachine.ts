@@ -2,7 +2,10 @@ import {
   provisionCloudEnvironment,
   type CloudProvisioningProgressPhase,
 } from "@t3tools/client-runtime/cloud";
-import { isOffDeviceReachablePairingUrl } from "@t3tools/client-runtime/connection";
+import {
+  isOffDeviceReachablePairingUrl,
+  provisionedGatewayPairingUrl,
+} from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useRef, useState } from "react";
@@ -56,6 +59,7 @@ export function useCreateCloudMachine(input: {
   readonly onCreated: (environmentId: EnvironmentId) => void;
 }) {
   const { managerId, connectedEnvironments, onCreated } = input;
+  const manager = connectedEnvironments.find((entry) => entry.environmentId === managerId);
   const provision = useAtomCommand(serverEnvironment.provisionEnvironment, {
     reportFailure: false,
   });
@@ -113,6 +117,12 @@ export function useCreateCloudMachine(input: {
               const result = await pair({ pairingUrl });
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
+            ...(manager?.displayUrl
+              ? {
+                  rewritePairingUrl: (pairingUrl: string, leaseId: string) =>
+                    provisionedGatewayPairingUrl(manager.displayUrl, leaseId, pairingUrl),
+                }
+              : {}),
             isConnected: (environmentId) =>
               connectedEnvironments.some((entry) => entry.environmentId === environmentId),
             // A phone is never the machine that started the box, so a loopback pairing URL is
@@ -135,7 +145,7 @@ export function useCreateCloudMachine(input: {
         inFlight.current = false;
       }
     },
-    [attach, connectedEnvironments, managerId, onCreated, pair, provision],
+    [attach, connectedEnvironments, manager, managerId, onCreated, pair, provision],
   );
 
   const dismissError = useCallback(() => setState(IDLE), []);

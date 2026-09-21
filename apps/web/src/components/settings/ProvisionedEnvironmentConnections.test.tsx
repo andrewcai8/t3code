@@ -58,6 +58,9 @@ vi.mock("../../hooks/useCopyToClipboard", () => ({
 }));
 const environment = Schema.decodeSync(DiscoveredProvisionedEnvironment)({
   requestId: "11111111-1111-4111-a111-111111111111",
+  leaseId: "11111111-1111-4111-a111-111111111112",
+  sandboxId: "sandbox-1",
+  lifecycle: "active",
   environmentId: "remote",
   provider: "e2b",
   label: "proof/repo",
