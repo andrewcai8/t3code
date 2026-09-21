@@ -559,7 +559,8 @@ export function makeProvisionPreparationStore(stateDir: string) {
             "home",
             ".gitconfig",
             Buffer.from(
-              "[credential]\n\thelper = store\n[user]\n\tname = T3\n\temail = agent@t3.local\n",
+              "[credential]\n\thelper = store\n[user]\n\tname = T3\n\temail = agent@t3.local\n" +
+                '[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n',
             ),
           ),
         );
