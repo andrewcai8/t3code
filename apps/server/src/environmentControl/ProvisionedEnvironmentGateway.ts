@@ -96,10 +96,10 @@ const proxyHttp = Effect.fn("ProvisionedEnvironmentGateway.proxyHttp")(function*
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   const method = request.method;
   const upstreamRequest = HttpClientRequest.make(method)(target.toString()).pipe(
-    HttpClientRequest.setHeaders(forwardedHeaders(request)),
     method === "GET" || method === "HEAD"
       ? (self) => self
       : HttpClientRequest.bodyStream(request.stream),
+    HttpClientRequest.setHeaders(forwardedHeaders(request)),
   );
   const response = yield* httpClient.execute(upstreamRequest);
   const headers: Record<string, string> = {};

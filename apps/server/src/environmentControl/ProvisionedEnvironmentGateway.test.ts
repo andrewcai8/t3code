@@ -31,7 +31,10 @@ const fixture = (origin: string | null) => {
         cookie: request.headers.cookie,
         dpop: request.headers.dpop,
         host: request.headers.host,
-        headers: { "x-guest": request.headers["x-guest"] },
+        headers: {
+          "x-guest": request.headers["x-guest"],
+          "content-type": request.headers["content-type"],
+        },
       });
       return HttpClientResponse.fromWeb(
         request,
@@ -62,6 +65,7 @@ describe("provisioned environment gateway", () => {
         method: "POST",
         headers: {
           authorization: "Bearer guest",
+          "content-type": "application/json",
           cookie: "manager=session",
           dpop: "manager-proof",
           host: "attacker.test",
@@ -77,6 +81,9 @@ describe("provisioned environment gateway", () => {
     expect(requests[0]?.url).toBe("http://namespace-proxy.test/api/run?q=1");
     expect(requests[0]?.headers).toMatchObject({
       "x-guest": "preserved",
+    });
+    expect(requests[0]?.headers).toMatchObject({
+      "content-type": "application/json",
     });
     expect(requests[0]?.headers).not.toHaveProperty("cookie");
     expect(requests[0]?.headers).not.toHaveProperty("dpop");
