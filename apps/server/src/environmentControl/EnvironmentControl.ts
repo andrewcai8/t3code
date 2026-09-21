@@ -76,7 +76,7 @@ import {
   type ProvisionedLease,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
-import type { NamespaceProxyLease } from "./namespaceProxy.ts";
+import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
@@ -545,6 +545,7 @@ export const layer = Layer.effect(
         new EnvironmentControlError({ message: "Existing cloud leases could not be loaded." }),
     });
     const leaseRegistry = createProvisionedLeaseRegistry(sql, legacyLeases);
+    const namespaceProxies = new NamespaceProxyManager();
     const importedLeases = new Map(
       decodeLegacyLeases(legacyLeases).map((lease) => [lease.leaseId, lease]),
     );
@@ -661,7 +662,7 @@ export const layer = Layer.effect(
                 );
             },
           }),
-          runtime: makeNamespaceProvisionRuntime({ session, stateDir }),
+          runtime: makeNamespaceProvisionRuntime({ session, stateDir, proxies: namespaceProxies }),
         };
       })();
       void namespace.catch(() => {
