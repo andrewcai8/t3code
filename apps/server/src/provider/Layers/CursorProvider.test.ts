@@ -37,6 +37,8 @@ import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { cursorUsageResponseToLimits, readCursorUsageLimits } from "./cursorUsageLimits.ts";
+import { displayUsageLimits, limitsNotice } from "@t3tools/shared/usageLimits";
+import cursorPeriod from "../testFixtures/cursor/period.json" with { type: "json" };
 
 const runNode = <A, E>(
   effect: Effect.Effect<
@@ -1102,6 +1104,31 @@ describe("Cursor usage limits", () => {
         else expect(limits.unavailable?.reason).toBe("unsupported");
       }
     }
+  });
+
+  it("reports the monthly allowance in the window the Limits view shows", async () => {
+    const limits = await runNode(
+      readCursorUsageLimits({ apiEndpoint: "" }, { CURSOR_AUTH_TOKEN: "token" }).pipe(
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(cursorPeriod))),
+          ),
+        ),
+      ),
+    );
+    const displayed = displayUsageLimits(ProviderDriverKind.make("cursor"), limits);
+    expect(displayed.windows).toEqual([
+      {
+        id: "cursor_monthly",
+        kind: "monthly",
+        label: "Monthly usage",
+        usedPercent: 74.42733333333334,
+        resetsAt: "2026-09-11T16:26:43.000Z",
+        windowDurationMins: 44640,
+      },
+    ]);
+    expect(limitsNotice(displayed)).toBeNull();
   });
 
   it("reports failed requests without exposing credentials or response bodies", async () => {
