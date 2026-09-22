@@ -229,6 +229,24 @@ export type EnvironmentProvisionResumeResult = typeof EnvironmentProvisionResume
 export const EnvironmentProvisionResumeUnclaimedResult = EnvironmentProvisionResumeResult;
 export type EnvironmentProvisionResumeUnclaimedResult = EnvironmentProvisionResumeResult;
 
+/** Move a provisioned workspace onto the manager's current pinned runtime build, in place. */
+export const EnvironmentProvisionUpgradeInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+});
+export type EnvironmentProvisionUpgradeInput = typeof EnvironmentProvisionUpgradeInput.Type;
+
+export const EnvironmentProvisionUpgradeResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literals(["upgraded", "current"]), t3Revision: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["unknown", "missing", "unconfigured", "busy"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionUpgradeResult = typeof EnvironmentProvisionUpgradeResult.Type;
+
 export const EnvironmentProvisionClaimInput = Schema.Struct({
   leaseId: TrimmedNonEmptyString,
   environmentId: EnvironmentId,
