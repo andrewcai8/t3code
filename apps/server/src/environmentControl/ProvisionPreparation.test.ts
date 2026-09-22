@@ -14,7 +14,9 @@ import * as Schema from "effect/Schema";
 import { ServerSettings } from "@t3tools/contracts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { makeProvisionPreparationStore, provisionDigest } from "./ProvisionPreparation.ts";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
+import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import type { ProvisioningProviderProfile } from "./ProvisioningProviderProfile.ts";
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const evidence = {
@@ -86,7 +88,7 @@ async function fixture() {
 it("freezes source, template, artifact and credentials across manager restart and rejects changed intent", async () => {
   const f = await fixture();
   try {
-    const first = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const first = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
     await NodeFSP.writeFile(NodePath.join(f.root, "runtime.tar"), "changed");
     await NodeFSP.writeFile(NodePath.join(f.root, ".codex/auth.json"), "changed");
     const again = await makeProvisionPreparationStore(f.root).freeze(
@@ -100,7 +102,7 @@ it("freezes source, template, artifact and credentials across manager restart an
           throw new Error("must not resolve");
         },
       },
-      f.profile,
+      [f.profile],
     );
     expect(again).toEqual(first);
     expect(first.request).toMatchObject({
@@ -119,14 +121,14 @@ it("freezes source, template, artifact and credentials across manager restart an
         0o777,
     ).toBe(0o600);
     await expect(
-      f.store.freeze({ ...input, branch: "other" }, f.config, f.resolver, f.profile),
+      f.store.freeze({ ...input, branch: "other" }, f.config, f.resolver, [f.profile]),
     ).rejects.toBeInstanceOf(ProvisionRequestConflict);
     await expect(
       f.store.freeze(
         { ...input, retentionDeadline: "2099-01-02T00:00:00.000Z" },
         f.config,
         f.resolver,
-        f.profile,
+        [f.profile],
       ),
     ).rejects.toBeInstanceOf(ProvisionRequestConflict);
   } finally {
@@ -142,7 +144,7 @@ it("concurrent manager instances adopt one complete manifest when resolution dif
           input,
           f.config,
           { ...f.resolver, revision: async () => sha.repeat(40) },
-          f.profile,
+          [f.profile],
         ),
       ),
     );
@@ -164,7 +166,7 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
         { ...input, workspaceFiles: [{ ...evidence, sha256: "0".repeat(64) }] },
         f.config,
         f.resolver,
-        f.profile,
+        [f.profile],
       ),
     ).rejects.toThrow("hash check");
     await expect(
@@ -172,31 +174,22 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
         { ...input, workspaceFiles: [{ ...evidence, destination: "../secret" }] },
         f.config,
         f.resolver,
-        f.profile,
+        [f.profile],
       ),
     ).rejects.toThrow("relative path");
     await expect(
-      f.store.freeze(
-        { ...input, workspaceFiles: [evidence, evidence] },
-        f.config,
-        f.resolver,
+      f.store.freeze({ ...input, workspaceFiles: [evidence, evidence] }, f.config, f.resolver, [
         f.profile,
-      ),
+      ]),
     ).rejects.toThrow("duplicate");
     await expect(
-      f.store.freeze(
-        input,
-        { ...f.config, provisioning: { templateId: "old" } },
-        f.resolver,
+      f.store.freeze(input, { ...f.config, provisioning: { templateId: "old" } }, f.resolver, [
         f.profile,
-      ),
+      ]),
     ).rejects.toThrow("pinned runtime artifact");
-    const empty = await f.store.freeze(
-      { ...input, repository: undefined },
-      f.config,
-      f.resolver,
+    const empty = await f.store.freeze({ ...input, repository: undefined }, f.config, f.resolver, [
       f.profile,
-    );
+    ]);
     expect(empty.request.sourceRevision).toBeNull();
     expect(empty.preparation.repository).toBeNull();
   } finally {
@@ -207,12 +200,12 @@ it("rejects corrupt files, escaping paths, duplicate destinations and unpinned l
 it("refuses a modified persisted preparation manifest", async () => {
   const f = await fixture();
   try {
-    const first = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const first = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
     const path = NodePath.join(f.root, "provisioning", `${input.requestId}.json`);
     await NodeFSP.writeFile(path, JSON.stringify({ ...first, egressAllow: ["changed.example"] }), {
       mode: 0o600,
     });
-    await expect(f.store.freeze(input, f.config, f.resolver, f.profile)).rejects.toThrow(
+    await expect(f.store.freeze(input, f.config, f.resolver, [f.profile])).rejects.toThrow(
       "Stored preparation manifest changed",
     );
   } finally {
@@ -257,7 +250,7 @@ it("uses staged HTTPS credentials for GitHub SSH dependency URLs", async () => {
       input,
       { ...f.config, provisioning: { ...f.config.provisioning, githubToken: token } },
       f.resolver,
-      f.profile,
+      [f.profile],
     );
     const configFile = homeFile(manifest, ".gitconfig");
     if (!configFile) throw new Error("GitHub config was not staged");
@@ -296,7 +289,7 @@ it("uses staged HTTPS credentials for GitHub SSH dependency URLs", async () => {
 it("does not install GitHub URL rewrites without a staged token", async () => {
   const f = await fixture();
   try {
-    const manifest = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
     expect(homeFile(manifest, ".gitconfig")).toBeUndefined();
     expect(homeFile(manifest, ".git-credentials")).toBeUndefined();
   } finally {
@@ -322,7 +315,7 @@ it("leaves installed dependencies and Git history out of a skill bundle", async 
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
     };
-    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
     expect(homeFile(manifest, ".codex/skills/pstack/scripts/run.sh")?.sha256).toBe(
       provisionDigest("echo hi\n"),
     );
@@ -344,7 +337,7 @@ it("loads the configured skill bundle into the root the selected agent reads", a
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
     };
-    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
     // Codex is the default driver. A bundle is copied whole, because a
     // playbook that references a nested file is useless without that file.
     expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")?.sha256).toBe(
@@ -389,12 +382,9 @@ it("follows the selected agent when the same bundle is provisioned for Cursor", 
         destination: ".cursor/auth.json",
       },
     };
-    const manifest = await f.store.freeze(
-      inputFor("cursor", "cursor"),
-      config,
-      f.resolver,
+    const manifest = await f.store.freeze(inputFor("cursor", "cursor"), config, f.resolver, [
       cursorProfile,
-    );
+    ]);
     expect(homeFile(manifest, ".cursor/skills/pstack/SKILL.md")).toBeDefined();
     expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")).toBeUndefined();
     expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
@@ -427,17 +417,19 @@ it("runs a Cursor guest on the selected account, not a copied credential", async
         ],
       },
     };
-    const manifest = await f.store.freeze(inputFor("cursor", "cursor_other"), config, f.resolver, {
-      kind: "cursor",
-      instanceId: ProviderInstanceId.make("cursor_other"),
-      environment: [],
-      credential: {
-        kind: "file",
-        source: NodePath.join(selected, "auth.json"),
-        // The manager resolves its own platform's path; the guest is Linux.
-        destination: ".cursor/auth.json",
+    const manifest = await f.store.freeze(inputFor("cursor", "cursor_other"), config, f.resolver, [
+      {
+        kind: "cursor",
+        instanceId: ProviderInstanceId.make("cursor_other"),
+        environment: [],
+        credential: {
+          kind: "file",
+          source: NodePath.join(selected, "auth.json"),
+          // The manager resolves its own platform's path; the guest is Linux.
+          destination: ".cursor/auth.json",
+        },
       },
-    });
+    ]);
     expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
       provisionDigest("selected-account"),
     );
@@ -476,7 +468,7 @@ it("installs a Claude sign-in where that CLI reads it", async () => {
       inputFor("claudeAgent", "claudeAgent"),
       config,
       f.resolver,
-      claudeProfile,
+      [claudeProfile],
     );
     // Claude Code keeps a dotfile credential rather than the auth.json the
     // other drivers use, and its skills follow the same profile.
@@ -497,14 +489,16 @@ it("gives a Claude account with a setup-token that token instead of a credential
       inputFor("claudeAgent", "claude_personal"),
       f.config,
       f.resolver,
-      {
-        kind: "claudeAgent",
-        instanceId: ProviderInstanceId.make("claude_personal"),
-        environment: [
-          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
-        ],
-        credential: { kind: "environment" },
-      },
+      [
+        {
+          kind: "claudeAgent",
+          instanceId: ProviderInstanceId.make("claude_personal"),
+          environment: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+          ],
+          credential: { kind: "environment" },
+        },
+      ],
     );
     const settings = homeFile(manifest, ".t3/userdata/settings.json");
     expect(
@@ -543,14 +537,16 @@ it("drops a copied credential file that the cloud token replaces", async () => {
       inputFor("claudeAgent", "claude_personal"),
       config,
       f.resolver,
-      {
-        kind: "claudeAgent",
-        instanceId: ProviderInstanceId.make("claude_personal"),
-        environment: [
-          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
-        ],
-        credential: { kind: "environment" },
-      },
+      [
+        {
+          kind: "claudeAgent",
+          instanceId: ProviderInstanceId.make("claude_personal"),
+          environment: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+          ],
+          credential: { kind: "environment" },
+        },
+      ],
     );
     expect(homeFile(manifest, ".claude/.credentials.json")).toBeUndefined();
     // Only the selected driver's login is replaced. Copying the others is why
@@ -580,12 +576,9 @@ it("hands a cloud box the setup its repository needs", async () => {
         ],
       },
     };
-    const manifest = await f.store.freeze(
-      inputFor("codex", "codex"),
-      config,
-      f.resolver,
+    const manifest = await f.store.freeze(inputFor("codex", "codex"), config, f.resolver, [
       f.profile,
-    );
+    ]);
     expect(manifest.preparation.prepareCommands).toEqual(["npm install --global vite-plus"]);
     // A prepared checkout is a different machine from an unprepared one, so
     // two requests only match when their setup matches.
@@ -593,7 +586,7 @@ it("hands a cloud box the setup its repository needs", async () => {
       inputFor("codex", "codex"),
       f.config,
       f.resolver,
-      f.profile,
+      [f.profile],
     );
     expect(bare.request.buildHash).not.toBe(manifest.request.buildHash);
     await NodeFSP.rm(f.root + "-bare", { recursive: true, force: true });
@@ -616,7 +609,7 @@ it("refuses a skill bundle that links out of itself", async () => {
     };
     // A bundle is copied into an environment that then holds whatever it
     // names, so a link out of it is refused rather than resolved.
-    await expect(f.store.freeze(input, config, f.resolver, f.profile)).rejects.toThrow(
+    await expect(f.store.freeze(input, config, f.resolver, [f.profile])).rejects.toThrow(
       /escape\.json/,
     );
   } finally {
@@ -635,7 +628,7 @@ it("carries a link that stays inside the bundle", async () => {
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source, name: "pstack" }] },
     };
-    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
     expect(homeFile(manifest, ".codex/skills/pstack/skills/.bin/why")?.sha256).toBe(
       provisionDigest("why\n"),
     );
@@ -656,7 +649,7 @@ it("lands a plugin holding many skills flat, where the CLI will find each one", 
       ...f.config,
       provisioning: { ...f.config.provisioning!, skills: [{ source }] },
     };
-    const manifest = await f.store.freeze(input, config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
     // Every supported CLI resolves `<root>/<directory>/SKILL.md` and looks no
     // deeper, so nesting these under a bundle name would hide all of them.
     expect(homeFile(manifest, ".codex/skills/why/SKILL.md")).toBeDefined();
@@ -671,7 +664,7 @@ const namespaceToken = `e30.${Buffer.from(
 it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in /tmp", async () => {
   const f = await fixture();
   try {
-    const e2b = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const e2b = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
     expect(e2b.preparation.root).toBe("/tmp/t3-provision/05d43b4e-0b92-477b-9503-31a377147fb0");
     expect(e2b.preparation.artifact.archivePath).toBe(
       `/tmp/t3-runtime-${provisionDigest("artifact")}.tar`,
@@ -694,7 +687,7 @@ it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in
         },
       },
       f.resolver,
-      f.profile,
+      [f.profile],
     );
     expect(namespace.preparation.root).toBe(
       "/Volumes/devbox/t3-provision/6b0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f",
@@ -762,7 +755,7 @@ it("hands a cloud Mac the artifacts configured for it, by identity rather than b
       decodeProvisionInput({ ...input, provider: "namespace" }),
       config,
       f.resolver,
-      f.profile,
+      [f.profile],
     );
     expect(platform.preparation.artifacts).toEqual([baseline]);
     const repository = await makeProvisionPreparationStore(f.root + "-repo").freeze(
@@ -774,7 +767,7 @@ it("hands a cloud Mac the artifacts configured for it, by identity rather than b
       }),
       config,
       f.resolver,
-      f.profile,
+      [f.profile],
     );
     expect(repository.preparation.artifacts).toEqual([override]);
     expect(repository.request.buildHash).not.toBe(platform.request.buildHash);
@@ -782,7 +775,7 @@ it("hands a cloud Mac the artifacts configured for it, by identity rather than b
       input,
       config,
       f.resolver,
-      f.profile,
+      [f.profile],
     );
     expect(e2b.preparation.artifacts).toBeUndefined();
   } finally {
@@ -838,14 +831,16 @@ it("runs a named Claude account's chat on the token it installed, and carries no
       inputFor("claudeAgent", "claude_acai13"),
       config,
       f.resolver,
-      {
-        kind: "claudeAgent",
-        instanceId: ProviderInstanceId.make("claude_acai13"),
-        environment: [
-          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
-        ],
-        credential: { kind: "environment" },
-      },
+      [
+        {
+          kind: "claudeAgent",
+          instanceId: ProviderInstanceId.make("claude_acai13"),
+          environment: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+          ],
+          credential: { kind: "environment" },
+        },
+      ],
     );
     // A guest holds one account. Offering a second, credential-less one is how
     // a turn reached the CLI with no login and failed on "Not logged in".
@@ -864,6 +859,121 @@ it("runs a named Claude account's chat on the token it installed, and carries no
   }
 });
 
+it("runs every provisioned driver on its own account and login, with skills for each", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.mkdir(NodePath.join(f.root, "cursor"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(f.root, "cursor/auth.json"), "cursor-login");
+    await NodeFSP.writeFile(NodePath.join(f.root, "anthropic-key"), "anthropic-api-key\n");
+    await NodeFSP.writeFile(NodePath.join(f.root, "linear-key"), "linear-api-key\n");
+    await NodeFSP.writeFile(NodePath.join(f.root, "openai-key"), "openai-api-key\n");
+    const source = await skillBundle(f.root);
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        skills: [{ source, name: "pstack" }],
+        shellEnvironment: [
+          { name: "ANTHROPIC_API_KEY", source: NodePath.join(f.root, "anthropic-key") },
+          { name: "LINEAR_API_KEY", source: NodePath.join(f.root, "linear-key") },
+          // No provisioned driver reads this one, so its source is never opened.
+          { name: "OPENAI_API_KEY", source: NodePath.join(f.root, "missing") },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(
+      inputFor("claudeAgent", "claude_acai13"),
+      config,
+      f.resolver,
+      [
+        {
+          kind: "claudeAgent",
+          instanceId: ProviderInstanceId.make("claude_acai13"),
+          displayName: "Claude · acai13",
+          environment: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+          ],
+          credential: { kind: "environment" },
+        },
+        {
+          kind: "cursor",
+          instanceId: ProviderInstanceId.make("cursor"),
+          environment: [],
+          credential: {
+            kind: "file",
+            source: NodePath.join(f.root, "cursor/auth.json"),
+            destination: ".cursor/auth.json",
+          },
+        },
+      ],
+    );
+    expect(guestAccounts(manifest, "claudeAgent")).toEqual([
+      {
+        instanceId: "claudeAgent",
+        config: undefined,
+        environment: ["ANTHROPIC_API_KEY", "LINEAR_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+      },
+    ]);
+    expect(guestAccounts(manifest, "cursor")).toEqual([
+      {
+        instanceId: "cursor",
+        config: undefined,
+        environment: ["LINEAR_API_KEY", "AGENT_CLI_CREDENTIAL_STORE"],
+      },
+    ]);
+    expect(guestAccounts(manifest, "codex")).toEqual([]);
+    expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
+      provisionDigest("cursor-login"),
+    );
+    expect(homeFile(manifest, ".claude/.credentials.json")).toBeUndefined();
+    expect(
+      [".claude/skills", ".cursor/skills", ".codex/skills"].map(
+        (root) => homeFile(manifest, `${root}/pstack/skills/why/SKILL.md`)?.sha256,
+      ),
+    ).toEqual([provisionDigest("why\n"), provisionDigest("why\n"), undefined]);
+    expect(manifest.preparation.providerInstall).toBe(
+      'npm install --global --no-fund --no-audit @anthropic-ai/claude-code@latest && "$HOME/.local/bin/claude" --version && ' +
+        "curl https://cursor.com/install -fsS | bash && " +
+        'test -x "$HOME/.local/bin/agent" && ' +
+        'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("installs what a manifest froze, and what a manifest from before that field always installed", async () => {
+  const f = await fixture();
+  try {
+    const frozen = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
+    const { providerInstall: _, ...preparation } = frozen.preparation;
+    const legacy = {
+      ...frozen,
+      preparation,
+      request: {
+        ...frozen.request,
+        preparationHash: provisionDigest(
+          stableStringify({ preparation, egressAllow: frozen.egressAllow }),
+        ),
+      },
+    };
+    await NodeFSP.writeFile(
+      NodePath.join(f.root, "provisioning", `${input.requestId}.json`),
+      stableStringify(legacy),
+      { mode: 0o600 },
+    );
+    const loaded = await makeProvisionPreparationStore(f.root).load(input.requestId);
+    expect(withGuestProviderInstall({ ...loaded.preparation }, "codex").providerInstall).toBe(
+      'npm install --global --no-fund --no-audit @openai/codex@latest && "$HOME/.local/bin/codex" --version',
+    );
+    expect(withGuestProviderInstall({ ...frozen.preparation }, "cursor").providerInstall).toBe(
+      'npm install --global --no-fund --no-audit @openai/codex@latest && "$HOME/.local/bin/codex" --version',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("runs a named Codex account's chat on the provisioned home", async () => {
   const f = await fixture();
   try {
@@ -871,7 +981,7 @@ it("runs a named Codex account's chat on the provisioned home", async () => {
       inputFor("codex", "codex_andrewca78"),
       f.config,
       f.resolver,
-      { ...f.profile, instanceId: ProviderInstanceId.make("codex_andrewca78") },
+      [{ ...f.profile, instanceId: ProviderInstanceId.make("codex_andrewca78") }],
     );
     const accounts = guestAccounts(manifest, "codex");
     expect(accounts.length).toBe(1);
@@ -884,10 +994,9 @@ it("runs a named Codex account's chat on the provisioned home", async () => {
 it("names the guest's provider instance after the account the manager selected", async () => {
   const f = await fixture();
   try {
-    const manifest = await f.store.freeze(input, f.config, f.resolver, {
-      ...f.profile,
-      displayName: "Codex · andrewcai083@gmail.com",
-    });
+    const manifest = await f.store.freeze(input, f.config, f.resolver, [
+      { ...f.profile, displayName: "Codex · andrewcai083@gmail.com" },
+    ]);
     const settings = homeFile(manifest, ".t3/userdata/settings.json");
     expect(
       JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()).providerInstances
@@ -901,7 +1010,7 @@ it("names the guest's provider instance after the account the manager selected",
 it("leaves the guest's provider instance unnamed when the manager has no display name for it", async () => {
   const f = await fixture();
   try {
-    const manifest = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
     const settings = homeFile(manifest, ".t3/userdata/settings.json");
     expect(
       Object.prototype.hasOwnProperty.call(
@@ -918,7 +1027,7 @@ it("leaves the guest's provider instance unnamed when the manager has no display
 it("records a requested runtime build beside the frozen manifest and leaves the manifest unchanged", async () => {
   const f = await fixture();
   try {
-    const manifest = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    const manifest = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
     expect(await f.store.readRuntime(input.requestId)).toBeNull();
     await NodeFSP.writeFile(NodePath.join(f.root, "runtime-next.tar"), "next artifact");
     const next = {
