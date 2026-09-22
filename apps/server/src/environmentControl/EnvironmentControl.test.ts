@@ -84,7 +84,6 @@ describe("managed cloud commands", () => {
     leaseId: "lease",
     sandboxId: "sandbox",
     environmentId: EnvironmentId.make("child"),
-    threadId: "thread",
   };
   async function withLease(
     test: (context: {
@@ -310,7 +309,7 @@ describe("managed cloud commands", () => {
         const manager = createEnvironmentControl([], driver, registry);
 
         expect(
-          await manager.resumeUnclaimed({
+          await manager.resume({
             leaseId: "unclaimed",
             sandboxId: "unclaimed-sandbox",
             environmentId: EnvironmentId.make("child"),
@@ -342,7 +341,7 @@ describe("managed cloud commands", () => {
       const manager = createEnvironmentControl([], driver, registry);
 
       expect(
-        await manager.resumeUnclaimed({
+        await manager.resume({
           leaseId: "unclaimed",
           sandboxId: "unclaimed-sandbox",
           environmentId: EnvironmentId.make("child"),
@@ -351,21 +350,27 @@ describe("managed cloud commands", () => {
       expect(driver.resume).not.toHaveBeenCalled();
     });
   });
-  it("refuses unclaimed resume after a lease has been claimed", async () => {
-    await withLease(async ({ driver, manager }) => {
-      driver.resume = vi.fn();
+  it("resumes a paused workspace for its environment whichever thread claimed it", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.markPaused("lease");
+      driver.resume = vi.fn().mockResolvedValue({});
       expect(
-        await manager.resumeUnclaimed({
+        await manager.resume({
           leaseId: "lease",
           sandboxId: "sandbox",
           environmentId: EnvironmentId.make("child"),
         }),
-      ).toEqual({
-        kind: "refused",
-        reason: "unknown",
-        message: "This workspace could not be found. Reconnect was refused.",
+      ).toEqual({ kind: "resumed" });
+      expect(driver.resume).toHaveBeenCalledWith({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        environmentId: "child",
+        providerInstanceId: "codex",
       });
-      expect(driver.resume).not.toHaveBeenCalled();
+      expect(await registry.findById("lease")).toMatchObject({
+        state: "active",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
     });
   });
   it("leaves failed recovery paused and allows another attempt", async () => {
@@ -392,7 +397,6 @@ describe("managed cloud commands", () => {
         { leaseId: "other" },
         { sandboxId: "other" },
         { environmentId: EnvironmentId.make("other") },
-        { threadId: "other" },
       ]) {
         expect(await manager.resume({ ...resumeInput, ...changed })).toMatchObject({
           kind: "refused",

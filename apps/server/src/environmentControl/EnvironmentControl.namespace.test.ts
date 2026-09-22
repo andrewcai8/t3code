@@ -252,12 +252,15 @@ it.effect(
           });
         });
         const manager = yield* EnvironmentControl;
-        const input = {
-          leaseId: requestId,
-          sandboxId: resource.devboxId,
-          environmentId: readiness.environmentId,
-          threadId: "thread",
-        };
+        expect(
+          yield* manager.resume({ environmentId: EnvironmentId.make("unprovisioned") }),
+        ).toEqual({
+          kind: "refused",
+          reason: "not-provisioned",
+          message: "This machine has no workspace for that environment.",
+        });
+        expect(prepareRemoteHost).not.toHaveBeenCalled();
+        const input = { environmentId: readiness.environmentId };
         expect(yield* manager.resume(input)).toEqual({ kind: "resumed" });
         const before = yield* Effect.promise(() => registry.findById(requestId));
         const origin = before?.namespaceProxy?.proxyOrigin;

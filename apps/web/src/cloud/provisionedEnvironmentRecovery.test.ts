@@ -1,17 +1,13 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { EnvironmentId, type EnvironmentProvisionResumeResult } from "@t3tools/contracts";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { createProvisionedEnvironmentRecovery } from "./provisionedEnvironmentRecovery";
-import {
-  forgetProvisionedSandbox,
-  provisionedSandboxForEnvironment,
-  rememberProvisionedSandbox,
-} from "./provisionedSandboxLeases";
 
-const threadRef = { environmentId: EnvironmentId.make("child"), threadId: ThreadId.make("thread") };
-const lease = {
-  leaseId: "lease",
-  sandboxId: "sandbox",
-  managerEnvironmentId: EnvironmentId.make("manager"),
+const child = EnvironmentId.make("child");
+const manager = EnvironmentId.make("manager");
+const notProvisioned: EnvironmentProvisionResumeResult = {
+  kind: "refused",
+  reason: "not-provisioned",
+  message: "This machine has no workspace for that environment.",
 };
 function signal() {
   let resolve = () => {};
@@ -20,31 +16,44 @@ function signal() {
   });
   return { promise, resolve };
 }
-afterEach(() => {
-  forgetProvisionedSandbox(threadRef);
-  forgetProvisionedSandbox("draft");
-});
+function operations(
+  resume: (
+    managerId: EnvironmentId,
+    environmentId: EnvironmentId,
+  ) => Promise<EnvironmentProvisionResumeResult | null>,
+) {
+  return {
+    managers: () => [manager],
+    resume,
+    markMissing: vi.fn(async () => {}),
+    retry: async () => {},
+    awaitConnected: async () => {},
+  };
+}
 
 describe("provisioned workspace recovery", () => {
-  it("derives an owner-qualified lease from the thread without treating drafts as children", () => {
-    rememberProvisionedSandbox("draft", lease);
-    expect(provisionedSandboxForEnvironment(threadRef.environmentId)).toBeNull();
-    rememberProvisionedSandbox(threadRef, lease);
-    expect(provisionedSandboxForEnvironment(threadRef.environmentId)).toEqual({ lease, threadRef });
+  it("asks the manager to resume the environment without any local lease", async () => {
+    const resumed: string[] = [];
+    const recover = createProvisionedEnvironmentRecovery(
+      operations(async (managerId, environmentId) => {
+        resumed.push(`${managerId}/${environmentId}`);
+        return { kind: "resumed" };
+      }),
+    );
+    expect(await recover(child)).toEqual({ kind: "ready" });
+    expect(resumed).toEqual(["manager/child"]);
   });
   it("coalesces recovery and waits for the retained connection before the caller continues", async () => {
-    rememberProvisionedSandbox(threadRef, lease);
     const ready = signal();
     const waiting = signal();
     const calls: string[] = [];
     const recover = createProvisionedEnvironmentRecovery({
-      resume: async (owned) => {
-        expect(owned).toEqual({ lease, threadRef });
+      ...operations(async () => {
         calls.push("resume");
-      },
+        return { kind: "resumed" };
+      }),
       retry: async (environmentId) => {
-        expect(environmentId).toBe("child");
-        calls.push("retry");
+        calls.push(`retry ${environmentId}`);
       },
       awaitConnected: async () => {
         calls.push("await-connected");
@@ -52,63 +61,65 @@ describe("provisioned workspace recovery", () => {
         await ready.promise;
       },
     });
-    const recovered = recover(threadRef.environmentId);
-    expect(recover(threadRef.environmentId)).toBe(recovered);
+    const recovered = recover(child);
+    expect(recover(child)).toBe(recovered);
     const sent: string[] = [];
     const send = recovered.then((result) => {
       if (result.kind === "ready") sent.push("pending draft");
     });
     await waiting.promise;
-    expect(calls).toEqual(["resume", "retry", "await-connected"]);
+    expect(calls).toEqual(["resume", "retry child", "await-connected"]);
     expect(sent).toEqual([]);
     ready.resolve();
     await send;
     expect(sent).toEqual(["pending draft"]);
     expect(await recovered).toEqual({ kind: "ready" });
   });
-  it("keeps ordinary retry independent of provisioning", async () => {
-    const resume = vi.fn();
+  it("leaves ordinary retry to the caller when no connected manager knows the environment", async () => {
     const retry = vi.fn();
-    const awaitConnected = vi.fn();
-    expect(
-      await createProvisionedEnvironmentRecovery({ resume, retry, awaitConnected })(
-        threadRef.environmentId,
-      ),
-    ).toEqual({ kind: "not-provisioned" });
-    expect(resume).not.toHaveBeenCalled();
+    const recover = createProvisionedEnvironmentRecovery({
+      ...operations(async () => notProvisioned),
+      managers: () => [manager, EnvironmentId.make("unreachable")],
+      resume: async (managerId) => (managerId === manager ? notProvisioned : null),
+      retry,
+    });
+    expect(await recover(child)).toEqual({ kind: "not-provisioned" });
     expect(retry).not.toHaveBeenCalled();
-    expect(awaitConnected).not.toHaveBeenCalled();
+  });
+  it("marks a workspace the provider no longer has as missing", async () => {
+    const recovery = operations(async () => ({
+      kind: "refused",
+      reason: "missing",
+      message: "The cloud provider no longer has this workspace. It cannot be reconnected.",
+    }));
+    expect(await createProvisionedEnvironmentRecovery(recovery)(child)).toEqual({
+      kind: "failed",
+      message: "The cloud provider no longer has this workspace. It cannot be reconnected.",
+    });
+    expect(recovery.markMissing).toHaveBeenCalledWith(child);
   });
   it("does not retry the child after refusal and allows another recovery attempt", async () => {
-    rememberProvisionedSandbox(threadRef, lease);
     const retry = vi.fn();
-    const recover = createProvisionedEnvironmentRecovery({
-      resume: vi
-        .fn()
-        .mockRejectedValueOnce(new Error("Workspace unavailable"))
-        .mockResolvedValue(undefined),
-      retry,
-      awaitConnected: async () => {},
-    });
-    expect(await recover(threadRef.environmentId)).toEqual({
-      kind: "failed",
-      message: "Workspace unavailable",
-    });
+    const resume = vi
+      .fn<() => Promise<EnvironmentProvisionResumeResult>>()
+      .mockResolvedValueOnce({
+        kind: "refused",
+        reason: "unknown",
+        message: "Workspace unavailable",
+      })
+      .mockResolvedValue({ kind: "resumed" });
+    const recover = createProvisionedEnvironmentRecovery({ ...operations(resume), retry });
+    expect(await recover(child)).toEqual({ kind: "failed", message: "Workspace unavailable" });
     expect(retry).not.toHaveBeenCalled();
-    expect(await recover(threadRef.environmentId)).toEqual({ kind: "ready" });
+    expect(await recover(child)).toEqual({ kind: "ready" });
   });
   it("reports a connection deadline without continuing the original action", async () => {
-    rememberProvisionedSandbox(threadRef, lease);
     const recover = createProvisionedEnvironmentRecovery({
-      resume: async () => {},
-      retry: async () => {},
+      ...operations(async () => ({ kind: "resumed" })),
       awaitConnected: async () => {
         throw new Error("Connection not ready");
       },
     });
-    expect(await recover(threadRef.environmentId)).toEqual({
-      kind: "failed",
-      message: "Connection not ready",
-    });
+    expect(await recover(child)).toEqual({ kind: "failed", message: "Connection not ready" });
   });
 });
