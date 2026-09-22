@@ -1,9 +1,16 @@
-import type { EnvironmentId, ServerConfig, ServerSelfUpdateCapability } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  EnvironmentProvisionUpgradeResult,
+  ServerConfig,
+  ServerSelfUpdateCapability,
+} from "@t3tools/contracts";
+import type { ProvisionedSandboxLease } from "@t3tools/client-runtime/cloud";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
+import { provisionedSandboxForEnvironment } from "./cloud/provisionedSandboxLeases";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
 export interface VersionMismatch {
@@ -119,8 +126,82 @@ export function manualServerUpdateCommand(targetVersion: string): string {
   return `npx t3@${targetVersion}`;
 }
 
-export function serverUpdateGuidance(capability: ServerSelfUpdateCapability): string {
-  return capability === "desktop-managed" ? "Update the desktop app" : "Update to stay in sync";
+/**
+ * How a version-skewed server gets onto the client's version. A server that
+ * advertises a self-update path keeps it. A provisioned guest without one is
+ * upgraded by the manager that owns its lease, since the public `npx t3`
+ * package is the wrong build for a fork guest. Anything else gets the command.
+ */
+export type ServerUpdatePath =
+  | { readonly kind: "self-update"; readonly capability: ServerSelfUpdateCapability }
+  | { readonly kind: "manager-upgrade"; readonly lease: ProvisionedSandboxLease }
+  | { readonly kind: "manual-command" };
+
+export function resolveServerUpdatePath({
+  selfUpdate,
+  lease,
+}: {
+  readonly selfUpdate: ServerSelfUpdateCapability | null;
+  readonly lease: ProvisionedSandboxLease | null;
+}): ServerUpdatePath {
+  if (selfUpdate !== null) return { kind: "self-update", capability: selfUpdate };
+  if (lease !== null) return { kind: "manager-upgrade", lease };
+  return { kind: "manual-command" };
+}
+
+/** The update path for a connected environment, using the lease this client holds for it. */
+export function resolveEnvironmentServerUpdatePath(
+  environmentId: EnvironmentId | null,
+  selfUpdate: ServerSelfUpdateCapability | null,
+): ServerUpdatePath {
+  return resolveServerUpdatePath({
+    selfUpdate,
+    lease:
+      environmentId === null
+        ? null
+        : (provisionedSandboxForEnvironment(environmentId)?.lease ?? null),
+  });
+}
+
+export function serverUpdateGuidance(path: ServerUpdatePath): string | null {
+  switch (path.kind) {
+    case "self-update":
+      return path.capability === "desktop-managed"
+        ? "Update the desktop app"
+        : "Update to stay in sync";
+    case "manager-upgrade":
+      return "Installs the manager's current build on this server.";
+    case "manual-command":
+      return null;
+  }
+}
+
+export interface UpgradeResultToast {
+  readonly type: "success" | "info" | "error";
+  readonly title: string;
+  readonly description?: string;
+}
+
+export function describeUpgradeResult(
+  result: EnvironmentProvisionUpgradeResult,
+  serverLabel: string,
+): UpgradeResultToast {
+  switch (result.kind) {
+    case "upgraded":
+      return {
+        type: "success",
+        title: `${serverLabel} updated`,
+        description: `Now on ${result.t3Revision.slice(0, 7)}`,
+      };
+    case "current":
+      return { type: "info", title: `${serverLabel} is already on the manager's build` };
+    case "refused":
+      return {
+        type: "error",
+        title: `${serverLabel} update refused`,
+        description: result.message,
+      };
+  }
 }
 
 export function buildVersionMismatchDismissalKey(

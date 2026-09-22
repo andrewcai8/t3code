@@ -558,6 +558,7 @@ import {
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
   resolveServerConfigVersionMismatch,
+  resolveEnvironmentServerUpdatePath,
   resolveServerSelfUpdateCapability,
   serverUpdateGuidance,
   supportsDesktopAppUpdate,
@@ -2783,6 +2784,10 @@ export default function ChatView(props: ChatViewProps) {
       : "server";
   const serverUpdateEnvironmentId = activeThread?.environmentId ?? null;
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
+  const versionMismatchUpdatePath = resolveEnvironmentServerUpdatePath(
+    serverUpdateEnvironmentId,
+    versionMismatchSelfUpdate,
+  );
   const versionMismatchDesktopAppUpdate = supportsDesktopAppUpdate(serverConfig);
   const versionMismatchThreadContinuation = supportsServerUpdateThreadContinuation(serverConfig);
   const serverUpdateState = useAtomValue(
@@ -2939,9 +2944,8 @@ export default function ChatView(props: ChatViewProps) {
         description:
           !updateInProgress &&
           !updateFailed &&
-          versionMismatchSelfUpdate !== null &&
           (versionMismatchSelfUpdate !== "desktop-managed" || !versionMismatchDesktopAppUpdate)
-            ? serverUpdateGuidance(versionMismatchSelfUpdate)
+            ? (serverUpdateGuidance(versionMismatchUpdatePath) ?? undefined)
             : undefined,
         actions: updateInProgress ? (
           disconnectAction
