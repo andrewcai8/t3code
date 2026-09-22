@@ -2,7 +2,8 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { UsageDay } from "@t3tools/contracts";
+import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { makeCursorDashboardReader } from "./cursorDashboard.ts";
@@ -306,5 +307,154 @@ describe("Cursor dashboard", () => {
     const first = await (await team({ CURSOR_AUTH_TOKEN: "a" })).identify();
     const second = await (await team({ CURSOR_AUTH_TOKEN: "b" })).identify();
     expect(first.sourceId).not.toBe(second.sourceId);
+  });
+});
+
+const at = (iso: string) => Date.parse(iso);
+const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+const usage = (timestamp: string, inputTokens = 1) => ({
+  timestamp: String(at(timestamp)),
+  model: "cursor-model",
+  tokenUsage: { inputTokens },
+});
+const hours = (sinceTime: string, untilTime: string): UsageSummaryInput => ({
+  sinceDay: UsageDay.make(sinceTime.slice(0, 10)),
+  untilDay: UsageDay.make(untilTime.slice(0, 10)),
+  timeZone: "UTC",
+  resolution: "hour",
+  sinceTime,
+  untilTime,
+});
+
+/** A Cursor API over `store`: inclusive date filter, newest first, page-numbered. */
+function historyApi(
+  store: { timestamp: string }[],
+  fails: (request: string) => boolean = () => false,
+) {
+  const requests: string[] = [];
+  const read = makeCursorDashboardReader({
+    fetch: async (url, options) => {
+      if (String(url).endsWith("GetMe")) return Response.json(me);
+      const body = JSON.parse(String(options.body));
+      const request = `${iso(Number(body.startDate))}..${iso(Number(body.endDate))} #${body.page}`;
+      requests.push(request);
+      if (fails(request)) return new Response("unavailable", { status: 503 });
+      const rows = store
+        .filter(
+          (row) =>
+            Number(row.timestamp) >= Number(body.startDate) &&
+            Number(row.timestamp) <= Number(body.endDate),
+        )
+        .toSorted((a, b) => Number(b.timestamp) - Number(a.timestamp));
+      return Response.json({
+        totalUsageEventsCount: rows.length,
+        usageEventsDisplay: rows.slice((body.page - 1) * body.pageSize, body.page * body.pageSize),
+      });
+    },
+  });
+  return { dashboard: () => read(environment), requests };
+}
+
+const inputTokens = (history: { events: readonly { tokenUsage?: { inputTokens?: number } }[] }) =>
+  history.events.map((event) => event.tokenUsage?.inputTokens ?? -1).toSorted((a, b) => a - b);
+
+describe("Cursor history cache", () => {
+  afterEach(() => vi.useRealTimers());
+  const week = hours("2026-09-03T12:00:00.000Z", "2026-09-10T12:00:00.000Z");
+
+  it("serves a repeated window, including concurrent repeats, without new page requests", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
+    const api = historyApi([
+      usage("2026-09-05T00:00:00.000Z", 1),
+      usage("2026-09-10T11:30:00.000Z", 2),
+    ]);
+    const dashboard = await api.dashboard();
+    expect(inputTokens(await dashboard.readHistory(week))).toEqual([1, 2]);
+    expect(api.requests).toEqual([
+      "2026-09-03T12:00:00.000Z..2026-09-10T11:00:00.000Z #1",
+      "2026-09-10T11:00:00.001Z..2026-09-10T12:00:00.000Z #1",
+    ]);
+    const [again, concurrent] = await Promise.all([
+      dashboard.readHistory(week),
+      dashboard.readHistory(week),
+    ]);
+    expect(inputTokens(again)).toEqual([1, 2]);
+    expect(inputTokens(concurrent)).toEqual([1, 2]);
+    expect(api.requests).toHaveLength(2);
+  });
+
+  it("fetches only the older gap when a window widens", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
+    const api = historyApi([
+      usage("2026-08-20T00:00:00.000Z", 1),
+      usage("2026-09-05T00:00:00.000Z", 2),
+    ]);
+    const dashboard = await api.dashboard();
+    await dashboard.readHistory(week);
+    const month = await dashboard.readHistory(
+      hours("2026-08-11T12:00:00.000Z", "2026-09-10T12:00:00.000Z"),
+    );
+    expect(inputTokens(month)).toEqual([1, 2]);
+    expect(api.requests.slice(2)).toEqual([
+      "2026-08-11T12:00:00.000Z..2026-09-03T11:59:59.999Z #1",
+    ]);
+  });
+
+  it("later refetches only the unsettled tail and counts a refetched event once", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
+    const store = [usage("2026-09-05T00:00:00.000Z", 1), usage("2026-09-10T11:30:00.000Z", 2)];
+    const api = historyApi(store);
+    const dashboard = await api.dashboard();
+    await dashboard.readHistory(week);
+    vi.setSystemTime(at("2026-09-10T12:10:00.000Z"));
+    store.push(usage("2026-09-10T12:05:00.000Z", 3));
+    const later = await dashboard.readHistory(
+      hours("2026-09-03T12:10:00.000Z", "2026-09-10T12:10:00.000Z"),
+    );
+    expect(inputTokens(later)).toEqual([1, 2, 3]);
+    expect(api.requests.slice(2)).toEqual([
+      "2026-09-10T11:00:00.001Z..2026-09-10T11:10:00.000Z #1",
+      "2026-09-10T11:10:00.001Z..2026-09-10T12:10:00.000Z #1",
+    ]);
+  });
+
+  it("caches settled history whose rows lack token usage", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
+    const api = historyApi([
+      usage("2026-09-05T00:00:00.000Z", 1),
+      { timestamp: String(at("2026-09-06T00:00:00.000Z")), model: "cursor-model" },
+    ]);
+    const dashboard = await api.dashboard();
+    const past = hours("2026-09-04T00:00:00.000Z", "2026-09-08T00:00:00.000Z");
+    await dashboard.readHistory(past);
+    const again = await dashboard.readHistory(past);
+    expect(again).toMatchObject({ status: "partial", malformedRecords: 1 });
+    expect(inputTokens(again)).toEqual([-1, 1]);
+    expect(api.requests).toEqual(["2026-09-04T00:00:00.000Z..2026-09-08T00:00:00.000Z #1"]);
+  });
+
+  it("does not treat a span with a failed later page as covered", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
+    let failing = true;
+    const api = historyApi(
+      Array.from({ length: 501 }, (_, i) => usage("2026-09-05T00:00:00.000Z", i)),
+      (request) => failing && request.endsWith("#2"),
+    );
+    const dashboard = await api.dashboard();
+    const past = hours("2026-09-04T00:00:00.000Z", "2026-09-08T00:00:00.000Z");
+    expect(await dashboard.readHistory(past)).toMatchObject({
+      status: "partial",
+      message: "A later Cursor history page could not be read; totals are partial.",
+    });
+    failing = false;
+    const retried = await dashboard.readHistory(past);
+    expect(retried).toMatchObject({ status: "ok" });
+    expect(retried.events).toHaveLength(501);
+    expect(api.requests.slice(2)).toEqual([
+      "2026-09-04T00:00:00.000Z..2026-09-08T00:00:00.000Z #1",
+      "2026-09-04T00:00:00.000Z..2026-09-08T00:00:00.000Z #2",
+    ]);
+    await dashboard.readHistory(past);
+    expect(api.requests).toHaveLength(4);
   });
 });
