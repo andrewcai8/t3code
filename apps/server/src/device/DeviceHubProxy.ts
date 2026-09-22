@@ -17,7 +17,6 @@ import {
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { proxyWebSocket } from "../httpWebSocketProxy.ts";
 import * as Option from "effect/Option";
 import {
   HttpClient,
@@ -27,6 +26,7 @@ import {
   HttpServerResponse,
 } from "effect/unstable/http";
 
+import { proxyWebSocket } from "../httpWebSocketProxy.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import {
   failEnvironmentAuthInvalid,

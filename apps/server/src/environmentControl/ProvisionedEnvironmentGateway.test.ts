@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import { it as effectIt } from "@effect/vitest";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as Context from "effect/Context";
@@ -138,66 +139,64 @@ describe("provisioned environment gateway", () => {
     });
   });
 
-  it("relays websocket frames both ways between the client and the guest", async () => {
-    const upstreamUrls: Array<string> = [];
-    const echoRoute = HttpRouter.add(
-      "GET",
-      "/ws",
-      Effect.gen(function* () {
-        const request = yield* HttpServerRequest.HttpServerRequest;
-        upstreamUrls.push(request.url);
-        const socket = yield* request.upgrade;
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const writer = yield* socket.writer;
-            const { pull } = yield* socket.reader;
-            while (true) {
-              for (const chunk of yield* pull) {
-                yield* writer.write(
-                  `echo:${typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)}`,
-                );
-              }
-            }
-          }),
-        ).pipe(Effect.catchCause(() => Effect.void));
-        return HttpServerResponse.empty();
-      }),
-    );
-    const serveOnLoopback = <A, E, R, D>(
-      routes: Layer.Layer<A, E, R>,
-      dependencies: Layer.Layer<D>,
-    ) =>
-      HttpRouter.serve(routes, { disableLogger: true, disableListenLog: true }).pipe(
-        Layer.provide(dependencies),
-        Layer.provideMerge(NodeHttpServer.layerTest),
-      );
-    const portOf = (services: Context.Context<HttpServer.HttpServer>) =>
-      (Context.get(services, HttpServer.HttpServer).address as NetAddress.InetAddress).port;
-
-    const echoed = await Effect.runPromise(
-      Effect.scoped(
+  effectIt.scoped("relays websocket frames both ways between the client and the guest", () =>
+    Effect.gen(function* () {
+      const upstreamUrls: Array<string> = [];
+      const echoRoute = HttpRouter.add(
+        "GET",
+        "/ws",
         Effect.gen(function* () {
-          const guest = yield* Layer.build(serveOnLoopback(echoRoute, Layer.empty));
-          const gateway = yield* Layer.build(
-            serveOnLoopback(
-              provisionedEnvironmentGatewayRouteLayer,
-              Layer.succeed(EnvironmentControl, {
-                namespaceProxyOrigin: () => Effect.succeed(`http://127.0.0.1:${portOf(guest)}`),
-              } as unknown as EnvironmentControl["Service"]),
-            ),
-          );
-          const socket = yield* Socket.makeWebSocket(
-            `ws://127.0.0.1:${portOf(gateway)}/api/provisioned-environment/lease-1/ws?wsTicket=guest-ticket`,
-            { openTimeout: "5 seconds" },
-          ).pipe(Effect.provide(NodeSocket.layerWebSocketConstructor));
-          const writer = yield* socket.writer;
-          const { pull } = yield* socket.reader;
-          yield* writer.write("ping");
-          return yield* pull;
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          upstreamUrls.push(request.url);
+          const socket = yield* request.upgrade;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const writer = yield* socket.writer;
+              const { pull } = yield* socket.reader;
+              while (true) {
+                for (const chunk of yield* pull) {
+                  yield* writer.write(
+                    `echo:${typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)}`,
+                  );
+                }
+              }
+            }),
+          ).pipe(Effect.catchCause(() => Effect.void));
+          return HttpServerResponse.empty();
         }),
-      ),
-    );
-    expect(echoed).toEqual(["echo:ping"]);
-    expect(upstreamUrls).toEqual(["/ws?wsTicket=guest-ticket"]);
-  });
+      );
+      const serveOnLoopback = <A, E, R, D>(
+        routes: Layer.Layer<A, E, R>,
+        dependencies: Layer.Layer<D>,
+      ) =>
+        HttpRouter.serve(routes, { disableLogger: true, disableListenLog: true }).pipe(
+          Layer.provide(dependencies),
+          Layer.provideMerge(NodeHttpServer.layerTest),
+        );
+      const portOf = (services: Context.Context<HttpServer.HttpServer>) =>
+        (Context.get(services, HttpServer.HttpServer).address as NetAddress.InetAddress).port;
+
+      const echoed = yield* Effect.gen(function* () {
+        const guest = yield* Layer.build(serveOnLoopback(echoRoute, Layer.empty));
+        const gateway = yield* Layer.build(
+          serveOnLoopback(
+            provisionedEnvironmentGatewayRouteLayer,
+            Layer.succeed(EnvironmentControl, {
+              namespaceProxyOrigin: () => Effect.succeed(`http://127.0.0.1:${portOf(guest)}`),
+            } as unknown as EnvironmentControl["Service"]),
+          ),
+        );
+        const socket = yield* Socket.makeWebSocket(
+          `ws://127.0.0.1:${portOf(gateway)}/api/provisioned-environment/lease-1/ws?wsTicket=guest-ticket`,
+          { openTimeout: "5 seconds" },
+        ).pipe(Effect.provide(NodeSocket.layerWebSocketConstructor));
+        const writer = yield* socket.writer;
+        const { pull } = yield* socket.reader;
+        yield* writer.write("ping");
+        return yield* pull;
+      });
+      expect(echoed).toEqual(["echo:ping"]);
+      expect(upstreamUrls).toEqual(["/ws?wsTicket=guest-ticket"]);
+    }),
+  );
 });
