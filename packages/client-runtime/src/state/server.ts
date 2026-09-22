@@ -1051,6 +1051,14 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}:${input.sandboxId}`,
       },
     }),
+    upgradeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:upgrade",
+      tag: WS_METHODS.environmentControlUpgrade,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
+      },
+    }),
     touchProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:touch",
       tag: WS_METHODS.environmentControlTouch,
