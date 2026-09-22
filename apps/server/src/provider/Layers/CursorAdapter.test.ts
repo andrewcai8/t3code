@@ -714,6 +714,66 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       }),
   );
 
+  it.effect("resolves T3's auto model to the value Cursor advertises for Auto", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-auto-model-probe");
+      const cursor = ProviderInstanceId.make("cursor");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: cursor, model: "auto" },
+      });
+      for (const model of ["composer-2", "auto"]) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: `hello ${model}`,
+          attachments: [],
+          modelSelection: { instanceId: cursor, model },
+        });
+      }
+      const unknown = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "hello unknown",
+          attachments: [],
+          modelSelection: { instanceId: cursor, model: "no-such-model" },
+        })
+        .pipe(Effect.flip);
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.deepStrictEqual(
+        requests.flatMap((entry) => {
+          const params = entry.params as Record<string, unknown> | undefined;
+          return entry.method === "session/set_config_option" && params?.configId === "model"
+            ? [params.value]
+            : [];
+        }),
+        ["composer-2", "default"],
+      );
+      assert.equal(requests.filter((entry) => entry.method === "session/prompt").length, 2);
+      assert.include(
+        unknown.message,
+        'Invalid value "no-such-model" for session config option "model": expected one of default, composer-2, gpt-5.4, claude-opus-4-6',
+      );
+    }),
+  );
+
   it.effect(
     "streams ACP tool calls and approvals on the active turn in approval-required mode",
     () =>
