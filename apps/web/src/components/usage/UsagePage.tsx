@@ -38,6 +38,7 @@ import {
   formatTokens,
   formatUsd,
   makeWindow,
+  windowReferenceTime,
 } from "@t3tools/shared/usageFormat";
 import { Button } from "../ui/button";
 import {
@@ -469,7 +470,7 @@ export function UsagePage() {
                       hours={hours}
                       hourly={merged.hourly}
                       metric={metric}
-                      referenceTime={window.untilTime}
+                      referenceTime={windowReferenceTime(window)}
                       resolution={isPast24Hours ? "hour" : "day"}
                       timeZone={window.timeZone}
                     />

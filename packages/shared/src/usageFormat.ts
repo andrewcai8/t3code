@@ -191,6 +191,16 @@ export function formatRelativeHourShort(
  * The window the page requests, expressed in the viewer's own time zone so days
  * line up with what they actually experienced.
  */
+/**
+ * The instant hourly labels are relative to: the last moment the window covers.
+ * An hour-aligned window ends at the next hour, which is already tomorrow
+ * during the last hour of the day.
+ */
+export function windowReferenceTime(window: UsageSummaryInput): string | undefined {
+  if (window.untilTime === undefined) return undefined;
+  return new Date(Date.parse(window.untilTime) - 1).toISOString();
+}
+
 export function makeWindow(
   days: number,
   now = new Date(),

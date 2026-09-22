@@ -7,6 +7,7 @@ import {
   formatHourShort,
   formatRelativeHourShort,
   makeWindow,
+  windowReferenceTime,
 } from "./usageFormat.ts";
 
 describe("hourly usage formatting", () => {
@@ -104,6 +105,23 @@ describe("hourly usage formatting", () => {
       "2026-08-10T14:00:00.000Z",
       "2026-08-11T14:00:00.000Z",
     ]);
+  });
+
+  it("labels the in-progress hour as today during the last hour of the day", () => {
+    try {
+      vi.stubEnv("TZ", "America/Los_Angeles");
+      const window = makeWindow(1, new Date("2026-08-12T06:40:00.000Z"), "hour");
+      const reference = windowReferenceTime(window)!;
+
+      expect(formatRelativeHourShort("2026-08-12T06:00:00.000Z", reference, window.timeZone)).toBe(
+        "11 PM today",
+      );
+      expect(formatRelativeHourShort("2026-08-11T07:00:00.000Z", reference, window.timeZone)).toBe(
+        "12 AM today",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("ends the hourly request on the day of its last covered hour", () => {
