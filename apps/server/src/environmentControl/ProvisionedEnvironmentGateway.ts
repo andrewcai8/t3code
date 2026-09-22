@@ -8,8 +8,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/unstable/http";
-import * as Socket from "effect/unstable/socket/Socket";
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import { proxyWebSocket } from "../httpWebSocketProxy.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 
 /** Headers owned by the manager transport and never presented to a guest T3 server. */
@@ -69,26 +68,6 @@ export const resolveProvisionedEnvironmentTarget = (
   return { leaseId, target };
 };
 
-const proxyWebSocket = Effect.fn("ProvisionedEnvironmentGateway.proxyWebSocket")(function* (
-  request: HttpServerRequest.HttpServerRequest,
-  target: URL,
-) {
-  const client = yield* request.upgrade;
-  const upstream = yield* Socket.makeWebSocket(target.toString().replace(/^http/, "ws"), {
-    openTimeout: "10 seconds",
-  }).pipe(Effect.provide(NodeSocket.layerWebSocketConstructor));
-  yield* Effect.scoped(
-    Effect.gen(function* () {
-      const writeToClient = yield* client.writer;
-      const writeToUpstream = yield* upstream.writer;
-      const downstream = upstream.runRaw((data) => writeToClient(data));
-      const upstreamPump = client.runRaw((data) => writeToUpstream(data));
-      yield* Effect.raceFirst(downstream, upstreamPump);
-    }),
-  ).pipe(Effect.catchCause(() => Effect.void));
-  return HttpServerResponse.empty();
-});
-
 const proxyHttp = Effect.fn("ProvisionedEnvironmentGateway.proxyHttp")(function* (
   request: HttpServerRequest.HttpServerRequest,
   target: URL,
@@ -129,7 +108,8 @@ const handler = Effect.gen(function* () {
   if (!origin) return HttpServerResponse.text("Not Found", { status: 404 });
   const resolved = resolveProvisionedEnvironmentTarget(url.value, origin);
   if (!resolved) return HttpServerResponse.text("Not Found", { status: 404 });
-  if (isWebSocketUpgrade(request)) return yield* proxyWebSocket(request, resolved.target);
+  if (isWebSocketUpgrade(request))
+    return yield* proxyWebSocket(request, resolved.target.toString().replace(/^http/, "ws"));
   return yield* proxyHttp(request, resolved.target).pipe(
     Effect.catch(() => Effect.succeed(HttpServerResponse.text("Bad Gateway", { status: 502 }))),
   );
