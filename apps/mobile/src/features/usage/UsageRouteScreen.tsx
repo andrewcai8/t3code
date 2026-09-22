@@ -167,15 +167,17 @@ export function UsageRouteScreen() {
         subtitle: undefined,
         state: selectedEnvironmentIds === null ? ("on" as const) : ("off" as const),
       },
-      ...environments.map((environment) => ({
-        id: environment.environmentId,
-        title: environment.label,
-        subtitle: usageEnvironmentStatus(environment),
-        state:
-          selectedEnvironmentIds === null || selectedEnvironmentIds.has(environment.environmentId)
-            ? ("on" as const)
-            : ("off" as const),
-      })),
+      ...environments.map((environment) => {
+        const selected =
+          selectedEnvironmentIds === null || selectedEnvironmentIds.has(environment.environmentId);
+        return {
+          id: environment.environmentId,
+          title: environment.label,
+          // Deselected environments are not asked for usage, so they have no status.
+          subtitle: selected ? usageEnvironmentStatus(environment) : undefined,
+          state: selected ? ("on" as const) : ("off" as const),
+        };
+      }),
     ],
     [environments, selectedEnvironmentIds],
   );
