@@ -2,11 +2,13 @@ import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId, EnvironmentProvisionInput } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { makeProvisionControl } from "./ProvisionControl.ts";
+import { makeProvisionControl, type ProvisionControlPorts } from "./ProvisionControl.ts";
+import type { ProvisionRuntimeArtifact } from "./config.ts";
 import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
@@ -50,6 +52,14 @@ const manifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)({
   },
   egressAllow: [],
 });
+/** Ports the upgrade path owns, for cases that never upgrade. */
+const noRuntimePorts = {
+  pinnedRuntime: async () => null,
+  setRuntime: async () => {
+    throw new Error("Unexpected setRuntime");
+  },
+  prepare: () => Effect.die("Unexpected prepare"),
+} satisfies Pick<ProvisionControlPorts, "pinnedRuntime" | "setRuntime" | "prepare">;
 
 it.effect(
   "ready survives a lost lease receipt, attachment uses fresh grants, and heartbeat extends compute before the lease",
@@ -108,6 +118,7 @@ it.effect(
           store,
           provisioning,
           {
+            ...noRuntimePorts,
             freeze: async () => manifest,
             load: async () => manifest,
             attach: async () => ({
@@ -235,6 +246,7 @@ it.effect(
         store,
         provisioning,
         {
+          ...noRuntimePorts,
           freeze: async () => namespaceManifest,
           load: async () => namespaceManifest,
           attach: async (_operation, _manifest, recordedProxy) => {
@@ -308,6 +320,7 @@ it.effect(
         store,
         provisioning,
         {
+          ...noRuntimePorts,
           freeze: async () => manifest,
           load: async () => manifest,
           attach: async () => ({
@@ -386,6 +399,7 @@ it.effect.each(["attach", "touch"] as const)(
         store,
         provisioning,
         {
+          ...noRuntimePorts,
           freeze: async () => manifest,
           load: async () => manifest,
           attach: async () => {
@@ -404,6 +418,145 @@ it.effect.each(["attach", "touch"] as const)(
       expect(result.kind).toBe("refused");
       expect(calls).toEqual(["dispose"]);
       expect((yield* store.get(input.requestId)).state).toEqual({ kind: "disposed" });
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "upgrades a ready guest onto the pinned build once, reports current otherwise, and refuses unknown or concurrent requests",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      const next: ProvisionRuntimeArtifact = {
+        ...manifest.localArtifact,
+        path: "/private/next",
+        sha256: "d".repeat(64),
+        revision: "e".repeat(40),
+      };
+      let pinned: ProvisionRuntimeArtifact | null = manifest.localArtifact;
+      const staged: ProvisionRuntimeArtifact[] = [];
+      const prepared: ProvisionRuntimeArtifact[] = [];
+      let hold: PromiseWithResolvers<void> | null = null;
+      const entered = Promise.withResolvers<void>();
+      const ports: ProvisionProviderPorts["Service"] = {
+        create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
+        recoverCreate: () => Effect.succeed([]),
+        fork: () => Effect.die("unexpected fork"),
+        recoverFork: () => Effect.succeed([]),
+        dispose: () => Effect.void,
+        // The guest converges on the last staged build, as the real runtimes do
+        // from the runtime record, and reports that build back.
+        prepare: () =>
+          Effect.promise(async () => {
+            const build = staged.at(-1) ?? manifest.localArtifact;
+            prepared.push(build);
+            if (hold) {
+              entered.resolve();
+              await hold.promise;
+            }
+            return {
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/private/operation/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: build.revision,
+              artifactSha256: build.sha256,
+            };
+          }),
+      };
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, ports),
+      );
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          freeze: async () => manifest,
+          load: async () => manifest,
+          attach: async () => ({
+            pairingUrl: "https://remote/pair#token=grant",
+            remoteAccess: { origin: "https://remote", brokerToken: "private-broker" },
+          }),
+          touch: async () => "running" as const,
+          pinnedRuntime: async () => pinned,
+          setRuntime: async (_id, artifact) => {
+            staged.push(artifact);
+            return artifact;
+          },
+          prepare: ports.prepare,
+        },
+        leases,
+      );
+      expect(yield* control.provision(input)).toMatchObject({
+        kind: "ready",
+        environment: { t3Revision: "c".repeat(40) },
+      });
+      const request = {
+        leaseId: input.requestId,
+        sandboxId: "sandbox",
+        environmentId: EnvironmentId.make("remote"),
+      };
+      for (const changed of [
+        { leaseId: "9c1f2d6e-7d0a-4a7f-9d4e-2b1c3a5e7f90" },
+        { sandboxId: "other" },
+        { environmentId: EnvironmentId.make("other") },
+      ]) {
+        expect(yield* control.upgrade({ ...request, ...changed })).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          message: "This workspace could not be found. Upgrade was refused.",
+        });
+      }
+      pinned = null;
+      expect(yield* control.upgrade(request)).toMatchObject({
+        kind: "refused",
+        reason: "unconfigured",
+      });
+      pinned = manifest.localArtifact;
+      expect(yield* control.upgrade(request)).toEqual({
+        kind: "current",
+        t3Revision: "c".repeat(40),
+      });
+      expect(prepared).toEqual([manifest.localArtifact]);
+
+      pinned = next;
+      hold = Promise.withResolvers<void>();
+      const first = yield* Effect.forkChild(control.upgrade(request));
+      yield* Effect.promise(() => entered.promise);
+      expect(yield* control.upgrade(request)).toEqual({
+        kind: "refused",
+        reason: "busy",
+        message: "This workspace is already being upgraded.",
+      });
+      hold.resolve();
+      hold = null;
+      expect(yield* Fiber.join(first)).toEqual({ kind: "upgraded", t3Revision: "e".repeat(40) });
+      expect(staged).toEqual([next]);
+      expect(prepared).toEqual([manifest.localArtifact, next]);
+      expect((yield* store.get(input.requestId)).state).toMatchObject({
+        kind: "ready",
+        readiness: { artifactSha256: "d".repeat(64), t3Revision: "e".repeat(40) },
+      });
+      expect(yield* control.provision(input)).toMatchObject({
+        kind: "ready",
+        environment: { t3Revision: "e".repeat(40), artifactSha256: "d".repeat(64) },
+      });
+      expect(yield* control.upgrade(request)).toEqual({
+        kind: "current",
+        t3Revision: "e".repeat(40),
+      });
+      expect(prepared).toHaveLength(2);
+
+      yield* Effect.promise(() => leases.markMissing(input.requestId));
+      expect(yield* control.upgrade(request)).toMatchObject({ kind: "refused", reason: "missing" });
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
