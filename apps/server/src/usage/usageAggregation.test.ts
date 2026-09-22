@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { UsageAggregator } from "./usageAggregation.ts";
+import * as Schema from "effect/Schema";
+
+import { addTranscript, type AggregateOptions, UsageAggregator } from "./usageAggregation.ts";
 import type { RateTable } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
@@ -200,5 +202,118 @@ describe("UsageAggregator", () => {
     ]);
 
     expect(result.buckets).toHaveLength(3);
+  });
+});
+
+describe("addTranscript", () => {
+  const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+  const inWindow = Date.parse("2026-08-06T20:00:00Z");
+  const lateEvening = Date.parse("2026-08-07T06:30:00Z");
+  const earlyMorning = Date.parse("2026-08-06T02:00:00Z");
+  const longAgo = Date.parse("2026-07-20T12:00:00Z");
+
+  const codex = (timestampMs: number, outputTokens: number) =>
+    record({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      sessionId: "rollout-1",
+      timestampMs,
+      totals: { ...record().totals, outputTokens },
+    });
+  const claude = (timestampMs: number, outputTokens: number, dedupeKey: string | null = null) =>
+    record({
+      sessionId: "session-b",
+      timestampMs,
+      dedupeKey,
+      totals: { ...record().totals, outputTokens },
+    });
+  const rollout = () => [
+    codex(inWindow, 11),
+    codex(inWindow, 12),
+    codex(inWindow, 11),
+    codex(longAgo, 1000),
+    codex(lateEvening, 13),
+  ];
+  const files: readonly (readonly UsageRecord[])[] = [
+    rollout(),
+    // A moved copy of the same rollout contributes nothing.
+    rollout(),
+    [claude(longAgo, 2000, "msg_1:"), claude(earlyMorning, 17), claude(inWindow, 19)],
+    // The first copy of a key wins even when it fell outside the window.
+    [claude(inWindow, 3000, "msg_1:")],
+  ];
+
+  /** The scan loop as it ran before out-of-window records were skipped. */
+  function referenceFold(aggregator: UsageAggregator) {
+    const sessionIds = new Set<string>();
+    for (const records of files) {
+      const occurrences = new Map<string, number>();
+      for (const item of records) {
+        let usageRecord = item;
+        if (item.provider === "codex" && item.sessionId.length > 0) {
+          const key = encodeKey([
+            item.provider,
+            item.sessionId,
+            item.timestampMs,
+            item.model,
+            item.totals,
+          ]);
+          const occurrence = (occurrences.get(key) ?? 0) + 1;
+          occurrences.set(key, occurrence);
+          usageRecord = { ...item, dedupeKey: key + ":" + occurrence };
+        }
+        if (aggregator.add(usageRecord) && item.sessionId.length > 0) {
+          sessionIds.add(item.sessionId);
+        }
+      }
+    }
+    return { buckets: aggregator.finish().buckets, sessionIds: [...sessionIds].toSorted() };
+  }
+
+  function fold(aggregator: UsageAggregator) {
+    const sessionIds = new Set<string>();
+    for (const records of files) addTranscript(aggregator, records, sessionIds);
+    return { buckets: aggregator.finish().buckets, sessionIds: [...sessionIds].toSorted() };
+  }
+
+  const windows: readonly AggregateOptions[] = [
+    {
+      timeZone: "America/Los_Angeles",
+      sinceDay: "2026-08-06",
+      untilDay: "2026-08-07",
+      resolution: "hour",
+      sinceTimeMs: Date.parse("2026-08-06T04:37:00.000Z"),
+      untilTimeMs: Date.parse("2026-08-07T04:37:00.000Z"),
+      rates,
+    },
+    { timeZone: "America/Los_Angeles", sinceDay: "2026-08-06", untilDay: "2026-08-06", rates },
+    { timeZone: "Pacific/Kiritimati", sinceDay: "2026-08-07", untilDay: "2026-08-07", rates },
+    { timeZone: "Pacific/Pago_Pago", sinceDay: "2026-08-06", untilDay: "2026-08-06", rates },
+    { timeZone: "UTC", sinceDay: "2026-07-01", untilDay: "2026-08-31", rates },
+  ];
+
+  it("matches the unfiltered scan loop in every window", () => {
+    for (const options of windows) {
+      expect(fold(new UsageAggregator(options))).toEqual(
+        referenceFold(new UsageAggregator(options)),
+      );
+    }
+  });
+
+  it("keeps repeated Codex events and drops keys first seen out of window", () => {
+    const outputTokens = (options: AggregateOptions) =>
+      fold(new UsageAggregator(options)).buckets.map((bucket) => [
+        bucket.provider,
+        bucket.totals.outputTokens,
+      ]);
+
+    expect(outputTokens(windows[0]!)).toEqual([
+      ["claude", 19],
+      ["codex", 34],
+    ]);
+    expect(outputTokens(windows[1]!)).toEqual([
+      ["claude", 19],
+      ["codex", 47],
+    ]);
   });
 });
