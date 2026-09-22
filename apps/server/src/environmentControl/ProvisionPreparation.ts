@@ -104,6 +104,13 @@ export function desiredRuntime(
     },
   };
 }
+/** The build this manager currently pins for a provider's guests, or null when none is configured. */
+export function configuredRuntimeArtifact(
+  config: EnvironmentControlConfig,
+  provider: "e2b" | "namespace",
+): ProvisionRuntimeArtifact | null {
+  return config.provisioning?.runtimeArtifacts?.[provider === "e2b" ? "linux" : "macos"] ?? null;
+}
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 const decodeSettings = Schema.decodeUnknownSync(
   Schema.Struct({
@@ -477,8 +484,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         return existing;
       }
       const provisioning = config.provisioning;
-      const artifact =
-        provisioning?.runtimeArtifacts?.[input.provider === "e2b" ? "linux" : "macos"];
+      const artifact = configuredRuntimeArtifact(config, input.provider);
       if (!provisioning || !artifact)
         throw new ProvisionRefused({
           reason: "unconfigured",

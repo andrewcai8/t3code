@@ -66,6 +66,7 @@ it.effect(
           pause: () => Effect.die("Unused in provision HTTP proof"),
           resume: () => Effect.die("Unused in provision HTTP proof"),
           resumeUnclaimed: () => Effect.die("Unused in provision HTTP proof"),
+          upgrade: () => Effect.die("Unused in provision HTTP proof"),
           provision: (input) =>
             Effect.sync(() => {
               calls.push({ method: "provision", input });
