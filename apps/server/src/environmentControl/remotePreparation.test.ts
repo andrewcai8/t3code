@@ -59,6 +59,7 @@ if (args[0] === 'auth') {
   fs.appendFileSync(path.join(root, 'issued'), 'issue\n');
   process.stdout.write('test-private-broker');
 } else if (args[0] === 'project') {
+  fs.writeFileSync(path.join(root, 'project-add-args'), JSON.stringify(args));
   process.exit(0);
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
@@ -217,6 +218,17 @@ describe("remote preparation subprocess", () => {
       ]),
     );
     expect(first.every((phase) => typeof phase.durationMs === "number")).toBe(true);
+    expect(
+      JSON.parse(await NodeFSP.readFile(NodePath.join(input.root, "project-add-args"), "utf8")),
+    ).toEqual([
+      "project",
+      "add",
+      "--base-dir",
+      expect.any(String),
+      "--title",
+      "source",
+      ready.projectDir,
+    ]);
     const converged: ProvisionPhase[] = [];
     await prepareRemoteHost(localPort, input, (phase) => {
       converged.push(phase);

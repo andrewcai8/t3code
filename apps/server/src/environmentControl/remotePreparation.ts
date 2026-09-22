@@ -559,9 +559,18 @@ def prepare(spec):
                     time.sleep(0.1)
         # t3 serve never creates a project. Add the checkout explicitly so
         # pairing can hand off even when an older guest is already running.
+        # The checkout directory is always workspace, so title the project
+        # after the repository instead of the directory.
         with step('projectAdd'):
+            title = []
+            if repository is not None:
+                name = repository['url'].rstrip('/').rsplit('/', 1)[-1]
+                if name.endswith('.git'):
+                    name = name[:-4]
+                if name:
+                    title = ['--title', name]
             added = subprocess.run(
-                command + ['project', 'add', '--base-dir', str(t3home), str(project)],
+                command + ['project', 'add', '--base-dir', str(t3home), *title, str(project)],
                 cwd=str(project),
                 env=env,
                 stdin=subprocess.DEVNULL,
