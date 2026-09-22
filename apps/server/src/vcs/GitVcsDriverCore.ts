@@ -2356,12 +2356,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
     const indexExists = yield* fileSystem.exists(indexPath);
     if (indexExists) {
-      yield* fileSystem.copyFile(indexPath, tempIndexPath);
       // Git trusts a cached entry only when the index file is newer than the
       // entry's mtime. A fresh copy looks newer, which hides a same-size edit
-      // made in the second the real index was written. Keep the original time.
+      // made in the second the real index was written. Keep the original time,
+      // read before copying so a concurrent index write cannot slip between.
+      // Git skips the racy check for a zero timestamp, so fall back to 1.
       const { mtime } = yield* fileSystem.stat(indexPath);
-      const indexWrittenAt = Option.getOrElse(mtime, () => 0);
+      const indexWrittenAt = Option.getOrElse(mtime, () => 1);
+      yield* fileSystem.copyFile(indexPath, tempIndexPath);
       yield* fileSystem.utimes(tempIndexPath, indexWrittenAt, indexWrittenAt);
     }
     const env = { GIT_INDEX_FILE: tempIndexPath } satisfies NodeJS.ProcessEnv;
