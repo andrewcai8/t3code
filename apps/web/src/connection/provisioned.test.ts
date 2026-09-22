@@ -41,6 +41,9 @@ describe("opening a discovered provisioned environment", () => {
         calls.push(`wait:${ref.environmentId}:${ref.threadId}`);
         return true;
       },
+      rememberLease: (ref: { environmentId: EnvironmentId; threadId: string }) => {
+        calls.push(`remember:${ref.environmentId}:${ref.threadId}`);
+      },
     };
     expect(await openProvisionedEnvironment(environment, ports)).toEqual({
       environmentId: "remote",
@@ -53,7 +56,9 @@ describe("opening a discovered provisioned environment", () => {
     expect(calls).toEqual([
       `attach:${environment.requestId}`,
       "https://remote.invalid/pair#token=fresh",
+      "remember:remote:existing-thread",
       "wait:remote:existing-thread",
+      "remember:remote:existing-thread",
       "wait:remote:existing-thread",
     ]);
   });
@@ -70,6 +75,9 @@ describe("opening a discovered provisioned environment", () => {
       pair: async () => {
         pairs++;
         return EnvironmentId.make("other");
+      },
+      rememberLease: () => {
+        throw new Error("unexpected remember");
       },
       waitForThread: async () => {
         waits++;
@@ -101,6 +109,7 @@ describe("opening a discovered provisioned environment", () => {
       pair: async () => {
         throw new Error("unexpected pair");
       },
+      rememberLease: () => {},
       waitForThread: async () => false,
     };
     await expect(openProvisionedEnvironment(environment, ports)).rejects.toThrow("still loading");
