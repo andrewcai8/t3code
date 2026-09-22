@@ -1011,20 +1011,17 @@ describe("isUsageLimitsCommand", () => {
 });
 
 describe("Cursor account limits", () => {
-  it("shows only Monthly usage while preserving the reported windows", () => {
+  it("shows only the monthly allowance", () => {
     const limits = {
       checkedAt: "2026-09-10T00:00:00Z",
       windows: [
-        { ...window, id: "cursor_auto", label: "Auto", usedPercent: 74.42733333333334 },
-        { ...window, id: "cursor_api", label: "API", usedPercent: 100 },
-        { ...window, id: "cursor_ondemand", label: "On-demand", usedPercent: 26 },
+        { ...window, id: "cursor_monthly", label: "Monthly usage", usedPercent: 74.4 },
+        { ...window, id: "apiPercentUsed", label: "Monthly · API", usedPercent: 100 },
       ],
     };
-    const displayed = displayUsageLimits(ProviderDriverKind.make("cursor"), limits);
-    expect(displayed.windows).toEqual([
-      { ...window, id: "cursor_auto", label: "Monthly usage", usedPercent: 74.42733333333334 },
+    expect(displayUsageLimits(ProviderDriverKind.make("cursor"), limits).windows).toEqual([
+      { ...window, id: "cursor_monthly", label: "Monthly usage", usedPercent: 74.4 },
     ]);
-    expect(limits.windows.map((window) => window.label)).toEqual(["Auto", "API", "On-demand"]);
     expect(displayUsageLimits(ProviderDriverKind.make("codex"), limits)).toBe(limits);
   });
 
@@ -1057,11 +1054,7 @@ describe("Cursor account limits", () => {
         auth: { status: "authenticated", email: "shared@example.com", accountIdentity },
         usageLimits: {
           checkedAt: "2026-09-10T00:00:00Z",
-          windows: [
-            { id: "cursor_auto", kind: "monthly", label: "Auto", usedPercent },
-            { id: "cursor_api", kind: "monthly", label: "API", usedPercent: 100 },
-            { id: "cursor_ondemand", kind: "other", label: "On-demand", usedPercent: 0 },
-          ],
+          windows: [{ id: "cursor_monthly", kind: "monthly", label: "Monthly usage", usedPercent }],
         },
       });
     const accounts = collectLimitAccounts(

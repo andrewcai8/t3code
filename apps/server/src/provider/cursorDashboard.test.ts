@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { makeCursorDashboardReader } from "./cursorDashboard.ts";
 import me from "./testFixtures/cursor/me.json" with { type: "json" };
-import period from "./testFixtures/cursor/period.json" with { type: "json" };
 import events from "./testFixtures/cursor/events.json" with { type: "json" };
 
 const input = {
@@ -22,7 +21,7 @@ const event = {
   tokenUsage: { inputTokens: 3, totalCents: 25 },
 };
 
-function reader(responses: { period?: unknown; page?: (page: number) => unknown } = {}) {
+function reader(responses: { page?: (page: number) => unknown } = {}) {
   const requests: { method: string; body: unknown; authorization: string | null }[] = [];
   const fetchApi = async (url: string, options: RequestInit) => {
     const method = String(url).split("/").at(-1) ?? "";
@@ -33,7 +32,6 @@ function reader(responses: { period?: unknown; page?: (page: number) => unknown 
       authorization: new Headers(options?.headers).get("Authorization"),
     });
     if (method === "GetMe") return Response.json(me);
-    if (method === "GetCurrentPeriodUsage") return Response.json(responses.period ?? period);
     return Response.json(
       responses.page?.(body.page) ?? {
         totalUsageEventsCount: 2,
@@ -47,57 +45,6 @@ function reader(responses: { period?: unknown; page?: (page: number) => unknown 
 afterEach(() => vi.restoreAllMocks());
 
 describe("Cursor dashboard", () => {
-  it("reads the reported Auto/API pools and actual monthly reset, with a separate on-demand budget", async () => {
-    const api = reader();
-    const dashboard = await api.read(environment);
-    const limits = await dashboard.currentPeriod();
-    expect(limits.windows).toEqual([
-      {
-        id: "cursor_auto",
-        kind: "monthly",
-        label: "Auto",
-        usedPercent: 74.42733333333334,
-        resetsAt: "2026-09-11T16:26:43.000Z",
-        windowDurationMins: 44640,
-      },
-      {
-        id: "cursor_api",
-        kind: "monthly",
-        label: "API",
-        usedPercent: 100,
-        resetsAt: "2026-09-11T16:26:43.000Z",
-        windowDurationMins: 44640,
-      },
-      {
-        id: "cursor_ondemand",
-        kind: "other",
-        label: "On-demand",
-        usedPercent: (2639 / 9900) * 100,
-        budgetUsd: { used: 26.39, limit: 99 },
-        resetsAt: "2026-09-11T16:26:43.000Z",
-      },
-    ]);
-    expect(api.requests.map((request) => request.method)).toEqual([
-      "GetMe",
-      "GetCurrentPeriodUsage",
-    ]);
-  });
-
-  it("keeps absent independent percentages unknown and never combines different on-demand budgets", async () => {
-    const api = reader({
-      period: {
-        planUsage: { apiPercentUsed: 0 },
-        spendLimitUsage: { individualUsed: 10, pooledLimit: 100 },
-      },
-    });
-    expect((await (await api.read(environment)).currentPeriod()).windows).toEqual([
-      { id: "cursor_api", label: "API", kind: "monthly", usedPercent: 0 },
-    ]);
-    expect(
-      (await (await reader({ period: {} }).read(environment)).currentPeriod()).unavailable?.reason,
-    ).toBe("probeFailed");
-  });
-
   it("accepts omitted protobuf zero counts for an empty account", async () => {
     const dashboard = await reader({ page: () => ({}) }).read(environment);
     expect(await dashboard.readHistory(input)).toMatchObject({

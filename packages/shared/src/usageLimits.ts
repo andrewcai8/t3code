@@ -6,6 +6,7 @@
  * @module usageLimits
  */
 import {
+  CURSOR_MONTHLY_WINDOW_ID,
   type EnvironmentId,
   type UsageLimitsReport,
   type ProviderInstanceId,
@@ -31,9 +32,7 @@ export function displayUsageLimits(
   if (driver !== "cursor") return limits;
   return {
     ...limits,
-    windows: limits.windows
-      .filter((window) => window.id === "cursor_auto")
-      .map((window) => ({ ...window, label: "Monthly usage" })),
+    windows: limits.windows.filter((window) => window.id === CURSOR_MONTHLY_WINDOW_ID),
   };
 }
 

@@ -976,51 +976,15 @@ describe("resolveCursorAcpConfigUpdates", () => {
 describe("Cursor usage limits", () => {
   const checkedAt = "2026-09-16T00:00:00.000Z";
 
-  it("uses the advertised percentages and billing-cycle reset", () => {
-    const limits = cursorUsageResponseToLimits(
-      {
-        billingCycleEnd: "1789876386000",
-        planUsage: { totalPercentUsed: 72.4, autoPercentUsed: 69.5, apiPercentUsed: 100 },
-      },
-      checkedAt,
-    );
-    expect(limits.windows).toEqual(
-      expect.arrayContaining([
-        {
-          id: "totalPercentUsed",
-          kind: "monthly",
-          label: "Monthly",
-          usedPercent: 72.4,
-          resetsAt: "2026-09-20T03:53:06.000Z",
-        },
-        {
-          id: "autoPercentUsed",
-          kind: "monthly",
-          label: "Monthly · Auto",
-          usedPercent: 69.5,
-          resetsAt: "2026-09-20T03:53:06.000Z",
-        },
-        {
-          id: "apiPercentUsed",
-          kind: "monthly",
-          label: "Monthly · API",
-          usedPercent: 100,
-          resetsAt: "2026-09-20T03:53:06.000Z",
-        },
-      ]),
-    );
-  });
-
-  it("does not invent unused allowance for absent buckets", () => {
+  it("does not invent unused allowance for an absent Auto pool", () => {
     expect(cursorUsageResponseToLimits({ planUsage: {} }, checkedAt).unavailable?.reason).toBe(
       "unsupported",
     );
     expect(
-      cursorUsageResponseToLimits({ planUsage: { totalPercentUsed: 0 } }, checkedAt).windows,
-    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Monthly", usedPercent: 0 }]);
-    expect(
-      cursorUsageResponseToLimits({ planUsage: { totalPercentUsed: 150 } }, checkedAt).windows,
-    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Monthly", usedPercent: 100 }]);
+      cursorUsageResponseToLimits({ planUsage: { autoPercentUsed: 150 } }, checkedAt).windows,
+    ).toEqual([
+      { id: "cursor_monthly", kind: "monthly", label: "Monthly usage", usedPercent: 100 },
+    ]);
   });
 
   it("reads the instance's credentials and endpoint even when usage enabled is false", async () => {
@@ -1044,7 +1008,7 @@ describe("Cursor usage limits", () => {
           return Effect.succeed(
             HttpClientResponse.fromWeb(
               request,
-              Response.json({ enabled: false, planUsage: { totalPercentUsed: 42 } }),
+              Response.json({ enabled: false, planUsage: { autoPercentUsed: 42 } }),
             ),
           );
         });
@@ -1093,7 +1057,7 @@ describe("Cursor usage limits", () => {
                 return Effect.succeed(
                   HttpClientResponse.fromWeb(
                     request,
-                    Response.json({ planUsage: { totalPercentUsed: 10 } }),
+                    Response.json({ planUsage: { autoPercentUsed: 10 } }),
                   ),
                 );
               }),

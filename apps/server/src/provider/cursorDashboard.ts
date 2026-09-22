@@ -2,7 +2,7 @@ import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Credential path resolution is synchronous at this Promise adapter boundary.
 import * as NodePath from "node:path";
 
-import { type ServerProviderUsageLimits, type UsageSummaryInput } from "@t3tools/contracts";
+import type { UsageSummaryInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -19,24 +19,6 @@ const Me = Schema.Struct({
   teamId: Schema.optional(Identifier),
   organizationId: Schema.optional(Identifier),
   isEnterpriseUser: Schema.optional(Schema.Boolean),
-});
-const Period = Schema.Struct({
-  billingCycleStart: Schema.optional(Schema.String),
-  billingCycleEnd: Schema.optional(Schema.String),
-  planUsage: Schema.optional(
-    Schema.Struct({
-      autoPercentUsed: Schema.optional(NonNegative),
-      apiPercentUsed: Schema.optional(NonNegative),
-    }),
-  ),
-  spendLimitUsage: Schema.optional(
-    Schema.Struct({
-      individualUsed: Schema.optional(NonNegative),
-      individualLimit: Schema.optional(NonNegative),
-      pooledUsed: Schema.optional(NonNegative),
-      pooledLimit: Schema.optional(NonNegative),
-    }),
-  ),
 });
 export const CursorUsageEvent = Schema.Struct({
   timestamp: Schema.String.check(
@@ -66,7 +48,6 @@ type CursorPage = typeof Page.Type;
 const AuthFile = Schema.Struct({ accessToken: Schema.NonEmptyString });
 const decodeAuth = Schema.decodeUnknownSync(Schema.fromJsonString(AuthFile));
 const decodeMe = Schema.decodeUnknownSync(Me);
-const decodePeriod = Schema.decodeUnknownSync(Period);
 const decodePage = Schema.decodeUnknownSync(Page);
 const decodeEvent = Schema.decodeUnknownSync(CursorUsageEvent);
 
@@ -126,7 +107,6 @@ export function makeCursorDashboardReader(
   const fetchApi = dependencies.fetch ?? fetch;
   const platform = dependencies.platform ?? HostProcessPlatform.defaultValue();
   const identities = requestCache<CursorAccount>();
-  const periods = requestCache<ServerProviderUsageLimits>();
   const histories = requestCache<CursorHistory>((history) => history.status === "ok");
 
   return async (environment: NodeJS.ProcessEnv, read = dependencies.readFile) => {
@@ -215,66 +195,6 @@ export function makeCursorDashboardReader(
       });
     return {
       identify,
-      currentPeriod: async () => {
-        const account = await identify();
-        return periods(account.sourceId, async () => {
-          const raw = decodePeriod(await request("GetCurrentPeriodUsage", {}));
-          const end = Number(raw.billingCycleEnd);
-          const start = Number(raw.billingCycleStart);
-          const resetsAt =
-            Number.isFinite(end) && end > 0
-              ? DateTime.formatIso(DateTime.makeUnsafe(end))
-              : undefined;
-          const duration =
-            Number.isFinite(start) && end > start ? Math.round((end - start) / 60000) : undefined;
-          const windows: ServerProviderUsageLimits["windows"][number][] = [];
-          for (const [id, label, percent] of [
-            ["cursor_auto", "Auto", raw.planUsage?.autoPercentUsed],
-            ["cursor_api", "API", raw.planUsage?.apiPercentUsed],
-          ] as const) {
-            if (percent === undefined) continue;
-            windows.push({
-              id,
-              label,
-              kind: "monthly",
-              usedPercent: Math.min(100, percent),
-              ...(resetsAt ? { resetsAt } : {}),
-              ...(duration ? { windowDurationMins: duration } : {}),
-            });
-          }
-          const spend = raw.spendLimitUsage;
-          const budget =
-            spend?.individualUsed !== undefined && spend.individualLimit !== undefined
-              ? { used: spend.individualUsed, limit: spend.individualLimit }
-              : spend?.pooledUsed !== undefined && spend.pooledLimit !== undefined
-                ? { used: spend.pooledUsed, limit: spend.pooledLimit }
-                : null;
-          const used = budget?.used;
-          const limit = budget?.limit;
-          if (used !== undefined && limit !== undefined && limit > 0) {
-            windows.push({
-              id: "cursor_ondemand",
-              label: "On-demand",
-              budgetUsd: { used: used / 100, limit: limit / 100 },
-              kind: "other",
-              usedPercent: Math.min(100, (used / limit) * 100),
-              ...(resetsAt ? { resetsAt } : {}),
-            });
-          }
-          return {
-            checkedAt: DateTime.formatIso(Effect.runSync(DateTime.now)),
-            windows,
-            ...(windows.length === 0
-              ? {
-                  unavailable: {
-                    reason: "probeFailed" as const,
-                    message: "Cursor did not report usable plan limits.",
-                  },
-                }
-              : {}),
-          };
-        });
-      },
       readHistory: async (input: UsageSummaryInput): Promise<CursorHistory> => {
         const account = await identify();
         return histories(JSON.stringify([account.sourceId, input]), async () => {
