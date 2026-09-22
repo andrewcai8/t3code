@@ -32,6 +32,7 @@ import {
   type NetworkStatus,
   type SupervisorConnectionState,
 } from "./model.ts";
+import { ConnectionBlockedError } from "./model.ts";
 import { credentialMissingError, profileMissingError } from "./errors.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
@@ -115,8 +116,14 @@ export class EnvironmentRegistry extends Context.Service<
       enabled: boolean,
     ) => Effect.Effect<
       void,
-      EnvironmentNotRegisteredError | Persistence.ConnectionPersistenceError
+      | EnvironmentNotRegisteredError
+      | Persistence.ConnectionPersistenceError
+      | ConnectionBlockedError
     >;
+    readonly setCompatibility: (
+      environmentId: EnvironmentId,
+      error: ConnectionBlockedError | null,
+    ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly state: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<SupervisorConnectionState, EnvironmentNotRegisteredError>;
@@ -302,6 +309,21 @@ export const make = Effect.gen(function* () {
             next.set(environmentId, { entry, supervisor, scope });
             return next;
           });
+          yield* SubscriptionRef.changes(supervisor.state).pipe(
+            Stream.runForEach((state) =>
+              state.phase === "blocked" && state.lastFailure?.reason === "unsupported"
+                ? setCompatibility(environmentId, state.lastFailure).pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning("Could not disable an unsupported environment.", {
+                        environmentId,
+                        error,
+                      }),
+                    ),
+                  )
+                : Effect.void,
+            ),
+            Effect.forkIn(scope),
+          );
           return supervisor;
         }),
       ),
@@ -437,7 +459,16 @@ export const make = Effect.gen(function* () {
         // Editing a saved environment must preserve its disabled state.
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
         const entry: ConnectionCatalogEntry =
-          previous === undefined ? registered : { ...registered, enabled: previous.enabled };
+          previous === undefined
+            ? registered
+            : {
+                ...registered,
+                enabled: previous.enabled,
+                ...(previous.unsupportedReason !== undefined &&
+                gitHubRoutingConnectionKey(previous) === gitHubRoutingConnectionKey(registered)
+                  ? { unsupportedReason: previous.unsupportedReason }
+                  : {}),
+              };
         if (
           previous !== undefined &&
           gitHubRoutingConnectionKey(previous) !== gitHubRoutingConnectionKey(entry)
@@ -510,12 +541,17 @@ export const make = Effect.gen(function* () {
 
   const installPlatformRegistration = Effect.fn("EnvironmentRegistry.installPlatformRegistration")(
     function* (registration: PlatformConnectionRegistration) {
-      const entry = connectionRegistrationCatalogEntry(registration);
-      const target = entry.target;
+      const registered = connectionRegistrationCatalogEntry(registration);
+      const target = registered.target;
       yield* withLeaseLock(
         target.environmentId,
         Effect.gen(function* () {
           const previous = (yield* SubscriptionRef.get(entries)).get(target.environmentId);
+          const entry: ConnectionCatalogEntry =
+            previous?.unsupportedReason !== undefined &&
+            gitHubRoutingConnectionKey(previous) === gitHubRoutingConnectionKey(registered)
+              ? { ...registered, enabled: false, unsupportedReason: previous.unsupportedReason }
+              : registered;
           const persistedTarget = (yield* Ref.get(persistedTargetsByEnvironment)).get(
             target.environmentId,
           );
@@ -770,6 +806,12 @@ export const make = Effect.gen(function* () {
       environmentId,
       Effect.gen(function* () {
         const entry = yield* getEntry(environmentId);
+        if (enabled && entry.unsupportedReason !== undefined) {
+          return yield* new ConnectionBlockedError({
+            reason: "unsupported",
+            detail: entry.unsupportedReason,
+          });
+        }
         if (entry.enabled === enabled) {
           return;
         }
@@ -850,6 +892,40 @@ export const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
 
+  const setCompatibility = Effect.fn("EnvironmentRegistry.setCompatibility")(function* (
+    environmentId: EnvironmentId,
+    error: ConnectionBlockedError | null,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (entry === undefined || entry.unsupportedReason === (error?.message ?? undefined))
+          return;
+        const { unsupportedReason: _previousReason, ...rest } = entry;
+        const next: ConnectionCatalogEntry =
+          error === null ? rest : { ...rest, enabled: false, unsupportedReason: error.message };
+        if (
+          error !== null &&
+          entry.enabled &&
+          !(yield* Ref.get(platformEnvironmentIds)).has(environmentId)
+        ) {
+          yield* registrations.setEnabled(environmentId, false);
+        }
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+        if (lease !== undefined) {
+          yield* SubscriptionRef.update(serviceScopes, (current) =>
+            new Map(current).set(environmentId, { ...lease, entry: next }),
+          );
+          if (error !== null) yield* lease.supervisor.disconnect;
+        }
+        yield* SubscriptionRef.update(entries, (current) =>
+          new Map(current).set(environmentId, next),
+        );
+      }),
+    );
+  });
+
   return EnvironmentRegistry.of({
     entries,
     networkStatus,
@@ -862,6 +938,7 @@ export const make = Effect.gen(function* () {
     retryNow,
     markWorkspaceMissing,
     setEnabled,
+    setCompatibility,
     state,
     stateChanges,
     run,

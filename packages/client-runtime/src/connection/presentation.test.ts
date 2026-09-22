@@ -52,6 +52,21 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 }
 
 describe("connection presentation", () => {
+  it("labels a blocked protocol as unsupported", () => {
+    const connection = presentConnectionState(
+      supervisorState({
+        phase: "blocked",
+        lastFailure: new ConnectionBlockedError({
+          reason: "unsupported",
+          detail: "Update your app.",
+        }),
+      }),
+    );
+    expect(connection.phase).toBe("unsupported");
+    expect(connection.error).toBe("Update your app.");
+    expect(connectionStatusText(connection)).toBe("Client not supported");
+  });
+
   it.each(["available", "offline", "connected"] as const)(
     "keeps a persisted missing workspace expired while the supervisor is %s",
     (phase) => {

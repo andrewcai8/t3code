@@ -37,46 +37,33 @@ function DraftChatThreadRouteView() {
   });
 
   useEffect(() => {
-    if (!inferredThreadRef || draftSession?.promotedTo) {
-      return;
-    }
+    if (!inferredThreadRef || draftSession?.promotedTo) return;
     transferProvisionedSandboxLease(draftId, inferredThreadRef);
     markPromotedDraftThreadByRef(inferredThreadRef);
   }, [draftSession?.promotedTo, inferredThreadRef]);
 
   useEffect(() => {
-    if (!canonicalThreadRef) {
-      return;
-    }
-
+    if (!canonicalThreadRef) return;
     let cancelled = false;
     void waitForDraftHeroTransition().then(() => {
-      if (cancelled) {
-        return;
-      }
+      if (cancelled) return;
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(canonicalThreadRef),
         replace: true,
       });
     });
-
     return () => {
       cancelled = true;
     };
   }, [canonicalThreadRef, navigate]);
 
   useEffect(() => {
-    if (draftSession || canonicalThreadRef) {
-      return;
-    }
+    if (draftSession || canonicalThreadRef) return;
     void navigate({ to: "/", replace: true });
   }, [canonicalThreadRef, draftSession, navigate]);
 
-  if (!draftSession) {
-    return null;
-  }
-
+  if (!draftSession) return null;
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
       <ChatView
@@ -90,6 +77,8 @@ function DraftChatThreadRouteView() {
   );
 }
 
+// The view lives in the `_chat` layout (see ThreadRouteView) so a draft's
+// promotion to `/$environmentId/$threadId` keeps the same ChatView mounted.
 export const Route = createFileRoute("/_chat/draft/$draftId")({
   component: DraftChatThreadRouteView,
 });

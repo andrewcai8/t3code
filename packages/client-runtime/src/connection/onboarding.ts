@@ -31,6 +31,7 @@ import {
 } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
+import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 
 export interface PairingConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
@@ -92,6 +93,8 @@ export const preparePairingRegistration = Effect.fn(
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: target.httpBaseUrl,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+  const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
+  if (compatibilityError !== null) return yield* compatibilityError;
   if (
     input.expectedEnvironmentId !== undefined &&
     descriptor.environmentId !== input.expectedEnvironmentId

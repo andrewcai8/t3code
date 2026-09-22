@@ -123,9 +123,9 @@ function fingerprintKey(fingerprint: UsageSourceFingerprint, environmentId: Envi
  *
  * Several environments on one machine (worktree servers, for instance) resolve
  * the same provider home and would otherwise double count every token. The
- * first environment in a stable order claims a fingerprint; the rest have that
- * provider's buckets dropped. Environments are sorted by id so the winner does
- * not change between renders.
+ * most recently read summary claims a fingerprint; the rest have that provider's
+ * buckets dropped. Environment ids break ties so the winner is stable when
+ * summaries have the same read time.
  */
 function claimSources(environments: readonly EnvironmentUsage[]): {
   readonly ownerByFingerprint: ReadonlyMap<string, EnvironmentId>;
@@ -147,11 +147,11 @@ function claimSources(environments: readonly EnvironmentUsage[]): {
     if ("kind" in a.source.fingerprint && "kind" in b.source.fingerprint) {
       const quality = rank[b.source.status] - rank[a.source.status];
       if (quality) return quality;
-      const freshness = (b.source.readAt ?? b.environment.summary.readAt).localeCompare(
-        a.source.readAt ?? a.environment.summary.readAt,
-      );
-      if (freshness) return freshness;
     }
+    const freshness = (b.source.readAt ?? b.environment.summary.readAt).localeCompare(
+      a.source.readAt ?? a.environment.summary.readAt,
+    );
+    if (freshness) return freshness;
     return a.environment.environmentId.localeCompare(b.environment.environmentId);
   });
   for (const { environment, source } of candidates) {
@@ -165,7 +165,6 @@ function claimSources(environments: readonly EnvironmentUsage[]): {
       duplicates.push(`${environment.label}: ${label}`);
     } else ownerByFingerprint.set(key, environment.environmentId);
   }
-
   return { ownerByFingerprint, duplicates };
 }
 
