@@ -1,5 +1,5 @@
 import * as NodeOS from "node:os";
-import type { CursorSettings, ServerProviderUsageWindow } from "@t3tools/contracts";
+import { CURSOR_MONTHLY_WINDOW_ID, type CursorSettings } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -17,47 +17,42 @@ import {
 const CursorCredentials = Schema.Struct({ accessToken: Schema.optional(Schema.String) });
 const decodeCredentials = Schema.decodeEffect(Schema.fromJsonString(CursorCredentials));
 const CursorUsageResponse = Schema.Struct({
+  billingCycleStart: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
   billingCycleEnd: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
-  planUsage: Schema.optional(
-    Schema.Struct({
-      totalPercentUsed: Schema.optional(Schema.Number),
-      autoPercentUsed: Schema.optional(Schema.Number),
-      apiPercentUsed: Schema.optional(Schema.Number),
-    }),
-  ),
+  planUsage: Schema.optional(Schema.Struct({ autoPercentUsed: Schema.optional(Schema.Number) })),
 });
 
-/** Cursor's dashboard percentages include bonus usage; spend / limit does not. */
+/**
+ * Cursor's monthly allowance is its included Auto pool. The API pool can read
+ * 100% while Auto turns still succeed, so it is not reported. Dashboard
+ * percentages include bonus usage; spend / limit does not.
+ */
 export function cursorUsageResponseToLimits(
   response: typeof CursorUsageResponse.Type,
   checkedAt: string,
 ) {
-  const reset = DateTime.make(Number(response.billingCycleEnd));
-  const resetsAt =
-    Number(response.billingCycleEnd) > 0 && Option.isSome(reset)
-      ? DateTime.formatIso(reset.value)
-      : undefined;
-  const windows: ServerProviderUsageWindow[] = [];
-  if (response.planUsage) {
-    for (const [key, label] of [
-      ["totalPercentUsed", "Monthly"],
-      ["autoPercentUsed", "Monthly · Auto"],
-      ["apiPercentUsed", "Monthly · API"],
-    ] as const) {
-      const usedPercent = response.planUsage[key];
-      if (usedPercent === undefined || !Number.isFinite(usedPercent)) continue;
-      windows.push({
-        id: key,
+  const usedPercent = response.planUsage?.autoPercentUsed;
+  if (usedPercent === undefined || !Number.isFinite(usedPercent)) {
+    return makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
+  }
+  const start = Number(response.billingCycleStart);
+  const end = Number(response.billingCycleEnd);
+  const reset = DateTime.make(end);
+  const resetsAt = end > 0 && Option.isSome(reset) ? DateTime.formatIso(reset.value) : undefined;
+  const windowDurationMins = start > 0 && end > start ? Math.round((end - start) / 60_000) : 0;
+  return makeUsageLimits({
+    checkedAt,
+    windows: [
+      {
+        id: CURSOR_MONTHLY_WINDOW_ID,
         kind: "monthly",
-        label,
+        label: "Monthly usage",
         usedPercent: clampPercent(usedPercent),
         ...(resetsAt ? { resetsAt } : {}),
-      });
-    }
-  }
-  return windows.length > 0
-    ? makeUsageLimits({ checkedAt, windows })
-    : makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
+        ...(windowDurationMins > 0 ? { windowDurationMins } : {}),
+      },
+    ],
+  });
 }
 
 export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function* (

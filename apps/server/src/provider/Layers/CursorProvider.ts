@@ -1230,32 +1230,22 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
     ...(discoveryWarning ? { discoveryWarning } : {}),
   });
   const dashboardFileSystem = yield* FileSystem.FileSystem;
-  const dashboard = yield* Effect.tryPromise(async () => {
+  const account = yield* Effect.tryPromise(async () => {
     const reader = await readCursorDashboard(environment ?? process.env, (filePath) =>
       Effect.runPromise(dashboardFileSystem.readFileString(filePath)),
     );
-    const account = await reader.identify();
-    const usageLimits = await reader.currentPeriod();
-    return { account, usageLimits };
+    return await reader.identify();
   }).pipe(Effect.catch(() => Effect.succeed(null)));
   return {
     ...snapshot,
     auth: {
       ...snapshot.auth,
-      ...(dashboard
+      ...(account
         ? {
-            accountIdentity: dashboard.account.sourceId,
-            ...(dashboard.account.email ? { email: dashboard.account.email } : {}),
+            accountIdentity: account.sourceId,
+            ...(account.email ? { email: account.email } : {}),
           }
         : {}),
-    },
-    usageLimits: dashboard?.usageLimits ?? {
-      checkedAt,
-      windows: [],
-      unavailable: {
-        reason: "probeFailed",
-        message: "Cursor limits could not be read from this instance's existing credentials.",
-      },
     },
   };
 });

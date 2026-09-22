@@ -33,6 +33,9 @@ export const ServerProviderUsageWindow = Schema.Struct({
 });
 export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
 
+/** Cursor's included monthly allowance, the one window Cursor accounts show. */
+export const CURSOR_MONTHLY_WINDOW_ID = "cursor_monthly";
+
 /**
  * Reset credits a provider banks on the account. Codex grants these when it
  * has rate-limited the user unfairly; redeeming one clears the current
