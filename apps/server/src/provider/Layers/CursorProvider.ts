@@ -565,9 +565,12 @@ function findCursorBooleanConfigValue(
   );
 }
 
+/** Cursor ACP's value for Auto; T3 stores the same choice as the product id "auto". */
+const CURSOR_ACP_AUTO_MODEL_ID = "default";
+
 export function resolveCursorAcpBaseModelId(model: string | null | undefined): string {
   const trimmed = model?.trim();
-  const base = trimmed && trimmed.length > 0 ? trimmed : "default";
+  const base = trimmed && trimmed !== "auto" ? trimmed : CURSOR_ACP_AUTO_MODEL_ID;
   return base.includes("[") ? base.slice(0, base.indexOf("[")) : base;
 }
 

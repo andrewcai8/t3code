@@ -923,7 +923,7 @@ describe("resolveCursorAcpBaseModelId", () => {
       "claude-4.6-opus-high-thinking",
     );
     expect(resolveCursorAcpBaseModelId("composer-2")).toBe("composer-2");
-    expect(resolveCursorAcpBaseModelId("auto")).toBe("auto");
+    expect(resolveCursorAcpBaseModelId("auto")).toBe("default");
   });
 });
 
