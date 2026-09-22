@@ -24,6 +24,25 @@ describe("withGuestProviderInstall", () => {
     });
   });
 
+  it("keeps the install a manifest froze for every provisioned driver", () => {
+    expect(
+      withGuestProviderInstall(
+        { port: 1, providerInstall: "install codex && install cursor" },
+        "codex",
+      ),
+    ).toEqual({ port: 1, providerInstall: "install codex && install cursor" });
+  });
+
+  it("derives an older manifest's install from its driver exactly as before", () => {
+    expect(withGuestProviderInstall({ port: 1 }, "cursor")).toEqual({
+      port: 1,
+      providerInstall:
+        "curl https://cursor.com/install -fsS | bash && " +
+        'test -x "$HOME/.local/bin/agent" && ' +
+        'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi',
+    });
+  });
+
   it("does not add a field when there is nothing to install", () => {
     expect(withGuestProviderInstall({ port: 1 }, undefined)).toEqual({ port: 1 });
   });

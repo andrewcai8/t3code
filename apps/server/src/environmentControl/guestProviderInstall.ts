@@ -13,10 +13,19 @@ export function guestProviderInstallCommand(kind: string | undefined): string | 
     );
 }
 
+/**
+ * A preparation spec with the command that installs its agent CLIs.
+ *
+ * A manifest frozen with `providerInstall` already names every CLI it runs. An
+ * older one predates that field, and derives the one command from its driver
+ * exactly as it always has, because the guest hashes the whole spec as its
+ * preparation identity.
+ */
 export function withGuestProviderInstall<T extends object>(
   input: T,
   agentDriver: string | undefined,
 ): T | (T & { providerInstall: string }) {
+  if ("providerInstall" in input && input.providerInstall) return input;
   const providerInstall = guestProviderInstallCommand(agentDriver);
   return providerInstall ? { ...input, providerInstall } : input;
 }
