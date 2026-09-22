@@ -79,21 +79,29 @@ const decodeManifest = Schema.decodeUnknownSync(
 );
 const decodeRuntime = Schema.decodeUnknownSync(Schema.fromJsonString(ProvisionRuntimeArtifact));
 /**
- * The build a guest converges to, as the guest script wants it. The identity
- * artifact stays in the manifest; a runtime record set later replaces only
- * what runs, and lands on the guest volume under the same naming scheme.
+ * The build a guest converges to: the runtime record when one was set, else
+ * the identity artifact the manifest pins. `local` is what the manager stages,
+ * `guest` is the same build as the guest script wants it, on the guest volume
+ * under the manifest's naming scheme.
  */
-export function guestRuntime(
+export function desiredRuntime(
   manifest: ProvisionPreparationManifest,
-  runtime: ProvisionRuntimeArtifact,
-): ProvisionPreparationManifest["preparation"]["artifact"] {
+  runtime: ProvisionRuntimeArtifact | null,
+): {
+  local: ProvisionRuntimeArtifact;
+  guest: ProvisionPreparationManifest["preparation"]["artifact"];
+} {
   const identity = manifest.preparation.artifact;
+  if (!runtime) return { local: manifest.localArtifact, guest: identity };
   return {
-    archivePath: `${NodePath.posix.dirname(identity.archivePath)}/t3-runtime-${runtime.sha256}.tar`,
-    sha256: runtime.sha256,
-    revision: runtime.revision,
-    entrypoint: runtime.entrypoint,
-    ...(runtime.install ? { install: runtime.install } : {}),
+    local: runtime,
+    guest: {
+      archivePath: `${NodePath.posix.dirname(identity.archivePath)}/t3-runtime-${runtime.sha256}.tar`,
+      sha256: runtime.sha256,
+      revision: runtime.revision,
+      entrypoint: runtime.entrypoint,
+      ...(runtime.install ? { install: runtime.install } : {}),
+    },
   };
 }
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
