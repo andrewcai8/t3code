@@ -71,12 +71,51 @@ describe("hourly usage formatting", () => {
     ).toBe("6 PM yesterday");
   });
 
-  it("builds an exact minute-aligned 24-hour request", () => {
-    const window = makeWindow(1, new Date("2026-08-11T12:37:42.123Z"), "hour");
+  it("requests 24 hour buckets ending with the current hour", () => {
+    try {
+      vi.stubEnv("TZ", "UTC");
+      const window = makeWindow(1, new Date("2026-08-11T12:37:42.123Z"), "hour");
 
-    expect(window.resolution).toBe("hour");
-    expect(window.sinceTime).toBe("2026-08-10T12:37:00.000Z");
-    expect(window.untilTime).toBe("2026-08-11T12:37:00.000Z");
+      expect(window).toEqual({
+        sinceDay: "2026-08-10",
+        untilDay: "2026-08-11",
+        timeZone: "UTC",
+        resolution: "hour",
+        sinceTime: "2026-08-10T13:00:00.000Z",
+        untilTime: "2026-08-11T13:00:00.000Z",
+      });
+      expect(enumerateHourStarts(window.sinceTime!, window.untilTime!)).toHaveLength(24);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps the same hourly request for the whole hour", () => {
+    const first = makeWindow(1, new Date("2026-08-11T12:00:00.000Z"), "hour");
+    const last = makeWindow(1, new Date("2026-08-11T12:59:59.999Z"), "hour");
+    const next = makeWindow(1, new Date("2026-08-11T13:00:00.000Z"), "hour");
+
+    expect(last).toEqual(first);
+    expect([first.sinceTime, first.untilTime]).toEqual([
+      "2026-08-10T13:00:00.000Z",
+      "2026-08-11T13:00:00.000Z",
+    ]);
+    expect([next.sinceTime, next.untilTime]).toEqual([
+      "2026-08-10T14:00:00.000Z",
+      "2026-08-11T14:00:00.000Z",
+    ]);
+  });
+
+  it("ends the hourly request on the day of its last covered hour", () => {
+    try {
+      vi.stubEnv("TZ", "America/Los_Angeles");
+      const window = makeWindow(1, new Date("2026-08-12T06:15:00.000Z"), "hour");
+
+      expect(window.untilTime).toBe("2026-08-12T07:00:00.000Z");
+      expect([window.sinceDay, window.untilDay]).toEqual(["2026-08-11", "2026-08-11"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("degrades an unknown resolved zone to UTC instead of crashing", () => {

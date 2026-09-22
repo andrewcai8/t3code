@@ -231,7 +231,7 @@ export function UsagePage() {
 
   const windowLabel =
     isPast24Hours && window.sinceTime !== undefined && window.untilTime !== undefined
-      ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to ${formatDateTimeShort(window.untilTime, window.timeZone)}`
+      ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to now`
       : `${formatDayShort(window.sinceDay)} to ${formatDayShort(window.untilDay)}`;
   const topbarContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 py-2 xl:flex">
@@ -469,7 +469,7 @@ export function UsagePage() {
                       hours={hours}
                       hourly={merged.hourly}
                       metric={metric}
-                      referenceTime={window.untilTime}
+                      referenceTime={new Date().toISOString()}
                       resolution={isPast24Hours ? "hour" : "day"}
                       timeZone={window.timeZone}
                     />
@@ -820,7 +820,8 @@ function UsageEnvironmentFilter({
               >
                 <span className="flex min-w-0 items-center gap-3">
                   <span className="min-w-0 flex-1 truncate">{environment.label}</span>
-                  {showUsageStatus ? (
+                  {/* Deselected environments are not asked for usage, so they have no status. */}
+                  {showUsageStatus && checked ? (
                     <span
                       className={cn(
                         "shrink-0 text-xs text-muted-foreground",
