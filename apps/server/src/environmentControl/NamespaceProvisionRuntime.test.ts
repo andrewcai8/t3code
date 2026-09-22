@@ -858,13 +858,27 @@ describe("Namespace runtime transport", () => {
     await serverLockReleased(root);
     f.state.instanceId = "";
 
-    expect(await first.resume(operation, resource, manifest, attached.namespaceProxy)).toEqual(
-      attached.namespaceProxy,
-    );
+    // An upgrade recorded before the pause must survive the wake, not fall
+    // back to the build the environment was first prepared with.
+    await NodeFSP.writeFile(NodePath.join(bundle, "cli.mjs"), `${fixtureCli}\n// upgraded build\n`);
+    const upgradedArchive = NodePath.join(f.directory, "upgraded.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", upgradedArchive, "-C", bundle, "cli.mjs"]);
+    const upgraded = {
+      ...manifest.localArtifact,
+      path: upgradedArchive,
+      sha256: provisionDigest(await NodeFSP.readFile(upgradedArchive)),
+      revision: "d".repeat(40),
+    };
+    expect(
+      await first.resume(operation, resource, manifest, attached.namespaceProxy, upgraded),
+    ).toEqual(attached.namespaceProxy);
+    expect(
+      JSON.parse(await NodeFSP.readFile(NodePath.join(root, "server.json"), "utf8")),
+    ).toMatchObject({ sha256: upgraded.sha256, revision: upgraded.revision });
     expect(f.commands).toContainEqual(["exec", "owned-box", "--", "true"]);
     expect(f.state.instanceId).toBe("woken-instance");
     expect(await started()).toBe("start\nstart\n");
-    expect(archiveUploads()).toHaveLength(1);
+    expect(archiveUploads()).toHaveLength(2);
     expect(extensions()).toEqual([
       { instanceId: "owned-instance", newDeadline: deadline },
       { instanceId: "owned-instance", newDeadline: deadline },
@@ -878,12 +892,12 @@ describe("Namespace runtime transport", () => {
     await firstProxies.close({ proxyId });
     await expect(environmentAt(origin)).rejects.toThrow();
     const second = makeRuntime(new NamespaceProxyManager());
-    expect(await second.resume(operation, resource, manifest, attached.namespaceProxy)).toEqual(
-      attached.namespaceProxy,
-    );
+    expect(
+      await second.resume(operation, resource, manifest, attached.namespaceProxy, upgraded),
+    ).toEqual(attached.namespaceProxy);
     expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
     expect(await started()).toBe("start\nstart\n");
-    expect(archiveUploads()).toHaveLength(1);
+    expect(archiveUploads()).toHaveLength(2);
   });
 
   it("resolves a fresh artifact URL on every convergence and refuses one that is not private HTTPS", async () => {

@@ -653,9 +653,10 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       resource: NamespaceResource,
       manifest: ProvisionPreparationManifest,
       recordedProxy?: NamespaceProxyLease,
+      runtime: ProvisionRuntimeArtifact | null = null,
     ) => {
       if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
-      const ready = await prepare(operation, resource, manifest);
+      const ready = await prepare(operation, resource, manifest, undefined, runtime);
       if (ready.environmentId !== operation.state.readiness.environmentId)
         throw new Error("Namespace retained environment identity changed");
       return publish(operation, resource, manifest, recordedProxy);
