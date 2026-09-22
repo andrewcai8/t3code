@@ -1498,6 +1498,42 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("keeps a same-size edit made in the second the index was written", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        // Compare only mtime and size, as git does when an edit lands in the
+        // same second as the index write, so ctime cannot reveal the edit.
+        yield* git(cwd, ["config", "core.trustctime", "false"]);
+        yield* git(cwd, ["config", "core.checkStat", "minimal"]);
+        const edited = pathService.join(cwd, "edited.txt");
+        // 2020-01-01T00:00:00Z, in seconds as utimes takes it.
+        const indexWrittenAt = 1_577_836_800;
+        yield* writeTextFile(cwd, "edited.txt", "changed\n");
+        yield* fileSystem.utimes(edited, indexWrittenAt, indexWrittenAt);
+        yield* git(cwd, ["add", "edited.txt"]);
+        yield* git(cwd, ["commit", "-m", "add edited"]);
+        yield* writeTextFile(cwd, "edited.txt", "updated\n");
+        yield* writeTextFile(cwd, "untracked.txt", "new\n");
+        yield* fileSystem.utimes(edited, indexWrittenAt, indexWrittenAt);
+        yield* fileSystem.utimes(
+          pathService.join(cwd, ".git", "index"),
+          indexWrittenAt,
+          indexWrittenAt,
+        );
+
+        const preview = yield* driver.getReviewDiffPreview({ cwd, baseRef: initialBranch });
+        const dirty = preview.sources.find((source) => source.kind === "working-tree")!;
+        assert.deepStrictEqual(
+          dirty.files?.map((file) => file.path),
+          ["edited.txt", "untracked.txt"],
+        );
+      }),
+    );
+
     it.effect("preserves renames, unusual paths, modes, and binary statistics", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
