@@ -390,9 +390,17 @@ export function makeProvisionControl(
         const readiness = yield* ports
           .prepare(operation, state.allocation)
           .pipe(timeProvisionPhase("upgrade", context), logCause, Effect.mapError(safeError));
-        yield* store
+        const saved = yield* store
           .advance(operation, { kind: "ready", allocation: state.allocation, readiness })
           .pipe(logCause, Effect.mapError(safeError));
+        // The guest already runs the new build. Losing the write to a concurrent
+        // pause or resume only means the next upgrade call re-converges and records it.
+        if (!saved.changed)
+          return {
+            kind: "refused",
+            reason: "busy",
+            message: "This workspace changed while it was being upgraded. Try again.",
+          } satisfies EnvironmentProvisionUpgradeResult;
         return { kind: "upgraded" as const, t3Revision: readiness.t3Revision };
       }).pipe(Effect.ensuring(Effect.sync(() => upgrading.delete(input.leaseId))));
     }),

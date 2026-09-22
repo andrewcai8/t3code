@@ -445,7 +445,7 @@ it.effect(
       const staged: ProvisionRuntimeArtifact[] = [];
       const prepared: ProvisionRuntimeArtifact[] = [];
       let hold: PromiseWithResolvers<void> | null = null;
-      const entered = Promise.withResolvers<void>();
+      let entered = Promise.withResolvers<void>();
       const ports: ProvisionProviderPorts["Service"] = {
         create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
         recoverCreate: () => Effect.succeed([]),
@@ -554,6 +554,39 @@ it.effect(
         t3Revision: "e".repeat(40),
       });
       expect(prepared).toHaveLength(2);
+
+      // A pause or resume that rewrites the operation mid-upgrade wins the
+      // optimistic write. The caller is told to retry; the retry converges.
+      const third = {
+        ...next,
+        path: "/private/third",
+        sha256: "f".repeat(64),
+        revision: "0".repeat(40),
+      };
+      pinned = third;
+      hold = Promise.withResolvers<void>();
+      entered = Promise.withResolvers<void>();
+      const raced = yield* Effect.forkChild(control.upgrade(request));
+      yield* Effect.promise(() => entered.promise);
+      const during = yield* store.get(input.requestId);
+      expect((yield* store.advance(during, during.state)).changed).toBe(true);
+      hold.resolve();
+      hold = null;
+      expect(yield* Fiber.join(raced)).toEqual({
+        kind: "refused",
+        reason: "busy",
+        message: "This workspace changed while it was being upgraded. Try again.",
+      });
+      expect((yield* store.get(input.requestId)).state).toMatchObject({
+        readiness: { artifactSha256: "d".repeat(64) },
+      });
+      expect(yield* control.upgrade(request)).toEqual({
+        kind: "upgraded",
+        t3Revision: "0".repeat(40),
+      });
+      expect((yield* store.get(input.requestId)).state).toMatchObject({
+        readiness: { artifactSha256: "f".repeat(64), t3Revision: "0".repeat(40) },
+      });
 
       yield* Effect.promise(() => leases.markMissing(input.requestId));
       expect(yield* control.upgrade(request)).toMatchObject({ kind: "refused", reason: "missing" });
