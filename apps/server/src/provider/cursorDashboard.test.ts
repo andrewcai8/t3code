@@ -424,8 +424,7 @@ describe("Cursor history cache", () => {
     const store = [usage("2026-09-10T11:30:00.000Z", 1)];
     const api = historyApi(store);
     const dashboard = await api.dashboard();
-    const pastDay = (until: string) =>
-      hours(new Date(at(until) - 24 * 60 * 60 * 1000).toISOString(), until);
+    const pastDay = (until: string) => hours(iso(at(until) - 24 * 60 * 60 * 1000), until);
     await dashboard.readHistory(pastDay("2026-09-10T12:00:00.000Z"));
     // A request that started at 11:50 is written only after the first read.
     store.push(usage("2026-09-10T11:50:00.000Z", 2));
