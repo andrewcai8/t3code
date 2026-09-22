@@ -753,6 +753,7 @@ export const layer = Layer.effect(
       )
         throw new Error("No ready Namespace runtime");
       const manifest = await manifests.load(requestId);
+      const build = await manifests.readRuntime(requestId);
       const { runtime } = await resolveNamespace();
       return {
         namespaceProxy: await runtime.resume(
@@ -760,6 +761,7 @@ export const layer = Layer.effect(
           operation.state.allocation.resource,
           manifest,
           recordedProxy,
+          build,
         ),
       };
     };
