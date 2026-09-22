@@ -10,12 +10,14 @@ vi.mock("./branding", () => branding);
 import { APP_VERSION } from "./branding";
 import {
   buildVersionMismatchDismissalKey,
+  describeUpgradeResult,
   dismissServerUpdateFailure,
   dismissVersionMismatch,
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
+  resolveServerUpdatePath,
   resolveVersionMismatch,
   serverUpdateGuidance,
   supportsDesktopAppUpdate,
@@ -214,8 +216,82 @@ describe("versionSkew", () => {
     expect(supportsDesktopAppUpdate(null)).toBe(false);
   });
 
-  it("matches version-drift guidance to the advertised update path", () => {
-    expect(serverUpdateGuidance("respawn")).toBe("Update to stay in sync");
-    expect(serverUpdateGuidance("desktop-managed")).toBe("Update the desktop app");
+  describe("resolveServerUpdatePath", () => {
+    const lease = {
+      leaseId: "lease-1",
+      sandboxId: "sandbox-1",
+      managerEnvironmentId: EnvironmentId.make("manager"),
+    };
+
+    it("upgrades through the manager when the guest cannot update itself", () => {
+      expect(resolveServerUpdatePath({ selfUpdate: null, lease })).toEqual({
+        kind: "manager-upgrade",
+        lease,
+      });
+    });
+
+    it("keeps the server's own update path when it advertises one", () => {
+      expect(resolveServerUpdatePath({ selfUpdate: "respawn", lease })).toEqual({
+        kind: "self-update",
+        capability: "respawn",
+      });
+      expect(resolveServerUpdatePath({ selfUpdate: "desktop-managed", lease: null })).toEqual({
+        kind: "self-update",
+        capability: "desktop-managed",
+      });
+    });
+
+    it("falls back to the manual command without a lease or self-update", () => {
+      expect(resolveServerUpdatePath({ selfUpdate: null, lease: null })).toEqual({
+        kind: "manual-command",
+      });
+    });
+
+    it("explains that a manager upgrade installs the manager's build", () => {
+      expect(serverUpdateGuidance({ kind: "manager-upgrade", lease })).toBe(
+        "Installs the manager's current build on this server.",
+      );
+      expect(serverUpdateGuidance({ kind: "self-update", capability: "desktop-managed" })).toBe(
+        "Update the desktop app",
+      );
+      expect(serverUpdateGuidance({ kind: "manual-command" })).toBeNull();
+    });
+  });
+
+  describe("describeUpgradeResult", () => {
+    it("reports the new revision after an upgrade", () => {
+      expect(
+        describeUpgradeResult(
+          { kind: "upgraded", t3Revision: "0123456789abcdef0123456789abcdef01234567" },
+          "Cloud sandbox server",
+        ),
+      ).toEqual({
+        type: "success",
+        title: "Cloud sandbox server updated",
+        description: "Now on 0123456",
+      });
+    });
+
+    it("says nothing changed when the guest already runs the manager's build", () => {
+      expect(
+        describeUpgradeResult({ kind: "current", t3Revision: "abcdef0" }, "Cloud sandbox server"),
+      ).toEqual({
+        type: "info",
+        title: "Cloud sandbox server is already on the manager's build",
+      });
+    });
+
+    it("surfaces the manager's refusal message", () => {
+      expect(
+        describeUpgradeResult(
+          { kind: "refused", reason: "busy", message: "A turn is still running." },
+          "Cloud sandbox server",
+        ),
+      ).toEqual({
+        type: "error",
+        title: "Cloud sandbox server update refused",
+        description: "A turn is still running.",
+      });
+    });
   });
 });

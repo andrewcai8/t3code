@@ -17,6 +17,7 @@ import {
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import {
+  isRemoteServerUpdate,
   ServerUpdateAction,
   ServerUpdateProgress,
   ServerUpdatesAction,
@@ -56,20 +57,21 @@ export function useAutoBalanceUpdateBanner(
         : dismissedNotices.has(state) || isServerUpdateFailureDismissed(state)
     )
       return [];
-    const selfUpdate = resolveServerSelfUpdateCapability(environment.serverConfig);
-    const desktopAppUpdate = supportsDesktopAppUpdate(environment.serverConfig);
+    const target = {
+      environmentId: environment.environmentId,
+      serverLabel: environment.label,
+      selfUpdate: resolveServerSelfUpdateCapability(environment.serverConfig),
+      desktopAppUpdate: supportsDesktopAppUpdate(environment.serverConfig),
+      threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
+      continueThreadsAfterServerUpdate:
+        environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
+      targetVersion: state.status === "idle" ? mismatch!.clientVersion : state.targetVersion,
+    };
     return [
       {
-        environmentId: environment.environmentId,
-        serverLabel: environment.label,
-        selfUpdate,
-        desktopAppUpdate,
-        threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
-        continueThreadsAfterServerUpdate:
-          environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
-        targetVersion: state.status === "idle" ? mismatch!.clientVersion : state.targetVersion,
+        ...target,
         connected: environment.connection.phase === "connected",
-        remoteUpdate: selfUpdate !== null && (selfUpdate !== "desktop-managed" || desktopAppUpdate),
+        remoteUpdate: isRemoteServerUpdate(target),
         state,
         dismissKey,
       },
