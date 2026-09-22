@@ -914,3 +914,36 @@ it("leaves the guest's provider instance unnamed when the manager has no display
     await f.cleanup();
   }
 });
+
+it("records a requested runtime build beside the frozen manifest and leaves the manifest unchanged", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(input, f.config, f.resolver, f.profile);
+    expect(await f.store.readRuntime(input.requestId)).toBeNull();
+    await NodeFSP.writeFile(NodePath.join(f.root, "runtime-next.tar"), "next artifact");
+    const next = {
+      path: NodePath.join(f.root, "runtime-next.tar"),
+      sha256: provisionDigest("next artifact"),
+      revision: "d".repeat(40),
+      entrypoint: "dist/bin.mjs",
+      runtimeExecutable: "node",
+    };
+    const recorded = await f.store.setRuntime(input.requestId, next);
+    await NodeFSP.writeFile(NodePath.join(f.root, "runtime-next.tar"), "changed after");
+    expect(recorded).toEqual({
+      ...next,
+      path: NodePath.join(f.root, "provisioning", `${next.sha256}.tar`),
+    });
+    expect(await NodeFSP.readFile(recorded.path, "utf8")).toBe("next artifact");
+    expect(await makeProvisionPreparationStore(f.root).readRuntime(input.requestId)).toEqual(
+      recorded,
+    );
+    expect(await f.store.load(input.requestId)).toEqual(manifest);
+    await expect(
+      f.store.setRuntime(input.requestId, { ...next, sha256: "0".repeat(64) }),
+    ).rejects.toThrow("content hash");
+    expect(await f.store.readRuntime(input.requestId)).toEqual(recorded);
+  } finally {
+    await f.cleanup();
+  }
+});
