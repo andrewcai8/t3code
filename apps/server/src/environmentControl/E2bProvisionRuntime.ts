@@ -14,7 +14,12 @@ import * as Schema from "effect/Schema";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
-import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
+import type { ProvisionRuntimeArtifact } from "./config.ts";
+import {
+  desiredRuntime,
+  provisionDigest,
+  type ProvisionPreparationManifest,
+} from "./ProvisionPreparation.ts";
 
 import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
 
@@ -157,11 +162,13 @@ export function makeE2bProvisionRuntime(connection: E2BClientOpts) {
       sandboxId: string,
       manifest: ProvisionPreparationManifest,
       record?: RecordProvisionPhase,
+      runtime: ProvisionRuntimeArtifact | null = null,
     ) => {
       const sandbox = await connect(operation, sandboxId);
+      const { local: desired, guest } = desiredRuntime(manifest, runtime);
       const stopDigest = startProvisionPhase(record);
-      const archive = await NodeFSP.readFile(manifest.localArtifact.path);
-      if (provisionDigest(archive) !== manifest.localArtifact.sha256)
+      const archive = await NodeFSP.readFile(desired.path);
+      if (provisionDigest(archive) !== desired.sha256)
         throw new Error("The stored runtime artifact changed.");
       stopDigest("artifact.digest", { bytes: archive.byteLength });
       const transport = e2bPythonPort(sandbox);
@@ -186,16 +193,13 @@ else:
         raise RuntimeError('The existing runtime archive failed its content hash check')
     print('true')
 `,
-        stdin: JSON.stringify({
-          path: manifest.preparation.artifact.archivePath,
-          sha256: manifest.localArtifact.sha256,
-        }),
+        stdin: JSON.stringify({ path: guest.archivePath, sha256: desired.sha256 }),
       });
       stopPresence("artifact.presence");
       if (!archivePresence(existingArchive.stdout)) {
         const stopUpload = startProvisionPhase(record);
         await sandbox.files.write(
-          manifest.preparation.artifact.archivePath,
+          guest.archivePath,
           new Uint8Array(archive).buffer,
           // E2B files.write uses AbortSignal.timeout(60_000) unless overridden.
           { requestTimeoutMs: PREPARE_COMMAND_TIMEOUT_MS },
@@ -211,6 +215,7 @@ else:
             resourceIdentity: `e2b:${sandboxId}`,
             requestHash: operation.requestHash,
             preparationHash: operation.request.preparationHash,
+            ...(runtime ? { runtime: guest } : {}),
           },
           operation.request.agentDriver,
         ),
@@ -218,8 +223,8 @@ else:
       );
       stopPrepare("remote.prepare");
       if (
-        result.artifactSha256 !== manifest.localArtifact.sha256 ||
-        result.t3Revision !== manifest.localArtifact.revision ||
+        result.artifactSha256 !== desired.sha256 ||
+        result.t3Revision !== desired.revision ||
         result.projectDir !== `${manifest.preparation.root}/workspace`
       )
         throw new Error("Prepared runtime does not match the pinned artifact and workspace.");

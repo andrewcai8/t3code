@@ -173,6 +173,33 @@ async function fixture(install = false): Promise<RemotePreparationInput> {
   };
 }
 
+/** A second runtime build whose entrypoint bytes differ, so its archive digest differs too. */
+async function secondBuild(input: RemotePreparationInput) {
+  const base = NodePath.dirname(input.artifact.archivePath);
+  const bundle = NodePath.join(base, "bundle-v2");
+  await NodeFSP.mkdir(bundle);
+  await NodeFSP.writeFile(NodePath.join(bundle, "cli.mjs"), `${fixtureCli}\n// build two\n`);
+  const archivePath = NodePath.join(base, "t3-v2.tar");
+  NodeChildProcess.execFileSync("tar", ["-cf", archivePath, "-C", bundle, "cli.mjs"]);
+  return {
+    archivePath,
+    sha256: sha256(await NodeFSP.readFile(archivePath)),
+    revision: "e".repeat(40),
+    entrypoint: "cli.mjs",
+  };
+}
+
+// The guest waits for the old server to release its lock before answering, so
+// by the time prepareRemoteHost resolves the previous pid is already gone.
+function exited(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 afterEach(async () => {
   for (const pid of pids) {
     try {
@@ -330,9 +357,58 @@ describe("remote preparation subprocess", () => {
     await expect(
       prepareRemoteHost(localPort, { ...input, requestHash: "d".repeat(64) }),
     ).rejects.toThrow();
+    // The build to converge to is runtime state, not identity: a journal
+    // written before the field existed still matches.
+    expect(
+      (await prepareRemoteHost(localPort, { ...input, runtime: input.artifact })).serverPid,
+    ).toBe(ready.serverPid);
     await NodeFSP.writeFile(NodePath.join(input.root, "artifact/cli.mjs"), "changed");
     await expect(prepareRemoteHost(localPort, input)).rejects.toThrow();
     expect(await NodeFSP.readFile(NodePath.join(input.root, "started"), "utf8")).toBe("start\n");
+  });
+
+  it("upgrades the running server to a new build and keeps the home data", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const marker = NodePath.join(input.root, "home/.t3/userdata/marker.txt");
+    await NodeFSP.writeFile(marker, "threads live here");
+    const runtime = await secondBuild(input);
+    const phases: ProvisionPhase[] = [];
+    const upgraded = await prepareRemoteHost(localPort, { ...input, runtime }, (phase) => {
+      phases.push(phase);
+    });
+    pids.add(upgraded.serverPid);
+    expect(upgraded.serverPid).not.toBe(first.serverPid);
+    expect(upgraded.artifactSha256).toBe(runtime.sha256);
+    expect(upgraded.t3Revision).toBe(runtime.revision);
+    expect(upgraded.environmentId).toBe(first.environmentId);
+    expect(phases.map((phase) => phase.phase)).toContain("remote.serverStart");
+    expect(exited(first.serverPid)).toBe(true);
+    expect(await NodeFSP.readFile(marker, "utf8")).toBe("threads live here");
+    expect(
+      await NodeFSP.readFile(
+        NodePath.join(input.root, "runtime", runtime.sha256, "cli.mjs"),
+        "utf8",
+      ),
+    ).toBe(`${fixtureCli}\n// build two\n`);
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "artifact/cli.mjs"), "utf8")).toBe(
+      fixtureCli,
+    );
+    expect(
+      JSON.parse(await NodeFSP.readFile(NodePath.join(input.root, "server.json"), "utf8")),
+    ).toEqual({
+      pid: upgraded.serverPid,
+      sha256: runtime.sha256,
+      revision: runtime.revision,
+    });
+
+    const again: ProvisionPhase[] = [];
+    const converged = await prepareRemoteHost(localPort, { ...input, runtime }, (phase) => {
+      again.push(phase);
+    });
+    expect(converged.serverPid).toBe(upgraded.serverPid);
+    expect(again.map((phase) => phase.phase)).not.toContain("remote.serverStart");
   });
 
   it("requires authenticated readiness, even when the server answers HTTP 200", async () => {

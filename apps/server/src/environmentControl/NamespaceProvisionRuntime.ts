@@ -21,7 +21,12 @@ import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProx
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
-import { provisionDigest, type ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
+import type { ProvisionRuntimeArtifact } from "./config.ts";
+import {
+  desiredRuntime,
+  provisionDigest,
+  type ProvisionPreparationManifest,
+} from "./ProvisionPreparation.ts";
 
 type NamespaceResource = Extract<ProvisionResource, { provider: "namespace" }>;
 interface CliCommand {
@@ -373,11 +378,13 @@ export function makeNamespaceProvisionRuntime(config: {
   const stageArtifact = async (
     resource: NamespaceResource,
     manifest: ProvisionPreparationManifest,
+    desired: ProvisionRuntimeArtifact,
+    guest: ProvisionPreparationManifest["preparation"]["artifact"],
     record?: RecordProvisionPhase,
   ) => {
     const stopDigest = startProvisionPhase(record);
-    const archive = await NodeFSP.readFile(manifest.localArtifact.path);
-    if (provisionDigest(archive) !== manifest.localArtifact.sha256)
+    const archive = await NodeFSP.readFile(desired.path);
+    if (provisionDigest(archive) !== desired.sha256)
       throw new Error("The stored runtime artifact changed");
     stopDigest("artifact.digest", { bytes: archive.byteLength });
     const id = resource.devboxId;
@@ -398,8 +405,8 @@ if not target.exists(): print('missing')
 elif target.is_symlink() or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest()!=expected: raise RuntimeError('Existing artifact conflicts')
 else: print('present')
 `,
-      manifest.preparation.artifact.archivePath,
-      manifest.localArtifact.sha256,
+      guest.archivePath,
+      desired.sha256,
     ]);
     stopPresence("artifact.presence");
     if (presence.trim() === "present") return;
@@ -416,12 +423,7 @@ else: print('present')
     ]);
     try {
       const stopUpload = startProvisionPhase(record);
-      await successful(config.session, [
-        "upload",
-        id,
-        manifest.localArtifact.path,
-        `${staged}/runtime.tar`,
-      ]);
+      await successful(config.session, ["upload", id, desired.path, `${staged}/runtime.tar`]);
       stopUpload("artifact.upload", { bytes: archive.byteLength });
       const stopLink = startProvisionPhase(record);
       await successful(config.session, [
@@ -443,8 +445,8 @@ except FileExistsError:
     if target.is_symlink() or hashlib.sha256(target.read_bytes()).hexdigest()!=expected: raise RuntimeError('Existing artifact conflicts')
 `,
         `${staged}/runtime.tar`,
-        manifest.preparation.artifact.archivePath,
-        manifest.localArtifact.sha256,
+        guest.archivePath,
+        desired.sha256,
       ]);
       stopLink("artifact.link");
     } finally {
@@ -485,7 +487,9 @@ except FileExistsError:
     resource: NamespaceResource,
     manifest: ProvisionPreparationManifest,
     record?: RecordProvisionPhase,
+    runtime: ProvisionRuntimeArtifact | null = null,
   ) => {
+    const { local: desired, guest } = desiredRuntime(manifest, runtime);
     const stopWake = startProvisionPhase(record);
     const instanceId = await wake(operation, resource);
     stopWake("allocate.wake");
@@ -494,7 +498,7 @@ except FileExistsError:
       await retain(instanceId, operation.request.retentionDeadline);
       stopRetain("allocate.retain");
     }
-    await stageArtifact(resource, manifest, record);
+    await stageArtifact(resource, manifest, desired, guest, record);
     const artifactSources = await resolveArtifactSources(manifest, record);
     const stopPrepare = startProvisionPhase(record);
     const ready = await prepareRemoteHost(
@@ -506,6 +510,7 @@ except FileExistsError:
           requestHash: operation.requestHash,
           preparationHash: operation.request.preparationHash,
           ...(artifactSources.length ? { artifactSources } : {}),
+          ...(runtime ? { runtime: guest } : {}),
         },
         operation.request.agentDriver,
       ),
@@ -513,8 +518,8 @@ except FileExistsError:
     );
     stopPrepare("remote.prepare");
     if (
-      ready.artifactSha256 !== manifest.localArtifact.sha256 ||
-      ready.t3Revision !== manifest.localArtifact.revision ||
+      ready.artifactSha256 !== desired.sha256 ||
+      ready.t3Revision !== desired.revision ||
       ready.projectDir !== `${manifest.preparation.root}/workspace`
     )
       throw new Error("Prepared Namespace runtime differs from its pinned inputs");

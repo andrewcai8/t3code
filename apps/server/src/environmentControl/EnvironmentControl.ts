@@ -760,9 +760,11 @@ export const layer = Layer.effect(
         const manager = await resolve();
         if (!manager) throw new Error("Missing cloud configuration");
         const manifest = await manifests.load(operation.request.requestId);
+        const build = await manifests.readRuntime(operation.request.requestId);
         const connection = { apiKey: manager.config.e2bApiKey };
         return {
           manifest,
+          build,
           namespace: operation.request.provider === "namespace" ? await resolveNamespace() : null,
           runtime: makeE2bProvisionRuntime(connection),
           allocator: makeE2bAllocationPorts({
@@ -832,13 +834,13 @@ export const layer = Layer.effect(
           phases.push(phase);
         };
         return Effect.gen(function* () {
-          const { runtime, manifest, namespace } = yield* provider(operation);
+          const { runtime, manifest, namespace, build } = yield* provider(operation);
           const resource = allocation.resource;
           if (resource.provider === "namespace")
             return yield* Effect.tryPromise({
               try: async () => {
                 if (!namespace) throw new Error("Namespace unavailable");
-                return namespace.runtime.prepare(operation, resource, manifest, record);
+                return namespace.runtime.prepare(operation, resource, manifest, record, build);
               },
               catch: (error) =>
                 new ProvisionProviderError({
@@ -851,7 +853,7 @@ export const layer = Layer.effect(
             });
           const sandboxId = resource.sandboxId;
           return yield* Effect.tryPromise({
-            try: () => runtime.prepare(operation, sandboxId, manifest, record),
+            try: () => runtime.prepare(operation, sandboxId, manifest, record, build),
             catch: (error) =>
               new ProvisionProviderError({
                 ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),

@@ -77,6 +77,33 @@ export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.T
 const decodeManifest = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProvisionPreparationManifest),
 );
+const decodeRuntime = Schema.decodeUnknownSync(Schema.fromJsonString(ProvisionRuntimeArtifact));
+/**
+ * The build a guest converges to: the runtime record when one was set, else
+ * the identity artifact the manifest pins. `local` is what the manager stages,
+ * `guest` is the same build as the guest script wants it, on the guest volume
+ * under the manifest's naming scheme.
+ */
+export function desiredRuntime(
+  manifest: ProvisionPreparationManifest,
+  runtime: ProvisionRuntimeArtifact | null,
+): {
+  local: ProvisionRuntimeArtifact;
+  guest: ProvisionPreparationManifest["preparation"]["artifact"];
+} {
+  const identity = manifest.preparation.artifact;
+  if (!runtime) return { local: manifest.localArtifact, guest: identity };
+  return {
+    local: runtime,
+    guest: {
+      archivePath: `${NodePath.posix.dirname(identity.archivePath)}/t3-runtime-${runtime.sha256}.tar`,
+      sha256: runtime.sha256,
+      revision: runtime.revision,
+      entrypoint: runtime.entrypoint,
+      ...(runtime.install ? { install: runtime.install } : {}),
+    },
+  };
+}
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 const decodeSettings = Schema.decodeUnknownSync(
   Schema.Struct({
@@ -358,6 +385,25 @@ async function writeOnce(path: string, data: string | Uint8Array) {
   }
 }
 
+/** Atomic replace for the one mutable record the store keeps. */
+async function writeReplace(path: string, data: string) {
+  const temporary = `${path}.${NodeCrypto.randomUUID()}.tmp`;
+  const handle = await NodeFSP.open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(data);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await NodeFSP.rename(temporary, path);
+  const directory = await NodeFSP.open(NodePath.dirname(path), "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
 export interface ProvisionPreparationResolver {
   readonly template: (configured: string) => Promise<string>;
   readonly revision: (repository: string, branch?: string) => Promise<string>;
@@ -367,6 +413,22 @@ export interface ProvisionPreparationResolver {
 export function makeProvisionPreparationStore(stateDir: string) {
   const directory = NodePath.join(stateDir, "provisioning");
   const manifestPath = (id: ProvisionRequestId) => NodePath.join(directory, `${id}.json`);
+  const runtimePath = (id: ProvisionRequestId) => NodePath.join(directory, `${id}.runtime.json`);
+  /** Copies a configured artifact into the store so a later config edit cannot change what a guest receives. */
+  const storeArtifact = async (artifact: ProvisionRuntimeArtifact) => {
+    relativePath(artifact.entrypoint);
+    const artifactBytes = await NodeFSP.readFile(artifact.path);
+    if (provisionDigest(artifactBytes) !== artifact.sha256)
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: "The configured runtime artifact failed its content hash check.",
+      });
+    const artifactPath = NodePath.join(directory, `${artifact.sha256}.tar`);
+    await writeOnce(artifactPath, artifactBytes);
+    if (provisionDigest(await NodeFSP.readFile(artifactPath)) !== artifact.sha256)
+      throw new Error("Stored runtime artifact changed.");
+    return { ...artifact, path: artifactPath };
+  };
   const load = async (id: ProvisionRequestId): Promise<ProvisionPreparationManifest> => {
     const manifest = decodeManifest(await privateRead(manifestPath(id)));
     if (
@@ -380,6 +442,22 @@ export function makeProvisionPreparationStore(stateDir: string) {
   };
   return {
     load,
+    readRuntime: async (id: ProvisionRequestId): Promise<ProvisionRuntimeArtifact | null> => {
+      const raw = await privateRead(runtimePath(id)).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      return raw === null ? null : decodeRuntime(raw);
+    },
+    setRuntime: async (
+      id: ProvisionRequestId,
+      artifact: ProvisionRuntimeArtifact,
+    ): Promise<ProvisionRuntimeArtifact> => {
+      await load(id);
+      const stored = await storeArtifact(artifact);
+      await writeReplace(runtimePath(id), stableStringify(stored));
+      return stored;
+    },
     freeze: async (
       rawInput: EnvironmentProvisionInput,
       config: EnvironmentControlConfig,
@@ -407,7 +485,6 @@ export function makeProvisionPreparationStore(stateDir: string) {
           message:
             "Configure a pinned runtime artifact for this cloud platform before provisioning.",
         });
-      relativePath(artifact.entrypoint);
       if (input.sourceRevision && !input.repository)
         throw new ProvisionRefused({
           reason: "unsupported",
@@ -423,16 +500,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         : null;
       const volume = guestVolume[input.provider];
       const root = `${volume}/t3-provision/${input.requestId}`;
-      const artifactBytes = await NodeFSP.readFile(artifact.path);
-      if (provisionDigest(artifactBytes) !== artifact.sha256)
-        throw new ProvisionRefused({
-          reason: "unconfigured",
-          message: "The configured runtime artifact failed its content hash check.",
-        });
-      const artifactPath = NodePath.join(directory, `${artifact.sha256}.tar`);
-      await writeOnce(artifactPath, artifactBytes);
-      if (provisionDigest(await NodeFSP.readFile(artifactPath)) !== artifact.sha256)
-        throw new Error("Stored runtime artifact changed.");
+      const localArtifact = await storeArtifact(artifact);
       let files: Array<typeof File.Type> = [...submitted];
       for (const scope of ["home", "workspace"] as const) {
         for (const configured of provisioning[scope === "home" ? "homeFiles" : "workspaceFiles"] ??
@@ -684,7 +752,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         input,
         request,
         preparation,
-        localArtifact: { ...artifact, path: artifactPath },
+        localArtifact,
         egressAllow: provisioning.egressAllow ?? [],
       };
       await writeOnce(manifestPath(input.requestId), stableStringify(manifest));
