@@ -65,9 +65,16 @@ describe("highlightSourceFile", () => {
         .join(""),
     ).toBe(source);
     expect(highlighted.flat().some((token) => token.color !== null)).toBe(true);
+    // The first tokenization pays for regex compilation inside Shiki's 500 ms
+    // per-line limit, so on a cold runner it may stop early. Compare warm calls.
+    const warm = await highlighter.highlightSourceFile({
+      path: "example.ts",
+      contents: source,
+      theme: "dark",
+    });
     expect(
       await highlighter.highlightCodeSnippet({ code: source, language: "ts", theme: "dark" }),
-    ).toEqual(highlighted);
+    ).toEqual(warm);
   });
 });
 
