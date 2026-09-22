@@ -189,16 +189,14 @@ async function secondBuild(input: RemotePreparationInput) {
   };
 }
 
-async function exited(pid: number) {
-  const deadline = Date.now() + 5_000;
-  for (;;) {
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return true;
-    }
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+// The guest waits for the old server to release its lock before answering, so
+// by the time prepareRemoteHost resolves the previous pid is already gone.
+function exited(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
   }
 }
 
@@ -386,7 +384,7 @@ describe("remote preparation subprocess", () => {
     expect(upgraded.t3Revision).toBe(runtime.revision);
     expect(upgraded.environmentId).toBe(first.environmentId);
     expect(phases.map((phase) => phase.phase)).toContain("remote.serverStart");
-    expect(await exited(first.serverPid)).toBe(true);
+    expect(exited(first.serverPid)).toBe(true);
     expect(await NodeFSP.readFile(marker, "utf8")).toBe("threads live here");
     expect(
       await NodeFSP.readFile(
