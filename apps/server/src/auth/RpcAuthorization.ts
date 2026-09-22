@@ -67,7 +67,6 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.environmentControlDispose]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlPause]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlResume]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlResumeUnclaimed]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlUpgrade]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlClaim]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlTouch]: AuthOrchestrationOperateScope,

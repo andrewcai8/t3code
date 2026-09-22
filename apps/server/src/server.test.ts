@@ -1092,8 +1092,6 @@ const buildAppUnderTest = (options?: {
           resume: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           upgrade: () => Effect.die("Unused in server routing proof"),
-          resumeUnclaimed: () =>
-            Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           claim: () =>
             Effect.succeed({
               kind: "refused",
@@ -6046,9 +6044,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               }),
             resume: (input) =>
               Effect.sync(() => {
-                observed.push(
-                  `resume:${input.leaseId}:${input.sandboxId}:${input.environmentId}:${input.threadId}`,
-                );
+                observed.push(`resume:${input.environmentId}`);
                 return { kind: "resumed" };
               }),
           },
@@ -6070,12 +6066,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               message: "Work is active.",
             });
             assert.deepEqual(
-              yield* client[WS_METHODS.environmentControlResume]({
-                leaseId: "retained-lease",
-                sandboxId: "retained-sandbox",
-                environmentId,
-                threadId: "retained-thread",
-              }),
+              yield* client[WS_METHODS.environmentControlResume]({ environmentId }),
               { kind: "resumed" },
             );
           }),
@@ -6084,7 +6075,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(observed, [
         "start:managed-cloud",
         "stop:managed-cloud",
-        "resume:retained-lease:retained-sandbox:managed-cloud:retained-thread",
+        "resume:managed-cloud",
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -6201,10 +6192,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               assert.equal(error._tag, "EnvironmentAuthorizationError");
             }
             const resumeError = yield* client[WS_METHODS.environmentControlResume]({
-              leaseId: "lease",
-              sandboxId: "sandbox",
               environmentId: EnvironmentId.make("child"),
-              threadId: "thread",
             }).pipe(Effect.flip);
             assert.equal(resumeError._tag, "EnvironmentAuthorizationError");
           }),

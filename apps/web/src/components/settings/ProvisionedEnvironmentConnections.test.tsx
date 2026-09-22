@@ -13,7 +13,6 @@ const state = vi.hoisted(() => ({
   refresh: vi.fn(),
   attach: vi.fn(),
   resume: vi.fn(),
-  resumeUnclaimed: vi.fn(),
   pair: vi.fn(),
   navigate: vi.fn(),
   wait: vi.fn(),
@@ -44,18 +43,11 @@ vi.mock("../../state/server", () => ({
     provisionedEnvironments: () => "discovery",
     attachProvisionedEnvironment: "attach",
     resumeProvisionedEnvironment: "resume",
-    resumeUnclaimedProvisionedEnvironment: "resume-unclaimed",
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: string) =>
-    command === "attach"
-      ? state.attach
-      : command === "resume"
-        ? state.resume
-        : command === "resume-unclaimed"
-          ? state.resumeUnclaimed
-          : state.pair,
+    command === "attach" ? state.attach : command === "resume" ? state.resume : state.pair,
 }));
 vi.mock("../../state/waitForThreadShell", () => ({
   waitForThreadShell: (...args: unknown[]) => state.wait(...args),
@@ -102,7 +94,6 @@ beforeEach(() => {
   state.pair.mockResolvedValue(AsyncResult.success(environment.environmentId));
   state.wait.mockResolvedValue(true);
   state.resume.mockResolvedValue(AsyncResult.success({ kind: "resumed" }));
-  state.resumeUnclaimed.mockResolvedValue(AsyncResult.success({ kind: "resumed" }));
 });
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -175,12 +166,7 @@ it("resumes a paused environment and routes its pairing through the manager", as
   await click(view, "Open thread");
   expect(state.resume).toHaveBeenCalledWith({
     environmentId: environment.environmentId,
-    input: {
-      leaseId: environment.leaseId,
-      sandboxId: environment.sandboxId,
-      environmentId: environment.environmentId,
-      threadId: environment.threadId,
-    },
+    input: { environmentId: environment.environmentId },
   });
   expect(state.pair).toHaveBeenCalledWith({
     pairingUrl:

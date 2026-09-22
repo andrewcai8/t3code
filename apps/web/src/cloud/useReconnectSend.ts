@@ -31,7 +31,7 @@ export function useReconnectSend<Input>(options: {
         onFailure(
           recovered.kind === "failed"
             ? recovered.message
-            : "The workspace could not be reconnected.",
+            : "This environment is not connected. Reconnect it, then send again.",
         );
       }
     },

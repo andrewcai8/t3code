@@ -531,7 +531,6 @@ import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
-import { provisionedSandboxForEnvironment } from "../cloud/provisionedSandboxLeases";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
@@ -2466,10 +2465,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeWorkspaceMissing =
     activeEnvironment?.connection.blockedReason === "workspace-missing";
   const canReconnectOnSend =
-    activeEnvironmentUnavailable &&
-    !activeWorkspaceMissing &&
-    activeThread != null &&
-    provisionedSandboxForEnvironment(activeThread.environmentId) !== null;
+    activeEnvironmentUnavailable && !activeWorkspaceMissing && activeThread != null;
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -2822,7 +2818,6 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
-    const waitForAutomaticReconnect = environmentReconnecting && !canReconnectOnSend;
     // Reconnecting to a version-skewed server with no update in flight
     // usually means the server is restarting mid-update and a refresh wiped
     // the in-memory update state. Fold the reconnect and version banners
@@ -2873,14 +2868,13 @@ export default function ChatView(props: ChatViewProps) {
                 <Button
                   size="xs"
                   variant="ghost"
-                  disabled={waitForAutomaticReconnect}
                   onClick={() =>
                     void handleReconnectActiveEnvironment(
                       activeEnvironmentUnavailableState.environmentId,
                     )
                   }
                 >
-                  {waitForAutomaticReconnect ? "Reconnecting..." : "Reconnect"}
+                  Reconnect
                 </Button>
               )}
               {workspaceMissing ? (
@@ -2984,7 +2978,6 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
-    canReconnectOnSend,
     reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,

@@ -184,9 +184,6 @@ export function ProvisionedEnvironmentConnections({
   const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
     reportFailure: false,
   });
-  const resumeUnclaimed = useAtomCommand(serverEnvironment.resumeUnclaimedProvisionedEnvironment, {
-    reportFailure: false,
-  });
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
   const { environments } = useEnvironments();
   const managerHttpBaseUrl = useEnvironmentHttpBaseUrl(managerId);
@@ -211,25 +208,10 @@ export function ProvisionedEnvironmentConnections({
     });
   async function attachForClient(environment: DiscoveredProvisionedEnvironment) {
     if (environment.lifecycle === "paused") {
-      const resumed =
-        environment.threadId === null
-          ? await resumeUnclaimed({
-              environmentId: managerId,
-              input: {
-                leaseId: environment.leaseId,
-                sandboxId: environment.sandboxId,
-                environmentId: environment.environmentId,
-              },
-            })
-          : await resume({
-              environmentId: managerId,
-              input: {
-                leaseId: environment.leaseId,
-                sandboxId: environment.sandboxId,
-                environmentId: environment.environmentId,
-                threadId: environment.threadId,
-              },
-            });
+      const resumed = await resume({
+        environmentId: managerId,
+        input: { environmentId: environment.environmentId },
+      });
       if (AsyncResult.isFailure(resumed))
         throw new Error("The manager could not resume this environment. Try again.");
       if (resumed.value.kind === "refused") throw new Error(resumed.value.message);
