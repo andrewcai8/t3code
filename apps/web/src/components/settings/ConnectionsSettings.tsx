@@ -171,6 +171,7 @@ import { useProvisionedEnvironmentRecovery } from "../../cloud/useProvisionedEnv
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import {
+  isRemoteServerUpdate,
   ServerUpdateAction,
   ServerUpdateProgress,
   ServerUpdatesAction,
@@ -1853,32 +1854,27 @@ export function ConnectionsSettings() {
     () =>
       savedServerUpdateStates.flatMap(({ environment, updateStatus }): ServerUpdateTarget[] => {
         const mismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
-        const selfUpdate = resolveServerSelfUpdateCapability(environment.serverConfig);
-        const desktopAppUpdate = supportsDesktopAppUpdate(environment.serverConfig);
         if (
           !mismatch ||
           updateStatus === "running" ||
           !environment.entry.enabled ||
           environment.connection.phase !== "connected" ||
-          isDesktopLocalConnectionTarget(environment.entry.target) ||
-          // Manual-update machines only offer a copy command on their row.
-          selfUpdate === null ||
-          (selfUpdate === "desktop-managed" && !desktopAppUpdate)
+          isDesktopLocalConnectionTarget(environment.entry.target)
         ) {
           return [];
         }
-        return [
-          {
-            environmentId: environment.environmentId,
-            serverLabel: environment.label,
-            selfUpdate,
-            desktopAppUpdate,
-            threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
-            continueThreadsAfterServerUpdate:
-              environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
-            targetVersion: mismatch.clientVersion,
-          },
-        ];
+        const target: ServerUpdateTarget = {
+          environmentId: environment.environmentId,
+          serverLabel: environment.label,
+          selfUpdate: resolveServerSelfUpdateCapability(environment.serverConfig),
+          desktopAppUpdate: supportsDesktopAppUpdate(environment.serverConfig),
+          threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
+          continueThreadsAfterServerUpdate:
+            environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
+          targetVersion: mismatch.clientVersion,
+        };
+        // Manual-update machines only offer a copy command on their row.
+        return isRemoteServerUpdate(target) ? [target] : [];
       }),
     [savedServerUpdateStates],
   );
