@@ -26,7 +26,7 @@ const DROPPED_REQUEST_HEADERS = new Set([
   "dpop",
 ]);
 
-export const PROVISIONED_ENVIRONMENT_ROUTE_PREFIX = PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX;
+const PROVISIONED_ENVIRONMENT_ROUTE_PREFIX = PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX;
 
 const isWebSocketUpgrade = (request: HttpServerRequest.HttpServerRequest) =>
   request.headers.upgrade?.toLowerCase() === "websocket";

@@ -18,6 +18,7 @@ import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as NetAddress from "effect/unstable/net/NetAddress";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
@@ -107,8 +108,8 @@ it.effect(
       );
       yield* Effect.gen(function* () {
         const server = yield* HttpServer.HttpServer;
-        if (server.address._tag !== "TcpAddress") throw new Error("Expected TCP test server");
-        const origin = `http://127.0.0.1:${server.address.port}`;
+        const address = server.address as NetAddress.InetAddress;
+        const origin = `http://127.0.0.1:${address.port}`;
         const requestId = "b601c79f-8b46-44e9-9675-1ed8d1d6c286";
         const input = {
           requestId,
