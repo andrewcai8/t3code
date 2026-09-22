@@ -313,7 +313,7 @@ describe("managed cloud commands", () => {
           await manager.resumeUnclaimed({
             leaseId: "unclaimed",
             sandboxId: "unclaimed-sandbox",
-            environmentId: "child",
+            environmentId: EnvironmentId.make("child"),
           }),
         ).toEqual({ kind: "resumed" });
         expect(driver.resume).toHaveBeenCalledWith({
@@ -345,7 +345,7 @@ describe("managed cloud commands", () => {
         await manager.resumeUnclaimed({
           leaseId: "unclaimed",
           sandboxId: "unclaimed-sandbox",
-          environmentId: "child",
+          environmentId: EnvironmentId.make("child"),
         }),
       ).toMatchObject({ kind: "refused", reason: "missing" });
       expect(driver.resume).not.toHaveBeenCalled();
@@ -358,7 +358,7 @@ describe("managed cloud commands", () => {
         await manager.resumeUnclaimed({
           leaseId: "lease",
           sandboxId: "sandbox",
-          environmentId: "child",
+          environmentId: EnvironmentId.make("child"),
         }),
       ).toEqual({
         kind: "refused",
