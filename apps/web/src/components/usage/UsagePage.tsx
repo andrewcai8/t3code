@@ -38,7 +38,6 @@ import {
   formatTokens,
   formatUsd,
   makeWindow,
-  windowReferenceTime,
 } from "@t3tools/shared/usageFormat";
 import { Button } from "../ui/button";
 import {
@@ -232,7 +231,7 @@ export function UsagePage() {
 
   const windowLabel =
     isPast24Hours && window.sinceTime !== undefined && window.untilTime !== undefined
-      ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to ${formatDateTimeShort(window.untilTime, window.timeZone)}`
+      ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to now`
       : `${formatDayShort(window.sinceDay)} to ${formatDayShort(window.untilDay)}`;
   const topbarContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 py-2 xl:flex">
@@ -470,7 +469,7 @@ export function UsagePage() {
                       hours={hours}
                       hourly={merged.hourly}
                       metric={metric}
-                      referenceTime={windowReferenceTime(window)}
+                      referenceTime={new Date().toISOString()}
                       resolution={isPast24Hours ? "hour" : "day"}
                       timeZone={window.timeZone}
                     />
