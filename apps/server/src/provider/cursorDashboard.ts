@@ -73,26 +73,115 @@ const MAX_PAGES = 40;
 const PAGE_CONCURRENCY = 4;
 const MAX_HISTORY_MS = 30_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Cursor stamps a row with its request's start and writes it when the request
+// finishes. An hour comfortably outlasts one model request, so older rows are final.
+const SETTLE_MS = 60 * 60 * 1000;
+// The longest Usage window is 90 days, padded a day each side for time zones.
+const RETAIN_MS = 93 * DAY_MS;
 
-function requestCache<T>(keep: (value: T) => boolean = () => true) {
+const nowMs = () => DateTime.toEpochMillis(Effect.runSync(DateTime.now));
+
+function requestCache<T>() {
   const entries = new Map<string, { expires: number; value: Promise<T> }>();
   return (key: string, run: () => Promise<T>): Promise<T> => {
-    const now = DateTime.toEpochMillis(Effect.runSync(DateTime.now));
+    const now = nowMs();
     const previous = entries.get(key);
     if (previous && previous.expires > now) return previous.value;
     for (const [key, entry] of entries) if (entry.expires <= now) entries.delete(key);
     if (entries.size >= MAX_CACHE_ENTRIES) entries.delete(entries.keys().next().value ?? "");
-    const value = run()
-      .then((result) => {
-        if (!keep(result)) entries.delete(key);
-        return result;
-      })
-      .catch((error: unknown) => {
-        entries.delete(key);
-        throw error;
-      });
+    const value = run().catch((error: unknown) => {
+      entries.delete(key);
+      throw error;
+    });
     entries.set(key, { expires: now + TTL_MS, value });
     return value;
+  };
+}
+
+/** Inclusive epoch-millisecond bounds, as GetFilteredUsageEvents reads startDate and endDate. */
+interface Span {
+  readonly from: number;
+  readonly until: number;
+}
+/** One API row. An unreadable row sits at its span's start so window reads still report it. */
+interface Row {
+  readonly timestamp: number;
+  readonly event: CursorUsageEvent | null;
+}
+interface SpanRead {
+  readonly span: Span;
+  readonly rows: readonly Row[];
+  /** Why some rows in the span went unread; null when the span was read completely. */
+  readonly message: string | null;
+}
+/**
+ * Every row Cursor reported for one account over one contiguous span. Rows up to
+ * `settledUntil` are final; newer rows are trusted until `checkedAt + TTL_MS`.
+ */
+interface AccountHistory extends Span {
+  readonly settledUntil: number;
+  readonly checkedAt: number;
+  readonly rows: readonly Row[];
+}
+
+/**
+ * Splits off the unsettled tail. Pages are numbered newest first, so a new event
+ * would shift every later page of a single span that reached the present.
+ */
+const splitAtSettled = (span: Span, now: number): Span[] =>
+  [
+    { from: span.from, until: Math.min(span.until, now - SETTLE_MS) },
+    { from: Math.max(span.from, now - SETTLE_MS + 1), until: span.until },
+  ].filter((part) => part.from <= part.until);
+
+/** Spans to read so `history` plus them covers `window`, keeping coverage contiguous. */
+function missingSpans(history: AccountHistory | undefined, window: Span, now: number): Span[] {
+  if (!history) return splitAtSettled(window, now);
+  const trustedUntil = now < history.checkedAt + TTL_MS ? history.until : history.settledUntil;
+  return [
+    ...(window.from < history.from ? [{ from: window.from, until: history.from - 1 }] : []),
+    ...(window.until > trustedUntil
+      ? splitAtSettled({ from: trustedUntil + 1, until: window.until }, now)
+      : []),
+  ];
+}
+
+/** A read span is authoritative for its whole range, so it replaces rather than appends. */
+const replaceSpan = (rows: readonly Row[], read: SpanRead): readonly Row[] => [
+  ...rows.filter((row) => row.timestamp < read.span.from || row.timestamp > read.span.until),
+  ...read.rows,
+];
+
+/** Adds a completely read span. A span that would leave a hole is not recorded. */
+function cover(
+  history: AccountHistory | undefined,
+  read: SpanRead,
+  now: number,
+): AccountHistory | undefined {
+  const { span } = read;
+  if (history && (span.from > history.until + 1 || span.until < history.from - 1)) return history;
+  const base = history ?? { ...span, settledUntil: span.from - 1, checkedAt: now, rows: [] };
+  return {
+    from: Math.min(base.from, span.from),
+    until: Math.max(base.until, span.until),
+    settledUntil:
+      span.from <= base.settledUntil + 1
+        ? Math.max(base.settledUntil, Math.min(span.until, now - SETTLE_MS))
+        : base.settledUntil,
+    checkedAt: span.until >= base.until ? now : base.checkedAt,
+    rows: replaceSpan(base.rows, read),
+  };
+}
+
+function retain(history: AccountHistory | undefined, now: number): AccountHistory | undefined {
+  const floor = now - RETAIN_MS;
+  if (!history || history.from >= floor) return history;
+  if (history.until < floor) return undefined;
+  return {
+    ...history,
+    from: floor,
+    settledUntil: Math.max(history.settledUntil, floor - 1),
+    rows: history.rows.filter((row) => row.timestamp >= floor),
   };
 }
 
@@ -107,7 +196,18 @@ export function makeCursorDashboardReader(
   const fetchApi = dependencies.fetch ?? fetch;
   const platform = dependencies.platform ?? HostProcessPlatform.defaultValue();
   const identities = requestCache<CursorAccount>();
-  const histories = requestCache<CursorHistory>((history) => history.status === "ok");
+  const histories = new Map<string, AccountHistory>();
+  // One read per account at a time, so a concurrent repeat is served from the
+  // first read's coverage instead of racing it to the API.
+  const accountTurns = new Map<string, Promise<unknown>>();
+  const exclusive = <T>(key: string, run: () => Promise<T>): Promise<T> => {
+    const result = (accountTurns.get(key) ?? Promise.resolve()).then(run);
+    accountTurns.set(
+      key,
+      result.catch(() => undefined),
+    );
+    return result;
+  };
 
   return async (environment: NodeJS.ProcessEnv, read = dependencies.readFile) => {
     let apiUrl: URL;
@@ -193,104 +293,122 @@ export function makeCursorDashboardReader(
           ...(me.teamId !== undefined ? { teamId: me.teamId } : {}),
         };
       });
+    const readSpan = async (
+      account: CursorAccount,
+      span: Span,
+      signal: AbortSignal,
+    ): Promise<SpanRead> => {
+      const requestPage = async (page: number) =>
+        decodePage(
+          await request(
+            "GetFilteredUsageEvents",
+            {
+              page,
+              pageSize: PAGE_SIZE,
+              startDate: String(span.from),
+              endDate: String(span.until),
+              ...(account.teamId === undefined ? {} : { teamId: account.teamId }),
+            },
+            signal,
+          ),
+        );
+      const firstPage = await requestPage(1);
+      const expected = firstPage.totalUsageEventsCount;
+      const pages: Array<CursorPage | null> = [firstPage];
+      let fetchedRows = firstPage.usageEventsDisplay?.length ?? 0;
+      let laterPageFailed = false;
+      for (let first = 2; first <= MAX_PAGES && fetchedRows < expected; first += PAGE_CONCURRENCY) {
+        const batchSize = Math.min(
+          PAGE_CONCURRENCY,
+          MAX_PAGES - first + 1,
+          Math.max(1, expected - fetchedRows),
+        );
+        const batch = await Promise.all(
+          Array.from({ length: batchSize }, (_, i) => requestPage(first + i).catch(() => null)),
+        );
+        pages.push(...batch);
+        for (const page of batch) {
+          if (page === null) laterPageFailed = true;
+          else fetchedRows += page.usageEventsDisplay?.length ?? 0;
+        }
+        if (laterPageFailed) break;
+      }
+      const rows: Row[] = [];
+      let seen = 0;
+      let message: string | null = null;
+      for (const result of pages) {
+        if (result === null) {
+          message = "A later Cursor history page could not be read; totals are partial.";
+          continue;
+        }
+        if (result.totalUsageEventsCount !== expected)
+          message = "Cursor history changed during pagination; coverage may be incomplete.";
+        const pageRows = result.usageEventsDisplay ?? [];
+        for (const row of pageRows.slice(0, PAGE_SIZE)) {
+          try {
+            const event = decodeEvent(row);
+            rows.push({ timestamp: Number(event.timestamp), event });
+          } catch {
+            rows.push({ timestamp: span.from, event: null });
+          }
+        }
+        seen += pageRows.length;
+        if (pageRows.length > PAGE_SIZE)
+          message = "Cursor returned an oversized history page; coverage is incomplete.";
+        if (seen > expected)
+          message =
+            "Cursor returned more requests than its reported count; coverage may be incomplete.";
+      }
+      if (seen < expected && !laterPageFailed)
+        message = "Cursor history reached the read limit; coverage is incomplete.";
+      return { span, rows, message };
+    };
     return {
       identify,
       readHistory: async (input: UsageSummaryInput): Promise<CursorHistory> => {
         const account = await identify();
-        return histories(JSON.stringify([account.sourceId, input]), async () => {
-          const startDate =
-            input.resolution === "hour"
-              ? Date.parse(input.sinceTime ?? "")
-              : Date.parse(`${input.sinceDay}T00:00:00Z`) - DAY_MS;
-          const endDate =
-            input.resolution === "hour"
-              ? Date.parse(input.untilTime ?? "")
-              : Date.parse(`${input.untilDay}T00:00:00Z`) + 2 * DAY_MS;
+        const window: Span =
+          input.resolution === "hour"
+            ? { from: Date.parse(input.sinceTime ?? ""), until: Date.parse(input.untilTime ?? "") }
+            : {
+                from: Date.parse(`${input.sinceDay}T00:00:00Z`) - DAY_MS,
+                until: Date.parse(`${input.untilDay}T00:00:00Z`) + 2 * DAY_MS,
+              };
+        return exclusive(account.sourceId, async () => {
+          const now = nowMs();
+          const cached = retain(histories.get(account.sourceId), now);
           const signal = AbortSignal.timeout(MAX_HISTORY_MS);
-          const events: CursorUsageEvent[] = [];
-          let expected: number;
-          let seen = 0;
-          let malformedRecords = 0;
-          let message: string | null = null;
-          const requestPage = async (page: number) =>
-            decodePage(
-              await request(
-                "GetFilteredUsageEvents",
-                {
-                  page,
-                  pageSize: PAGE_SIZE,
-                  startDate: String(startDate),
-                  endDate: String(endDate),
-                  ...(account.teamId === undefined ? {} : { teamId: account.teamId }),
-                },
-                signal,
-              ),
+          const results = await Promise.allSettled(
+            missingSpans(cached, window, now).map((span) => readSpan(account, span, signal)),
+          );
+          const reads = results.flatMap((result) =>
+            result.status === "fulfilled" ? [result.value] : [],
+          );
+          const history = reads
+            .filter((read) => read.message === null)
+            .reduce<AccountHistory | undefined>(
+              (current, read) => cover(current, read, now),
+              cached,
             );
-          let firstPage: CursorPage;
-          try {
-            firstPage = await requestPage(1);
-          } catch {
+          if (history) histories.set(account.sourceId, history);
+          else histories.delete(account.sourceId);
+          if (reads.length < results.length)
             throw new Error("Cursor history could not be read for this account.");
-          }
-          expected = firstPage.totalUsageEventsCount;
-          const pages: Array<CursorPage | null> = [firstPage];
-          let fetchedRows = firstPage.usageEventsDisplay?.length ?? 0;
-          let laterPageFailed = false;
-          for (
-            let first = 2;
-            first <= MAX_PAGES && fetchedRows < expected;
-            first += PAGE_CONCURRENCY
-          ) {
-            const batchSize = Math.min(
-              PAGE_CONCURRENCY,
-              MAX_PAGES - first + 1,
-              Math.max(1, expected - fetchedRows),
-            );
-            const batch = await Promise.all(
-              Array.from({ length: batchSize }, (_, i) => requestPage(first + i).catch(() => null)),
-            );
-            pages.push(...batch);
-            for (const page of batch) {
-              if (page === null) laterPageFailed = true;
-              else fetchedRows += page.usageEventsDisplay?.length ?? 0;
-            }
-            if (laterPageFailed) break;
-          }
-          for (const result of pages) {
-            if (result === null) {
-              message = "A later Cursor history page could not be read; totals are partial.";
-              continue;
-            }
-            if (result.totalUsageEventsCount !== expected)
-              message = "Cursor history changed during pagination; coverage may be incomplete.";
-            const rows = result.usageEventsDisplay ?? [];
-            for (const row of rows.slice(0, PAGE_SIZE)) {
-              try {
-                const event = decodeEvent(row);
-                if (!event.tokenUsage) malformedRecords++;
-                events.push(event);
-              } catch {
-                malformedRecords++;
-              }
-            }
-            seen += rows.length;
-            if (rows.length > PAGE_SIZE)
-              message = "Cursor returned an oversized history page; coverage is incomplete.";
-            if (seen > expected)
-              message =
-                "Cursor returned more requests than its reported count; coverage may be incomplete.";
-          }
-          if (seen < expected && !laterPageFailed)
-            message = "Cursor history reached the read limit; coverage is incomplete.";
-          if (malformedRecords > 0)
-            message ??=
-              "Some Cursor requests did not include readable token usage; totals are partial.";
+          const rows = reads
+            .reduce(replaceSpan, history?.rows ?? [])
+            .filter((row) => row.timestamp >= window.from && row.timestamp <= window.until);
+          const malformedRecords = rows.filter((row) => !row.event?.tokenUsage).length;
+          const message =
+            reads.find((read) => read.message !== null)?.message ??
+            (malformedRecords > 0
+              ? "Some Cursor requests did not include readable token usage; totals are partial."
+              : null);
           return {
-            events,
+            events: rows.flatMap((row) => (row.event ? [row.event] : [])),
             status: message ? "partial" : "ok",
             message,
             malformedRecords,
-            readAt: DateTime.formatIso(Effect.runSync(DateTime.now)),
+            readAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
           };
         });
       },

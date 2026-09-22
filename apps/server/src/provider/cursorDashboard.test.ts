@@ -6,7 +6,7 @@ import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { makeCursorDashboardReader } from "./cursorDashboard.ts";
+import { makeCursorDashboardReader, type CursorHistory } from "./cursorDashboard.ts";
 import me from "./testFixtures/cursor/me.json" with { type: "json" };
 import events from "./testFixtures/cursor/events.json" with { type: "json" };
 
@@ -176,7 +176,7 @@ describe("Cursor dashboard", () => {
     expect(timeouts.filter((ms) => ms === 8000)).toHaveLength(3);
   });
 
-  it("coalesces history by authoritative account across credential aliases and expires the cache", async () => {
+  it("shares history by authoritative account across credential aliases and keeps settled history", async () => {
     vi.useFakeTimers();
     try {
       const api = reader();
@@ -185,7 +185,8 @@ describe("Cursor dashboard", () => {
         api.read({ CURSOR_AUTH_TOKEN: "another-token" }),
       ]);
       const [a, b] = await Promise.all([first.readHistory(input), second.readHistory(input)]);
-      expect(a).toBe(b);
+      expect(a.events).toHaveLength(2);
+      expect(b.events).toEqual(a.events);
       expect(
         api.requests.filter((request) => request.method === "GetFilteredUsageEvents"),
       ).toHaveLength(1);
@@ -193,7 +194,7 @@ describe("Cursor dashboard", () => {
       await first.readHistory(input);
       expect(
         api.requests.filter((request) => request.method === "GetFilteredUsageEvents"),
-      ).toHaveLength(2);
+      ).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -328,7 +329,7 @@ const hours = (sinceTime: string, untilTime: string): UsageSummaryInput => ({
 
 /** A Cursor API over `store`: inclusive date filter, newest first, page-numbered. */
 function historyApi(
-  store: { timestamp: string }[],
+  store: Array<Record<string, unknown> & { timestamp: string }>,
   fails: (request: string) => boolean = () => false,
 ) {
   const requests: string[] = [];
@@ -355,7 +356,7 @@ function historyApi(
   return { dashboard: () => read(environment), requests };
 }
 
-const inputTokens = (history: { events: readonly { tokenUsage?: { inputTokens?: number } }[] }) =>
+const inputTokens = (history: CursorHistory) =>
   history.events.map((event) => event.tokenUsage?.inputTokens ?? -1).toSorted((a, b) => a - b);
 
 describe("Cursor history cache", () => {

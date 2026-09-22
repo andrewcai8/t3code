@@ -124,14 +124,11 @@ describe("Cursor usage contribution", () => {
     const dashboard = makeCursorDashboardReader({
       fetch: async (url, options) => {
         if (String(url).endsWith("GetMe")) return Response.json(me);
-        return Response.json(
-          new Headers(options?.headers).get("Authorization") === "Bearer a"
-            ? {
-                totalUsageEventsCount: 2,
-                usageEventsDisplay: [row, { timestamp: row.timestamp, model: "missing" }],
-              }
-            : { totalUsageEventsCount: 1, usageEventsDisplay: [row] },
-        );
+        if (new Headers(options?.headers).get("Authorization") === "Bearer b")
+          return Response.json({ totalUsageEventsCount: 1, usageEventsDisplay: [row] });
+        if (JSON.parse(String(options?.body)).page > 1)
+          return new Response("unavailable", { status: 503 });
+        return Response.json({ totalUsageEventsCount: 2, usageEventsDisplay: [row] });
       },
     });
     const result = await aggregate(
