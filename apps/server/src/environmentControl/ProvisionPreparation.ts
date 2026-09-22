@@ -27,7 +27,9 @@ import {
   isForeignCredentialVariable,
   ProvisionRefused,
   type ProvisioningProviderProfile,
+  type ProvisioningProviderProfiles,
 } from "./ProvisioningProviderProfile.ts";
+import { guestProviderInstallCommand } from "./guestProviderInstall.ts";
 
 const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
 const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
@@ -59,6 +61,7 @@ const Preparation = Schema.Struct({
   readinessTimeoutSeconds: Schema.Int,
   brokerTtl: Schema.String,
   prepareCommands: Schema.optional(Schema.Array(Schema.String)),
+  providerInstall: Schema.optional(Schema.String),
   artifacts: Schema.optional(
     Schema.Array(
       Schema.Struct({ path: Schema.String, destination: Schema.String, sha256: Sha256 }),
@@ -158,23 +161,22 @@ type ChildProviderInstanceSettings = Record<string, unknown> & {
 };
 
 /**
- * The instance id a provisioned environment keys its one account by.
+ * The instance id a provisioned environment keys a driver's account by.
  *
  * An enabled driver already contributes an implicit instance under this id, so
  * an account keyed by the manager's own slug leaves that implicit instance
- * enabled with no credentials for a guest client to pick. A guest holds exactly
- * one account and the manager's slug is not a routing key there, so the account
- * takes the id the guest would have synthesized anyway.
+ * enabled with no credentials for a guest client to pick. A guest holds one
+ * account per driver and the manager's slug is not a routing key there, so the
+ * account takes the id the guest would have synthesized anyway.
  */
 const guestInstanceId = (agentDriver: string) =>
   defaultInstanceIdForDriver(ProviderDriverKind.make(agentDriver));
 
 function enableChildProvider(
   existing: string,
-  agentDriver: string,
+  profiles: ProvisioningProviderProfiles,
   homePath = "/home/user",
   devices = false,
-  displayName?: string,
 ): string {
   let settings: ChildSettings = {};
   try {
@@ -185,39 +187,26 @@ function enableChildProvider(
   } catch {}
   const providers = settings.providers ?? {};
   const providerInstances = settings.providerInstances ?? {};
-  const instanceId = guestInstanceId(agentDriver);
-  const existingInstance = providerInstances[instanceId] ?? {};
-  const environment =
-    agentDriver === "cursor"
-      ? [
-          ...(existingInstance.environment ?? []).filter(
-            (variable) =>
-              !["AGENT_CLI_CREDENTIAL_STORE", "CURSOR_CONFIG_DIR", "HOME"].includes(variable.name),
-          ),
-          { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
-          { name: "CURSOR_CONFIG_DIR", value: `${homePath}/.config/cursor`, sensitive: false },
-          { name: "HOME", value: homePath, sensitive: false },
-        ]
-      : existingInstance.environment;
-  return `${JSON.stringify({
-    ...settings,
-    // Namespace children are macOS Macs used for iOS work; nobody opens
-    // settings on a cloud Mac to flip device access on by hand.
-    ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
-    providers: {
-      ...providers,
-      // Only one agent CLI is installed here, so every other driver offers an
-      // account no turn can run on.
-      ...Object.fromEntries(
-        Object.keys(DEFAULT_SERVER_SETTINGS.providers)
-          .filter((driver) => driver !== agentDriver)
-          .map((driver) => [driver, { ...providers[driver], enabled: false }]),
-      ),
-      [agentDriver]: { ...providers[agentDriver], enabled: true },
-    },
-    providerInstances: {
-      ...providerInstances,
-      [instanceId]: {
+  const accounts = profiles.map(({ kind: agentDriver, displayName }) => {
+    const instanceId = guestInstanceId(agentDriver);
+    const existingInstance = providerInstances[instanceId] ?? {};
+    const environment =
+      agentDriver === "cursor"
+        ? [
+            ...(existingInstance.environment ?? []).filter(
+              (variable) =>
+                !["AGENT_CLI_CREDENTIAL_STORE", "CURSOR_CONFIG_DIR", "HOME"].includes(
+                  variable.name,
+                ),
+            ),
+            { name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false },
+            { name: "CURSOR_CONFIG_DIR", value: `${homePath}/.config/cursor`, sensitive: false },
+            { name: "HOME", value: homePath, sensitive: false },
+          ]
+        : existingInstance.environment;
+    return [
+      instanceId,
+      {
         ...existingInstance,
         driver: agentDriver,
         enabled: true,
@@ -237,7 +226,25 @@ function enableChildProvider(
           : {}),
         ...(environment ? { environment } : {}),
       },
+    ] as const;
+  });
+  const enabled = new Set<string>(profiles.map(({ kind }) => kind));
+  return `${JSON.stringify({
+    ...settings,
+    // Namespace children are macOS Macs used for iOS work; nobody opens
+    // settings on a cloud Mac to flip device access on by hand.
+    ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
+    providers: {
+      ...providers,
+      // Only the provisioned drivers' CLIs are installed here, so every other
+      // driver offers an account no turn can run on.
+      ...Object.fromEntries(
+        [...new Set([...Object.keys(DEFAULT_SERVER_SETTINGS.providers), ...enabled])].map(
+          (driver) => [driver, { ...providers[driver], enabled: enabled.has(driver) }],
+        ),
+      ),
     },
+    providerInstances: { ...providerInstances, ...Object.fromEntries(accounts) },
   })}\n`;
 }
 
@@ -469,7 +476,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       rawInput: EnvironmentProvisionInput,
       config: EnvironmentControlConfig,
       resolver: ProvisionPreparationResolver,
-      profile: ProvisioningProviderProfile,
+      profiles: ProvisioningProviderProfiles,
     ): Promise<ProvisionPreparationManifest> => {
       const input = decodeInput(rawInput);
       const submitted = submittedFiles(input);
@@ -517,21 +524,24 @@ export function makeProvisionPreparationStore(stateDir: string) {
         }
       }
       const skillLimit = { remaining: provisionInputLimit };
+      const skillRoots = new Set(profiles.map(({ kind }) => skillRoot(kind)));
       for (const skill of provisioning.skills ?? []) {
         const prefix = skill.name ? `${relativePath(skill.name)}/` : "";
         for (const entry of await skillFiles(skill.source, skillLimit)) {
-          files.push(file("home", `${skillRoot(profile.kind)}/${prefix}${entry.path}`, entry.data));
+          for (const root of skillRoots)
+            files.push(file("home", `${root}/${prefix}${entry.path}`, entry.data));
         }
       }
-      // A configured home file never decides which login the selected account
+      // A configured home file never decides which login a provisioned account
       // uses. A CLI handed a stale credentials file prefers it over the token
       // and fails the turn refreshing a login this manager no longer keeps,
       // so the credential provisioning resolved replaces every copy of it --
       // including the ones a file credential does not itself write, which a
       // guest on another platform would read first.
-      const replaced = new Set(credentialDestinations[profile.kind]);
+      const replaced = new Set(profiles.flatMap(({ kind }) => credentialDestinations[kind]));
       files = files.filter((item) => !(item.scope === "home" && replaced.has(item.destination)));
-      if (profile.credential.kind === "file") {
+      for (const profile of profiles) {
+        if (profile.credential.kind !== "file") continue;
         const { source } = profile.credential;
         const destination = guestCredentialDestination(
           profile.kind,
@@ -557,16 +567,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
       if (settingsIndex !== -1) files.splice(settingsIndex, 1);
       // Environment entries reach the provider's child process without shell interpolation.
       const configuredSettings: unknown = JSON.parse(
-        enableChildProvider(
-          settings,
-          profile.kind,
-          `${root}/home`,
-          input.provider === "namespace",
-          profile.displayName,
-        ),
+        enableChildProvider(settings, profiles, `${root}/home`, input.provider === "namespace"),
       );
       const parsedSettings = decodeSettings(configuredSettings);
-      const environment = [];
+      const kinds = profiles.map(({ kind }) => kind);
+      const environment: Array<{ name: string; value: string; sensitive: boolean }> = [];
       for (const variable of provisioning.shellEnvironment ?? []) {
         if (
           !/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name) ||
@@ -576,36 +581,46 @@ export function makeProvisionPreparationStore(stateDir: string) {
             reason: "unconfigured",
             message: "A configured environment variable would change the isolated home.",
           });
-        if (isForeignCredentialVariable(profile.kind, variable.name)) continue;
+        if (isForeignCredentialVariable(kinds, variable.name)) continue;
         environment.push({
           name: variable.name,
           value: (await NodeFSP.readFile(variable.source, "utf8")).trim(),
           sensitive: true,
         });
       }
-      const credentials =
-        profile.credential.kind === "environment"
-          ? profile.environment.filter(
-              ({ name, value }) => credentialVariables[profile.kind].includes(name) && value.trim(),
-            )
-          : [];
-      const instanceId = guestInstanceId(profile.kind);
-      const selected = parsedSettings.providerInstances[instanceId] ?? {};
-      const resultSettings = {
-        ...decodeSettingsRecord(configuredSettings),
-        ...parsedSettings,
-        providerInstances: {
-          ...parsedSettings.providerInstances,
-          [instanceId]: {
-            ...selected,
+      const accounts = profiles.map((profile) => {
+        const credentials =
+          profile.credential.kind === "environment"
+            ? profile.environment.filter(
+                ({ name, value }) =>
+                  credentialVariables[profile.kind].includes(name) && value.trim(),
+              )
+            : [];
+        const instanceId = guestInstanceId(profile.kind);
+        return [
+          instanceId,
+          {
+            ...parsedSettings.providerInstances[instanceId],
             environment: [
-              ...environment.filter(({ name }) => !credentials.some((c) => c.name === name)),
+              ...environment.filter(
+                ({ name }) =>
+                  !isForeignCredentialVariable([profile.kind], name) &&
+                  !credentials.some((c) => c.name === name),
+              ),
               ...credentials,
               ...(profile.kind === "cursor"
                 ? [{ name: "AGENT_CLI_CREDENTIAL_STORE", value: "file", sensitive: false }]
                 : []),
             ],
           },
+        ] as const;
+      });
+      const resultSettings = {
+        ...decodeSettingsRecord(configuredSettings),
+        ...parsedSettings,
+        providerInstances: {
+          ...parsedSettings.providerInstances,
+          ...Object.fromEntries(accounts),
         },
       };
       files.push(file("home", settingsPath, Buffer.from(JSON.stringify(resultSettings))));
@@ -683,6 +698,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         input.provider === "namespace"
           ? (repositoryEntry?.namespace?.artifacts ?? provisioning.namespace?.artifacts ?? [])
           : [];
+      const providerInstall = profiles
+        .flatMap(({ kind }) => guestProviderInstallCommand(kind) ?? [])
+        .join(" && ");
       const build = {
         repository,
         artifact: {
@@ -700,6 +718,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
         // from one that was, so two requests only match when these match.
         ...(prepareCommands.length ? { prepareCommands } : {}),
         ...(artifacts.length ? { artifacts } : {}),
+        // Frozen with the accounts it installs CLIs for. A manifest from before
+        // this field has none, and its runtime keeps deriving the one command
+        // from the request's driver so its preparation identity never moves.
+        ...(providerInstall ? { providerInstall } : {}),
       };
       const preparation = {
         ...build,

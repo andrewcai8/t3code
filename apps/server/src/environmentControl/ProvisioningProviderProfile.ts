@@ -5,12 +5,15 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ProviderInstanceEnvironment,
   type ServerSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
@@ -70,18 +73,19 @@ export const guestCredentialDestination = (
 ) => (kind === "cursor" && provider === "e2b" ? ".config/cursor/auth.json" : destination);
 
 /**
- * Whether a variable is some other driver's login.
+ * Whether a variable is the login of a driver outside `kinds`.
  *
  * An operator's `shellEnvironment` holds a key per account they provision
- * with, and a cloud environment runs one agent on one account, so another
- * driver's credential has nothing to do there.
+ * with. A driver an environment does not run has nothing to do with its key,
+ * and each enabled account carries only its own driver's.
  */
 export const isForeignCredentialVariable = (
-  kind: ProvisioningProviderProfile["kind"],
+  kinds: ReadonlyArray<ProvisioningProviderProfile["kind"]>,
   name: string,
 ) =>
   Object.entries(credentialVariables).some(
-    ([driver, names]) => driver !== kind && names.includes(name),
+    ([driver, names]) =>
+      !kinds.includes(driver as ProvisioningProviderProfile["kind"]) && names.includes(name),
   );
 
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
@@ -215,6 +219,45 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
   },
 );
 
+/**
+ * The accounts a new cloud environment runs, the selected one first.
+ *
+ * The selected account must resolve. Every other driver comes along on the
+ * manager's default account for it when that account is portable, and is
+ * left off the guest when it is not, so one unusable login never blocks the
+ * account that was asked for.
+ */
+export type ProvisioningProviderProfiles = readonly [
+  primary: ProvisioningProviderProfile,
+  ...companions: ProvisioningProviderProfile[],
+];
+
+export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfiles")(function* (
+  settings: ServerSettings,
+  input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
+  claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
+) {
+  const primary = yield* resolveProvisioningProviderProfile(settings, input, claudeOAuthTokens);
+  const companions: ProvisioningProviderProfile[] = [];
+  for (const driver of Object.keys(credentialVariables)) {
+    if (driver === primary.kind) continue;
+    const companion = yield* Effect.option(
+      resolveProvisioningProviderProfile(
+        settings,
+        {
+          providerInstanceId: defaultInstanceIdForDriver(ProviderDriverKind.make(driver)),
+          agentDriver: driver,
+        },
+        claudeOAuthTokens,
+      ),
+    );
+    if (Option.isSome(companion)) companions.push(companion.value);
+    else yield* Effect.logInfo(`Provisioning without ${driver}: its default account is unusable.`);
+  }
+  const profiles: ProvisioningProviderProfiles = [primary, ...companions];
+  return profiles;
+});
+
 export async function resolvePreparation(
   profile: ProvisioningProviderProfile,
   provisioning: Provisioning,
@@ -296,7 +339,7 @@ export async function resolvePreparation(
       });
     if (
       selectedNames.has(variable.name) ||
-      isForeignCredentialVariable(profile.kind, variable.name)
+      isForeignCredentialVariable([profile.kind], variable.name)
     )
       continue;
     const value = (

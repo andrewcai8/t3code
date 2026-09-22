@@ -29,6 +29,7 @@ import {
   type EnvironmentProvisionUpgradeResult,
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -60,6 +61,7 @@ import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   ProvisionRefused,
+  resolveProvisioningProfiles,
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
 import * as ServerConfig from "../config.ts";
@@ -580,15 +582,14 @@ export const layer = Layer.effect(
       | undefined;
     const settings = yield* ServerSettingsService;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
-    const resolveProfile = async (
-      request: ProvisionRequest,
-      claudeOAuthTokens?: ProvisioningConfig["claudeOAuthTokens"],
+    const resolveAccounts = async <A>(
+      resolveFrom: (
+        current: ServerSettings,
+      ) => Effect.Effect<A, unknown, Path.Path | FileSystem.FileSystem>,
     ) => {
       const result = await Effect.runPromiseWith(profileContext)(
         settings.getSettings.pipe(
-          Effect.flatMap((current) =>
-            resolveProvisioningProviderProfile(current, request, claudeOAuthTokens),
-          ),
+          Effect.flatMap(resolveFrom),
           Effect.match({
             onSuccess: (profile) => ({ kind: "resolved" as const, profile }),
             onFailure: (error) => ({ kind: "refused" as const, error }),
@@ -604,6 +605,13 @@ export const layer = Layer.effect(
             });
       return result.profile;
     };
+    const resolveProfile = (
+      request: ProvisionRequest,
+      claudeOAuthTokens?: ProvisioningConfig["claudeOAuthTokens"],
+    ) =>
+      resolveAccounts((current) =>
+        resolveProvisioningProviderProfile(current, request, claudeOAuthTokens),
+      );
     const resolve = () =>
       (async () => {
         const path = await resolveControlConfigPath({
@@ -869,15 +877,17 @@ export const layer = Layer.effect(
                 ? { githubToken: manager.config.provisioning.githubToken }
                 : {}),
             }),
-            // Credentials and the skill root follow the account's real settings
-            // rather than a path this module guesses from the driver name.
-            await resolveProfile(
-              {
-                provider: input.provider,
-                providerInstanceId: input.providerInstanceId,
-                ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
-              },
-              manager.config.provisioning?.claudeOAuthTokens,
+            // Credentials and skill roots follow the accounts' real settings
+            // rather than paths this module guesses from driver names.
+            await resolveAccounts((current) =>
+              resolveProvisioningProfiles(
+                current,
+                {
+                  providerInstanceId: input.providerInstanceId,
+                  ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
+                },
+                manager.config.provisioning?.claudeOAuthTokens,
+              ),
             ),
           );
         },

@@ -11,6 +11,7 @@ import { it } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   resolvePreparation,
+  resolveProvisioningProfiles,
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
 
@@ -242,6 +243,73 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
       );
       expect((yield* Effect.flip(resolve(settings))).message).toContain("disabled");
       expect((yield* Effect.flip(resolve(settings, "missing"))).message).toContain("unavailable");
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("provisioned accounts", (it) => {
+  const accounts = (
+    settings: ServerSettings,
+    providerInstanceId = "selected",
+    claudeOAuthTokens?: Record<string, string>,
+  ) =>
+    resolveProvisioningProfiles(settings, { providerInstanceId }, claudeOAuthTokens).pipe(
+      Effect.map((profiles) =>
+        profiles.map(({ kind, instanceId, credential }) => [kind, instanceId, credential.kind]),
+      ),
+    );
+
+  it.effect("brings every driver's default account along with the selected one", () =>
+    Effect.gen(function* () {
+      const codex = yield* file("codex/auth.json");
+      const settings = decodeSettings({
+        providers: { codex: { homePath: NodePath.dirname(codex) } },
+        providerInstances: {
+          selected: { driver: "claudeAgent", config: { homePath: directory } },
+          cursor: {
+            driver: "cursor",
+            enabled: true,
+            environment: [{ name: "CURSOR_API_KEY", value: "cursor-key", sensitive: true }],
+          },
+        },
+      });
+      expect(
+        yield* accounts(settings, "selected", { selected: "sk-ant-oat01-cloud-only" }),
+      ).toEqual([
+        ["claudeAgent", "selected", "environment"],
+        ["codex", "codex", "file"],
+        ["cursor", "cursor", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("leaves off a driver whose default account cannot be provisioned", () =>
+    Effect.gen(function* () {
+      yield* file("codex/auth.json");
+      const settings = decodeSettings({
+        providerInstances: {
+          selected: { driver: "codex", config: { homePath: NodePath.join(directory, "codex") } },
+          claudeAgent: { driver: "claudeAgent", config: { homePath: directory } },
+          cursor: { driver: "cursor", enabled: false },
+        },
+      });
+      expect(yield* accounts(settings)).toEqual([["codex", "selected", "file"]]);
+    }),
+  );
+
+  it.effect("still refuses when the selected account cannot be provisioned", () =>
+    Effect.gen(function* () {
+      yield* file("codex/auth.json");
+      const settings = decodeSettings({
+        providers: { codex: { homePath: NodePath.join(directory, "codex") } },
+        providerInstances: {
+          selected: { driver: "claudeAgent", config: { homePath: directory } },
+          cursor: { driver: "cursor", enabled: false },
+        },
+      });
+      expect((yield* Effect.flip(accounts(settings))).message).toBe(
+        `This Claude account stores its login in the macOS keychain, which can't be copied safely. Run \`CLAUDE_CONFIG_DIR=${directory} claude setup-token\` and add the token under provisioning.claudeOAuthTokens.selected in environment-control.json.`,
+      );
     }),
   );
 });
