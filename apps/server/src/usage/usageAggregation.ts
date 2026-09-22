@@ -49,6 +49,13 @@ function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
 const decodeBucket = Schema.decodeUnknownSync(UsageBucket);
 
 const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Parses a `YYYY-MM-DD` day as its UTC midnight, or `fallback` when it is not a date. */
+function utcMidnightMs(day: string, fallback: number): number {
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  return Number.isNaN(ms) ? fallback : ms;
+}
 
 interface MutableBucket {
   totals: UsageTokenTotals;
@@ -91,6 +98,9 @@ export class UsageAggregator {
   readonly #seen = new Set<string>();
   readonly #toDay: (timestampMs: number) => string;
   readonly #hourlyWindow: { readonly sinceTimeMs: number; readonly untilTimeMs: number } | null;
+  /** Instant range, `[since, until)`, outside which no record can land. */
+  readonly #admitSinceMs: number;
+  readonly #admitUntilMs: number;
   readonly #options: AggregateOptions;
   #duplicatesDropped = 0;
   #outOfWindow = 0;
@@ -106,9 +116,24 @@ export class UsageAggregator {
         sinceTimeMs: options.sinceTimeMs,
         untilTimeMs: options.untilTimeMs,
       };
+      this.#admitSinceMs = options.sinceTimeMs;
+      this.#admitUntilMs = options.untilTimeMs;
     } else {
       this.#hourlyWindow = null;
+      // A day in any zone lies within a day of its UTC counterpart (offsets
+      // span -12h to +14h), so this range is a superset of the local days.
+      this.#admitSinceMs = utcMidnightMs(options.sinceDay, -Infinity) - DAY_MS;
+      this.#admitUntilMs = utcMidnightMs(options.untilDay, Infinity) + 2 * DAY_MS;
     }
+  }
+
+  /**
+   * Cheap instant check: `false` means the record cannot land in the window.
+   * `true` is exact for hourly windows and a superset for day windows, which
+   * `add` then narrows by the record's day in the requested zone.
+   */
+  admits(timestampMs: number): boolean {
+    return timestampMs >= this.#admitSinceMs && timestampMs < this.#admitUntilMs;
   }
 
   /**
@@ -125,11 +150,7 @@ export class UsageAggregator {
       this.#seen.add(record.dedupeKey);
     }
 
-    if (
-      this.#hourlyWindow !== null &&
-      (record.timestampMs < this.#hourlyWindow.sinceTimeMs ||
-        record.timestampMs >= this.#hourlyWindow.untilTimeMs)
-    ) {
+    if (!this.admits(record.timestampMs)) {
       this.#outOfWindow += 1;
       return false;
     }
@@ -227,6 +248,59 @@ export class UsageAggregator {
       duplicatesDropped: this.#duplicatesDropped,
       outOfWindow: this.#outOfWindow,
     };
+  }
+}
+
+const encodeCodexIdentity = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+/** Records are immutable while their scan-cache entry lives, so identities are built once. */
+const codexIdentities = new WeakMap<UsageRecord, string>();
+
+function codexIdentity(record: UsageRecord): string {
+  let identity = codexIdentities.get(record);
+  if (identity === undefined) {
+    identity = encodeCodexIdentity([
+      record.provider,
+      record.sessionId,
+      record.timestampMs,
+      record.model,
+      record.totals,
+    ]);
+    codexIdentities.set(record, identity);
+  }
+  return identity;
+}
+
+/**
+ * Folds one transcript's records in, adding each contributing session id to
+ * `sessionIds`.
+ *
+ * Codex records are keyed here so moved rollout copies match without
+ * collapsing repeated equal events within one rollout (timestamps can have only
+ * second precision): the key counts occurrences within the file. Unkeyed
+ * records outside the window are skipped first. That cannot shift an in-window
+ * occurrence count, because equal identities share a timestamp. Keyed records
+ * still reach `add`, which remembers their key even out of window.
+ */
+export function addTranscript(
+  aggregator: UsageAggregator,
+  records: readonly UsageRecord[],
+  sessionIds: Set<string>,
+): void {
+  const codexOccurrences = new Map<string, number>();
+  for (const record of records) {
+    if (record.dedupeKey === null && !aggregator.admits(record.timestampMs)) continue;
+    let usageRecord = record;
+    if (record.provider === "codex" && record.sessionId.length > 0) {
+      const identity = codexIdentity(record);
+      const occurrence = (codexOccurrences.get(identity) ?? 0) + 1;
+      codexOccurrences.set(identity, occurrence);
+      usageRecord = { ...record, dedupeKey: identity + ":" + occurrence };
+    }
+    // Only sessions contributing in-window count; the mtime slack can admit
+    // boundary files whose records fall outside the range.
+    if (aggregator.add(usageRecord) && record.sessionId.length > 0) {
+      sessionIds.add(record.sessionId);
+    }
   }
 }
 

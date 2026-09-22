@@ -49,7 +49,7 @@ import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
-import { UsageAggregator } from "./usageAggregation.ts";
+import { addTranscript, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -103,7 +103,6 @@ const encodeRatesCache = Schema.encodeEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
-const encodeUsageRecordKey = Schema.encodeSync(ScanCacheJson);
 const CachedSource = Schema.Struct({ dir: Schema.String, volumeId: Schema.String });
 const decodeCachedSources = Schema.decodeUnknownOption(
   Schema.Struct({ sources: Schema.Record(Schema.String, CachedSource) }),
@@ -584,29 +583,7 @@ export const make = Effect.gen(function* () {
           continue;
         }
         scannedFiles += 1;
-        const codexEventOccurrences = new Map<string, number>();
-        for (const record of file.records) {
-          let usageRecord = record;
-          if (record.provider === "codex" && record.sessionId.length > 0) {
-            // Match moved rollout copies without collapsing repeated equal events
-            // within one rollout (timestamps can have only second precision).
-            const key = encodeUsageRecordKey([
-              record.provider,
-              record.sessionId,
-              record.timestampMs,
-              record.model,
-              record.totals,
-            ]);
-            const occurrence = (codexEventOccurrences.get(key) ?? 0) + 1;
-            codexEventOccurrences.set(key, occurrence);
-            usageRecord = { ...record, dedupeKey: key + ":" + occurrence };
-          }
-          // Only sessions contributing in-window count; the mtime slack can
-          // admit boundary files whose records fall outside the range.
-          if (aggregator.add(usageRecord) && record.sessionId.length > 0) {
-            sessionIds.add(record.sessionId);
-          }
-        }
+        addTranscript(aggregator, file.records, sessionIds);
       }
 
       sources.push({

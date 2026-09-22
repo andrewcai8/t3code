@@ -76,6 +76,8 @@ export interface TranscriptParseResult {
 export const GUARD_LENGTH = 64;
 const NEWLINE = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
+/** Stats in flight per listing; enough to hide disk latency without exhausting descriptors. */
+const STAT_CONCURRENCY = 32;
 
 function fnv1a(buffer: Buffer): number {
   let hash = 0x811c9dc5;
@@ -102,7 +104,7 @@ export async function listTranscriptFiles(
   sinceMs: number,
   options?: { readonly fileName?: string },
 ): Promise<readonly TranscriptFile[]> {
-  const found: TranscriptFile[] = [];
+  const candidates: string[] = [];
   const fileName = options?.fileName;
 
   const walk = async (dir: string): Promise<void> => {
@@ -123,19 +125,32 @@ export async function listTranscriptFiles(
       } else if (!entry.name.endsWith(".jsonl")) {
         continue;
       }
+      candidates.push(child);
+    }
+  };
+
+  await walk(root);
+
+  // Walk order decides which copy of a duplicated record wins, so results keep
+  // their candidate slot while the stats run concurrently.
+  const slots: (TranscriptFile | null)[] = Array.from({ length: candidates.length }, () => null);
+  let next = 0;
+  const statNext = async (): Promise<void> => {
+    while (next < candidates.length) {
+      const index = next++;
+      const path = candidates[index]!;
       try {
-        const stats = await NodeFSP.stat(child);
+        const stats = await NodeFSP.stat(path);
         if (stats.mtimeMs >= sinceMs) {
-          found.push({ path: child, size: stats.size, mtimeMs: stats.mtimeMs });
+          slots[index] = { path, size: stats.size, mtimeMs: stats.mtimeMs };
         }
       } catch {
         // Vanished between readdir and stat.
       }
     }
   };
-
-  await walk(root);
-  return found;
+  await Promise.all(Array.from({ length: STAT_CONCURRENCY }, statNext));
+  return slots.filter((file) => file !== null);
 }
 
 /**
