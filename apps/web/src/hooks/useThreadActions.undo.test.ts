@@ -27,6 +27,9 @@ vi.mock("react", async (original) => ({
 }));
 vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
 vi.mock("./useSettings", () => ({ useClientSettings: () => false }));
+vi.mock("../cloud/useProvisionedEnvironmentRecovery", () => ({
+  useProvisionedEnvironmentRecovery: () => async () => ({ kind: "not-provisioned" }),
+}));
 vi.mock("./useHandleNewThread", () => ({ useNewThreadHandler: () => vi.fn() }));
 vi.mock("../composerDraftStore", () => ({ useComposerDraftStore: () => vi.fn() }));
 vi.mock("../terminalUiStateStore", () => ({ useTerminalUiStateStore: () => vi.fn() }));
