@@ -26,6 +26,7 @@ import * as HttpApiTest from "effect/unstable/httpapi/HttpApiTest";
 
 import { ServerConfig } from "../config.ts";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { orchestrationHttpApiLayer } from "./http.ts";
@@ -51,6 +52,12 @@ const makeLayer = (directory: string) =>
       ).pipe(Layer.provideMerge(NodeServices.layer));
       return orchestrationHttpApiLayer.pipe(
         HttpRouter.provideRequest(requestServices),
+        Layer.provide(
+          Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
+            get: () => Effect.succeed(null),
+            discard: () => Effect.void,
+          }),
+        ),
         Layer.provideMerge(authenticated),
         Layer.provideMerge(OrchestrationLayerLive),
         Layer.provide(RepositoryIdentityResolver.layer),

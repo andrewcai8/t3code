@@ -1362,6 +1362,8 @@ describe("deriveMessagesTimelineRows", () => {
         createdAt: "2026-01-01T00:00:00Z",
         snapshot,
       },
+      { kind: "working", id: "working-indicator-row", createdAt: "2026-01-01T00:00:00Z" },
+      { kind: "thinking", id: "live-activity-row", createdAt: "2026-01-01T00:00:00Z" },
     ]);
     const withUser = deriveMessagesTimelineRows({
       timelineEntries: [userEntry],
@@ -1371,7 +1373,12 @@ describe("deriveMessagesTimelineRows", () => {
       supportsConversationRollback: false,
       environmentSetup: snapshot,
     });
-    expect(withUser.map((row) => row.kind)).toEqual(["message", "environment-setup"]);
+    expect(withUser.map((row) => row.kind)).toEqual([
+      "message",
+      "environment-setup",
+      "working",
+      "thinking",
+    ]);
   });
 
   it("keeps context compaction visible outside folded work", () => {

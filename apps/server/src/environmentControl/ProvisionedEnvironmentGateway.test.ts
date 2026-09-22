@@ -34,7 +34,7 @@ const fixture = (origin: string | null) => {
     cookie: string | undefined;
     dpop: string | undefined;
     host: string | undefined;
-    headers: Record<string, string>;
+    headers: Record<string, string | undefined>;
   }> = [];
   const client = HttpClient.make((request, _url, _signal) =>
     Effect.sync(() => {
@@ -139,7 +139,7 @@ describe("provisioned environment gateway", () => {
     });
   });
 
-  effectIt.scoped("relays websocket frames both ways between the client and the guest", () =>
+  effectIt.effect("relays websocket frames both ways between the client and the guest", () =>
     Effect.gen(function* () {
       const upstreamUrls: Array<string> = [];
       const echoRoute = HttpRouter.add(

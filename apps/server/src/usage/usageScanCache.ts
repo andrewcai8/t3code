@@ -14,8 +14,6 @@
  *
  * @module usageScanCache
  */
-// @effect-diagnostics nodeBuiltinImport:off
-import * as NodePath from "node:path";
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
@@ -294,36 +292,11 @@ function decodeCodexState(value: unknown): CodexScanState | null | undefined {
   };
 }
 
-export interface PruneOptions {
-  readonly livePaths: ReadonlySet<string>;
-  readonly walkedRoots: readonly string[];
-  readonly windowStartMs: number;
-  readonly retentionCutoffMs: number;
-}
-
-/** Drops aged-out entries and deleted files within roots completed by this walk. */
-export function pruneScanCache(cache: ScanCache, options: PruneOptions | number): number {
-  const retentionCutoffMs = typeof options === "number" ? options : options.retentionCutoffMs;
+/** Keeps saved usage after transcript cleanup, until the reporting retention expires. */
+export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): number {
   let removed = 0;
   for (const [path, entry] of cache) {
-    const agedOut = entry.mtimeMs < retentionCutoffMs;
-    const underWalkedRoot =
-      typeof options !== "number" &&
-      options.walkedRoots.some((root) => {
-        const relative = NodePath.relative(root, path);
-        return (
-          relative === "" ||
-          (relative !== ".." &&
-            !relative.startsWith(`..${NodePath.sep}`) &&
-            !NodePath.isAbsolute(relative))
-        );
-      });
-    const deleted =
-      typeof options !== "number" &&
-      underWalkedRoot &&
-      entry.mtimeMs >= options.windowStartMs &&
-      !options.livePaths.has(path);
-    if (agedOut || deleted) {
+    if (entry.mtimeMs < retentionCutoffMs) {
       cache.delete(path);
       removed += 1;
     }

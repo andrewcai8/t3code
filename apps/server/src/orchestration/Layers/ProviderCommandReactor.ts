@@ -36,12 +36,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
-import {
-  ProviderAdapterProcessError,
-  ProviderAdapterRequestError,
-  ProviderAdapterValidationError,
-  ProviderWorkspaceMissingError,
-} from "../../provider/Errors.ts";
+import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import {
   describeUnavailableProviderInstance,
@@ -71,7 +66,6 @@ import {
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
-const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 
 // Mirrors the wording the server uses when it continues threads across an
 // update, so a revived thread reads the same to the provider either way.
@@ -381,23 +375,6 @@ const make = Effect.gen(function* () {
     }
     if (turnsAfterCompaction.get(threadId) === queued) turnsAfterCompaction.delete(threadId);
   });
-
-  const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
-    const failReason = cause.reasons.find(Cause.isFailReason);
-    if (isProviderAdapterRequestError(failReason?.error)) {
-      return failReason.error.detail;
-    }
-    if (isProviderAdapterProcessError(failReason?.error)) {
-      return failReason.error.detail;
-    }
-    if (isProviderAdapterValidationError(failReason?.error)) {
-      return failReason.error.issue;
-    }
-    if (isProviderWorkspaceMissingError(failReason?.error)) {
-      return failReason.error.message;
-    }
-    return Cause.pretty(cause);
-  };
 
   const setThreadSession = (input: {
     readonly threadId: ThreadId;

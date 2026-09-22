@@ -60,6 +60,7 @@ export function handoffRejection(
         : undefined;
     case "thread.create":
     case "thread.delete":
+    case "thread.message.user.append":
     case "thread.checkpoint.revert":
     case "thread.conversation.revert":
     case "thread.runtime-mode.set":
@@ -91,6 +92,10 @@ export function handoffRejection(
     case "thread.session.set":
     case "thread.message.assistant.delta":
     case "thread.message.assistant.complete":
+    case "thread.message.reasoning.delta":
+    case "thread.message.reasoning.complete":
+    case "thread.title.generate.complete":
+    case "thread.title.refine":
     case "thread.history.import":
     case "thread.proposed-plan.upsert":
     case "thread.turn.diff.complete":

@@ -4,7 +4,7 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
+import * as ByteSize from "effect/ByteSize";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -33,7 +33,7 @@ export const environmentControlBodyLimitLayer = HttpRouter.middleware(
       return yield* Effect.provideService(
         httpEffect,
         HttpServerRequest.MaxBodySize,
-        FileSystem.Size(MAX_PROVISION_BODY_BYTES),
+        ByteSize.bytes(MAX_PROVISION_BODY_BYTES),
       );
     }),
   { global: true },
