@@ -6,8 +6,10 @@ export const provisionedSandboxLeases = createProvisionedSandboxLeaseStore(local
 
 export const {
   remember: rememberProvisionedSandbox,
+  rememberForEnvironment: rememberProvisionedSandboxForEnvironment,
   transfer: transferProvisionedSandboxLease,
   leaseFor: provisionedSandboxFor,
   leaseForEnvironment: provisionedSandboxForEnvironment,
+  leaseOwnedByEnvironment: provisionedSandboxOwnedByEnvironment,
   forget: forgetProvisionedSandbox,
 } = provisionedSandboxLeases;

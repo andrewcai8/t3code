@@ -50,6 +50,27 @@ describe("provisioned sandbox leases", () => {
     expect(store.leaseForEnvironment(threadRef.environmentId)).toBeNull();
   });
 
+  it("keeps a lease for an environment that has no thread yet and prefers the thread's once it does", () => {
+    const { records, storage } = memoryStorage();
+    const store = createProvisionedSandboxLeaseStore(storage);
+    store.rememberForEnvironment(threadRef.environmentId, lease);
+    expect(JSON.parse(records.get(PROVISIONED_SANDBOX_LEASES_STORAGE_KEY)!)).toEqual({
+      "environment:child": {
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        managerEnvironmentId: "manager",
+      },
+    });
+    const reloaded = createProvisionedSandboxLeaseStore(storage);
+    expect(reloaded.leaseOwnedByEnvironment(threadRef.environmentId)).toEqual(lease);
+    expect(reloaded.leaseForEnvironment(threadRef.environmentId)).toBeNull();
+    expect(reloaded.leaseOwnedByEnvironment(EnvironmentId.make("other"))).toBeNull();
+
+    const threadLease = { ...lease, leaseId: "thread-lease" };
+    reloaded.remember(threadRef, threadLease);
+    expect(reloaded.leaseOwnedByEnvironment(threadRef.environmentId)).toEqual(threadLease);
+  });
+
   it("reads records written before leases had their own id", () => {
     const { storage } = memoryStorage({
       [PROVISIONED_SANDBOX_LEASES_STORAGE_KEY]: JSON.stringify({

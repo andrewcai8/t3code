@@ -45,8 +45,7 @@ vi.mock("~/state/environments", () => ({
     environmentId === null ? null : { label: "Manager" },
 }));
 vi.mock("~/cloud/provisionedSandboxLeases", () => ({
-  provisionedSandboxForEnvironment: () =>
-    testState.lease === null ? null : { lease: testState.lease, threadRef: null },
+  provisionedSandboxOwnedByEnvironment: () => testState.lease,
 }));
 vi.mock("./ui/toast", () => ({
   toastManager: { add: testState.toast },
