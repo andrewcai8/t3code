@@ -26,6 +26,8 @@ import {
   type EnvironmentProvisionClaimResult,
   type EnvironmentProvisionTouchInput,
   type EnvironmentProvisionTouchResult,
+  type EnvironmentProvisionUpgradeInput,
+  type EnvironmentProvisionUpgradeResult,
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
 } from "@t3tools/contracts";
@@ -39,7 +41,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ALL_TRAFFIC } from "e2b";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts, ProvisionProviderError } from "./Provisioning.ts";
-import { makeProvisionPreparationStore } from "./ProvisionPreparation.ts";
+import {
+  configuredRuntimeArtifact,
+  makeProvisionPreparationStore,
+} from "./ProvisionPreparation.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { makeProvisionControl } from "./ProvisionControl.ts";
 import { makeNamespaceAllocationPorts } from "./namespaceAllocation.ts";
@@ -587,6 +592,9 @@ export class EnvironmentControl extends Context.Service<
     readonly touch: (
       input: EnvironmentProvisionTouchInput,
     ) => Effect.Effect<EnvironmentProvisionTouchResult, EnvironmentControlError>;
+    readonly upgrade: (
+      input: EnvironmentProvisionUpgradeInput,
+    ) => Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>;
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
@@ -961,6 +969,12 @@ export const layer = Layer.effect(
             resource.sandboxId,
           );
         },
+        pinnedRuntime: async (provider) => {
+          const manager = await resolve();
+          return manager ? configuredRuntimeArtifact(manager.config, provider) : null;
+        },
+        setRuntime: manifests.setRuntime,
+        prepare: ports.prepare,
       },
       leaseRegistry,
     );
@@ -1082,6 +1096,7 @@ export const layer = Layer.effect(
           reason: "unknown",
           message: "This install has no provisioning template configured.",
         }),
+      upgrade: provisionControl.upgrade,
       touch: (input) =>
         importedLeases.has(input.leaseId)
           ? run<EnvironmentProvisionTouchResult>(

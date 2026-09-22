@@ -1091,6 +1091,7 @@ const buildAppUnderTest = (options?: {
             }),
           resume: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
+          upgrade: () => Effect.die("Unused in server routing proof"),
           resumeUnclaimed: () =>
             Effect.succeed({ kind: "refused", reason: "unknown", message: "Not configured" }),
           claim: () =>

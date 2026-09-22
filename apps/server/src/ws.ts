@@ -2632,6 +2632,8 @@ const makeWsRpcLayer = (
             WS_METHODS.environmentControlResumeUnclaimed,
             environmentControl.resumeUnclaimed(input),
           ),
+        [WS_METHODS.environmentControlUpgrade]: (input) =>
+          observeRpcEffect(WS_METHODS.environmentControlUpgrade, environmentControl.upgrade(input)),
         [WS_METHODS.environmentControlAttach]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlAttach, environmentControl.attach(input)),
         [WS_METHODS.environmentControlClaim]: (input) =>

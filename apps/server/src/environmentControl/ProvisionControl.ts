@@ -8,6 +8,8 @@ import {
   type EnvironmentProvisionResult,
   type EnvironmentProvisionTouchInput,
   type EnvironmentProvisionTouchResult,
+  type EnvironmentProvisionUpgradeInput,
+  type EnvironmentProvisionUpgradeResult,
   type ProvisionOperation,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -18,7 +20,8 @@ import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 
 const isProvisionRefused = Schema.is(ProvisionRefused);
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
-import type { Provisioning } from "./Provisioning.ts";
+import type { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
+import type { ProvisionRuntimeArtifact } from "./config.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import type { ProvisionedLeaseRegistry, RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 import type { NamespaceProxyLease } from "./namespaceProxy.ts";
@@ -52,6 +55,16 @@ export interface ProvisionControlPorts {
    * there. The runtime that owns the provider decides what "gone" looks like.
    */
   readonly touch: (operation: ProvisionOperation) => Promise<"running" | "missing">;
+  /** The build this manager currently pins for a provider, or null when none is configured. */
+  readonly pinnedRuntime: (
+    provider: "e2b" | "namespace",
+  ) => Promise<ProvisionRuntimeArtifact | null>;
+  /** Records the build a guest should run next. `prepare` then converges the guest on it. */
+  readonly setRuntime: (
+    id: ProvisionRequestId,
+    artifact: ProvisionRuntimeArtifact,
+  ) => Promise<ProvisionRuntimeArtifact>;
+  readonly prepare: ProvisionProviderPorts["Service"]["prepare"];
 }
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
@@ -147,6 +160,8 @@ export function makeProvisionControl(
       .pipe(logCause, Effect.mapError(safeError));
     return true;
   });
+  /** Leases with an upgrade in flight. A second request for the same lease is refused, not queued. */
+  const upgrading = new Set<string>();
   const remote = <A>(operation: ProvisionOperation, run: () => Promise<A>) =>
     Effect.tryPromise({
       try: run,
@@ -324,6 +339,62 @@ export function makeProvisionControl(
       return touched
         ? { kind: "touched" }
         : { kind: "refused", reason: "unknown", message: "This environment's lease has ended." };
+    }),
+    upgrade: Effect.fn("EnvironmentControl.upgrade")(function* (
+      input: EnvironmentProvisionUpgradeInput,
+    ): Effect.fn.Return<EnvironmentProvisionUpgradeResult, EnvironmentControlError> {
+      const unknown: EnvironmentProvisionUpgradeResult = {
+        kind: "refused",
+        reason: "unknown",
+        message: "This workspace could not be found. Upgrade was refused.",
+      };
+      if (upgrading.has(input.leaseId))
+        return {
+          kind: "refused",
+          reason: "busy",
+          message: "This workspace is already being upgraded.",
+        };
+      upgrading.add(input.leaseId);
+      return yield* Effect.gen(function* () {
+        const lease = yield* promise(() => leases.findById(input.leaseId));
+        if (!lease || lease.sandboxId !== input.sandboxId) return unknown;
+        if (lease.state !== "active" && lease.state !== "paused")
+          return {
+            kind: "refused",
+            reason: "missing",
+            message: "This workspace is no longer available. Upgrade was refused.",
+          } satisfies EnvironmentProvisionUpgradeResult;
+        const id = yield* decodeRequestId(input.leaseId).pipe(logCause, Effect.mapError(safeError));
+        const operation = yield* store.get(id).pipe(logCause, Effect.mapError(safeError));
+        const state = operation.state;
+        if (
+          (yield* expired(operation)) ||
+          state.kind !== "ready" ||
+          state.readiness.environmentId !== input.environmentId
+        )
+          return unknown;
+        const pinned = yield* promise(() =>
+          ports.pinnedRuntime(state.allocation.resource.provider),
+        );
+        if (!pinned)
+          return {
+            kind: "refused",
+            reason: "unconfigured",
+            message:
+              "Configure a pinned runtime artifact for this cloud platform before upgrading.",
+          } satisfies EnvironmentProvisionUpgradeResult;
+        if (pinned.sha256 === state.readiness.artifactSha256)
+          return { kind: "current" as const, t3Revision: state.readiness.t3Revision };
+        yield* promise(() => ports.setRuntime(id, pinned));
+        const context = { requestId: id, provider: state.allocation.resource.provider };
+        const readiness = yield* ports
+          .prepare(operation, state.allocation)
+          .pipe(timeProvisionPhase("upgrade", context), logCause, Effect.mapError(safeError));
+        yield* store
+          .advance(operation, { kind: "ready", allocation: state.allocation, readiness })
+          .pipe(logCause, Effect.mapError(safeError));
+        return { kind: "upgraded" as const, t3Revision: readiness.t3Revision };
+      }).pipe(Effect.ensuring(Effect.sync(() => upgrading.delete(input.leaseId))));
     }),
   };
 }
