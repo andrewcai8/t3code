@@ -7,6 +7,12 @@ import { type DiscoveredProvisionedEnvironment, type ScopedThreadRef } from "@t3
 
 export interface ProvisionedConnectionPorts extends Omit<ProvisionedJoinPorts, "canReach"> {
   readonly waitForThread: (ref: ScopedThreadRef) => Promise<boolean>;
+  /**
+   * Records that this client reached the thread through a manager lease, so
+   * resume and update actions can route through the manager later. Only the
+   * provisioning flow recorded leases before; joining from Settings did not.
+   */
+  readonly rememberLease: (ref: ScopedThreadRef) => void;
 }
 
 export async function openProvisionedEnvironment(
@@ -26,6 +32,7 @@ export async function openProvisionedEnvironment(
     );
   if (environment.threadId === null) return null;
   const ref = scopeThreadRef(environment.environmentId, environment.threadId);
+  ports.rememberLease(ref);
   if (!(await ports.waitForThread(ref)))
     throw new Error("Connected. The existing thread is still loading; try Open thread again.");
   return ref;
