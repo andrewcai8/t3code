@@ -168,7 +168,10 @@ function cover(
       span.from <= base.settledUntil + 1
         ? Math.max(base.settledUntil, Math.min(span.until, now - SETTLE_MS))
         : base.settledUntil,
-    checkedAt: span.until >= base.until ? now : base.checkedAt,
+    // Only a read of the whole unsettled tail vouches for it. A read that merely
+    // extends the end would otherwise keep a late-written row out indefinitely.
+    checkedAt:
+      span.until >= base.until && span.from <= base.settledUntil + 1 ? now : base.checkedAt,
     rows: replaceSpan(base.rows, read),
   };
 }

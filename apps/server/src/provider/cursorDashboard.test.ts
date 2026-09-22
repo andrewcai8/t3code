@@ -419,6 +419,26 @@ describe("Cursor history cache", () => {
     ]);
   });
 
+  it("refetches the unsettled hour once a minute even when reads keep extending the window", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
+    const store = [usage("2026-09-10T11:30:00.000Z", 1)];
+    const api = historyApi(store);
+    const dashboard = await api.dashboard();
+    const pastDay = (until: string) =>
+      hours(new Date(at(until) - 24 * 60 * 60 * 1000).toISOString(), until);
+    await dashboard.readHistory(pastDay("2026-09-10T12:00:00.000Z"));
+    // A request that started at 11:50 is written only after the first read.
+    store.push(usage("2026-09-10T11:50:00.000Z", 2));
+    vi.setSystemTime(at("2026-09-10T12:00:58.000Z"));
+    expect(inputTokens(await dashboard.readHistory(pastDay("2026-09-10T12:00:58.000Z")))).toEqual([
+      1,
+    ]);
+    vi.setSystemTime(at("2026-09-10T12:01:56.000Z"));
+    expect(inputTokens(await dashboard.readHistory(pastDay("2026-09-10T12:01:56.000Z")))).toEqual([
+      1, 2,
+    ]);
+  });
+
   it("caches settled history whose rows lack token usage", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: at("2026-09-10T12:00:00.000Z") });
     const api = historyApi([
