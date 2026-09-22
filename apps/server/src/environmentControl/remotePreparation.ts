@@ -56,6 +56,13 @@ export interface RemotePreparationInput {
   readonly artifactSources?:
     | ReadonlyArray<{ readonly path: string; readonly url: string }>
     | undefined;
+  /**
+   * The build the guest converges to when it differs from `artifact`, which
+   * stays the environment's identity. Excluded from the guest's intent hash
+   * like `artifactSources`, so an environment prepared before this field
+   * existed still recognises its journal.
+   */
+  readonly runtime?: RemotePreparationInput["artifact"] | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
@@ -274,13 +281,14 @@ def prepare(spec):
             return None
 
         repository = spec['repository']
-        hashes = [(spec['artifact']['revision'], 40), (spec['artifact']['sha256'], 64), (spec['requestHash'], 64), (spec['preparationHash'], 64)]
+        runtime = spec.get('runtime') or spec['artifact']
+        hashes = [(spec['artifact']['revision'], 40), (spec['artifact']['sha256'], 64), (runtime['revision'], 40), (runtime['sha256'], 64), (spec['requestHash'], 64), (spec['preparationHash'], 64)]
         if repository is not None:
             hashes.append((repository['revision'], 40))
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key != 'artifactSources'}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
@@ -313,16 +321,29 @@ def prepare(spec):
             # t3 serve forces this off. Cloud guests must publish the cloned workspace.
             'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '1',
         })
-        artifact = root / 'artifact'
+        # The identity build keeps its pre-upgrade layout so every existing
+        # root verifies unchanged; any other build lives beside it by digest.
+        legacy = runtime['sha256'] == spec['artifact']['sha256']
+        artifact = root / 'artifact' if legacy else root / 'runtime' / runtime['sha256']
+        def recorded_snapshot():
+            if legacy:
+                return {'files': journal.get('artifactFiles'), 'links': journal.get('artifactLinks', {})}
+            return journal.get('runtimes', {}).get(runtime['sha256'])
+        def record_snapshot(files, links):
+            if legacy:
+                journal['artifactFiles'], journal['artifactLinks'] = files, links
+            else:
+                journal.setdefault('runtimes', {})[runtime['sha256']] = {'files': files, 'links': links}
         if not artifact.exists():
             with step('artifactExtract'):
-                if digest(spec['artifact']['archivePath']) != spec['artifact']['sha256']:
+                if digest(runtime['archivePath']) != runtime['sha256']:
                     raise RuntimeError('Artifact digest mismatch')
-                stage = root / 'artifact.partial'
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                stage = artifact.with_name(artifact.name + '.partial')
                 if stage.exists():
                     shutil.rmtree(stage)
                 stage.mkdir()
-                with tarfile.open(spec['artifact']['archivePath']) as archive:
+                with tarfile.open(runtime['archivePath']) as archive:
                     members = []
                     links = []
                     for member in archive.getmembers():
@@ -354,7 +375,7 @@ def prepare(spec):
                         else:
                             contained_link(stage, target, member.linkname)
                             os.symlink(member.linkname, target)
-                install = spec['artifact'].get('install')
+                install = runtime.get('install')
                 if install is not None and install != 'npm':
                     raise RuntimeError('Unsupported runtime artifact installer')
                 if install == 'npm':
@@ -387,14 +408,15 @@ def prepare(spec):
                                 npm_env['npm_config_nodedir'] = nodedir
                         with step('npmInstall'):
                             run([npm, 'ci', '--omit=dev', '--no-audit', '--no-fund'], stage, npm_env, timeout=600)
-                journal['artifactFiles'], journal['artifactLinks'] = artifact_snapshot(stage)
+                record_snapshot(*artifact_snapshot(stage))
                 atomic(journal_path, json.dumps(journal))
                 os.rename(stage, artifact)
         with step('artifactVerify'):
             actual_files, actual_links = artifact_snapshot(artifact)
-            if actual_files != journal.get('artifactFiles') or actual_links != journal.get('artifactLinks', {}):
+            expected = recorded_snapshot()
+            if expected is None or actual_files != expected['files'] or actual_links != expected['links']:
                 raise RuntimeError('Installed artifact changed')
-        entrypoint = contained(artifact, spec['artifact']['entrypoint'])
+        entrypoint = contained(artifact, runtime['entrypoint'])
         command = [spec['runtimeExecutable'], str(entrypoint)]
         userdata = t3home / 'userdata'
         userdata.mkdir(parents=True, exist_ok=True)
@@ -544,12 +566,45 @@ def prepare(spec):
                 return session.get('authenticated') is True and session.get('sessionMethod') == 'bearer-access-token' and ${JSON.stringify(AuthAccessWriteScope)} in session.get('scopes', [])
             except (OSError, ValueError):
                 return False
-        if not probe():
+        server_path = root / 'server.json'
+        def server_process():
+            try:
+                process = json.loads(server_path.read_text())
+            except (OSError, ValueError):
+                return None
+            # A server started before builds were recorded runs the identity build.
+            return {'pid': process['pid'], 'sha256': process.get('sha256', spec['artifact']['sha256']), 'revision': process.get('revision', spec['artifact']['revision'])}
+        def server_lock_free():
+            with open(root / 'server.lock', 'a') as held:
+                try:
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
+                return True
+        def stop_server(pid):
+            for signal, grace in ((15, 30), (9, 10)):
+                try:
+                    os.kill(pid, signal)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + grace
+                while not server_lock_free():
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.1)
+                else:
+                    return
+            raise RuntimeError('Running server did not stop for the upgrade')
+        healthy = probe()
+        process = server_process()
+        if not (healthy and process is not None and process['sha256'] == runtime['sha256']):
             with step('serverStart'):
+                if healthy and process is not None:
+                    stop_server(process['pid'])
                 # serve is headless and forces auto-bootstrap off, so the client
                 # pairs to an empty environment. start --no-browser keeps the same
                 # bind, and the cwd argument is the path we report as projectDir.
-                config = {'root': str(root), 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--auto-bootstrap-project-from-cwd', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
+                config = {'root': str(root), 'build': {'sha256': runtime['sha256'], 'revision': runtime['revision']}, 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--auto-bootstrap-project-from-cwd', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
                 with open(root / 'server.log', 'a') as log:
                     subprocess.Popen([sys.executable, '-c', SUPERVISOR, json.dumps(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
                 deadline = time.monotonic() + spec['readinessTimeoutSeconds']
@@ -584,9 +639,11 @@ def prepare(spec):
             detail = (added.stderr or added.stdout or '').strip()
             if 'already exists' not in detail.lower():
                 raise RuntimeError('Could not add the workspace as a project' + ((': ' + detail[-1500:]) if detail else ''))
-        process = json.loads((root / 'server.json').read_text())
+        process = server_process()
+        if process is None or process['sha256'] != runtime['sha256']:
+            raise RuntimeError('Prepared server is not running the requested build')
         mark('prepareTotal', entered)
-        return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': spec['artifact']['revision'], 'artifactSha256': spec['artifact']['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
+        return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 
 SUPERVISOR = r"""
 import fcntl,json,os,pathlib,sys
@@ -599,7 +656,7 @@ with open(root / 'server.lock', 'a') as lock:
     except BlockingIOError:
         sys.exit(0)
     with open(root / 'server.json.tmp', 'w') as output:
-        json.dump({'pid': os.getpid()}, output)
+        json.dump({'pid': os.getpid(), **config['build']}, output)
         output.flush()
         os.fsync(output.fileno())
     os.replace(root / 'server.json.tmp', root / 'server.json')
