@@ -531,7 +531,6 @@ import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
-import { provisionedSandboxForEnvironment } from "../cloud/provisionedSandboxLeases";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
@@ -2466,10 +2465,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeWorkspaceMissing =
     activeEnvironment?.connection.blockedReason === "workspace-missing";
   const canReconnectOnSend =
-    activeEnvironmentUnavailable &&
-    !activeWorkspaceMissing &&
-    activeThread != null &&
-    provisionedSandboxForEnvironment(activeThread.environmentId) !== null;
+    activeEnvironmentUnavailable && !activeWorkspaceMissing && activeThread != null;
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -2822,7 +2818,6 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
-    const waitForAutomaticReconnect = environmentReconnecting && !canReconnectOnSend;
     // Reconnecting to a version-skewed server with no update in flight
     // usually means the server is restarting mid-update and a refresh wiped
     // the in-memory update state. Fold the reconnect and version banners
@@ -2838,6 +2833,19 @@ export default function ChatView(props: ChatViewProps) {
       environmentReconnecting &&
       (updateRunning || (!reconnectingThroughVersionSkew && !reconnectWarningGraceElapsed));
     if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
+      // A paused cloud workspace on an older build also lands in the folded
+      // update line, so both lines keep the action that wakes it.
+      const reconnectAction = (
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={() =>
+            void handleReconnectActiveEnvironment(activeEnvironmentUnavailableState.environmentId)
+          }
+        >
+          Reconnect
+        </Button>
+      );
       if (reconnectingThroughVersionSkew) {
         items.push({
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
@@ -2852,7 +2860,12 @@ export default function ChatView(props: ChatViewProps) {
           ),
           title: `${unavailableConnection.phase === "connecting" ? "Connecting" : "Reconnecting"} to ${activeEnvironmentUnavailableState.label}`,
           description: "Finishing an update",
-          actions: disconnectAction,
+          actions: (
+            <>
+              {reconnectAction}
+              {disconnectAction}
+            </>
+          ),
         });
       } else {
         items.push({
@@ -2869,20 +2882,7 @@ export default function ChatView(props: ChatViewProps) {
               : "Reconnect to continue",
           actions: (
             <>
-              {!workspaceMissing && (
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  disabled={waitForAutomaticReconnect}
-                  onClick={() =>
-                    void handleReconnectActiveEnvironment(
-                      activeEnvironmentUnavailableState.environmentId,
-                    )
-                  }
-                >
-                  {waitForAutomaticReconnect ? "Reconnecting..." : "Reconnect"}
-                </Button>
-              )}
+              {!workspaceMissing && reconnectAction}
               {workspaceMissing ? (
                 <Button
                   size="xs"
@@ -2984,7 +2984,6 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
-    canReconnectOnSend,
     reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,

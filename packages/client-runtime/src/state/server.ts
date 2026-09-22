@@ -1039,16 +1039,7 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.environmentControlResume,
       concurrency: {
         mode: "singleFlight",
-        key: ({ environmentId, input }) =>
-          `${environmentId}:${input.leaseId}:${input.environmentId}:${input.threadId}`,
-      },
-    }),
-    resumeUnclaimedProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:cloud:resume-unclaimed",
-      tag: WS_METHODS.environmentControlResumeUnclaimed,
-      concurrency: {
-        mode: "singleFlight",
-        key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}:${input.sandboxId}`,
+        key: ({ environmentId, input }) => `${environmentId}:${input.environmentId}`,
       },
     }),
     upgradeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {

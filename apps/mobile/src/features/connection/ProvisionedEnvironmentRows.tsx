@@ -58,9 +58,6 @@ export function ProvisionedEnvironmentRows(props: {
   const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
     reportFailure: false,
   });
-  const resumeUnclaimed = useAtomCommand(serverEnvironment.resumeUnclaimedProvisionedEnvironment, {
-    reportFailure: false,
-  });
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
   const [joinStates, setJoinStates] = useState<Readonly<Record<string, ProvisionedJoinState>>>({});
   const [creating, setCreating] = useState(false);
@@ -80,25 +77,10 @@ export function ProvisionedEnvironmentRows(props: {
           isConnected: (id) => isProvisionedEnvironmentConnected(id, connectedEnvironments),
           attach: async () => {
             if (environment.lifecycle === "paused") {
-              const resumed =
-                environment.threadId === null
-                  ? await resumeUnclaimed({
-                      environmentId: managerId,
-                      input: {
-                        leaseId: environment.leaseId,
-                        sandboxId: environment.sandboxId,
-                        environmentId: environment.environmentId,
-                      },
-                    })
-                  : await resume({
-                      environmentId: managerId,
-                      input: {
-                        leaseId: environment.leaseId,
-                        sandboxId: environment.sandboxId,
-                        environmentId: environment.environmentId,
-                        threadId: environment.threadId,
-                      },
-                    });
+              const resumed = await resume({
+                environmentId: managerId,
+                input: { environmentId: environment.environmentId },
+              });
               if (AsyncResult.isFailure(resumed) || resumed.value.kind !== "resumed") {
                 return {
                   kind: "refused" as const,
@@ -153,7 +135,7 @@ export function ProvisionedEnvironmentRows(props: {
         });
       }
     },
-    [attach, connectedEnvironments, manager, managerId, pair, resume, resumeUnclaimed],
+    [attach, connectedEnvironments, manager, managerId, pair, resume],
   );
 
   if (!supported) return null;

@@ -199,35 +199,22 @@ export const EnvironmentProvisionPauseResult = Schema.Union([
 ]);
 export type EnvironmentProvisionPauseResult = typeof EnvironmentProvisionPauseResult.Type;
 
+/** Resume the retained workspace this manager provisioned for an environment. */
 export const EnvironmentProvisionResumeInput = Schema.Struct({
-  leaseId: TrimmedNonEmptyString,
-  sandboxId: TrimmedNonEmptyString,
   environmentId: EnvironmentId,
-  threadId: TrimmedNonEmptyString,
 });
 export type EnvironmentProvisionResumeInput = typeof EnvironmentProvisionResumeInput.Type;
-
-/** Resume a retained provisioned workspace before it has been claimed by a thread. */
-export const EnvironmentProvisionResumeUnclaimedInput = Schema.Struct({
-  leaseId: TrimmedNonEmptyString,
-  sandboxId: TrimmedNonEmptyString,
-  environmentId: EnvironmentId,
-});
-export type EnvironmentProvisionResumeUnclaimedInput =
-  typeof EnvironmentProvisionResumeUnclaimedInput.Type;
 
 export const EnvironmentProvisionResumeResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("resumed") }),
   Schema.Struct({
     kind: Schema.Literal("refused"),
-    reason: Schema.Literals(["unknown", "missing"]),
+    /** `not-provisioned` means this manager holds no workspace for the environment. */
+    reason: Schema.Literals(["unknown", "missing", "not-provisioned"]),
     message: Schema.String,
   }),
 ]);
 export type EnvironmentProvisionResumeResult = typeof EnvironmentProvisionResumeResult.Type;
-
-export const EnvironmentProvisionResumeUnclaimedResult = EnvironmentProvisionResumeResult;
-export type EnvironmentProvisionResumeUnclaimedResult = EnvironmentProvisionResumeResult;
 
 /** Move a provisioned workspace onto the manager's current pinned runtime build, in place. */
 export const EnvironmentProvisionUpgradeInput = Schema.Struct({

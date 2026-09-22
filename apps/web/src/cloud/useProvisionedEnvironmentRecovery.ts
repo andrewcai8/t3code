@@ -2,6 +2,7 @@ import { RegistryContext } from "@effect/atom-react";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useContext } from "react";
 import { environmentCatalog } from "../connection/catalog";
+import { environmentPresentations } from "../state/presentation";
 import { serverEnvironment } from "../state/server";
 import { createProvisionedEnvironmentRecovery } from "./provisionedEnvironmentRecovery";
 
@@ -15,28 +16,31 @@ export function useProvisionedEnvironmentRecovery() {
   let recovery = recoveries.get(registry);
   if (!recovery) {
     recovery = createProvisionedEnvironmentRecovery({
-      resume: async ({ lease, threadRef }) => {
+      managers: (environmentId) =>
+        [...registry.get(environmentPresentations.presentationsAtom)]
+          .filter(
+            ([managerId, presentation]) =>
+              managerId !== environmentId &&
+              presentation.connection.phase === "connected" &&
+              presentation.serverConfig?.environmentControl === true,
+          )
+          .map(([managerId]) => managerId),
+      resume: async (managerId, environmentId) => {
         const result = await runAtomCommand(
           registry,
           serverEnvironment.resumeProvisionedEnvironment,
-          {
-            environmentId: lease.managerEnvironmentId,
-            input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId, ...threadRef },
-          },
+          { environmentId: managerId, input: { environmentId } },
           { reportFailure: false },
         );
-        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-        if (result.value.kind === "refused") {
-          if (result.value.reason === "missing") {
-            const marked = await runAtomCommand(
-              registry,
-              environmentCatalog.markWorkspaceMissing,
-              threadRef.environmentId,
-            );
-            if (marked._tag === "Failure") throw squashAtomCommandFailure(marked);
-          }
-          throw new Error(result.value.message);
-        }
+        return result._tag === "Failure" ? null : result.value;
+      },
+      markMissing: async (environmentId) => {
+        const marked = await runAtomCommand(
+          registry,
+          environmentCatalog.markWorkspaceMissing,
+          environmentId,
+        );
+        if (marked._tag === "Failure") throw squashAtomCommandFailure(marked);
       },
       retry: async (environmentId) => {
         const result = await runAtomCommand(registry, environmentCatalog.retryNow, environmentId, {
