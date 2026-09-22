@@ -271,6 +271,13 @@ describe("thread handoff admission", () => {
         },
         { type: "thread.delete", commandId: CommandId.make("delete"), threadId },
         {
+          type: "thread.message.user.append",
+          commandId: CommandId.make("append"),
+          threadId,
+          message: { messageId: MessageId.make("appended"), text: "Later", attachments: [] },
+          createdAt,
+        },
+        {
           type: "project.delete",
           commandId: CommandId.make("delete-project"),
           projectId,
@@ -294,6 +301,15 @@ describe("thread handoff admission", () => {
         commandId: CommandId.make("title"),
         threadId,
         title: "Readable source",
+      });
+      await system.dispatch({
+        type: "thread.message.reasoning.delta",
+        commandId: CommandId.make("reasoning"),
+        threadId,
+        messageId: MessageId.make("reasoning-message"),
+        delta: "Considering",
+        turnId,
+        createdAt,
       });
       await system.dispatch({
         type: "thread.turn.interrupt",
