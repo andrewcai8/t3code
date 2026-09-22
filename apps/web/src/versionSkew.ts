@@ -10,7 +10,7 @@ import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
-import { provisionedSandboxForEnvironment } from "./cloud/provisionedSandboxLeases";
+import { provisionedSandboxOwnedByEnvironment } from "./cloud/provisionedSandboxLeases";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
 export interface VersionMismatch {
@@ -156,10 +156,7 @@ export function resolveEnvironmentServerUpdatePath(
 ): ServerUpdatePath {
   return resolveServerUpdatePath({
     selfUpdate,
-    lease:
-      environmentId === null
-        ? null
-        : (provisionedSandboxForEnvironment(environmentId)?.lease ?? null),
+    lease: environmentId === null ? null : provisionedSandboxOwnedByEnvironment(environmentId),
   });
 }
 

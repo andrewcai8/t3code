@@ -24,10 +24,16 @@ function key(target: string | ScopedThreadRef): string {
     : `thread:${target.environmentId}:${target.threadId}`;
 }
 
+function environmentKey(environmentId: EnvironmentId): string {
+  return `environment:${environmentId}`;
+}
+
 /**
  * Which sandbox a draft or thread owns, so the client can heartbeat, pause, and dispose it.
  * A lease starts under the draft that provisioned it and moves to the thread once the first
  * turn starts; whichever holds it is the one whose deletion must tear the machine down.
+ * An environment joined from Settings before it has any thread is recorded under the
+ * environment itself, which answers "is this a manager lease" but owns no lifecycle.
  */
 export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
   const leases = new Map<string, ProvisionedSandboxLease>();
@@ -63,6 +69,14 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     persist();
   }
 
+  function rememberForEnvironment(
+    environmentId: EnvironmentId,
+    lease: ProvisionedSandboxLease,
+  ): void {
+    leases.set(environmentKey(environmentId), lease);
+    persist();
+  }
+
   function transfer(draftId: string, threadRef: ScopedThreadRef): void {
     const draftKey = key(draftId);
     const lease = leases.get(draftKey);
@@ -88,11 +102,25 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     return null;
   }
 
+  function leaseOwnedByEnvironment(environmentId: EnvironmentId): ProvisionedSandboxLease | null {
+    return (
+      leaseForEnvironment(environmentId)?.lease ?? leases.get(environmentKey(environmentId)) ?? null
+    );
+  }
+
   function forget(target: string | ScopedThreadRef): void {
     if (leases.delete(key(target))) persist();
   }
 
-  return { remember, transfer, leaseFor, leaseForEnvironment, forget };
+  return {
+    remember,
+    rememberForEnvironment,
+    transfer,
+    leaseFor,
+    leaseForEnvironment,
+    leaseOwnedByEnvironment,
+    forget,
+  };
 }
 
 export type ProvisionedSandboxLeaseStore = ReturnType<typeof createProvisionedSandboxLeaseStore>;

@@ -41,8 +41,10 @@ describe("opening a discovered provisioned environment", () => {
         calls.push(`wait:${ref.environmentId}:${ref.threadId}`);
         return true;
       },
-      rememberLease: (ref: { environmentId: EnvironmentId; threadId: string }) => {
-        calls.push(`remember:${ref.environmentId}:${ref.threadId}`);
+      rememberLease: (ref: { environmentId: EnvironmentId; threadId: string } | null) => {
+        calls.push(
+          ref === null ? "remember:none" : `remember:${ref.environmentId}:${ref.threadId}`,
+        );
       },
     };
     expect(await openProvisionedEnvironment(environment, ports)).toEqual({
@@ -100,7 +102,7 @@ describe("opening a discovered provisioned environment", () => {
     ).rejects.toThrow("does not match");
     expect(waits).toBe(0);
   });
-  it("keeps a missing existing thread explicit and supports an unclaimed environment", async () => {
+  it("keeps a missing existing thread explicit", async () => {
     const ports = {
       isConnected: () => true,
       attach: async () => {
@@ -113,6 +115,32 @@ describe("opening a discovered provisioned environment", () => {
       waitForThread: async () => false,
     };
     await expect(openProvisionedEnvironment(environment, ports)).rejects.toThrow("still loading");
+  });
+  it("records the lease against the environment when it has no thread yet", async () => {
+    const calls: string[] = [];
+    let connected = false;
+    const ports = {
+      isConnected: () => connected,
+      attach: async () => ({
+        kind: "attached" as const,
+        environmentId: environment.environmentId,
+        pairingUrl: "https://remote.invalid/pair#token=fresh",
+      }),
+      pair: async (url: string) => {
+        calls.push(url);
+        connected = true;
+        return environment.environmentId;
+      },
+      waitForThread: async () => {
+        throw new Error("unexpected wait");
+      },
+      rememberLease: (ref: { environmentId: EnvironmentId; threadId: string } | null) => {
+        calls.push(
+          ref === null ? "remember:none" : `remember:${ref.environmentId}:${ref.threadId}`,
+        );
+      },
+    };
     expect(await openProvisionedEnvironment({ ...environment, threadId: null }, ports)).toBeNull();
+    expect(calls).toEqual(["https://remote.invalid/pair#token=fresh", "remember:none"]);
   });
 });

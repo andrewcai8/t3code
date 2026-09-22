@@ -8,11 +8,11 @@ import { type DiscoveredProvisionedEnvironment, type ScopedThreadRef } from "@t3
 export interface ProvisionedConnectionPorts extends Omit<ProvisionedJoinPorts, "canReach"> {
   readonly waitForThread: (ref: ScopedThreadRef) => Promise<boolean>;
   /**
-   * Records that this client reached the thread through a manager lease, so
-   * resume and update actions can route through the manager later. Only the
-   * provisioning flow recorded leases before; joining from Settings did not.
+   * Records that this client reached the environment through a manager lease, so
+   * resume and update actions can route through the manager later. `null` means the
+   * environment has no thread yet and the lease belongs to the environment itself.
    */
-  readonly rememberLease: (ref: ScopedThreadRef) => void;
+  readonly rememberLease: (ref: ScopedThreadRef | null) => void;
 }
 
 export async function openProvisionedEnvironment(
@@ -30,7 +30,10 @@ export async function openProvisionedEnvironment(
         ? joined.message
         : "This machine is reachable only through the computer that started it.",
     );
-  if (environment.threadId === null) return null;
+  if (environment.threadId === null) {
+    ports.rememberLease(null);
+    return null;
+  }
   const ref = scopeThreadRef(environment.environmentId, environment.threadId);
   ports.rememberLease(ref);
   if (!(await ports.waitForThread(ref)))

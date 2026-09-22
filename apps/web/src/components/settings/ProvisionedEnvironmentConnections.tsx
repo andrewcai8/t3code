@@ -20,7 +20,10 @@ import { waitForThreadShell } from "../../state/waitForThreadShell";
 import { Button } from "../ui/button";
 import { QRCodeSvg } from "../ui/qr-code";
 import { toastManager } from "../ui/toast";
-import { rememberProvisionedSandbox } from "../../cloud/provisionedSandboxLeases";
+import {
+  rememberProvisionedSandbox,
+  rememberProvisionedSandboxForEnvironment,
+} from "../../cloud/provisionedSandboxLeases";
 
 type DevicePairing =
   | { readonly kind: "minting" }
@@ -262,12 +265,16 @@ export function ProvisionedEnvironmentConnections({
         },
         rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
         waitForThread: waitForThreadShell,
-        rememberLease: (ref) =>
-          rememberProvisionedSandbox(ref, {
+        rememberLease: (ref) => {
+          const lease = {
             leaseId: environment.leaseId,
             sandboxId: environment.sandboxId,
             managerEnvironmentId: managerId,
-          }),
+          };
+          if (ref === null)
+            rememberProvisionedSandboxForEnvironment(environment.environmentId, lease);
+          else rememberProvisionedSandbox(ref, lease);
+        },
       });
       if (ref) await navigate({ to: "/$environmentId/$threadId", params: ref });
       else setMessage("Environment connected. Its threads will appear when they are available.");
