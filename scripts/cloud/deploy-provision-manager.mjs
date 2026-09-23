@@ -7,7 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 import * as NodeChildProcess from "node:child_process";
-import { planManagerAccounts } from "./provision-manager-accounts.ts";
+import { packHostState } from "./pack-host-state.ts";
 
 const require = NodeModule.createRequire(
   new URL("../../apps/server/package.json", import.meta.url),
@@ -53,10 +53,6 @@ const output = NodePath.resolve(values.output);
 await NodeFSP.mkdir(output, { recursive: true, mode: 0o700 });
 
 const config = JSON.parse(await NodeFSP.readFile(values.config, "utf8"));
-const apiKey = config.e2bApiKey;
-if (typeof apiKey !== "string" || !apiKey) throw new Error("E2B API key is missing");
-const templateId = config.provisioning?.templateId;
-if (!templateId) throw new Error("Configure provisioning.templateId before deploying a manager");
 
 const MANAGER_BASE_DIR = "/home/user/manager-state";
 // A TTL, not an idle timer: E2B pauses the manager this long after creation
@@ -67,69 +63,41 @@ const MANAGER_BASE_DIR = "/home/user/manager-state";
 // request wakes it in well under a second.
 const MANAGER_TIMEOUT_MS = 30 * 60_000;
 
-const plan = planManagerAccounts({
+// Packing reads every credential before paying for a sandbox, so a missing
+// file fails here rather than stranding a half-built box.
+const state = await packHostState({
+  config,
   settings: JSON.parse(await NodeFSP.readFile(values.settings, "utf8")),
-  provisioning: config.provisioning ?? {},
   accounts: values.accounts
     ?.split(",")
     .map((id) => id.trim())
     .filter(Boolean),
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Deploy script has no Effect runtime.
   host: { homedir: NodeOS.homedir(), platform: process.platform, environment: process.env },
-  managerBaseDir: MANAGER_BASE_DIR,
+  baseDir: MANAGER_BASE_DIR,
+  skillsDir: "/home/user/skills",
 });
-for (const { id, reason } of plan.skipped) console.log(`skipping ${id}: ${reason}`);
-if (plan.accounts.length === 0) throw new Error("No provider account can travel");
-console.log(`carrying accounts ${plan.accounts.join(", ")}`);
-// Read every credential before paying for a sandbox, so a missing file fails
-// here rather than stranding a half-built box.
-const credentialFiles = [];
-for (const file of plan.files)
-  credentialFiles.push({ path: file.destination, data: await NodeFSP.readFile(file.source) });
-
-const run = (command, args) => {
-  const result = NodeChildProcess.spawnSync(command, args, {
-    cwd: repoRoot,
-    stdio: "inherit",
-    // COPYFILE_DISABLE is what actually suppresses AppleDouble sidecars on
-    // macOS. `tar --no-xattrs` alone does not, and the sidecars are invisible
-    // locally, so a bundle only looks wrong once it is inside the sandbox.
-    env: { ...process.env, COPYFILE_DISABLE: "1" },
-  });
-  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
-};
+for (const { id, reason } of state.skipped) console.log(`skipping ${id}: ${reason}`);
+console.log(`carrying accounts ${state.accounts.join(", ")}`);
+const { e2bApiKey: apiKey, provisioning } = state.config;
+const templateId = provisioning.templateId;
 
 let artifactPath = values.artifact;
 if (!artifactPath) {
   artifactPath = NodePath.join(output, "runtime-linux.tar");
   console.log("building the runtime artifact");
-  run("node", ["apps/server/scripts/build-runtime-artifact.ts", artifactPath]);
+  const build = NodeChildProcess.spawnSync(
+    "node",
+    ["apps/server/scripts/build-runtime-artifact.ts", artifactPath],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
+  if (build.status !== 0) throw new Error("building the runtime artifact failed");
 }
 const artifact = await NodeFSP.readFile(artifactPath);
 const sha256 = NodeCrypto.createHash("sha256").update(artifact).digest("hex");
 const revision = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
   .toString()
   .trim();
-
-/** Skill bundles travel as archives, one per configured source. */
-const bundles = [];
-for (const [index, skill] of (config.provisioning?.skills ?? []).entries()) {
-  const archive = NodePath.join(output, `skills-${index}.tgz`);
-  run("tar", [
-    "--no-xattrs",
-    "-czf",
-    archive,
-    "-C",
-    NodePath.dirname(skill.source),
-    NodePath.basename(skill.source),
-  ]);
-  bundles.push({
-    archive,
-    index,
-    source: skill.source,
-    ...(skill.name ? { name: skill.name } : {}),
-  });
-}
 
 // Reusing a sandbox matters on a retry: the artifact upload is the slow step,
 // and a failure part way through would otherwise strand the box it created.
@@ -165,28 +133,9 @@ const port = Number(values.port);
 const host = sandbox.getHost(port);
 
 const managerConfig = {
-  e2bApiKey: apiKey,
-  broker: {
-    sandboxId: sandbox.sandboxId,
-    metadata: { purpose: "t3-environment", account: values.account },
-    url: `https://${host}`,
-    ingressKey: `ingress-${NodeCrypto.randomUUID()}`,
-  },
-  targets: [],
+  ...state.config,
   provisioning: {
-    templateId,
-    ...(config.provisioning?.githubToken ? { githubToken: config.provisioning.githubToken } : {}),
-    ...(config.provisioning?.namespace ? { namespace: config.provisioning.namespace } : {}),
-    // Carry the host's provisioning policy through. Dropping egressAllow left
-    // provisioned environments without the allowlist their preparation needs,
-    // which fails far from here as an unreachable package host.
-    ...(config.provisioning?.egressAllow ? { egressAllow: config.provisioning.egressAllow } : {}),
-    ...(plan.claudeOAuthTokens ? { claudeOAuthTokens: plan.claudeOAuthTokens } : {}),
-    // The host's `shellEnvironment` names source paths on the host, and
-    // freezing a manifest reads every one of them, so the entries the manager
-    // gets point at copies it owns. Carrying the host's paths verbatim made
-    // every provision fail with an ENOENT naming another machine.
-    ...(plan.shellEnvironment ? { shellEnvironment: plan.shellEnvironment } : {}),
+    ...provisioning,
     runtimeArtifacts: {
       linux: {
         path: "/home/user/runtime-linux.tar",
@@ -197,10 +146,12 @@ const managerConfig = {
         install: "npm",
       },
     },
-    skills: bundles.map((bundle) => ({
-      source: `/home/user/skills/${bundle.index}/${NodePath.basename(bundle.source)}`,
-      ...(bundle.name ? { name: bundle.name } : {}),
-    })),
+  },
+  broker: {
+    sandboxId: sandbox.sandboxId,
+    metadata: { purpose: "t3-environment", account: values.account },
+    url: `https://${host}`,
+    ingressKey: `ingress-${NodeCrypto.randomUUID()}`,
   },
 };
 
@@ -211,8 +162,7 @@ await sandbox.commands.run(
 );
 const privateFiles = [
   { path: "/home/user/environment-control.json", data: JSON.stringify(managerConfig) },
-  { path: plan.settingsPath, data: JSON.stringify({ providerInstances: plan.providerInstances }) },
-  ...credentialFiles,
+  ...state.files,
 ];
 await sandbox.files.write(privateFiles);
 // The runtime artifact is hundreds of megabytes; the SDK's default request
@@ -220,20 +170,17 @@ await sandbox.files.write(privateFiles);
 await sandbox.files.write("/home/user/runtime-linux.tar", artifact, {
   requestTimeoutMs: 1_800_000,
 });
-for (const bundle of bundles)
-  await sandbox.files.write(
-    `/home/user/skills-${bundle.index}.tgz`,
-    await NodeFSP.readFile(bundle.archive),
-  );
+for (const [index, bundle] of state.skills.entries())
+  await sandbox.files.write(`/home/user/skills-${index}.tgz`, bundle.archive);
 
 console.log("installing the runtime artifact");
 const install = await sandbox.commands.run(
   [
     "set -eu",
     `chmod 600 ${privateFiles.map((file) => `'${file.path}'`).join(" ")}`,
-    ...bundles.map(
-      (bundle) =>
-        `mkdir -p /home/user/skills/${bundle.index} && tar -xzf /home/user/skills-${bundle.index}.tgz -C /home/user/skills/${bundle.index}`,
+    ...state.skills.map(
+      (bundle, index) =>
+        `mkdir -p ${bundle.directory} && tar -xzf /home/user/skills-${index}.tgz -C ${bundle.directory}`,
     ),
     "rm -rf /home/user/manager && mkdir -p /home/user/manager",
     "tar -xf /home/user/runtime-linux.tar -C /home/user/manager",
@@ -281,7 +228,7 @@ const descriptor = {
   sha256,
   revision,
   templateId,
-  accounts: plan.accounts,
+  accounts: state.accounts,
 };
 await NodeFSP.writeFile(
   NodePath.join(output, "manager.json"),
@@ -293,10 +240,10 @@ const redacted = {
   e2bApiKey: "[redacted]",
   provisioning: {
     ...managerConfig.provisioning,
-    ...(plan.claudeOAuthTokens
+    ...(provisioning.claudeOAuthTokens
       ? {
           claudeOAuthTokens: Object.fromEntries(
-            Object.keys(plan.claudeOAuthTokens).map((id) => [id, "[redacted]"]),
+            Object.keys(provisioning.claudeOAuthTokens).map((id) => [id, "[redacted]"]),
           ),
         }
       : {}),
