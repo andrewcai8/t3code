@@ -59,10 +59,7 @@ export interface HostState {
   readonly config: {
     readonly e2bApiKey: string;
     readonly targets: readonly [];
-    readonly provisioning: Record<string, unknown> & {
-      readonly templateId: string;
-      readonly claudeOAuthTokens?: Record<string, string>;
-    };
+    readonly provisioning: Record<string, unknown> & { readonly templateId: string };
   };
   /** Every file is private to the host user (0600). */
   readonly files: ReadonlyArray<{ readonly path: string; readonly data: string | Buffer }>;
@@ -140,7 +137,6 @@ export async function packHostState(input: PackInput): Promise<HostState> {
         // provisioned environments without the allowlist their preparation needs,
         // which fails far from here as an unreachable package host.
         ...(provisioning?.egressAllow ? { egressAllow: provisioning.egressAllow } : {}),
-        ...(plan.claudeOAuthTokens ? { claudeOAuthTokens: plan.claudeOAuthTokens } : {}),
         // The host's `shellEnvironment` names source paths on the host, and
         // freezing a manifest reads every one of them, so the entries the manager
         // gets point at copies it owns. Carrying the host's paths verbatim made

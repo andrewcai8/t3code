@@ -19,7 +19,7 @@ import {
   query as claudeQuery,
   type Options as ClaudeQueryOptions,
   type SlashCommand as ClaudeSlashCommand,
-  type SDKControlGetUsageResponse,
+  type SDKRateLimitInfo,
   type SDKUserMessage,
   type SettingSource,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -41,8 +41,9 @@ import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 import {
   type ClaudeScopedLimitNames,
-  claudeUsageResponseToLimits,
-  recordClaudeUsageResponse,
+  type ClaudeUsageRead,
+  claudeUsageReadToLimits,
+  recordClaudeUsageRead,
 } from "./claudeUsageLimits.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
@@ -277,6 +278,49 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
   };
 }
 
+/**
+ * The `tokenSource` a `claude setup-token` login reports. Its token carries
+ * inference scope only, so `get_usage` has no windows for it.
+ */
+const SETUP_TOKEN_SOURCE = "CLAUDE_CODE_OAUTH_TOKEN";
+
+export const CLAUDE_USAGE_TURN_PROMPT = "Reply with the single word OK.";
+
+/**
+ * Options for the throwaway turn that reads a setup-token account's windows:
+ * the cheapest model, no tools, thinking, settings, hooks, MCP, or session.
+ */
+function buildClaudeUsageTurnQueryOptions(input: {
+  readonly executablePath: string;
+  readonly abortController: AbortController;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly cwd: string | undefined;
+}): ClaudeQueryOptions {
+  return {
+    persistSession: false,
+    pathToClaudeCodeExecutable: input.executablePath,
+    abortController: input.abortController,
+    model: "haiku",
+    maxTurns: 1,
+    tools: [],
+    thinking: { type: "disabled" },
+    systemPrompt: "Reply tersely.",
+    settingSources: [],
+    settings: { disableAllHooks: true },
+    mcpServers: {},
+    strictMcpConfig: true,
+    env: {
+      ...input.environment,
+      ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      FORCE_CODE_TERMINAL: undefined,
+      CLAUDE_CODE_AUTO_CONNECT_IDE: "0",
+      CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL: "1",
+    },
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    stderr: () => {},
+  };
+}
+
 function nonEmptyProbeString(value: string): string | undefined {
   const candidate = value.trim();
   return candidate ? candidate : undefined;
@@ -294,11 +338,10 @@ export type ClaudeCapabilitiesProbe = {
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   /**
-   * Subscription windows from the SDK's `get_usage` control request, or
-   * `undefined` when the request itself failed. Absent windows on an
-   * otherwise successful response mean the account has none (API key).
+   * Subscription windows, or `undefined` when they could not be read. Absent
+   * windows on a `get_usage` response mean the account has none (API key).
    */
-  readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
+  readonly usage?: ClaudeUsageRead;
 };
 
 function parseClaudeInitializationCommands(
@@ -421,11 +464,11 @@ const probeClaudeCapabilities = (
         }),
       });
       const init = await q.initializationResult();
-      return { q, init };
+      return { q, init, executablePath, claudeEnvironment };
     });
   }).pipe(
     Effect.timeout(CAPABILITIES_PROBE_TIMEOUT_MS),
-    Effect.flatMap(({ q, init }) =>
+    Effect.flatMap(({ q, init, executablePath, claudeEnvironment }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         const usageResult = yield* Effect.tryPromise(() =>
@@ -437,12 +480,6 @@ const probeClaudeCapabilities = (
           ),
           Effect.result,
         );
-        const usage = Result.isSuccess(usageResult)
-          ? {
-              rate_limits_available: usageResult.success.rate_limits_available,
-              rate_limits: usageResult.success.rate_limits,
-            }
-          : undefined;
         const account = init.account as
           | {
               readonly email?: string;
@@ -451,6 +488,21 @@ const probeClaudeCapabilities = (
               readonly apiProvider?: string;
             }
           | undefined;
+        let usage: ClaudeUsageRead | undefined;
+        if (Result.isSuccess(usageResult)) {
+          const { rate_limits_available, rate_limits } = usageResult.success;
+          if (rate_limits_available || account?.tokenSource !== SETUP_TOKEN_SOURCE) {
+            usage = { source: "usageEndpoint", response: { rate_limits_available, rate_limits } };
+          } else {
+            abort.abort();
+            const info = yield* readClaudeUsageFromTurn({
+              executablePath,
+              environment: claudeEnvironment,
+              cwd,
+            });
+            usage = { source: "rateLimitEvent", info };
+          }
+        }
         return {
           email: account?.email,
           subscriptionType: account?.subscriptionType,
@@ -476,6 +528,36 @@ const probeClaudeCapabilities = (
   );
 };
 
+/**
+ * Read a setup-token account's windows from one throwaway turn. The
+ * `rate_limit_event` arrives with the response headers, before the reply,
+ * and the turn is aborted there.
+ */
+const readClaudeUsageFromTurn = (input: {
+  readonly executablePath: string;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly cwd: string | undefined;
+}): Effect.Effect<SDKRateLimitInfo | undefined> => {
+  const abort = new AbortController();
+  return Effect.tryPromise(async () => {
+    const q = claudeQuery({
+      prompt: CLAUDE_USAGE_TURN_PROMPT,
+      options: buildClaudeUsageTurnQueryOptions({ ...input, abortController: abort }),
+    });
+    for await (const message of q) {
+      if (message.type === "rate_limit_event") return message.rate_limit_info;
+    }
+    throw new Error("The turn ended without a rate_limit_event.");
+  }).pipe(
+    Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS),
+    Effect.ensuring(Effect.sync(() => abort.abort())),
+    Effect.tapError((error) =>
+      Effect.logWarning("Claude usage turn failed.", { cause: probeFailureMessage(error) }),
+    ),
+    Effect.orElseSucceed(() => undefined),
+  );
+};
+
 const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   claudeSettings: ClaudeSettings,
   args: ReadonlyArray<string>,
@@ -491,6 +573,8 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   });
   return yield* spawnAndCollect(claudeSettings.binaryPath, command);
 });
+
+const NO_SCOPED_NAMES: ClaudeScopedLimitNames = { overageIncluded: undefined };
 
 export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(function* (
   claudeSettings: ClaudeSettings,
@@ -661,11 +745,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     }) ?? apiProviderAuthMetadata(capabilities?.apiProvider ?? cliAuth?.apiProvider);
   const usageLimits = capabilities?.usage
     ? scopedLimitNames
-      ? yield* recordClaudeUsageResponse(scopedLimitNames, {
-          response: capabilities.usage,
-          checkedAt,
-        })
-      : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits
+      ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
+      : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
+          .limits
     : undefined;
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
@@ -718,11 +800,9 @@ export const overlayClaudeCapabilitiesOnSnapshot = Effect.fn("overlayClaudeCapab
     const usageLimits = !capabilities.usage
       ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
       : scopedLimitNames
-        ? yield* recordClaudeUsageResponse(scopedLimitNames, {
-            response: capabilities.usage,
-            checkedAt,
-          })
-        : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
+        ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
+        : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
+            .limits;
 
     return {
       ...snapshot,

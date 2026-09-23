@@ -31,7 +31,7 @@ Use the account's config directory, or drop `CLAUDE_CONFIG_DIR=` for the default
 { "provisioning": { "claudeOAuthTokens": { "claude_personal": "sk-ant-oat01-..." } } }
 ```
 
-Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. Local runs keep using the keychain login. A credential set in the instance's own environment variables still wins, and an account with a `.credentials.json` file needs no token.
+Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. A manager deployed by `deploy-provision-manager.mjs` or `pack-host-state.ts` runs that account on the token too, so the manager can chat on it and read its usage. Local runs keep using the keychain login. A credential set in the instance's own environment variables still wins, and an account with a `.credentials.json` file needs no token.
 
 ## Which account a cloud environment uses
 

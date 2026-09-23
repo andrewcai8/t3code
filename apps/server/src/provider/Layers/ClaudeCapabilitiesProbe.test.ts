@@ -17,6 +17,7 @@ import {
   buildClaudeCapabilitiesProbeQueryOptions,
   CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES,
   CLAUDE_USAGE_PROBE_TIMEOUT_MS,
+  CLAUDE_USAGE_TURN_PROMPT,
   parseClaudeAuthStatusOutput,
   probeClaudeCapabilities,
 } from "./ClaudeProvider.ts";
@@ -191,8 +192,11 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
           },
         ],
         usage: {
-          rate_limits_available: true,
-          rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
+          source: "usageEndpoint",
+          response: {
+            rate_limits_available: true,
+            rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
+          },
         },
       });
 
@@ -256,5 +260,63 @@ it.effect("preserves initialized capabilities when optional usage times out", ()
     ]);
     assert.equal(capabilities?.usage, undefined);
     assert.equal(abortSignal?.aborted, true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reads windows from one probe turn only for a setup-token account", () =>
+  Effect.gen(function* () {
+    const rateLimitInfo = {
+      status: "allowed",
+      rateLimitType: "five_hour",
+      unifiedWindows: {
+        five_hour: { utilization: 0.03, resetsAt: 1_790_207_400 },
+        seven_day: { utilization: 0.44, resetsAt: 1_790_672_400 },
+      },
+    } as ClaudeSdk.SDKRateLimitInfo;
+    let account: ClaudeSdk.AccountInfo = {};
+    let usage: Pick<ClaudeSdk.SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits"> =
+      { rate_limits_available: false, rate_limits: null };
+    const spawned: unknown[] = [];
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(({ prompt, options }) => {
+      if (typeof prompt === "string") {
+        spawned.push({ prompt, model: options?.model, tools: options?.tools });
+        return (async function* () {
+          yield { type: "system", subtype: "init" };
+          yield { type: "rate_limit_event", rate_limit_info: rateLimitInfo };
+          throw new Error("the probe turn must stop at its rate_limit_event");
+        })() as unknown as ReturnType<typeof ClaudeSdk.query>;
+      }
+      spawned.push("initialize");
+      return {
+        initializationResult: async () => ({ account, commands: [] }),
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => usage,
+      } as unknown as ReturnType<typeof ClaudeSdk.query>;
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const settings = decodeClaudeSettings({ binaryPath: "claude" });
+
+    account = { tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", apiProvider: "firstParty" };
+    usage = { rate_limits_available: false, rate_limits: null };
+    const setupToken = yield* probeClaudeCapabilities(settings);
+    account = { email: "dev@example.com", subscriptionType: "max", tokenSource: "claude.ai" };
+    usage = {
+      rate_limits_available: true,
+      rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
+    };
+    const keychain = yield* probeClaudeCapabilities(settings);
+
+    assert.deepEqual(setupToken?.usage, { source: "rateLimitEvent", info: rateLimitInfo });
+    assert.deepEqual(keychain?.usage, {
+      source: "usageEndpoint",
+      response: {
+        rate_limits_available: true,
+        rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
+      },
+    });
+    assert.deepEqual(spawned, [
+      "initialize",
+      { prompt: CLAUDE_USAGE_TURN_PROMPT, model: "haiku", tools: [] },
+      "initialize",
+    ]);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
