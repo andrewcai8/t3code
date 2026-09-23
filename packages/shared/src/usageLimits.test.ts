@@ -1130,6 +1130,18 @@ describe("rankAccounts", () => {
     expect(ids(ranked)).toEqual(["fresh", "session-busy", "weekly-spent"]);
   });
 
+  it("ranks a spent account below one whose usage is unknown", () => {
+    const ranked = rankAccounts(
+      [
+        account("spent", { checkedAt, windows: [session(10), weekly(100)] }),
+        account("unknown"),
+        account("room", { checkedAt, windows: [session(90)] }),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual(["room", "unknown", "spent"]);
+  });
+
   it("counts a window past its reset as full", () => {
     const ranked = rankAccounts(
       [

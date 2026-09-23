@@ -706,12 +706,16 @@ export function accountHeadroom(
   return tightest;
 }
 
+/** Known room first, then unknown, then known to be spent: a spent account fails its first turn. */
+const headroomTier = (headroom: AccountHeadroom | null) =>
+  headroom === null ? 1 : headroom.remainingPercent > 0 ? 0 : 2;
+
 const earlier = (left: number | null, right: number | null) =>
   left !== null && (right === null || left < right);
 
 /**
  * Accounts of one driver, the one with the most headroom first. Unknown
- * headroom ranks below any known amount. Ties go to the account whose
+ * headroom ranks below any account with room left, and above a spent one. Ties go to the account whose
  * tightest window refills first, then the preferred account, then the id,
  * so the same snapshots always rank the same way.
  */
@@ -730,9 +734,9 @@ export function rankAccounts<
     .sort((left, right) => {
       const a = left.headroom;
       const b = right.headroom;
-      if (a === null || b === null) {
-        if (a !== b) return a === null ? 1 : -1;
-      } else {
+      const tierDelta = headroomTier(a) - headroomTier(b);
+      if (tierDelta !== 0) return tierDelta;
+      if (a !== null && b !== null) {
         if (a.remainingPercent !== b.remainingPercent)
           return b.remainingPercent - a.remainingPercent;
         if (a.resetsAt !== b.resetsAt) return earlier(a.resetsAt, b.resetsAt) ? -1 : 1;
