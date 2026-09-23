@@ -5,6 +5,7 @@ import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -371,6 +372,24 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  // Re-registering an unchanged entry replaces the supervisor without changing
+  // the catalog, so followers track the lease itself rather than the entry.
+  const followCurrentSupervisor = <A, E, R>(
+    environmentId: EnvironmentId,
+    stream: Stream.Stream<A, E, R>,
+  ) =>
+    Stream.concat(
+      Stream.fromEffect(SubscriptionRef.get(serviceScopes)),
+      SubscriptionRef.changes(serviceScopes),
+    ).pipe(
+      Stream.map((current) => current.get(environmentId)?.supervisor),
+      Stream.filter(Predicate.isNotUndefined),
+      Stream.changesWith((left, right) => left === right),
+      Stream.switchMap((supervisor) =>
+        Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      ),
+    );
+
   const followStream: EnvironmentRegistry["Service"]["followStream"] = <A, E, R>(
     environmentId: EnvironmentId,
     stream: Stream.Stream<A, E, R>,
@@ -389,12 +408,7 @@ export const make = Effect.gen(function* () {
               acquireSupervisor(environmentId).pipe(
                 Effect.match({
                   onFailure: () => Stream.empty,
-                  onSuccess: (supervisor) =>
-                    Stream.provideService(
-                      stream,
-                      EnvironmentSupervisor.EnvironmentSupervisor,
-                      supervisor,
-                    ),
+                  onSuccess: () => followCurrentSupervisor(environmentId, stream),
                 }),
               ),
             ),
