@@ -940,6 +940,7 @@ import { proposedPlanTitle } from "../../proposedPlan";
 import { hasProviderSetup } from "./ProviderStatusBanner";
 import {
   applyProviderInstanceSettings,
+  cloudProviderEntries,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
   sortProviderInstanceEntries,
@@ -1331,6 +1332,8 @@ export interface ChatComposerProps {
   draftId: DraftId | null;
   multipleModelSelections: ReadonlyArray<ModelSelection> | null;
   supportsMultipleModels: boolean;
+  /** The draft will provision a cloud environment, so the picker offers drivers, not accounts. */
+  startsCloudEnvironment: boolean;
   onMultipleModelSelectionsChange: React.Dispatch<
     React.SetStateAction<ReadonlyArray<ModelSelection> | null>
   >;
@@ -1498,6 +1501,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     draftId,
     multipleModelSelections,
     supportsMultipleModels,
+    startsCloudEnvironment,
     onMultipleModelSelectionsChange: setMultipleModelSelections,
     activeThreadId,
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
@@ -1868,6 +1872,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ),
     [providerStatuses, settings],
   );
+  const pickerInstanceEntries = useMemo(
+    () =>
+      startsCloudEnvironment
+        ? cloudProviderEntries(providerInstanceEntries)
+        : providerInstanceEntries,
+    [providerInstanceEntries, startsCloudEnvironment],
+  );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const {
     selectedProviderEntry,
@@ -2052,6 +2063,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
+  // A cloud draft still pinned to another account of the same driver shows as that driver's row.
+  const pickerSelectedInstanceId =
+    (startsCloudEnvironment
+      ? pickerInstanceEntries.find((entry) => entry.driverKind === selectedProvider)?.instanceId
+      : undefined) ?? selectedInstanceId;
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
   // options are server-reported models plus that exact instance's
@@ -5056,7 +5072,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         activeInstanceId={
           providerCatalogPending
             ? (activeThreadModelSelection?.instanceId ?? selectedInstanceId)
-            : selectedInstanceId
+            : pickerSelectedInstanceId
         }
         model={
           providerCatalogPending
@@ -5065,7 +5081,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         lockedProvider={lockedProvider}
         lockedContinuationGroupKey={lockedContinuationGroupKey}
-        instanceEntries={providerInstanceEntries}
+        instanceEntries={pickerInstanceEntries}
         keybindings={keybindings}
         modelOptionsByInstance={modelOptionsByInstance}
         size={composerControlsInStrip ? "xs" : "sm"}
