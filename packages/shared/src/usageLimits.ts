@@ -675,6 +675,7 @@ const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
  * tightest window's remaining percent. A window past its reset counts as
  * full, and an account with no subscription limits (an API key) as 100.
  * `null` means unknown, a failed probe, stale data, or no report at all.
+ * Ranking divides it among the account's active sessions plus the new one.
  */
 export interface AccountHeadroom {
   readonly remainingPercent: number;
@@ -713,11 +714,16 @@ const headroomTier = (headroom: AccountHeadroom | null) =>
 const earlier = (left: number | null, right: number | null) =>
   left !== null && (right === null || left < right);
 
+/** Sessions already running on each account when a new chat is routed; absent means none. */
+export type AccountLoad = ReadonlyMap<ProviderInstanceId, number>;
+
 /**
- * Accounts of one driver, the one with the most headroom first. Unknown
- * headroom ranks below any account with room left, and above a spent one. Ties go to the account whose
- * tightest window refills first, then the preferred account, then the id,
- * so the same snapshots always rank the same way.
+ * Accounts of one driver, the one whose remaining usage leaves the new chat
+ * the largest share first: `remainingPercent / (active + 1)`. Unknown
+ * headroom ranks below any account with room left, fewest active sessions
+ * first, and above a spent one. Ties go to the account whose tightest window
+ * refills first, then the preferred account, then the id, so the same
+ * snapshots always rank the same way.
  */
 export function rankAccounts<
   A extends {
@@ -725,10 +731,11 @@ export function rankAccounts<
     readonly driver: ServerProvider["driver"];
     readonly usageLimits?: ServerProviderUsageLimits | undefined;
   },
->(accounts: readonly A[], now: number, preferred?: ProviderInstanceId): A[] {
+>(accounts: readonly A[], now: number, preferred?: ProviderInstanceId, load?: AccountLoad): A[] {
   const scored = accounts.map((account) => ({
     account,
     headroom: accountHeadroom(account.driver, account.usageLimits, now),
+    active: load?.get(account.instanceId) ?? 0,
   }));
   return scored
     .sort((left, right) => {
@@ -737,10 +744,11 @@ export function rankAccounts<
       const tierDelta = headroomTier(a) - headroomTier(b);
       if (tierDelta !== 0) return tierDelta;
       if (a !== null && b !== null) {
-        if (a.remainingPercent !== b.remainingPercent)
-          return b.remainingPercent - a.remainingPercent;
+        const shareDelta =
+          b.remainingPercent / (right.active + 1) - a.remainingPercent / (left.active + 1);
+        if (shareDelta !== 0) return shareDelta;
         if (a.resetsAt !== b.resetsAt) return earlier(a.resetsAt, b.resetsAt) ? -1 : 1;
-      }
+      } else if (left.active !== right.active) return left.active - right.active;
       if (left.account.instanceId === preferred) return -1;
       if (right.account.instanceId === preferred) return 1;
       return left.account.instanceId < right.account.instanceId ? -1 : 1;
