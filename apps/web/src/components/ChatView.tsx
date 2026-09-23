@@ -275,6 +275,7 @@ import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities } from "../providerModels";
 import {
   applyProviderInstanceSettings,
+  cloudProviderEntries,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
   sortProviderInstanceEntries,
@@ -4892,7 +4893,14 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
-  const cloudAccount = activeProviderStatus;
+  // The manager picks the account; this instance is only the hint the picker shows for the driver.
+  const cloudAccount = useMemo(
+    () =>
+      cloudProviderEntries(providerInstanceEntries).find(
+        (entry) => entry.driverKind === activeProviderStatus?.driver,
+      )?.snapshot ?? activeProviderStatus,
+    [activeProviderStatus, providerInstanceEntries],
+  );
   const canCreateCloudEnvironment =
     draftId !== null &&
     primaryEnvironmentId !== null &&
@@ -10931,6 +10939,7 @@ export default function ChatView(props: ChatViewProps) {
                               serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
                               true
                             }
+                            startsCloudEnvironment={cloudProvisioningRequested !== null}
                             onMultipleModelSelectionsChange={setMultipleModelSelections}
                             composerRef={composerRef}
                             composerDraftTarget={composerDraftTarget}

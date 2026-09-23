@@ -2,6 +2,7 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
 import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
+  cloudProviderEntries,
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
@@ -59,6 +60,57 @@ const usage = (usedPercents: number[], unavailable = false): ServerProvider["usa
     usedPercent,
   })),
   ...(unavailable ? { unavailable: { reason: "probeFailed" as const } } : {}),
+});
+
+describe("cloudProviderEntries", () => {
+  it("offers one driver-labeled row per cloud driver, hinting a ready account", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("claudeAgent"),
+        instanceId: "claude_work",
+        displayName: "Work",
+        accentColor: "#ff0000",
+        models: [model("claude-work-model")],
+      }),
+      provider({
+        provider: ProviderDriverKind.make("claudeAgent"),
+        instanceId: "claudeAgent",
+        models: [model("claude-default-model")],
+      }),
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex",
+        status: "error",
+      }),
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex_personal",
+      }),
+      provider({
+        provider: ProviderDriverKind.make("cursor"),
+        instanceId: "cursor",
+        enabled: false,
+      }),
+      provider({ provider: ProviderDriverKind.make("opencode"), instanceId: "opencode" }),
+    ]);
+
+    expect(
+      cloudProviderEntries(entries).map((entry) => ({
+        instanceId: entry.instanceId,
+        displayName: entry.displayName,
+        accentColor: entry.accentColor,
+        models: entry.models.map((option) => option.slug),
+      })),
+    ).toEqual([
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        accentColor: undefined,
+        models: ["claude-default-model"],
+      },
+      { instanceId: "codex_personal", displayName: "Codex", accentColor: undefined, models: [] },
+    ]);
+  });
 });
 
 describe("selectProviderInstanceByUsage", () => {

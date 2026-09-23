@@ -15,6 +15,7 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
+  PROVIDER_DISPLAY_NAMES,
   resolveProviderInstanceEnabled,
   type ModelSelection,
   type ProviderDriverKind,
@@ -82,6 +83,38 @@ export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boo
 /** Picker rails contain configured, enabled instances only. */
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
   return entry.enabled;
+}
+
+/** Drivers a provisioned cloud environment can run; mirrors the server's `credentialVariables`. */
+const CLOUD_AGENT_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent", "cursor"]);
+
+/**
+ * The picker rail for a draft that starts a cloud environment: one entry per
+ * cloud-capable driver, labeled as the driver rather than an account, because
+ * the manager routes the provision to whichever account of that driver has the
+ * most usage left. The entry is a real local instance so its id can ride along
+ * as the provision hint: a ready instance first, the driver's default next.
+ * Its models are the hint's own; every account of a driver serves the same
+ * catalog, and a union would offer models the hint cannot fall back to.
+ */
+export function cloudProviderEntries(
+  entries: ReadonlyArray<ProviderInstanceEntry>,
+): ReadonlyArray<ProviderInstanceEntry> {
+  const byDriver = new Map<ProviderDriverKind, ProviderInstanceEntry>();
+  const rank = (entry: ProviderInstanceEntry) =>
+    (isProviderInstancePickerReady(entry) ? 2 : 0) + (entry.isDefault ? 1 : 0);
+  for (const entry of entries) {
+    if (!CLOUD_AGENT_DRIVERS.has(entry.driverKind) || !isProviderInstancePickerVisible(entry)) {
+      continue;
+    }
+    const current = byDriver.get(entry.driverKind);
+    if (!current || rank(entry) > rank(current)) byDriver.set(entry.driverKind, entry);
+  }
+  return [...byDriver.values()].map((entry) => ({
+    ...entry,
+    displayName: PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName,
+    accentColor: undefined,
+  }));
 }
 
 /**
