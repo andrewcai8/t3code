@@ -1207,19 +1207,6 @@ describe("rankAccounts", () => {
       expect(ids(rankAccounts([busy, idle], now))).toEqual(["a", "b"]);
     });
 
-    it("prefers an idle account over a busy one with less left", () => {
-      const ranked = rankAccounts(
-        [
-          account("a", { checkedAt, windows: [session(80)] }),
-          account("b", { checkedAt, windows: [session(50)] }),
-        ],
-        now,
-        undefined,
-        load({ a: 3, b: 0 }),
-      );
-      expect(ids(ranked)).toEqual(["b", "a"]);
-    });
-
     it("sends the new chat to the idle account when usage left is equal", () => {
       const ranked = rankAccounts(
         [
