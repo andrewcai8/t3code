@@ -143,6 +143,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         Effect.flatMap((snapshot) =>
           effectiveConfig.enabled && snapshot.installed && snapshot.auth.status === "authenticated"
             ? readCursorUsageLimits(effectiveConfig, processEnv).pipe(
+                Effect.annotateLogs({ providerInstanceId: instanceId }),
                 Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),
               )
             : Effect.succeed(snapshot),

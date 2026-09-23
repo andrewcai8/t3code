@@ -193,6 +193,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           }
           const probe = yield* probeClaudeCapabilities(effectiveConfig, processEnv, cwd).pipe(
             Effect.provideService(Path.Path, path),
+            Effect.annotateLogs({ providerInstanceId: instanceId }),
           );
           if (probe?.usage) {
             yield* Ref.set(completeCapabilitiesCache, {

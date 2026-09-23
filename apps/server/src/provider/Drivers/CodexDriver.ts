@@ -210,7 +210,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const checkProvider = modelManifest.refreshInBackground.pipe(
         Effect.andThen(
           Effect.zipWith(
-            checkCodexProviderStatus(effectiveConfig, undefined, providerEnvironment),
+            checkCodexProviderStatus(effectiveConfig, undefined, providerEnvironment).pipe(
+              Effect.annotateLogs({ providerInstanceId: instanceId }),
+            ),
             modelManifest.current,
             (draft, manifest) =>
               stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
