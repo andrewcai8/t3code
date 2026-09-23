@@ -33,6 +33,7 @@ import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
 import { makeClaudeScopedLimitNames } from "../Layers/claudeUsageLimits.ts";
 import {
   checkClaudeProviderStatus,
+  makeClaudeUsageTurnReader,
   makePendingClaudeProvider,
   overlayClaudeCapabilitiesOnSnapshot,
   probeClaudeCapabilities,
@@ -180,6 +181,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         | undefined
       >(undefined);
       const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(effectiveConfig, cwd);
+      const readUsageTurn = yield* makeClaudeUsageTurnReader;
       const resolveCapabilities = () =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
@@ -191,7 +193,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           ) {
             return cached.probe;
           }
-          const probe = yield* probeClaudeCapabilities(effectiveConfig, processEnv, cwd).pipe(
+          const probe = yield* probeClaudeCapabilities(
+            effectiveConfig,
+            processEnv,
+            cwd,
+            readUsageTurn,
+          ).pipe(
             Effect.provideService(Path.Path, path),
             Effect.annotateLogs({ providerInstanceId: instanceId }),
           );

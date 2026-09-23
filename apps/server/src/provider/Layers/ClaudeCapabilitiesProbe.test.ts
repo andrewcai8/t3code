@@ -4,7 +4,7 @@ import { vi } from "vite-plus/test";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
-import { ClaudeSettings } from "@t3tools/contracts";
+import { ClaudeSettings, type ServerProvider } from "@t3tools/contracts";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -18,6 +18,9 @@ import {
   CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES,
   CLAUDE_USAGE_PROBE_TIMEOUT_MS,
   CLAUDE_USAGE_TURN_PROMPT,
+  makeClaudeUsageTurnReader,
+  makePendingClaudeProvider,
+  overlayClaudeCapabilitiesOnSnapshot,
   parseClaudeAuthStatusOutput,
   probeClaudeCapabilities,
 } from "./ClaudeProvider.ts";
@@ -319,4 +322,88 @@ it.effect("reads windows from one probe turn only for a setup-token account", ()
       "initialize",
     ]);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("spends at most one usage turn per 30 minutes on a setup-token account", () =>
+  Effect.gen(function* () {
+    const rateLimitInfo = {
+      status: "allowed",
+      rateLimitType: "five_hour",
+      unifiedWindows: { five_hour: { utilization: 0.03, resetsAt: 1_790_207_400 } },
+    } as ClaudeSdk.SDKRateLimitInfo;
+    let turns = 0;
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(({ prompt }) => {
+      if (typeof prompt === "string") {
+        turns += 1;
+        const failed = turns === 1;
+        return (async function* () {
+          if (failed) return;
+          yield { type: "rate_limit_event", rate_limit_info: rateLimitInfo };
+        })() as unknown as ReturnType<typeof ClaudeSdk.query>;
+      }
+      return {
+        initializationResult: async () => ({
+          account: { tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", apiProvider: "firstParty" },
+          commands: [],
+        }),
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+          rate_limits_available: false,
+          rate_limits: null,
+        }),
+      } as unknown as ReturnType<typeof ClaudeSdk.query>;
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const settings = decodeClaudeSettings({ binaryPath: "claude" });
+    const readUsageTurn = yield* makeClaudeUsageTurnReader;
+    const probe = () =>
+      probeClaudeCapabilities(settings, undefined, undefined, readUsageTurn).pipe(
+        Effect.map((capabilities) => ({ usage: capabilities?.usage, turns })),
+      );
+
+    const failedTurn = yield* probe();
+    yield* TestClock.adjust("29 minutes");
+    const withinTtl = yield* probe();
+    yield* TestClock.adjust("1 minute");
+    const afterTtl = yield* probe();
+
+    assert.deepEqual(failedTurn, {
+      usage: { source: "rateLimitEvent", info: undefined },
+      turns: 1,
+    });
+    assert.deepEqual(withinTtl, { usage: { source: "recentTurn" }, turns: 1 });
+    assert.deepEqual(afterTtl, {
+      usage: { source: "rateLimitEvent", info: rateLimitInfo },
+      turns: 2,
+    });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("keeps the published windows when the usage turn ran recently", () =>
+  Effect.gen(function* () {
+    const published = {
+      checkedAt: "2026-09-23T19:10:00.000Z",
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          usedPercent: 20,
+          windowDurationMins: 300,
+        },
+      ],
+    } as const;
+    const snapshot = yield* makePendingClaudeProvider(decodeClaudeSettings({}));
+    const overlaid = yield* overlayClaudeCapabilitiesOnSnapshot(
+      { ...snapshot, usageLimits: published } as unknown as ServerProvider,
+      {
+        email: undefined,
+        subscriptionType: undefined,
+        tokenSource: "CLAUDE_CODE_OAUTH_TOKEN",
+        apiProvider: "firstParty",
+        slashCommands: [],
+        usage: { source: "recentTurn" },
+      },
+    );
+    assert.deepEqual(overlaid.usageLimits, published);
+  }),
 );

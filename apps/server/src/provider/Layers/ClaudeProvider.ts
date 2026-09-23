@@ -5,7 +5,9 @@ import {
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -440,6 +442,7 @@ const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
+  readUsageTurn: ClaudeUsageTurnReader = readFreshClaudeUsageTurn,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -495,12 +498,7 @@ const probeClaudeCapabilities = (
             usage = { source: "usageEndpoint", response: { rate_limits_available, rate_limits } };
           } else {
             abort.abort();
-            const info = yield* readClaudeUsageFromTurn({
-              executablePath,
-              environment: claudeEnvironment,
-              cwd,
-            });
-            usage = { source: "rateLimitEvent", info };
+            usage = yield* readUsageTurn({ executablePath, environment: claudeEnvironment, cwd });
           }
         }
         return {
@@ -528,16 +526,24 @@ const probeClaudeCapabilities = (
   );
 };
 
+interface ClaudeUsageTurnInput {
+  readonly executablePath: string;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly cwd: string | undefined;
+}
+
+export type ClaudeUsageTurnReader = (
+  input: ClaudeUsageTurnInput,
+) => Effect.Effect<Extract<ClaudeUsageRead, { source: "rateLimitEvent" | "recentTurn" }>>;
+
 /**
  * Read a setup-token account's windows from one throwaway turn. The
  * `rate_limit_event` arrives with the response headers, before the reply,
  * and the turn is aborted there.
  */
-const readClaudeUsageFromTurn = (input: {
-  readonly executablePath: string;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly cwd: string | undefined;
-}): Effect.Effect<SDKRateLimitInfo | undefined> => {
+const readClaudeUsageFromTurn = (
+  input: ClaudeUsageTurnInput,
+): Effect.Effect<SDKRateLimitInfo | undefined> => {
   const abort = new AbortController();
   return Effect.tryPromise(async () => {
     const q = claudeQuery({
@@ -557,6 +563,33 @@ const readClaudeUsageFromTurn = (input: {
     Effect.orElseSucceed(() => undefined),
   );
 };
+
+const readFreshClaudeUsageTurn: ClaudeUsageTurnReader = (input) =>
+  readClaudeUsageFromTurn(input).pipe(Effect.map((info) => ({ source: "rateLimitEvent", info })));
+
+/**
+ * How often a setup-token account spends a turn on reading its windows.
+ * Routing trusts usage for 30 minutes, and real turns report in between.
+ * Every turn opens the five-hour window, so a shorter cadence would keep an
+ * idle account's session window open for good.
+ */
+export const CLAUDE_USAGE_TURN_TTL = Duration.minutes(30);
+
+/** One per instance: at most one usage turn per TTL, failed turns included. */
+export const makeClaudeUsageTurnReader = Effect.gen(function* () {
+  const lastTurnAt = yield* Ref.make<number | undefined>(undefined);
+  const reader: ClaudeUsageTurnReader = (input) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const last = yield* Ref.get(lastTurnAt);
+      if (last !== undefined && now - last < Duration.toMillis(CLAUDE_USAGE_TURN_TTL)) {
+        return { source: "recentTurn" } as const;
+      }
+      yield* Ref.set(lastTurnAt, now);
+      return yield* readFreshClaudeUsageTurn(input);
+    });
+  return reader;
+});
 
 const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   claudeSettings: ClaudeSettings,
@@ -799,10 +832,10 @@ export const overlayClaudeCapabilitiesOnSnapshot = Effect.fn("overlayClaudeCapab
     const email = capabilities.email ?? previousEmail;
     const usageLimits = !capabilities.usage
       ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
-      : scopedLimitNames
-        ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
-        : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
-            .limits;
+      : ((scopedLimitNames
+          ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
+          : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
+              .limits) ?? snapshot.usageLimits);
 
     return {
       ...snapshot,

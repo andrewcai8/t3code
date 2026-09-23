@@ -234,30 +234,37 @@ export function claudeUsageResponseToLimits(input: {
  * One read of an account's windows. `get_usage` answers for any login with
  * profile scope. A setup-token account instead runs a one-word turn and
  * reports the `rate_limit_event` that came back with it, or none when the
- * turn failed. The failed read is still a read, so the probe cache holds it
- * and a failing account costs at most one turn per refresh window.
+ * turn failed. Those turns are rationed (see `makeClaudeUsageTurnReader`);
+ * `recentTurn` means one ran recently, so there is nothing new to publish and
+ * the windows it and later real turns established stand.
  */
 export type ClaudeUsageRead =
   | {
       readonly source: "usageEndpoint";
       readonly response: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
     }
-  | { readonly source: "rateLimitEvent"; readonly info: SDKRateLimitInfo | undefined };
+  | { readonly source: "rateLimitEvent"; readonly info: SDKRateLimitInfo | undefined }
+  | { readonly source: "recentTurn" };
 
 /**
  * Only `get_usage` names the scoped buckets, so a turn-derived read keeps
  * the names already known. A turn that reported no window this build can
- * draw is a failed read, not an account without limits.
+ * draw is a failed read, not an account without limits. `recentTurn` yields
+ * no limits, which callers publish as "usage unchanged".
  */
 export function claudeUsageReadToLimits(input: {
   readonly read: ClaudeUsageRead;
   readonly names: ClaudeScopedLimitNames;
   readonly checkedAt: string;
-}): { readonly limits: ServerProviderUsageLimits; readonly names: ClaudeScopedLimitNames } {
+}): {
+  readonly limits: ServerProviderUsageLimits | undefined;
+  readonly names: ClaudeScopedLimitNames;
+} {
   const { read, names, checkedAt } = input;
   if (read.source === "usageEndpoint") {
     return claudeUsageResponseToLimits({ response: read.response, checkedAt });
   }
+  if (read.source === "recentTurn") return { limits: undefined, names };
   const windows = read.info ? claudeRateLimitEventWindows(read.info, names) : [];
   return {
     limits:
@@ -276,7 +283,7 @@ export function claudeUsageReadToLimits(input: {
 export const recordClaudeUsageRead = (
   namesRef: Ref.Ref<ClaudeScopedLimitNames>,
   input: { readonly read: ClaudeUsageRead; readonly checkedAt: string },
-): Effect.Effect<ServerProviderUsageLimits> =>
+): Effect.Effect<ServerProviderUsageLimits | undefined> =>
   Ref.modify(namesRef, (names) => {
     const mapped = claudeUsageReadToLimits({ ...input, names });
     return [mapped.limits, mapped.names];

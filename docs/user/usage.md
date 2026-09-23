@@ -88,8 +88,9 @@ On macOS, use `AGENT_CLI_CREDENTIAL_STORE=file` when signing in and in the provi
 to use a file-based login.
 
 A Claude account signed in with a `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`) cannot
-read its limits directly. At each check, T3 Code sends it a one-word message on Haiku and reads the
-session and weekly windows from the reply. That spends a sliver of the account's usage. Model-specific
+read its limits directly. At most every 30 minutes, T3 Code sends it a one-word message on Haiku and
+reads the session and weekly windows from the reply. That spends a sliver of the account's usage,
+and your own chats on the account update the windows in between. Model-specific
 weekly limits do not appear for these accounts.
 
 Grok reports the remaining subscription allowance and reset time for its current billing period
