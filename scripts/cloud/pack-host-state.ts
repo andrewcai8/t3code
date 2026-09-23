@@ -101,7 +101,12 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   const files: Array<{ path: string; data: string | Buffer }> = [
     {
       path: plan.settingsPath,
-      data: JSON.stringify({ providerInstances: plan.providerInstances }),
+      // Hosts run the provider CLIs baked into their image or template as
+      // another user, so an in-app update can't install and wouldn't survive.
+      data: JSON.stringify({
+        enableProviderUpdateChecks: false,
+        providerInstances: plan.providerInstances,
+      }),
     },
   ];
   for (const file of plan.files)
