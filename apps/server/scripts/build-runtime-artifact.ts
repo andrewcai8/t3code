@@ -117,6 +117,9 @@ try {
             "rm -rf node_modules/@yuuang/ffi-rs-linux-x64-musl",
             "find . -name '*.map' -delete",
             "test -f node_modules/node-pty/build/Release/pty.node",
+            // The container runs as root. On Linux the bind mount keeps that
+            // ownership, and the caller could not delete its own stage.
+            `chown -R ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0} /src`,
           ].join("; "),
         ],
         { stdio: "inherit" },
