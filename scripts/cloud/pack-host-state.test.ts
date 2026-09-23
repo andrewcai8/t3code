@@ -52,6 +52,7 @@ describe("packHostState", () => {
           [
             "/data/t3/userdata/settings.json",
             JSON.stringify({
+              enableProviderUpdateChecks: false,
               providerInstances: {
                 codex: {
                   driver: "codex",
