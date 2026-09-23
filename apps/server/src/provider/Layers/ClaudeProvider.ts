@@ -573,7 +573,7 @@ const readFreshClaudeUsageTurn: ClaudeUsageTurnReader = (input) =>
  * Every turn opens the five-hour window, so a shorter cadence would keep an
  * idle account's session window open for good.
  */
-export const CLAUDE_USAGE_TURN_TTL = Duration.minutes(30);
+const CLAUDE_USAGE_TURN_TTL = Duration.minutes(30);
 
 /** One per instance: at most one usage turn per TTL, failed turns included. */
 export const makeClaudeUsageTurnReader = Effect.gen(function* () {
