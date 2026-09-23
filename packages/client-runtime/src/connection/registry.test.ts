@@ -1218,6 +1218,57 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect("follows the replacement supervisor when an environment is re-paired unchanged", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: BEARER_TARGET,
+            profile: BEARER_PROFILE,
+            credential: BEARER_CREDENTIAL,
+          }),
+        );
+        const followedPhase = yield* Ref.make<SupervisorConnectionState["phase"] | null>(null);
+        const followerSees = Effect.fn("followerSees")(function* (
+          phase: SupervisorConnectionState["phase"],
+        ) {
+          for (let turn = 0; turn < 100 && (yield* Ref.get(followedPhase)) !== phase; turn += 1) {
+            yield* Effect.yieldNow;
+          }
+          return yield* Ref.get(followedPhase);
+        });
+        yield* registry.stateChanges(BEARER_TARGET.environmentId).pipe(
+          Stream.runForEach((state) => Ref.set(followedPhase, state.phase)),
+          Effect.forkScoped,
+        );
+        expect(yield* followerSees("connected")).toBe("connected");
+        const [session] = yield* Ref.get(harness.sessions);
+        yield* Deferred.fail(
+          session!.closed,
+          new ConnectionTransientError({ reason: "transport", detail: "Workspace paused." }),
+        );
+        expect(yield* followerSees("backoff")).toBe("backoff");
+
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: BEARER_TARGET,
+            profile: BEARER_PROFILE,
+            credential: new BearerConnectionCredential({ token: "re-paired-token" }),
+          }),
+        );
+        yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        expect(yield* followerSees("connected")).toBe("connected");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("ignores retry signals for environments that are no longer registered", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([]);
