@@ -668,7 +668,7 @@ export function collectProviderUsageLimits(
 }
 
 /** Older than this, a snapshot no longer says how much an account has left. */
-export const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
+const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
 
 /**
  * How much an account has left before any of its windows stops it: the
@@ -682,7 +682,7 @@ export interface AccountHeadroom {
   readonly resetsAt: number | null;
 }
 
-export function accountHeadroom(
+function accountHeadroom(
   driver: ServerProvider["driver"],
   limits: ServerProviderUsageLimits | undefined,
   now: number,
