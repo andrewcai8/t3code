@@ -22,6 +22,7 @@ import {
   limitsNotice,
   paceOf,
   providersWithLimits,
+  rankAccounts,
   remainingPercent,
 } from "./usageLimits.ts";
 
@@ -1081,5 +1082,102 @@ describe("Cursor account limits", () => {
     expect(pools[0]?.windows.map((window) => [window.label, window.members.length])).toEqual([
       ["Monthly usage", 2],
     ]);
+  });
+});
+
+describe("rankAccounts", () => {
+  const checkedAt = "2026-09-03T11:55:00.000Z";
+  const session = (usedPercent: number, resetsAt = "2026-09-03T14:00:00.000Z") =>
+    ({ ...window, usedPercent, resetsAt }) as const;
+  const weekly = (usedPercent: number, resetsAt = "2026-09-07T00:00:00.000Z") =>
+    ({
+      id: "seven_day",
+      kind: "weekly",
+      label: "Weekly",
+      usedPercent,
+      windowDurationMins: 10_080,
+      resetsAt,
+    }) as const;
+  const monthly = (usedPercent: number) =>
+    ({
+      id: "cursor_monthly",
+      kind: "monthly",
+      label: "Monthly",
+      usedPercent,
+      resetsAt: "2026-09-30T00:00:00.000Z",
+    }) as const;
+  const account = (
+    id: string,
+    usageLimits?: ServerProvider["usageLimits"],
+    driver = "claudeAgent",
+  ) => ({
+    instanceId: ProviderInstanceId.make(id),
+    driver: ProviderDriverKind.make(driver),
+    usageLimits,
+  });
+  const ids = (accounts: ReadonlyArray<{ instanceId: string }>) =>
+    accounts.map((a) => a.instanceId);
+
+  it("ranks by the tightest window, so an exhausted week loses to a busier session", () => {
+    const ranked = rankAccounts(
+      [
+        account("weekly-spent", { checkedAt, windows: [session(10), weekly(97)] }),
+        account("session-busy", { checkedAt, windows: [session(70), weekly(20)] }),
+        account("fresh", { checkedAt, windows: [session(5), weekly(5)] }),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual(["fresh", "session-busy", "weekly-spent"]);
+  });
+
+  it("counts a window past its reset as full", () => {
+    const ranked = rankAccounts(
+      [
+        account("half", { checkedAt, windows: [session(50)] }),
+        account("reset", { checkedAt, windows: [session(100, "2026-09-03T11:00:00.000Z")] }),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual(["reset", "half"]);
+  });
+
+  it("uses only Cursor's monthly allowance, like the Limits view", () => {
+    const ranked = rankAccounts(
+      [
+        account("a", { checkedAt, windows: [monthly(60)] }, "cursor"),
+        account("b", { checkedAt, windows: [monthly(30), { ...session(99), id: "x" }] }, "cursor"),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual(["b", "a"]);
+  });
+
+  it("puts API keys at full headroom and unknown accounts last", () => {
+    const ranked = rankAccounts(
+      [
+        account("failed", { checkedAt, windows: [], unavailable: { reason: "probeFailed" } }),
+        account("stale", { checkedAt: "2026-09-03T10:00:00.000Z", windows: [session(0)] }),
+        account("unreported"),
+        account("used", { checkedAt, windows: [session(99), weekly(99)] }),
+        account("api-key", { checkedAt, windows: [], unavailable: { reason: "unsupported" } }),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual(["api-key", "used", "failed", "stale", "unreported"]);
+  });
+
+  it("breaks ties by earliest refill, then the preferred account, then id", () => {
+    const ranked = rankAccounts(
+      [
+        account("c", { checkedAt, windows: [session(40)] }),
+        account("b", { checkedAt, windows: [session(40)] }),
+        account("late", { checkedAt, windows: [weekly(40)] }),
+        account("a", { checkedAt, windows: [session(40)] }),
+        account("soon", { checkedAt, windows: [session(40, "2026-09-03T12:30:00.000Z")] }),
+      ],
+      now,
+      ProviderInstanceId.make("c"),
+    );
+    expect(ids(ranked)).toEqual(["soon", "c", "a", "b", "late"]);
   });
 });

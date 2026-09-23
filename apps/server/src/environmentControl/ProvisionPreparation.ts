@@ -732,7 +732,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const common = {
         requestId: input.requestId,
         ...(input.retentionDeadline ? { retentionDeadline: input.retentionDeadline } : {}),
-        providerInstanceId: input.providerInstanceId,
+        // The account routing chose, which the input only hinted at. The
+        // lease, the sandbox's metadata, and discovery all read it from here.
+        providerInstanceId: profiles[0].instanceId,
         ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
         ...(input.repository ? { repository: input.repository } : {}),
         ...(input.branch ? { branch: input.branch } : {}),

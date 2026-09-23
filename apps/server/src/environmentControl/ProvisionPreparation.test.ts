@@ -135,6 +135,26 @@ it("freezes source, template, artifact and credentials across manager restart an
     await f.cleanup();
   }
 });
+it("records the routed account and keeps it when a retry would route elsewhere", async () => {
+  const f = await fixture();
+  const routed = (instanceId: string) => ({
+    ...f.profile,
+    instanceId: ProviderInstanceId.make(instanceId),
+  });
+  try {
+    const first = await f.store.freeze(input, f.config, f.resolver, [routed("codex_spare")]);
+    const retry = await makeProvisionPreparationStore(f.root).freeze(input, f.config, f.resolver, [
+      routed("codex"),
+    ]);
+    expect([first.input.providerInstanceId, first.request.providerInstanceId]).toEqual([
+      "codex",
+      "codex_spare",
+    ]);
+    expect(retry.request.providerInstanceId).toBe("codex_spare");
+  } finally {
+    await f.cleanup();
+  }
+});
 it("concurrent manager instances adopt one complete manifest when resolution differs", async () => {
   const f = await fixture();
   try {

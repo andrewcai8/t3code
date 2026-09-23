@@ -16,6 +16,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { EnvironmentControl, layer } from "./EnvironmentControl.ts";
 import { makeNamespaceAccountSession } from "./NamespaceProvisionRuntime.ts";
 import { NamespaceProxyManager, type NamespaceProxyOpenInput } from "./namespaceProxy.ts";
@@ -290,6 +291,7 @@ it.effect(
           Layer.merge(layer, ProvisionOperationStore.layer).pipe(
             Layer.provideMerge(SqlitePersistenceMemory),
             Layer.provide(ServerSettings.layerTest()),
+            Layer.provide(makeProviderRegistryLayer()),
             Layer.provideMerge(ServerConfig.layerTest(directory, directory)),
             Layer.provide(NodeServices.layer),
           ),

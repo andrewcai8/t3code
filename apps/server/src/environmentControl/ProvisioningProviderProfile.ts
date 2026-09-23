@@ -5,12 +5,12 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
-  defaultInstanceIdForDriver,
-  ProviderDriverKind,
   ProviderInstanceId,
   type ProviderInstanceEnvironment,
+  type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
+import { rankAccounts } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -220,12 +220,15 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
 );
 
 /**
- * The accounts a new cloud environment runs, the selected one first.
+ * The accounts a new cloud environment runs, the routed one first.
  *
- * The selected account must resolve. Every other driver comes along on the
- * manager's default account for it when that account is portable, and is
- * left off the guest when it is not, so one unusable login never blocks the
- * account that was asked for.
+ * Each driver runs on its account with the most usage left (`rankAccounts`),
+ * walking down the ranking past any account whose login cannot leave this
+ * machine. The requested driver must resolve to some account; every other
+ * driver comes along when one of its accounts is portable and is left off
+ * the guest otherwise, so one unusable login never blocks the chat asked for.
+ * `providerInstanceId` names the driver when `agentDriver` is absent and wins
+ * ties, which keeps a manager with no usage data on the account the user saw.
  */
 export type ProvisioningProviderProfiles = readonly [
   primary: ProvisioningProviderProfile,
@@ -235,24 +238,63 @@ export type ProvisioningProviderProfiles = readonly [
 export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfiles")(function* (
   settings: ServerSettings,
   input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
-  claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
+  claudeOAuthTokens: Provisioning["claudeOAuthTokens"] | undefined,
+  usage: {
+    readonly providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "usageLimits">>;
+    readonly now: number;
+  },
 ) {
-  const primary = yield* resolveProvisioningProviderProfile(settings, input, claudeOAuthTokens);
-  const companions: ProvisioningProviderProfile[] = [];
-  for (const driver of Object.keys(credentialVariables)) {
-    if (driver === primary.kind) continue;
-    const companion = yield* Effect.option(
-      resolveProvisioningProviderProfile(
-        settings,
-        {
-          providerInstanceId: defaultInstanceIdForDriver(ProviderDriverKind.make(driver)),
-          agentDriver: driver,
-        },
-        claudeOAuthTokens,
+  const instances = deriveProviderInstanceConfigMap(settings);
+  const hint = ProviderInstanceId.make(input.providerInstanceId);
+  const limits = new Map(usage.providers.map((provider) => [provider.instanceId, provider]));
+  const ranked = (driver: string) =>
+    rankAccounts(
+      Object.entries(instances).flatMap(([id, instance]) =>
+        instance.driver === driver
+          ? [
+              {
+                instanceId: ProviderInstanceId.make(id),
+                driver: instance.driver,
+                usageLimits: limits.get(ProviderInstanceId.make(id))?.usageLimits,
+              },
+            ]
+          : [],
       ),
+      usage.now,
+      hint,
+    ).map(({ instanceId }) => instanceId);
+  const firstPortable = Effect.fnUntraced(function* (driver: string) {
+    const refusals = [];
+    for (const instanceId of ranked(driver)) {
+      const profile = yield* Effect.result(
+        resolveProvisioningProviderProfile(
+          settings,
+          { providerInstanceId: instanceId, agentDriver: driver },
+          claudeOAuthTokens,
+        ),
+      );
+      if (profile._tag === "Success") return Option.some(profile.success);
+      refusals.push({ instanceId, failure: profile.failure });
+    }
+    // The hinted account's refusal carries the fix the user can act on.
+    const refusal = refusals.find(({ instanceId }) => instanceId === hint) ?? refusals[0];
+    return refusal
+      ? yield* Effect.fail(refusal.failure)
+      : Option.none<ProvisioningProviderProfile>();
+  });
+  const driver = input.agentDriver ?? instances[hint]?.driver;
+  const routed = driver === undefined ? Option.none() : yield* firstPortable(driver);
+  const primary = Option.isSome(routed)
+    ? routed.value
+    : yield* resolveProvisioningProviderProfile(settings, input, claudeOAuthTokens);
+  const companions: ProvisioningProviderProfile[] = [];
+  for (const companionDriver of Object.keys(credentialVariables)) {
+    if (companionDriver === primary.kind) continue;
+    const companion = yield* firstPortable(companionDriver).pipe(
+      Effect.orElseSucceed(() => Option.none()),
     );
     if (Option.isSome(companion)) companions.push(companion.value);
-    else yield* Effect.logInfo(`Provisioning without ${driver}: its default account is unusable.`);
+    else yield* Effect.logInfo(`Provisioning without ${companionDriver}: no account is usable.`);
   }
   const profiles: ProvisioningProviderProfiles = [primary, ...companions];
   return profiles;
