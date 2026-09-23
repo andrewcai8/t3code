@@ -1,0 +1,65 @@
+# Publishes the linux/amd64 runtime artifact as a release asset, so the AWS
+# provisioning host image can download it and pin it by sha256.
+name: Runtime artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "runtime-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish linux/amd64 runtime artifact
+    if: github.repository == 'andrewcai8/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      # t3#build depends on @t3tools/web#build and copies it into dist/client.
+      # It only warns when the web build is missing, so check the result.
+      - name: Build server and web client
+        run: |
+          vp run --filter t3 build
+          test -f apps/server/dist/client/index.html
+
+      # --platform compiles node-pty inside a linux/amd64 container.
+      - name: Build runtime artifact
+        run: node apps/server/scripts/build-runtime-artifact.ts runtime-linux-amd64.tar.gz --install --platform=linux/amd64
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum runtime-linux-amd64.tar.gz > runtime-linux-amd64.tar.gz.sha256
+          sha256="$(cut -d ' ' -f 1 runtime-linux-amd64.tar.gz.sha256)"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="runtime-${GITHUB_SHA::7}"
+          fi
+          gh release create "$tag" \
+            runtime-linux-amd64.tar.gz \
+            runtime-linux-amd64.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --notes "$(printf 'Runtime artifact for linux/amd64.\n\n- revision: `%s`\n- sha256: `%s`\n' "$GITHUB_SHA" "$sha256")"
