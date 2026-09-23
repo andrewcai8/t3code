@@ -122,13 +122,18 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
     return cursorUsageResponseToLimits(body, checkedAt);
   }).pipe(
     Effect.timeout("10 seconds"),
-    Effect.catch(() =>
-      Effect.succeed(
-        makeUnavailableUsageLimits({
-          checkedAt,
-          reason: "probeFailed",
-          message: "Cursor could not read usage limits.",
-        }),
+    Effect.catch((error) =>
+      Effect.logWarning("Cursor usage read failed.", {
+        // A schema failure can echo the input it rejected, and one input is auth.json.
+        cause: error._tag === "SchemaError" ? error._tag : error.message,
+      }).pipe(
+        Effect.as(
+          makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "probeFailed",
+            message: "Cursor could not read usage limits.",
+          }),
+        ),
       ),
     ),
   );

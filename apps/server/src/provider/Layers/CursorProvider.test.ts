@@ -5,6 +5,7 @@ import { it as effectIt } from "@effect/vitest";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -1068,6 +1069,47 @@ describe("Cursor usage limits", () => {
         else expect(limits.unavailable?.reason).toBe("unsupported");
       }
     }
+  });
+
+  it("logs why a usage read failed without echoing the credential", async () => {
+    const messages: unknown[] = [];
+    const logger = Logger.make<unknown, void>(({ message }) => {
+      messages.push(message);
+    });
+    const read = (environment: NodeJS.ProcessEnv, readFileString: () => Effect.Effect<string>) =>
+      runNode(
+        readCursorUsageLimits({ apiEndpoint: "https://cursor.example" }, environment).pipe(
+          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({ readFileString })),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response("", { status: 401 })),
+              ),
+            ),
+          ),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        ),
+      );
+
+    const rejected = await read({ CURSOR_AUTH_TOKEN: "secret-token" }, () => Effect.die("unused"));
+    const malformed = await read({ AGENT_CLI_CREDENTIAL_STORE: "file", HOME: "/home/u" }, () =>
+      Effect.succeed('{"accessToken": 42, "note": "secret-token"}'),
+    );
+
+    expect(rejected.unavailable?.reason).toBe("probeFailed");
+    expect(malformed.unavailable?.reason).toBe("probeFailed");
+    expect(messages).toEqual([
+      [
+        "Cursor usage read failed.",
+        {
+          cause:
+            "StatusCode: non 2xx status code (401 POST https://cursor.example/aiserver.v1.DashboardService/GetCurrentPeriodUsage)",
+        },
+      ],
+      ["Cursor usage read failed.", { cause: "SchemaError" }],
+    ]);
   });
 
   it("reports the monthly allowance in the window the Limits view shows", async () => {

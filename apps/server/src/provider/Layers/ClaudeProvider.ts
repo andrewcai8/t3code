@@ -4,6 +4,7 @@ import {
   type ServerProvider,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -363,6 +364,13 @@ function dedupeSlashCommands(
   return [...commandsByName.values()];
 }
 
+/** The SDK's own rejection text, not the generic wrapper `Effect.tryPromise` puts around it. */
+function probeFailureMessage(error: Error): string {
+  return Cause.isUnknownError(error) && error.cause instanceof Error
+    ? error.cause.message
+    : error.message;
+}
+
 function waitForAbortSignal(signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.resolve();
@@ -422,7 +430,13 @@ const probeClaudeCapabilities = (
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         const usageResult = yield* Effect.tryPromise(() =>
           q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(),
-        ).pipe(Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS), Effect.result);
+        ).pipe(
+          Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS),
+          Effect.tapError((error) =>
+            Effect.logWarning("Claude usage read failed.", { cause: probeFailureMessage(error) }),
+          ),
+          Effect.result,
+        );
         const usage = Result.isSuccess(usageResult)
           ? {
               rate_limits_available: usageResult.success.rate_limits_available,
@@ -450,6 +464,11 @@ const probeClaudeCapabilities = (
     Effect.ensuring(
       Effect.sync(() => {
         if (!abort.signal.aborted) abort.abort();
+      }),
+    ),
+    Effect.tapError((error) =>
+      Effect.logWarning("Claude capabilities probe failed; usage was not read.", {
+        cause: probeFailureMessage(error),
       }),
     ),
     Effect.result,

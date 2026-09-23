@@ -447,15 +447,15 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
           rateLimitsByLimitId: response.rateLimitsByLimitId,
           resetCredits: response.rateLimitResetCredits,
         })),
-        Effect.timeoutOption(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
-        Effect.map(
-          Option.getOrElse((): CodexRateLimitsProbe => ({
-            failure: "Codex did not answer the usage request.",
-          })),
-        ),
+        Effect.timeout(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
         Effect.catch((error) =>
-          Effect.logDebug("Codex rate-limit read failed.", { cause: error }).pipe(
-            Effect.as<CodexRateLimitsProbe>({ failure: codexRateLimitsFailureMessage(error) }),
+          Effect.logWarning("Codex rate-limit read failed.", { cause: error.message }).pipe(
+            Effect.as<CodexRateLimitsProbe>({
+              failure:
+                error._tag === "TimeoutError"
+                  ? "Codex did not answer the usage request."
+                  : codexRateLimitsFailureMessage(error),
+            }),
           ),
         ),
       ),
