@@ -2,6 +2,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 
@@ -71,6 +72,25 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
       `,
   });
 
+  const listRunningProjectionThreadSessionRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadSession,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          status,
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          runtime_mode AS "runtimeMode",
+          active_turn_id AS "activeTurnId",
+          last_error AS "lastError",
+          updated_at AS "updatedAt"
+        FROM projection_thread_sessions
+        WHERE status = 'running'
+      `,
+  });
+
   const deleteProjectionThreadSessionRow = SqlSchema.void({
     Request: DeleteProjectionThreadSessionInput,
     execute: ({ threadId }) =>
@@ -99,9 +119,15 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
       ),
     );
 
+  const listRunning: ProjectionThreadSessionRepositoryShape["listRunning"] = () =>
+    listRunningProjectionThreadSessionRows(undefined).pipe(
+      Effect.mapError(toPersistenceSqlError("ProjectionThreadSessionRepository.listRunning:query")),
+    );
+
   return {
     upsert,
     getByThreadId,
+    listRunning,
     deleteByThreadId,
   } satisfies ProjectionThreadSessionRepositoryShape;
 });

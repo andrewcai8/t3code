@@ -258,6 +258,7 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     claudeOAuthTokens?: Record<string, string>,
     usage: Record<string, ReadonlyArray<ServerProviderUsageWindow>> = {},
     agentDriver?: string,
+    active: Record<string, number> = {},
   ) =>
     resolveProvisioningProfiles(settings, { providerInstanceId, agentDriver }, claudeOAuthTokens, {
       providers: Object.entries(usage).map(([instanceId, windows]) => ({
@@ -265,6 +266,12 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
         usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows },
       })),
       now: Date.parse("2026-09-03T12:00:00.000Z"),
+      load: new Map(
+        Object.entries(active).map(([instanceId, count]) => [
+          ProviderInstanceId.make(instanceId),
+          count,
+        ]),
+      ),
     }).pipe(
       Effect.map((profiles) =>
         profiles.map(({ kind, instanceId, credential }) => [kind, instanceId, credential.kind]),
@@ -352,6 +359,24 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       ).toEqual([
         ["claudeAgent", "claudeSpare", "environment"],
         ["cursor", "cursorHome", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("moves the chat and each companion off accounts that are already busy", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* accounts(
+          routedSettings(),
+          "selected",
+          undefined,
+          { selected: [session(40)], claudeSpare: [session(70)] },
+          undefined,
+          { selected: 2, cursorHome: 1 },
+        ),
+      ).toEqual([
+        ["claudeAgent", "claudeSpare", "environment"],
+        ["cursor", "cursorWork", "environment"],
       ]);
     }),
   );

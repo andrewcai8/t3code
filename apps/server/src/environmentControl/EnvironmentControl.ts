@@ -61,6 +61,9 @@ import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/ProjectionThreadSessions.ts";
+import { ProjectionThreadSessionRepository } from "../persistence/Services/ProjectionThreadSessions.ts";
+import { readAccountLoad } from "./accountLoad.ts";
 import {
   ProvisionRefused,
   resolveProvisioningProfiles,
@@ -584,6 +587,7 @@ export const layer = Layer.effect(
       | undefined;
     const settings = yield* ServerSettingsService;
     const providerRegistry = yield* ProviderRegistry;
+    const threadSessions = yield* ProjectionThreadSessionRepository;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
     const resolveAccounts = async <A>(
       resolveFrom: (
@@ -882,12 +886,14 @@ export const layer = Layer.effect(
             }),
             // Credentials and skill roots follow the accounts' real settings
             // rather than paths this module guesses from driver names.
-            // Each driver runs on the account with the most usage left right
-            // now. The manifest freezes that choice, so a retry keeps it.
+            // Each driver runs on the account with the most usage left per
+            // active session right now. The manifest freezes that choice, so
+            // a retry keeps it.
             await resolveAccounts((current) =>
               Effect.all({
                 providers: providerRegistry.getProviders,
                 now: Clock.currentTimeMillis,
+                load: readAccountLoad(leaseRegistry, threadSessions),
               }).pipe(
                 Effect.flatMap((usage) =>
                   resolveProvisioningProfiles(
@@ -1105,4 +1111,7 @@ export const layer = Layer.effect(
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };
   }),
-).pipe(Layer.provide(ProvisionOperationStore.layer));
+).pipe(
+  Layer.provide(ProvisionOperationStore.layer),
+  Layer.provide(ProjectionThreadSessionRepositoryLive),
+);

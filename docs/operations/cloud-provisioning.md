@@ -35,7 +35,7 @@ Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. Loc
 
 ## Which account a cloud environment uses
 
-The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh. An account with no known usage ranks last, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. The choice is frozen with the request, so retrying or resuming keeps the same account.
+The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left per chat, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh, split among the chats already running on it: awake cloud machines routed to that account and local threads with a turn in progress. An account with no known usage ranks last, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. The choice is frozen with the request, so retrying or resuming keeps the same account.
 
 ## Stand up a manager
 

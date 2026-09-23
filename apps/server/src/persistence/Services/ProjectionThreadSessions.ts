@@ -61,6 +61,12 @@ export interface ProjectionThreadSessionRepositoryShape {
     input: GetProjectionThreadSessionInput,
   ) => Effect.Effect<Option.Option<ProjectionThreadSession>, ProjectionRepositoryError>;
 
+  /** Sessions with a turn running, across every thread. */
+  readonly listRunning: () => Effect.Effect<
+    ReadonlyArray<ProjectionThreadSession>,
+    ProjectionRepositoryError
+  >;
+
   /**
    * Delete projected thread-session state by thread id.
    */

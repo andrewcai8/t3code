@@ -1192,4 +1192,55 @@ describe("rankAccounts", () => {
     );
     expect(ids(ranked)).toEqual(["soon", "c", "a", "b", "late"]);
   });
+
+  describe("with active sessions", () => {
+    const load = (entries: Record<string, number>) =>
+      new Map(Object.entries(entries).map(([id, active]) => [ProviderInstanceId.make(id), active]));
+
+    it("shares what is left with the sessions already on an account", () => {
+      const busy = account("a", { checkedAt, windows: [session(20)] });
+      const idle = account("b", { checkedAt, windows: [session(50)] });
+      expect(ids(rankAccounts([busy, idle], now, undefined, load({ a: 3, b: 0 })))).toEqual([
+        "b",
+        "a",
+      ]);
+      expect(ids(rankAccounts([busy, idle], now))).toEqual(["a", "b"]);
+    });
+
+    it("sends the new chat to the idle account when usage left is equal", () => {
+      const ranked = rankAccounts(
+        [
+          account("a", { checkedAt, windows: [session(40)] }),
+          account("b", { checkedAt, windows: [session(40)] }),
+        ],
+        now,
+        ProviderInstanceId.make("a"),
+        load({ a: 2 }),
+      );
+      expect(ids(ranked)).toEqual(["b", "a"]);
+    });
+
+    it("ranks unknown accounts by fewest active sessions", () => {
+      const ranked = rankAccounts(
+        [account("a"), account("b"), account("c")],
+        now,
+        undefined,
+        load({ a: 2, b: 1 }),
+      );
+      expect(ids(ranked)).toEqual(["c", "b", "a"]);
+    });
+
+    it("keeps an idle spent account below a busy one with room left", () => {
+      const ranked = rankAccounts(
+        [
+          account("spent", { checkedAt, windows: [session(100)] }),
+          account("nearly", { checkedAt, windows: [session(99)] }),
+        ],
+        now,
+        undefined,
+        load({ spent: 0, nearly: 5 }),
+      );
+      expect(ids(ranked)).toEqual(["nearly", "spent"]);
+    });
+  });
 });
