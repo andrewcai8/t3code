@@ -97,6 +97,8 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly expired: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
+  /** Leases whose machine is running, paused and released ones excluded. */
+  readonly awake: () => Promise<ReadonlyArray<ProvisionedLease>>;
 }
 
 function nowIso(now?: Date): string {
@@ -353,5 +355,6 @@ export function createProvisionedLeaseRegistry(
             lease.expiresAt <= cutoff && (lease.state === "releasing" || lease.state === "active"),
         );
       }),
+    awake: () => consistentRead((leases) => leases.filter((lease) => lease.state === "active")),
   };
 }

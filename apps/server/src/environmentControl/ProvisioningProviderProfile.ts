@@ -10,7 +10,7 @@ import {
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
-import { rankAccounts } from "@t3tools/shared/usageLimits";
+import { rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -222,8 +222,8 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
 /**
  * The accounts a new cloud environment runs, the routed one first.
  *
- * Each driver runs on its account with the most usage left (`rankAccounts`),
- * walking down the ranking past any account whose login cannot leave this
+ * Each driver runs on its account with the largest share of usage left once
+ * its active sessions are counted (`rankAccounts`), walking down the ranking past any account whose login cannot leave this
  * machine. The requested driver must resolve to some account; every other
  * driver comes along when one of its accounts is portable and is left off
  * the guest otherwise, so one unusable login never blocks the chat asked for.
@@ -242,6 +242,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
   usage: {
     readonly providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "usageLimits">>;
     readonly now: number;
+    readonly load?: AccountLoad;
   },
 ) {
   const instances = deriveProviderInstanceConfigMap(settings);
@@ -262,6 +263,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
       ),
       usage.now,
       hint,
+      usage.load,
     ).map(({ instanceId }) => instanceId);
   const firstPortable = Effect.fnUntraced(function* (driver: string) {
     const refusals = [];
