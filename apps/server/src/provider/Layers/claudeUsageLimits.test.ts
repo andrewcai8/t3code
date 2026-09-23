@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { claudeRateLimitEventToUpdate, claudeUsageResponseToLimits } from "./claudeUsageLimits.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { rankAccounts } from "@t3tools/shared/usageLimits";
+import type { SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
+
+import {
+  claudeRateLimitEventToUpdate,
+  claudeUsageReadToLimits,
+  claudeUsageResponseToLimits,
+} from "./claudeUsageLimits.ts";
 
 const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
@@ -176,5 +184,143 @@ describe("claudeRateLimitEventToUpdate", () => {
     expect(
       claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
     ).toBeUndefined();
+  });
+});
+
+/**
+ * A `rate_limit_event` as a `claude setup-token` account streams it: no
+ * top-level utilization, every window under the (untyped) `unifiedWindows`.
+ */
+const setupTokenEvent = (fiveHour: number, sevenDay: number) =>
+  ({
+    status: "allowed",
+    resetsAt: 1_790_207_400,
+    rateLimitType: "five_hour",
+    overageStatus: "rejected",
+    overageDisabledReason: "out_of_credits",
+    isUsingOverage: false,
+    unifiedWindows: {
+      five_hour: { utilization: fiveHour, resetsAt: 1_790_207_400 },
+      seven_day: { utilization: sevenDay, resetsAt: 1_790_672_400 },
+    },
+  }) as SDKRateLimitInfo;
+
+const setupTokenWindows = (fiveHour: number, sevenDay: number) => [
+  {
+    id: "five_hour",
+    kind: "session",
+    label: "Session",
+    usedPercent: fiveHour,
+    windowDurationMins: 300,
+    resetsAt: "2026-09-23T23:50:00.000Z",
+  },
+  {
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    usedPercent: sevenDay,
+    windowDurationMins: 10080,
+    resetsAt: "2026-09-29T09:00:00.000Z",
+  },
+];
+
+describe("setup-token accounts", () => {
+  it("updates every window a turn's rate_limit_event reports", () => {
+    expect(claudeRateLimitEventToUpdate(setupTokenEvent(0.03, 0.44), noNames)).toEqual({
+      windows: setupTokenWindows(3, 44),
+    });
+  });
+
+  it("derives the windows get_usage cannot read from the probe turn's event", () => {
+    const unavailable = claudeUsageReadToLimits({
+      read: {
+        source: "usageEndpoint",
+        response: { rate_limits_available: false, rate_limits: null },
+      },
+      names: noNames,
+      checkedAt,
+    });
+    const derived = claudeUsageReadToLimits({
+      read: { source: "rateLimitEvent", info: setupTokenEvent(0.03, 0.44) },
+      names: noNames,
+      checkedAt,
+    });
+
+    expect(unavailable.limits).toEqual({
+      checkedAt,
+      windows: [],
+      unavailable: { reason: "unsupported" },
+    });
+    expect(derived.limits).toEqual({ checkedAt, windows: setupTokenWindows(3, 44) });
+  });
+
+  it("treats a failed probe turn, or one with no drawable window, as a failed read", () => {
+    const failed = {
+      checkedAt,
+      windows: [],
+      unavailable: { reason: "probeFailed", message: "Claude did not report usage windows." },
+    };
+    for (const info of [undefined, { status: "allowed" } as const]) {
+      expect(
+        claudeUsageReadToLimits({
+          read: { source: "rateLimitEvent", info },
+          names: noNames,
+          checkedAt,
+        }).limits,
+      ).toEqual(failed);
+    }
+  });
+
+  it("keeps the named window when unifiedWindows carries none this build draws", () => {
+    expect(
+      claudeRateLimitEventToUpdate(
+        {
+          status: "allowed",
+          rateLimitType: "seven_day",
+          utilization: 0.5,
+          ...({ unifiedWindows: {} } as object),
+        },
+        noNames,
+      ),
+    ).toEqual({
+      windows: [
+        {
+          id: "seven_day",
+          kind: "weekly",
+          label: "Weekly",
+          usedPercent: 50,
+          windowDurationMins: 10080,
+        },
+      ],
+    });
+  });
+
+  it("routes a chat to the setup-token account with the most headroom", () => {
+    const driver = ProviderDriverKind.make("claudeAgent");
+    const account = (id: string, fiveHour: number, sevenDay: number) => ({
+      instanceId: ProviderInstanceId.make(id),
+      driver,
+      usageLimits: claudeUsageReadToLimits({
+        read: { source: "rateLimitEvent", info: setupTokenEvent(fiveHour, sevenDay) },
+        names: noNames,
+        checkedAt,
+      }).limits,
+    });
+    const now = Date.parse(checkedAt) + 60_000;
+
+    const ranked = rankAccounts(
+      [
+        account("claude_busy", 0.5, 0.1),
+        account("claude_weekly", 0.03, 0.8),
+        account("claude_fresh", 0.03, 0.44),
+      ],
+      now,
+    );
+
+    expect(ranked.map((entry) => entry.instanceId)).toEqual([
+      "claude_fresh",
+      "claude_busy",
+      "claude_weekly",
+    ]);
   });
 });

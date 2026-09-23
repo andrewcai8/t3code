@@ -62,7 +62,6 @@ export interface ManagerPlan {
   readonly files: ReadonlyArray<{ readonly source: string; readonly destination: string }>;
   readonly settingsPath: string;
   readonly providerInstances: Record<string, ManagerInstance>;
-  readonly claudeOAuthTokens?: Record<string, string>;
   readonly shellEnvironment?: ReadonlyArray<{ readonly name: string; readonly source: string }>;
 }
 
@@ -132,7 +131,6 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
   const skipped: Array<{ id: string; reason: string }> = [];
   const files: Array<{ source: string; destination: string }> = [];
   const providerInstances: Record<string, ManagerInstance> = {};
-  const claudeOAuthTokens: Record<string, string> = {};
 
   for (const [id, instance] of Object.entries(instances)) {
     if (requested && !requested.has(id)) continue;
@@ -164,15 +162,20 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
         break;
       }
       case "claudeAgent": {
-        // A keychain login cannot be copied; only a setup-token travels, and
-        // the manager reads it from its own config rather than a file.
+        // A keychain login cannot be copied; only a setup-token travels. It
+        // rides in the instance's own environment, so the manager's Claude
+        // runs on it too, and provisioning hands the same variable on.
         const token = input.provisioning.claudeOAuthTokens?.[id];
         if (!token) {
           skip("no provisioning.claudeOAuthTokens entry; run `claude setup-token` for it");
           continue;
         }
-        claudeOAuthTokens[id] = token;
-        providerInstances[id] = { driver: "claudeAgent", ...named, enabled: true };
+        providerInstances[id] = {
+          driver: "claudeAgent",
+          ...named,
+          enabled: true,
+          environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: token, sensitive: true }],
+        };
         break;
       }
       case "cursor": {
@@ -227,7 +230,6 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
     files,
     settingsPath: posix.join(base, "userdata", "settings.json"),
     providerInstances,
-    ...(Object.keys(claudeOAuthTokens).length ? { claudeOAuthTokens } : {}),
     ...(shellEnvironment?.length ? { shellEnvironment } : {}),
   };
 }

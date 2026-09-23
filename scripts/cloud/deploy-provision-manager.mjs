@@ -235,20 +235,7 @@ await NodeFSP.writeFile(
   `${JSON.stringify(descriptor, null, 2)}\n`,
   { mode: 0o600 },
 );
-const redacted = {
-  ...managerConfig,
-  e2bApiKey: "[redacted]",
-  provisioning: {
-    ...managerConfig.provisioning,
-    ...(provisioning.claudeOAuthTokens
-      ? {
-          claudeOAuthTokens: Object.fromEntries(
-            Object.keys(provisioning.claudeOAuthTokens).map((id) => [id, "[redacted]"]),
-          ),
-        }
-      : {}),
-  },
-};
+const redacted = { ...managerConfig, e2bApiKey: "[redacted]" };
 await NodeFSP.writeFile(
   NodePath.join(output, "manager-config.json"),
   `${JSON.stringify(redacted, null, 2)}\n`,

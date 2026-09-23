@@ -4,9 +4,12 @@
  * `get_usage` read established:
  *
  * - `get_usage` (on demand, during the capabilities probe) reports every
- *   window at once as 0–100 percentages with ISO reset times.
- * - `rate_limit_event` (streamed during a turn) names one window at a time
- *   with a 0–1 utilization fraction and an epoch-seconds reset.
+ *   window at once as 0–100 percentages with ISO reset times. It needs the
+ *   login's profile scope, which a `claude setup-token` token lacks.
+ * - `rate_limit_event` (streamed during a turn) carries 0–1 utilization
+ *   fractions and epoch-seconds resets: every window under `unifiedWindows`,
+ *   or on older CLIs the one window `rateLimitType` names. A setup-token
+ *   account gets its windows from this alone.
  *
  * @module provider/Layers/claudeUsageLimits
  */
@@ -20,6 +23,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 
 import {
   clampPercent,
@@ -127,27 +131,64 @@ function makeWindow(
 }
 
 /**
+ * `unifiedWindows` is marked internal in the CLI and missing from the SDK
+ * typings, so it is parsed rather than trusted.
+ */
+const UnifiedWindow = Schema.Struct({ utilization: Schema.Finite, resetsAt: Schema.Finite });
+const decodeUnifiedWindows = Schema.decodeUnknownOption(
+  Schema.Struct({
+    five_hour: Schema.optional(UnifiedWindow),
+    seven_day: Schema.optional(UnifiedWindow),
+    [OVERAGE_INCLUDED_EVENT_TYPE]: Schema.optional(UnifiedWindow),
+  }),
+);
+
+function eventWindow(
+  type: string,
+  utilization: number,
+  resetsAtSeconds: number | undefined,
+  names: ClaudeScopedLimitNames,
+): ServerProviderUsageWindow | undefined {
+  const usedPercent = utilization * 100;
+  const resetsAt = isoFromEpochSeconds(resetsAtSeconds);
+  if (type in WINDOWS) return makeWindow(type, usedPercent, resetsAt);
+  if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
+    return scopedWindow(names.overageIncluded, usedPercent, resetsAt);
+  }
+  return undefined;
+}
+
+/**
  * Utilization is a 0–1 fraction on the streamed event. An overage-included
- * event before any probe has named the bucket is dropped: guessing a name
+ * window before any probe has named the bucket is dropped: guessing a name
  * would draw a row the next probe cannot reconcile.
  */
+function claudeRateLimitEventWindows(
+  info: SDKRateLimitInfo,
+  names: ClaudeScopedLimitNames,
+): ReadonlyArray<ServerProviderUsageWindow> {
+  const unified = decodeUnifiedWindows(
+    (info as { readonly unifiedWindows?: unknown }).unifiedWindows,
+  );
+  const windows = Option.isSome(unified)
+    ? Object.entries(unified.value).flatMap(([type, window]) => {
+        const mapped = window && eventWindow(type, window.utilization, window.resetsAt, names);
+        return mapped ? [mapped] : [];
+      })
+    : [];
+  if (windows.length > 0) return windows;
+  const type: string | undefined = info.rateLimitType;
+  if (!type || typeof info.utilization !== "number") return [];
+  const mapped = eventWindow(type, info.utilization, info.resetsAt, names);
+  return mapped ? [mapped] : [];
+}
+
 export function claudeRateLimitEventToUpdate(
   info: SDKRateLimitInfo,
   names: ClaudeScopedLimitNames,
 ): ProviderUsageLimitsUpdate | undefined {
-  const type: string | undefined = info.rateLimitType;
-  if (!type || typeof info.utilization !== "number") {
-    return undefined;
-  }
-  const usedPercent = info.utilization * 100;
-  const resetsAt = isoFromEpochSeconds(info.resetsAt);
-  if (type in WINDOWS) {
-    return { windows: [makeWindow(type, usedPercent, resetsAt)] };
-  }
-  if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
-    return { windows: [scopedWindow(names.overageIncluded, usedPercent, resetsAt)] };
-  }
-  return undefined;
+  const windows = claudeRateLimitEventWindows(info, names);
+  return windows.length > 0 ? { windows } : undefined;
 }
 
 /**
@@ -189,11 +230,61 @@ export function claudeUsageResponseToLimits(input: {
   };
 }
 
-/** Probe-side helper: map the response and remember the scoped names for events. */
-export const recordClaudeUsageResponse = (
+/**
+ * One read of an account's windows. `get_usage` answers for any login with
+ * profile scope. A setup-token account instead runs a one-word turn and
+ * reports the `rate_limit_event` that came back with it, or none when the
+ * turn failed. Those turns are rationed (see `makeClaudeUsageTurnReader`);
+ * `recentTurn` means one ran recently, so there is nothing new to publish and
+ * the windows it and later real turns established stand.
+ */
+export type ClaudeUsageRead =
+  | {
+      readonly source: "usageEndpoint";
+      readonly response: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
+    }
+  | { readonly source: "rateLimitEvent"; readonly info: SDKRateLimitInfo | undefined }
+  | { readonly source: "recentTurn" };
+
+/**
+ * Only `get_usage` names the scoped buckets, so a turn-derived read keeps
+ * the names already known. A turn that reported no window this build can
+ * draw is a failed read, not an account without limits. `recentTurn` yields
+ * no limits, which callers publish as "usage unchanged".
+ */
+export function claudeUsageReadToLimits(input: {
+  readonly read: ClaudeUsageRead;
+  readonly names: ClaudeScopedLimitNames;
+  readonly checkedAt: string;
+}): {
+  readonly limits: ServerProviderUsageLimits | undefined;
+  readonly names: ClaudeScopedLimitNames;
+} {
+  const { read, names, checkedAt } = input;
+  if (read.source === "usageEndpoint") {
+    return claudeUsageResponseToLimits({ response: read.response, checkedAt });
+  }
+  if (read.source === "recentTurn") return { limits: undefined, names };
+  const windows = read.info ? claudeRateLimitEventWindows(read.info, names) : [];
+  return {
+    limits:
+      windows.length > 0
+        ? makeUsageLimits({ checkedAt, windows })
+        : makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "probeFailed",
+            message: "Claude did not report usage windows.",
+          }),
+    names,
+  };
+}
+
+/** Probe-side helper: map the read and remember the scoped names for events. */
+export const recordClaudeUsageRead = (
   namesRef: Ref.Ref<ClaudeScopedLimitNames>,
-  input: Parameters<typeof claudeUsageResponseToLimits>[0],
-): Effect.Effect<ServerProviderUsageLimits> => {
-  const { limits, names } = claudeUsageResponseToLimits(input);
-  return Ref.set(namesRef, names).pipe(Effect.as(limits));
-};
+  input: { readonly read: ClaudeUsageRead; readonly checkedAt: string },
+): Effect.Effect<ServerProviderUsageLimits | undefined> =>
+  Ref.modify(namesRef, (names) => {
+    const mapped = claudeUsageReadToLimits({ ...input, names });
+    return [mapped.limits, mapped.names];
+  });

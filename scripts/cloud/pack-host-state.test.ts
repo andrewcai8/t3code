@@ -58,7 +58,18 @@ describe("packHostState", () => {
                   enabled: true,
                   config: { homePath: "/data/t3/codex-homes/codex" },
                 },
-                claude_work: { driver: "claudeAgent", displayName: "Claude · work", enabled: true },
+                claude_work: {
+                  driver: "claudeAgent",
+                  displayName: "Claude · work",
+                  enabled: true,
+                  environment: [
+                    {
+                      name: "CLAUDE_CODE_OAUTH_TOKEN",
+                      value: "sk-ant-oat01-work",
+                      sensitive: true,
+                    },
+                  ],
+                },
               },
             }),
           ],
@@ -72,7 +83,6 @@ describe("packHostState", () => {
         provisioning: {
           templateId: "t3-common",
           egressAllow: ["registry.npmjs.org"],
-          claudeOAuthTokens: { claude_work: "sk-ant-oat01-work" },
           shellEnvironment: [{ name: "GH_TOKEN", source: "/data/t3/shell-environment/GH_TOKEN" }],
           skills: [{ source: "/data/t3/skills/0/review-skills", name: "review" }],
         },

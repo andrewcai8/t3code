@@ -104,7 +104,14 @@ describe("planManagerAccounts", () => {
         enabled: true,
         config: { homePath: "/home/user/manager-state/codex-homes/codex_ac1" },
       },
-      claude_work: { driver: "claudeAgent", displayName: "Claude · work", enabled: true },
+      claude_work: {
+        driver: "claudeAgent",
+        displayName: "Claude · work",
+        enabled: true,
+        environment: [
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-work", sensitive: true },
+        ],
+      },
       cursor_work: {
         driver: "cursor",
         displayName: "Cursor · work",
@@ -129,7 +136,6 @@ describe("planManagerAccounts", () => {
         ],
       },
     });
-    assert.deepEqual(plan.claudeOAuthTokens, { claude_work: "sk-ant-oat01-work" });
     assert.deepEqual(plan.shellEnvironment, [
       {
         name: "CURSOR_API_KEY",
@@ -151,7 +157,7 @@ describe("planManagerAccounts", () => {
     assert.equal(cursorFileCredentialPath(environment, "linux"), credential?.destination);
   });
 
-  it("carries a Claude account as a token, not a file, and skips one without a token", () => {
+  it("carries a Claude account as a token its instance runs on, and skips one without", () => {
     const plan = planManagerAccounts({
       settings: {
         providerInstances: {
@@ -190,8 +196,10 @@ describe("planManagerAccounts", () => {
     assert.deepEqual(plan.providerInstances.claude_work, {
       driver: "claudeAgent",
       enabled: true,
+      environment: [
+        { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-work", sensitive: true },
+      ],
     });
-    assert.deepEqual(plan.claudeOAuthTokens, { claude_work: "sk-ant-oat01-work" });
   });
 
   it("treats a built-in driver with no instance entry as the legacy default instance", () => {
@@ -213,7 +221,6 @@ describe("planManagerAccounts", () => {
       plan.skipped.map(({ id }) => id),
       ["claudeAgent", "cursor"],
     );
-    assert.equal(plan.claudeOAuthTokens, undefined);
     assert.equal(plan.shellEnvironment, undefined);
   });
 
@@ -254,7 +261,6 @@ describe("planManagerAccounts", () => {
 
     assert.deepEqual(plan.accounts, ["codex_ac1", "cursor_work"]);
     assert.deepEqual(Object.keys(plan.providerInstances), ["codex_ac1", "cursor_work"]);
-    assert.equal(plan.claudeOAuthTokens, undefined);
     assert.throws(
       () =>
         planManagerAccounts({ settings, provisioning, host, managerBaseDir, accounts: ["nope"] }),
