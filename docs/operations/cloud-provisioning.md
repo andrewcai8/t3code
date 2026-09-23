@@ -33,6 +33,10 @@ Use the account's config directory, or drop `CLAUDE_CONFIG_DIR=` for the default
 
 Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. Local runs keep using the keychain login. A credential set in the instance's own environment variables still wins, and an account with a `.credentials.json` file needs no token.
 
+## Which account a cloud environment uses
+
+The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh. An account with no known usage ranks last, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. The choice is frozen with the request, so retrying or resuming keeps the same account.
+
 ## Stand up a manager
 
 ```

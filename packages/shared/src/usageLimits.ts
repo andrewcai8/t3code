@@ -666,3 +666,84 @@ export function collectProviderUsageLimits(
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
 }
+
+/** Older than this, a snapshot no longer says how much an account has left. */
+const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
+
+/**
+ * How much an account has left before any of its windows stops it: the
+ * tightest window's remaining percent. A window past its reset counts as
+ * full, and an account with no subscription limits (an API key) as 100.
+ * `null` means unknown, a failed probe, stale data, or no report at all.
+ */
+export interface AccountHeadroom {
+  readonly remainingPercent: number;
+  /** When the tightest window refills, null when it never reports a reset. */
+  readonly resetsAt: number | null;
+}
+
+function accountHeadroom(
+  driver: ServerProvider["driver"],
+  limits: ServerProviderUsageLimits | undefined,
+  now: number,
+): AccountHeadroom | null {
+  if (!limits || limits.unavailable?.reason === "probeFailed") return null;
+  if (limits.unavailable?.reason === "unsupported")
+    return { remainingPercent: 100, resetsAt: null };
+  const checkedAt = Date.parse(limits.checkedAt);
+  if (!Number.isFinite(checkedAt) || now - checkedAt > USAGE_LIMITS_STALE_MS) return null;
+  let tightest: AccountHeadroom = { remainingPercent: 100, resetsAt: null };
+  for (const window of displayUsageLimits(driver, limits).windows) {
+    const resetsAt = resetMillis(window);
+    if (resetsAt !== null && resetsAt <= now) continue;
+    const remaining = remainingPercent(window);
+    if (
+      remaining < tightest.remainingPercent ||
+      (remaining === tightest.remainingPercent && earlier(resetsAt, tightest.resetsAt))
+    )
+      tightest = { remainingPercent: remaining, resetsAt };
+  }
+  return tightest;
+}
+
+/** Known room first, then unknown, then known to be spent: a spent account fails its first turn. */
+const headroomTier = (headroom: AccountHeadroom | null) =>
+  headroom === null ? 1 : headroom.remainingPercent > 0 ? 0 : 2;
+
+const earlier = (left: number | null, right: number | null) =>
+  left !== null && (right === null || left < right);
+
+/**
+ * Accounts of one driver, the one with the most headroom first. Unknown
+ * headroom ranks below any account with room left, and above a spent one. Ties go to the account whose
+ * tightest window refills first, then the preferred account, then the id,
+ * so the same snapshots always rank the same way.
+ */
+export function rankAccounts<
+  A extends {
+    readonly instanceId: ProviderInstanceId;
+    readonly driver: ServerProvider["driver"];
+    readonly usageLimits?: ServerProviderUsageLimits | undefined;
+  },
+>(accounts: readonly A[], now: number, preferred?: ProviderInstanceId): A[] {
+  const scored = accounts.map((account) => ({
+    account,
+    headroom: accountHeadroom(account.driver, account.usageLimits, now),
+  }));
+  return scored
+    .sort((left, right) => {
+      const a = left.headroom;
+      const b = right.headroom;
+      const tierDelta = headroomTier(a) - headroomTier(b);
+      if (tierDelta !== 0) return tierDelta;
+      if (a !== null && b !== null) {
+        if (a.remainingPercent !== b.remainingPercent)
+          return b.remainingPercent - a.remainingPercent;
+        if (a.resetsAt !== b.resetsAt) return earlier(a.resetsAt, b.resetsAt) ? -1 : 1;
+      }
+      if (left.account.instanceId === preferred) return -1;
+      if (right.account.instanceId === preferred) return 1;
+      return left.account.instanceId < right.account.instanceId ? -1 : 1;
+    })
+    .map(({ account }) => account);
+}

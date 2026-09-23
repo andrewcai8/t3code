@@ -3,7 +3,11 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ServerSettings } from "@t3tools/contracts";
+import {
+  ProviderInstanceId,
+  ServerSettings,
+  type ServerProviderUsageWindow,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, expect } from "vite-plus/test";
@@ -252,8 +256,16 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     settings: ServerSettings,
     providerInstanceId = "selected",
     claudeOAuthTokens?: Record<string, string>,
+    usage: Record<string, ReadonlyArray<ServerProviderUsageWindow>> = {},
+    agentDriver?: string,
   ) =>
-    resolveProvisioningProfiles(settings, { providerInstanceId }, claudeOAuthTokens).pipe(
+    resolveProvisioningProfiles(settings, { providerInstanceId, agentDriver }, claudeOAuthTokens, {
+      providers: Object.entries(usage).map(([instanceId, windows]) => ({
+        instanceId: ProviderInstanceId.make(instanceId),
+        usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows },
+      })),
+      now: Date.parse("2026-09-03T12:00:00.000Z"),
+    }).pipe(
       Effect.map((profiles) =>
         profiles.map(({ kind, instanceId, credential }) => [kind, instanceId, credential.kind]),
       ),
@@ -294,6 +306,84 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
         },
       });
       expect(yield* accounts(settings)).toEqual([["codex", "selected", "file"]]);
+    }),
+  );
+
+  const session = (usedPercent: number) => ({
+    id: "five_hour",
+    kind: "session" as const,
+    label: "Session",
+    usedPercent,
+    resetsAt: "2026-09-03T14:00:00.000Z",
+  });
+  const weekly = (usedPercent: number) => ({
+    id: "seven_day",
+    kind: "weekly" as const,
+    label: "Weekly",
+    usedPercent,
+    resetsAt: "2026-09-07T00:00:00.000Z",
+  });
+  const apiKeyAccount = (driver: string, name: string, value: string) => ({
+    driver,
+    enabled: true,
+    environment: [{ name, value, sensitive: true }],
+  });
+  const routedSettings = () =>
+    decodeSettings({
+      providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+      providerInstances: {
+        selected: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "selected-key"),
+        claudeSpare: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "spare-key"),
+        cursor: { driver: "cursor", enabled: false },
+        cursorWork: apiKeyAccount("cursor", "CURSOR_API_KEY", "work-key"),
+        cursorHome: apiKeyAccount("cursor", "CURSOR_API_KEY", "home-key"),
+      },
+    });
+
+  it.effect("runs the chat and each companion on the account with the most usage left", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* accounts(routedSettings(), "selected", undefined, {
+          selected: [session(20), weekly(97)],
+          claudeSpare: [session(80), weekly(10)],
+          cursorWork: [session(60)],
+          cursorHome: [session(10)],
+        }),
+      ).toEqual([
+        ["claudeAgent", "claudeSpare", "environment"],
+        ["cursor", "cursorHome", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("keeps the hinted account when no account reports usage", () =>
+    Effect.gen(function* () {
+      expect(yield* accounts(routedSettings(), "selected")).toEqual([
+        ["claudeAgent", "selected", "environment"],
+        ["cursor", "cursorHome", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("falls through to the next account when the best login is not portable", () =>
+    Effect.gen(function* () {
+      const settings = decodeSettings({
+        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+        providerInstances: {
+          selected: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "selected-key"),
+          keychain: { driver: "claudeAgent", config: { homePath: directory } },
+          cursor: { driver: "cursor", enabled: false },
+        },
+      });
+      expect(
+        yield* accounts(
+          settings,
+          "selected",
+          undefined,
+          { keychain: [session(0)], selected: [session(90)] },
+          "claudeAgent",
+        ),
+      ).toEqual([["claudeAgent", "selected", "environment"]]);
     }),
   );
 
