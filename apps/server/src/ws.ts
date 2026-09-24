@@ -1791,6 +1791,7 @@ const makeWsRpcLayer = (
             cwd: config.cwd,
             keybindingsConfigPath: config.keybindingsConfigPath,
             environmentControl: true,
+            localAgentRuns: config.localAgentRuns,
             // A config this server cannot read offers nothing rather than failing getConfig.
             provisionProviders: yield* environmentControl.provisionProviders.pipe(
               Effect.orElseSucceed(() => []),

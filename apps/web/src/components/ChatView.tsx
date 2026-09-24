@@ -6,7 +6,7 @@ import {
 } from "../cloud/provisionRequests";
 import {
   type CloudProvisioningProgressPhase,
-  offeredProvisionProviders,
+  newChatRunTargets,
   provisionCloudEnvironment,
 } from "@t3tools/client-runtime/cloud";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -513,6 +513,7 @@ import {
   toolGroupConsumesUpwardNavigation,
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
+  needsLoadBalancedPick,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -1842,7 +1843,8 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [pendingServerThreadEnvMode, setPendingServerThreadEnvMode] =
     useState<DraftThreadEnvMode | null>(null);
-  const [cloudProvisioningRequested, setCloudProvisioningRequested] = useState<
+  // The cloud kind the user picked; `cloudProvisioningRequested` adds the default.
+  const [cloudProvisioningChoice, setCloudProvisioningChoice] = useState<
     "e2b" | "namespace" | null
   >(null);
   const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
@@ -2590,7 +2592,25 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
+  const runTargets = useMemo(
+    () =>
+      newChatRunTargets({
+        environments: logicalProjectEnvironments,
+        serverConfig: (environmentId) => environmentById.get(environmentId)?.serverConfig,
+        environmentId: activeThreadEnvironmentId,
+        managerConfig: primaryEnvironment?.serverConfig,
+      }),
+    [
+      logicalProjectEnvironments,
+      environmentById,
+      activeThreadEnvironmentId,
+      primaryEnvironment?.serverConfig,
+    ],
+  );
+  // A draft offers only machines a new chat can run on; a started thread still
+  // names the machine it ran on.
+  const pickableEnvironments = draftId ? runTargets.environments : logicalProjectEnvironments;
+  const hasMultipleEnvironments = pickableEnvironments.length > 1;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
       (environment) => environment.environmentId === activeThread?.environmentId,
@@ -2759,12 +2779,12 @@ export default function ChatView(props: ChatViewProps) {
   const autoUpdateEnvironments = useMemo(
     () =>
       automaticEnvironment
-        ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
+        ? pickableEnvironments.flatMap(({ environmentId }) => {
             const environment = environmentById.get(environmentId);
             return environment ? [environment] : [];
           })
         : [],
-    [automaticEnvironment, logicalProjectEnvironments, environmentById],
+    [automaticEnvironment, pickableEnvironments, environmentById],
   );
   const autoBalanceUpdateBanner = useAutoBalanceUpdateBanner(autoUpdateEnvironments);
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
@@ -4010,11 +4030,15 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen]);
 
-  const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
+  const needsLoadBalancing = needsLoadBalancedPick({
+    automatic: automaticEnvironment,
+    pickedEnvironmentId: draftThread?.loadBalancedEnvironmentId,
+    candidates: pickableEnvironments,
+  });
   const loadBalancingCandidates = useMemo(
     () =>
       needsLoadBalancing
-        ? logicalProjectEnvironments
+        ? pickableEnvironments
             .filter((candidate) => {
               const environment = environmentById.get(candidate.environmentId);
               return (
@@ -4037,7 +4061,7 @@ export default function ChatView(props: ChatViewProps) {
         : [],
     [
       needsLoadBalancing,
-      logicalProjectEnvironments,
+      pickableEnvironments,
       environmentById,
       loadBalancingSettings.loadBalancingWeights,
       activeProviderInstanceId,
@@ -4050,7 +4074,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
-    const target = logicalProjectEnvironments.find(
+    const target = pickableEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
     if (!target) return;
@@ -4064,12 +4088,26 @@ export default function ChatView(props: ChatViewProps) {
     loadBalancing.pending,
     loadBalancing.environmentId,
     draftId,
-    logicalProjectEnvironments,
+    pickableEnvironments,
     setDraftThreadContext,
   ]);
+  // A draft on a host that runs no agents, with no cloud kind to start instead,
+  // moves to a machine that does run them.
+  const redirectEnvironment =
+    draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
+      ? runTargets.redirect.environment
+      : null;
+  useEffect(() => {
+    if (!draftId || !redirectEnvironment || sendInFlightRef.current) return;
+    setDraftThreadContext(draftId, {
+      projectRef: scopeProjectRef(redirectEnvironment.environmentId, redirectEnvironment.projectId),
+      environmentSelection: "manual",
+      loadBalancedEnvironmentId: null,
+    });
+  }, [draftId, redirectEnvironment, setDraftThreadContext]);
   const onAutoEnvironment = useCallback(() => {
     if (envLocked || !draftId) return;
-    setCloudProvisioningRequested(null);
+    setCloudProvisioningChoice(null);
     setPendingCloudSendEnvironmentId(null);
     if (composerHasAttachments) {
       toastManager.add({
@@ -4081,9 +4119,7 @@ export default function ChatView(props: ChatViewProps) {
       });
       return;
     }
-    loadBalancing.refresh(
-      logicalProjectEnvironments.map((environment) => environment.environmentId),
-    );
+    loadBalancing.refresh(pickableEnvironments.map((environment) => environment.environmentId));
     setDraftThreadContext(draftId, {
       environmentSelection: "auto",
       loadBalancedEnvironmentId: null,
@@ -4095,7 +4131,7 @@ export default function ChatView(props: ChatViewProps) {
     draftId,
     setDraftThreadContext,
     loadBalancing.refresh,
-    logicalProjectEnvironments,
+    pickableEnvironments,
     composerHasAttachments,
   ]);
   const autoEnvironmentLabel = automaticEnvironment
@@ -4114,7 +4150,7 @@ export default function ChatView(props: ChatViewProps) {
   const onEnvironmentChange = useCallback(
     (nextEnvironmentId: EnvironmentId) => {
       if (envLocked || !draftId) return;
-      setCloudProvisioningRequested(null);
+      setCloudProvisioningChoice(null);
       setPendingCloudSendEnvironmentId(null);
       const target = logicalProjectEnvironments.find(
         (env) => env.environmentId === nextEnvironmentId,
@@ -4907,17 +4943,22 @@ export default function ChatView(props: ChatViewProps) {
       )?.snapshot ?? activeProviderStatus,
     [activeProviderStatus, providerInstanceEntries],
   );
-  const offeredCloudProviders = offeredProvisionProviders(primaryEnvironment?.serverConfig);
+  const offeredCloudProviders = runTargets.cloudProviders;
   const canCreateCloudEnvironment =
     draftId !== null &&
     primaryEnvironmentId !== null &&
     offeredCloudProviders.length > 0 &&
     cloudAccount !== null;
+  const cloudProvisioningRequested =
+    cloudProvisioningChoice ??
+    (canCreateCloudEnvironment && !automaticEnvironment && runTargets.redirect?.kind === "cloud"
+      ? runTargets.redirect.provider
+      : null);
   const handleSelectCloudEnvironment = useCallback(
     (provider: "e2b" | "namespace") => {
       if (!canCreateCloudEnvironment || !cloudAccount) return;
       cloudSetupProviderRef.current = provider;
-      setCloudProvisioningRequested(provider);
+      setCloudProvisioningChoice(provider);
       setPendingCloudSendEnvironmentId(null);
       toastManager.add({
         type: "info",
@@ -5051,7 +5092,7 @@ export default function ChatView(props: ChatViewProps) {
           readyEnvironmentId: outcome.projectRef.environmentId,
         });
         if (viewingStartedDraft()) {
-          setCloudProvisioningRequested(null);
+          setCloudProvisioningChoice(null);
           setPendingCloudSendEnvironmentId(outcome.projectRef.environmentId);
           setCloudProvisioningPhase("ready");
         }
@@ -6279,7 +6320,7 @@ export default function ChatView(props: ChatViewProps) {
       heldCloudSendSnapshotRef.current = null;
       cloudProvisioningStartedAtRef.current = null;
       cloudProvisioningEndedAtRef.current = null;
-      setCloudProvisioningRequested(null);
+      setCloudProvisioningChoice(null);
       setCloudProvisioningPhase(null);
       setCloudProvisioningError(null);
       setCreatingCloudEnvironment(false);
@@ -6294,10 +6335,10 @@ export default function ChatView(props: ChatViewProps) {
     setCloudProvisioningPhase(pending.phase);
     setCreatingCloudEnvironment(isInProgressCloudProvisioningPhase(pending.phase));
     if (pending.phase === "ready" && pending.readyEnvironmentId) {
-      setCloudProvisioningRequested(null);
+      setCloudProvisioningChoice(null);
       setPendingCloudSendEnvironmentId(EnvironmentId.make(pending.readyEnvironmentId));
     } else {
-      setCloudProvisioningRequested(pending.provider);
+      setCloudProvisioningChoice(pending.provider);
       setPendingCloudSendEnvironmentId(null);
     }
     heldCloudSendSnapshotRef.current = {
@@ -11126,7 +11167,7 @@ export default function ChatView(props: ChatViewProps) {
                                     ? onAutoEnvironment
                                     : undefined
                                 }
-                                availableEnvironments={logicalProjectEnvironments}
+                                availableEnvironments={pickableEnvironments}
                                 {...(canCreateCloudEnvironment &&
                                 offeredCloudProviders.includes("e2b")
                                   ? { onCreateCloudEnvironment: handleSelectCloudEnvironment }

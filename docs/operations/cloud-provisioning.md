@@ -49,6 +49,8 @@ The script builds the runtime artifact, creates a sandbox from the configured te
 
 Pass `--artifact FILE` to reuse a build. `--auth FILE` points at the account credential to install, and defaults to `~/.codex/auth.json`.
 
+A host that should only provision, such as a small always-on server, runs with `T3CODE_LOCAL_AGENT_RUNS=false`. Clients then leave it out of "Run on", start new chats in its projects on the first cloud kind it offers, and the server refuses to start a turn on its own machine. Its projects and old threads stay browsable.
+
 Namespace needs a manager on a Mac with the `nsc` login, which a hosted manager does not have. A container host packed with `pack-host-state.ts --namespace-session` carries that login's 30-day session token, so re-pack it after each `nsc login`. `scripts/cloud/local-manager.sh start` runs one from your checkout instead. It copies the config from `~/.t3/fork-dev` (set `SOURCE_HOME` to use another home) into `.t3/manager`, pins an artifact built from `HEAD`, serves on `127.0.0.1`, and writes a pairing token to `.t3/manager/pairing-token`. `stop` stops it. Smoke it end to end with:
 
 ```

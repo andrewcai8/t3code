@@ -83,6 +83,17 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     const serverConfig = yield* ServerConfig;
     const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
 
+    // An answer in message mode becomes a turn inside the decider, past this guard.
+    if (
+      !serverConfig.localAgentRuns &&
+      (canonicalCommand.type === "thread.turn.start" ||
+        canonicalCommand.type === "thread.user-input.respond")
+    ) {
+      return yield* new OrchestrationDispatchCommandError({
+        message: "This server does not run agents. Start the chat on a cloud environment.",
+      });
+    }
+
     const normalizeProjectWorkspaceRoot = (workspaceRoot: string) =>
       workspacePaths.normalizeWorkspaceRoot(workspaceRoot).pipe(
         Effect.mapError(

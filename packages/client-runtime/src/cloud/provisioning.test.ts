@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   type ProvisionRequestId,
+  type ServerConfig,
   ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -17,6 +18,7 @@ import {
 import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
 import {
   type CloudProvisionPorts,
+  newChatRunTargets,
   offeredProvisionProviders,
   provisionCloudEnvironment,
 } from "./provisioning.ts";
@@ -277,5 +279,75 @@ describe("offeredProvisionProviders", () => {
     expect(offeredProvisionProviders({ environmentControl: true })).toEqual(["e2b", "namespace"]);
     expect(offeredProvisionProviders({})).toEqual([]);
     expect(offeredProvisionProviders(null)).toEqual([]);
+  });
+});
+
+describe("newChatRunTargets", () => {
+  const host = { environmentId: EnvironmentId.make("host") };
+  const laptop = { environmentId: EnvironmentId.make("laptop") };
+  type ManagerConfig = Pick<ServerConfig, "environmentControl" | "provisionProviders">;
+  const manager: ManagerConfig = {
+    environmentControl: true,
+    provisionProviders: ["namespace", "e2b"],
+  };
+  const targets = (input: {
+    readonly localAgentRuns: boolean | undefined;
+    readonly environmentId?: EnvironmentId;
+    readonly managerConfig?: ManagerConfig;
+  }) =>
+    newChatRunTargets({
+      environments: [host, laptop],
+      serverConfig: (id) =>
+        id !== host.environmentId
+          ? { localAgentRuns: true }
+          : input.localAgentRuns === undefined
+            ? {}
+            : { localAgentRuns: input.localAgentRuns },
+      environmentId: input.environmentId ?? host.environmentId,
+      managerConfig: input.managerConfig ?? manager,
+    });
+
+  it("hides a host without local runs and sends its chats to the first cloud kind", () => {
+    expect(targets({ localAgentRuns: false })).toEqual({
+      environments: [laptop],
+      cloudProviders: ["namespace", "e2b"],
+      redirect: { kind: "cloud", provider: "namespace" },
+    });
+  });
+
+  it("moves a host chat to an environment that runs agents when no cloud kind is offered", () => {
+    expect(
+      targets({
+        localAgentRuns: false,
+        managerConfig: { environmentControl: true, provisionProviders: [] },
+      }).redirect,
+    ).toEqual({ kind: "environment", environment: laptop });
+  });
+
+  it("keeps a chat that points elsewhere where it is", () => {
+    expect(
+      targets({ localAgentRuns: false, environmentId: laptop.environmentId }).redirect,
+    ).toBeNull();
+  });
+
+  it("offers the host and keeps chats there when the switch is on or absent", () => {
+    for (const localAgentRuns of [true, undefined]) {
+      expect(targets({ localAgentRuns })).toEqual({
+        environments: [host, laptop],
+        cloudProviders: ["namespace", "e2b"],
+        redirect: null,
+      });
+    }
+  });
+
+  it("has nowhere to send a chat when nothing else can run it", () => {
+    expect(
+      newChatRunTargets({
+        environments: [host],
+        serverConfig: () => ({ localAgentRuns: false }),
+        environmentId: host.environmentId,
+        managerConfig: { environmentControl: true, provisionProviders: [] },
+      }),
+    ).toEqual({ environments: [], cloudProviders: [], redirect: null });
   });
 });

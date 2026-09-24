@@ -559,6 +559,12 @@ export const ServerConfig = Schema.Struct({
    * whenever `environmentControl` was set.
    */
   provisionProviders: Schema.optionalKey(ForwardCompatibleArray(ProvisionProvider)),
+  /**
+   * Whether new chats may run agents on this environment's own machine. False
+   * on a host that only provisions cloud environments. Absent on servers that
+   * predate it, which always ran them.
+   */
+  localAgentRuns: Schema.optionalKey(Schema.Boolean),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,
