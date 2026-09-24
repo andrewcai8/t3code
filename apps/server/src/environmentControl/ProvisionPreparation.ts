@@ -117,7 +117,8 @@ export function configuredRuntimeArtifact(
 }
 /**
  * The cloud environments this configuration can provision. Each needs its
- * pinned runtime, and a Mac also needs Namespace defaults. Namespace
+ * pinned runtime; E2B also needs its template and a Mac its Namespace
+ * defaults. Namespace
  * credentials are checked when a provision starts, since `nsc login` can
  * supply them outside this file.
  */
@@ -127,7 +128,9 @@ export function provisionProviders(
   return ProvisionProvider.literals.filter(
     (provider) =>
       configuredRuntimeArtifact(config, provider) !== null &&
-      (provider === "e2b" || config.provisioning?.namespace !== undefined),
+      (provider === "e2b"
+        ? Boolean(config.provisioning?.templateId)
+        : config.provisioning?.namespace !== undefined),
   );
 }
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));

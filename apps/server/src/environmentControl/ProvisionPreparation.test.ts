@@ -1097,16 +1097,29 @@ it("offers each cloud platform only when its runtime and defaults are configured
   });
 
   expect(provisionProviders(configWith(undefined))).toEqual([]);
-  expect(provisionProviders(configWith({ runtimeArtifacts: { linux: runtime } }))).toEqual(["e2b"]);
   expect(
-    provisionProviders(
-      configWith({ runtimeArtifacts: { linux: runtime }, namespace: { size: "m" } }),
-    ),
+    provisionProviders(configWith({ templateId: "t3", runtimeArtifacts: { linux: runtime } })),
   ).toEqual(["e2b"]);
-  expect(provisionProviders(configWith({ runtimeArtifacts: { macos: runtime } }))).toEqual([]);
   expect(
     provisionProviders(
       configWith({
+        templateId: "t3",
+        runtimeArtifacts: { linux: runtime },
+        namespace: { size: "m" },
+      }),
+    ),
+  ).toEqual(["e2b"]);
+  expect(provisionProviders(configWith({ runtimeArtifacts: { linux: runtime } }))).toEqual([]);
+  expect(provisionProviders(configWith({ runtimeArtifacts: { macos: runtime } }))).toEqual([]);
+  expect(
+    provisionProviders(
+      configWith({ runtimeArtifacts: { macos: runtime }, namespace: { size: "m" } }),
+    ),
+  ).toEqual(["namespace"]);
+  expect(
+    provisionProviders(
+      configWith({
+        templateId: "t3",
         runtimeArtifacts: { linux: runtime, macos: runtime },
         namespace: { size: "m" },
       }),
