@@ -136,6 +136,7 @@ it("shows a manager-created environment without a composer draft and opens its s
   expect(state.attach).toHaveBeenCalledWith({
     environmentId: "remote",
     input: { requestId: environment.requestId },
+    showsOwnProgress: true,
   });
   expect(state.pair).toHaveBeenCalledWith({
     pairingUrl: "https://remote.invalid/pair#token=fresh",
@@ -167,6 +168,7 @@ it("resumes a paused environment and routes its pairing through the manager", as
   expect(state.resume).toHaveBeenCalledWith({
     environmentId: environment.environmentId,
     input: { environmentId: environment.environmentId },
+    showsOwnProgress: true,
   });
   expect(state.pair).toHaveBeenCalledWith({
     pairingUrl:
@@ -196,6 +198,7 @@ it("shares a scannable pairing link for a machine reachable off this computer", 
   expect(state.attach).toHaveBeenCalledWith({
     environmentId: "remote",
     input: { requestId: environment.requestId },
+    showsOwnProgress: true,
   });
   expect(view.root.findByType("img").props.src).toBe("https://remote.invalid/pair#token=fresh");
   await click(view, "Copy link");
