@@ -53,6 +53,12 @@ export interface PackInput {
   readonly baseDir: string;
   /** Skill bundle `i` unpacks into `<skillsDir>/<i>`. */
   readonly skillsDir: string;
+  /**
+   * A Namespace login's `token.json`. Its session token lands at
+   * `<baseDir>/ns/token.json`, where the Namespace SDK finds it on a host run
+   * with `XDG_CONFIG_HOME=<baseDir>`.
+   */
+  readonly namespaceSession?: string | undefined;
 }
 
 export interface HostState {
@@ -62,8 +68,9 @@ export interface HostState {
    * The host's config minus what only the transport knows: `broker`, which for
    * the E2B manager is the sandbox it creates after packing, and
    * `provisioning.runtimeArtifacts`, which a host pins itself. Namespace
-   * settings travel only with a `namespaceToken`: a host has no `nsc login` of
-   * its own, so without one it could not start the Macs it offers.
+   * settings travel only with a `namespaceToken` or a Namespace session: a host
+   * has no `nsc login` of its own, so without one it could not start the Macs
+   * it offers.
    */
   readonly config: {
     readonly e2bApiKey: string;
@@ -121,6 +128,23 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   ];
   for (const file of plan.files)
     files.push({ path: file.destination, data: await NodeFSP.readFile(file.source) });
+  if (input.namespaceSession) {
+    // Errors name the file and never its contents, since a JSON.parse message quotes the input.
+    let sessionToken: unknown;
+    try {
+      sessionToken = JSON.parse(
+        await NodeFSP.readFile(input.namespaceSession, "utf8"),
+      )?.session_token;
+    } catch {
+      throw new Error(`${input.namespaceSession} is not a Namespace token.json`);
+    }
+    if (typeof sessionToken !== "string" || !sessionToken)
+      throw new Error(`${input.namespaceSession} has no session_token; run \`nsc login\``);
+    files.push({
+      path: NodePath.posix.join(input.baseDir, "ns/token.json"),
+      data: JSON.stringify({ session_token: sessionToken }),
+    });
+  }
 
   const bundles = (config.provisioning?.skills ?? []).map((skill, index) => {
     const directory = NodePath.posix.join(input.skillsDir, String(index));
@@ -137,10 +161,11 @@ export async function packHostState(input: PackInput): Promise<HostState> {
 
   const provisioning = config.provisioning;
   const namespaceToken = config.namespaceToken;
+  const namespaceAuthorized = Boolean(namespaceToken || input.namespaceSession);
   // A repository entry's `workspaceFiles` name paths on this machine, so only
   // its Namespace settings travel. Their artifact paths live in Namespace's
   // storage, not on disk.
-  const namespaceRepositories = namespaceToken
+  const namespaceRepositories = namespaceAuthorized
     ? (provisioning?.repositories ?? []).flatMap(({ repository, namespace }) =>
         namespace ? [{ repository, namespace }] : [],
       )
@@ -167,7 +192,9 @@ export async function packHostState(input: PackInput): Promise<HostState> {
         // every provision fail with an ENOENT naming another machine.
         ...(plan.shellEnvironment ? { shellEnvironment: plan.shellEnvironment } : {}),
         skills: bundles.map((bundle) => bundle.source),
-        ...(namespaceToken && provisioning?.namespace ? { namespace: provisioning.namespace } : {}),
+        ...(namespaceAuthorized && provisioning?.namespace
+          ? { namespace: provisioning.namespace }
+          : {}),
         ...(namespaceRepositories.length ? { repositories: namespaceRepositories } : {}),
       },
     },
@@ -225,12 +252,17 @@ export async function writeSeedArchive(input: {
 
 const USAGE = `Usage: node scripts/cloud/pack-host-state.ts --output FILE.tgz --base-dir DIR
        --broker-url https://HOST [--config FILE] [--settings FILE] [--accounts ID,ID,...]
+       [--namespace-session FILE]
 
 Packs a provisioning host's state as a seed tarball rooted at --base-dir, for
 a container that runs the linux runtime artifact baked into its image. The
 tarball holds credentials; treat it as a secret.
-Namespace (macOS) settings are carried only with a namespaceToken. Runtime
-artifacts are never carried; the host adds its own.`;
+Namespace (macOS) settings are carried only with a namespaceToken in the
+config or a --namespace-session, the token.json of an \`nsc login\` (on macOS,
+~/Library/Application Support/ns/token.json). Its session token lands at
+<base-dir>/ns/token.json, so run the host with XDG_CONFIG_HOME=<base-dir>, and
+re-pack after each monthly login. Runtime artifacts are never carried; the
+host adds its own.`;
 
 if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({
@@ -247,6 +279,7 @@ if (import.meta.main) {
         default: NodePath.join(NodeOS.homedir(), ".t3/userdata/settings.json"),
       },
       accounts: { type: "string" },
+      "namespace-session": { type: "string" },
       help: { type: "boolean", default: false },
     },
   });
@@ -271,6 +304,7 @@ if (import.meta.main) {
     host: { homedir: NodeOS.homedir(), platform: process.platform, environment: process.env },
     baseDir,
     skillsDir: NodePath.posix.join(baseDir, "skills"),
+    namespaceSession: values["namespace-session"],
   });
   for (const { id, reason } of state.skipped) console.log(`skipping ${id}: ${reason}`);
   console.log(`carrying accounts ${state.accounts.join(", ")}`);
