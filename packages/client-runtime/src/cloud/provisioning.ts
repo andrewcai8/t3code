@@ -37,6 +37,53 @@ export function offeredProvisionProviders(
   return config?.environmentControl === true ? ProvisionProvider.literals : [];
 }
 
+/** Whether an environment runs agents on its own machine. Servers that predate the switch did. */
+export function runsLocalAgents(
+  config: Pick<ServerConfig, "localAgentRuns"> | null | undefined,
+): boolean {
+  return config?.localAgentRuns !== false;
+}
+
+export interface NewChatRunTargets<Environment> {
+  /** The environments holding the project that a new chat may run on. */
+  readonly environments: ReadonlyArray<Environment>;
+  /** The cloud kinds the manager can create for the chat. */
+  readonly cloudProviders: ReadonlyArray<ProvisionProvider>;
+  /**
+   * The cloud kind a chat starts on while it points at an environment that
+   * runs no agents; null when the environment runs them itself.
+   */
+  readonly defaultCloudProvider: ProvisionProvider | null;
+}
+
+/** Where a new chat can run, and where it starts before the user picks. */
+export function newChatRunTargets<
+  Environment extends { readonly environmentId: EnvironmentId },
+>(input: {
+  /** The environments holding the chat's project. */
+  readonly environments: ReadonlyArray<Environment>;
+  readonly serverConfig: (
+    environmentId: EnvironmentId,
+  ) => Pick<ServerConfig, "localAgentRuns"> | null | undefined;
+  /** The environment the chat points at now. */
+  readonly environmentId: EnvironmentId | null;
+  readonly managerConfig:
+    | Pick<ServerConfig, "environmentControl" | "provisionProviders">
+    | null
+    | undefined;
+}): NewChatRunTargets<Environment> {
+  const cloudProviders = offeredProvisionProviders(input.managerConfig);
+  const pointsAtRunner =
+    input.environmentId === null || runsLocalAgents(input.serverConfig(input.environmentId));
+  return {
+    environments: input.environments.filter((environment) =>
+      runsLocalAgents(input.serverConfig(environment.environmentId)),
+    ),
+    cloudProviders,
+    defaultCloudProvider: pointsAtRunner ? null : (cloudProviders[0] ?? null),
+  };
+}
+
 function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
   return provider === "namespace" ? "Namespace Mac" : "E2B";
 }

@@ -101,6 +101,8 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    /** False on a host that only provisions cloud environments: it refuses to start agent turns. */
+    readonly localAgentRuns: boolean;
   }
 >()("t3/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */
@@ -229,6 +231,7 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
+    localAgentRuns: true,
     port: 0,
     host: undefined,
     desktopBootstrapToken: undefined,

@@ -27,7 +27,12 @@ import {
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 
-import { useEnvironmentServerConfig, useProjects, useThreadShells } from "../../state/entities";
+import {
+  useEnvironmentServerConfig,
+  useProjects,
+  useServerConfigs,
+  useThreadShells,
+} from "../../state/entities";
 import type { TurnCommandMetadata } from "../../lib/commandMetadata";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
 import type { ModelOption, ProviderGroup } from "../../lib/modelOptions";
@@ -82,6 +87,7 @@ import {
   setPendingConnectionError,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
+import { runsLocalAgents } from "@t3tools/client-runtime/cloud";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
 import {
@@ -228,6 +234,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const projects = useProjects();
   const threads = useThreadShells();
   const { savedConnectionsById } = useSavedRemoteConnections();
+  const serverConfigs = useServerConfigs();
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
     useLegacyPlanModeState();
@@ -249,11 +256,16 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const [selectedEnvironmentIdOverride, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
     null,
   );
+  // A host that runs no agents still lists its projects, but a new task starts
+  // elsewhere when anywhere else holds one.
   const selectedEnvironmentId =
     selectedEnvironmentIdOverride !== null &&
     projects.some((project) => project.environmentId === selectedEnvironmentIdOverride)
       ? selectedEnvironmentIdOverride
-      : (projects[0]?.environmentId ?? null);
+      : ((
+          projects.find((project) => runsLocalAgents(serverConfigs.get(project.environmentId))) ??
+          projects[0]
+        )?.environmentId ?? null);
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   // The new-task draft the composer is bound to. Null until a project is
   // chosen; each New Task entry mints its own, so a project can hold several.
@@ -368,7 +380,10 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!hostsSelectedRepository(project)) {
         continue;
       }
-      if (seen.has(project.environmentId)) {
+      if (
+        seen.has(project.environmentId) ||
+        !runsLocalAgents(serverConfigs.get(project.environmentId))
+      ) {
         continue;
       }
       const environment = savedConnectionsById[project.environmentId];
@@ -385,6 +400,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   }, [
     projects,
     savedConnectionsById,
+    serverConfigs,
     selectedRepositoryKey,
     selectedWorkspaceBasename,
     selectedProjectTitle,

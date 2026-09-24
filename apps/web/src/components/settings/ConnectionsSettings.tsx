@@ -43,6 +43,7 @@ import {
   type EnvironmentId,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
+import { runsLocalAgents } from "@t3tools/client-runtime/cloud";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import {
   isAtomCommandInterrupted,
@@ -1888,6 +1889,12 @@ export function ConnectionsSettings() {
       ...savedEnvironments.filter((environment) => environment.entry.enabled),
     ],
     [primaryEnvironment, savedEnvironments],
+  );
+  // A host that runs no agents never receives a balanced thread.
+  const balancedEnvironments = useMemo(
+    () =>
+      loadBalancingEnvironments.filter((environment) => runsLocalAgents(environment.serverConfig)),
+    [loadBalancingEnvironments],
   );
   const savedDesktopSshEnvironmentKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -3771,7 +3778,7 @@ export function ConnectionsSettings() {
             />
           </div>
         ))}
-      <LoadBalancingSettings environments={loadBalancingEnvironments} />
+      <LoadBalancingSettings environments={balancedEnvironments} />
       <GitHubRoutingSettings environments={loadBalancingEnvironments} />
     </SettingsPageContainer>
   );

@@ -688,3 +688,32 @@ describe("question attachments", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 });
+
+describe("normalizeDispatchCommand on a server without local agent runs", () => {
+  it.effect("refuses to start a turn and still accepts other thread commands", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const withoutLocalRuns = Effect.provideService(ServerConfig.ServerConfig, {
+        ...config,
+        localAgentRuns: false,
+      });
+      const refused = yield* normalizeDispatchCommand(
+        turnStartCommand({
+          attachments: [{ dataUrl: "data:image/png;base64,cGl4ZWxz", sizeBytes: 6 }],
+        }),
+      ).pipe(withoutLocalRuns, Effect.flip);
+      expect(refused.message).toBe(
+        "This server does not run agents. Start the chat on a cloud environment.",
+      );
+      expect(NodeFS.readdirSync(config.attachmentsDir)).toEqual([]);
+
+      const stop = yield* normalizeDispatchCommand({
+        type: "thread.session.stop",
+        commandId: CommandId.make("command-stop"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }).pipe(withoutLocalRuns);
+      expect(stop.type).toBe("thread.session.stop");
+    }).pipe(Effect.provide(testLayer)),
+  );
+});

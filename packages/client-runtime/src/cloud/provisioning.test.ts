@@ -17,6 +17,7 @@ import {
 import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
 import {
   type CloudProvisionPorts,
+  newChatRunTargets,
   offeredProvisionProviders,
   provisionCloudEnvironment,
 } from "./provisioning.ts";
@@ -277,5 +278,59 @@ describe("offeredProvisionProviders", () => {
     expect(offeredProvisionProviders({ environmentControl: true })).toEqual(["e2b", "namespace"]);
     expect(offeredProvisionProviders({})).toEqual([]);
     expect(offeredProvisionProviders(null)).toEqual([]);
+  });
+});
+
+describe("newChatRunTargets", () => {
+  const host = { environmentId: EnvironmentId.make("host") };
+  const laptop = { environmentId: EnvironmentId.make("laptop") };
+  const manager = { environmentControl: true, provisionProviders: ["namespace", "e2b"] as const };
+  const targets = (
+    localAgentRuns: boolean | undefined,
+    environmentId: EnvironmentId | null = host.environmentId,
+  ) =>
+    newChatRunTargets({
+      environments: [host, laptop],
+      serverConfig: (id) =>
+        id === host.environmentId
+          ? localAgentRuns === undefined
+            ? {}
+            : { localAgentRuns }
+          : { localAgentRuns: true },
+      environmentId,
+      managerConfig: manager,
+    });
+
+  it("hides a host without local runs and starts its chats on the first cloud kind", () => {
+    expect(targets(false)).toEqual({
+      environments: [laptop],
+      cloudProviders: ["namespace", "e2b"],
+      defaultCloudProvider: "namespace",
+    });
+  });
+
+  it("keeps a chat that points elsewhere where it is", () => {
+    expect(targets(false, laptop.environmentId).defaultCloudProvider).toBeNull();
+  });
+
+  it("offers the host and keeps chats local when the switch is on or absent", () => {
+    for (const localAgentRuns of [true, undefined]) {
+      expect(targets(localAgentRuns)).toEqual({
+        environments: [host, laptop],
+        cloudProviders: ["namespace", "e2b"],
+        defaultCloudProvider: null,
+      });
+    }
+  });
+
+  it("has no cloud default when the manager offers none", () => {
+    expect(
+      newChatRunTargets({
+        environments: [host],
+        serverConfig: () => ({ localAgentRuns: false }),
+        environmentId: host.environmentId,
+        managerConfig: { environmentControl: true, provisionProviders: [] },
+      }),
+    ).toEqual({ environments: [], cloudProviders: [], defaultCloudProvider: null });
   });
 });
