@@ -754,6 +754,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         // The account routing chose, which the input only hinted at. The
         // lease, the sandbox's metadata, and discovery all read it from here.
         providerInstanceId: profiles[0].instanceId,
+        companionInstanceIds: profiles.slice(1).map(({ instanceId }) => instanceId),
         ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
         ...(input.repository ? { repository: input.repository } : {}),
         ...(input.branch ? { branch: input.branch } : {}),

@@ -44,6 +44,7 @@ export const StoredProvisionedLease = Schema.Struct({
     }),
   ),
   providerInstanceId: Schema.String,
+  companionInstanceIds: Schema.optional(Schema.Array(Schema.String)),
   state: ProvisionedLeaseState,
   owner: Schema.NullOr(ProvisionedLeaseOwner),
   createdAt: Schema.String,
@@ -67,6 +68,7 @@ export interface ProvisionedLeaseRegistry {
     readonly leaseId: string;
     readonly sandboxId: string;
     readonly providerInstanceId: string;
+    readonly companionInstanceIds?: ReadonlyArray<string>;
     readonly provider?: "e2b" | "namespace";
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly namespaceResource?: NamespaceResource;
@@ -196,6 +198,9 @@ export function createProvisionedLeaseRegistry(
             ? {}
             : { namespaceResource: input.namespaceResource }),
           providerInstanceId: input.providerInstanceId,
+          ...(input.companionInstanceIds === undefined
+            ? {}
+            : { companionInstanceIds: input.companionInstanceIds }),
           state: "active",
           owner: null,
           createdAt: now,

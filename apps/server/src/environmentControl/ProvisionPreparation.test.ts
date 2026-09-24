@@ -250,6 +250,56 @@ const inputFor = (agentDriver: string, providerInstanceId: string) =>
     retentionDeadline: "2099-01-01T00:00:00.000Z",
   });
 
+it("records each companion's account and keeps it when a retry or resume would route elsewhere", async () => {
+  const f = await fixture();
+  const claude: ProvisioningProviderProfile = {
+    kind: "claudeAgent",
+    instanceId: ProviderInstanceId.make("claude_work"),
+    environment: [{ name: "ANTHROPIC_API_KEY", value: "work-key", sensitive: true }],
+    credential: { kind: "environment" },
+  };
+  const codex = async (instanceId: string, login: string) => {
+    const source = NodePath.join(f.root, instanceId, "auth.json");
+    await NodeFSP.mkdir(NodePath.dirname(source), { recursive: true });
+    await NodeFSP.writeFile(source, login);
+    return {
+      ...f.profile,
+      instanceId: ProviderInstanceId.make(instanceId),
+      credential: { ...f.profile.credential, source },
+    };
+  };
+  try {
+    const request = inputFor("claudeAgent", "claudeAgent");
+    const first = await f.store.freeze(request, f.config, f.resolver, [
+      claude,
+      await codex("codex_ac1", "spare-login"),
+    ]);
+    const retry = await makeProvisionPreparationStore(f.root).freeze(
+      request,
+      f.config,
+      f.resolver,
+      [claude, await codex("codex", "exhausted-login")],
+    );
+    const resumed = await makeProvisionPreparationStore(f.root).load(request.requestId);
+    expect(
+      [first, retry, resumed].map((manifest) => [
+        manifest.request.providerInstanceId,
+        manifest.request.companionInstanceIds,
+        Buffer.from(
+          homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
+          "base64",
+        ).toString(),
+      ]),
+    ).toEqual([
+      ["claude_work", ["codex_ac1"], "spare-login"],
+      ["claude_work", ["codex_ac1"], "spare-login"],
+      ["claude_work", ["codex_ac1"], "spare-login"],
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 /** A skill bundle with nested content, as a real playbook directory has. */
 async function skillBundle(root: string) {
   const source = NodePath.join(root, "bundles/pstack");

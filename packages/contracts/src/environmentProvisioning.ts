@@ -9,6 +9,14 @@ const requestFields = {
   requestId: ProvisionRequestId,
   retentionDeadline: EnvironmentProvisionInput.fields.retentionDeadline,
   providerInstanceId: EnvironmentProvisionInput.fields.providerInstanceId,
+  /**
+   * The account each other driver on the machine runs, routed the same way as
+   * `providerInstanceId`. Absent on requests frozen before companions were
+   * recorded.
+   */
+  companionInstanceIds: Schema.optional(
+    Schema.Array(EnvironmentProvisionInput.fields.providerInstanceId),
+  ),
   agentDriver: EnvironmentProvisionInput.fields.agentDriver,
   repository: EnvironmentProvisionInput.fields.repository,
   branch: EnvironmentProvisionInput.fields.branch,

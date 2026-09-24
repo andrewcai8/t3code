@@ -194,6 +194,7 @@ const namespaceManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)
   input: namespaceInput,
   request: {
     ...namespaceInput,
+    companionInstanceIds: ["claude_work", "cursor_home"],
     sourceRevision: null,
     preparationHash: "a".repeat(64),
     creator: "user",
@@ -272,6 +273,8 @@ it.effect(
       });
       expect(yield* Effect.promise(() => leases.findById(namespaceInput.requestId))).toMatchObject({
         state: "active",
+        providerInstanceId: "codex",
+        companionInstanceIds: ["claude_work", "cursor_home"],
         namespaceProxy,
         remoteAccess: { origin: "http://127.0.0.1:50766", brokerToken: "broker-1" },
       });
