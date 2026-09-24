@@ -264,6 +264,15 @@ def prepare(spec):
             run(prefix + [apt, 'update', '-qq'], root, apt_env, timeout=180)
             run(prefix + [apt, 'install', '-y', '-qq', '--no-install-recommends', 'build-essential', 'python3'], root, apt_env, timeout=300)
 
+        def bundled_node_gyp(npm):
+            package = pathlib.Path(npm).resolve().parent.parent / 'node_modules' / 'node-gyp'
+            try:
+                major = int(json.loads((package / 'package.json').read_text())['version'].split('.')[0])
+            except (OSError, ValueError, KeyError):
+                return None
+            script = package / 'bin' / 'node-gyp.js'
+            return script if major >= 11 and script.is_file() else None
+
         def resolve_nodedir(env):
             prefixes = []
             node = shutil.which('node', path=env.get('PATH'))
@@ -393,11 +402,15 @@ def prepare(spec):
                         needs_native = any((pkg or {}).get('hasInstallScript') for pkg in (package_lock.get('packages') or {}).values())
                         if needs_native:
                             ensure_native_toolchain(npm_env)
-                            gyp_prefix = pathlib.Path(env.get('TMPDIR', '/tmp')) / 't3-node-gyp'
-                            gyp_js = gyp_prefix / 'lib' / 'node_modules' / 'node-gyp' / 'bin' / 'node-gyp.js'
-                            if not gyp_js.is_file():
-                                run([npm, 'install', '--global', '--prefix', str(gyp_prefix), '--no-audit', '--no-fund', 'node-gyp@11'], stage, npm_env, timeout=180)
-                            npm_env['PATH'] = str(gyp_prefix / 'bin') + os.pathsep + npm_env.get('PATH', '')
+                            # npm 11 bundles a node-gyp new enough for Node 24; only an
+                            # older npm needs one installed beside it.
+                            gyp_js = bundled_node_gyp(npm)
+                            if gyp_js is None:
+                                gyp_prefix = pathlib.Path(env.get('TMPDIR', '/tmp')) / 't3-node-gyp'
+                                gyp_js = gyp_prefix / 'lib' / 'node_modules' / 'node-gyp' / 'bin' / 'node-gyp.js'
+                                if not gyp_js.is_file():
+                                    run([npm, 'install', '--global', '--prefix', str(gyp_prefix), '--no-audit', '--no-fund', 'node-gyp@11'], stage, npm_env, timeout=180)
+                                npm_env['PATH'] = str(gyp_prefix / 'bin') + os.pathsep + npm_env.get('PATH', '')
                             npm_env['npm_config_node_gyp'] = str(gyp_js)
                             python = shutil.which('python3', path=npm_env.get('PATH'))
                             if python:
