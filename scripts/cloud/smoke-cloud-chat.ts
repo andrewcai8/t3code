@@ -30,6 +30,7 @@ import {
   ThreadId,
   WsRpcGroup,
 } from "@t3tools/contracts";
+import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import {
   PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX,
@@ -111,6 +112,17 @@ const encodeReport = Schema.encodeEffect(
 );
 const BearerCache = Schema.fromJsonString(
   Schema.Struct({ origin: Schema.String, accessToken: Schema.String, expiresAt: Schema.Finite }),
+);
+/** The accounts routing froze for a request, from the manager's preparation manifest. */
+const decodeFrozenAccounts = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      request: Schema.Struct({
+        providerInstanceId: Schema.String,
+        companionInstanceIds: Schema.optional(Schema.Array(Schema.String)),
+      }),
+    }),
+  ),
 );
 const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
 const decodeBearerCache = Schema.decodeUnknownEffect(BearerCache);
@@ -377,8 +389,15 @@ interface Options {
   readonly steps: ReadonlySet<Step>;
   readonly deviceAgent: Agent;
   readonly managerLog: string | null;
+  readonly managerState: string | null;
   readonly report: string;
 }
+
+/** The fullest usage window, the one routing judges an account by; null when none is known. */
+const mostUsedPercent = (provider: ServerProvider | undefined) =>
+  provider?.usageLimits?.windows.length
+    ? Math.max(...provider.usageLimits.windows.map((window) => window.usedPercent))
+    : null;
 
 const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
   const fs = yield* FileSystem.FileSystem;
@@ -658,6 +677,98 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     return turn;
   });
 
+  /**
+   * Records the account each agent ran on the box: the child's instance, named by the manager and
+   * signed in on the box, against the account routing froze for it, and whether it had usage left.
+   * Without `--manager-state` only the chat's own account is known to routing's record.
+   */
+  const accounts = Effect.fn("accounts")(function* (manager: T3Client, child: T3Client) {
+    const box = created.box!;
+    const managerProviders = (yield* bounded(manager["server.getConfig"]({}), "manager config"))
+      .providers;
+    const childProviders = (yield* bounded(child["server.getConfig"]({}), "child config"))
+      .providers;
+    const frozen =
+      options.managerState && created.requestId
+        ? yield* fs
+            .readFileString(
+              path.join(options.managerState, "provisioning", `${created.requestId}.json`),
+            )
+            .pipe(Effect.flatMap(decodeFrozenAccounts), Effect.option)
+        : Option.none();
+    const routedIds = Option.match(frozen, {
+      onNone: () => [box.providerInstanceId],
+      onSome: ({ request }) => [
+        request.providerInstanceId,
+        ...(request.companionInstanceIds ?? []),
+      ],
+    });
+    for (const agent of options.agents) {
+      const onBox = childProviders.find(
+        (provider) => provider.driver === agent && provider.enabled,
+      );
+      const account = managerProviders.find(
+        (provider) =>
+          provider.driver === agent &&
+          provider.displayName !== undefined &&
+          provider.displayName === onBox?.displayName,
+      );
+      const routed =
+        routedIds.find(
+          (id) => managerProviders.find((provider) => provider.instanceId === id)?.driver === agent,
+        ) ?? null;
+      const knowsRouting = routed !== null || Option.isSome(frozen);
+      const email = onBox?.auth.email ?? null;
+      const used = mostUsedPercent(account);
+      const usedOnBox = mostUsedPercent(onBox);
+      // A weekly window resets at a fixed time per account, so the box and the manager disagree
+      // on it only when the box signed in as someone else. A Claude token carries no email.
+      const resetMismatches = (onBox?.usageLimits?.windows ?? []).filter((window) => {
+        const managed = account?.usageLimits?.windows.find(({ id }) => id === window.id);
+        return (
+          window.kind === "weekly" &&
+          window.resetsAt !== undefined &&
+          managed?.resetsAt !== undefined &&
+          Math.abs(Date.parse(window.resetsAt) - Date.parse(managed.resetsAt)) > 60 * 60_000
+        );
+      });
+      const windows = (provider: ServerProvider | undefined) =>
+        provider?.usageLimits?.windows.map(({ id, usedPercent, resetsAt }) => ({
+          id,
+          usedPercent,
+          resetsAt: resetsAt ?? null,
+        })) ?? null;
+      yield* record(
+        `account.${agent}`,
+        account !== undefined &&
+          (!knowsRouting || account.instanceId === routed) &&
+          onBox?.auth.status === "authenticated" &&
+          (email === null || onBox.displayName!.includes(email)) &&
+          resetMismatches.length === 0 &&
+          (used ?? 0) < 100 &&
+          (usedOnBox ?? 0) < 100,
+        account?.instanceId ?? null,
+        {
+          routed,
+          routedFrom: Option.isSome(frozen) ? "manifest" : routed ? "provision" : null,
+          onBox: onBox
+            ? {
+                instanceId: onBox.instanceId,
+                displayName: onBox.displayName ?? null,
+                auth: onBox.auth,
+                mostUsedPercent: usedOnBox,
+                windows: windows(onBox),
+              }
+            : null,
+          managerMostUsedPercent: used,
+          managerWindows: windows(account),
+          managerUsageCheckedAt: account?.usageLimits?.checkedAt ?? null,
+          resetMismatches: resetMismatches.map(({ id }) => id),
+        },
+      );
+    }
+  });
+
   const provision = Effect.fn("provision")(function* (manager: T3Client) {
     const config = yield* manager["server.getConfig"]({}).pipe(
       Effect.timeoutOption("30 seconds"),
@@ -820,12 +931,16 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
                 record(`turn.${agent}`, false, null, { error: describe(cause) }),
               ),
             );
+        if (options.steps.has("turns"))
+          yield* accounts(manager, client).pipe(
+            Effect.catch((cause) => record("account", false, null, { error: describe(cause) })),
+          );
         if (options.steps.has("device")) yield* device(client, claim);
       }),
     );
   });
 
-  /** Fetches a file on the box through a signed media URL, resolved the way clients resolve it. */
+  /** Fetches a file on the box through a signed media URL at the address clients load it from. */
   const fetchMedia = Effect.fn("fetchMedia")(function* (
     client: T3Client,
     threadId: ThreadId,
@@ -836,15 +951,20 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       client["assets.createUrl"]({ resource: { _tag: "media-file", threadId, path } }),
       "assets.createUrl",
     );
-    const base = new URL(access.httpBaseUrl);
-    const response = yield* bounded(
-      HttpClient.get(new URL(asset.relativeUrl.replace(/^\//, ""), base)),
-      "media fetch",
-    );
+    const url = resolveAssetUrl(access.httpBaseUrl, asset.relativeUrl);
+    if (url === null)
+      return yield* new SmokeFailure({ message: "clients cannot resolve the asset URL" });
+    const response = yield* bounded(HttpClient.get(url), "media fetch");
     const bytes = new Uint8Array(yield* bounded(response.arrayBuffer, "media body"));
-    // Clients resolve the URL against the child's base; a root-relative URL escapes a gateway prefix.
-    const asClientsResolve = new URL(asset.relativeUrl, base).pathname.startsWith(base.pathname);
-    return { status: response.status, bytes, asClientsResolve };
+    const { pathname } = new URL(url);
+    return {
+      status: response.status,
+      contentType: response.headers["content-type"] ?? null,
+      bytes,
+      // The signed segment reads the file until it expires; the report keeps only the route.
+      pathname: pathname.replace(/\/api\/assets\/[^/]+\//, "/api/assets/<signed>/"),
+      insideChild: pathname.startsWith(new URL(access.httpBaseUrl).pathname),
+    };
   });
 
   /**
@@ -877,6 +997,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       name: string,
       turn: { readonly thread: ChildThread },
       path: string,
+      contentType: string,
       isValid: (bytes: Uint8Array) => boolean,
     ) =>
       fetchMedia(client, turn.thread.threadId, path).pipe(
@@ -896,8 +1017,18 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
             Effect.andThen(
               record(
                 `device.${name}.clientUrl`,
-                file.asClientsResolve,
-                file.asClientsResolve ? "inside child" : "escapes gateway",
+                file.insideChild &&
+                  file.status === 200 &&
+                  file.contentType?.split(";")[0]?.trim() === contentType &&
+                  file.bytes.length > 0,
+                file.status,
+                {
+                  pathname: file.pathname,
+                  insideChild: file.insideChild,
+                  contentType: file.contentType,
+                  expectedContentType: contentType,
+                  bytes: file.bytes.length,
+                },
               ),
             ),
           ),
@@ -952,6 +1083,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       "screenshot",
       shot,
       `${dir}/screenshot.png`,
+      "image/png",
       (bytes) => bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47,
     );
 
@@ -963,6 +1095,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       "record",
       video,
       `${dir}/recording.mp4`,
+      "video/mp4",
       (bytes) => new TextDecoder().decode(bytes.slice(4, 8)) === "ftyp",
     );
 
@@ -1233,6 +1366,12 @@ const command = Command.make(
       ),
       Flag.optional,
     ),
+    managerState: Flag.String("manager-state").pipe(
+      Flag.withDescription(
+        "The manager's state directory, to check each agent's account against routing's record.",
+      ),
+      Flag.optional,
+    ),
     report: Flag.String("report").pipe(Flag.withDescription("Where to write the JSON report.")),
   },
   (flags) =>
@@ -1263,6 +1402,10 @@ const command = Command.make(
         managerLog: Option.match(flags.managerLog, {
           onNone: () => null,
           onSome: (file) => path.resolve(file),
+        }),
+        managerState: Option.match(flags.managerState, {
+          onNone: () => null,
+          onSome: (dir) => path.resolve(dir),
         }),
         report: path.resolve(flags.report),
       });

@@ -54,10 +54,10 @@ Namespace needs a manager on a Mac with the `nsc` login, which a hosted manager 
 ```
 node scripts/cloud/smoke-cloud-chat.ts --origin http://127.0.0.1:$(cat .t3/manager/manager.port) \
   --pairing-token-file .t3/manager/pairing-token --manager-log .t3/manager/manager.log \
-  --provider namespace --steps provision,turns,device,resume,delete --report /tmp/run.json
+  --manager-state .t3/manager/userdata --provider namespace --steps provision,turns,device,resume,delete --report /tmp/run.json
 ```
 
-`--manager-log` copies the manager's per-phase provisioning timings into the report. The `device` step is Namespace-only. It boots a simulator, builds and launches a sample app, takes a screenshot, records a video, and stops at an LLDB breakpoint, then checks the files each step left on the box.
+`--manager-log` copies the manager's per-phase provisioning timings into the report. `--manager-state` lets each `account.<driver>` check compare the account the box signed in as with the one routing froze for every driver, companions included; without it only the chat's own account is checked against routing. A Claude setup-token carries no email, so that check compares the weekly reset the box sees with the manager's for the same account, which catches a token minted from the wrong login. The `device` step is Namespace-only. It boots a simulator, builds and launches a sample app, takes a screenshot, records a video, and stops at an LLDB breakpoint, then checks the files each step left on the box.
 
 ## Why the manager runs the artifact
 
