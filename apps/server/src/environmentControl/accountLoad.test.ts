@@ -67,6 +67,36 @@ it.effect("counts awake cloud boxes and local running turns per account", () =>
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("counts an awake box against its companions' accounts too", () =>
+  Effect.gen(function* () {
+    const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
+    const sessions = yield* ProjectionThreadSessionRepository;
+    yield* Effect.promise(async () => {
+      await leases.register({
+        leaseId: "claude-chat",
+        sandboxId: "claude-chat-box",
+        providerInstanceId: "claude-work",
+        companionInstanceIds: ["codex-spare", "cursor-work"],
+      });
+      await leases.register({
+        leaseId: "codex-chat",
+        sandboxId: "codex-chat-box",
+        providerInstanceId: "codex-spare",
+        companionInstanceIds: ["claude-work", "cursor-home"],
+      });
+    });
+
+    expect(yield* readAccountLoad(leases, sessions)).toEqual(
+      new Map([
+        ["claude-work", 2],
+        ["codex-spare", 2],
+        ["cursor-work", 1],
+        ["cursor-home", 1],
+      ]),
+    );
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("counts local turns alone when cloud leases cannot be read", () =>
   Effect.gen(function* () {
     const sessions = yield* ProjectionThreadSessionRepository;

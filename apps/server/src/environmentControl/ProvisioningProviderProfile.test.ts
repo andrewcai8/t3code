@@ -330,6 +330,13 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     usedPercent,
     resetsAt: "2026-09-07T00:00:00.000Z",
   });
+  const cursorMonthly = (usedPercent: number) => ({
+    id: "cursor_monthly",
+    kind: "monthly" as const,
+    label: "Monthly",
+    usedPercent,
+    resetsAt: "2026-10-01T00:00:00.000Z",
+  });
   const apiKeyAccount = (driver: string, name: string, value: string) => ({
     driver,
     enabled: true,
@@ -377,6 +384,58 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       ).toEqual([
         ["claudeAgent", "claudeSpare", "environment"],
         ["cursor", "cursorWork", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("gives a Claude chat's Codex and Cursor companions their best accounts", () =>
+    Effect.gen(function* () {
+      yield* file("codex-default/auth.json", "default-login");
+      yield* file("codex-spare/auth.json", "spare-login");
+      const settings = decodeSettings({
+        providers: {
+          claudeAgent: { enabled: false },
+          codex: { homePath: NodePath.join(directory, "codex-default") },
+        },
+        providerInstances: {
+          selected: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "selected-key"),
+          codex_ac1: {
+            driver: "codex",
+            config: { homePath: NodePath.join(directory, "codex-spare") },
+          },
+          cursor: apiKeyAccount("cursor", "CURSOR_API_KEY", "default-key"),
+          cursorWork: apiKeyAccount("cursor", "CURSOR_API_KEY", "work-key"),
+        },
+      });
+      const exhaustedDefaults = yield* accounts(
+        settings,
+        "claudeAgent",
+        undefined,
+        {
+          selected: [session(10)],
+          codex: [session(100)],
+          codex_ac1: [session(30)],
+          cursor: [cursorMonthly(100)],
+          cursorWork: [cursorMonthly(60)],
+        },
+        "claudeAgent",
+      );
+      // Unknown usage everywhere: the defaults already carry a box's companions.
+      const busyDefaults = yield* accounts(settings, "claudeAgent", undefined, {}, "claudeAgent", {
+        codex: 1,
+        cursor: 1,
+      });
+      expect([exhaustedDefaults, busyDefaults]).toEqual([
+        [
+          ["claudeAgent", "selected", "environment"],
+          ["codex", "codex_ac1", "file"],
+          ["cursor", "cursorWork", "environment"],
+        ],
+        [
+          ["claudeAgent", "selected", "environment"],
+          ["codex", "codex_ac1", "file"],
+          ["cursor", "cursorWork", "environment"],
+        ],
       ]);
     }),
   );
