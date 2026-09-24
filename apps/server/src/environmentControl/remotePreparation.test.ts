@@ -678,7 +678,7 @@ describe("remote preparation subprocess", () => {
     const ready = await prepareRemoteHost(localPort, {
       ...input,
       providerInstall:
-        'sleep 0.5 && printf "#!/bin/sh\\necho installed-cli\\n" > "$HOME/.local/bin/fixture-cli" && ' +
+        'sleep 3 && printf "#!/bin/sh\\necho installed-cli\\n" > "$HOME/.local/bin/fixture-cli" && ' +
         'chmod 700 "$HOME/.local/bin/fixture-cli"',
       prepareCommands: ['"$HOME/.local/bin/fixture-cli" > setup-saw.txt'],
     });
