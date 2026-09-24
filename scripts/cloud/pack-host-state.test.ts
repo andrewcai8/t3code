@@ -8,7 +8,10 @@ import { assert, describe, it } from "@effect/vitest";
 
 import { packHostState, writeSeedArchive, type HostConfig } from "./pack-host-state.ts";
 
-const fixture = async (extra: Pick<HostConfig, "namespaceToken"> = {}) => {
+const fixture = async (
+  extra: Pick<HostConfig, "namespaceToken"> = {},
+  namespaceSession?: string,
+) => {
   const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pack-host-state-"));
   const write = async (path: string, data: string) => {
     await NodeFSP.mkdir(NodePath.dirname(NodePath.join(home, path)), { recursive: true });
@@ -17,6 +20,7 @@ const fixture = async (extra: Pick<HostConfig, "namespaceToken"> = {}) => {
   await write(".codex/auth.json", '{"token":"codex"}');
   await write("secrets/github.bin", "gh-secret");
   await write("plugins/review-skills/review/SKILL.md", "# Review\n");
+  if (namespaceSession !== undefined) await write("ns/token.json", namespaceSession);
   const packed = await packHostState({
     config: {
       e2bApiKey: "e2b-key",
@@ -57,8 +61,29 @@ const fixture = async (extra: Pick<HostConfig, "namespaceToken"> = {}) => {
     host: { homedir: home, platform: "linux", environment: {} },
     baseDir: "/data/t3",
     skillsDir: "/data/t3/skills",
+    namespaceSession:
+      namespaceSession === undefined ? undefined : NodePath.join(home, "ns/token.json"),
   });
   return { home, packed };
+};
+
+const extractSeed = async (home: string, state: Awaited<ReturnType<typeof packHostState>>) => {
+  const output = NodePath.join(home, "seed.tgz");
+  await writeSeedArchive({
+    state,
+    baseDir: "/data/t3",
+    output,
+    broker: {
+      sandboxId: "none",
+      metadata: { purpose: "t3-environment", account: "aws-host" },
+      url: "https://host.example",
+      ingressKey: "ingress-test",
+    },
+  });
+  const extracted = NodePath.join(home, "extracted");
+  await NodeFSP.mkdir(extracted);
+  NodeChildProcess.execFileSync("tar", ["-xzf", output, "-C", extracted]);
+  return extracted;
 };
 
 describe("packHostState", () => {
@@ -136,24 +161,59 @@ describe("packHostState", () => {
     }
   });
 
+  it("carries a Namespace login session as a private ns/token.json with Namespace settings", async () => {
+    const { home, packed } = await fixture(
+      {},
+      '{"session_token":"st_test","bearer_token":"nsct_stale"}',
+    );
+    try {
+      assert.deepEqual(packed.files.at(-1), {
+        path: "/data/t3/ns/token.json",
+        data: '{"session_token":"st_test"}',
+      });
+      assert.deepEqual(packed.config, {
+        e2bApiKey: "e2b-key",
+        targets: [],
+        provisioning: {
+          templateId: "t3-common",
+          egressAllow: ["registry.npmjs.org"],
+          shellEnvironment: [{ name: "GH_TOKEN", source: "/data/t3/shell-environment/GH_TOKEN" }],
+          skills: [{ source: "/data/t3/skills/0/review-skills", name: "review" }],
+          namespace: { size: "m" },
+          repositories: [
+            { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
+          ],
+        },
+      });
+      const extracted = await extractSeed(home, packed);
+      const token = NodePath.join(extracted, "ns/token.json");
+      assert.equal(await NodeFSP.readFile(token, "utf8"), '{"session_token":"st_test"}');
+      assert.equal((await NodeFSP.stat(token)).mode & 0o777, 0o600);
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a Namespace session file without quoting it", async () => {
+    const rejection = async (contents: string) => {
+      try {
+        await fixture({}, contents);
+        return "resolved";
+      } catch (error) {
+        return (error as Error).message.replace(/^.*\/ns\/token\.json/, "<file>");
+      }
+    };
+    assert.equal(await rejection("st_secret"), "<file> is not a Namespace token.json");
+    assert.equal(
+      await rejection('{"bearer_token":"nsct_secret"}'),
+      "<file> has no session_token; run `nsc login`",
+    );
+  });
+
   it("writes a seed tarball rooted at the base dir with private files", async () => {
     const { home, packed } = await fixture();
     try {
-      const output = NodePath.join(home, "seed.tgz");
-      await writeSeedArchive({
-        state: packed,
-        baseDir: "/data/t3",
-        output,
-        broker: {
-          sandboxId: "none",
-          metadata: { purpose: "t3-environment", account: "aws-host" },
-          url: "https://host.example",
-          ingressKey: "ingress-test",
-        },
-      });
-      const extracted = NodePath.join(home, "extracted");
-      await NodeFSP.mkdir(extracted);
-      NodeChildProcess.execFileSync("tar", ["-xzf", output, "-C", extracted]);
+      const extracted = await extractSeed(home, packed);
       const entries = (await NodeFSP.readdir(extracted, { recursive: true, withFileTypes: true }))
         .filter((entry) => entry.isFile())
         .map((entry) => NodePath.relative(extracted, NodePath.join(entry.parentPath, entry.name)))
