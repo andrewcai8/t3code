@@ -49,6 +49,16 @@ The script builds the runtime artifact, creates a sandbox from the configured te
 
 Pass `--artifact FILE` to reuse a build. `--auth FILE` points at the account credential to install, and defaults to `~/.codex/auth.json`.
 
+Namespace needs a manager on a Mac with the `nsc` login, which a hosted manager does not have. `scripts/cloud/local-manager.sh start` runs one from your checkout instead. It copies the config from `~/.t3/fork-dev` (set `SOURCE_HOME` to use another home) into `.t3/manager`, pins an artifact built from `HEAD`, serves on `127.0.0.1`, and writes a pairing token to `.t3/manager/pairing-token`. `stop` stops it. Smoke it end to end with:
+
+```
+node scripts/cloud/smoke-cloud-chat.ts --origin http://127.0.0.1:$(cat .t3/manager/manager.port) \
+  --pairing-token-file .t3/manager/pairing-token --manager-log .t3/manager/manager.log \
+  --provider namespace --steps provision,turns,device,resume,delete --report /tmp/run.json
+```
+
+`--manager-log` copies the manager's per-phase provisioning timings into the report. The `device` step is Namespace-only. It boots a simulator, builds and launches a sample app, takes a screenshot, records a video, and stops at an LLDB breakpoint, then checks the files each step left on the box.
+
 ## Why the manager runs the artifact
 
 The E2B template ships the published `t3` package from npm. That is upstream's build. It does not contain this fork's provisioning code, and the version number matches, so the mismatch is invisible until the server fails to start.
