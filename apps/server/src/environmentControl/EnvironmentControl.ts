@@ -29,6 +29,7 @@ import {
   type EnvironmentProvisionUpgradeResult,
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
+  type ProvisionProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -44,6 +45,7 @@ import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts, ProvisionProviderError } from "./Provisioning.ts";
 import {
   configuredRuntimeArtifact,
+  provisionProviders,
   makeProvisionPreparationStore,
 } from "./ProvisionPreparation.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
@@ -509,6 +511,11 @@ export class EnvironmentControl extends Context.Service<
       leaseId: string,
     ) => Effect.Effect<string | null, EnvironmentControlError>;
     readonly list: Effect.Effect<ReadonlyArray<ManagedEnvironment>, EnvironmentControlError>;
+    /** The cloud environments the current configuration can provision; none without one. */
+    readonly provisionProviders: Effect.Effect<
+      ReadonlyArray<ProvisionProvider>,
+      EnvironmentControlError
+    >;
     readonly listProvisioned: Effect.Effect<
       ReadonlyArray<DiscoveredProvisionedEnvironment>,
       EnvironmentControlError
@@ -1018,6 +1025,7 @@ export const layer = Layer.effect(
           catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
         }),
       list: run((service) => service.list(), []),
+      provisionProviders: run(async (service) => provisionProviders(service.config), []),
       listProvisioned: listProvisionedEnvironments(sql),
       provision: provisionControl.provision,
       attach: provisionControl.attach,

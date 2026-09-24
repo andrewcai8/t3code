@@ -140,6 +140,12 @@ describe("cloudMachineBlockReason", () => {
     usedPercent: null,
   };
 
+  it("blocks when the manager can provision no cloud platform", () => {
+    expect(cloudMachineBlockReason({ repository: "a/b", provider: null, account })).toBe(
+      "This manager has no cloud platform set up.",
+    );
+  });
+
   it("blocks with no account", () => {
     expect(cloudMachineBlockReason({ repository: "a/b", provider: "e2b", account: null })).toBe(
       "Connect a provider account first.",

@@ -1,3 +1,4 @@
+import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { type ReactNode, useMemo, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, ScrollView, View } from "react-native";
@@ -20,8 +21,6 @@ import {
   type CloudMachineProvider,
 } from "./cloudMachineOptions";
 import { createCloudMachineProgressText, useCreateCloudMachine } from "./useCreateCloudMachine";
-
-const PROVIDERS: ReadonlyArray<CloudMachineProvider> = ["e2b", "namespace"];
 
 /**
  * Starts a cloud machine from the phone: pick a repository to clone, where to run it, and which
@@ -49,11 +48,17 @@ export function NewCloudMachineSheet(props: {
     [serverConfig?.providers],
   );
   const [repository, setRepository] = useState<string | null>(null);
-  const [provider, setProvider] = useState<CloudMachineProvider>("e2b");
+  const providers = offeredProvisionProviders(serverConfig);
+  const [provider, setProvider] = useState<CloudMachineProvider | null>(null);
   const [account, setAccount] = useState<CloudMachineAccountOption | null>(null);
   const selectedAccount = account ?? defaultCloudMachineAccount(accounts);
   const selectedRepository = repository ?? defaultCloudMachineRepository(repositories);
-  const selection = { repository: selectedRepository, provider, account: selectedAccount };
+  const selectedProvider = provider ?? providers[0] ?? null;
+  const selection = {
+    repository: selectedRepository,
+    provider: selectedProvider,
+    account: selectedAccount,
+  };
   const blockReason = cloudMachineBlockReason(selection);
   const { state, create, dismissError } = useCreateCloudMachine({
     managerId: props.managerId,
@@ -107,12 +112,12 @@ export function NewCloudMachineSheet(props: {
           </Section>
 
           <Section title="Run on">
-            {PROVIDERS.map((candidate, index) => (
+            {providers.map((candidate, index) => (
               <Choice
                 key={candidate}
                 title={CLOUD_MACHINE_PROVIDER_LABELS[candidate]}
                 subtitle={candidate === "namespace" ? "macOS, for Apple builds" : "Linux"}
-                selected={provider === candidate}
+                selected={selectedProvider === candidate}
                 borderTop={index !== 0}
                 disabled={working}
                 onPress={() => setProvider(candidate)}
@@ -153,11 +158,11 @@ export function NewCloudMachineSheet(props: {
         </ScrollView>
 
         <View className="gap-3 border-t border-border px-5 pt-4">
-          {working ? (
+          {working && selectedProvider !== null ? (
             <View className="flex-row items-center gap-3">
               <ActivityIndicator colorClassName="accent-icon" size="small" />
               <Text className="flex-1 text-sm text-foreground-muted">
-                {createCloudMachineProgressText(state.phase, provider)}
+                {createCloudMachineProgressText(state.phase, selectedProvider)}
               </Text>
             </View>
           ) : blockReason !== null ? (
@@ -168,7 +173,12 @@ export function NewCloudMachineSheet(props: {
             accessibilityLabel="Create cloud machine"
             disabled={working || blockReason !== null}
             onPress={() => {
-              if (selection.repository === null || selection.account === null) return;
+              if (
+                selection.repository === null ||
+                selection.provider === null ||
+                selection.account === null
+              )
+                return;
               void create({
                 repository: selection.repository,
                 provider: selection.provider,

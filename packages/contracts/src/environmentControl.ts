@@ -34,6 +34,10 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
   { message: Schema.String },
 ) {}
 
+/** Where a provisioned environment runs: an E2B Linux sandbox or a Namespace Mac. */
+export const ProvisionProvider = Schema.Literals(["e2b", "namespace"]);
+export type ProvisionProvider = typeof ProvisionProvider.Type;
+
 export const ProvisionRequestId = Schema.String.check(
   Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
 ).pipe(Schema.brand("ProvisionRequestId"));

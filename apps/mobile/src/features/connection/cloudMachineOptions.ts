@@ -125,7 +125,8 @@ export function defaultCloudMachineRepository(
 
 export interface CloudMachineSelection {
   readonly repository: string | null;
-  readonly provider: CloudMachineProvider;
+  /** Null when the manager can provision no cloud platform. */
+  readonly provider: CloudMachineProvider | null;
   readonly account: CloudMachineAccountOption | null;
 }
 
@@ -134,6 +135,7 @@ export interface CloudMachineSelection {
  * machine has nothing to work on, and the phone has no way to put a checkout on it afterwards.
  */
 export function cloudMachineBlockReason(selection: CloudMachineSelection): string | null {
+  if (selection.provider === null) return "This manager has no cloud platform set up.";
   if (selection.account === null) return "Connect a provider account first.";
   if (selection.repository === null) return "Choose a repository to clone.";
   return null;

@@ -13,7 +13,11 @@ import {
 import * as Schema from "effect/Schema";
 import { ServerSettings } from "@t3tools/contracts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
-import { makeProvisionPreparationStore, provisionDigest } from "./ProvisionPreparation.ts";
+import {
+  makeProvisionPreparationStore,
+  provisionDigest,
+  provisionProviders,
+} from "./ProvisionPreparation.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
@@ -1075,4 +1079,37 @@ it("records a requested runtime build beside the frozen manifest and leaves the 
   } finally {
     await f.cleanup();
   }
+});
+
+it("offers each cloud platform only when its runtime and defaults are configured", () => {
+  const runtime = {
+    path: "/runtime.tar",
+    sha256: "a".repeat(64),
+    revision: "c".repeat(40),
+    entrypoint: "dist/bin.mjs",
+    runtimeExecutable: "node",
+  };
+  const configWith = (provisioning: EnvironmentControlConfig["provisioning"]) => ({
+    targets: [],
+    e2bApiKey: "fixture",
+    broker: { sandboxId: "broker", metadata: {}, url: "https://fixture.invalid", ingressKey: "k" },
+    ...(provisioning ? { provisioning } : {}),
+  });
+
+  expect(provisionProviders(configWith(undefined))).toEqual([]);
+  expect(provisionProviders(configWith({ runtimeArtifacts: { linux: runtime } }))).toEqual(["e2b"]);
+  expect(
+    provisionProviders(
+      configWith({ runtimeArtifacts: { linux: runtime }, namespace: { size: "m" } }),
+    ),
+  ).toEqual(["e2b"]);
+  expect(provisionProviders(configWith({ runtimeArtifacts: { macos: runtime } }))).toEqual([]);
+  expect(
+    provisionProviders(
+      configWith({
+        runtimeArtifacts: { linux: runtime, macos: runtime },
+        namespace: { size: "m" },
+      }),
+    ),
+  ).toEqual(["e2b", "namespace"]);
 });
