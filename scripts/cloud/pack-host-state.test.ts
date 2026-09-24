@@ -23,6 +23,7 @@ const fixture = async () => {
       provisioning: {
         templateId: "t3-common",
         egressAllow: ["registry.npmjs.org"],
+        namespace: { size: "m" },
         claudeOAuthTokens: { claude_work: "sk-ant-oat01-work" },
         shellEnvironment: [{ name: "GH_TOKEN", source: NodePath.join(home, "secrets/github.bin") }],
         skills: [{ source: NodePath.join(home, "plugins/review-skills"), name: "review" }],
