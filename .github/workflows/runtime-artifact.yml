@@ -1,5 +1,7 @@
-# Publishes the linux/amd64 runtime artifact as a release asset, so the AWS
-# provisioning host image can download it and pin it by sha256.
+# Publishes the runtime artifacts as release assets, so the AWS provisioning
+# host image can download them and pin them by sha256. The linux/amd64 one
+# ships node_modules for E2B. The lockfile one has none, and a Namespace Mac
+# runs `npm ci` against it.
 name: Runtime artifact
 
 on:
@@ -13,7 +15,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish linux/amd64 runtime artifact
+    name: Publish runtime artifacts
     if: github.repository == 'andrewcai8/t3code'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -44,13 +46,18 @@ jobs:
       - name: Build runtime artifact
         run: node apps/server/scripts/build-runtime-artifact.ts runtime-linux-amd64.tar.gz --install --platform=linux/amd64
 
+      - name: Build lockfile runtime artifact
+        run: node apps/server/scripts/build-runtime-artifact.ts runtime-lockfile.tar.gz
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sha256sum runtime-linux-amd64.tar.gz > runtime-linux-amd64.tar.gz.sha256
-          sha256="$(cut -d ' ' -f 1 runtime-linux-amd64.tar.gz.sha256)"
+          sha256sum runtime-lockfile.tar.gz > runtime-lockfile.tar.gz.sha256
+          linux_sha256="$(cut -d ' ' -f 1 runtime-linux-amd64.tar.gz.sha256)"
+          lockfile_sha256="$(cut -d ' ' -f 1 runtime-lockfile.tar.gz.sha256)"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             tag="$GITHUB_REF_NAME"
           else
@@ -59,7 +66,9 @@ jobs:
           gh release create "$tag" \
             runtime-linux-amd64.tar.gz \
             runtime-linux-amd64.tar.gz.sha256 \
+            runtime-lockfile.tar.gz \
+            runtime-lockfile.tar.gz.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$tag" \
-            --notes "$(printf 'Runtime artifact for linux/amd64.\n\n- revision: `%s`\n- sha256: `%s`\n' "$GITHUB_SHA" "$sha256")"
+            --notes "$(printf 'Runtime artifacts.\n\n- revision: `%s`\n- runtime-linux-amd64.tar.gz sha256: `%s`\n- runtime-lockfile.tar.gz sha256: `%s`\n' "$GITHUB_SHA" "$linux_sha256" "$lockfile_sha256")"
