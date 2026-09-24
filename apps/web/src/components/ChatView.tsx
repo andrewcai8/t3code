@@ -2591,7 +2591,6 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
   const runTargets = useMemo(
     () =>
       newChatRunTargets({
