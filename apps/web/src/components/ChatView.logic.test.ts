@@ -89,6 +89,7 @@ import {
   toolGroupConsumesUpwardNavigation,
   waitForRevertedMessage,
   prepareRevertedMessageAttachments,
+  needsLoadBalancedPick,
 } from "./ChatView.logic";
 
 describe("agent browser close confirmation", () => {
@@ -2567,5 +2568,40 @@ describe("worktree setup visibility", () => {
       ...settledDone,
       sequence: 9,
     });
+  });
+});
+
+describe("needsLoadBalancedPick", () => {
+  const laptop = { environmentId: EnvironmentId.make("laptop") };
+  const desktop = { environmentId: EnvironmentId.make("desktop") };
+  const host = EnvironmentId.make("host");
+
+  it("picks again when the earlier pick no longer takes new chats", () => {
+    expect(
+      needsLoadBalancedPick({
+        automatic: true,
+        pickedEnvironmentId: host,
+        candidates: [laptop, desktop],
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps a pick that still takes new chats and picks when there is none", () => {
+    expect(
+      needsLoadBalancedPick({
+        automatic: true,
+        pickedEnvironmentId: laptop.environmentId,
+        candidates: [laptop, desktop],
+      }),
+    ).toBe(false);
+    expect(
+      needsLoadBalancedPick({ automatic: true, pickedEnvironmentId: null, candidates: [laptop] }),
+    ).toBe(true);
+  });
+
+  it("never picks for a manually placed draft", () => {
+    expect(
+      needsLoadBalancedPick({ automatic: false, pickedEnvironmentId: host, candidates: [laptop] }),
+    ).toBe(false);
   });
 });

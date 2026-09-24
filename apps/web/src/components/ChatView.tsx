@@ -513,6 +513,7 @@ import {
   toolGroupConsumesUpwardNavigation,
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
+  needsLoadBalancedPick,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -4029,7 +4030,11 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen]);
 
-  const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
+  const needsLoadBalancing = needsLoadBalancedPick({
+    automatic: automaticEnvironment,
+    pickedEnvironmentId: draftThread?.loadBalancedEnvironmentId,
+    candidates: pickableEnvironments,
+  });
   const loadBalancingCandidates = useMemo(
     () =>
       needsLoadBalancing
@@ -4069,7 +4074,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
-    const target = logicalProjectEnvironments.find(
+    const target = pickableEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
     if (!target) return;
@@ -4083,9 +4088,23 @@ export default function ChatView(props: ChatViewProps) {
     loadBalancing.pending,
     loadBalancing.environmentId,
     draftId,
-    logicalProjectEnvironments,
+    pickableEnvironments,
     setDraftThreadContext,
   ]);
+  // A draft on a host that runs no agents, with no cloud kind to start instead,
+  // moves to a machine that does run them.
+  const redirectEnvironment =
+    draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
+      ? runTargets.redirect.environment
+      : null;
+  useEffect(() => {
+    if (!draftId || !redirectEnvironment || sendInFlightRef.current) return;
+    setDraftThreadContext(draftId, {
+      projectRef: scopeProjectRef(redirectEnvironment.environmentId, redirectEnvironment.projectId),
+      environmentSelection: "manual",
+      loadBalancedEnvironmentId: null,
+    });
+  }, [draftId, redirectEnvironment, setDraftThreadContext]);
   const onAutoEnvironment = useCallback(() => {
     if (envLocked || !draftId) return;
     setCloudProvisioningChoice(null);
@@ -4932,7 +4951,9 @@ export default function ChatView(props: ChatViewProps) {
     cloudAccount !== null;
   const cloudProvisioningRequested =
     cloudProvisioningChoice ??
-    (canCreateCloudEnvironment && !automaticEnvironment ? runTargets.defaultCloudProvider : null);
+    (canCreateCloudEnvironment && !automaticEnvironment && runTargets.redirect?.kind === "cloud"
+      ? runTargets.redirect.provider
+      : null);
   const handleSelectCloudEnvironment = useCallback(
     (provider: "e2b" | "namespace") => {
       if (!canCreateCloudEnvironment || !cloudAccount) return;

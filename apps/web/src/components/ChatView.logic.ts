@@ -1403,3 +1403,18 @@ export function restorePlanFollowUpComposer(input: {
     detectTrigger: true,
   });
 }
+
+/**
+ * Whether auto balance must pick a machine: it has not picked one, or its pick
+ * no longer takes new chats (such as a host whose local agent runs were
+ * switched off after the pick).
+ */
+export function needsLoadBalancedPick(input: {
+  readonly automatic: boolean;
+  readonly pickedEnvironmentId: EnvironmentId | null | undefined;
+  readonly candidates: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+}): boolean {
+  if (!input.automatic) return false;
+  const picked = input.pickedEnvironmentId;
+  return !picked || !input.candidates.some((candidate) => candidate.environmentId === picked);
+}

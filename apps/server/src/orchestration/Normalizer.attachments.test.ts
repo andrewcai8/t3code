@@ -690,7 +690,7 @@ describe("question attachments", () => {
 });
 
 describe("normalizeDispatchCommand on a server without local agent runs", () => {
-  it.effect("refuses to start a turn and still accepts other thread commands", () =>
+  it.effect("refuses turns and answers that become turns, and accepts other thread commands", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const withoutLocalRuns = Effect.provideService(ServerConfig.ServerConfig, {
@@ -706,6 +706,16 @@ describe("normalizeDispatchCommand on a server without local agent runs", () => 
         "This server does not run agents. Start the chat on a cloud environment.",
       );
       expect(NodeFS.readdirSync(config.attachmentsDir)).toEqual([]);
+
+      const answer = yield* normalizeDispatchCommand({
+        type: "thread.user-input.respond",
+        commandId: CommandId.make("command-answer"),
+        threadId: ThreadId.make("thread-1"),
+        requestId: ApprovalRequestId.make("request-1"),
+        answers: { question: "yes" },
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }).pipe(withoutLocalRuns, Effect.flip);
+      expect(answer.message).toBe(refused.message);
 
       const stop = yield* normalizeDispatchCommand({
         type: "thread.session.stop",

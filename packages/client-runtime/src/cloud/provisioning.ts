@@ -50,10 +50,14 @@ export interface NewChatRunTargets<Environment> {
   /** The cloud kinds the manager can create for the chat. */
   readonly cloudProviders: ReadonlyArray<ProvisionProvider>;
   /**
-   * The cloud kind a chat starts on while it points at an environment that
-   * runs no agents; null when the environment runs them itself.
+   * Where a chat pointed at an environment that runs no agents goes instead:
+   * the manager's first cloud kind, else the first environment that runs them.
+   * Null when the chat may stay, or there is nowhere else to go.
    */
-  readonly defaultCloudProvider: ProvisionProvider | null;
+  readonly redirect:
+    | { readonly kind: "cloud"; readonly provider: ProvisionProvider }
+    | { readonly kind: "environment"; readonly environment: Environment }
+    | null;
 }
 
 /** Where a new chat can run, and where it starts before the user picks. */
@@ -73,14 +77,23 @@ export function newChatRunTargets<
     | undefined;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
+  const environments = input.environments.filter((environment) =>
+    runsLocalAgents(input.serverConfig(environment.environmentId)),
+  );
   const pointsAtRunner =
     input.environmentId === null || runsLocalAgents(input.serverConfig(input.environmentId));
+  const provider = cloudProviders[0];
+  const environment = environments[0];
   return {
-    environments: input.environments.filter((environment) =>
-      runsLocalAgents(input.serverConfig(environment.environmentId)),
-    ),
+    environments,
     cloudProviders,
-    defaultCloudProvider: pointsAtRunner ? null : (cloudProviders[0] ?? null),
+    redirect: pointsAtRunner
+      ? null
+      : provider
+        ? { kind: "cloud", provider }
+        : environment
+          ? { kind: "environment", environment }
+          : null,
   };
 }
 
