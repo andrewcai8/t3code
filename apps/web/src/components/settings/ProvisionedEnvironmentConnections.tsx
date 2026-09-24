@@ -205,12 +205,14 @@ export function ProvisionedEnvironmentConnections({
     attach({
       environmentId: managerId,
       input: { requestId: environment.requestId },
+      showsOwnProgress: true,
     });
   async function attachForClient(environment: DiscoveredProvisionedEnvironment) {
     if (environment.lifecycle === "paused") {
       const resumed = await resume({
         environmentId: managerId,
         input: { environmentId: environment.environmentId },
+        showsOwnProgress: true,
       });
       if (AsyncResult.isFailure(resumed))
         throw new Error("The manager could not resume this environment. Try again.");

@@ -34,6 +34,7 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   EnvironmentRpcRequestObserver,
+  EnvironmentRpcShowsOwnProgress,
   request,
   runStream,
   subscribe,
@@ -284,25 +285,28 @@ describe("environment RPC", () => {
       const { activeSession, supervisor } = yield* makeHarness();
       yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
 
-      const result = yield* request(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
-        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
-        Effect.provideService(
-          EnvironmentRpcRequestObserver,
-          EnvironmentRpcRequestObserver.of({
-            observe: ({ environmentId, method }) =>
-              Effect.sync(() => {
-                observations.push(`start:${environmentId}:${method}`);
-                return Effect.sync(() => {
-                  observations.push(`finish:${environmentId}:${method}`);
-                });
-              }),
+      const observer = EnvironmentRpcRequestObserver.of({
+        observe: ({ environmentId, method, showsOwnProgress }) =>
+          Effect.sync(() => {
+            observations.push(`start:${environmentId}:${method}:${showsOwnProgress}`);
+            return Effect.sync(() => {
+              observations.push(`finish:${environmentId}:${method}`);
+            });
           }),
-        ),
+      });
+      const observed = request(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(EnvironmentRpcRequestObserver, observer),
       );
+
+      const result = yield* observed;
+      yield* observed.pipe(Effect.provideService(EnvironmentRpcShowsOwnProgress, true));
 
       expect(result).toEqual({ status: "available", version: "2026.6.0" });
       expect(observations).toEqual([
-        `start:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
+        `start:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}:false`,
+        `finish:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
+        `start:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}:true`,
         `finish:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
       ]);
     }),

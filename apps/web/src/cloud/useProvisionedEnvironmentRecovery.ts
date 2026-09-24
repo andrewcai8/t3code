@@ -25,11 +25,11 @@ export function useProvisionedEnvironmentRecovery() {
               presentation.serverConfig?.environmentControl === true,
           )
           .map(([managerId]) => managerId),
-      resume: async (managerId, environmentId) => {
+      resume: async (managerId, environmentId, showsOwnProgress) => {
         const result = await runAtomCommand(
           registry,
           serverEnvironment.resumeProvisionedEnvironment,
-          { environmentId: managerId, input: { environmentId } },
+          { environmentId: managerId, input: { environmentId }, showsOwnProgress },
           { reportFailure: false },
         );
         return result._tag === "Failure" ? null : result.value;

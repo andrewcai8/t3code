@@ -996,7 +996,6 @@ export function createServerEnvironmentAtoms<R, E>(
     provisionEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:provision",
       tag: WS_METHODS.environmentControlProvision,
-      showsOwnProgress: true,
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId, input }) => `${environmentId}:${input.requestId}`,
@@ -1005,7 +1004,6 @@ export function createServerEnvironmentAtoms<R, E>(
     attachProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:attach",
       tag: WS_METHODS.environmentControlAttach,
-      showsOwnProgress: true,
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId, input }) => `${environmentId}:${input.requestId}`,
@@ -1039,7 +1037,6 @@ export function createServerEnvironmentAtoms<R, E>(
     resumeProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:resume",
       tag: WS_METHODS.environmentControlResume,
-      showsOwnProgress: true,
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId, input }) => `${environmentId}:${input.environmentId}`,

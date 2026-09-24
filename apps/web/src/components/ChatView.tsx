@@ -1616,6 +1616,11 @@ export default function ChatView(props: ChatViewProps) {
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const recoverEnvironment = useProvisionedEnvironmentRecovery();
+  // The send button spins while a queued send wakes its workspace.
+  const recoverEnvironmentForSend = useCallback(
+    (environmentId: EnvironmentId) => recoverEnvironment(environmentId, { showsOwnProgress: true }),
+    [recoverEnvironment],
+  );
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
@@ -4982,6 +4987,7 @@ export default function ChatView(props: ChatViewProps) {
               const result = await requestCloudProvision({
                 environmentId: request.managerEnvironmentId,
                 input: request.input,
+                showsOwnProgress: true,
               });
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
@@ -4989,6 +4995,7 @@ export default function ChatView(props: ChatViewProps) {
               const result = await attachCloudEnvironment({
                 environmentId: request.managerEnvironmentId,
                 input: { requestId: request.input.requestId },
+                showsOwnProgress: true,
               });
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
@@ -9482,7 +9489,7 @@ export default function ChatView(props: ChatViewProps) {
     threadKey: routeThreadKey,
     ready:
       !activeEnvironmentUnavailable && !threadDetailLoading && !isSendBusy && serverConfig !== null,
-    recover: recoverEnvironment,
+    recover: recoverEnvironmentForSend,
     send: ({ submissionIntent, directAnnotation }) => {
       void onSend(undefined, submissionIntent, directAnnotation);
     },

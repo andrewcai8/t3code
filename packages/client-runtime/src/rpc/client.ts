@@ -22,16 +22,17 @@ export class EnvironmentRpcUnavailableError extends Schema.TaggedError<Environme
   },
 ) {}
 
-export interface EnvironmentRpcRequestOptions {
-  /** The caller renders its own progress, so clients should not flag the wait as slow. */
-  readonly showsOwnProgress?: boolean;
-}
-
 export interface EnvironmentRpcRequestObservation {
   readonly environmentId: string;
   readonly method: string;
   readonly showsOwnProgress: boolean;
 }
+
+/** True while the caller renders its own progress, so clients should not flag the wait as slow. */
+export class EnvironmentRpcShowsOwnProgress extends Context.Reference<boolean>(
+  "@t3tools/client-runtime/rpc/EnvironmentRpcShowsOwnProgress",
+  { defaultValue: () => false },
+) {}
 
 export class EnvironmentRpcRequestObserver extends Context.Reference<{
   readonly observe: (
@@ -138,7 +139,7 @@ const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
 
 export const request = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
->(tag: TTag, input: EnvironmentRpcInput<TTag>, options: EnvironmentRpcRequestOptions = {}) {
+>(tag: TTag, input: EnvironmentRpcInput<TTag>) {
   const supervisor = yield* EnvironmentSupervisor;
   yield* Effect.annotateCurrentSpan({
     "environment.id": supervisor.target.environmentId,
@@ -152,7 +153,7 @@ export const request = Effect.fn("EnvironmentRpc.request")(function* <
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     method: tag,
-    showsOwnProgress: options.showsOwnProgress === true,
+    showsOwnProgress: yield* EnvironmentRpcShowsOwnProgress,
   });
   return yield* method(input).pipe(Effect.ensuring(completeObservation));
 });

@@ -17,6 +17,7 @@ import {
   type EnvironmentRpcStreamValue,
   type EnvironmentSubscriptionRpcTag,
   type EnvironmentUnaryRpcTag,
+  EnvironmentRpcShowsOwnProgress,
   EnvironmentRpcUnavailableError,
   request,
   subscribe,
@@ -613,10 +614,22 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
     label: options.label,
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
     ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
-    execute: (target, registry) => {
+    execute: (
+      target: {
+        readonly environmentId: EnvironmentIdType;
+        readonly input: Input;
+        /** Set by callers that render their own progress for this invocation. */
+        readonly showsOwnProgress?: boolean;
+      },
+      registry,
+    ) => {
       const effect = runInEnvironment(
         target.environmentId,
-        options.execute(target.input, registry, target.environmentId),
+        options
+          .execute(target.input, registry, target.environmentId)
+          .pipe(
+            Effect.provideService(EnvironmentRpcShowsOwnProgress, target.showsOwnProgress === true),
+          ),
       );
       const recover = options.recover;
       if (recover === undefined) return effect;
@@ -713,7 +726,6 @@ export function createEnvironmentRpcCommand<R, ER, TTag extends EnvironmentUnary
       EnvironmentSupervisor | EnvironmentRegistry
     >;
     readonly scheduler?: AtomCommandScheduler;
-    readonly showsOwnProgress?: boolean;
     readonly concurrency?: AtomCommandConcurrency<{
       readonly environmentId: EnvironmentIdType;
       readonly input: EnvironmentRpcInput<TTag>;
@@ -743,10 +755,7 @@ export function createEnvironmentRpcCommand<R, ER, TTag extends EnvironmentUnary
         environmentId,
         input,
       };
-      return (
-        options.execute?.(input) ??
-        request(options.tag, input, { showsOwnProgress: options.showsOwnProgress === true })
-      ).pipe(
+      return (options.execute?.(input) ?? request(options.tag, input)).pipe(
         Effect.tap(() => options.onSuccess?.(target, registry) ?? Effect.void),
         Effect.ensuring(options.onSettled?.(target, registry) ?? Effect.void),
       );

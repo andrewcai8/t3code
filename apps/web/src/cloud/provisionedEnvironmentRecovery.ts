@@ -8,7 +8,8 @@ export type ProvisionedEnvironmentRecovery =
 /**
  * Wakes a paused cloud workspace through whichever connected manager provisioned it.
  * `not-provisioned` means no connected manager knows the environment, so the caller
- * falls back to an ordinary connection retry.
+ * falls back to an ordinary connection retry. Callers that render their own pending
+ * state pass `showsOwnProgress`; a concurrent caller joins the first caller's recovery.
  */
 export function createProvisionedEnvironmentRecovery(operations: {
   managers: (environmentId: EnvironmentId) => ReadonlyArray<EnvironmentId>;
@@ -16,20 +17,24 @@ export function createProvisionedEnvironmentRecovery(operations: {
   resume: (
     managerId: EnvironmentId,
     environmentId: EnvironmentId,
+    showsOwnProgress: boolean,
   ) => Promise<EnvironmentProvisionResumeResult | null>;
   markMissing: (environmentId: EnvironmentId) => Promise<void>;
   retry: (environmentId: EnvironmentId) => Promise<void>;
   awaitConnected: (environmentId: EnvironmentId) => Promise<void>;
 }) {
   const pending = new Map<EnvironmentId, Promise<ProvisionedEnvironmentRecovery>>();
-  return (environmentId: EnvironmentId): Promise<ProvisionedEnvironmentRecovery> => {
+  return (
+    environmentId: EnvironmentId,
+    { showsOwnProgress = false }: { readonly showsOwnProgress?: boolean } = {},
+  ): Promise<ProvisionedEnvironmentRecovery> => {
     const existing = pending.get(environmentId);
     if (existing) return existing;
     const recovery = (async (): Promise<ProvisionedEnvironmentRecovery> => {
       const results = await Promise.all(
         operations
           .managers(environmentId)
-          .map((managerId) => operations.resume(managerId, environmentId)),
+          .map((managerId) => operations.resume(managerId, environmentId, showsOwnProgress)),
       );
       if (!results.some((result) => result?.kind === "resumed")) {
         const refusal = results.find(

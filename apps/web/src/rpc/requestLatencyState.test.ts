@@ -115,6 +115,13 @@ describe("requestLatencyState", () => {
     expect(getSlowRpcAckRequests().map((request) => request.requestId)).toEqual(["config"]);
   });
 
+  it("still flags a resume whose caller shows no progress", () => {
+    trackRpcRequestSent("resume", WS_METHODS.environmentControlResume);
+    vi.advanceTimersByTime(16_000);
+
+    expect(getSlowRpcAckRequests().map((request) => request.requestId)).toEqual(["resume"]);
+  });
+
   it("evicts the oldest pending requests once the tracker reaches capacity", () => {
     for (let index = 0; index < MAX_TRACKED_RPC_ACK_REQUESTS + 1; index += 1) {
       trackRpcRequestSent(String(index), "server.getConfig");
