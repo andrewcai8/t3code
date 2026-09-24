@@ -54,9 +54,21 @@ export function parseAssetCollectionKey(
   }
 }
 
+/**
+ * Resolve a server-relative URL (`/api/assets/...`) inside the environment's base, keeping any
+ * path prefix such as a manager gateway's `/api/provisioned-environment/<leaseId>/`.
+ */
+function environmentUrl(httpBaseUrl: string, relativeUrl: string): string {
+  const base = new URL(httpBaseUrl);
+  if (!base.pathname.endsWith("/")) base.pathname = `${base.pathname}/`;
+  base.search = "";
+  base.hash = "";
+  return new URL(relativeUrl.replace(/^\/(?!\/)/, ""), base).toString();
+}
+
 export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
+    return environmentUrl(httpBaseUrl, relativeUrl);
   } catch {
     return null;
   }
@@ -131,7 +143,7 @@ export function createAssetEnvironmentAtoms<R, E>(
       request(WS_METHODS.assetsCreateUrl, input),
     );
     // Callers resolve against the thread's server, so preserve the local server's origin.
-    return { ...asset, relativeUrl: new URL(asset.relativeUrl, local.httpBaseUrl).href };
+    return { ...asset, relativeUrl: environmentUrl(local.httpBaseUrl, asset.relativeUrl) };
   });
   const createUrl = createEnvironmentQueryAtomFamily(runtime, {
     label: "environment-data:assets:create-url",
