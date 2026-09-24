@@ -8,6 +8,7 @@ import {
   defaultInstanceIdForDriver,
   EnvironmentProvisionInput,
   ProviderDriverKind,
+  ProvisionProvider,
   ProvisionRequestConflict,
   type ProvisionRequestId,
 } from "@t3tools/contracts";
@@ -113,6 +114,24 @@ export function configuredRuntimeArtifact(
   provider: "e2b" | "namespace",
 ): ProvisionRuntimeArtifact | null {
   return config.provisioning?.runtimeArtifacts?.[provider === "e2b" ? "linux" : "macos"] ?? null;
+}
+/**
+ * The cloud environments this configuration can provision. Each needs its
+ * pinned runtime; E2B also needs its template and a Mac its Namespace
+ * defaults. Namespace
+ * credentials are checked when a provision starts, since `nsc login` can
+ * supply them outside this file.
+ */
+export function provisionProviders(
+  config: EnvironmentControlConfig,
+): ReadonlyArray<ProvisionProvider> {
+  return ProvisionProvider.literals.filter(
+    (provider) =>
+      configuredRuntimeArtifact(config, provider) !== null &&
+      (provider === "e2b"
+        ? Boolean(config.provisioning?.templateId)
+        : config.provisioning?.namespace !== undefined),
+  );
 }
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 const decodeSettings = Schema.decodeUnknownSync(

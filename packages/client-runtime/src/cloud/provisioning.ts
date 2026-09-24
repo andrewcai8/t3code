@@ -1,10 +1,12 @@
-import type {
-  EnvironmentId,
-  EnvironmentProvisionAttachResult,
-  EnvironmentProvisionInput,
-  EnvironmentProvisionResult,
-  ProjectId,
-  ScopedProjectRef,
+import {
+  type EnvironmentId,
+  type EnvironmentProvisionAttachResult,
+  type EnvironmentProvisionInput,
+  type EnvironmentProvisionResult,
+  type ProjectId,
+  ProvisionProvider,
+  type ScopedProjectRef,
+  type ServerConfig,
 } from "@t3tools/contracts";
 
 import { joinProvisionedEnvironment } from "../connection/provisioned.ts";
@@ -23,6 +25,17 @@ export type CloudProvisioningProgressPhase = Exclude<CloudProvisioningPhase, "re
 
 /** How long a freshly paired environment gets to publish its cloned project. */
 const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
+
+/**
+ * The cloud environments a manager offers to create. Servers that predate
+ * `provisionProviders` only set `environmentControl`, and offered every kind.
+ */
+export function offeredProvisionProviders(
+  config: Pick<ServerConfig, "environmentControl" | "provisionProviders"> | null | undefined,
+): ReadonlyArray<ProvisionProvider> {
+  if (config?.provisionProviders) return config.provisionProviders;
+  return config?.environmentControl === true ? ProvisionProvider.literals : [];
+}
 
 function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
   return provider === "namespace" ? "Namespace Mac" : "E2B";

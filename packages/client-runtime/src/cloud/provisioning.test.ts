@@ -15,7 +15,11 @@ import {
   type ProvisionRequestStore,
 } from "./provisionRequests.ts";
 import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
-import { type CloudProvisionPorts, provisionCloudEnvironment } from "./provisioning.ts";
+import {
+  type CloudProvisionPorts,
+  offeredProvisionProviders,
+  provisionCloudEnvironment,
+} from "./provisioning.ts";
 import type { ProvisionStorage } from "./storage.ts";
 
 const draft = {
@@ -250,5 +254,28 @@ describe("provisionCloudEnvironment", () => {
       kind: "failed",
       message: "Namespace Mac was created but could not be connected.",
     });
+  });
+});
+
+describe("offeredProvisionProviders", () => {
+  it("offers what the server advertises", () => {
+    expect(
+      offeredProvisionProviders({ environmentControl: true, provisionProviders: ["e2b"] }),
+    ).toEqual(["e2b"]);
+    expect(
+      offeredProvisionProviders({
+        environmentControl: true,
+        provisionProviders: ["e2b", "namespace"],
+      }),
+    ).toEqual(["e2b", "namespace"]);
+    expect(offeredProvisionProviders({ environmentControl: true, provisionProviders: [] })).toEqual(
+      [],
+    );
+  });
+
+  it("offers every kind on an older server that only sets the control flag", () => {
+    expect(offeredProvisionProviders({ environmentControl: true })).toEqual(["e2b", "namespace"]);
+    expect(offeredProvisionProviders({})).toEqual([]);
+    expect(offeredProvisionProviders(null)).toEqual([]);
   });
 });

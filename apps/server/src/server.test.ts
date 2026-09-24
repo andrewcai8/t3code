@@ -19,6 +19,7 @@ import {
   GitCommandError,
   KeybindingRule,
   MessageId,
+  EnvironmentControlError,
   ExternalLauncherCommandNotFoundError,
   OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
@@ -1069,6 +1070,7 @@ const buildAppUnderTest = (options?: {
         Layer.succeed(EnvironmentControl.EnvironmentControl, {
           namespaceProxyOrigin: () => Effect.succeed(null),
           list: Effect.succeed([]),
+          provisionProviders: Effect.succeed([]),
           listProvisioned: Effect.succeed([]),
           provision: () =>
             Effect.succeed({
@@ -5010,6 +5012,54 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(response.availableEditors, ["file-manager"]);
       assert.equal(response.shellRevealInFileManager, true);
       assert.equal(response.shellRevealInFileManagerKind, "file-explorer");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("advertises the cloud environments its configuration can provision", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          environmentControl: {
+            provisionProviders: Effect.succeed(["e2b"]),
+          },
+        },
+      });
+
+      const { cookie } = yield* bootstrapBrowserSession();
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+      );
+
+      assert.deepEqual(response.provisionProviders, ["e2b"]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("advertises no cloud environments when their configuration cannot be read", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          environmentControl: {
+            provisionProviders: Effect.fail(
+              new EnvironmentControlError({ message: "Cloud controls are unavailable." }),
+            ),
+          },
+        },
+      });
+
+      const { cookie } = yield* bootstrapBrowserSession();
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+      );
+
+      assert.deepEqual(response.provisionProviders, []);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

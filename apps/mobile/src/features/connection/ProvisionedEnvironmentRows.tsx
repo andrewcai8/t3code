@@ -4,6 +4,7 @@ import {
   joinProvisionedEnvironment,
   provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
+import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -45,8 +46,9 @@ export function ProvisionedEnvironmentRows(props: {
   /** Forget a joined machine on this device. The callback owns the confirm. */
   readonly onLeave: (environmentId: EnvironmentId) => void;
 }) {
-  const supported =
-    useAtomValue(serverEnvironment.configValueAtom(props.managerId))?.environmentControl === true;
+  const config = useAtomValue(serverEnvironment.configValueAtom(props.managerId));
+  const supported = config?.environmentControl === true;
+  const canCreate = offeredProvisionProviders(config).length > 0;
   const query = useEnvironmentQuery(
     supported
       ? serverEnvironment.provisionedEnvironments({ environmentId: props.managerId, input: {} })
@@ -149,19 +151,21 @@ export function ProvisionedEnvironmentRows(props: {
           Cloud machines · {props.managerLabel}
         </Text>
         <View className="flex-row items-center gap-2">
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="New cloud machine"
-            onPress={() => setCreating(true)}
-            className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70"
-          >
-            <SymbolView
-              name="plus"
-              size={14}
-              tintColorClassName={"accent-icon"}
-              type="monochrome"
-            />
-          </Pressable>
+          {canCreate ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="New cloud machine"
+              onPress={() => setCreating(true)}
+              className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70"
+            >
+              <SymbolView
+                name="plus"
+                size={14}
+                tintColorClassName={"accent-icon"}
+                type="monochrome"
+              />
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Refresh cloud machines"

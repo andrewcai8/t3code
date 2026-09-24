@@ -22,6 +22,7 @@ import {
   ResolvedKeybindingsConfig,
 } from "./keybindings.ts";
 import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
+import { ProvisionProvider } from "./environmentControl.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
@@ -552,6 +553,12 @@ export function environmentThemeFileHasColors(file: EnvironmentThemeFile): boole
 
 export const ServerConfig = Schema.Struct({
   environmentControl: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The cloud environments this server can provision with its current
+   * configuration. Absent on servers that predate it, which offered every kind
+   * whenever `environmentControl` was set.
+   */
+  provisionProviders: Schema.optionalKey(ForwardCompatibleArray(ProvisionProvider)),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

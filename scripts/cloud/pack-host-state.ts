@@ -54,7 +54,9 @@ export interface HostState {
    * The host's config minus what only the transport knows: `broker`, which for
    * the E2B manager is the sandbox it creates after packing, and
    * `provisioning.runtimeArtifacts.linux`, which a container host has baked
-   * into its image. Namespace's `runtimeArtifacts.macos` does not travel.
+   * into its image. Namespace's `runtimeArtifacts.macos` does not travel, so
+   * neither does `provisioning.namespace`: without the runtime, the host would
+   * advertise Macs it cannot start.
    */
   readonly config: {
     readonly e2bApiKey: string;
@@ -137,7 +139,6 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       provisioning: {
         templateId,
         ...(provisioning?.githubToken ? { githubToken: provisioning.githubToken } : {}),
-        ...(provisioning?.namespace ? { namespace: provisioning.namespace } : {}),
         // Carry the host's provisioning policy through. Dropping egressAllow left
         // provisioned environments without the allowlist their preparation needs,
         // which fails far from here as an unreachable package host.

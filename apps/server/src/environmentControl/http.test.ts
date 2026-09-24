@@ -60,6 +60,7 @@ it.effect(
         EnvironmentControl.of({
           namespaceProxyOrigin: () => Effect.succeed(null),
           list: Effect.succeed([]),
+          provisionProviders: Effect.succeed([]),
           listProvisioned: Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),
           stop: () => Effect.die("Unused in provision HTTP proof"),

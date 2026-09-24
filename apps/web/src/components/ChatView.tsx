@@ -6,6 +6,7 @@ import {
 } from "../cloud/provisionRequests";
 import {
   type CloudProvisioningProgressPhase,
+  offeredProvisionProviders,
   provisionCloudEnvironment,
 } from "@t3tools/client-runtime/cloud";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -4901,10 +4902,11 @@ export default function ChatView(props: ChatViewProps) {
       )?.snapshot ?? activeProviderStatus,
     [activeProviderStatus, providerInstanceEntries],
   );
+  const offeredCloudProviders = offeredProvisionProviders(primaryEnvironment?.serverConfig);
   const canCreateCloudEnvironment =
     draftId !== null &&
     primaryEnvironmentId !== null &&
-    primaryEnvironment?.serverConfig?.environmentControl === true &&
+    offeredCloudProviders.length > 0 &&
     cloudAccount !== null;
   const handleSelectCloudEnvironment = useCallback(
     (provider: "e2b" | "namespace") => {
@@ -11118,15 +11120,13 @@ export default function ChatView(props: ChatViewProps) {
                                     : undefined
                                 }
                                 availableEnvironments={logicalProjectEnvironments}
-                                {...(canCreateCloudEnvironment
-                                  ? {
-                                      onCreateCloudEnvironment: (provider) => {
-                                        handleSelectCloudEnvironment(provider);
-                                      },
-                                      onCreateNamespaceEnvironment: (provider) => {
-                                        handleSelectCloudEnvironment(provider);
-                                      },
-                                    }
+                                {...(canCreateCloudEnvironment &&
+                                offeredCloudProviders.includes("e2b")
+                                  ? { onCreateCloudEnvironment: handleSelectCloudEnvironment }
+                                  : {})}
+                                {...(canCreateCloudEnvironment &&
+                                offeredCloudProviders.includes("namespace")
+                                  ? { onCreateNamespaceEnvironment: handleSelectCloudEnvironment }
                                   : {})}
                                 creatingCloudEnvironment={creatingCloudEnvironment}
                                 pendingCloudProvider={cloudProvisioningRequested}

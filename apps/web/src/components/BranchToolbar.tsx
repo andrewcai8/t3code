@@ -662,7 +662,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   const showEnvironmentPicker = shouldOfferEnvironmentChoice({
     environmentCount: availableEnvironments?.length ?? 0,
     canChangeEnvironment: Boolean(availableEnvironments && onEnvironmentChange),
-    canCreateEnvironment: onCreateCloudEnvironment !== undefined,
+    canCreateEnvironment:
+      onCreateCloudEnvironment !== undefined || onCreateNamespaceEnvironment !== undefined,
   });
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
