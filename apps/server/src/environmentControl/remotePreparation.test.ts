@@ -537,6 +537,63 @@ describe("remote preparation subprocess", () => {
     expect(remotePreparationScript).toContain("node.h");
   });
 
+  it("builds native addons without downloading node-gyp when npm bundles a new enough one", async () => {
+    const input = await fixture();
+    const base = NodePath.dirname(input.artifact.archivePath);
+    const bundle = NodePath.join(base, "native");
+    await NodeFSP.mkdir(NodePath.join(bundle, "addon"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(bundle, "cli.mjs"), fixtureCli);
+    await NodeFSP.writeFile(
+      NodePath.join(bundle, "addon/package.json"),
+      JSON.stringify({
+        name: "fixture-addon",
+        version: "1.0.0",
+        scripts: {
+          install:
+            "node -e \"require('fs').writeFileSync(require('path').join(process.env.INIT_CWD, 'addon-built'), 'yes')\"",
+        },
+      }),
+    );
+    await NodeFSP.writeFile(
+      NodePath.join(bundle, "package.json"),
+      JSON.stringify({
+        name: "fixture-runtime",
+        version: "1.0.0",
+        type: "module",
+        dependencies: { "fixture-addon": "file:./addon" },
+      }),
+    );
+    NodeChildProcess.execFileSync(
+      "npm",
+      ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
+      { cwd: bundle, stdio: "ignore" },
+    );
+    const archivePath = NodePath.join(base, "native.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archivePath, "-C", bundle, "."]);
+    const tmpdir = NodePath.join(base, "tmp");
+    await NodeFSP.mkdir(tmpdir);
+    const previousTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = tmpdir;
+    try {
+      const ready = await prepareRemoteHost(localPort, {
+        ...input,
+        artifact: {
+          ...input.artifact,
+          archivePath,
+          sha256: sha256(await NodeFSP.readFile(archivePath)),
+          install: "npm",
+        },
+      });
+      pids.add(ready.serverPid);
+    } finally {
+      process.env.TMPDIR = previousTmpdir;
+    }
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "artifact/addon-built"), "utf8")).toBe(
+      "yes",
+    );
+    expect(await NodeFSP.readdir(tmpdir)).not.toContain("t3-node-gyp");
+  });
+
   it("extracts contained relative artifact symlinks", async () => {
     const input = await fixture();
     const unpacked = NodePath.join(NodePath.dirname(input.artifact.archivePath), "with-link");
