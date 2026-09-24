@@ -6,9 +6,9 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 
-import { packHostState, writeSeedArchive } from "./pack-host-state.ts";
+import { packHostState, writeSeedArchive, type HostConfig } from "./pack-host-state.ts";
 
-const fixture = async () => {
+const fixture = async (extra: Pick<HostConfig, "namespaceToken"> = {}) => {
   const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pack-host-state-"));
   const write = async (path: string, data: string) => {
     await NodeFSP.mkdir(NodePath.dirname(NodePath.join(home, path)), { recursive: true });
@@ -20,10 +20,29 @@ const fixture = async () => {
   const packed = await packHostState({
     config: {
       e2bApiKey: "e2b-key",
+      ...extra,
       provisioning: {
         templateId: "t3-common",
+        runtimeArtifacts: {
+          macos: {
+            path: NodePath.join(home, "runtime-macos.tar.gz"),
+            sha256: "0".repeat(64),
+            revision: "1".repeat(40),
+            entrypoint: "dist/bin.mjs",
+            runtimeExecutable: "node",
+            install: "npm",
+          },
+        },
         egressAllow: ["registry.npmjs.org"],
         namespace: { size: "m" },
+        repositories: [
+          {
+            repository: "acme/ios",
+            workspaceFiles: [{ source: NodePath.join(home, "ios.env"), destination: ".env" }],
+            namespace: { prepareCommands: ["pod install"] },
+          },
+          { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
+        ],
         claudeOAuthTokens: { claude_work: "sk-ant-oat01-work" },
         shellEnvironment: [{ name: "GH_TOKEN", source: NodePath.join(home, "secrets/github.bin") }],
         skills: [{ source: NodePath.join(home, "plugins/review-skills"), name: "review" }],
@@ -43,7 +62,7 @@ const fixture = async () => {
 };
 
 describe("packHostState", () => {
-  it("places every file and config path under the base dir", async () => {
+  it("places every file and config path under the base dir, leaving Namespace without a token", async () => {
     const { home, packed } = await fixture();
     try {
       assert.deepEqual(packed.accounts, ["codex", "claude_work"]);
@@ -87,6 +106,29 @@ describe("packHostState", () => {
           egressAllow: ["registry.npmjs.org"],
           shellEnvironment: [{ name: "GH_TOKEN", source: "/data/t3/shell-environment/GH_TOKEN" }],
           skills: [{ source: "/data/t3/skills/0/review-skills", name: "review" }],
+        },
+      });
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("carries Namespace settings with a namespaceToken, but no runtime artifact", async () => {
+    const { home, packed } = await fixture({ namespaceToken: "nsc-token" });
+    try {
+      assert.deepEqual(packed.config, {
+        e2bApiKey: "e2b-key",
+        namespaceToken: "nsc-token",
+        targets: [],
+        provisioning: {
+          templateId: "t3-common",
+          egressAllow: ["registry.npmjs.org"],
+          shellEnvironment: [{ name: "GH_TOKEN", source: "/data/t3/shell-environment/GH_TOKEN" }],
+          skills: [{ source: "/data/t3/skills/0/review-skills", name: "review" }],
+          namespace: { size: "m" },
+          repositories: [
+            { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
+          ],
         },
       });
     } finally {
