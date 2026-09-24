@@ -17,6 +17,7 @@ import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
+  AuthWebSocketTicketResult,
   CommandId,
   MessageId,
   type OrchestrationThreadStreamItem,
@@ -38,6 +39,7 @@ import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -66,13 +68,15 @@ const CHEAP_MODEL: Record<Agent, RegExp> = {
   claudeAgent: /haiku/i,
   cursor: /^(auto|composer|cheetah)/i,
 };
-const STEPS = ["provision", "turns", "resume", "delete"] as const;
+const STEPS = ["provision", "turns", "device", "resume", "delete"] as const;
 type Step = (typeof STEPS)[number];
 
 const PROVISION_TIMEOUT = "20 minutes";
 const PROJECT_TIMEOUT = "2 minutes";
 const PROVIDER_TIMEOUT = "3 minutes";
 const TURN_TIMEOUT = "10 minutes";
+/** Building the sample app and agent-device's first XCTest runner build take minutes each. */
+const DEVICE_TURN_TIMEOUT = "20 minutes";
 const RECONNECT_TIMEOUT = "3 minutes";
 const PAUSED_TIMEOUT = "2 minutes";
 const CALL_TIMEOUT = "2 minutes";
@@ -98,6 +102,7 @@ const encodeReport = Schema.encodeEffect(
       repo: Schema.String,
       steps: Schema.Array(Schema.String),
       box: Schema.Unknown,
+      managerPhases: Schema.Unknown,
       ok: Schema.Boolean,
       checks: Schema.Array(Check),
     }),
@@ -114,6 +119,10 @@ const encodeBearerCache = Schema.encodeEffect(BearerCache);
 class SmokeFailure extends Schema.TaggedError<SmokeFailure>()("SmokeFailure", {
   message: Schema.String,
 }) {}
+/** Not a SmokeFailure: a timeout nobody recorded must still fail the run as `harness`. */
+class SmokeTimeout extends Schema.TaggedError<SmokeTimeout>()("SmokeTimeout", {
+  message: Schema.String,
+}) {}
 
 /** Bounds a call that a stuck cloud API could otherwise hold forever. */
 const bounded = <A, E, R>(self: Effect.Effect<A, E, R>, what: string) =>
@@ -121,7 +130,7 @@ const bounded = <A, E, R>(self: Effect.Effect<A, E, R>, what: string) =>
     Effect.timeoutOrElse({
       duration: CALL_TIMEOUT,
       orElse: () =>
-        Effect.fail(new SmokeFailure({ message: `${what}: no answer in ${CALL_TIMEOUT}` })),
+        Effect.fail(new SmokeTimeout({ message: `${what}: no answer in ${CALL_TIMEOUT}` })),
     }),
   );
 
@@ -139,34 +148,56 @@ const wsUrl = (httpBaseUrl: string) => {
 const makeClient = RpcClient.make(WsRpcGroup);
 type T3Client = typeof makeClient extends Effect.Effect<infer C, infer _E, infer _R> ? C : never;
 
-/** Runs `use` with an RPC client whose socket closes when `use` finishes. */
+const decodeWebSocketTicket = Schema.decodeUnknownEffect(
+  Schema.Struct({ ticket: AuthWebSocketTicketResult.fields.ticket }),
+);
+
+/**
+ * Runs `use` with an RPC client whose socket closes when `use` finishes. Every connection, the
+ * first and each reconnect, authenticates with a fresh ticket in its URL as the web client does:
+ * the manager's gateway to a Namespace box forwards the upgrade URL but not its headers.
+ */
 const withRpc = <A, E, R>(
   httpBaseUrl: string,
   bearer: string,
   use: (client: T3Client) => Effect.Effect<A, E, R>,
 ) =>
-  makeClient.pipe(
-    Effect.flatMap(use),
-    Effect.provide(
-      RpcClient.layerProtocolSocket().pipe(
-        Layer.provide(
-          Socket.layerWebSocket(wsUrl(httpBaseUrl)).pipe(
-            Layer.provide(
-              Layer.succeed(
-                Socket.WebSocketConstructor,
-                (url, protocols) =>
-                  new NodeSocket.NodeWS.WebSocket(url, protocols as string[] | undefined, {
-                    headers: { authorization: `Bearer ${bearer}` },
-                  }) as unknown as globalThis.WebSocket,
-              ),
+  Effect.gen(function* () {
+    const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+    const connectUrl = http
+      .execute(
+        HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
+          HttpClientRequest.bearerToken(bearer),
+        ),
+      )
+      .pipe(
+        Effect.flatMap((response) => response.json),
+        Effect.flatMap(decodeWebSocketTicket),
+        Effect.map(({ ticket }) => {
+          const url = new URL(wsUrl(httpBaseUrl));
+          url.searchParams.set("wsTicket", ticket);
+          return url.toString();
+        }),
+        Effect.timeout(CALL_TIMEOUT),
+        // Without a ticket the server refuses the upgrade, which the RPC client reports as a
+        // socket error on the call that needed it.
+        Effect.orElseSucceed(() => wsUrl(httpBaseUrl)),
+      );
+    return yield* makeClient.pipe(
+      Effect.flatMap(use),
+      Effect.provide(
+        RpcClient.layerProtocolSocket().pipe(
+          Layer.provide(
+            Socket.layerWebSocket(connectUrl).pipe(
+              Layer.provide(NodeSocket.layerWebSocketConstructor),
             ),
           ),
+          Layer.provide(RpcSerialization.layerJson),
         ),
-        Layer.provide(RpcSerialization.layerJson),
       ),
-    ),
-    Effect.scoped,
-  );
+      Effect.scoped,
+    );
+  });
 
 const exchangePairingToken = Effect.fn("exchangePairingToken")(function* (
   httpBaseUrl: string,
@@ -201,16 +232,23 @@ interface Markers {
   readonly skill: string | null;
   readonly nonce: string | null;
 }
-const readMarkers = (reply: string): Markers => {
-  const read = (key: string) => reply.match(new RegExp(`SMOKE_${key}=([^\\s\`'"]+)`))?.[1] ?? null;
-  return { head: read("HEAD"), branch: read("BRANCH"), skill: read("SKILL"), nonce: read("NONCE") };
-};
+/** The last `SMOKE_<key>=<value>` the agent printed: a reply may quote the prompt's example first. */
+const readMarker = (reply: string, key: string) =>
+  [...reply.matchAll(new RegExp(`SMOKE_${key}=[\`'"]?([^\\s\`'"]+)`, "g"))].at(-1)?.[1] ?? null;
+const readMarkers = (reply: string): Markers => ({
+  head: readMarker(reply, "HEAD"),
+  branch: readMarker(reply, "BRANCH"),
+  skill: readMarker(reply, "SKILL"),
+  nonce: readMarker(reply, "NONCE"),
+});
 
 /** What one turn's thread stream has shown so far, folded the way the projector folds it. */
 interface TurnProgress {
   readonly assistant: ReadonlyMap<string, string>;
   readonly firstOutputAt: number | null;
   readonly started: boolean;
+  /** The provider turn this message started; a late checkpoint of the previous turn is not ours. */
+  readonly turnId: string | null;
   readonly completedAt: number | null;
   readonly error: string | null;
   /** Events at or below the snapshot's sequence are already folded into it. */
@@ -222,6 +260,7 @@ const initialProgress: TurnProgress = {
   assistant: new Map(),
   firstOutputAt: null,
   started: false,
+  turnId: null,
   completedAt: null,
   error: null,
   sequence: -1,
@@ -255,6 +294,7 @@ const advanceTurn = (
       assistant: new Map(replies.map((message) => [message.id, message.text])),
       firstOutputAt: replies.some((message) => message.text.trim()) ? now : null,
       started: true,
+      turnId: ours ? turn.turnId : null,
       completedAt: finished ? now : null,
       error:
         finished && turn.state === "error" ? (thread.session?.lastError ?? "turn error") : null,
@@ -285,18 +325,47 @@ const advanceTurn = (
       const newError = session.lastError !== null && session.lastError !== progress.priorError;
       if (session.status === "error" || newError)
         return { ...progress, error: session.lastError ?? "session error", completedAt: now };
+      if (session.status === "running" && progress.turnId === null && session.activeTurnId !== null)
+        return { ...progress, turnId: session.activeTurnId };
       const settled = session.activeTurnId === null && session.status !== "starting";
       return settled && session.status !== "running" && progress.firstOutputAt !== null
         ? { ...progress, completedAt: progress.completedAt ?? now }
         : progress;
     }
     case "thread.turn-diff-completed":
-      return progress.started
+      return progress.turnId !== null && event.payload.turnId === progress.turnId
         ? { ...progress, completedAt: progress.completedAt ?? now }
         : progress;
     default:
       return progress;
   }
+};
+
+/**
+ * The manager logs each provisioning phase as a `provision phase` line followed by indented
+ * `key: value` annotations; this reads back the ones for one request, in order.
+ */
+const readManagerPhases = (log: string, requestId: string) => {
+  const entries: Array<Record<string, string>> = [];
+  let current: Record<string, string> | null = null;
+  for (const line of log.split("\n")) {
+    if (line.endsWith(": provision phase")) {
+      current = {};
+      entries.push(current);
+      continue;
+    }
+    const field = current ? line.match(/^ {2}(\w+): (.*)$/) : null;
+    if (current && field) current[field[1]!] = field[2]!;
+    else current = null;
+  }
+  return entries
+    .filter((entry) => entry.requestId === requestId)
+    .map((entry) => ({
+      phase: entry.phase ?? "",
+      durationMs: Math.round(Number(entry.durationMs)),
+      ...(entry.bytes ? { bytes: Number(entry.bytes) } : {}),
+      ...(entry.failed === "true" ? { failed: true } : {}),
+    }));
 };
 
 interface Options {
@@ -306,6 +375,8 @@ interface Options {
   readonly agents: ReadonlyArray<Agent>;
   readonly repo: string;
   readonly steps: ReadonlySet<Step>;
+  readonly deviceAgent: Agent;
+  readonly managerLog: string | null;
   readonly report: string;
 }
 
@@ -391,8 +462,16 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     box: ProvisionedEnvironment | null;
     child: { readonly httpBaseUrl: string; readonly bearer: string } | null;
     projectId: ProjectId | null;
+    workspaceRoot: string | null;
     readonly threads: Array<ChildThread>;
-  } = { requestId: null, box: null, child: null, projectId: null, threads: [] };
+  } = {
+    requestId: null,
+    box: null,
+    child: null,
+    projectId: null,
+    workspaceRoot: null,
+    threads: [],
+  };
 
   const expectedHead = Effect.fn("expectedHead")(function* () {
     if (created.box?.sourceRevision) return created.box.sourceRevision;
@@ -402,7 +481,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     return output.split(/\s/)[0] || null;
   });
 
-  const awaitProvider = Effect.fn("awaitProvider")(function* (client: T3Client, agent: Agent) {
+  const awaitProvider = Effect.fn("awaitProvider")(function* (
+    client: T3Client,
+    agent: Agent,
+    label: string,
+  ) {
     let last: ServerProvider | undefined;
     const found = yield* Effect.gen(function* () {
       const config = yield* client["server.getConfig"]({});
@@ -416,7 +499,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       Effect.timeoutOption(PROVIDER_TIMEOUT),
     );
     if (Option.isSome(found) && found.value) return found.value;
-    return yield* fail(`turn.${agent}.provider`, "no usable provider instance on the child", {
+    return yield* fail(`${label}.provider`, "no usable provider instance on the child", {
       instanceId: last?.instanceId ?? null,
       status: last?.status ?? null,
       auth: last?.auth.status ?? null,
@@ -425,33 +508,33 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     });
   });
 
-  /** Sends one marker turn, waits for it to finish, and records its checks under `label`. */
-  const runTurn = Effect.fn("runTurn")(function* (
+  /**
+   * Sends one turn, waits for it to finish, and records its first output and completion under
+   * `label`. `cheap` picks the driver's cheapest model; otherwise its default.
+   */
+  const sendTurn = Effect.fn("sendTurn")(function* (
     client: T3Client,
     agent: Agent,
     label: string,
     thread: ChildThread | null,
-    onDispatched: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void,
+    prompt: string,
+    options: {
+      readonly cheap: boolean;
+      readonly timeout: Duration.Input;
+      readonly onDispatched?: (threadId: ThreadId) => Effect.Effect<void>;
+    },
   ) {
-    const provider = yield* awaitProvider(client, agent);
+    const provider = yield* awaitProvider(client, agent, label);
     const model =
-      provider.models.find((candidate) => CHEAP_MODEL[agent].test(candidate.slug)) ??
+      (options.cheap
+        ? provider.models.find((candidate) => CHEAP_MODEL[agent].test(candidate.slug))
+        : undefined) ??
       provider.models.find((candidate) => candidate.isDefault) ??
       provider.models[0]!;
     const modelSelection = {
       instanceId: ProviderInstanceId.make(provider.instanceId),
       model: model.slug,
     };
-    // The agent cannot print the nonce without running the snippet: only its sha256 prefix counts.
-    const seed = (yield* uuid).replaceAll("-", "");
-    const expectedNonce = (yield* sha256(seed)).slice(0, 16);
-    const snippet = [
-      `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
-      `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
-      `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
-      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_NONCE=$n"`,
-    ].join("; ");
-    const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
     const threadId = thread?.threadId ?? ThreadId.make(yield* uuid);
     const messageId = MessageId.make(yield* uuid);
     const createdAt = DateTime.formatIso(yield* DateTime.now);
@@ -471,7 +554,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
             bootstrap: {
               createThread: {
                 projectId,
-                title: `smoke ${agent}`,
+                title: `smoke ${label}`,
                 modelSelection,
                 runtimeMode: "full-access",
                 interactionMode: "default",
@@ -488,7 +571,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     const turnThread = thread ?? { agent, threadId };
     if (!thread) created.threads.push(turnThread);
-    yield* onDispatched(threadId);
+    if (options.onDispatched) yield* options.onDispatched(threadId);
 
     let progress = initialProgress;
     const watched = yield* client["orchestration.subscribeThread"]({ threadId }).pipe(
@@ -500,7 +583,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           }),
         ),
       ),
-      Effect.timeoutOption(TURN_TIMEOUT),
+      Effect.timeoutOption(options.timeout),
       Effect.map((finished) => (Option.isSome(finished) ? null : "turn did not finish in time")),
       Effect.catch((cause) => Effect.succeed(describe(cause))),
     );
@@ -528,7 +611,33 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       completed ? seconds(sentAt, progress.completedAt!) : null,
       { threadId, error },
     );
-    const markers = readMarkers(reply);
+    return { reply, firstOutputAt: progress.firstOutputAt, thread: turnThread };
+  });
+
+  /** Sends one marker turn and records its checks under `label`. */
+  const runTurn = Effect.fn("runTurn")(function* (
+    client: T3Client,
+    agent: Agent,
+    label: string,
+    thread: ChildThread | null,
+    onDispatched?: (threadId: ThreadId) => Effect.Effect<void>,
+  ) {
+    // The agent cannot print the nonce without running the snippet: only its sha256 prefix counts.
+    const seed = (yield* uuid).replaceAll("-", "");
+    const expectedNonce = (yield* sha256(seed)).slice(0, 16);
+    const snippet = [
+      `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
+      `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
+      `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
+      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_NONCE=$n"`,
+    ].join("; ");
+    const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
+    const turn = yield* sendTurn(client, agent, label, thread, prompt, {
+      cheap: true,
+      timeout: TURN_TIMEOUT,
+      ...(onDispatched ? { onDispatched } : {}),
+    });
+    const markers = readMarkers(turn.reply);
     yield* record(`${label}.markers`, markers.nonce === expectedNonce, markers.nonce, {
       expectedNonce,
       markers,
@@ -546,7 +655,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     yield* record(`${label}.skill`, markers.skill === "present", markers.skill, {
       path: `$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md`,
     });
-    return { firstOutputAt: progress.firstOutputAt, thread: turnThread };
+    return turn;
   });
 
   const provision = Effect.fn("provision")(function* (manager: T3Client) {
@@ -681,32 +790,211 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         if (Option.isNone(project) || Option.isNone(project.value))
           return yield* fail("child.project", `no project after ${PROJECT_TIMEOUT}`);
         created.projectId = project.value.value.id;
+        created.workspaceRoot = project.value.value.workspaceRoot;
         yield* record("child.project", true, seconds(pairedAt, yield* Clock.currentTimeMillis), {
           projectId: created.projectId,
-          workspaceRoot: project.value.value.workspaceRoot,
+          workspaceRoot: created.workspaceRoot,
         });
-        if (!options.steps.has("turns")) return;
-        for (const agent of options.agents) {
-          // The web claims the lease for the chat that first sends on the box, right after sending.
-          const claim = (threadId: ThreadId) =>
-            created.threads.length !== 1
-              ? Effect.void
-              : bounded(
-                  manager["environmentControl.claim"]({
-                    leaseId: box.leaseId,
-                    environmentId: box.environmentId,
-                    threadId,
-                  }),
-                  "claim",
-                ).pipe(
-                  Effect.catch((cause) => Effect.succeed({ kind: describe(cause) })),
-                  Effect.flatMap((claimed) =>
-                    record("lease.claim", claimed.kind === "claimed", claimed.kind, claimed),
-                  ),
-                );
-          yield* runTurn(client, agent, `turn.${agent}`, null, claim).pipe(Effect.option);
-        }
+        // The web claims the lease for the chat that first sends on the box, right after sending.
+        const claim = (threadId: ThreadId) =>
+          created.threads.length !== 1
+            ? Effect.void
+            : bounded(
+                manager["environmentControl.claim"]({
+                  leaseId: box.leaseId,
+                  environmentId: box.environmentId,
+                  threadId,
+                }),
+                "claim",
+              ).pipe(
+                Effect.catch((cause) => Effect.succeed({ kind: describe(cause) })),
+                Effect.flatMap((claimed) =>
+                  record("lease.claim", claimed.kind === "claimed", claimed.kind, claimed),
+                ),
+              );
+        if (options.steps.has("turns"))
+          for (const agent of options.agents)
+            yield* runTurn(client, agent, `turn.${agent}`, null, claim).pipe(
+              Effect.catchTag("SmokeFailure", () => Effect.void),
+              Effect.catch((cause) =>
+                record(`turn.${agent}`, false, null, { error: describe(cause) }),
+              ),
+            );
+        if (options.steps.has("device")) yield* device(client, claim);
       }),
+    );
+  });
+
+  /** Fetches a file on the box through a signed media URL, resolved the way clients resolve it. */
+  const fetchMedia = Effect.fn("fetchMedia")(function* (
+    client: T3Client,
+    threadId: ThreadId,
+    path: string,
+  ) {
+    const access = created.child!;
+    const asset = yield* bounded(
+      client["assets.createUrl"]({ resource: { _tag: "media-file", threadId, path } }),
+      "assets.createUrl",
+    );
+    const base = new URL(access.httpBaseUrl);
+    const response = yield* bounded(
+      HttpClient.get(new URL(asset.relativeUrl.replace(/^\//, ""), base)),
+      "media fetch",
+    );
+    const bytes = new Uint8Array(yield* bounded(response.arrayBuffer, "media body"));
+    // Clients resolve the URL against the child's base; a root-relative URL escapes a gateway prefix.
+    const asClientsResolve = new URL(asset.relativeUrl, base).pathname.startsWith(base.pathname);
+    return { status: response.status, bytes, asClientsResolve };
+  });
+
+  /**
+   * Drives an iPhone simulator on a Namespace Mac the way an agent in a chat would: one turn per
+   * capability in a single thread, each timed and checked against what it left on the box.
+   */
+  const device = Effect.fn("device")(function* (
+    client: T3Client,
+    claim: (threadId: ThreadId) => Effect.Effect<void>,
+  ) {
+    const agent = options.deviceAgent;
+    const run = (yield* uuid).replaceAll("-", "").slice(0, 12);
+    const dir = `/tmp/t3-smoke-device-${run}`;
+    const bundleId = `dev.t3.smoke.s${run}`;
+    const expectedLldb = `SMOKE_LLDB_${[...run].toReversed().join("")}`;
+    let thread: ChildThread | null = null;
+    const step = (name: string, prompt: string) =>
+      sendTurn(client, agent, `device.${name}`, thread, prompt, {
+        cheap: false,
+        timeout: DEVICE_TURN_TIMEOUT,
+        ...(thread === null ? { onDispatched: claim } : {}),
+      }).pipe(
+        Effect.tap((turn) =>
+          Effect.sync(() => {
+            thread = turn.thread;
+          }),
+        ),
+      );
+    const fileCheck = (
+      name: string,
+      turn: { readonly thread: ChildThread },
+      path: string,
+      isValid: (bytes: Uint8Array) => boolean,
+    ) =>
+      fetchMedia(client, turn.thread.threadId, path).pipe(
+        Effect.flatMap((file) =>
+          record(
+            `device.${name}.file`,
+            file.status === 200 && file.bytes.length > 0 && isValid(file.bytes),
+            file.bytes.length,
+            {
+              path,
+              status: file.status,
+              head: Array.from(file.bytes.slice(0, 12), (byte) =>
+                byte.toString(16).padStart(2, "0"),
+              ).join(""),
+            },
+          ).pipe(
+            Effect.andThen(
+              record(
+                `device.${name}.clientUrl`,
+                file.asClientsResolve,
+                file.asClientsResolve ? "inside child" : "escapes gateway",
+              ),
+            ),
+          ),
+        ),
+        Effect.catch((cause) =>
+          record(`device.${name}.file`, false, null, { path, error: describe(cause) }),
+        ),
+      );
+
+    const boot = yield* step(
+      "boot",
+      [
+        `This chat smoke-tests iOS simulator control on this Mac. Use the t3-code MCP device tools and the agent-device command they return; keep every file you create under ${dir}. Run every command in the foreground and wait for it to finish: no background tasks or subagents.`,
+        `Now call device_open for an iPhone simulator (platform ios). Keep the agentDevice command and targetArgs it returns for every agent-device call in later messages.`,
+        `Reply with one line: SMOKE_DEVICE=<the simulator udid>`,
+      ].join("\n\n"),
+    );
+    const udid = readMarker(boot.reply, "DEVICE");
+    const listed = yield* bounded(client["device.list"]({ inspectOnly: true }), "device.list").pipe(
+      Effect.map((state) => state.devices.find((candidate) => candidate.id === udid) ?? null),
+      Effect.catch((cause) => Effect.succeed(describe(cause))),
+    );
+    yield* record(
+      "device.boot.booted",
+      typeof listed === "object" && listed !== null && listed.booted,
+      udid,
+      { listed },
+    );
+
+    const app = yield* step(
+      "app",
+      [
+        `Write a minimal single-file iPhone app under ${dir}/app with bundle identifier ${bundleId}. It shows the text "T3 smoke ${run}" and runs a repeating one-second Timer that calls a function tick(). Inside tick(), on its own line, assign: let marker = "SMOKE_LLDB_" + String("${run}".reversed())`,
+        `Build it for the iOS simulator with debug info and no optimization (-g -Onone), keeping its .dSYM next to the .app so LLDB can find it later. Install it on the booted simulator with agent-device and open ${bundleId} with agent-device so it is running in the foreground.`,
+        `Reply with one line: SMOKE_APP=<the bundle identifier now running>`,
+      ].join("\n\n"),
+    );
+    yield* record(
+      "device.app.markers",
+      readMarker(app.reply, "APP") === bundleId,
+      readMarker(app.reply, "APP"),
+      {
+        expected: bundleId,
+      },
+    );
+
+    const shot = yield* step(
+      "screenshot",
+      `Take a screenshot of the simulator with agent-device and save it as ${dir}/screenshot.png. Reply with one line: SMOKE_SCREENSHOT=${dir}/screenshot.png`,
+    );
+    yield* fileCheck(
+      "screenshot",
+      shot,
+      `${dir}/screenshot.png`,
+      (bytes) => bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47,
+    );
+
+    const video = yield* step(
+      "record",
+      `Record about three seconds of the simulator screen with agent-device record (start, wait, stop) and save the video as ${dir}/recording.mp4, moving it there if agent-device writes it elsewhere. Reply with one line: SMOKE_VIDEO=${dir}/recording.mp4`,
+    );
+    yield* fileCheck(
+      "record",
+      video,
+      `${dir}/recording.mp4`,
+      (bytes) => new TextDecoder().decode(bytes.slice(4, 8)) === "ftyp",
+    );
+
+    const debug = yield* step(
+      "lldb",
+      [
+        `Attach LLDB to the running ${bundleId} app process. Set a breakpoint on the line in tick() that assigns marker, continue until the process stops there, step over that line, print marker, then detach so the app keeps running.`,
+        `Run LLDB non-interactively (for example lldb --batch with -o commands) and save its complete output to ${dir}/lldb.txt.`,
+        `Reply with one line: SMOKE_LLDB=<the value LLDB printed for marker> SMOKE_LLDB_AT=<file:line of the breakpoint>`,
+      ].join("\n\n"),
+    );
+    yield* record(
+      "device.lldb.marker",
+      readMarker(debug.reply, "LLDB") === expectedLldb,
+      readMarker(debug.reply, "LLDB"),
+      {
+        expected: expectedLldb,
+        at: readMarker(debug.reply, "LLDB_AT"),
+      },
+    );
+    const transcript = yield* bounded(
+      client["projects.readFile"]({ cwd: created.workspaceRoot!, relativePath: `${dir}/lldb.txt` }),
+      "projects.readFile",
+    ).pipe(Effect.catch((cause) => Effect.succeed(describe(cause))));
+    const text = typeof transcript === "string" ? "" : transcript.contents;
+    yield* record(
+      "device.lldb.transcript",
+      /stop reason = breakpoint/.test(text) && text.includes(expectedLldb),
+      typeof transcript === "string" ? null : transcript.byteLength,
+      typeof transcript === "string"
+        ? { error: transcript }
+        : { stoppedAtBreakpoint: /stop reason = breakpoint/.test(text), tail: text.slice(-800) },
     );
   });
 
@@ -863,9 +1151,18 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         Effect.catch((cause) => record("harness", false, null, describe(cause))),
         Effect.ensuring(cleanup),
       );
-    });
+    }).pipe(
+      Effect.catch((cause) => record("manager.connect", false, null, { error: describe(cause) })),
+    );
   }
 
+  const managerPhases =
+    options.managerLog && created.requestId
+      ? yield* fs.readFileString(options.managerLog).pipe(
+          Effect.map((log) => readManagerPhases(log, created.requestId!)),
+          Effect.catch((cause) => Effect.succeed({ error: describe(cause) })),
+        )
+      : null;
   const ok = checks.length > 0 && checks.every((check) => check.pass);
   const report = yield* encodeReport({
     harness: "smoke-cloud-chat",
@@ -885,6 +1182,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           environmentId: created.box.environmentId,
         }
       : null,
+    managerPhases,
     ok,
     checks,
   });
@@ -925,7 +1223,16 @@ const command = Command.make(
     provider: Flag.Literals("provider", ["e2b", "namespace"]).pipe(Flag.withDefault("e2b")),
     agents: Flag.String("agents").pipe(Flag.withDefault("codex,claudeAgent,cursor")),
     repo: Flag.String("repo").pipe(Flag.withDefault("andrewcai8/t3code")),
-    steps: Flag.String("steps").pipe(Flag.withDefault(STEPS.join(","))),
+    steps: Flag.String("steps").pipe(
+      Flag.withDefault(STEPS.filter((step) => step !== "device").join(",")),
+    ),
+    deviceAgent: Flag.Literals("device-agent", AGENTS).pipe(Flag.withDefault("claudeAgent")),
+    managerLog: Flag.String("manager-log").pipe(
+      Flag.withDescription(
+        "The manager's log, to copy this run's provisioning phases into the report.",
+      ),
+      Flag.optional,
+    ),
     report: Flag.String("report").pipe(Flag.withDescription("Where to write the JSON report.")),
   },
   (flags) =>
@@ -941,6 +1248,10 @@ const command = Command.make(
         return yield* new SmokeFailure({
           message: "--steps: resume continues a thread from turns",
         });
+      if (steps.has("device") && flags.provider !== "namespace")
+        return yield* new SmokeFailure({
+          message: "--steps: device needs a Namespace Mac; pass --provider namespace",
+        });
       yield* smoke({
         origin: new URL(flags.origin).origin,
         pairingTokenFile: path.resolve(flags.pairingTokenFile),
@@ -948,6 +1259,11 @@ const command = Command.make(
         agents,
         repo: flags.repo,
         steps,
+        deviceAgent: flags.deviceAgent,
+        managerLog: Option.match(flags.managerLog, {
+          onNone: () => null,
+          onSome: (file) => path.resolve(file),
+        }),
         report: path.resolve(flags.report),
       });
     }),
