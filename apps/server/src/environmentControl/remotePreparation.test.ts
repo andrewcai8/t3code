@@ -586,7 +586,8 @@ describe("remote preparation subprocess", () => {
       });
       pids.add(ready.serverPid);
     } finally {
-      process.env.TMPDIR = previousTmpdir;
+      if (previousTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmpdir;
     }
     expect(await NodeFSP.readFile(NodePath.join(input.root, "artifact/addon-built"), "utf8")).toBe(
       "yes",
