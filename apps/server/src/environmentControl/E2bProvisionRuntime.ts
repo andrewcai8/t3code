@@ -83,6 +83,8 @@ export function makeProvisionResolution(config: {
   };
 }
 
+const STDIN_CHUNK = 4 * 1024 * 1024;
+
 function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
   return {
     executePython: async ({ script, stdin }) => {
@@ -98,8 +100,10 @@ function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
         timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
       });
       try {
-        for (let offset = 0; offset < stdin.length; offset += 256 * 1024)
-          await command.sendStdin(stdin.slice(offset, offset + 256 * 1024));
+        // Each chunk is a round trip: a 2.5 MB preparation spec took about 2.5 s
+        // in 256 KiB chunks and under 1 s in one.
+        for (let offset = 0; offset < stdin.length; offset += STDIN_CHUNK)
+          await command.sendStdin(stdin.slice(offset, offset + STDIN_CHUNK));
         await command.closeStdin();
         return await e2bPythonResult(command.wait());
       } finally {
