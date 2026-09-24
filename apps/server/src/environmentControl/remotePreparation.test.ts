@@ -514,10 +514,6 @@ describe("remote preparation subprocess", () => {
     expect(remotePreparationScript).toContain("'protocol.version=2'");
     expect(remotePreparationScript).toContain("'--depth=1'");
     expect(remotePreparationScript).toContain("'GIT_LFS_SKIP_SMUDGE': '1'");
-    expect(remotePreparationScript).toContain("if not (stage / '.git').is_dir():");
-    expect(remotePreparationScript).toContain(
-      "run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)",
-    );
   });
 
   it("starts the guest so it publishes the cloned workspace as a project", () => {
@@ -678,6 +674,18 @@ describe("remote preparation subprocess", () => {
     ).toBe("export default 1;\n");
   });
 
+  it("does not start T3 when the repository revision cannot be fetched", async () => {
+    const input = await fixture();
+    await expect(
+      prepareRemoteHost(localPort, {
+        ...input,
+        repository: { url: input.repository!.url, revision: "d".repeat(40) },
+      }),
+    ).rejects.toThrow(/Preparation command failed/);
+    await expect(NodeFSP.access(NodePath.join(input.root, "started"))).rejects.toThrow();
+    await expect(NodeFSP.access(NodePath.join(input.root, "workspace"))).rejects.toThrow();
+  });
+
   it("resumes a leftover workspace.partial clone instead of deleting it", async () => {
     const input = await fixture();
     const first = await prepareRemoteHost(localPort, input);
@@ -721,6 +729,21 @@ describe("remote preparation subprocess", () => {
     await expect(
       NodeFSP.access(NodePath.join(input.root, "home/.local/bin/codex")),
     ).resolves.toBeUndefined();
+  });
+
+  it("finishes installing provider CLIs before the repository's setup calls them", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, {
+      ...input,
+      providerInstall:
+        'sleep 3 && printf "#!/bin/sh\\necho installed-cli\\n" > "$HOME/.local/bin/fixture-cli" && ' +
+        'chmod 700 "$HOME/.local/bin/fixture-cli"',
+      prepareCommands: ['"$HOME/.local/bin/fixture-cli" > setup-saw.txt'],
+    });
+    pids.add(ready.serverPid);
+    expect(await NodeFSP.readFile(NodePath.join(ready.projectDir, "setup-saw.txt"), "utf8")).toBe(
+      "installed-cli\n",
+    );
   });
 
   it("does not start T3 when guest provider install fails", async () => {

@@ -138,10 +138,12 @@ export async function prepareRemoteHost(
 
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
-import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, time, urllib.request, uuid
+import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
 
 INTERPRETER_START = time.monotonic()
 STARTUP = []
+# Children preparation started without waiting on; stopped if it fails first.
+BACKGROUND = []
 os.umask(0o077)
 
 def atomic(path, value):
@@ -246,6 +248,25 @@ def prepare(spec):
                 raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
             return result.stdout.strip()
 
+        # Start a command preparation needs only later, then finish() it there.
+        def start(args, cwd, env):
+            log = tempfile.TemporaryFile(mode='w+')
+            child = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, text=True, pass_fds=(lock.fileno(),), start_new_session=True)
+            BACKGROUND.append(child)
+            return child, log, args
+
+        def finish(started, timeout):
+            child, log, args = started
+            try:
+                code = child.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
+            BACKGROUND.remove(child)
+            if code != 0:
+                log.seek(0)
+                detail = log.read().strip()
+                raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
+
         def ensure_native_toolchain(env):
             missing = [name for name in ['g++', 'make', 'python3'] if shutil.which(name, path=env.get('PATH')) is None]
             if not missing:
@@ -330,6 +351,70 @@ def prepare(spec):
             # t3 serve forces this off. Cloud guests must publish the cloned workspace.
             'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '1',
         })
+        project = root / 'workspace'
+        def install_files(scope):
+            for index, file in enumerate(spec['files']):
+                if file['scope'] != scope:
+                    continue
+                if index in journal['installedFiles']:
+                    continue
+                data = base64.b64decode(file['contentsBase64'], validate=True)
+                if hashlib.sha256(data).hexdigest() != file['sha256']:
+                    raise RuntimeError('Transferred file digest mismatch')
+                if file['scope'] not in ['home', 'workspace']:
+                    raise RuntimeError('Invalid transferred file scope')
+                target = contained(home if file['scope'] == 'home' else project, file['destination'])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    if digest(target) != file['sha256']:
+                        raise RuntimeError('Refusing to overwrite an existing workspace or credential file')
+                else:
+                    temp = target.with_name(target.name + '.preparing')
+                    with open(temp, 'wb') as output:
+                        output.write(data)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    os.replace(temp, target)
+                target.chmod(0o600)
+                journal['installedFiles'].append(index)
+                atomic(journal_path, json.dumps(journal))
+        with step('homeFiles'):
+            install_files('home')
+        # Agent CLIs install into the isolated home, independent of the runtime
+        # and the checkout, so they download while those do. Setup commands may
+        # call the CLIs, so preparation waits for this before running them.
+        install = spec.get('providerInstall')
+        installing = None
+        if install:
+            if not isinstance(install, str) or not install.strip() or '\0' in install:
+                raise RuntimeError('Invalid provider install command')
+            installing = start(['sh', '-c', install], home, env)
+        git_env = dict(env)
+        if repository is not None and repository.get('accessToken'):
+            token = repository['accessToken']
+            git_env.update({
+                'GIT_CONFIG_COUNT': '1',
+                'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode(),
+            })
+        checkout = root / 'workspace.partial'
+        fetching = None
+        if repository is not None and not project.exists():
+            # Keep a partial clone across retries. Wiping it restarts a
+            # large fetch from zero after every timeout.
+            if not (checkout / '.git').is_dir():
+                if checkout.exists():
+                    shutil.rmtree(checkout)
+                checkout.mkdir()
+                run(['git', 'init', '-q', str(checkout)], root, env)
+                run(['git', 'remote', 'add', 'origin', repository['url']], checkout, git_env)
+            elif run(['git', 'remote', 'get-url', 'origin'], checkout, env) != repository['url']:
+                raise RuntimeError('Repository identity conflict')
+            # Shallow, with blobs: checkout needs every blob of this one
+            # commit, and fetching them in the pack is about twice as fast
+            # as a blobless fetch that backfills them on checkout. It
+            # downloads while the runtime installs.
+            fetching = start(['git', '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', repository['revision']], checkout, git_env)
         # The identity build keeps its pre-upgrade layout so every existing
         # root verifies unchanged; any other build lives beside it by digest.
         legacy = runtime['sha256'] == spec['artifact']['sha256']
@@ -438,69 +523,18 @@ def prepare(spec):
             raise RuntimeError('Environment identity conflict')
         if not environment_path.exists():
             atomic(environment_path, journal['environmentId'] + '\n')
-        project = root / 'workspace'
-        git_env = dict(env)
-        if repository is not None and repository.get('accessToken'):
-            token = repository['accessToken']
-            git_env.update({
-                'GIT_CONFIG_COUNT': '1',
-                'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
-                'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode(),
-            })
-        def install_files(scope):
-            for index, file in enumerate(spec['files']):
-                if file['scope'] != scope:
-                    continue
-                if index in journal['installedFiles']:
-                    continue
-                data = base64.b64decode(file['contentsBase64'], validate=True)
-                if hashlib.sha256(data).hexdigest() != file['sha256']:
-                    raise RuntimeError('Transferred file digest mismatch')
-                if file['scope'] not in ['home', 'workspace']:
-                    raise RuntimeError('Invalid transferred file scope')
-                target = contained(home if file['scope'] == 'home' else project, file['destination'])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    if digest(target) != file['sha256']:
-                        raise RuntimeError('Refusing to overwrite an existing workspace or credential file')
-                else:
-                    temp = target.with_name(target.name + '.preparing')
-                    with open(temp, 'wb') as output:
-                        output.write(data)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    os.replace(temp, target)
-                target.chmod(0o600)
-                journal['installedFiles'].append(index)
-                atomic(journal_path, json.dumps(journal))
-        with step('homeFiles'):
-            install_files('home')
         if not project.exists():
             with step('repositoryClone'):
-                stage = root / 'workspace.partial'
                 if repository is None:
-                    if stage.exists():
-                        shutil.rmtree(stage)
-                    stage.mkdir()
-                    run(['git', 'init', '-q', str(stage)], root, env)
-                    run(['git', '-c', 'user.name=T3', '-c', 'user.email=agent@t3.local', 'commit', '--allow-empty', '-qm', 'Initialize workspace'], stage, git_env)
+                    if checkout.exists():
+                        shutil.rmtree(checkout)
+                    checkout.mkdir()
+                    run(['git', 'init', '-q', str(checkout)], root, env)
+                    run(['git', '-c', 'user.name=T3', '-c', 'user.email=agent@t3.local', 'commit', '--allow-empty', '-qm', 'Initialize workspace'], checkout, git_env)
                 else:
-                    # Keep a partial clone across retries. Wiping it restarts a
-                    # large fetch from zero after every timeout.
-                    if not (stage / '.git').is_dir():
-                        if stage.exists():
-                            shutil.rmtree(stage)
-                        stage.mkdir()
-                        run(['git', 'init', '-q', str(stage)], root, env)
-                        run(['git', 'remote', 'add', 'origin', repository['url']], stage, git_env)
-                    elif run(['git', 'remote', 'get-url', 'origin'], stage, env) != repository['url']:
-                        raise RuntimeError('Repository identity conflict')
-                    # Shallow, with blobs: checkout needs every blob of this one
-                    # commit, and fetching them in the pack is about twice as fast
-                    # as a blobless fetch that backfills them on checkout.
-                    run(['git', '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', repository['revision']], stage, git_env, timeout=600)
-                    run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)
-                os.rename(stage, project)
+                    finish(fetching, 600)
+                    run(['git', 'checkout', '--detach', repository['revision']], checkout, git_env, timeout=600)
+                os.rename(checkout, project)
         if repository is not None:
             with step('repositoryVerify'):
                 if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
@@ -542,12 +576,9 @@ def prepare(spec):
                             raise RuntimeError('Refusing to overwrite an existing artifact')
                         continue
                     fetch_artifact(url, target, entry['sha256'])
-        install = spec.get('providerInstall')
-        if install:
-            if not isinstance(install, str) or not install.strip() or '\0' in install:
-                raise RuntimeError('Invalid provider install command')
+        if installing is not None:
             with step('providerInstall'):
-                run(['sh', '-c', install], home, env, timeout=900)
+                finish(installing, 900)
         prepare = spec.get('prepareCommands') or []
         if prepare:
             if not isinstance(prepare, list):
@@ -687,6 +718,9 @@ try:
     STARTUP.append({'phase': 'stdinRead', 'durationMs': round((time.monotonic() - reading) * 1000), 'bytes': len(payload)})
     print(json.dumps(prepare(json.loads(payload))))
 except Exception as error:
+    for child in BACKGROUND:
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, 9)
     sys.stderr.write('Remote preparation failed: ' + str(error) + '\n')
     sys.exit(1)
 `;
