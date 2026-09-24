@@ -665,6 +665,21 @@ describe("remote preparation subprocess", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("finishes installing provider CLIs before the repository's setup calls them", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, {
+      ...input,
+      providerInstall:
+        'sleep 0.5 && printf "#!/bin/sh\\necho installed-cli\\n" > "$HOME/.local/bin/fixture-cli" && ' +
+        'chmod 700 "$HOME/.local/bin/fixture-cli"',
+      prepareCommands: ['"$HOME/.local/bin/fixture-cli" > setup-saw.txt'],
+    });
+    pids.add(ready.serverPid);
+    expect(await NodeFSP.readFile(NodePath.join(ready.projectDir, "setup-saw.txt"), "utf8")).toBe(
+      "installed-cli\n",
+    );
+  });
+
   it("does not start T3 when guest provider install fails", async () => {
     const input = await fixture();
     await expect(

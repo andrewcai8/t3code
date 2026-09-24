@@ -138,10 +138,12 @@ export async function prepareRemoteHost(
 
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
-import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, time, urllib.request, uuid
+import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
 
 INTERPRETER_START = time.monotonic()
 STARTUP = []
+# Children preparation started without waiting on; stopped if it fails first.
+BACKGROUND = []
 os.umask(0o077)
 
 def atomic(path, value):
@@ -321,6 +323,46 @@ def prepare(spec):
             # t3 serve forces this off. Cloud guests must publish the cloned workspace.
             'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '1',
         })
+        project = root / 'workspace'
+        def install_files(scope):
+            for index, file in enumerate(spec['files']):
+                if file['scope'] != scope:
+                    continue
+                if index in journal['installedFiles']:
+                    continue
+                data = base64.b64decode(file['contentsBase64'], validate=True)
+                if hashlib.sha256(data).hexdigest() != file['sha256']:
+                    raise RuntimeError('Transferred file digest mismatch')
+                if file['scope'] not in ['home', 'workspace']:
+                    raise RuntimeError('Invalid transferred file scope')
+                target = contained(home if file['scope'] == 'home' else project, file['destination'])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    if digest(target) != file['sha256']:
+                        raise RuntimeError('Refusing to overwrite an existing workspace or credential file')
+                else:
+                    temp = target.with_name(target.name + '.preparing')
+                    with open(temp, 'wb') as output:
+                        output.write(data)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    os.replace(temp, target)
+                target.chmod(0o600)
+                journal['installedFiles'].append(index)
+                atomic(journal_path, json.dumps(journal))
+        with step('homeFiles'):
+            install_files('home')
+        # Agent CLIs install into the isolated home, independent of the runtime
+        # and the checkout, so they download while those do. Setup commands may
+        # call the CLIs, so preparation waits for this before running them.
+        install = spec.get('providerInstall')
+        installing = None
+        if install:
+            if not isinstance(install, str) or not install.strip() or '\0' in install:
+                raise RuntimeError('Invalid provider install command')
+            install_log = tempfile.TemporaryFile(mode='w+')
+            installing = subprocess.Popen(['sh', '-c', install], cwd=home, env=env, stdin=subprocess.DEVNULL, stdout=install_log, stderr=subprocess.STDOUT, text=True, pass_fds=(lock.fileno(),), start_new_session=True)
+            BACKGROUND.append(installing)
         # The identity build keeps its pre-upgrade layout so every existing
         # root verifies unchanged; any other build lives beside it by digest.
         legacy = runtime['sha256'] == spec['artifact']['sha256']
@@ -425,7 +467,6 @@ def prepare(spec):
             raise RuntimeError('Environment identity conflict')
         if not environment_path.exists():
             atomic(environment_path, journal['environmentId'] + '\n')
-        project = root / 'workspace'
         git_env = dict(env)
         if repository is not None and repository.get('accessToken'):
             token = repository['accessToken']
@@ -434,34 +475,6 @@ def prepare(spec):
                 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
                 'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode(),
             })
-        def install_files(scope):
-            for index, file in enumerate(spec['files']):
-                if file['scope'] != scope:
-                    continue
-                if index in journal['installedFiles']:
-                    continue
-                data = base64.b64decode(file['contentsBase64'], validate=True)
-                if hashlib.sha256(data).hexdigest() != file['sha256']:
-                    raise RuntimeError('Transferred file digest mismatch')
-                if file['scope'] not in ['home', 'workspace']:
-                    raise RuntimeError('Invalid transferred file scope')
-                target = contained(home if file['scope'] == 'home' else project, file['destination'])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    if digest(target) != file['sha256']:
-                        raise RuntimeError('Refusing to overwrite an existing workspace or credential file')
-                else:
-                    temp = target.with_name(target.name + '.preparing')
-                    with open(temp, 'wb') as output:
-                        output.write(data)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    os.replace(temp, target)
-                target.chmod(0o600)
-                journal['installedFiles'].append(index)
-                atomic(journal_path, json.dumps(journal))
-        with step('homeFiles'):
-            install_files('home')
         if not project.exists():
             with step('repositoryClone'):
                 stage = root / 'workspace.partial'
@@ -529,12 +542,17 @@ def prepare(spec):
                             raise RuntimeError('Refusing to overwrite an existing artifact')
                         continue
                     fetch_artifact(url, target, entry['sha256'])
-        install = spec.get('providerInstall')
-        if install:
-            if not isinstance(install, str) or not install.strip() or '\0' in install:
-                raise RuntimeError('Invalid provider install command')
+        if installing is not None:
             with step('providerInstall'):
-                run(['sh', '-c', install], home, env, timeout=900)
+                try:
+                    code = installing.wait(timeout=900)
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError('Preparation command timed out: sh -c ' + install[:200])
+            BACKGROUND.remove(installing)
+            if code != 0:
+                install_log.seek(0)
+                detail = install_log.read().strip()
+                raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
         prepare = spec.get('prepareCommands') or []
         if prepare:
             if not isinstance(prepare, list):
@@ -674,6 +692,9 @@ try:
     STARTUP.append({'phase': 'stdinRead', 'durationMs': round((time.monotonic() - reading) * 1000), 'bytes': len(payload)})
     print(json.dumps(prepare(json.loads(payload))))
 except Exception as error:
+    for child in BACKGROUND:
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, 9)
     sys.stderr.write('Remote preparation failed: ' + str(error) + '\n')
     sys.exit(1)
 `;
