@@ -15,7 +15,12 @@
     "scripts": {
       // Knip loads its preprocessor through a CLI option, not a source import.
       // Cloud CLIs are invoked from docs (`node scripts/cloud/...`), not imports.
-      "entry": ["knip-schemas.ts", "mobile-native-client.ts", "cloud/*.mjs"],
+      "entry": [
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "cloud/*.mjs",
+        "cloud/smoke-cloud-chat.ts",
+      ],
     },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.

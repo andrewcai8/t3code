@@ -1,0 +1,961 @@
+/**
+ * End-to-end smoke for cloud chats against a live T3 manager: provision one box, run one turn
+ * per agent in it, pause and resume it, then delete it. Every check lands in a JSON report and
+ * the process exits nonzero when any check fails.
+ *
+ *   node scripts/cloud/smoke-cloud-chat.ts --origin https://host --pairing-token-file ./token \
+ *     --provider e2b --agents codex,claudeAgent,cursor --report ./run.json
+ *
+ * The pairing token is exchanged once; the bearer is cached next to it (0600) until it expires.
+ * Tokens and pairing URLs never reach stdout or the report.
+ */
+import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import {
+  AuthAccessTokenResult,
+  AuthAccessTokenType,
+  AuthEnvironmentBootstrapTokenType,
+  AuthTokenExchangeGrantType,
+  CommandId,
+  MessageId,
+  type OrchestrationThreadStreamItem,
+  type ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProvisionRequestId,
+  type ProvisionedEnvironment,
+  type ServerProvider,
+  ThreadId,
+  WsRpcGroup,
+} from "@t3tools/contracts";
+import { isLoopbackHost } from "@t3tools/shared/preview";
+import {
+  PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX,
+  resolveRemotePairingTarget,
+} from "@t3tools/shared/remote";
+import * as Clock from "effect/Clock";
+import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import { Command, Flag } from "effect/unstable/cli";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import * as Socket from "effect/unstable/socket/Socket";
+
+/** Where each driver loads user skills from, relative to the box's HOME. */
+const SKILL_ROOT = {
+  codex: ".codex/skills",
+  claudeAgent: ".claude/skills",
+  cursor: ".cursor/skills",
+};
+type Agent = keyof typeof SKILL_ROOT;
+const AGENTS = Object.keys(SKILL_ROOT) as ReadonlyArray<Agent>;
+/** Cheapest model per driver; falls back to the driver's default, then its first model. */
+const CHEAP_MODEL: Record<Agent, RegExp> = {
+  codex: /luna|mini/i,
+  claudeAgent: /haiku/i,
+  cursor: /^(auto|composer|cheetah)/i,
+};
+const STEPS = ["provision", "turns", "resume", "delete"] as const;
+type Step = (typeof STEPS)[number];
+
+const PROVISION_TIMEOUT = "20 minutes";
+const PROJECT_TIMEOUT = "2 minutes";
+const PROVIDER_TIMEOUT = "3 minutes";
+const TURN_TIMEOUT = "10 minutes";
+const RECONNECT_TIMEOUT = "3 minutes";
+const PAUSED_TIMEOUT = "2 minutes";
+const CALL_TIMEOUT = "2 minutes";
+const DISPOSE_TIMEOUT = "3 minutes";
+
+const Check = Schema.Struct({
+  name: Schema.String,
+  pass: Schema.Boolean,
+  value: Schema.NullOr(Schema.Union([Schema.Finite, Schema.String])),
+  evidence: Schema.Unknown,
+});
+type Check = typeof Check.Type;
+const encodeReport = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      harness: Schema.Literal("smoke-cloud-chat"),
+      startedAt: Schema.String,
+      finishedAt: Schema.String,
+      origin: Schema.String,
+      host: Schema.Unknown,
+      provider: Schema.String,
+      agents: Schema.Array(Schema.String),
+      repo: Schema.String,
+      steps: Schema.Array(Schema.String),
+      box: Schema.Unknown,
+      ok: Schema.Boolean,
+      checks: Schema.Array(Check),
+    }),
+    { space: 2 },
+  ),
+);
+const BearerCache = Schema.fromJsonString(
+  Schema.Struct({ origin: Schema.String, accessToken: Schema.String, expiresAt: Schema.Finite }),
+);
+const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
+const decodeBearerCache = Schema.decodeUnknownEffect(BearerCache);
+const encodeBearerCache = Schema.encodeEffect(BearerCache);
+
+class SmokeFailure extends Schema.TaggedError<SmokeFailure>()("SmokeFailure", {
+  message: Schema.String,
+}) {}
+
+/** Bounds a call that a stuck cloud API could otherwise hold forever. */
+const bounded = <A, E, R>(self: Effect.Effect<A, E, R>, what: string) =>
+  self.pipe(
+    Effect.timeoutOrElse({
+      duration: CALL_TIMEOUT,
+      orElse: () =>
+        Effect.fail(new SmokeFailure({ message: `${what}: no answer in ${CALL_TIMEOUT}` })),
+    }),
+  );
+
+const hasMessage = Schema.is(Schema.Struct({ message: Schema.String }));
+const describe = (cause: unknown): string => (hasMessage(cause) ? cause.message : String(cause));
+
+const seconds = (from: number, to: number) => Math.round((to - from) / 100) / 10;
+
+const wsUrl = (httpBaseUrl: string) => {
+  const url = new URL("ws", httpBaseUrl.endsWith("/") ? httpBaseUrl : `${httpBaseUrl}/`);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+};
+
+const makeClient = RpcClient.make(WsRpcGroup);
+type T3Client = typeof makeClient extends Effect.Effect<infer C, infer _E, infer _R> ? C : never;
+
+/** Runs `use` with an RPC client whose socket closes when `use` finishes. */
+const withRpc = <A, E, R>(
+  httpBaseUrl: string,
+  bearer: string,
+  use: (client: T3Client) => Effect.Effect<A, E, R>,
+) =>
+  makeClient.pipe(
+    Effect.flatMap(use),
+    Effect.provide(
+      RpcClient.layerProtocolSocket().pipe(
+        Layer.provide(
+          Socket.layerWebSocket(wsUrl(httpBaseUrl)).pipe(
+            Layer.provide(
+              Layer.succeed(
+                Socket.WebSocketConstructor,
+                (url, protocols) =>
+                  new NodeSocket.NodeWS.WebSocket(url, protocols as string[] | undefined, {
+                    headers: { authorization: `Bearer ${bearer}` },
+                  }) as unknown as globalThis.WebSocket,
+              ),
+            ),
+          ),
+        ),
+        Layer.provide(RpcSerialization.layerJson),
+      ),
+    ),
+    Effect.scoped,
+  );
+
+const exchangePairingToken = Effect.fn("exchangePairingToken")(function* (
+  httpBaseUrl: string,
+  credential: string,
+) {
+  const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const request = http.execute(
+    HttpClientRequest.post(new URL("oauth/token", httpBaseUrl)).pipe(
+      HttpClientRequest.bodyUrlParams({
+        grant_type: AuthTokenExchangeGrantType,
+        subject_token: credential,
+        subject_token_type: AuthEnvironmentBootstrapTokenType,
+        requested_token_type: AuthAccessTokenType,
+        client_label: "cloud smoke",
+        client_device_type: "bot",
+      }),
+    ),
+  );
+  return yield* bounded(
+    request.pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.flatMap(decodeAccessToken),
+    ),
+    "token exchange",
+  );
+});
+
+/** A driver's agent answers the fixed snippet; these markers prove it ran on the box. */
+interface Markers {
+  readonly head: string | null;
+  readonly branch: string | null;
+  readonly skill: string | null;
+  readonly nonce: string | null;
+}
+const readMarkers = (reply: string): Markers => {
+  const read = (key: string) => reply.match(new RegExp(`SMOKE_${key}=([^\\s\`'"]+)`))?.[1] ?? null;
+  return { head: read("HEAD"), branch: read("BRANCH"), skill: read("SKILL"), nonce: read("NONCE") };
+};
+
+/** What one turn's thread stream has shown so far, folded the way the projector folds it. */
+interface TurnProgress {
+  readonly assistant: ReadonlyMap<string, string>;
+  readonly firstOutputAt: number | null;
+  readonly started: boolean;
+  readonly completedAt: number | null;
+  readonly error: string | null;
+  /** Events at or below the snapshot's sequence are already folded into it. */
+  readonly sequence: number;
+  /** A session keeps its last error across turns; only a new one belongs to this turn. */
+  readonly priorError: string | null;
+}
+const initialProgress: TurnProgress = {
+  assistant: new Map(),
+  firstOutputAt: null,
+  started: false,
+  completedAt: null,
+  error: null,
+  sequence: -1,
+  priorError: null,
+};
+const advanceTurn = (
+  progress: TurnProgress,
+  item: OrchestrationThreadStreamItem,
+  sentMessageId: string,
+  now: number,
+): TurnProgress => {
+  // The subscription opens after dispatch, so the snapshot may already hold the turn's start.
+  if (item.kind === "snapshot") {
+    const thread = item.snapshot.thread;
+    const base = { ...progress, sequence: item.snapshot.snapshotSequence };
+    const sent = thread.messages.findIndex((message) => message.id === sentMessageId);
+    if (sent === -1) return { ...base, priorError: thread.session?.lastError ?? null };
+    const replies = thread.messages
+      .slice(sent + 1)
+      .filter((message) => message.role === "assistant");
+    const turn = thread.latestTurn;
+    const sentTurnId = thread.messages[sent]!.turnId;
+    const ours =
+      turn !== null &&
+      (sentTurnId !== null
+        ? turn.turnId === sentTurnId
+        : turn.requestedAt >= thread.messages[sent]!.createdAt);
+    const finished = ours && turn.state !== "running";
+    return {
+      ...base,
+      assistant: new Map(replies.map((message) => [message.id, message.text])),
+      firstOutputAt: replies.some((message) => message.text.trim()) ? now : null,
+      started: true,
+      completedAt: finished ? now : null,
+      error:
+        finished && turn.state === "error" ? (thread.session?.lastError ?? "turn error") : null,
+      priorError: ours ? null : (thread.session?.lastError ?? null),
+    };
+  }
+  if (item.kind !== "event" || item.event.sequence <= progress.sequence) return progress;
+  const event = item.event;
+  switch (event.type) {
+    case "thread.message-sent": {
+      if (event.payload.role !== "assistant") return progress;
+      const previous = progress.assistant.get(event.payload.messageId) ?? "";
+      const text = event.payload.streaming
+        ? previous + event.payload.text
+        : event.payload.text || previous;
+      const assistant = new Map(progress.assistant).set(event.payload.messageId, text);
+      return {
+        ...progress,
+        assistant,
+        firstOutputAt: progress.firstOutputAt ?? (text.trim() ? now : null),
+      };
+    }
+    case "thread.turn-start-requested":
+      return event.payload.messageId === sentMessageId ? { ...progress, started: true } : progress;
+    case "thread.session-set": {
+      const session = event.payload.session;
+      if (!progress.started) return progress;
+      const newError = session.lastError !== null && session.lastError !== progress.priorError;
+      if (session.status === "error" || newError)
+        return { ...progress, error: session.lastError ?? "session error", completedAt: now };
+      const settled = session.activeTurnId === null && session.status !== "starting";
+      return settled && session.status !== "running" && progress.firstOutputAt !== null
+        ? { ...progress, completedAt: progress.completedAt ?? now }
+        : progress;
+    }
+    case "thread.turn-diff-completed":
+      return progress.started
+        ? { ...progress, completedAt: progress.completedAt ?? now }
+        : progress;
+    default:
+      return progress;
+  }
+};
+
+interface Options {
+  readonly origin: string;
+  readonly pairingTokenFile: string;
+  readonly provider: "e2b" | "namespace";
+  readonly agents: ReadonlyArray<Agent>;
+  readonly repo: string;
+  readonly steps: ReadonlySet<Step>;
+  readonly report: string;
+}
+
+const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const crypto = yield* Crypto.Crypto;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const startedAt = DateTime.formatIso(yield* DateTime.now);
+  const runStart = yield* Clock.currentTimeMillis;
+  const checks: Array<Check> = [];
+  const record = (name: string, pass: boolean, value: Check["value"], evidence: unknown = null) =>
+    Effect.gen(function* () {
+      checks.push({ name, pass, value, evidence });
+      const at = seconds(runStart, yield* Clock.currentTimeMillis);
+      yield* Console.log(`[${at}s] ${pass ? "PASS" : "FAIL"} ${name} ${value ?? ""}`);
+    });
+  /** Records a failed check and stops the current step. */
+  const fail = (name: string, message: string, evidence: unknown = null) =>
+    record(name, false, null, { error: message, ...(evidence ? { detail: evidence } : {}) }).pipe(
+      Effect.andThen(Effect.fail(new SmokeFailure({ message: `${name}: ${message}` }))),
+    );
+  const uuid = crypto.randomUUIDv4;
+  const sha256 = (value: string) =>
+    crypto
+      .digest("SHA-256", new TextEncoder().encode(value))
+      .pipe(
+        Effect.map((bytes) =>
+          Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+        ),
+      );
+
+  const bearerFor = Effect.fn("bearerFor")(function* () {
+    const cachePath = `${options.pairingTokenFile}.bearer.json`;
+    const now = yield* Clock.currentTimeMillis;
+    const cached = yield* fs
+      .readFileString(cachePath)
+      .pipe(Effect.flatMap(decodeBearerCache), Effect.option);
+    if (
+      Option.isSome(cached) &&
+      cached.value.origin === options.origin &&
+      cached.value.expiresAt - now > 15 * 60_000
+    ) {
+      yield* record("auth.bearer", true, "cached", {
+        expiresInMinutes: Math.round((cached.value.expiresAt - now) / 60_000),
+      });
+      return cached.value.accessToken;
+    }
+    const credential = (yield* fs.readFileString(options.pairingTokenFile)).trim();
+    const token = yield* exchangePairingToken(options.origin, credential).pipe(
+      Effect.catch((cause) => fail("auth.bearer", `token exchange refused: ${describe(cause)}`)),
+    );
+    const expiresAt = now + token.expires_in * 1000;
+    yield* fs.writeFileString(
+      cachePath,
+      yield* encodeBearerCache({
+        origin: options.origin,
+        accessToken: token.access_token,
+        expiresAt,
+      }),
+      { mode: 0o600 },
+    );
+    yield* fs.chmod(cachePath, 0o600);
+    yield* record("auth.bearer", true, "exchanged", {
+      scope: token.scope,
+      expiresInMinutes: Math.round(token.expires_in / 60),
+    });
+    return token.access_token;
+  });
+
+  const host = yield* HttpClient.get(new URL(".well-known/t3/environment", options.origin)).pipe(
+    Effect.flatMap((response) => response.json),
+    Effect.catch((cause) => Effect.succeed({ unreachable: describe(cause) })),
+  );
+
+  interface ChildThread {
+    readonly agent: Agent;
+    readonly threadId: ThreadId;
+  }
+  /** What this run created, so cleanup finds it whichever step failed. */
+  const created: {
+    requestId: ProvisionRequestId | null;
+    box: ProvisionedEnvironment | null;
+    child: { readonly httpBaseUrl: string; readonly bearer: string } | null;
+    projectId: ProjectId | null;
+    readonly threads: Array<ChildThread>;
+  } = { requestId: null, box: null, child: null, projectId: null, threads: [] };
+
+  const expectedHead = Effect.fn("expectedHead")(function* () {
+    if (created.box?.sourceRevision) return created.box.sourceRevision;
+    const output = yield* spawner
+      .string(ChildProcess.make("git", ["ls-remote", `https://github.com/${options.repo}`, "HEAD"]))
+      .pipe(Effect.orElseSucceed(() => ""));
+    return output.split(/\s/)[0] || null;
+  });
+
+  const awaitProvider = Effect.fn("awaitProvider")(function* (client: T3Client, agent: Agent) {
+    let last: ServerProvider | undefined;
+    const found = yield* Effect.gen(function* () {
+      const config = yield* client["server.getConfig"]({});
+      last = config.providers.find((provider) => provider.driver === agent && provider.enabled);
+      return last && last.models.length > 0 && last.status !== "error" ? last : undefined;
+    }).pipe(
+      Effect.repeat({
+        until: (provider) => provider !== undefined,
+        schedule: Schedule.spaced("3 seconds"),
+      }),
+      Effect.timeoutOption(PROVIDER_TIMEOUT),
+    );
+    if (Option.isSome(found) && found.value) return found.value;
+    return yield* fail(`turn.${agent}.provider`, "no usable provider instance on the child", {
+      instanceId: last?.instanceId ?? null,
+      status: last?.status ?? null,
+      auth: last?.auth.status ?? null,
+      message: last?.message ?? null,
+      models: last?.models.length ?? 0,
+    });
+  });
+
+  /** Sends one marker turn, waits for it to finish, and records its checks under `label`. */
+  const runTurn = Effect.fn("runTurn")(function* (
+    client: T3Client,
+    agent: Agent,
+    label: string,
+    thread: ChildThread | null,
+    onDispatched: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void,
+  ) {
+    const provider = yield* awaitProvider(client, agent);
+    const model =
+      provider.models.find((candidate) => CHEAP_MODEL[agent].test(candidate.slug)) ??
+      provider.models.find((candidate) => candidate.isDefault) ??
+      provider.models[0]!;
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make(provider.instanceId),
+      model: model.slug,
+    };
+    // The agent cannot print the nonce without running the snippet: only its sha256 prefix counts.
+    const seed = (yield* uuid).replaceAll("-", "");
+    const expectedNonce = (yield* sha256(seed)).slice(0, 16);
+    const snippet = [
+      `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
+      `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
+      `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
+      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_NONCE=$n"`,
+    ].join("; ");
+    const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
+    const threadId = thread?.threadId ?? ThreadId.make(yield* uuid);
+    const messageId = MessageId.make(yield* uuid);
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const projectId = created.projectId!;
+    const sentAt = yield* Clock.currentTimeMillis;
+    const dispatch = client["orchestration.dispatchCommand"]({
+      type: "thread.turn.start",
+      commandId: CommandId.make(yield* uuid),
+      threadId,
+      message: { messageId, role: "user", text: prompt, attachments: [] },
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      ...(thread
+        ? {}
+        : {
+            bootstrap: {
+              createThread: {
+                projectId,
+                title: `smoke ${agent}`,
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: null,
+                createdAt,
+              },
+            },
+          }),
+      createdAt,
+    });
+    yield* bounded(dispatch, "dispatch").pipe(
+      Effect.catch((cause) => fail(`${label}.dispatch`, describe(cause))),
+    );
+    const turnThread = thread ?? { agent, threadId };
+    if (!thread) created.threads.push(turnThread);
+    yield* onDispatched(threadId);
+
+    let progress = initialProgress;
+    const watched = yield* client["orchestration.subscribeThread"]({ threadId }).pipe(
+      Stream.runForEachWhile((item) =>
+        Clock.currentTimeMillis.pipe(
+          Effect.map((now) => {
+            progress = advanceTurn(progress, item, messageId, now);
+            return progress.completedAt === null;
+          }),
+        ),
+      ),
+      Effect.timeoutOption(TURN_TIMEOUT),
+      Effect.map((finished) => (Option.isSome(finished) ? null : "turn did not finish in time")),
+      Effect.catch((cause) => Effect.succeed(describe(cause))),
+    );
+    const reply = [...progress.assistant.values()].join("\n");
+    const evidence = {
+      threadId,
+      instanceId: provider.instanceId,
+      model: model.slug,
+      models: provider.models.map((candidate) => candidate.slug),
+      replyTail: reply.slice(-600),
+    };
+    const error = progress.error ?? watched;
+    yield* record(
+      `${label}.firstOutput`,
+      progress.firstOutputAt !== null,
+      progress.firstOutputAt === null ? null : seconds(sentAt, progress.firstOutputAt),
+      progress.firstOutputAt === null
+        ? { ...evidence, error: error ?? "no assistant output" }
+        : evidence,
+    );
+    const completed = progress.completedAt !== null && progress.error === null;
+    yield* record(
+      `${label}.complete`,
+      completed,
+      completed ? seconds(sentAt, progress.completedAt!) : null,
+      { threadId, error },
+    );
+    const markers = readMarkers(reply);
+    yield* record(`${label}.markers`, markers.nonce === expectedNonce, markers.nonce, {
+      expectedNonce,
+      markers,
+    });
+    const head = yield* expectedHead();
+    yield* record(
+      `${label}.checkout`,
+      markers.head !== null && markers.head === head,
+      markers.head,
+      {
+        expectedHead: head,
+        branch: markers.branch,
+      },
+    );
+    yield* record(`${label}.skill`, markers.skill === "present", markers.skill, {
+      path: `$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md`,
+    });
+    return { firstOutputAt: progress.firstOutputAt, thread: turnThread };
+  });
+
+  const provision = Effect.fn("provision")(function* (manager: T3Client) {
+    const config = yield* manager["server.getConfig"]({}).pipe(
+      Effect.timeoutOption("30 seconds"),
+      Effect.catch((cause) => Effect.succeed(describe(cause))),
+    );
+    if (typeof config === "string" || Option.isNone(config))
+      return yield* fail(
+        "manager.connect",
+        typeof config === "string" ? config : "no answer in 30s",
+      );
+    const primary = options.agents[0]!;
+    const instance = config.value.providers.find(
+      (provider) => provider.driver === primary && provider.enabled,
+    );
+    if (!instance) return yield* fail("provision.ready", `the manager has no ${primary} account`);
+    const requestId = ProvisionRequestId.make(yield* uuid);
+    created.requestId = requestId;
+    const input = {
+      requestId,
+      provider: options.provider,
+      providerInstanceId: instance.instanceId,
+      agentDriver: ProviderDriverKind.make(primary),
+      repository: options.repo,
+    };
+    const started = yield* Clock.currentTimeMillis;
+    const phases: Array<{ readonly at: number; readonly kind: string; readonly message: string }> =
+      [];
+    const result = yield* Effect.gen(function* () {
+      const response = yield* manager["environmentControl.provision"](input);
+      const message = response.kind === "ready" ? "" : response.message;
+      const last = phases.at(-1);
+      if (last?.kind !== response.kind || last.message !== message)
+        phases.push({
+          at: seconds(started, yield* Clock.currentTimeMillis),
+          kind: response.kind,
+          message,
+        });
+      return response;
+    }).pipe(
+      Effect.repeat({
+        while: (response) => response.kind === "pending" || response.kind === "allocation_unknown",
+        schedule: Schedule.spaced("5 seconds"),
+      }),
+      Effect.timeoutOption(PROVISION_TIMEOUT),
+      Effect.catch((cause) => fail("provision.ready", describe(cause), { phases })),
+    );
+    if (Option.isNone(result))
+      return yield* fail("provision.ready", `not ready after ${PROVISION_TIMEOUT}`, { phases });
+    if (result.value.kind !== "ready")
+      return yield* fail("provision.ready", `provision ${result.value.kind}`, { phases });
+    const readyAt = yield* Clock.currentTimeMillis;
+    const box = result.value.environment;
+    created.box = box;
+    yield* record("provision.ready", true, seconds(started, readyAt), {
+      requestId,
+      phases,
+      leaseId: box.leaseId,
+      sandboxId: box.sandboxId,
+      environmentId: box.environmentId,
+      providerInstanceId: box.providerInstanceId,
+      sourceRevision: box.sourceRevision,
+      t3Revision: box.t3Revision,
+    });
+
+    const attached = yield* bounded(manager["environmentControl.attach"]({ requestId }), "attach");
+    if (attached.kind !== "attached")
+      return yield* fail("child.paired", `attach refused: ${attached.message}`);
+    if (attached.environmentId !== box.environmentId)
+      return yield* fail("child.paired", "attach returned another environment");
+    // A loopback pairing URL is only reachable through the manager's guest gateway.
+    // Parse failures would carry the pairing URL, so they surface without it.
+    const minted = yield* Effect.try({
+      try: () => new URL(attached.pairingUrl),
+      catch: () => new SmokeFailure({ message: "child.paired: attach returned an invalid URL" }),
+    });
+    const gateway = isLoopbackHost(minted.hostname);
+    const pairingUrl = gateway
+      ? Object.assign(new URL(options.origin), {
+          pathname: `${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/${encodeURIComponent(box.leaseId)}/pair`,
+          search: minted.search,
+          hash: minted.hash,
+        }).toString()
+      : attached.pairingUrl;
+    const target = yield* Effect.try({
+      try: () => resolveRemotePairingTarget({ pairingUrl }),
+      catch: () => new SmokeFailure({ message: "child.paired: pairing URL has no usable target" }),
+    });
+    const childToken = yield* exchangePairingToken(target.httpBaseUrl, target.credential).pipe(
+      Effect.catch((cause) => fail("child.paired", `child token exchange: ${describe(cause)}`)),
+    );
+    created.child = { httpBaseUrl: target.httpBaseUrl, bearer: childToken.access_token };
+    return { readyAt, gateway, childHost: new URL(target.httpBaseUrl).host };
+  });
+
+  const turns = Effect.fn("turns")(function* (
+    manager: T3Client,
+    paired: { readonly readyAt: number; readonly gateway: boolean; readonly childHost: string },
+  ) {
+    const box = created.box!;
+    const access = created.child!;
+    yield* withRpc(access.httpBaseUrl, access.bearer, (client) =>
+      Effect.gen(function* () {
+        const config = yield* client["server.getConfig"]({}).pipe(
+          Effect.timeoutOption("1 minute"),
+          Effect.catch((cause) => fail("child.paired", describe(cause))),
+        );
+        if (Option.isNone(config)) return yield* fail("child.paired", "child did not answer in 1m");
+        const pairedAt = yield* Clock.currentTimeMillis;
+        yield* record("child.paired", true, seconds(paired.readyAt, pairedAt), {
+          gateway: paired.gateway,
+          childHost: paired.childHost,
+          environmentId: config.value.environment.environmentId,
+          providers: config.value.providers
+            .filter((provider) => provider.enabled)
+            .map((provider) => `${provider.instanceId}:${provider.status}/${provider.auth.status}`),
+        });
+        const project = yield* client["orchestration.subscribeShell"]({}).pipe(
+          Stream.flatMap((item) =>
+            Stream.fromIterable(
+              item.kind === "snapshot"
+                ? item.snapshot.projects
+                : item.kind === "project-upserted"
+                  ? [item.project]
+                  : [],
+            ),
+          ),
+          Stream.runHead,
+          Effect.timeoutOption(PROJECT_TIMEOUT),
+        );
+        if (Option.isNone(project) || Option.isNone(project.value))
+          return yield* fail("child.project", `no project after ${PROJECT_TIMEOUT}`);
+        created.projectId = project.value.value.id;
+        yield* record("child.project", true, seconds(pairedAt, yield* Clock.currentTimeMillis), {
+          projectId: created.projectId,
+          workspaceRoot: project.value.value.workspaceRoot,
+        });
+        if (!options.steps.has("turns")) return;
+        for (const agent of options.agents) {
+          // The web claims the lease for the chat that first sends on the box, right after sending.
+          const claim = (threadId: ThreadId) =>
+            created.threads.length !== 1
+              ? Effect.void
+              : bounded(
+                  manager["environmentControl.claim"]({
+                    leaseId: box.leaseId,
+                    environmentId: box.environmentId,
+                    threadId,
+                  }),
+                  "claim",
+                ).pipe(
+                  Effect.catch((cause) => Effect.succeed({ kind: describe(cause) })),
+                  Effect.flatMap((claimed) =>
+                    record("lease.claim", claimed.kind === "claimed", claimed.kind, claimed),
+                  ),
+                );
+          yield* runTurn(client, agent, `turn.${agent}`, null, claim).pipe(Effect.option);
+        }
+      }),
+    );
+  });
+
+  /** Pauses the box the way archiving does, then wakes it the way reopening a chat does. */
+  const resume = Effect.fn("resume")(function* (manager: T3Client) {
+    const box = created.box!;
+    const access = created.child!;
+    const thread = created.threads[0];
+    if (!thread) return yield* fail("resume.pause", "no thread to resume");
+    const pauseAt = yield* Clock.currentTimeMillis;
+    const paused = yield* bounded(
+      manager["environmentControl.pause"]({ leaseId: box.leaseId, sandboxId: box.sandboxId }),
+      "pause",
+    );
+    if (paused.kind !== "paused") return yield* fail("resume.pause", paused.kind, paused);
+    yield* record("resume.pause", true, seconds(pauseAt, yield* Clock.currentTimeMillis));
+    const listed = yield* manager["environmentControl.listProvisioned"]({}).pipe(
+      Effect.map((list) => list.find((entry) => entry.leaseId === box.leaseId)),
+      Effect.repeat({
+        until: (entry) => entry?.lifecycle === "paused",
+        schedule: Schedule.spaced("3 seconds"),
+      }),
+      Effect.timeoutOption(PAUSED_TIMEOUT),
+    );
+    const lifecycle = Option.getOrUndefined(listed)?.lifecycle ?? "not paused in time";
+    yield* record("resume.paused", lifecycle === "paused", lifecycle);
+
+    const resumeAt = yield* Clock.currentTimeMillis;
+    const resumed = yield* bounded(
+      manager["environmentControl.resume"]({ environmentId: box.environmentId }),
+      "resume",
+    );
+    if (resumed.kind !== "resumed") return yield* fail("resume.resumed", resumed.kind, resumed);
+    yield* record("resume.resumed", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
+    yield* withRpc(access.httpBaseUrl, access.bearer, (client) =>
+      Effect.gen(function* () {
+        const reconnected = yield* client["server.getConfig"]({}).pipe(
+          Effect.retry({ schedule: Schedule.spaced("3 seconds") }),
+          Effect.timeoutOption(RECONNECT_TIMEOUT),
+        );
+        if (Option.isNone(reconnected))
+          return yield* fail("resume.reconnect", `child unreachable after ${RECONNECT_TIMEOUT}`);
+        yield* record("resume.reconnect", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
+        const turn = yield* runTurn(client, thread.agent, "resume.turn", thread);
+        if (turn.firstOutputAt !== null)
+          yield* record("resume.toFirstOutput", true, seconds(resumeAt, turn.firstOutputAt), {
+            from: "resume request",
+          });
+      }),
+    );
+  });
+
+  /** Deletes the run's threads, disposes the box twice, and confirms the lease is gone. */
+  const remove = Effect.fn("remove")(function* (manager: T3Client) {
+    const box = created.box;
+    if (!box && !created.requestId) return;
+    const access = created.child;
+    if (access && created.threads.length > 0) {
+      const deleted = yield* withRpc(access.httpBaseUrl, access.bearer, (client) =>
+        Effect.forEach(created.threads, (thread) =>
+          uuid.pipe(
+            Effect.flatMap((commandId) =>
+              client["orchestration.dispatchCommand"]({
+                type: "thread.delete",
+                commandId: CommandId.make(commandId),
+                threadId: thread.threadId,
+              }),
+            ),
+            Effect.as(thread.threadId),
+          ),
+        ),
+      ).pipe(
+        Effect.timeoutOption("1 minute"),
+        Effect.map((result) => (Option.isSome(result) ? null : "no answer in 1m")),
+        Effect.catch((cause) => Effect.succeed(describe(cause))),
+      );
+      yield* record(
+        "delete.threads",
+        deleted === null,
+        deleted === null ? created.threads.length : null,
+        { threadIds: created.threads.map((thread) => thread.threadId), error: deleted },
+      );
+    }
+    // Before ready, only the request can be cancelled; after, the web disposes by lease.
+    const disposeOnce = bounded(
+      manager["environmentControl.dispose"](
+        box
+          ? { leaseId: box.leaseId, sandboxId: box.sandboxId }
+          : { requestId: created.requestId! },
+      ),
+      "dispose",
+    ).pipe(
+      Effect.catch((cause) => Effect.succeed({ kind: "error" as const, message: describe(cause) })),
+    );
+    const disposeAt = yield* Clock.currentTimeMillis;
+    let attempts = 0;
+    // Another lease operation or a pending cleanup refuses for a moment; the web user would retry.
+    const first = yield* disposeOnce.pipe(
+      Effect.tap(() => Effect.sync(() => void attempts++)),
+      Effect.repeat({
+        while: (result) => result.kind !== "disposed",
+        schedule: Schedule.spaced("5 seconds"),
+      }),
+      Effect.timeoutOption(DISPOSE_TIMEOUT),
+    );
+    const disposed = Option.isSome(first) && first.value.kind === "disposed";
+    yield* record(
+      "delete.dispose",
+      disposed,
+      disposed ? seconds(disposeAt, yield* Clock.currentTimeMillis) : "not disposed",
+      { attempts, ...(disposed ? {} : { timeout: DISPOSE_TIMEOUT }) },
+    );
+    if (!box) return;
+    const second = yield* disposeOnce;
+    yield* record("delete.disposeAgain", second.kind === "disposed", second.kind, second);
+    const entry = yield* bounded(manager["environmentControl.listProvisioned"]({}), "list").pipe(
+      Effect.map((list) => list.find((candidate) => candidate.leaseId === box.leaseId)),
+      Effect.catch((cause) => Effect.succeed({ lifecycle: `unknown: ${describe(cause)}` })),
+    );
+    yield* record(
+      "delete.leaseGone",
+      entry === undefined || entry.lifecycle === "missing",
+      entry?.lifecycle ?? "absent",
+    );
+  });
+
+  const bearer = yield* bearerFor().pipe(
+    Effect.asSome,
+    Effect.catchTag("SmokeFailure", () => Effect.succeed(Option.none<string>())),
+    Effect.catch((cause) =>
+      record("auth.bearer", false, null, { error: describe(cause) }).pipe(
+        Effect.as(Option.none<string>()),
+      ),
+    ),
+  );
+  if (Option.isSome(bearer)) {
+    yield* withRpc(options.origin, bearer.value, (manager) => {
+      const steps = Effect.gen(function* () {
+        const paired = yield* provision(manager);
+        yield* turns(manager, paired);
+        if (options.steps.has("resume")) yield* resume(manager);
+      });
+      const cleanup = options.steps.has("delete")
+        ? remove(manager)
+        : Effect.suspend(() =>
+            created.box
+              ? Console.log(
+                  `kept box lease=${created.box.leaseId} sandbox=${created.box.sandboxId}`,
+                )
+              : Effect.void,
+          );
+      return steps.pipe(
+        Effect.catchTag("SmokeFailure", () => Effect.void),
+        Effect.catch((cause) => record("harness", false, null, describe(cause))),
+        Effect.ensuring(cleanup),
+      );
+    });
+  }
+
+  const ok = checks.length > 0 && checks.every((check) => check.pass);
+  const report = yield* encodeReport({
+    harness: "smoke-cloud-chat",
+    startedAt,
+    finishedAt: DateTime.formatIso(yield* DateTime.now),
+    origin: options.origin,
+    host,
+    provider: options.provider,
+    agents: options.agents,
+    repo: options.repo,
+    steps: [...options.steps],
+    box: created.box
+      ? {
+          requestId: created.requestId,
+          leaseId: created.box.leaseId,
+          sandboxId: created.box.sandboxId,
+          environmentId: created.box.environmentId,
+        }
+      : null,
+    ok,
+    checks,
+  });
+  yield* fs.makeDirectory(path.dirname(options.report), { recursive: true });
+  yield* fs.writeFileString(options.report, `${report}\n`);
+  const width = Math.max(...checks.map((check) => check.name.length));
+  yield* Console.log(
+    [
+      "",
+      ...checks.map(
+        (check) =>
+          `${check.name.padEnd(width)}  ${check.pass ? "PASS" : "FAIL"}  ${check.value ?? ""}`,
+      ),
+      "",
+      `report: ${options.report}`,
+    ].join("\n"),
+  );
+  if (!ok) process.exitCode = 1;
+});
+
+const parseList = <const A extends string>(raw: string, allowed: ReadonlyArray<A>, flag: string) =>
+  Effect.forEach(raw.split(","), (entry) => {
+    const value = entry.trim();
+    return (allowed as ReadonlyArray<string>).includes(value)
+      ? Effect.succeed(value as A)
+      : Effect.fail(
+          new SmokeFailure({ message: `--${flag}: ${value} is not one of ${allowed.join(", ")}` }),
+        );
+  });
+
+const command = Command.make(
+  "smoke-cloud-chat",
+  {
+    origin: Flag.String("origin").pipe(Flag.withDescription("Manager origin, e.g. https://host")),
+    pairingTokenFile: Flag.String("pairing-token-file").pipe(
+      Flag.withDescription("File holding a manager pairing token; the bearer is cached beside it."),
+    ),
+    provider: Flag.Literals("provider", ["e2b", "namespace"]).pipe(Flag.withDefault("e2b")),
+    agents: Flag.String("agents").pipe(Flag.withDefault("codex,claudeAgent,cursor")),
+    repo: Flag.String("repo").pipe(Flag.withDefault("andrewcai8/t3code")),
+    steps: Flag.String("steps").pipe(Flag.withDefault(STEPS.join(","))),
+    report: Flag.String("report").pipe(Flag.withDescription("Where to write the JSON report.")),
+  },
+  (flags) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const agents = yield* parseList(flags.agents, AGENTS, "agents");
+      const steps = new Set(yield* parseList(flags.steps, STEPS, "steps"));
+      if (!steps.has("provision"))
+        return yield* new SmokeFailure({
+          message: "--steps: every step runs on a box this run provisions, so include provision",
+        });
+      if (steps.has("resume") && !steps.has("turns"))
+        return yield* new SmokeFailure({
+          message: "--steps: resume continues a thread from turns",
+        });
+      yield* smoke({
+        origin: new URL(flags.origin).origin,
+        pairingTokenFile: path.resolve(flags.pairingTokenFile),
+        provider: flags.provider,
+        agents,
+        repo: flags.repo,
+        steps,
+        report: path.resolve(flags.report),
+      });
+    }),
+).pipe(Command.withDescription("End-to-end smoke for cloud chats against a live T3 manager."));
+
+if (import.meta.main) {
+  Command.run(command, { version: "0.0.0" }).pipe(
+    Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+    NodeRuntime.runMain,
+  );
+}
