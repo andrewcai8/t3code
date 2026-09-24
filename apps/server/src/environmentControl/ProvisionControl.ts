@@ -141,6 +141,9 @@ export function makeProvisionControl(
         sandboxId: resource.provider === "e2b" ? resource.sandboxId : resource.devboxId,
         provider: resource.provider,
         providerInstanceId: operation.request.providerInstanceId,
+        ...(operation.request.companionInstanceIds === undefined
+          ? {}
+          : { companionInstanceIds: operation.request.companionInstanceIds }),
         ...(resource.provider === "namespace" ? { namespaceResource: resource } : {}),
       }),
     );
