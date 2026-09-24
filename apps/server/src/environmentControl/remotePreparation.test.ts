@@ -514,10 +514,6 @@ describe("remote preparation subprocess", () => {
     expect(remotePreparationScript).toContain("'protocol.version=2'");
     expect(remotePreparationScript).toContain("'--depth=1'");
     expect(remotePreparationScript).toContain("'GIT_LFS_SKIP_SMUDGE': '1'");
-    expect(remotePreparationScript).toContain("if not (stage / '.git').is_dir():");
-    expect(remotePreparationScript).toContain(
-      "run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)",
-    );
   });
 
   it("starts the guest so it publishes the cloned workspace as a project", () => {
@@ -618,6 +614,18 @@ describe("remote preparation subprocess", () => {
         "utf8",
       ),
     ).toBe("export default 1;\n");
+  });
+
+  it("does not start T3 when the repository revision cannot be fetched", async () => {
+    const input = await fixture();
+    await expect(
+      prepareRemoteHost(localPort, {
+        ...input,
+        repository: { url: input.repository!.url, revision: "d".repeat(40) },
+      }),
+    ).rejects.toThrow(/Preparation command failed/);
+    await expect(NodeFSP.access(NodePath.join(input.root, "started"))).rejects.toThrow();
+    await expect(NodeFSP.access(NodePath.join(input.root, "workspace"))).rejects.toThrow();
   });
 
   it("resumes a leftover workspace.partial clone instead of deleting it", async () => {
