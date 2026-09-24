@@ -20,10 +20,18 @@ import { planManagerAccounts, type PlanInput } from "./provision-manager-account
 /** The host's `environment-control.json`, as written. */
 export interface HostConfig {
   readonly e2bApiKey?: string;
+  readonly namespaceToken?: string;
   readonly provisioning?: PlanInput["provisioning"] & {
     readonly templateId?: string;
+    readonly runtimeArtifacts?: unknown;
     readonly githubToken?: string;
     readonly namespace?: unknown;
+    readonly repositories?: ReadonlyArray<{
+      readonly repository: string;
+      readonly workspaceFiles?: unknown;
+      readonly e2b?: unknown;
+      readonly namespace?: unknown;
+    }>;
     readonly egressAllow?: unknown;
     readonly skills?: ReadonlyArray<{ readonly source: string; readonly name?: string }>;
   };
@@ -53,13 +61,13 @@ export interface HostState {
   /**
    * The host's config minus what only the transport knows: `broker`, which for
    * the E2B manager is the sandbox it creates after packing, and
-   * `provisioning.runtimeArtifacts.linux`, which a container host has baked
-   * into its image. Namespace's `runtimeArtifacts.macos` does not travel, so
-   * neither does `provisioning.namespace`: without the runtime, the host would
-   * advertise Macs it cannot start.
+   * `provisioning.runtimeArtifacts`, which a host pins itself. Namespace
+   * settings travel only with a `namespaceToken`: a host has no `nsc login` of
+   * its own, so without one it could not start the Macs it offers.
    */
   readonly config: {
     readonly e2bApiKey: string;
+    readonly namespaceToken?: string;
     readonly targets: readonly [];
     readonly provisioning: Record<string, unknown> & { readonly templateId: string };
   };
@@ -128,6 +136,15 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   });
 
   const provisioning = config.provisioning;
+  const namespaceToken = config.namespaceToken;
+  // A repository entry's `workspaceFiles` name paths on this machine, so only
+  // its Namespace settings travel. Their artifact paths live in Namespace's
+  // storage, not on disk.
+  const namespaceRepositories = namespaceToken
+    ? (provisioning?.repositories ?? []).flatMap(({ repository, namespace }) =>
+        namespace ? [{ repository, namespace }] : [],
+      )
+    : [];
   return {
     accounts: plan.accounts,
     skipped: plan.skipped,
@@ -135,6 +152,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     skills: bundles.map(({ directory, archive }) => ({ directory, archive })),
     config: {
       e2bApiKey,
+      ...(namespaceToken ? { namespaceToken } : {}),
       targets: [],
       provisioning: {
         templateId,
@@ -149,6 +167,8 @@ export async function packHostState(input: PackInput): Promise<HostState> {
         // every provision fail with an ENOENT naming another machine.
         ...(plan.shellEnvironment ? { shellEnvironment: plan.shellEnvironment } : {}),
         skills: bundles.map((bundle) => bundle.source),
+        ...(namespaceToken && provisioning?.namespace ? { namespace: provisioning.namespace } : {}),
+        ...(namespaceRepositories.length ? { repositories: namespaceRepositories } : {}),
       },
     },
   };
@@ -156,9 +176,8 @@ export async function packHostState(input: PackInput): Promise<HostState> {
 
 /**
  * Writes `state` as a gzipped tarball whose root is `baseDir`. The config is
- * `environment-control.base.json`: the host adds
- * `provisioning.runtimeArtifacts.linux` at boot, because the artifact is baked
- * into its image.
+ * `environment-control.base.json`: the host adds `provisioning.runtimeArtifacts`
+ * at boot, because it pins its own artifacts.
  */
 export async function writeSeedArchive(input: {
   readonly state: HostState;
@@ -210,7 +229,8 @@ const USAGE = `Usage: node scripts/cloud/pack-host-state.ts --output FILE.tgz --
 Packs a provisioning host's state as a seed tarball rooted at --base-dir, for
 a container that runs the linux runtime artifact baked into its image. The
 tarball holds credentials; treat it as a secret.
-Namespace (macOS) provisioning is not carried: runtimeArtifacts.macos is omitted.`;
+Namespace (macOS) settings are carried only with a namespaceToken. Runtime
+artifacts are never carried; the host adds its own.`;
 
 if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({
