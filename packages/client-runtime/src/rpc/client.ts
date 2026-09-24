@@ -25,7 +25,14 @@ export class EnvironmentRpcUnavailableError extends Schema.TaggedError<Environme
 export interface EnvironmentRpcRequestObservation {
   readonly environmentId: string;
   readonly method: string;
+  readonly showsOwnProgress: boolean;
 }
+
+/** True while the caller renders its own progress, so clients should not flag the wait as slow. */
+export class EnvironmentRpcShowsOwnProgress extends Context.Reference<boolean>(
+  "@t3tools/client-runtime/rpc/EnvironmentRpcShowsOwnProgress",
+  { defaultValue: () => false },
+) {}
 
 export class EnvironmentRpcRequestObserver extends Context.Reference<{
   readonly observe: (
@@ -146,6 +153,7 @@ export const request = Effect.fn("EnvironmentRpc.request")(function* <
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     method: tag,
+    showsOwnProgress: yield* EnvironmentRpcShowsOwnProgress,
   });
   return yield* method(input).pipe(Effect.ensuring(completeObservation));
 });
