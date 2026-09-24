@@ -595,11 +595,14 @@ const environmentOwnedDataCleanupLayer = Layer.succeed(
 const rpcRequestObserverLayer = Layer.succeed(
   EnvironmentRpcRequestObserver,
   EnvironmentRpcRequestObserver.of({
-    observe: ({ environmentId, method }) =>
+    observe: ({ environmentId, method, showsOwnProgress }) =>
       Effect.sync(() => {
         nextObservedRpcRequestId += 1;
         const requestId = `${environmentId}:${nextObservedRpcRequestId}`;
-        trackRpcRequestSent(requestId, method, `${method} · ${environmentId}`);
+        trackRpcRequestSent(requestId, method, {
+          tag: `${method} · ${environmentId}`,
+          showsOwnProgress,
+        });
         return Effect.sync(() => {
           acknowledgeRpcRequest(requestId);
         });

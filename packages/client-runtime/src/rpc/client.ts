@@ -22,9 +22,15 @@ export class EnvironmentRpcUnavailableError extends Schema.TaggedError<Environme
   },
 ) {}
 
+export interface EnvironmentRpcRequestOptions {
+  /** The caller renders its own progress, so clients should not flag the wait as slow. */
+  readonly showsOwnProgress?: boolean;
+}
+
 export interface EnvironmentRpcRequestObservation {
   readonly environmentId: string;
   readonly method: string;
+  readonly showsOwnProgress: boolean;
 }
 
 export class EnvironmentRpcRequestObserver extends Context.Reference<{
@@ -132,7 +138,7 @@ const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
 
 export const request = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
->(tag: TTag, input: EnvironmentRpcInput<TTag>) {
+>(tag: TTag, input: EnvironmentRpcInput<TTag>, options: EnvironmentRpcRequestOptions = {}) {
   const supervisor = yield* EnvironmentSupervisor;
   yield* Effect.annotateCurrentSpan({
     "environment.id": supervisor.target.environmentId,
@@ -146,6 +152,7 @@ export const request = Effect.fn("EnvironmentRpc.request")(function* <
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     method: tag,
+    showsOwnProgress: options.showsOwnProgress === true,
   });
   return yield* method(input).pipe(Effect.ensuring(completeObservation));
 });

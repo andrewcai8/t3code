@@ -77,18 +77,18 @@ describe("requestLatencyState", () => {
   );
 
   it("keeps ignoring untracked methods when a display tag is supplied", () => {
-    trackRpcRequestSent(
-      "1",
-      WS_METHODS.previewAutomationConnect,
-      `${WS_METHODS.previewAutomationConnect} · env-1`,
-    );
+    trackRpcRequestSent("1", WS_METHODS.previewAutomationConnect, {
+      tag: `${WS_METHODS.previewAutomationConnect} · env-1`,
+    });
     vi.advanceTimersByTime(SLOW_RPC_ACK_THRESHOLD_MS * 2);
 
     expect(getSlowRpcAckRequests()).toEqual([]);
   });
 
   it("gives provider updates a longer threshold before warning", () => {
-    trackRpcRequestSent("1", WS_METHODS.serverUpdateProvider, "server.updateProvider · env-1");
+    trackRpcRequestSent("1", WS_METHODS.serverUpdateProvider, {
+      tag: "server.updateProvider · env-1",
+    });
     vi.advanceTimersByTime(LONG_RUNNING_RPC_ACK_THRESHOLD_MS - 1);
     expect(getSlowRpcAckRequests()).toEqual([]);
 
@@ -100,6 +100,19 @@ describe("requestLatencyState", () => {
         thresholdMs: LONG_RUNNING_RPC_ACK_THRESHOLD_MS,
       },
     ]);
+  });
+
+  it("never flags a request whose caller shows its own progress", () => {
+    trackRpcRequestSent("provision", WS_METHODS.environmentControlProvision, {
+      tag: "environmentControl.provision · env-1",
+      showsOwnProgress: true,
+    });
+    trackRpcRequestSent("config", "server.getConfig");
+    vi.advanceTimersByTime(16_000);
+    expect(getSlowRpcAckRequests().map((request) => request.requestId)).toEqual(["config"]);
+
+    vi.advanceTimersByTime(44_000);
+    expect(getSlowRpcAckRequests().map((request) => request.requestId)).toEqual(["config"]);
   });
 
   it("evicts the oldest pending requests once the tracker reaches capacity", () => {
