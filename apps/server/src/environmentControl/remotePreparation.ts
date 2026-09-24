@@ -482,8 +482,10 @@ def prepare(spec):
                         run(['git', 'remote', 'add', 'origin', repository['url']], stage, git_env)
                     elif run(['git', 'remote', 'get-url', 'origin'], stage, env) != repository['url']:
                         raise RuntimeError('Repository identity conflict')
-                    # Shallow + blobless: one commit's trees, blobs on checkout.
-                    run(['git', '-c', 'protocol.version=2', 'fetch', '--filter=blob:none', '--depth=1', '--no-tags', 'origin', repository['revision']], stage, git_env, timeout=600)
+                    # Shallow, with blobs: checkout needs every blob of this one
+                    # commit, and fetching them in the pack is about twice as fast
+                    # as a blobless fetch that backfills them on checkout.
+                    run(['git', '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', repository['revision']], stage, git_env, timeout=600)
                     run(['git', 'checkout', '--detach', repository['revision']], stage, git_env, timeout=600)
                 os.rename(stage, project)
         if repository is not None:

@@ -510,9 +510,8 @@ describe("remote preparation subprocess", () => {
     expect(remotePreparationScript).toContain("except subprocess.TimeoutExpired");
   });
 
-  it("fetches the workspace as a shallow partial clone instead of downloading every blob", () => {
+  it("fetches the workspace as a shallow clone of the one requested commit", () => {
     expect(remotePreparationScript).toContain("'protocol.version=2'");
-    expect(remotePreparationScript).toContain("'--filter=blob:none'");
     expect(remotePreparationScript).toContain("'--depth=1'");
     expect(remotePreparationScript).toContain("'GIT_LFS_SKIP_SMUDGE': '1'");
     expect(remotePreparationScript).toContain("if not (stage / '.git').is_dir():");
