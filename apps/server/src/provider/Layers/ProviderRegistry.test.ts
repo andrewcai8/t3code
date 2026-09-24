@@ -566,6 +566,21 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         }),
       );
 
+      it.effect("reports ready when the app-server answers after 15 seconds", () =>
+        Effect.gen(function* () {
+          const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.sleep("15 seconds").pipe(Effect.as(makeCodexProbeSnapshot())),
+          ).pipe(Effect.forkChild);
+
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust("15 seconds");
+
+          const status = yield* Fiber.join(statusFiber);
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.version, "1.0.0");
+        }),
+      );
+
       it.effect("closes the app-server probe scope when provider status times out", () =>
         Effect.gen(function* () {
           const killCalls = yield* Ref.make(0);
@@ -575,7 +590,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           );
 
           yield* Effect.yieldNow;
-          yield* TestClock.adjust("11 seconds");
+          yield* TestClock.adjust("29 seconds");
+          yield* Effect.yieldNow;
+          assert.strictEqual(statusFiber.pollUnsafe(), undefined);
+
+          yield* TestClock.adjust("1 second");
           yield* Effect.yieldNow;
 
           const status = yield* Fiber.join(statusFiber);

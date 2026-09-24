@@ -33,7 +33,6 @@ import {
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
-  AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   type ServerProviderDraft,
@@ -62,6 +61,10 @@ type CodexRateLimitsProbe =
   | { readonly failure: string };
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
+// Longer than other providers' auth probes: with CODEX_HOME on a network
+// filesystem (EFS), app-server startup opens its SQLite state there and can
+// take 5-10 s before it answers `initialize`.
+const CODEX_APP_SERVER_PROBE_TIMEOUT = "30 seconds" as const;
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -606,11 +609,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,
-  }).pipe(
-    Effect.scoped,
-    Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
-    Effect.result,
-  );
+  }).pipe(Effect.scoped, Effect.timeoutOption(CODEX_APP_SERVER_PROBE_TIMEOUT), Effect.result);
 
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
