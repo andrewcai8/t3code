@@ -6,7 +6,7 @@ import {
   isOffDeviceReachablePairingUrl,
   provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useRef, useState } from "react";
 
@@ -55,8 +55,8 @@ export function createCloudMachineProgressText(
 export function useCreateCloudMachine(input: {
   readonly managerId: EnvironmentId;
   readonly connectedEnvironments: ReadonlyArray<ConnectedEnvironmentSummary>;
-  /** Called once the machine is joined and its checkout has appeared. */
-  readonly onCreated: (environmentId: EnvironmentId) => void;
+  /** Called with the machine's checkout once it is joined and the checkout has appeared. */
+  readonly onCreated: (projectRef: ScopedProjectRef) => void;
 }) {
   const { managerId, connectedEnvironments, onCreated } = input;
   const manager = connectedEnvironments.find((entry) => entry.environmentId === managerId);
@@ -140,7 +140,7 @@ export function useCreateCloudMachine(input: {
           return;
         }
         setState(IDLE);
-        if (outcome.kind === "ready") onCreated(outcome.projectRef.environmentId);
+        if (outcome.kind === "ready") onCreated(outcome.projectRef);
       } finally {
         inFlight.current = false;
       }

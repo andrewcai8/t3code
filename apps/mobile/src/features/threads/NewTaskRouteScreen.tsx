@@ -17,13 +17,17 @@ import { MaterialButton } from "../../components/MaterialButton";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { AppText as Text } from "../../components/AppText";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
-import { useProjects } from "../../state/entities";
+import { useProjects, useServerConfigs } from "../../state/entities";
 import type { WorkspaceState } from "../../state/workspaceModel";
 import { useWorkspaceState } from "../../state/workspace";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { useNewTaskFlow } from "./new-task-flow-provider";
-import { filterProjectScopes, getProjectScopeSelectionTarget } from "./new-task-project-selection";
+import {
+  filterProjectScopes,
+  getProjectScopeSelectionTarget,
+  resolveNewThreadStart,
+} from "./new-task-project-selection";
 
 type NewTaskRouteParams = {
   readonly incomingShareId?: string | string[];
@@ -127,6 +131,7 @@ function NewTaskHeader(props: {
 
 export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRouteParams | undefined>) {
   const projects = useProjects();
+  const serverConfigs = useServerConfigs();
   const [searchText, setSearchText] = useState("");
   const { projectScopes, selectedEnvironmentId, setProject } = useNewTaskFlow();
   const { state: catalogState } = useWorkspaceState();
@@ -176,6 +181,20 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
     if (previousRoute?.name === "NewTaskDraft") {
       setProject(project);
       navigation.goBack();
+      return;
+    }
+
+    // A host that runs no agents refuses a draft on itself; start a cloud machine for the
+    // project instead. Shared content stays on the draft path, which owns its reservation.
+    const start = resolveNewThreadStart(project, serverConfigs.get(project.environmentId));
+    if (start.kind === "cloud-machine" && !incomingShare) {
+      navigation.dispatch(
+        StackActions.push("NewTaskCloudMachine", {
+          environmentId: project.environmentId,
+          repository: start.repository,
+          title: project.title,
+        }),
+      );
       return;
     }
 
