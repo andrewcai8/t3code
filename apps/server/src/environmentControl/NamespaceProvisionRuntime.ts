@@ -4,7 +4,6 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
-import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
 import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
@@ -15,7 +14,11 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import { ProvisionRetentionError } from "./retention.ts";
-import { namespaceResourceMatches, resolveNamespaceIdentity } from "./namespaceAllocation.ts";
+import {
+  namespaceResourceMatches,
+  namespaceTokenSource,
+  resolveNamespaceIdentity,
+} from "./namespaceAllocation.ts";
 import type { NamespaceResource as ImportedNamespaceResource } from "./namespaceProvisioner.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
@@ -80,7 +83,11 @@ function executeCli(binary: string, command: CliCommand): Promise<CliResult> {
   });
 }
 
-/** The private token file binds CLI execution to the same actor and tenant as the SDK. */
+/**
+ * The private token file binds CLI execution to the same actor and tenant as
+ * the SDK. Without an explicit token each issue rereads the user token file, so
+ * the session and every CLI call follow a credential refreshed in place.
+ */
 export async function makeNamespaceAccountSession(config: {
   readonly stateDir: string;
   readonly token?: string;
@@ -91,7 +98,7 @@ export async function makeNamespaceAccountSession(config: {
   readonly commandTimeoutMs?: number;
   readonly execute?: (command: CliCommand) => Promise<CliResult>;
 }) {
-  const source = config.token ? fromBearerToken(config.token) : await loadUserToken();
+  const source = namespaceTokenSource(config.token);
   const identity = await resolveNamespaceIdentity(await source.issueToken(60_000));
   const verifiedToken = async (duration: number, force?: boolean) => {
     const token = await source.issueToken(duration, force);
@@ -681,7 +688,8 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       if (
         response.devbox?.id !== resource.devboxId ||
         (resource.devboxName !== undefined && response.devbox.name !== resource.devboxName) ||
-        response.devbox.creator !== config.session.identity.creator ||
+        (config.session.identity.creator !== undefined &&
+          response.devbox.creator !== config.session.identity.creator) ||
         response.devbox.site !== resource.region ||
         !response.instanceId ||
         response.instanceId !== resource.instanceId

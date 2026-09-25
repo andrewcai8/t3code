@@ -10,7 +10,7 @@ import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   makeNamespaceAccountSession,
@@ -708,6 +708,50 @@ describe("Namespace runtime transport", () => {
     });
     await expect(runtime.touch(f.operation, resource)).rejects.toThrow("active deadline");
     expect(f.apiCalls.some(({ method }) => method === "ExtendInstance")).toBe(false);
+  });
+
+  it("rereads a user token refreshed in place for the API and every CLI call", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-home-"));
+    cleanups.push(() => NodeFSP.rm(home, { recursive: true, force: true }));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("XDG_CONFIG_HOME", NodePath.join(home, ".config"));
+    cleanups.push(async () => vi.unstubAllEnvs());
+    // Guards the developer's real credential: the SDK must resolve the stubbed home.
+    expect(NodeOS.homedir()).toBe(home);
+    const userTokenFile =
+      HostProcessPlatform.defaultValue() === "darwin"
+        ? NodePath.join(home, "Library/Application Support/ns/token.json")
+        : NodePath.join(home, ".config/ns/token.json");
+    await NodeFSP.mkdir(NodePath.dirname(userTokenFile), { recursive: true });
+    // A federated workload token names its tenant but no actor.
+    const federated = (tenantId: string, exp: number) =>
+      `e30.${Buffer.from(encodeJson({ tenant_id: tenantId, exp })).toString("base64url")}.signature`;
+    const first = federated("tenant-test", 4102444800);
+    const refreshed = federated("tenant-test", 4102448400);
+    const write = (bearer: string) =>
+      NodeFSP.writeFile(userTokenFile, encodeJson({ bearer_token: bearer }));
+    await write(first);
+    const cliTokens: string[] = [];
+    const session = await makeNamespaceAccountSession({
+      stateDir: NodePath.join(home, "state"),
+      execute: async ({ env }) => {
+        if (!env.NSC_TOKEN_FILE) throw new Error("CLI had no explicit credential file");
+        cliTokens.push(
+          decodeToken(await NodeFSP.readFile(env.NSC_TOKEN_FILE, "utf8")).bearer_token,
+        );
+        return { exitCode: 0, stdout: "" };
+      },
+    });
+    expect(session.identity).toEqual({ tenantId: "tenant-test" });
+    expect(await session.issueToken(60_000)).toBe(first);
+    await session.run(["list"]);
+    await write(refreshed);
+    expect(await session.issueToken(60_000)).toBe(refreshed);
+    await session.run(["list"]);
+    expect(cliTokens).toEqual([first, refreshed]);
+    await write(federated("another-tenant", 4102448400));
+    await expect(session.run(["list"])).rejects.toThrow("account changed");
+    expect(cliTokens).toHaveLength(2);
   });
 
   it("bounds a real stuck CLI process and removes its private credential staging", async () => {

@@ -41,7 +41,8 @@ export const DurableProvisionRequest = Schema.Union([
   Schema.Struct({
     ...requestFields,
     provider: Schema.Literal("namespace"),
-    creator: TrimmedNonEmptyString,
+    /** The Namespace actor. Absent for a federated workload credential, which has none. */
+    creator: Schema.optional(TrimmedNonEmptyString),
     tenantId: TrimmedNonEmptyString,
     size: TrimmedNonEmptyString,
     image: TrimmedNonEmptyString,
