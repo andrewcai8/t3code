@@ -715,7 +715,9 @@ describe("Namespace runtime transport", () => {
     cleanups.push(() => NodeFSP.rm(home, { recursive: true, force: true }));
     vi.stubEnv("HOME", home);
     vi.stubEnv("XDG_CONFIG_HOME", NodePath.join(home, ".config"));
-    cleanups.push(async () => vi.unstubAllEnvs());
+    cleanups.push(async () => {
+      vi.unstubAllEnvs();
+    });
     // Guards the developer's real credential: the SDK must resolve the stubbed home.
     expect(NodeOS.homedir()).toBe(home);
     const userTokenFile =
