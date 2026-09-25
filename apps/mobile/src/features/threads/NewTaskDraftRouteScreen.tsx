@@ -23,6 +23,11 @@ type NewTaskDraftRouteParams = {
   readonly title?: string | string[];
   /** Set by Add Project when this draft opens while the project's clone runs. */
   readonly cloning?: string | string[];
+  /**
+   * "1" when the branch is only a preference: a failed checkout keeps the draft on the default
+   * branch instead of closing it. Set when nothing sits behind the draft to go back to.
+   */
+  readonly branchOptional?: string | string[];
   readonly pendingTaskId?: string | string[];
   readonly draftId?: string | string[];
   readonly incomingShareId?: string | string[];
@@ -68,6 +73,9 @@ export function NewTaskDraftRouteScreen({ route }: StaticScreenProps<NewTaskDraf
   const environmentId = project?.environmentId;
   const workspaceRoot = project?.workspaceRoot;
   const needsPreparation = Boolean(initialProjectRef.branch && !pendingTaskId && !draftId);
+  const branchOptional =
+    (Array.isArray(params.branchOptional) ? params.branchOptional[0] : params.branchOptional) ===
+    "1";
 
   const [pendingCheckouts, setPendingCheckouts] = useState(0);
   const checkoutTail = useRef(Promise.resolve());
@@ -129,23 +137,29 @@ export function NewTaskDraftRouteScreen({ route }: StaticScreenProps<NewTaskDraf
     if (checkoutPending || result?._tag !== "Failure") return;
     if (!isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
+      const message =
+        error instanceof Error ? error.message : "The branch could not be checked out.";
       Alert.alert(
         "Could not switch branch",
-        error instanceof Error ? error.message : "The branch could not be checked out.",
+        branchOptional ? `${message}\n\nThis task starts on the default branch.` : message,
       );
     }
-    navigation.goBack();
-  }, [checkoutPending, result, navigation]);
+    if (!branchOptional) navigation.goBack();
+  }, [branchOptional, checkoutPending, result, navigation]);
 
+  const keepsDefaultBranch = branchOptional && result?._tag === "Failure";
   const preparedProjectRef = useMemo(
     () =>
       result?._tag === "Success"
         ? { ...initialProjectRef, branch: result.value.name }
-        : initialProjectRef,
-    [initialProjectRef, result],
+        : keepsDefaultBranch
+          ? { ...initialProjectRef, branch: null }
+          : initialProjectRef,
+    [initialProjectRef, keepsDefaultBranch, result],
   );
   // Send/queue remain unavailable on failure while the unlocked route closes.
-  const preparingBranch = checkoutPending || (needsPreparation && result?._tag !== "Success");
+  const preparingBranch =
+    checkoutPending || (needsPreparation && result?._tag !== "Success" && !keepsDefaultBranch);
 
   return (
     <>

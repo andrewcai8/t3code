@@ -1,14 +1,10 @@
-import {
-  CommonActions,
-  useNavigation,
-  usePreventRemove,
-  type StaticScreenProps,
-} from "@react-navigation/native";
+import { CommonActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { readProject } from "../../state/entities";
 import {
   useRemoteConnectionStatus,
   useSavedRemoteConnection,
@@ -20,7 +16,6 @@ type NewTaskCloudMachineRouteParams = {
   /** The host that starts the machine; it holds the project the thread was asked for. */
   readonly environmentId: string;
   readonly repository: string;
-  readonly title?: string;
   readonly branch?: string | null;
 };
 
@@ -36,9 +31,10 @@ export function NewTaskCloudMachineRouteScreen({
   if (!params?.environmentId || !params.repository) return null;
   return (
     <NewTaskCloudMachine
+      // A new request while this screen is open starts from its own params, not the last form.
+      key={`${params.environmentId}\n${params.repository}\n${params.branch ?? ""}`}
       environmentId={params.environmentId}
       repository={params.repository}
-      {...(params.title ? { title: params.title } : {})}
       {...(params.branch ? { branch: params.branch } : {})}
     />
   );
@@ -47,7 +43,6 @@ export function NewTaskCloudMachineRouteScreen({
 function NewTaskCloudMachine({
   environmentId,
   repository,
-  title,
   branch,
 }: NewTaskCloudMachineRouteParams) {
   const managerId = EnvironmentId.make(environmentId);
@@ -55,8 +50,19 @@ function NewTaskCloudMachine({
   const insets = useSafeAreaInsets();
   const manager = useSavedRemoteConnection(managerId);
   const { connectedEnvironments } = useRemoteConnectionStatus();
+  // Leaving is allowed while the machine starts: it keeps starting and appears under
+  // Connections, but nothing opens a draft for a screen the user already left.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const onCreated = useCallback(
     (projectRef: ScopedProjectRef) => {
+      if (!mounted.current) return;
+      const title = readProject(projectRef)?.title;
       navigation.dispatch(
         CommonActions.reset({
           index: 0,
@@ -67,19 +73,19 @@ function NewTaskCloudMachine({
                 environmentId: projectRef.environmentId,
                 projectId: projectRef.projectId,
                 ...(title ? { title } : {}),
-                // The branch carries over by name; the draft checks it out on the new machine.
-                ...(branch ? { branch } : {}),
+                // The branch carries over by name. The draft checks it out on the machine and
+                // stays on the default branch when it cannot, since the sheet has nothing
+                // behind it to go back to.
+                ...(branch ? { branch, branchOptional: "1" } : {}),
               },
             },
           ],
         }),
       );
     },
-    [branch, navigation, title],
+    [branch, navigation],
   );
   const creation = useCreateCloudMachine({ managerId, connectedEnvironments, onCreated });
-  // Leaving mid-start would strand a machine nobody opens.
-  usePreventRemove(creation.state.kind === "working", () => undefined);
 
   return (
     <View className="flex-1 bg-sheet" style={{ paddingBottom: insets.bottom }}>

@@ -192,7 +192,6 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         StackActions.push("NewTaskCloudMachine", {
           environmentId: project.environmentId,
           repository: start.repository,
-          title: project.title,
         }),
       );
       return;

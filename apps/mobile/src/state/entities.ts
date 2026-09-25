@@ -52,6 +52,11 @@ export function waitForProject(
   });
 }
 
+/** The project as the live client store holds it now. */
+export function readProject(ref: ScopedProjectRef): EnvironmentProject | null {
+  return appAtomRegistry.get(environmentProjects.projectAtom(ref));
+}
+
 export function useProjects(): ReadonlyArray<EnvironmentProject> {
   return useAtomValue(environmentProjects.projectsAtom);
 }

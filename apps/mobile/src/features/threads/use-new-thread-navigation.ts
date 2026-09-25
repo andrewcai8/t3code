@@ -26,7 +26,6 @@ export function useNewThreadNavigation() {
           params: {
             environmentId: String(project.environmentId),
             repository: start.repository,
-            title: project.title,
           },
         });
         return;
@@ -58,7 +57,6 @@ export function useNewThreadNavigation() {
           params: {
             environmentId: String(project.environmentId),
             repository: start.repository,
-            title: project.title,
             branch: thread.branch,
           },
         });
