@@ -9,6 +9,7 @@ import {
   type ServerConfig,
 } from "@t3tools/contracts";
 
+import type { EnvironmentConnectionPresentation } from "../connection/presentation.ts";
 import { joinProvisionedEnvironment } from "../connection/provisioned.ts";
 import { scopeProjectRef } from "../environment/scoped.ts";
 import type { DraftProvisionRequest, ProvisionRequestStore } from "./provisionRequests.ts";
@@ -44,15 +45,29 @@ export function runsLocalAgents(
   return config?.localAgentRuns !== false;
 }
 
+/** What the client knows about one environment when placing a new chat. */
+export interface NewChatEnvironmentState {
+  readonly serverConfig?: Pick<ServerConfig, "localAgentRuns"> | null | undefined;
+  readonly connection?: Pick<EnvironmentConnectionPresentation, "blockedReason"> | null | undefined;
+}
+
+/** Whether an environment's machine is gone for good, such as a cloud box whose lease expired. */
+function isEnvironmentGone(state: NewChatEnvironmentState | null | undefined): boolean {
+  return state?.connection?.blockedReason === "workspace-missing";
+}
+
 export interface NewChatRunTargets<Environment> {
   /** The environments holding the project that a new chat may run on. */
   readonly environments: ReadonlyArray<Environment>;
   /** The cloud kinds the manager can create for the chat. */
   readonly cloudProviders: ReadonlyArray<ProvisionProvider>;
   /**
-   * Where a chat pointed at an environment that runs no agents goes instead:
-   * the manager's first cloud kind, else the first environment that runs them.
-   * Null when the chat may stay, or there is nowhere else to go.
+   * Where a chat that cannot start where it points goes instead. A chat on a
+   * gone machine moves to the first live environment that runs agents or can
+   * hand the chat to a cloud kind. A chat on a live environment that runs no
+   * agents starts on the manager's first cloud kind, else moves to the first
+   * environment that runs them. Null when the chat may stay, or there is
+   * nowhere else to go.
    */
   readonly redirect:
     | { readonly kind: "cloud"; readonly provider: ProvisionProvider }
@@ -64,11 +79,11 @@ export interface NewChatRunTargets<Environment> {
 export function newChatRunTargets<
   Environment extends { readonly environmentId: EnvironmentId },
 >(input: {
-  /** The environments holding the chat's project. */
+  /** The environments holding the chat's project, in the order to prefer them. */
   readonly environments: ReadonlyArray<Environment>;
-  readonly serverConfig: (
+  readonly environmentState: (
     environmentId: EnvironmentId,
-  ) => Pick<ServerConfig, "localAgentRuns"> | null | undefined;
+  ) => NewChatEnvironmentState | null | undefined;
   /** The environment the chat points at now. */
   readonly environmentId: EnvironmentId | null;
   readonly managerConfig:
@@ -77,24 +92,32 @@ export function newChatRunTargets<
     | undefined;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
-  const environments = input.environments.filter((environment) =>
-    runsLocalAgents(input.serverConfig(environment.environmentId)),
-  );
-  const pointsAtRunner =
-    input.environmentId === null || runsLocalAgents(input.serverConfig(input.environmentId));
   const provider = cloudProviders[0];
-  const environment = environments[0];
-  return {
-    environments,
-    cloudProviders,
-    redirect: pointsAtRunner
+  const gone = (environmentId: EnvironmentId) =>
+    isEnvironmentGone(input.environmentState(environmentId));
+  const runs = (environmentId: EnvironmentId) =>
+    runsLocalAgents(input.environmentState(environmentId)?.serverConfig);
+  const environments = input.environments.filter(
+    ({ environmentId }) => runs(environmentId) && !gone(environmentId),
+  );
+  const moveTo = (environment: Environment | undefined) =>
+    environment ? ({ kind: "environment", environment } as const) : null;
+  const redirect =
+    input.environmentId === null
       ? null
-      : provider
-        ? { kind: "cloud", provider }
-        : environment
-          ? { kind: "environment", environment }
-          : null,
-  };
+      : gone(input.environmentId)
+        ? moveTo(
+            input.environments.find(
+              ({ environmentId }) =>
+                !gone(environmentId) && (runs(environmentId) || provider !== undefined),
+            ),
+          )
+        : runs(input.environmentId)
+          ? null
+          : provider
+            ? ({ kind: "cloud", provider } as const)
+            : moveTo(environments[0]);
+  return { environments, cloudProviders, redirect };
 }
 
 function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {

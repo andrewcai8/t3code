@@ -8,6 +8,7 @@ import {
   getProjectScopeSelectionTarget,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
+  resolveNewThreadProject,
 } from "./new-task-project-selection";
 
 function makeProject(
@@ -179,5 +180,43 @@ describe("filterProjectScopes", () => {
     expect(matches[0]).toBe(code);
     expect(getProjectScopeSelectionTarget(matches[0]!, EnvironmentId.make("mac"))).toBe(mac);
     expect(code.projects).toEqual([mac, server]);
+  });
+});
+
+describe("resolveNewThreadProject", () => {
+  const repositoryKey = "github.com/andrewcai8/t3code";
+  const onHost = makeProject("t3code-host", "host", { repositoryKey });
+  const onBox = makeProject("t3code-box", "box", { repositoryKey });
+  const other = makeProject("other-box", "box", { repositoryKey: "github.com/other/repo" });
+  const projects = [other, onHost, onBox];
+  const cloudOnlyHost = new Map([[EnvironmentId.make("host"), { localAgentRuns: false }]]);
+
+  it("moves a thread off a host that runs no agents to the same repository elsewhere", () => {
+    expect(
+      resolveNewThreadProject({ requested: onHost, projects, serverConfigs: cloudOnlyHost }),
+    ).toBe(onBox);
+  });
+
+  it("keeps a host that runs agents, as a local install does", () => {
+    expect(
+      resolveNewThreadProject({
+        requested: onHost,
+        projects,
+        serverConfigs: new Map([[EnvironmentId.make("host"), { localAgentRuns: true }]]),
+      }),
+    ).toBe(onHost);
+    expect(resolveNewThreadProject({ requested: onHost, projects, serverConfigs: new Map() })).toBe(
+      onHost,
+    );
+  });
+
+  it("stays when no other environment holds the repository", () => {
+    expect(
+      resolveNewThreadProject({
+        requested: onHost,
+        projects: [other, onHost],
+        serverConfigs: cloudOnlyHost,
+      }),
+    ).toBe(onHost);
   });
 });

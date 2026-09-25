@@ -2596,7 +2596,7 @@ export default function ChatView(props: ChatViewProps) {
     () =>
       newChatRunTargets({
         environments: logicalProjectEnvironments,
-        serverConfig: (environmentId) => environmentById.get(environmentId)?.serverConfig,
+        environmentState: (environmentId) => environmentById.get(environmentId),
         environmentId: activeThreadEnvironmentId,
         managerConfig: primaryEnvironment?.serverConfig,
       }),
@@ -4091,8 +4091,8 @@ export default function ChatView(props: ChatViewProps) {
     pickableEnvironments,
     setDraftThreadContext,
   ]);
-  // A draft on a host that runs no agents, with no cloud kind to start instead,
-  // moves to a machine that does run them.
+  // A draft on an expired box, or on a host that runs no agents with no cloud
+  // kind to start instead, moves to a machine that can take it.
   const redirectEnvironment =
     draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
       ? runTargets.redirect.environment
