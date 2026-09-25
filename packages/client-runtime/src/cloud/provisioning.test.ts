@@ -285,11 +285,15 @@ describe("offeredProvisionProviders", () => {
 describe("newChatRunTargets", () => {
   const host = { environmentId: EnvironmentId.make("host") };
   const laptop = { environmentId: EnvironmentId.make("laptop") };
+  const box = { environmentId: EnvironmentId.make("box") };
   type ManagerConfig = Pick<ServerConfig, "environmentControl" | "provisionProviders">;
   const manager: ManagerConfig = {
     environmentControl: true,
-    provisionProviders: ["namespace", "e2b"],
+    provisionProviders: ["e2b", "namespace"],
   };
+  const noCloud: ManagerConfig = { environmentControl: true, provisionProviders: [] };
+  const cloudOnlyHost = { serverConfig: { localAgentRuns: false } };
+  const expired = { connection: { blockedReason: "workspace-missing" as const } };
   const targets = (input: {
     readonly localAgentRuns: boolean | undefined;
     readonly environmentId?: EnvironmentId;
@@ -297,12 +301,12 @@ describe("newChatRunTargets", () => {
   }) =>
     newChatRunTargets({
       environments: [host, laptop],
-      serverConfig: (id) =>
+      environmentState: (id) =>
         id !== host.environmentId
-          ? { localAgentRuns: true }
+          ? { serverConfig: { localAgentRuns: true } }
           : input.localAgentRuns === undefined
             ? {}
-            : { localAgentRuns: input.localAgentRuns },
+            : { serverConfig: { localAgentRuns: input.localAgentRuns } },
       environmentId: input.environmentId ?? host.environmentId,
       managerConfig: input.managerConfig ?? manager,
     });
@@ -310,18 +314,16 @@ describe("newChatRunTargets", () => {
   it("hides a host without local runs and sends its chats to the first cloud kind", () => {
     expect(targets({ localAgentRuns: false })).toEqual({
       environments: [laptop],
-      cloudProviders: ["namespace", "e2b"],
-      redirect: { kind: "cloud", provider: "namespace" },
+      cloudProviders: ["e2b", "namespace"],
+      redirect: { kind: "cloud", provider: "e2b" },
     });
   });
 
   it("moves a host chat to an environment that runs agents when no cloud kind is offered", () => {
-    expect(
-      targets({
-        localAgentRuns: false,
-        managerConfig: { environmentControl: true, provisionProviders: [] },
-      }).redirect,
-    ).toEqual({ kind: "environment", environment: laptop });
+    expect(targets({ localAgentRuns: false, managerConfig: noCloud }).redirect).toEqual({
+      kind: "environment",
+      environment: laptop,
+    });
   });
 
   it("keeps a chat that points elsewhere where it is", () => {
@@ -334,7 +336,7 @@ describe("newChatRunTargets", () => {
     for (const localAgentRuns of [true, undefined]) {
       expect(targets({ localAgentRuns })).toEqual({
         environments: [host, laptop],
-        cloudProviders: ["namespace", "e2b"],
+        cloudProviders: ["e2b", "namespace"],
         redirect: null,
       });
     }
@@ -344,10 +346,78 @@ describe("newChatRunTargets", () => {
     expect(
       newChatRunTargets({
         environments: [host],
-        serverConfig: () => ({ localAgentRuns: false }),
+        environmentState: () => cloudOnlyHost,
         environmentId: host.environmentId,
-        managerConfig: { environmentControl: true, provisionProviders: [] },
+        managerConfig: noCloud,
       }),
     ).toEqual({ environments: [], cloudProviders: [], redirect: null });
+  });
+
+  describe("a chat on an expired box", () => {
+    const onExpiredBox = (input: {
+      readonly environments: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+      readonly hostRunsAgents: boolean;
+      readonly managerConfig: ManagerConfig;
+    }) =>
+      newChatRunTargets({
+        environments: input.environments,
+        environmentState: (id) =>
+          id === box.environmentId
+            ? expired
+            : id === host.environmentId && !input.hostRunsAgents
+              ? cloudOnlyHost
+              : {},
+        environmentId: box.environmentId,
+        managerConfig: input.managerConfig,
+      });
+
+    it("moves to a cloud-only host that can start a cloud kind instead", () => {
+      expect(
+        onExpiredBox({
+          environments: [host, laptop, box],
+          hostRunsAgents: false,
+          managerConfig: manager,
+        }),
+      ).toEqual({
+        environments: [laptop],
+        cloudProviders: ["e2b", "namespace"],
+        redirect: { kind: "environment", environment: host },
+      });
+    });
+
+    it("skips a cloud-only host that can start nothing", () => {
+      expect(
+        onExpiredBox({
+          environments: [host, laptop, box],
+          hostRunsAgents: false,
+          managerConfig: noCloud,
+        }).redirect,
+      ).toEqual({ kind: "environment", environment: laptop });
+    });
+
+    it("moves to a local install that runs agents", () => {
+      expect(
+        onExpiredBox({ environments: [host, box], hostRunsAgents: true, managerConfig: manager })
+          .redirect,
+      ).toEqual({ kind: "environment", environment: host });
+    });
+
+    it("stays when no live environment holds the project", () => {
+      expect(
+        onExpiredBox({ environments: [box], hostRunsAgents: true, managerConfig: manager }),
+      ).toEqual({ environments: [], cloudProviders: ["e2b", "namespace"], redirect: null });
+    });
+  });
+
+  it("keeps a chat on a box that is only disconnected", () => {
+    expect(
+      newChatRunTargets({
+        environments: [host, box],
+        environmentState: (id) =>
+          id === box.environmentId ? { connection: { blockedReason: "authentication" } } : {},
+        environmentId: box.environmentId,
+        managerConfig: manager,
+      }).redirect,
+    ).toBeNull();
   });
 });
