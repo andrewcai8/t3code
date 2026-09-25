@@ -1,6 +1,5 @@
-import { newChatRunTargets } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import type { HomeProjectScope } from "../home/homeThreadList";
@@ -107,34 +106,4 @@ export function resolveDraftProjectSelection(
 
   const onlyProject = getOnlySelectableProject(projectScopes);
   return onlyProject ? { kind: "select", project: onlyProject } : { kind: "pick" };
-}
-
-/**
- * The project a "new thread in this project" entry opens: the requested one,
- * unless a new chat cannot start on its environment (such as a host that only
- * provisions cloud machines). Then the same repository on the first
- * environment that runs agents, the default the New Task flow picks.
- */
-export function resolveNewThreadProject(input: {
-  readonly requested: EnvironmentProject;
-  readonly projects: ReadonlyArray<EnvironmentProject>;
-  readonly serverConfigs: ReadonlyMap<EnvironmentId, Pick<ServerConfig, "localAgentRuns">>;
-}): EnvironmentProject {
-  const repositoryKey = input.requested.repositoryIdentity?.canonicalKey ?? null;
-  const members =
-    repositoryKey === null
-      ? [input.requested]
-      : input.projects.filter(
-          (project) => project.repositoryIdentity?.canonicalKey === repositoryKey,
-        );
-  const { redirect } = newChatRunTargets({
-    environments: members.map((project) => ({ environmentId: project.environmentId, project })),
-    environmentState: (environmentId) => ({
-      serverConfig: input.serverConfigs.get(environmentId),
-    }),
-    environmentId: input.requested.environmentId,
-    // Mobile drafts cannot start a cloud machine; they move to one that exists.
-    managerConfig: null,
-  });
-  return redirect?.kind === "environment" ? redirect.environment.project : input.requested;
 }
