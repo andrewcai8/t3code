@@ -756,6 +756,29 @@ describe("Namespace runtime transport", () => {
     expect(cliTokens).toHaveLength(2);
   });
 
+  it("refuses calls a federated credential cannot finish or does not own", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-expiry-"));
+    cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));
+    const exp = Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1000) + 600;
+    const calls: ReadonlyArray<string>[] = [];
+    const session = await makeNamespaceAccountSession({
+      stateDir: directory,
+      token: `e30.${Buffer.from(encodeJson({ tenant_id: "tenant-test", exp })).toString("base64url")}.signature`,
+      execute: async ({ args }) => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "" };
+      },
+    });
+    // Ten minutes left covers a default five-minute command, not a twenty-minute preparation.
+    await session.run(["list"]);
+    await expect(session.run(["exec"], undefined, 1_200_000)).rejects.toThrow(
+      "expires within the 1200s",
+    );
+    expect(calls).toEqual([["list"]]);
+    const runtime = makeNamespaceProvisionRuntime({ session, stateDir: directory });
+    await expect(runtime.retainImportedLease(resource)).rejects.toThrow("user login");
+  });
+
   it("bounds a real stuck CLI process and removes its private credential staging", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-timeout-"));
     cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));

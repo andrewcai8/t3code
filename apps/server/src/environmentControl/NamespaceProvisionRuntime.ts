@@ -4,6 +4,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
+import { extractClaims } from "@namespacelabs/sdk/auth";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
 import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
@@ -49,6 +50,9 @@ const decodeExposure = Schema.decodeUnknownSync(
 );
 const decodeDescriptor = Schema.decodeUnknownSync(Schema.Struct({ environmentId: Schema.String }));
 const isNotFound = Schema.is(Schema.Struct({ code: Schema.Literal(5) }));
+const decodeExpiry = Schema.decodeUnknownSync(
+  Schema.Struct({ exp: Schema.optional(Schema.Finite) }),
+);
 
 function executeCli(binary: string, command: CliCommand): Promise<CliResult> {
   return new Promise((resolve, reject) => {
@@ -100,11 +104,24 @@ export async function makeNamespaceAccountSession(config: {
 }) {
   const source = namespaceTokenSource(config.token);
   const identity = await resolveNamespaceIdentity(await source.issueToken(60_000));
+  /**
+   * A bearer token file is returned as is, whatever duration is asked for, so
+   * its expiry is checked here: a call must not start on a token that dies
+   * before the call can finish.
+   */
   const verifiedToken = async (duration: number, force?: boolean) => {
     const token = await source.issueToken(duration, force);
     const current = await resolveNamespaceIdentity(token);
     if (current.creator !== identity.creator || current.tenantId !== identity.tenantId)
       throw new Error("Namespace account changed during the operation");
+    const { exp } = decodeExpiry(extractClaims(token));
+    if (
+      exp !== undefined &&
+      exp * 1000 - (await Effect.runPromise(Clock.currentTimeMillis)) < duration
+    )
+      throw new Error(
+        `Namespace credential expires within the ${Math.ceil(duration / 1000)}s this call needs; refresh the Namespace token`,
+      );
     return token;
   };
   const client = createClient(
@@ -133,13 +150,15 @@ export async function makeNamespaceAccountSession(config: {
     await NodeFSP.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
     const directory = await NodeFSP.mkdtemp(NodePath.join(config.stateDir, "namespace-cli-"));
     try {
+      const limitMs = timeoutMs ?? config.commandTimeoutMs ?? 300_000;
       const tokenFile = NodePath.join(directory, "token.json");
+      // The CLI holds this token for the whole command, up to its timeout.
       await NodeFSP.writeFile(
         tokenFile,
-        encodeJson({ bearer_token: await verifiedToken(60_000) }),
+        encodeJson({ bearer_token: await verifiedToken(limitMs) }),
         { mode: 0o600 },
       );
-      const timeout = AbortSignal.timeout(timeoutMs ?? config.commandTimeoutMs ?? 300_000);
+      const timeout = AbortSignal.timeout(limitMs);
       const command = {
         args,
         env: { ...process.env, NSC_TOKEN_FILE: tokenFile },
@@ -679,8 +698,14 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       await retain(instanceId, operation.request.retentionDeadline);
       return "running" as const;
     },
-    /** Only the registry's imported legacy lease IDs may call this operation-independent path. */
+    /**
+     * Only the registry's imported legacy lease IDs may call this
+     * operation-independent path. Those Macs were all created private under a
+     * user login, so a credential with no actor cannot own them.
+     */
     retainImportedLease: async (resource: ImportedNamespaceResource) => {
+      if (config.session.identity.creator === undefined)
+        throw new Error("Imported Namespace leases need the user login that created them");
       const response = await config.session.client.fetch(
         { id: resource.devboxId, returnActivatedInstance: true },
         { timeoutMs: 30_000 },
@@ -688,8 +713,7 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       if (
         response.devbox?.id !== resource.devboxId ||
         (resource.devboxName !== undefined && response.devbox.name !== resource.devboxName) ||
-        (config.session.identity.creator !== undefined &&
-          response.devbox.creator !== config.session.identity.creator) ||
+        response.devbox.creator !== config.session.identity.creator ||
         response.devbox.site !== resource.region ||
         !response.instanceId ||
         response.instanceId !== resource.instanceId

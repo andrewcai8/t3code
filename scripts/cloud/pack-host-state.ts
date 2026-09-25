@@ -59,6 +59,11 @@ export interface PackInput {
    * with `XDG_CONFIG_HOME=<baseDir>`.
    */
   readonly namespaceSession?: string | undefined;
+  /**
+   * The host keeps its own federated Namespace token at
+   * `<baseDir>/ns/token.json`, so the settings travel with no packed credential.
+   */
+  readonly namespaceFederated?: boolean | undefined;
 }
 
 export interface HostState {
@@ -161,7 +166,13 @@ export async function packHostState(input: PackInput): Promise<HostState> {
 
   const provisioning = config.provisioning;
   const namespaceToken = config.namespaceToken;
-  const namespaceAuthorized = Boolean(namespaceToken || input.namespaceSession);
+  if (input.namespaceFederated && (namespaceToken || input.namespaceSession))
+    throw new Error(
+      "--namespace-federated reads the host's own token file; drop namespaceToken and --namespace-session",
+    );
+  const namespaceAuthorized = Boolean(
+    namespaceToken || input.namespaceSession || input.namespaceFederated,
+  );
   // A repository entry's `workspaceFiles` name paths on this machine, so only
   // its Namespace settings travel. Their artifact paths live in Namespace's
   // storage, not on disk.
@@ -252,7 +263,7 @@ export async function writeSeedArchive(input: {
 
 const USAGE = `Usage: node scripts/cloud/pack-host-state.ts --output FILE.tgz --base-dir DIR
        --broker-url https://HOST [--config FILE] [--settings FILE] [--accounts ID,ID,...]
-       [--namespace-session FILE]
+       [--namespace-session FILE | --namespace-federated]
 
 Packs a provisioning host's state as a seed tarball rooted at --base-dir, for
 a container that runs the linux runtime artifact baked into its image. The
@@ -261,7 +272,10 @@ Namespace (macOS) settings are carried only with a namespaceToken in the
 config or a --namespace-session, the token.json of an \`nsc login\` (on macOS,
 ~/Library/Application Support/ns/token.json). Its session token lands at
 <base-dir>/ns/token.json, so run the host with XDG_CONFIG_HOME=<base-dir>, and
-re-pack after each monthly login. Runtime artifacts are never carried; the
+re-pack after each monthly login. --namespace-federated carries the settings
+with no credential, for a host that keeps a federated workload token at that
+same path itself. The workspace is whichever tenant the credential names;
+Namespace settings do not choose one. Runtime artifacts are never carried; the
 host adds its own.`;
 
 if (import.meta.main) {
@@ -280,6 +294,7 @@ if (import.meta.main) {
       },
       accounts: { type: "string" },
       "namespace-session": { type: "string" },
+      "namespace-federated": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -305,6 +320,7 @@ if (import.meta.main) {
     baseDir,
     skillsDir: NodePath.posix.join(baseDir, "skills"),
     namespaceSession: values["namespace-session"],
+    namespaceFederated: values["namespace-federated"],
   });
   for (const { id, reason } of state.skipped) console.log(`skipping ${id}: ${reason}`);
   console.log(`carrying accounts ${state.accounts.join(", ")}`);
