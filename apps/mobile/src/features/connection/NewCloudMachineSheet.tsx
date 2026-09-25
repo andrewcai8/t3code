@@ -23,9 +23,9 @@ import {
 import { createCloudMachineProgressText, useCreateCloudMachine } from "./useCreateCloudMachine";
 
 /**
- * Starts a cloud machine from the phone: pick a repository to clone, where to run it, and which
- * account its agent signs in as. The manager does the work, so this closes once the machine is
- * joined and its checkout has landed — at which point a new task can be started on it normally.
+ * Starts a cloud machine from Settings. The manager does the work, so this closes once the
+ * machine is joined and its checkout has landed — at which point a new task can be started on
+ * it normally.
  */
 export function NewCloudMachineSheet(props: {
   readonly managerId: EnvironmentId;
@@ -34,38 +34,12 @@ export function NewCloudMachineSheet(props: {
   readonly onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
-  const projects = useProjects();
-  const serverConfig = useEnvironmentServerConfig(props.managerId);
-  const repositories = useMemo(
-    () =>
-      cloudMachineRepositoryOptions(
-        projects.filter((project) => project.environmentId === props.managerId),
-      ),
-    [projects, props.managerId],
-  );
-  const accounts = useMemo(
-    () => cloudMachineAccountOptions(serverConfig?.providers ?? []),
-    [serverConfig?.providers],
-  );
-  const [repository, setRepository] = useState<string | null>(null);
-  const providers = offeredProvisionProviders(serverConfig);
-  const [provider, setProvider] = useState<CloudMachineProvider | null>(null);
-  const [account, setAccount] = useState<CloudMachineAccountOption | null>(null);
-  const selectedAccount = account ?? defaultCloudMachineAccount(accounts);
-  const selectedRepository = repository ?? defaultCloudMachineRepository(repositories);
-  const selectedProvider = provider ?? providers[0] ?? null;
-  const selection = {
-    repository: selectedRepository,
-    provider: selectedProvider,
-    account: selectedAccount,
-  };
-  const blockReason = cloudMachineBlockReason(selection);
-  const { state, create, dismissError } = useCreateCloudMachine({
+  const creation = useCreateCloudMachine({
     managerId: props.managerId,
     connectedEnvironments: props.connectedEnvironments,
     onCreated: props.onClose,
   });
-  const working = state.kind === "working";
+  const working = creation.state.kind === "working";
 
   return (
     <Modal
@@ -87,113 +61,165 @@ export function NewCloudMachineSheet(props: {
             <Text className="text-base text-primary">Cancel</Text>
           </Pressable>
         </View>
-        <Text className="px-5 pb-3 text-sm text-foreground-muted">
-          {props.managerLabel} starts the machine and this device joins it. It keeps running when
-          this app is closed.
-        </Text>
-
-        <ScrollView className="flex-1" contentContainerClassName="gap-5 px-5 pb-8">
-          <Section title="Repository">
-            {repositories.length === 0 ? (
-              <Empty text="No project on this manager has a git remote to clone." />
-            ) : (
-              repositories.map((option, index) => (
-                <Choice
-                  key={option.repository}
-                  title={option.repository}
-                  subtitle={option.projectTitles.join(", ")}
-                  selected={selectedRepository === option.repository}
-                  borderTop={index !== 0}
-                  disabled={working}
-                  onPress={() => setRepository(option.repository)}
-                />
-              ))
-            )}
-          </Section>
-
-          <Section title="Run on">
-            {providers.map((candidate, index) => (
-              <Choice
-                key={candidate}
-                title={CLOUD_MACHINE_PROVIDER_LABELS[candidate]}
-                subtitle={candidate === "namespace" ? "macOS, for Apple builds" : "Linux"}
-                selected={selectedProvider === candidate}
-                borderTop={index !== 0}
-                disabled={working}
-                onPress={() => setProvider(candidate)}
-              />
-            ))}
-          </Section>
-
-          <Section title="Account">
-            {accounts.length === 0 ? (
-              <Empty text="No provider account on this manager is ready to run an agent." />
-            ) : (
-              accounts.map((option, index) => (
-                <Choice
-                  key={option.instanceId}
-                  title={option.label}
-                  {...(cloudMachineAccountDetail(option)
-                    ? { subtitle: cloudMachineAccountDetail(option) as string }
-                    : {})}
-                  selected={selectedAccount?.instanceId === option.instanceId}
-                  borderTop={index !== 0}
-                  disabled={working}
-                  onPress={() => setAccount(option)}
-                />
-              ))
-            )}
-          </Section>
-
-          {state.kind === "failed" ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Dismiss error"
-              onPress={dismissError}
-              className="rounded-[20px] bg-card p-4"
-            >
-              <Text className="text-sm text-danger">{state.message}</Text>
-            </Pressable>
-          ) : null}
-        </ScrollView>
-
-        <View className="gap-3 border-t border-border px-5 pt-4">
-          {working && selectedProvider !== null ? (
-            <View className="flex-row items-center gap-3">
-              <ActivityIndicator colorClassName="accent-icon" size="small" />
-              <Text className="flex-1 text-sm text-foreground-muted">
-                {createCloudMachineProgressText(state.phase, selectedProvider)}
-              </Text>
-            </View>
-          ) : blockReason !== null ? (
-            <Text className="text-sm text-foreground-muted">{blockReason}</Text>
-          ) : null}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Create cloud machine"
-            disabled={working || blockReason !== null}
-            onPress={() => {
-              if (
-                selection.repository === null ||
-                selection.provider === null ||
-                selection.account === null
-              )
-                return;
-              void create({
-                repository: selection.repository,
-                provider: selection.provider,
-                account: selection.account,
-              });
-            }}
-            className="min-h-12 items-center justify-center rounded-full bg-primary active:opacity-80 disabled:opacity-50"
-          >
-            <Text className="text-base font-t3-bold text-primary-foreground">
-              {working ? "Starting…" : "Create machine"}
-            </Text>
-          </Pressable>
-        </View>
+        <NewCloudMachineForm
+          managerId={props.managerId}
+          managerLabel={props.managerLabel}
+          creation={creation}
+        />
       </View>
     </Modal>
+  );
+}
+
+/**
+ * Picks what a cloud machine needs — a repository to clone, where to run it, and which account
+ * its agent signs in as — and starts it through `creation`, which the host screen owns so it
+ * can decide what happens once the machine is ready.
+ */
+export function NewCloudMachineForm(props: {
+  readonly managerId: EnvironmentId;
+  readonly managerLabel: string;
+  /** The repository to start on, such as the project a new thread was asked for. */
+  readonly initialRepository?: string;
+  readonly creation: ReturnType<typeof useCreateCloudMachine>;
+}) {
+  const projects = useProjects();
+  const serverConfig = useEnvironmentServerConfig(props.managerId);
+  const repositories = useMemo(
+    () =>
+      cloudMachineRepositoryOptions(
+        projects.filter((project) => project.environmentId === props.managerId),
+      ),
+    [projects, props.managerId],
+  );
+  const accounts = useMemo(
+    () => cloudMachineAccountOptions(serverConfig?.providers ?? []),
+    [serverConfig?.providers],
+  );
+  const [repository, setRepository] = useState<string | null>(props.initialRepository ?? null);
+  const providers = offeredProvisionProviders(serverConfig);
+  const [provider, setProvider] = useState<CloudMachineProvider | null>(null);
+  const [account, setAccount] = useState<CloudMachineAccountOption | null>(null);
+  const selectedAccount = account ?? defaultCloudMachineAccount(accounts);
+  const selectedRepository = repository ?? defaultCloudMachineRepository(repositories);
+  const selectedProvider = provider ?? providers[0] ?? null;
+  const selection = {
+    repository: selectedRepository,
+    provider: selectedProvider,
+    account: selectedAccount,
+  };
+  const blockReason = cloudMachineBlockReason(selection);
+  const { state, create, dismissError } = props.creation;
+  const working = state.kind === "working";
+
+  return (
+    <>
+      <Text className="px-5 pb-3 text-sm text-foreground-muted">
+        {props.managerLabel} starts the machine and this device joins it. It keeps running when this
+        app is closed.
+      </Text>
+
+      <ScrollView className="flex-1" contentContainerClassName="gap-5 px-5 pb-8">
+        <Section title="Repository">
+          {repositories.length === 0 ? (
+            <Empty text="No project on this manager has a git remote to clone." />
+          ) : (
+            repositories.map((option, index) => (
+              <Choice
+                key={option.repository}
+                title={option.repository}
+                subtitle={option.projectTitles.join(", ")}
+                selected={selectedRepository === option.repository}
+                borderTop={index !== 0}
+                disabled={working}
+                onPress={() => setRepository(option.repository)}
+              />
+            ))
+          )}
+        </Section>
+
+        <Section title="Run on">
+          {providers.map((candidate, index) => (
+            <Choice
+              key={candidate}
+              title={CLOUD_MACHINE_PROVIDER_LABELS[candidate]}
+              subtitle={candidate === "namespace" ? "macOS, for Apple builds" : "Linux"}
+              selected={selectedProvider === candidate}
+              borderTop={index !== 0}
+              disabled={working}
+              onPress={() => setProvider(candidate)}
+            />
+          ))}
+        </Section>
+
+        <Section title="Account">
+          {accounts.length === 0 ? (
+            <Empty text="No provider account on this manager is ready to run an agent." />
+          ) : (
+            accounts.map((option, index) => (
+              <Choice
+                key={option.instanceId}
+                title={option.label}
+                {...(cloudMachineAccountDetail(option)
+                  ? { subtitle: cloudMachineAccountDetail(option) as string }
+                  : {})}
+                selected={selectedAccount?.instanceId === option.instanceId}
+                borderTop={index !== 0}
+                disabled={working}
+                onPress={() => setAccount(option)}
+              />
+            ))
+          )}
+        </Section>
+
+        {state.kind === "failed" ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss error"
+            onPress={dismissError}
+            className="rounded-[20px] bg-card p-4"
+          >
+            <Text className="text-sm text-danger">{state.message}</Text>
+          </Pressable>
+        ) : null}
+      </ScrollView>
+
+      <View className="gap-3 border-t border-border px-5 pt-4">
+        {working && selectedProvider !== null ? (
+          <View className="flex-row items-center gap-3">
+            <ActivityIndicator colorClassName="accent-icon" size="small" />
+            <Text className="flex-1 text-sm text-foreground-muted">
+              {createCloudMachineProgressText(state.phase, selectedProvider)}
+            </Text>
+          </View>
+        ) : blockReason !== null ? (
+          <Text className="text-sm text-foreground-muted">{blockReason}</Text>
+        ) : null}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Create cloud machine"
+          disabled={working || blockReason !== null}
+          onPress={() => {
+            if (
+              selection.repository === null ||
+              selection.provider === null ||
+              selection.account === null
+            )
+              return;
+            void create({
+              repository: selection.repository,
+              provider: selection.provider,
+              account: selection.account,
+            });
+          }}
+          className="min-h-12 items-center justify-center rounded-full bg-primary active:opacity-80 disabled:opacity-50"
+        >
+          <Text className="text-base font-t3-bold text-primary-foreground">
+            {working ? "Starting…" : "Create machine"}
+          </Text>
+        </Pressable>
+      </View>
+    </>
   );
 }
 

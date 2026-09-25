@@ -1,5 +1,6 @@
+import { offeredProvisionProviders, runsLocalAgents } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { cloneRepository, type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import type { HomeProjectScope } from "../home/homeThreadList";
@@ -106,4 +107,29 @@ export function resolveDraftProjectSelection(
 
   const onlyProject = getOnlySelectableProject(projectScopes);
   return onlyProject ? { kind: "select", project: onlyProject } : { kind: "pick" };
+}
+
+export type NewThreadStart =
+  | { readonly kind: "draft" }
+  | { readonly kind: "cloud-machine"; readonly repository: string };
+
+/**
+ * How a new thread in `project` starts. A host that runs no agents but can provision refuses a
+ * draft on itself, so the thread starts by cloning the project's repository onto a new cloud
+ * machine. Everywhere else, and for a project with no repository to clone, it opens a draft on
+ * the project as before.
+ */
+export function resolveNewThreadStart(
+  project: Pick<EnvironmentProject, "repositoryIdentity">,
+  hostConfig:
+    | Pick<ServerConfig, "localAgentRuns" | "environmentControl" | "provisionProviders">
+    | null
+    | undefined,
+): NewThreadStart {
+  const repository = cloneRepository(project.repositoryIdentity);
+  return repository !== undefined &&
+    !runsLocalAgents(hostConfig) &&
+    offeredProvisionProviders(hostConfig).length > 0
+    ? { kind: "cloud-machine", repository }
+    : { kind: "draft" };
 }

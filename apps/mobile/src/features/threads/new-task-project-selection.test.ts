@@ -8,6 +8,7 @@ import {
   getProjectScopeSelectionTarget,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
+  resolveNewThreadStart,
 } from "./new-task-project-selection";
 
 function makeProject(
@@ -179,5 +180,42 @@ describe("filterProjectScopes", () => {
     expect(matches[0]).toBe(code);
     expect(getProjectScopeSelectionTarget(matches[0]!, EnvironmentId.make("mac"))).toBe(mac);
     expect(code.projects).toEqual([mac, server]);
+  });
+});
+
+describe("resolveNewThreadStart", () => {
+  const onHost = makeProject("t3code", "host", { repositoryKey: "github.com/andrewcai8/t3code" });
+  const project = {
+    ...onHost,
+    repositoryIdentity: { ...onHost.repositoryIdentity!, owner: "andrewcai8", name: "t3code" },
+  };
+  const cloudOnlyHost = {
+    localAgentRuns: false,
+    environmentControl: true,
+    provisionProviders: ["e2b", "namespace"] as const,
+  };
+
+  it("starts a cloud machine from a host that runs no agents but can provision", () => {
+    expect(resolveNewThreadStart(project, cloudOnlyHost)).toEqual({
+      kind: "cloud-machine",
+      repository: "andrewcai8/t3code",
+    });
+  });
+
+  it("opens a draft on a host that runs agents, or predates the switch", () => {
+    expect(resolveNewThreadStart(project, { ...cloudOnlyHost, localAgentRuns: true })).toEqual({
+      kind: "draft",
+    });
+    expect(resolveNewThreadStart(project, { environmentControl: true })).toEqual({ kind: "draft" });
+    expect(resolveNewThreadStart(project, null)).toEqual({ kind: "draft" });
+  });
+
+  it("opens a draft when the host cannot provision or there is nothing to clone", () => {
+    expect(resolveNewThreadStart(project, { ...cloudOnlyHost, provisionProviders: [] })).toEqual({
+      kind: "draft",
+    });
+    expect(resolveNewThreadStart(makeProject("scratch", "host"), cloudOnlyHost)).toEqual({
+      kind: "draft",
+    });
   });
 });

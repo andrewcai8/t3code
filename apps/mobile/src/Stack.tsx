@@ -50,6 +50,7 @@ import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestin
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
 import { AddProjectRepositoryRoute } from "./features/projects/AddProjectRepositoryRoute";
 import { AddProjectSourceRoute } from "./features/projects/AddProjectSourceRoute";
+import { NewTaskCloudMachineRouteScreen } from "./features/threads/NewTaskCloudMachineRouteScreen";
 import { NewTaskDraftRouteScreen } from "./features/threads/NewTaskDraftRouteScreen";
 import {
   NewTaskBranchPickerRouteScreen,
@@ -378,6 +379,13 @@ const NewTaskSheetStack = createNativeStackNavigator({
       options: {
         headerBackVisible: false,
         title: "",
+      },
+    }),
+    NewTaskCloudMachine: createNativeStackScreen({
+      screen: NewTaskCloudMachineRouteScreen,
+      linking: "cloud-machine",
+      options: {
+        title: "New cloud machine",
       },
     }),
     NewTaskEnvironment: createNativeStackScreen({

@@ -30,6 +30,7 @@ import { useSavedRemoteConnections } from "../../state/use-remote-environment-re
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { ThreadSearchMatchExcerpt } from "../threads/thread-search-match";
+import { useNewThreadNavigation } from "../threads/use-new-thread-navigation";
 import {
   filterCommandPaletteItems,
   nextPaletteIndex,
@@ -137,6 +138,7 @@ export function CommandPalette(props: {
   readonly onCommand: (command: HardwareKeyboardCommand) => void;
 }) {
   const navigation = useNavigation();
+  const { newThreadInProject } = useNewThreadNavigation();
   const { themeVariables } = useAppearancePreferences();
   const { selectThread } = useAdaptiveWorkspaceLayout();
   const runCommand = props.onCommand;
@@ -260,15 +262,7 @@ export function CommandPalette(props: {
         kind: "action",
         title: `New thread in ${activeProject.title}`,
         searchTerms: ["new task", "chat", "create"],
-        run: () =>
-          navigation.navigate("NewTaskSheet", {
-            screen: "NewTaskDraft",
-            params: {
-              environmentId: activeProject.environmentId,
-              projectId: activeProject.id,
-              title: activeProject.title,
-            },
-          }),
+        run: () => newThreadInProject(activeProject),
       });
     }
     if (activeThreadRef) {
@@ -294,15 +288,7 @@ export function CommandPalette(props: {
       title: project.title,
       detail: `New thread · ${savedConnectionsById[project.environmentId]?.environmentLabel ?? project.environmentId}`,
       searchTerms: [project.workspaceRoot, "new thread", "project"],
-      run: () =>
-        navigation.navigate("NewTaskSheet", {
-          screen: "NewTaskDraft",
-          params: {
-            environmentId: project.environmentId,
-            projectId: project.id,
-            title: project.title,
-          },
-        }),
+      run: () => newThreadInProject(project),
     }));
     const threadItems: CommandPaletteItem[] = threads
       .filter((thread) => thread.archivedAt === null)
@@ -334,6 +320,7 @@ export function CommandPalette(props: {
     activeThread,
     activeThreadRef,
     navigation,
+    newThreadInProject,
     projects,
     runCommand,
     savedConnectionsById,
