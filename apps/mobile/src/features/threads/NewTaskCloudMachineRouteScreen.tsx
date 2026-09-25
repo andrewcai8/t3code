@@ -51,7 +51,7 @@ function NewTaskCloudMachine({
   const manager = useSavedRemoteConnection(managerId);
   const { connectedEnvironments } = useRemoteConnectionStatus();
   // Leaving is allowed while the machine starts: it keeps starting and appears under
-  // Connections, but nothing opens a draft for a screen the user already left.
+  // Connections, but nothing opens a draft for a screen the user left or moved past.
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -61,7 +61,9 @@ function NewTaskCloudMachine({
   }, []);
   const onCreated = useCallback(
     (projectRef: ScopedProjectRef) => {
-      if (!mounted.current) return;
+      // A screen pushed over this one (such as another project's draft opened from the
+      // sidebar) is where the user is now; resetting the sheet would throw it away.
+      if (!mounted.current || !navigation.isFocused()) return;
       const title = readProject(projectRef)?.title;
       navigation.dispatch(
         CommonActions.reset({

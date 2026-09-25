@@ -57,6 +57,11 @@ export function readProject(ref: ScopedProjectRef): EnvironmentProject | null {
   return appAtomRegistry.get(environmentProjects.projectAtom(ref));
 }
 
+/** The environment's server config as the live client store holds it now. */
+export function readServerConfig(environmentId: EnvironmentId): ServerConfig | null {
+  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId) ?? null;
+}
+
 export function useProjects(): ReadonlyArray<EnvironmentProject> {
   return useAtomValue(environmentProjects.projectsAtom);
 }

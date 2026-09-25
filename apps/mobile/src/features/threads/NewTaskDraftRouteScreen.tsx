@@ -157,7 +157,8 @@ export function NewTaskDraftRouteScreen({ route }: StaticScreenProps<NewTaskDraf
           : initialProjectRef,
     [initialProjectRef, keepsDefaultBranch, result],
   );
-  // Send/queue remain unavailable on failure while the unlocked route closes.
+  // Send/queue stay unavailable until the checkout lands. A failure closes the route, or, for
+  // an optional branch, opens the draft on the default branch.
   const preparingBranch =
     checkoutPending || (needsPreparation && result?._tag !== "Success" && !keepsDefaultBranch);
 
