@@ -659,6 +659,8 @@ export const make = Effect.gen(function* () {
       });
     }
     for (const { dir, account } of accounts) {
+      // No saved login means there is no account source to report, not a setup error.
+      if (account.missing && account.error === null) continue;
       if (account.accountKey !== null && readAccounts.has(account.accountKey)) continue;
       if (account.accountKey !== null && account.error === null && !account.missing) continue;
       scanned.push({
