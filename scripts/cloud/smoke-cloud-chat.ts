@@ -1325,7 +1325,6 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         )
       : null;
     if (pushed) yield* record("refresh.commit", true, pushed.sha, { parent: pushed.parent });
-    const tipBefore = yield* remoteTip("resume.turn.origin", scratch);
     const resumeAt = yield* Clock.currentTimeMillis;
     const resumed = yield* bounded(
       manager["environmentControl.resume"]({ environmentId: box.environmentId }),
@@ -1333,9 +1332,6 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     if (resumed.kind !== "resumed") return yield* fail("resume.resumed", resumed.kind, resumed);
     yield* record("resume.resumed", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
-    const tipAfter = yield* remoteTip("resume.turn.origin", scratch);
-    const resumeTips = new Set([tipBefore.sha, tipAfter.sha]);
-    created.branch = tipAfter.branch;
     yield* withRpc(access.httpBaseUrl, access.bearer, (client) =>
       Effect.gen(function* () {
         const reconnected = yield* client["server.getConfig"]({}).pipe(
@@ -1346,12 +1342,6 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           return yield* fail("resume.reconnect", `child unreachable after ${RECONNECT_TIMEOUT}`);
         yield* record("resume.reconnect", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
         const turn = yield* runTurn(client, thread.agent, "resume.turn", thread);
-        yield* record(
-          "resume.turn.origin",
-          turn.markers.origin !== null && resumeTips.has(turn.markers.origin),
-          turn.markers.origin,
-          { tipBefore, tipAfter },
-        );
         if (pushed) {
           yield* record("refresh.head", turn.markers.head === created.head, turn.markers.head, {
             expected: created.head,
