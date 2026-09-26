@@ -22,6 +22,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/storage"
   | "/settings/connections"
+  | "/settings/automations"
   | "/settings/archived";
 
 /**
@@ -91,6 +92,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
   "/settings/connections": "Connections",
+  "/settings/automations": "Automations",
   "/settings/archived": "Archive",
 };
 
@@ -797,6 +799,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["pull request trusted environments shared credentials permissions read actions"],
   },
   {
+    id: "automations",
+    title: "Automations",
+    to: "/settings/automations",
+    searchTerms: ["schedule cron webhook recurring prompt cloud agent e2b mac run now"],
+  },
+  {
     id: "archive",
     title: "Archived threads",
     to: "/settings/archived",
@@ -821,6 +829,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
   "/settings/connections": "connections",
+  "/settings/automations": null,
   "/settings/archived": "project-defaults",
 };
 
