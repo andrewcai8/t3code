@@ -41,7 +41,7 @@ curl -X POST "$AUTOMATION_LINK" -H "Content-Type: application/json" -d '{"issue"
 ```
 
 The request body is added to the prompt as context. JSON and plain text both work, and only about
-the first 16 KB is used. Each automation accepts 20 webhook runs per hour. Calls beyond that
+the first 16 KB is used. Bodies over 64 KB are refused with `413`. Each automation accepts 20 webhook runs per hour. Calls beyond that
 return `429`.
 
 If the link leaks, choose **Rotate webhook link** from the automation's menu. The old link stops
@@ -66,3 +66,6 @@ While the web or desktop app is open and visible, it checks the host about once 
 the chats of up to 10 of the newest runs started in the last 24 hours to the sidebar. A run's
 machine pauses when idle until you open its chat, after which it stays awake while the app is open.
 If you remove a run's environment from your sidebar, it stays removed.
+
+Each run's machine, and the chat on it, is removed 24 hours after the run started. Work the agent
+pushed, such as a branch or a pull request, stays on GitHub.
