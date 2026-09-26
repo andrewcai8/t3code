@@ -200,6 +200,40 @@ describe("durable cloud provisioning", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("logs why a provisioning phase failed", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const p = provider("prepare");
+      const logs: { message: unknown; annotations: Readonly<Record<string, unknown>> }[] = [];
+      const logger = Logger.make(({ fiber, message }) => {
+        logs.push({ message, annotations: fiber.getRef(References.CurrentLogAnnotations) });
+      });
+      yield* ensure().pipe(
+        Effect.provide(
+          Layer.merge(
+            makeLayer(file, p.ports),
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
+        Effect.scoped,
+      );
+      const prepare = logs
+        .filter((log) => Array.isArray(log.message) && log.message[0] === "provision phase")
+        .map(({ annotations: { durationMs: _, ...phase } }) => phase)
+        .filter((phase) => phase.phase === "prepare");
+      expect(prepare).toEqual([
+        {
+          requestId: request.requestId,
+          provider: "e2b",
+          phase: "prepare",
+          failed: true,
+          errorTag: "ProvisionProviderError",
+          error: "Response lost after provider committed",
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("a fork parent that cannot be killed does not block the ready child", () =>
     Effect.gen(function* () {
       const file = yield* temporaryDatabase;

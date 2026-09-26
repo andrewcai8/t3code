@@ -118,6 +118,7 @@ async function fixture() {
       DateTime.makeUnsafe(DateTime.toEpochMillis(DateTime.nowUnsafe()) + 60_000),
     ),
     staleReadback: false,
+    acknowledge: true,
     capOffset: 0,
     lifetimeCap: Number.POSITIVE_INFINITY,
     destroyed: false,
@@ -164,15 +165,20 @@ async function fixture() {
         return;
       }
       if (method === "ExtendInstance") {
+        // Namespace answers a request it does not apply with no deadline at all.
+        if (!state.acknowledge) {
+          response.end(encodeJson({}));
+          return;
+        }
         const requested = decodeExtensionRequest(body).newDeadline;
         const newDeadline = DateTime.formatIso(
           DateTime.makeUnsafe(
-            (requested
-              ? DateTime.toEpochMillis(DateTime.makeUnsafe(requested))
-              : Math.min(
-                  state.lifetimeCap,
-                  DateTime.toEpochMillis(DateTime.nowUnsafe()) + 21_600_000,
-                )) + state.capOffset,
+            Math.min(
+              state.lifetimeCap,
+              requested
+                ? DateTime.toEpochMillis(DateTime.makeUnsafe(requested))
+                : DateTime.toEpochMillis(DateTime.nowUnsafe()) + 21_600_000,
+            ) + state.capOffset,
           ),
         );
         if (!state.staleReadback) state.deadline = newDeadline;
@@ -602,26 +608,55 @@ describe("Namespace runtime transport", () => {
     expect(f.state.deadline).toBe(deadline);
   });
 
-  it.each([-1000, 1000])(
-    "rejects an acknowledgment offset from the cap by %i milliseconds",
-    async (offset) => {
-      const f = await fixture();
-      f.state.capOffset = offset;
-      const deadline = DateTime.formatIso(
-        DateTime.makeUnsafe(DateTime.toEpochMillis(DateTime.nowUnsafe()) + 3_600_000),
-      );
-      const operation = decodeOperation({
-        ...f.operation,
-        request: { ...f.request, retentionDeadline: deadline },
-      });
-      const runtime = makeNamespaceProvisionRuntime({
-        session: f.session,
-        getIngressAuthorization: async () => "Bearer private-ingress",
-        stateDir: f.directory,
-      });
-      await expect(runtime.touch(operation, resource)).rejects.toThrow(ProvisionRetentionError);
-    },
-  );
+  it("accepts a deadline Namespace caps below a later retention deadline", async () => {
+    const f = await fixture();
+    const created = DateTime.toEpochMillis(DateTime.nowUnsafe()) - 60_000;
+    f.state.deadline = DateTime.formatIso(DateTime.makeUnsafe(created + 600_000));
+    f.state.lifetimeCap = created + 18_000_000;
+    const deadline = DateTime.formatIso(DateTime.makeUnsafe(created + 86_400_000));
+    const operation = decodeOperation({
+      ...f.operation,
+      request: { ...f.request, retentionDeadline: deadline },
+    });
+    const runtime = makeNamespaceProvisionRuntime({
+      session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
+      stateDir: f.directory,
+    });
+    expect(await runtime.touch(operation, resource)).toBe("running");
+    expect(await runtime.touch(operation, resource)).toBe("running");
+    expect(f.state.deadline).toBe(DateTime.formatIso(DateTime.makeUnsafe(created + 18_000_000)));
+    expect(
+      f.apiCalls.filter(({ method }) => method === "ExtendInstance").map(({ body }) => body),
+    ).toEqual([
+      { instanceId: "owned-instance", newDeadline: deadline },
+      { instanceId: "owned-instance", newDeadline: deadline },
+    ]);
+  });
+
+  it.each([
+    { name: "later than the retention deadline", capOffset: 1000, lifetimeCap: Infinity },
+    { name: "already past", capOffset: 0, lifetimeCap: -60_000 },
+    { name: "missing", capOffset: 0, lifetimeCap: Infinity, acknowledge: false },
+  ])("refuses a Namespace acknowledgment that is $name", async (acknowledgment) => {
+    const f = await fixture();
+    const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
+    f.state.capOffset = acknowledgment.capOffset;
+    f.state.lifetimeCap = now + acknowledgment.lifetimeCap;
+    f.state.acknowledge = acknowledgment.acknowledge ?? true;
+    const deadline = DateTime.formatIso(DateTime.makeUnsafe(now + 3_600_000));
+    const operation = decodeOperation({
+      ...f.operation,
+      request: { ...f.request, retentionDeadline: deadline },
+    });
+    const runtime = makeNamespaceProvisionRuntime({
+      session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
+      stateDir: f.directory,
+    });
+    await expect(runtime.touch(operation, resource)).rejects.toThrow(ProvisionRetentionError);
+    expect(f.apiCalls.filter(({ method }) => method === "ExtendInstance")).toHaveLength(1);
+  });
 
   it("rejects cap acknowledgment when provider readback still exceeds the cap", async () => {
     const f = await fixture();
