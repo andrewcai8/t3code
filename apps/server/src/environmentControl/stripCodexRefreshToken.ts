@@ -10,7 +10,7 @@
  * string would instead get a 400 that Codex treats as transient and retries
  * on every request.
  */
-export const UNREDEEMABLE_CODEX_REFRESH_TOKEN = "t3-copy-cannot-refresh";
+const UNREDEEMABLE_CODEX_REFRESH_TOKEN = "t3-copy-cannot-refresh";
 
 /** Text Codex could not load, or a login without a refresh token, is returned unchanged. */
 export function stripCodexRefreshToken(authJson: string): string {
