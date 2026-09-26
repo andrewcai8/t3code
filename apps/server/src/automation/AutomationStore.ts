@@ -126,7 +126,7 @@ const decodeRunRow = Schema.decodeUnknownExit(
         Schema.Boolean,
         SchemaTransformation.transform({
           decode: (flag: number) => flag === 1,
-          encode: (accepted: boolean) => (accepted ? 1 : 0),
+          encode: (accepted: boolean): number => (accepted ? 1 : 0),
         }),
       ),
     ),

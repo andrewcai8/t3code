@@ -22,7 +22,7 @@ it.effect(
       const automations = yield* makeAutomations({
         run: (_automation, run) =>
           Effect.sync(() => launched.push(run)).pipe(Effect.andThen(Effect.never)),
-        dispose: () => Effect.void,
+        dispose: () => Effect.succeed(true),
         listProvisioned: Effect.succeed([]),
       });
       const input = {
