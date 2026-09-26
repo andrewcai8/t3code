@@ -1024,21 +1024,27 @@ describe("bounded preparation commands", () => {
       "survived",
     );
     roots.push(NodePath.dirname(marker));
-    const startedAt = performance.now();
+    // The grandchild would touch the marker after 6 s if it outlived the timeout.
     const result = await localPort.executePython({
       script: [
-        "import contextlib, json, os, subprocess, sys",
+        "import contextlib, json, os, pathlib, subprocess, sys, time",
         boundedRunScript,
+        "marker = json.load(sys.stdin)",
+        "started = time.monotonic()",
         "try:",
-        `    run_bounded(['sh', '-c', 'sh -c "sleep 6; touch $0" & sleep 25', json.load(sys.stdin)], None, None, 1)`,
+        `    run_bounded(['sh', '-c', 'sh -c "sleep 6; touch $0" & sleep 25', marker], None, None, 1)`,
         "except RuntimeError as error:",
-        "    print(error)",
+        "    failure = str(error)",
+        "elapsed = time.monotonic() - started",
+        "time.sleep(7)",
+        "print(json.dumps({'failure': failure, 'onTime': elapsed < 11, 'survived': pathlib.Path(marker).exists()}))",
       ].join("\n"),
       stdin: JSON.stringify(marker),
     });
-    expect(result.stdout).toMatch(/timed out/);
-    expect(performance.now() - startedAt).toBeLessThan(11_000);
-    await new Promise((resolve) => setTimeout(resolve, 7_000));
-    await expect(NodeFSP.access(marker)).rejects.toThrow();
-  }, 30_000);
+    expect(JSON.parse(result.stdout)).toEqual({
+      failure: expect.stringMatching(/timed out/),
+      onTime: true,
+      survived: false,
+    });
+  }, 45_000);
 });
