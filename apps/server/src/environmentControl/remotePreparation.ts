@@ -1,5 +1,5 @@
 import { AuthAccessWriteScope, ProvisionReadiness } from "@t3tools/contracts";
-import { Effect, Schema } from "effect";
+import { Schema } from "effect";
 import type { RecordProvisionPhase } from "./provisionTiming.ts";
 
 /** Trusted host-local inputs. Package dependencies are installed on the target host when requested. */
@@ -74,7 +74,7 @@ export interface RemotePreparationInput {
 export const RemotePreparationReady = Schema.Struct({
   ...ProvisionReadiness.fields,
   headRevision: ProvisionReadiness.fields.t3Revision,
-  /** Why this open kept the checkout it had instead of refreshing it. */
+  /** Why this open kept the checkout it had, or why setup after moving it failed. */
   refreshError: Schema.optional(Schema.NullOr(Schema.String)),
   artifactSha256: ProvisionReadiness.fields.preparationHash,
   runtimeVersion: Schema.String,
@@ -128,13 +128,6 @@ export async function prepareRemoteHost(
     throw new Error(detail && detail.length > 0 ? detail : "Remote preparation failed.");
   }
   const ready = decodeReady(result.stdout);
-  if (ready.refreshError)
-    Effect.runSync(
-      Effect.logWarning("Cloud checkout refresh skipped", {
-        resourceIdentity: input.resourceIdentity,
-        cause: ready.refreshError,
-      }),
-    );
   const phases = decodePhases(result.stdout).phases ?? [];
   for (const entry of phases)
     record?.({
@@ -568,36 +561,49 @@ def prepare(spec):
                 os.rename(checkout, project)
         # Where preparation last put HEAD, the move it has started, the tree it
         # left behind, and the revision setup last ran at.
+        unrecorded = 'checkout' not in journal and (root / 'broker-token').exists()
         placement = journal.setdefault('checkout', {})
+        if unrecorded:
+            # Prepared before setup was recorded; its setup already ran, and a
+            # rerun now would land on a live thread's tree.
+            placement['setup'] = repository['revision'] if repository else None
+            atomic(journal_path, json.dumps(journal))
         def status_digest():
             return hashlib.sha256(run(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], project, env).encode()).hexdigest()
         def refresh_checkout(follow):
             if follow == 'HEAD':
-                default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env, timeout=120), re.M)
+                default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env, timeout=30), re.M)
                 if default is None:
                     raise RuntimeError('The repository does not advertise a default branch')
                 follow = default.group(1)
-            elif not run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + follow], project, git_env, timeout=120):
+            elif not run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + follow], project, git_env, timeout=30):
                 # Deleted upstream, usually once its pull request merged.
                 return False
             tracking = 'refs/remotes/origin/' + follow
             run(['git', 'check-ref-format', tracking], project, env)
             depth = ['--depth=1'] if run(['git', 'rev-parse', '--is-shallow-repository'], project, env) == 'true' else []
-            run(['git', '-c', 'protocol.version=2', 'fetch', *depth, '--no-tags', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=120)
+            run(['git', '-c', 'protocol.version=2', 'fetch', *depth, '--no-tags', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=30)
             tip = run(['git', 'rev-parse', tracking], project, env)
             head = run(['git', 'rev-parse', 'HEAD'], project, env)
             detached = run(['git', 'rev-parse', '--symbolic-full-name', 'HEAD'], project, env) == 'HEAD'
-            # A move whose checkout finished but whose record did not.
-            adopted = head == placement.get('target')
-            placed = head if adopted else placement.get('revision', repository['revision'])
             # The tree preparation left is the baseline; a box prepared before
             # it was recorded is never moved.
             dirty = not cloned and placement.get('status') != status_digest()
+            # A move whose checkout finished but whose record did not.
+            adopted = head == placement.get('target') and not dirty
+            placed = head if adopted else placement.get('revision', repository['revision'])
             moved = checkout_action(placed, head, detached, dirty, tip) == 'fast-forward'
             if moved:
                 placement['target'] = tip
                 atomic(journal_path, json.dumps(journal))
-                run(['git', 'checkout', '-q', '--detach', tip], project, env, timeout=600)
+                try:
+                    run(['git', 'checkout', '-q', '--detach', tip], project, env, timeout=600)
+                except Exception:
+                    # Otherwise a thread that later detaches onto this commit
+                    # would read as preparation's own move.
+                    placement.pop('target', None)
+                    atomic(journal_path, json.dumps(journal))
+                    raise
             if moved or adopted:
                 placement['revision'] = tip if moved else head
                 placement.pop('target', None)
@@ -666,11 +672,21 @@ def prepare(spec):
         if prepare and placement.get('setup', False) != setup_revision:
             if not isinstance(prepare, list):
                 raise RuntimeError('Invalid prepare commands')
-            with step('prepareCommands'):
-                for command_line in prepare:
-                    if not isinstance(command_line, str) or not command_line.strip() or '\0' in command_line:
-                        raise RuntimeError('Invalid prepare command')
-                    run(['sh', '-lc', command_line], project, env, timeout=1800)
+            # The first setup must succeed. A rerun after a refresh is best
+            # effort and bounded, so a commit that breaks setup cannot stop the
+            # box from opening, and is attempted once rather than every open.
+            first = 'setup' not in placement
+            deadline = time.monotonic() + (1800 * len(prepare) if first else 300)
+            try:
+                with step('prepareCommands'):
+                    for command_line in prepare:
+                        if not isinstance(command_line, str) or not command_line.strip() or '\0' in command_line:
+                            raise RuntimeError('Invalid prepare command')
+                        run(['sh', '-lc', command_line], project, env, timeout=max(1, min(1800, deadline - time.monotonic())))
+            except Exception as error:
+                if first:
+                    raise
+                refresh_error = 'Setup after the refresh failed: ' + str(error)
             placement['setup'] = setup_revision
             atomic(journal_path, json.dumps(journal))
         credential_path = root / 'broker-token'

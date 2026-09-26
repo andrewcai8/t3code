@@ -1064,4 +1064,54 @@ describe("checkout refresh", () => {
     ).toThrow();
     expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
   });
+
+  it("opens once a pushed commit breaks setup, and tries that setup only once", async () => {
+    const { input, source } = await followed();
+    const withSetup = {
+      ...input,
+      prepareCommands: ["echo tried >> ../setup-attempts", "test ! -f breaks-setup"],
+    };
+    const attempts = async () =>
+      (await NodeFSP.readFile(NodePath.join(input.root, "setup-attempts"), "utf8")).split("\n")
+        .length - 1;
+    const first = await prepareRemoteHost(localPort, withSetup);
+    pids.add(first.serverPid);
+    await NodeFSP.writeFile(NodePath.join(source, "breaks-setup"), "");
+    git(source, "add", ".");
+    const tip = advance(source, "breaks setup");
+    const reopened = await prepareRemoteHost(localPort, withSetup);
+    expect(reopened.headRevision).toBe(tip);
+    expect(reopened.refreshError).toMatch(/Setup after the refresh failed/);
+    expect((await prepareRemoteHost(localPort, withSetup)).headRevision).toBe(tip);
+    expect(await attempts()).toBe(2);
+  });
+
+  it("does not adopt a commit a thread detached onto after a failed move", async () => {
+    const { input, source, branch } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const attempted = advance(source, "attempted");
+    const lock = NodePath.join(first.projectDir, ".git/index.lock");
+    await NodeFSP.writeFile(lock, "");
+    expect((await prepareRemoteHost(localPort, input)).refreshError).toMatch(/index\.lock/);
+    await NodeFSP.rm(lock);
+    git(first.projectDir, "checkout", "-q", "--detach", `origin/${branch}`);
+    advance(source, "later");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(attempted);
+  });
+
+  it("never runs setup over a box prepared before setup was recorded", async () => {
+    const { input, source } = await followed();
+    const withSetup = { ...input, prepareCommands: ["echo ran >> ../setup-runs"] };
+    const first = await prepareRemoteHost(localPort, withSetup);
+    pids.add(first.serverPid);
+    const journalPath = NodePath.join(input.root, "preparation.json");
+    const { checkout: _, ...legacy } = JSON.parse(await NodeFSP.readFile(journalPath, "utf8"));
+    await NodeFSP.writeFile(journalPath, JSON.stringify(legacy));
+    advance(source, "upstream");
+    expect((await prepareRemoteHost(localPort, withSetup)).headRevision).toBe(first.headRevision);
+    advance(source, "again");
+    await prepareRemoteHost(localPort, withSetup);
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "setup-runs"), "utf8")).toBe("ran\n");
+  });
 });
