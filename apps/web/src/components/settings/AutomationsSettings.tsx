@@ -320,7 +320,10 @@ function AutomationRuns({
   automationId: Automation["id"];
 }) {
   const query = useEnvironmentQuery(
-    serverEnvironment.automationRuns({ environmentId: managerId, input: { id: automationId } }),
+    serverEnvironment.recentAutomationRuns({
+      environmentId: managerId,
+      input: { id: automationId },
+    }),
   );
   const runs = query.data?.slice(0, RUN_HISTORY_LIMIT) ?? [];
   const active = query.data?.some((run) => isAutomationRunActive(run.state)) ?? false;

@@ -1,56 +1,96 @@
-import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  recentAutomationEnvironments,
+  ThreadId,
+  type DiscoveredProvisionedEnvironment,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 import type { ProvisionStorage } from "./storage.ts";
 
-export const AUTOMATION_JOIN_ATTEMPTS_STORAGE_KEY = "t3code:automation-join-attempts:v1";
-const AUTOMATION_JOIN_ATTEMPT_LIMIT = 200;
-const decodeAttempts = Schema.decodeUnknownSync(Schema.Array(Schema.String));
+const AUTOMATION_JOINS_STORAGE_KEY = "t3code:automation-joins:v1";
+const AUTOMATION_JOIN_RECORD_LIMIT = 200;
+const AUTOMATION_JOIN_MAX_FAILURES = 3;
+const AUTOMATION_JOIN_RETRY_BASE_MS = 60_000;
 
 /**
- * The environments a host started for automation runs that this device should join now, so
- * each run's chat shows in the sidebar. A run is joined once its chat exists, because the
- * lease heartbeat only follows leases recorded under a thread. Anything this device already
- * knows or already tried is skipped: a user who removed one is not re-joined, and a failing
- * join is not retried.
+ * A run's environment this device joined without being asked. Its lease lives here rather than
+ * in the lease store because the heartbeat renews every stored lease: an unopened run's box
+ * should idle and pause like any other. Opening the chat moves the lease into the lease store.
  */
-export function automationEnvironmentsToJoin(
-  discovered: ReadonlyArray<DiscoveredProvisionedEnvironment>,
-  known: ReadonlySet<EnvironmentId>,
-  attempted: ReadonlySet<string>,
-): ReadonlyArray<DiscoveredProvisionedEnvironment> {
-  return discovered.filter(
-    (environment) =>
-      environment.automationId !== undefined &&
-      environment.lifecycle === "active" &&
-      environment.threadId !== null &&
-      !known.has(environment.environmentId) &&
-      !attempted.has(environment.requestId),
-  );
+const AutomationJoin = Schema.Struct({
+  requestId: Schema.String,
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  leaseId: Schema.String,
+  sandboxId: Schema.String,
+  managerEnvironmentId: EnvironmentId,
+});
+const decodeJoins = Schema.decodeUnknownSync(Schema.Array(AutomationJoin));
+
+/** Failed joins of one run this session. `retryAt` is `Infinity` once the device gives up. */
+export interface AutomationJoinFailure {
+  readonly failures: number;
+  readonly retryAt: number;
+}
+
+/** Waits one minute after the first failure, two after the second, and stops at the third. */
+export function recordAutomationJoinFailure(
+  previous: AutomationJoinFailure | undefined,
+  now: number,
+): AutomationJoinFailure {
+  const failures = (previous?.failures ?? 0) + 1;
+  return {
+    failures,
+    retryAt:
+      failures >= AUTOMATION_JOIN_MAX_FAILURES
+        ? Infinity
+        : now + AUTOMATION_JOIN_RETRY_BASE_MS * 2 ** (failures - 1),
+  };
 }
 
 /**
- * The provision request ids this device has tried to join, newest last and bounded. Storage is
- * read on every call so tabs sharing it see each other's attempts.
+ * The runs this device should join now, so their chats show in the sidebar: the host's recent
+ * automation runs whose chat exists, minus any this device already knows, already joined (a user
+ * who removed one keeps it removed), or is backing off from.
  */
-export function createAutomationJoinAttempts(storage: ProvisionStorage) {
-  function read(): ReadonlyArray<string> {
-    const raw = storage.getItem(AUTOMATION_JOIN_ATTEMPTS_STORAGE_KEY);
+export function automationEnvironmentsToJoin(
+  joinable: ReadonlyArray<DiscoveredProvisionedEnvironment>,
+  device: {
+    readonly now: number;
+    readonly known: ReadonlySet<EnvironmentId>;
+    readonly joined: ReadonlySet<string>;
+    readonly failures: ReadonlyMap<string, AutomationJoinFailure>;
+  },
+) {
+  return recentAutomationEnvironments(joinable, device.now).filter(
+    (environment): environment is DiscoveredProvisionedEnvironment & { threadId: ThreadId } =>
+      environment.threadId !== null &&
+      !device.known.has(environment.environmentId) &&
+      !device.joined.has(environment.requestId) &&
+      (device.failures.get(environment.requestId)?.retryAt ?? -Infinity) <= device.now,
+  );
+}
+
+/** Joins this device made, newest last and bounded. Read on every call so tabs share them. */
+export function createAutomationJoins(storage: ProvisionStorage) {
+  function joined(): ReadonlyArray<typeof AutomationJoin.Type> {
+    const raw = storage.getItem(AUTOMATION_JOINS_STORAGE_KEY);
     if (!raw) return [];
     try {
-      return decodeAttempts(JSON.parse(raw));
+      return decodeJoins(JSON.parse(raw));
     } catch {
       return [];
     }
   }
 
   return {
-    attempted: (): ReadonlySet<string> => new Set(read()),
-    record: (requestId: string): void => {
-      const attempts = read().filter((id) => id !== requestId);
+    joined,
+    record: (join: typeof AutomationJoin.Type): void => {
+      const others = joined().filter((entry) => entry.requestId !== join.requestId);
       storage.setItem(
-        AUTOMATION_JOIN_ATTEMPTS_STORAGE_KEY,
-        JSON.stringify([...attempts, requestId].slice(-AUTOMATION_JOIN_ATTEMPT_LIMIT)),
+        AUTOMATION_JOINS_STORAGE_KEY,
+        JSON.stringify([...others, join].slice(-AUTOMATION_JOIN_RECORD_LIMIT)),
       );
     },
   };

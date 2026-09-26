@@ -1,4 +1,5 @@
 import {
+  type AutomationIdInput,
   type EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
@@ -986,9 +987,15 @@ export function createServerEnvironmentAtoms<R, E>(
     tag: WS_METHODS.automationsList,
     staleTimeMs: 5_000,
   });
-  const automationRuns = createEnvironmentRpcQueryAtomFamily(runtime, {
-    label: "environment-data:automations:runs",
-    tag: WS_METHODS.automationsListRuns,
+  const recentAutomationRuns = createEnvironmentQueryAtomFamily(runtime, {
+    label: "environment-data:automations:recent-runs",
+    staleTimeMs: 5_000,
+    execute: (input: AutomationIdInput) =>
+      request(WS_METHODS.automationsListRuns, { id: input.id, limit: 5 }),
+  });
+  const joinableAutomationEnvironments = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:automations:joinable",
+    tag: WS_METHODS.automationsListJoinable,
     staleTimeMs: 5_000,
   });
   const refreshAutomations = (
@@ -1009,7 +1016,8 @@ export function createServerEnvironmentAtoms<R, E>(
     managedEnvironments,
     provisionedEnvironments,
     automations,
-    automationRuns,
+    recentAutomationRuns,
+    joinableAutomationEnvironments,
     createAutomation: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:automations:create",
       tag: WS_METHODS.automationsCreate,
@@ -1036,7 +1044,8 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:automations:run-now",
       tag: WS_METHODS.automationsRunNow,
       concurrency: { mode: "singleFlight", key: automationKey },
-      onSettled: (target, registry) => Effect.sync(() => registry.refresh(automationRuns(target))),
+      onSettled: (target, registry) =>
+        Effect.sync(() => registry.refresh(recentAutomationRuns(target))),
     }),
     startManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:start",

@@ -1,72 +1,104 @@
 import {
   automationEnvironmentsToJoin,
-  createAutomationJoinAttempts,
+  recordAutomationJoinFailure,
+  type AutomationJoinFailure,
 } from "@t3tools/client-runtime/cloud";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { useEffect, useEffectEvent } from "react";
+import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import { useParams } from "@tanstack/react-router";
+import { useEffect, useEffectEvent, useRef } from "react";
 
 import { useProvisionedEnvironmentJoin } from "../connection/useProvisionedEnvironmentJoin";
+import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import { useEnvironments } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
-import { localProvisionStorage } from "./provisionStorage";
+import { resolveThreadRouteRef } from "../threadRoutes";
+import { automationJoins, useAutomationHosts } from "./automationHosts";
+import { provisionedSandboxFor, rememberProvisionedSandbox } from "./provisionedSandboxLeases";
 
-const DISCOVERY_INTERVAL_MS = 60_000;
-const automationJoinAttempts = createAutomationJoinAttempts(localProvisionStorage);
+const JOIN_POLL_MS = 60_000;
+/** Per session, so a host whose connection flaps does not reset the backoff. */
+const joinFailures = new Map<string, AutomationJoinFailure>();
 
 /**
  * Joins the environments hosts start for automation runs, so each run's chat shows in the
- * sidebar without anyone opening it from Settings. It never navigates.
+ * sidebar. A joined box is left to idle until the user opens its chat, which hands its lease to
+ * the heartbeat. It never navigates.
  */
 export function AutomationRunAutoJoin() {
-  const { environments } = useEnvironments();
-  return environments
-    .filter(
-      (environment) =>
-        environment.connection.phase === "connected" &&
-        environment.serverConfig?.environmentControl === true,
-    )
-    .map((manager) => (
-      <ManagerAutomationRunAutoJoin key={manager.environmentId} managerId={manager.environmentId} />
-    ));
+  const hosts = useAutomationHosts();
+  const openedThread = resolveThreadRouteRef(useParams({ strict: false }));
+  const openedEnvironmentId = openedThread?.environmentId;
+  const openedThreadId = openedThread?.threadId;
+
+  useEffect(() => {
+    if (!openedEnvironmentId || !openedThreadId) return;
+    const joined = automationJoins
+      .joined()
+      .find(
+        (join) => join.environmentId === openedEnvironmentId && join.threadId === openedThreadId,
+      );
+    if (!joined) return;
+    const ref = { environmentId: joined.environmentId, threadId: joined.threadId };
+    if (provisionedSandboxFor(ref) !== null) return;
+    rememberProvisionedSandbox(ref, {
+      leaseId: joined.leaseId,
+      sandboxId: joined.sandboxId,
+      managerEnvironmentId: joined.managerEnvironmentId,
+    });
+  }, [openedEnvironmentId, openedThreadId]);
+
+  return hosts.map((host) => (
+    <HostAutomationRunAutoJoin key={host.environmentId} managerId={host.environmentId} />
+  ));
 }
 
-function ManagerAutomationRunAutoJoin({ managerId }: { managerId: EnvironmentId }) {
+function HostAutomationRunAutoJoin({ managerId }: { managerId: EnvironmentId }) {
   const { environments } = useEnvironments();
   const query = useEnvironmentQuery(
-    serverEnvironment.provisionedEnvironments({ environmentId: managerId, input: {} }),
+    serverEnvironment.joinableAutomationEnvironments({ environmentId: managerId, input: {} }),
   );
   const { join } = useProvisionedEnvironmentJoin(managerId);
-  const refresh = query.refresh;
-  useEffect(() => {
-    const timer = globalThis.setInterval(refresh, DISCOVERY_INTERVAL_MS);
-    return () => globalThis.clearInterval(timer);
-  }, [refresh]);
+  const joining = useRef(false);
+  useVisibleInterval(query.refresh, JOIN_POLL_MS, true);
 
-  const joinNewRuns = useEffectEvent(() => {
-    const selected = automationEnvironmentsToJoin(
-      query.data ?? [],
-      new Set(environments.map((environment) => environment.environmentId)),
-      automationJoinAttempts.attempted(),
-    );
-    for (const environment of selected) {
-      // Recorded first, so a join that fails or that the user later undoes is never repeated.
-      // Without a record there is no such guarantee, so storage that refuses it skips the join.
+  const joinNewRuns = useEffectEvent(
+    async (joinable: ReadonlyArray<DiscoveredProvisionedEnvironment>) => {
+      if (joining.current) return;
+      joining.current = true;
       try {
-        automationJoinAttempts.record(environment.requestId);
-      } catch {
-        return;
-      }
-      join(environment).catch((error: unknown) => {
-        console.warn("[automations] could not join a run's environment", {
-          requestId: environment.requestId,
-          message: error instanceof Error ? error.message : String(error),
+        const selected = automationEnvironmentsToJoin(joinable, {
+          now: Date.now(),
+          known: new Set(environments.map((environment) => environment.environmentId)),
+          joined: new Set(automationJoins.joined().map((joined) => joined.requestId)),
+          failures: joinFailures,
         });
-      });
-    }
-  });
+        // One at a time: each join may resume a box and pair a new connection.
+        for (const environment of selected) {
+          try {
+            await join(environment, (_, ref, lease) => {
+              if (ref === null) return;
+              automationJoins.record({ requestId: environment.requestId, ...ref, ...lease });
+            });
+            joinFailures.delete(environment.requestId);
+          } catch (error) {
+            joinFailures.set(
+              environment.requestId,
+              recordAutomationJoinFailure(joinFailures.get(environment.requestId), Date.now()),
+            );
+            console.warn("[automations] could not join a run's environment", {
+              requestId: environment.requestId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      } finally {
+        joining.current = false;
+      }
+    },
+  );
   useEffect(() => {
-    if (query.data) joinNewRuns();
+    if (query.data) void joinNewRuns(query.data);
   }, [query.data]);
 
   return null;

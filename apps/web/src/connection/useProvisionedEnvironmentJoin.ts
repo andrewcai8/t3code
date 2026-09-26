@@ -1,5 +1,10 @@
+import type { ProvisionedSandboxLease } from "@t3tools/client-runtime/cloud";
 import { provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
-import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import type {
+  DiscoveredProvisionedEnvironment,
+  EnvironmentId,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 
 import {
@@ -13,10 +18,23 @@ import { waitForThreadShell } from "../state/waitForThreadShell";
 import { connectPairing } from "./onboarding";
 import { openProvisionedEnvironment } from "./provisioned";
 
+/** Where a joined environment's lease goes. `ref` is null when the environment has no thread. */
+type RememberLease = (
+  environment: DiscoveredProvisionedEnvironment,
+  ref: ScopedThreadRef | null,
+  lease: ProvisionedSandboxLease,
+) => void;
+
+/** The lease store, whose leases the heartbeat renews: for a user opening the environment. */
+const keepLeaseAwake: RememberLease = (environment, ref, lease) => {
+  if (ref === null) rememberProvisionedSandboxForEnvironment(environment.environmentId, lease);
+  else rememberProvisionedSandbox(ref, lease);
+};
+
 /**
- * Connects this client to environments `managerId` provisioned. Settings and the automation
- * auto-join share it so both resume, route pairing through the manager's gateway, and record
- * the lease the heartbeat keeps alive.
+ * Connects this client to environments `managerId` provisioned. Settings, run history, and the
+ * automation auto-join share it so all resume, route pairing through the manager's gateway, and
+ * record the lease.
  */
 export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
   const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
@@ -62,7 +80,7 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
       return rewritePairingUrl(result.pairingUrl, environment.leaseId);
     },
     /** Pairs this client with the environment; resolves with its thread once that has loaded. */
-    join: (environment: DiscoveredProvisionedEnvironment) =>
+    join: (environment: DiscoveredProvisionedEnvironment, remember = keepLeaseAwake) =>
       openProvisionedEnvironment(environment, {
         isConnected: (id) =>
           environments.some(
@@ -80,16 +98,12 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
         },
         rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
         waitForThread: waitForThreadShell,
-        rememberLease: (ref) => {
-          const lease = {
+        rememberLease: (ref) =>
+          remember(environment, ref, {
             leaseId: environment.leaseId,
             sandboxId: environment.sandboxId,
             managerEnvironmentId: managerId,
-          };
-          if (ref === null)
-            rememberProvisionedSandboxForEnvironment(environment.environmentId, lease);
-          else rememberProvisionedSandbox(ref, lease);
-        },
+          }),
       }),
   };
 }
