@@ -679,10 +679,11 @@ export const layer = Layer.effect(
           );
           return { ...control, config };
         })();
-        // A config that fails to load stays failed until the file changes, so
-        // callers polling it do not re-read and re-parse a broken file.
         loaded = { path, mtimeMs, service };
-        return service;
+        return service.catch((error: unknown) => {
+          if (loaded?.path === path && loaded.mtimeMs === mtimeMs) loaded = undefined;
+          throw error;
+        });
       })();
     const resolveNamespace = () => {
       namespace ??= (async () => {

@@ -24,7 +24,8 @@ const invocation = (frontmatter: CursorSkillFrontmatter) => ({
  * The entry each driver's adapter in the environment would report for one
  * skill directory, or `undefined` when that adapter would not offer it.
  * Claude and Cursor key a skill by its directory, Codex by its frontmatter
- * `name`. Cursor hides a skill whose `metadata.surfaces` leaves out the CLI.
+ * `name`, and Codex loads only a skill whose frontmatter has both `name` and
+ * `description`. Cursor hides a skill whose `metadata.surfaces` leaves out the CLI.
  */
 const entryFor: Record<
   ProvisionedDriver,
@@ -37,12 +38,12 @@ const entryFor: Record<
     ...invocation(frontmatter),
   }),
   codex: (_directory, frontmatter) =>
-    frontmatter.displayName
+    frontmatter.displayName && frontmatter.description
       ? {
           name: frontmatter.displayName,
           enabled: true,
           scope: "user",
-          ...(frontmatter.description ? { description: frontmatter.description } : {}),
+          description: frontmatter.description,
         }
       : undefined,
   cursor: (directory, frontmatter) =>

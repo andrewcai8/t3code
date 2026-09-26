@@ -38,11 +38,13 @@ const onHost = (localAgentRuns: boolean) =>
     yield* Effect.promise(async () => {
       await writeSkill(claudeBundle, "poteto-mode", ["name: poteto-mode", "description: Claude."]);
       await writeSkill(claudeBundle, "why", ["name: why", "description: Explain history."]);
+      // No description: Codex's loader rejects it, Cursor's does not.
       await writeSkill(codexCursorBundle, "poteto-mode", ["name: poteto-mode"]);
       // Codex matches the frontmatter name; Claude and Cursor match the folder.
       await writeSkill(codexCursorBundle, "how-folder", ["name: how", "description: Explain."]);
       await writeSkill(codexCursorBundle, "desktop-only", [
         "name: desktop-only",
+        "description: Desktop app only.",
         "metadata:",
         "  surfaces: [desktop]",
       ]);
@@ -94,11 +96,7 @@ const onHost = (localAgentRuns: boolean) =>
         Layer.provide(NodeServices.layer),
       ),
     );
-    return {
-      control: Context.get(services, EnvironmentControl),
-      codexCursorBundle,
-      configPath: NodePath.join(directory, "environment-control.json"),
-    };
+    return { control: Context.get(services, EnvironmentControl), codexCursorBundle };
   });
 
 const namesByDriver = (
@@ -115,7 +113,7 @@ it.effect("lists each driver's provisioned skills on a host that runs no agents"
     const skills = yield* control.provisionedSkills;
 
     assert.deepEqual(namesByDriver(skills), {
-      codex: ["deploy-skill", "desktop-only", "how", "poteto-mode"],
+      codex: ["deploy-skill", "desktop-only", "how"],
       claudeAgent: ["deploy", "poteto-mode", "why"],
       cursor: ["deploy", "how-folder", "poteto-mode"],
     });
@@ -143,29 +141,5 @@ it.effect("reports no provisioned skills on a host that runs agents itself", () 
   Effect.gen(function* () {
     const { control } = yield* onHost(true);
     assert.strictEqual(yield* control.provisionedSkills, undefined);
-  }).pipe(Effect.scoped),
-);
-
-it.effect("keeps a config that failed to load failed until the file changes", () =>
-  Effect.gen(function* () {
-    const { control, configPath } = yield* onHost(false);
-    const valid = yield* Effect.promise(() => NodeFSP.readFile(configPath, "utf8"));
-    const rewrite = (contents: string, mtimeSeconds: number) =>
-      Effect.promise(async () => {
-        await NodeFSP.writeFile(configPath, contents);
-        await NodeFSP.utimes(configPath, mtimeSeconds, mtimeSeconds);
-      });
-    const broken = 1_767_225_600;
-
-    yield* rewrite("{", broken);
-    assert.strictEqual(yield* control.provisionedSkills, undefined);
-    yield* rewrite(valid, broken);
-    assert.strictEqual(yield* control.provisionedSkills, undefined, "same mtime, cached failure");
-    yield* rewrite(valid, broken + 86_400);
-    assert.deepEqual(namesByDriver(yield* control.provisionedSkills)?.claudeAgent, [
-      "deploy",
-      "poteto-mode",
-      "why",
-    ]);
   }).pipe(Effect.scoped),
 );
