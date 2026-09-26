@@ -255,7 +255,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
         "--size",
         input.size,
         "--image",
-        "tahoe-xcode-26.4.x-latest",
+        "tahoe-slim",
         ...(input.region ? ["--site", input.region] : []),
         ...(input.idleTimeoutMinutes
           ? ["--auto_stop_idle_timeout", `${input.idleTimeoutMinutes}m`]

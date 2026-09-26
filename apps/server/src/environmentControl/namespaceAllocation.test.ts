@@ -53,8 +53,7 @@ function devbox(id = "box-1") {
       selectors: [
         { name: "macos.version", value: "26.x" },
         { name: "macos.purpose", value: "githubrunner" },
-        { name: "image.with", value: "xcode-26.4.x" },
-        { name: "image.with", value: "xcode-beta" },
+        { name: "image.with", value: "xcode-latest" },
       ],
     },
   };
@@ -153,7 +152,7 @@ describe("Namespace durable allocation through the SDK", () => {
             "--size",
             "m",
             "--image",
-            "tahoe-xcode-26.4.x-latest",
+            "tahoe-slim",
             "--site",
             "iad",
             "--auto_stop_idle_timeout",
