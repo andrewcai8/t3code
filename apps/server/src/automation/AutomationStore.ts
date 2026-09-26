@@ -5,12 +5,12 @@ import {
   type AutomationId,
   type AutomationRunId,
   type AutomationRunState,
-  type AutomationTrigger,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -26,6 +26,8 @@ export interface StoredRun extends AutomationRun {
 export interface StoredAutomation {
   readonly automation: Automation;
   readonly webhookSecretHash: string | null;
+  /** No cron slot at or before this time is owed. */
+  readonly scheduleSince: string;
 }
 
 /** What moving a run to `state` records alongside it. */
@@ -33,7 +35,7 @@ export type RunTransition =
   | { readonly state: "attaching" }
   | { readonly state: "starting"; readonly environmentId: EnvironmentId }
   | { readonly state: "started"; readonly threadId: ThreadId }
-  | { readonly state: "failed"; readonly error: string };
+  | { readonly state: "failed"; readonly error: string; readonly disposedAt: string | null };
 
 /** The states a run may leave, and the ones it may enter from each. */
 const transitions: Record<AutomationRunState, ReadonlyArray<AutomationRunState>> = {
@@ -42,7 +44,20 @@ const transitions: Record<AutomationRunState, ReadonlyArray<AutomationRunState>>
   starting: ["started", "failed"],
   started: [],
   failed: [],
+  skipped: [],
 };
+
+const IN_FLIGHT_RUN_SKIPPED = "Skipped because the previous run was still starting.";
+
+/** Triggered and not yet `started`, `failed`, or `skipped`. */
+export const isInFlight = (run: Pick<AutomationRun, "state">) =>
+  run.state === "provisioning" || run.state === "attaching" || run.state === "starting";
+
+/** How a trigger's run was recorded. */
+export type RunInsert =
+  | { readonly kind: "created"; readonly run: StoredRun }
+  | { readonly kind: "existing"; readonly run: StoredRun }
+  | { readonly kind: "capped" };
 
 const AutomationRow = Schema.Struct({
   id: Schema.String,
@@ -55,40 +70,64 @@ const AutomationRow = Schema.Struct({
   provider: Schema.String,
   cron: Schema.NullOr(Schema.String),
   timeZone: Schema.NullOr(Schema.String),
+  scheduleSince: Schema.String,
   webhookSecretHash: Schema.NullOr(Schema.String),
   enabled: Schema.Number,
   createdAt: Schema.String,
   updatedAt: Schema.String,
 });
-const decodeAutomationRows = Schema.decodeUnknownEffect(Schema.Array(AutomationRow));
-const decodeAutomation = Schema.decodeUnknownEffect(Automation);
-const RunRow = Schema.Struct({
-  ...AutomationRun.fields,
-  prompt: Schema.String,
-});
-const decodeRunRows = Schema.decodeUnknownEffect(Schema.Array(RunRow));
+const decodeRow = Schema.decodeUnknownExit(AutomationRow);
+const decodeAutomation = Schema.decodeUnknownExit(Automation);
+const decodeAutomationRow = (input: unknown): Exit.Exit<StoredAutomation, unknown> => {
+  const decoded = decodeRow(input);
+  if (Exit.isFailure(decoded)) return decoded;
+  const row = decoded.value;
+  return Exit.map(
+    decodeAutomation({
+      id: row.id,
+      name: row.name,
+      repository: row.repository,
+      branch: row.branch,
+      prompt: row.prompt,
+      agentDriver: row.agentDriver,
+      account: row.account,
+      provider: row.provider,
+      schedule:
+        row.cron === null || row.timeZone === null
+          ? null
+          : { cron: row.cron, timeZone: row.timeZone },
+      webhook: row.webhookSecretHash !== null,
+      enabled: row.enabled === 1,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }),
+    (automation) => ({
+      automation,
+      webhookSecretHash: row.webhookSecretHash,
+      scheduleSince: row.scheduleSince,
+    }),
+  );
+};
+const decodeRunRow = Schema.decodeUnknownExit(
+  Schema.Struct({ ...AutomationRun.fields, prompt: Schema.String }),
+);
 
-const toStoredAutomation = Effect.fnUntraced(function* (row: typeof AutomationRow.Type) {
-  const automation = yield* decodeAutomation({
-    id: row.id,
-    name: row.name,
-    repository: row.repository,
-    branch: row.branch,
-    prompt: row.prompt,
-    agentDriver: row.agentDriver,
-    account: row.account,
-    provider: row.provider,
-    schedule:
-      row.cron === null || row.timeZone === null
-        ? null
-        : { cron: row.cron, timeZone: row.timeZone },
-    webhook: row.webhookSecretHash !== null,
-    enabled: row.enabled === 1,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+/** Decodes each row on its own, so one row a newer or broken writer left cannot hide the rest. */
+function decodeEach<A>(
+  rows: ReadonlyArray<unknown>,
+  decode: (row: unknown) => Exit.Exit<A, unknown>,
+  table: string,
+) {
+  return Effect.gen(function* () {
+    const decoded: Array<A> = [];
+    for (const row of rows) {
+      const exit = decode(row);
+      if (Exit.isSuccess(exit)) decoded.push(exit.value);
+      else yield* Effect.logWarning("skipping an automation row that does not decode", { table });
+    }
+    return decoded as ReadonlyArray<A>;
   });
-  return { automation, webhookSecretHash: row.webhookSecretHash } satisfies StoredAutomation;
-});
+}
 
 const storeError = (cause: unknown) =>
   new AutomationError({ message: `Automations could not be read or saved: ${String(cause)}` });
@@ -108,12 +147,15 @@ export class AutomationStore extends Context.Service<
     /** Deletes an automation and its run history. */
     readonly remove: (id: AutomationId) => Effect.Effect<void, AutomationError>;
     /**
-     * Records a run unless one already holds its `requestId`, and returns whichever run holds
-     * it. A repeated trigger therefore resolves to the run it already started.
+     * Records a trigger's run in one statement. A `requestId` already recorded resolves to that
+     * run, before any cap. Otherwise `hourlyCap` refuses the run once this automation recorded
+     * that many runs of the same trigger since `since`, and a run arriving while another of the
+     * automation's runs is in flight is recorded as skipped.
      */
     readonly insertRun: (
       run: StoredRun,
-    ) => Effect.Effect<{ readonly run: StoredRun; readonly created: boolean }, AutomationError>;
+      hourlyCap?: { readonly since: string; readonly max: number },
+    ) => Effect.Effect<RunInsert, AutomationError>;
     /** Moves a run out of `from`. Returns null when it had already left `from`. */
     readonly advanceRun: (
       id: AutomationRunId,
@@ -127,15 +169,10 @@ export class AutomationStore extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<StoredRun>, AutomationError>;
     /** Runs a restart left between triggered and started. */
     readonly unfinishedRuns: Effect.Effect<ReadonlyArray<StoredRun>, AutomationError>;
-    /** The latest cron slot this automation already ran, as an ISO time. */
+    /** The latest cron slot this automation already recorded, as an ISO time. */
     readonly lastCronSlot: (
       automationId: AutomationId,
     ) => Effect.Effect<string | null, AutomationError>;
-    readonly countRunsSince: (
-      automationId: AutomationId,
-      trigger: AutomationTrigger,
-      since: string,
-    ) => Effect.Effect<number, AutomationError>;
   }
 >()("t3/automation/AutomationStore") {
   static readonly layer = Layer.effect(
@@ -144,44 +181,47 @@ export class AutomationStore extends Context.Service<
       const sql = yield* SqlClient.SqlClient;
       const readAutomations = (where: Statement.Fragment) =>
         sql`
-        SELECT id, name, repository, branch, prompt, agent_driver AS "agentDriver",
-          provider_instance_id AS account, provider, cron, timezone AS "timeZone",
-          webhook_secret_hash AS "webhookSecretHash", enabled,
-          created_at AS "createdAt", updated_at AS "updatedAt"
-        FROM automations ${where}
-        ORDER BY created_at, id
-      `.pipe(
-          Effect.flatMap(decodeAutomationRows),
-          Effect.flatMap((rows) => Effect.forEach(rows, toStoredAutomation)),
+          SELECT id, name, repository, branch, prompt, agent_driver AS "agentDriver",
+            provider_instance_id AS account, provider, cron, timezone AS "timeZone",
+            schedule_since AS "scheduleSince", webhook_secret_hash AS "webhookSecretHash",
+            enabled, created_at AS "createdAt", updated_at AS "updatedAt"
+          FROM automations ${where}
+          ORDER BY created_at, id
+        `.pipe(
           Effect.mapError(storeError),
+          Effect.flatMap((rows) => decodeEach(rows, decodeAutomationRow, "automations")),
         );
       const runColumns = sql`
         id, automation_id AS "automationId", trigger, scheduled_for AS "scheduledFor",
         request_id AS "requestId", prompt, state, child_environment_id AS "environmentId",
-        thread_id AS "threadId", error, created_at AS "createdAt", updated_at AS "updatedAt"
+        thread_id AS "threadId", error, disposed_at AS "disposedAt", created_at AS "createdAt",
+        updated_at AS "updatedAt"
       `;
       const readRuns = (query: Effect.Effect<ReadonlyArray<unknown>, SqlError.SqlError>) =>
         query.pipe(
-          Effect.flatMap(decodeRunRows),
-          Effect.map((rows): ReadonlyArray<StoredRun> => rows),
           Effect.mapError(storeError),
+          Effect.flatMap((rows) => decodeEach(rows, decodeRunRow, "automation_runs")),
         );
       const first = <A>(rows: ReadonlyArray<A>) => Option.fromNullishOr(rows[0]);
+      const runByRequest = (requestId: string) =>
+        readRuns(
+          sql`SELECT ${runColumns} FROM automation_runs WHERE request_id = ${requestId}`,
+        ).pipe(Effect.map(first));
 
       return {
         list: readAutomations(sql``),
         get: (id) => readAutomations(sql`WHERE id = ${id}`).pipe(Effect.map(first)),
         byWebhookHash: (hash) =>
           readAutomations(sql`WHERE webhook_secret_hash = ${hash}`).pipe(Effect.map(first)),
-        save: ({ automation, webhookSecretHash }) =>
+        save: ({ automation, webhookSecretHash, scheduleSince }) =>
           sql`
             INSERT INTO automations (id, name, repository, branch, prompt, agent_driver,
-              provider_instance_id, provider, cron, timezone, webhook_secret_hash, enabled,
-              created_at, updated_at)
+              provider_instance_id, provider, cron, timezone, schedule_since, webhook_secret_hash,
+              enabled, created_at, updated_at)
             VALUES (${automation.id}, ${automation.name}, ${automation.repository},
               ${automation.branch}, ${automation.prompt}, ${automation.agentDriver},
               ${automation.account}, ${automation.provider}, ${automation.schedule?.cron ?? null},
-              ${automation.schedule?.timeZone ?? null},
+              ${automation.schedule?.timeZone ?? null}, ${scheduleSince},
               ${automation.webhook ? webhookSecretHash : null}, ${automation.enabled ? 1 : 0},
               ${automation.createdAt}, ${automation.updatedAt})
             ON CONFLICT(id) DO UPDATE SET name = excluded.name, repository = excluded.repository,
@@ -189,6 +229,7 @@ export class AutomationStore extends Context.Service<
               agent_driver = excluded.agent_driver,
               provider_instance_id = excluded.provider_instance_id, provider = excluded.provider,
               cron = excluded.cron, timezone = excluded.timezone,
+              schedule_since = excluded.schedule_since,
               webhook_secret_hash = excluded.webhook_secret_hash, enabled = excluded.enabled,
               updated_at = excluded.updated_at
           `.pipe(Effect.asVoid, Effect.mapError(storeError)),
@@ -201,34 +242,53 @@ export class AutomationStore extends Context.Service<
               ]),
             )
             .pipe(Effect.asVoid, Effect.mapError(storeError)),
-        insertRun: (run) =>
+        insertRun: (run, hourlyCap) =>
           Effect.gen(function* () {
+            const inFlight = sql`
+              EXISTS (SELECT 1 FROM automation_runs WHERE automation_id = ${run.automationId}
+                AND state IN ('provisioning', 'attaching', 'starting'))
+            `;
+            // One statement, so SQLite's single writer makes the dedupe, the cap and the
+            // in-flight check atomic against a burst of concurrent triggers.
             const inserted = yield* sql`
               INSERT INTO automation_runs (id, automation_id, trigger, scheduled_for, request_id,
-                prompt, state, child_environment_id, thread_id, error, created_at, updated_at)
-              VALUES (${run.id}, ${run.automationId}, ${run.trigger}, ${run.scheduledFor},
-                ${run.requestId}, ${run.prompt}, ${run.state}, ${run.environmentId},
-                ${run.threadId}, ${run.error}, ${run.createdAt}, ${run.updatedAt})
+                prompt, state, child_environment_id, thread_id, error, disposed_at, created_at,
+                updated_at)
+              SELECT ${run.id}, ${run.automationId}, ${run.trigger}, ${run.scheduledFor},
+                ${run.requestId}, ${run.prompt},
+                CASE WHEN ${inFlight} THEN 'skipped' ELSE ${run.state} END, NULL, NULL,
+                CASE WHEN ${inFlight} THEN ${IN_FLIGHT_RUN_SKIPPED} ELSE NULL END, NULL,
+                ${run.createdAt}, ${run.updatedAt}
+              WHERE NOT EXISTS (SELECT 1 FROM automation_runs WHERE request_id = ${run.requestId})
+                ${
+                  hourlyCap === undefined
+                    ? sql``
+                    : sql`AND (SELECT COUNT(*) FROM automation_runs
+                        WHERE automation_id = ${run.automationId} AND trigger = ${run.trigger}
+                          AND created_at >= ${hourlyCap.since}) < ${hourlyCap.max}`
+                }
               ON CONFLICT(request_id) DO NOTHING
               RETURNING id
-            `;
-            const [stored] = yield* readRuns(
-              sql`SELECT ${runColumns} FROM automation_runs WHERE request_id = ${run.requestId}`,
-            );
-            if (!stored) return yield* storeError("the run vanished after it was recorded");
-            return { run: stored, created: inserted.length > 0 };
-          }).pipe(Effect.mapError(storeError)),
+            `.pipe(Effect.mapError(storeError));
+            const stored = yield* runByRequest(run.requestId);
+            if (Option.isNone(stored)) return { kind: "capped" } as const;
+            return {
+              kind: inserted.length > 0 ? "created" : "existing",
+              run: stored.value,
+            } as const;
+          }),
         advanceRun: (id, from, next, now) => {
           if (!transitions[from].includes(next.state))
             return Effect.fail(storeError(`a run cannot move from ${from} to ${next.state}`));
           const environmentId = next.state === "starting" ? next.environmentId : null;
           const threadId = next.state === "started" ? next.threadId : null;
           const error = next.state === "failed" ? next.error : null;
+          const disposedAt = next.state === "failed" ? next.disposedAt : null;
           return readRuns(sql`
             UPDATE automation_runs SET state = ${next.state},
               child_environment_id = COALESCE(${environmentId}, child_environment_id),
               thread_id = COALESCE(${threadId}, thread_id),
-              error = ${error}, updated_at = ${now}
+              error = ${error}, disposed_at = ${disposedAt}, updated_at = ${now}
             WHERE id = ${id} AND state = ${from}
             RETURNING ${runColumns}
           `).pipe(Effect.map((rows) => rows[0] ?? null));
@@ -248,14 +308,6 @@ export class AutomationStore extends Context.Service<
             WHERE automation_id = ${automationId} AND trigger = 'cron'
           `.pipe(
             Effect.map((rows) => rows[0]?.slot ?? null),
-            Effect.mapError(storeError),
-          ),
-        countRunsSince: (automationId, trigger, since) =>
-          sql<{ readonly count: number }>`
-            SELECT COUNT(*) AS count FROM automation_runs
-            WHERE automation_id = ${automationId} AND trigger = ${trigger} AND created_at >= ${since}
-          `.pipe(
-            Effect.map((rows) => rows[0]?.count ?? 0),
             Effect.mapError(storeError),
           ),
       };

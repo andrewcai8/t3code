@@ -10,13 +10,16 @@ import {
   ProviderInstanceId,
   type Automation,
   type EnvironmentProvisionInput,
+  type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionResult,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
+import * as TestClock from "effect/testing/TestClock";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { makeAutomationRunner, type AutomationRunnerPorts } from "./AutomationRunner.ts";
@@ -49,6 +52,7 @@ const run = (state: StoredRun["state"], environmentId: string | null = null): St
   environmentId: environmentId === null ? null : EnvironmentId.make(environmentId),
   threadId: null,
   error: null,
+  disposedAt: null,
   createdAt: "2026-09-26T09:00:00.000Z",
   updatedAt: "2026-09-26T09:00:00.000Z",
 });
@@ -100,7 +104,10 @@ const fakeChild = (requests: Array<ChildRequest>) =>
 const fakeManager = (
   seen: Array<string>,
   provisioned: Array<EnvironmentProvisionInput>,
-  provisionResult: EnvironmentProvisionResult | null = null,
+  overrides: {
+    readonly provision?: EnvironmentProvisionResult;
+    readonly attach?: EnvironmentProvisionAttachResult;
+  } = {},
 ) => {
   const stateNow = (label: string) =>
     AutomationStore.use((store) => store.listRuns(automation.id, 1)).pipe(
@@ -119,7 +126,7 @@ const fakeManager = (
               Effect.andThen(() => {
                 provisioned.push(input);
                 return Effect.succeed(
-                  provisionResult ?? {
+                  overrides.provision ?? {
                     kind: "ready" as const,
                     requestId: input.requestId,
                     environment: {
@@ -148,11 +155,19 @@ const fakeManager = (
         attach: (input) =>
           withStore(
             stateNow("attach").pipe(
-              Effect.as({
-                kind: "attached" as const,
-                environmentId: EnvironmentId.make("child-env"),
-                pairingUrl: `https://child.test/pair#token=${input.requestId}`,
-              }),
+              Effect.as(
+                overrides.attach ?? {
+                  kind: "attached" as const,
+                  environmentId: EnvironmentId.make("child-env"),
+                  pairingUrl: `https://child.test/pair#token=${input.requestId}`,
+                },
+              ),
+            ),
+          ),
+        dispose: (input) =>
+          withStore(
+            stateNow(`dispose ${"requestId" in input ? input.requestId : "?"}`).pipe(
+              Effect.as({ kind: "disposed" as const }),
             ),
           ),
         claim: (input) =>
@@ -181,7 +196,11 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
     withStore(
       Effect.gen(function* () {
         const store = yield* AutomationStore;
-        yield* store.save({ automation, webhookSecretHash: null });
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
         yield* store.insertRun(run("provisioning"));
         const seen: Array<string> = [];
         const provisioned: Array<EnvironmentProvisionInput> = [];
@@ -201,6 +220,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
             pinAccount: true,
             repository: "andrewcai8/t3code",
             branch: "main",
+            retentionDeadline: "2026-09-27T09:00:00.000Z",
           },
         ]);
         expect(seen).toEqual([
@@ -272,7 +292,11 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
     withStore(
       Effect.gen(function* () {
         const store = yield* AutomationStore;
-        yield* store.save({ automation, webhookSecretHash: null });
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
         yield* store.insertRun(run("starting", "child-env"));
         const seen: Array<string> = [];
         const provisioned: Array<EnvironmentProvisionInput> = [];
@@ -301,15 +325,21 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
     withStore(
       Effect.gen(function* () {
         const store = yield* AutomationStore;
-        yield* store.save({ automation, webhookSecretHash: null });
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
         yield* store.insertRun(run("provisioning"));
         const seen: Array<string> = [];
         const requests: Array<ChildRequest> = [];
         const runner = yield* makeAutomationRunner(
           yield* fakeManager(seen, [], {
-            kind: "refused",
-            reason: "credentials",
-            message: "The selected provider account is unavailable on this machine.",
+            provision: {
+              kind: "refused",
+              reason: "credentials",
+              message: "The selected provider account is unavailable on this machine.",
+            },
           }),
         );
 
@@ -324,6 +354,81 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           environmentId: null,
           threadId: null,
           error: "The selected provider account is unavailable on this machine.",
+          disposedAt: null,
+        });
+      }),
+    ),
+  );
+
+  it.effect("disposes the machine of a run that fails after its provision was accepted", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* AutomationStore;
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const seen: Array<string> = [];
+        const runner = yield* makeAutomationRunner(
+          yield* fakeManager(seen, [], {
+            attach: { kind: "refused", message: "This environment's lease has ended." },
+          }),
+        );
+
+        const finished = yield* runner(automation, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild([])),
+        );
+
+        expect(seen).toEqual([
+          "provision:provisioning",
+          "attach:attaching",
+          "dispose 11111111-1111-4111-a111-000000000001:attaching",
+        ]);
+        expect(finished).toMatchObject({
+          state: "failed",
+          error: "This environment's lease has ended.",
+          disposedAt: "1970-01-01T00:00:00.000Z",
+        });
+      }),
+    ),
+  );
+
+  it.effect("gives up on a provision still pending after 30 minutes and disposes it", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* AutomationStore;
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const seen: Array<string> = [];
+        const runner = yield* makeAutomationRunner(
+          yield* fakeManager(seen, [], {
+            provision: {
+              kind: "pending",
+              requestId: ProvisionRequestId.make("11111111-1111-4111-a111-000000000001"),
+              message: "The environment is still being prepared.",
+            },
+          }),
+        );
+
+        const fiber = yield* runner(automation, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild([])),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("31 minutes");
+        const finished = yield* Fiber.join(fiber);
+
+        expect(seen.at(-1)).toBe("dispose 11111111-1111-4111-a111-000000000001:provisioning");
+        expect(finished).toMatchObject({
+          state: "failed",
+          error:
+            "The environment was not ready after 30 minutes. The environment is still being prepared.",
+          disposedAt: "1970-01-01T00:30:00.000Z",
         });
       }),
     ),
