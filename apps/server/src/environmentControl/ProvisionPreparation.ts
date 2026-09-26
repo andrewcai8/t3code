@@ -22,7 +22,7 @@ import {
 } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
-import { stripCodexRefreshToken } from "./stripCodexRefreshToken.ts";
+import { stripCodexRefreshToken } from "../provider/codexLoginCopy.ts";
 import {
   credentialVariables,
   guestCredentialDestination,

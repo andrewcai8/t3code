@@ -16,7 +16,7 @@ import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
 import { credentialDestinations } from "../../apps/server/src/environmentControl/credentialDestinations.ts";
-import { stripCodexRefreshToken } from "../../apps/server/src/environmentControl/stripCodexRefreshToken.ts";
+import { stripCodexRefreshToken } from "../../apps/server/src/provider/codexLoginCopy.ts";
 import { planManagerAccounts, type PlanInput } from "./provision-manager-accounts.ts";
 
 interface ConfiguredFile {

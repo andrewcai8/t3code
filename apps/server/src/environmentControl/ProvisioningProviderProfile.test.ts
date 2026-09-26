@@ -9,6 +9,7 @@ import {
   type ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
@@ -437,6 +438,47 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
           ["cursor", "cursorWork", "environment"],
         ],
       ]);
+    }),
+  );
+
+  it.effect("skips a Codex account whose copied login would expire, however much room it has", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-09-03T12:00:00.000Z"));
+      const codexLogin = (exp: number) =>
+        JSON.stringify({
+          tokens: {
+            id_token: "eyJ.id.sig",
+            access_token: `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(`{"exp":${exp}}`).toString("base64url")}.sig`,
+            refresh_token: "t3-copy-cannot-refresh",
+            account_id: "acct-1",
+          },
+        });
+      yield* file("codex-roomy/auth.json", codexLogin(1788433200));
+      yield* file("codex-spare/auth.json", codexLogin(1789041600));
+      const settings = (spareHome: string) =>
+        decodeSettings({
+          providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+          providerInstances: {
+            roomy: {
+              driver: "codex",
+              displayName: "Codex · roomy",
+              config: { homePath: NodePath.join(directory, "codex-roomy") },
+            },
+            spare: { driver: "codex", config: { homePath: NodePath.join(directory, spareHome) } },
+            cursor: { driver: "cursor", enabled: false },
+          },
+        });
+      const usage = { roomy: [session(5)], spare: [session(90)] };
+      const expired = "Codex · roomy's Codex login expired; sign in on your computer and reseed.";
+      expect(yield* accounts(settings("codex-spare"), "roomy", undefined, usage)).toEqual([
+        ["codex", "spare", "file"],
+      ]);
+      expect((yield* Effect.flip(resolve(settings("codex-spare"), "roomy", "codex"))).message).toBe(
+        expired,
+      );
+      expect(
+        (yield* Effect.flip(accounts(settings("codex-roomy"), "roomy", undefined, usage))).message,
+      ).toBe(expired);
     }),
   );
 

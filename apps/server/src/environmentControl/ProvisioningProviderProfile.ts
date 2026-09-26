@@ -11,12 +11,18 @@ import {
   type ServerSettings,
 } from "@t3tools/contracts";
 import { rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import {
+  codexLoginExpiredMessage,
+  codexLoginExpiring,
+  parseCodexLogin,
+} from "../provider/codexLoginCopy.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
@@ -196,6 +202,18 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
             ? `This Claude account stores its login in the macOS keychain, which can't be copied safely. Run \`${claudeLoginDirectory ? `CLAUDE_CONFIG_DIR=${claudeLoginDirectory} ` : ""}claude setup-token\` and add the token under provisioning.claudeOAuthTokens.${instanceId} in environment-control.json.`
             : "The selected account credentials could not be found on this machine.",
       });
+    // Every environment gets a copy that cannot refresh (`stripCodexRefreshToken`),
+    // so its access token must outlive the run.
+    if (kind === "codex") {
+      const login = parseCodexLogin(
+        yield* fs.readFileString(source).pipe(Effect.orElseSucceed(() => "")),
+      );
+      if (codexLoginExpiring(login, yield* Clock.currentTimeMillis))
+        return yield* new ProvisionRefused({
+          reason: "credentials",
+          message: codexLoginExpiredMessage(instance.displayName ?? instanceId),
+        });
+    }
     return {
       kind,
       instanceId,
@@ -211,7 +229,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
  *
  * Each driver runs on its account with the largest share of usage left once
  * its active sessions are counted (`rankAccounts`), walking down the ranking past any account whose login cannot leave this
- * machine. The requested driver must resolve to some account; every other
+ * machine or would expire before the run could use it. The requested driver must resolve to some account; every other
  * driver comes along when one of its accounts is portable and is left off
  * the guest otherwise, so one unusable login never blocks the chat asked for.
  * `providerInstanceId` names the driver when `agentDriver` is absent and wins

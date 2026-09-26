@@ -22,6 +22,7 @@
  * @module provider/Drivers/CodexDriver
  */
 import { CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -35,6 +36,11 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  codexLoginExpiredMessage,
+  codexLoginExpiring,
+  parseCodexLogin,
+} from "../codexLoginCopy.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
@@ -51,6 +57,7 @@ import { resolveCodexLaunchArgs } from "../Layers/codexLaunchArgs.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import * as ModelManifest from "../ModelManifest.ts";
+import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
@@ -174,6 +181,30 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: expandHomePath(config.binaryPath),
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
+      // Codex still reports a copied login (`stripCodexRefreshToken`) as signed
+      // in after its access token dies, and no refresh will ever revive it.
+      const authPath = pathService.join(
+        homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
+        "auth.json",
+      );
+      const markExpiredLoginCopy = (draft: ServerProviderDraft) =>
+        draft.auth.status !== "authenticated"
+          ? Effect.succeed(draft)
+          : Effect.zipWith(
+              fileSystem.readFileString(authPath).pipe(Effect.orElseSucceed(() => "")),
+              Clock.currentTimeMillis,
+              (authJson, now): ServerProviderDraft => {
+                const login = parseCodexLogin(authJson);
+                return !login.refreshable && codexLoginExpiring(login, now)
+                  ? {
+                      ...draft,
+                      status: "error",
+                      auth: { status: "unauthenticated" },
+                      message: codexLoginExpiredMessage(displayName ?? instanceId),
+                    }
+                  : draft;
+              },
+            );
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(
           makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
@@ -211,6 +242,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         Effect.andThen(
           Effect.zipWith(
             checkCodexProviderStatus(effectiveConfig, undefined, providerEnvironment).pipe(
+              Effect.flatMap(markExpiredLoginCopy),
               Effect.annotateLogs({ providerInstanceId: instanceId }),
             ),
             modelManifest.current,

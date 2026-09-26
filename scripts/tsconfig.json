@@ -11,6 +11,6 @@
     "**/*.ts",
     "../apps/server/src/provider/cursorCredentialPath.ts",
     "../apps/server/src/environmentControl/credentialDestinations.ts",
-    "../apps/server/src/environmentControl/stripCodexRefreshToken.ts"
+    "../apps/server/src/provider/codexLoginCopy.ts"
   ]
 }
