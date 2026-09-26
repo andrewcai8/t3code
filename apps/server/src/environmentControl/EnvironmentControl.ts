@@ -945,6 +945,7 @@ export const layer = Layer.effect(
                     {
                       providerInstanceId: input.providerInstanceId,
                       ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
+                      pinAccount: input.pinAccount,
                     },
                     manager.config.provisioning?.claudeOAuthTokens,
                     usage,
