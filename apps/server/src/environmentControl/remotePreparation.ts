@@ -1,5 +1,5 @@
 import { AuthAccessWriteScope, ProvisionReadiness } from "@t3tools/contracts";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import type { RecordProvisionPhase } from "./provisionTiming.ts";
 
 /** Trusted host-local inputs. Package dependencies are installed on the target host when requested. */
@@ -74,6 +74,8 @@ export interface RemotePreparationInput {
 export const RemotePreparationReady = Schema.Struct({
   ...ProvisionReadiness.fields,
   headRevision: ProvisionReadiness.fields.t3Revision,
+  /** Why this open kept the checkout it had instead of refreshing it. */
+  refreshError: Schema.optional(Schema.NullOr(Schema.String)),
   artifactSha256: ProvisionReadiness.fields.preparationHash,
   runtimeVersion: Schema.String,
   serverPid: Schema.Int,
@@ -126,6 +128,13 @@ export async function prepareRemoteHost(
     throw new Error(detail && detail.length > 0 ? detail : "Remote preparation failed.");
   }
   const ready = decodeReady(result.stdout);
+  if (ready.refreshError)
+    Effect.runSync(
+      Effect.logWarning("Cloud checkout refresh skipped", {
+        resourceIdentity: input.resourceIdentity,
+        cause: ready.refreshError,
+      }),
+    );
   const phases = decodePhases(result.stdout).phases ?? [];
   for (const entry of phases)
     record?.({
@@ -544,7 +553,8 @@ def prepare(spec):
             raise RuntimeError('Environment identity conflict')
         if not environment_path.exists():
             atomic(environment_path, journal['environmentId'] + '\n')
-        if not project.exists():
+        cloned = not project.exists()
+        if cloned:
             with step('repositoryClone'):
                 if repository is None:
                     if checkout.exists():
@@ -556,44 +566,60 @@ def prepare(spec):
                     finish(fetching, 600)
                     run(['git', 'checkout', '--detach', repository['revision']], checkout, git_env, timeout=600)
                 os.rename(checkout, project)
+        # Where preparation last put HEAD, the move it has started, the tree it
+        # left behind, and the revision setup last ran at.
+        placement = journal.setdefault('checkout', {})
+        def status_digest():
+            return hashlib.sha256(run(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], project, env).encode()).hexdigest()
         def refresh_checkout(follow):
             if follow == 'HEAD':
-                default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env), re.M)
+                default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env, timeout=120), re.M)
                 if default is None:
                     raise RuntimeError('The repository does not advertise a default branch')
                 follow = default.group(1)
-            elif not run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + follow], project, git_env):
+            elif not run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + follow], project, git_env, timeout=120):
                 # Deleted upstream, usually once its pull request merged.
-                return
+                return False
             tracking = 'refs/remotes/origin/' + follow
             run(['git', 'check-ref-format', tracking], project, env)
-            run(['git', '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=600)
+            depth = ['--depth=1'] if run(['git', 'rev-parse', '--is-shallow-repository'], project, env) == 'true' else []
+            run(['git', '-c', 'protocol.version=2', 'fetch', *depth, '--no-tags', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=120)
             tip = run(['git', 'rev-parse', tracking], project, env)
             head = run(['git', 'rev-parse', 'HEAD'], project, env)
             detached = run(['git', 'rev-parse', '--symbolic-full-name', 'HEAD'], project, env) == 'HEAD'
-            # Files preparation installed into the workspace are not a thread's edits.
-            installed = {str(pathlib.PurePosixPath(file['destination'])) for file in spec['files'] if file['scope'] == 'workspace'}
-            untracked = run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], project, env).split('\0')
-            dirty = bool(run(['git', 'diff', '--name-only', 'HEAD'], project, env)) or any(path and path not in installed for path in untracked)
-            placed = journal.get('checkoutRevision', repository['revision'])
-            if checkout_action(placed, head, detached, dirty, tip) == 'fast-forward':
-                run(['git', 'checkout', '-q', '--detach', tip], project, env, timeout=600)
-                head = tip
-            # Recorded after the move: a crash in between leaves HEAD at the tip,
-            # and the next open records it.
-            if head == tip and placed != tip:
-                journal['checkoutRevision'] = tip
+            # A move whose checkout finished but whose record did not.
+            adopted = head == placement.get('target')
+            placed = head if adopted else placement.get('revision', repository['revision'])
+            # The tree preparation left is the baseline; a box prepared before
+            # it was recorded is never moved.
+            dirty = not cloned and placement.get('status') != status_digest()
+            moved = checkout_action(placed, head, detached, dirty, tip) == 'fast-forward'
+            if moved:
+                placement['target'] = tip
                 atomic(journal_path, json.dumps(journal))
+                run(['git', 'checkout', '-q', '--detach', tip], project, env, timeout=600)
+            if moved or adopted:
+                placement['revision'] = tip if moved else head
+                placement.pop('target', None)
+                atomic(journal_path, json.dumps(journal))
+            return moved or adopted
+        owned = cloned
+        refresh_error = None
         if repository is not None:
             with step('repositoryVerify'):
                 if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
                     raise RuntimeError('Repository identity conflict')
-                # A refreshed shallow checkout cannot show the prepared revision
-                # is its ancestor, only that it was cloned from it.
-                run(['git', 'cat-file', '-e', repository['revision'] + '^{commit}'], project, env)
+                # The revision preparation last placed, which a thread's history
+                # keeps reachable even after the frozen one is pruned.
+                run(['git', 'cat-file', '-e', placement.get('revision', repository['revision']) + '^{commit}'], project, env)
             if spec.get('follow'):
                 with step('repositoryRefresh'):
-                    refresh_checkout(spec['follow'])
+                    # Best effort: a box that cannot reach its remote still opens
+                    # on the checkout it has.
+                    try:
+                        owned = refresh_checkout(spec['follow']) or owned
+                    except Exception as error:
+                        refresh_error = str(error)
         with step('workspaceFiles'):
             install_files('workspace')
         def fetch_artifact(url, target, expected):
@@ -634,7 +660,10 @@ def prepare(spec):
             with step('providerInstall'):
                 finish(installing, 900)
         prepare = spec.get('prepareCommands') or []
-        if prepare:
+        # Setup belongs to a checkout: it reruns only once preparation has
+        # placed a different revision, never on a plain resume.
+        setup_revision = placement.get('revision', repository['revision'] if repository else None)
+        if prepare and placement.get('setup', False) != setup_revision:
             if not isinstance(prepare, list):
                 raise RuntimeError('Invalid prepare commands')
             with step('prepareCommands'):
@@ -642,6 +671,8 @@ def prepare(spec):
                     if not isinstance(command_line, str) or not command_line.strip() or '\0' in command_line:
                         raise RuntimeError('Invalid prepare command')
                     run(['sh', '-lc', command_line], project, env, timeout=1800)
+            placement['setup'] = setup_revision
+            atomic(journal_path, json.dumps(journal))
         credential_path = root / 'broker-token'
         if not credential_path.exists():
             with step('brokerToken'):
@@ -742,8 +773,11 @@ def prepare(spec):
         process = server_process()
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
+        if owned and repository is not None:
+            placement['status'] = status_digest()
+            atomic(journal_path, json.dumps(journal))
         mark('prepareTotal', entered)
-        return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
+        return {'refreshError': refresh_error, 'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 
 SUPERVISOR = r"""
 import fcntl,json,os,pathlib,sys

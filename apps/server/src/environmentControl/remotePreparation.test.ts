@@ -973,4 +973,95 @@ describe("checkout refresh", () => {
     git(source, "branch", "-D", "feature");
     expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
   });
+
+  it("still opens on the checkout it has when the remote cannot be reached", async () => {
+    const { input, source } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    advance(source, "unreachable");
+    await NodeFSP.rename(source, `${source}-moved`);
+    const reopened = await prepareRemoteHost(localPort, input);
+    expect(reopened.headRevision).toBe(first.headRevision);
+    expect(reopened.refreshError).toMatch(/Preparation command failed/);
+  });
+
+  it("keeps a box whose preparation files the tip now tracks, and still opens it", async () => {
+    const { input, source } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    await NodeFSP.mkdir(NodePath.join(source, ".evidence"));
+    await NodeFSP.writeFile(NodePath.join(source, ".evidence/report.json"), "upstream\n");
+    git(source, "add", ".");
+    advance(source, "tracks the evidence path");
+    const reopened = await prepareRemoteHost(localPort, input);
+    expect(reopened.headRevision).toBe(first.headRevision);
+    expect(reopened.refreshError).toMatch(/would be overwritten/);
+    expect(
+      await NodeFSP.readFile(NodePath.join(first.projectDir, ".evidence/report.json"), "utf8"),
+    ).toBe("private evidence");
+  });
+
+  it("reruns setup only when the checkout moved", async () => {
+    const { input, source } = await followed();
+    const withSetup = { ...input, prepareCommands: ["echo ran >> ../setup-runs"] };
+    const runs = async () =>
+      (await NodeFSP.readFile(NodePath.join(input.root, "setup-runs"), "utf8")).split("\n").length -
+      1;
+    const first = await prepareRemoteHost(localPort, withSetup);
+    pids.add(first.serverPid);
+    await prepareRemoteHost(localPort, withSetup);
+    expect(await runs()).toBe(1);
+    advance(source, "needs setup");
+    await prepareRemoteHost(localPort, withSetup);
+    expect(await runs()).toBe(2);
+  });
+
+  it("moves a box whose setup left files behind, since that tree is its baseline", async () => {
+    const { input, source } = await followed();
+    const withSetup = { ...input, prepareCommands: ["echo built > generated.txt"] };
+    const first = await prepareRemoteHost(localPort, withSetup);
+    pids.add(first.serverPid);
+    const tip = advance(source, "upstream");
+    expect((await prepareRemoteHost(localPort, withSetup)).headRevision).toBe(tip);
+  });
+
+  it("does not re-shallow a checkout a thread deepened", async () => {
+    const { input, source } = await followed();
+    advance(source, "history");
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    git(first.projectDir, "fetch", "-q", "--unshallow", "origin");
+    const tip = advance(source, "upstream");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
+    expect(git(first.projectDir, "rev-parse", "--is-shallow-repository")).toBe("false");
+  });
+
+  it("finishes a move that crashed between the checkout and its record", async () => {
+    const { input, source } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const interrupted = advance(source, "interrupted");
+    git(first.projectDir, "fetch", "-q", "origin", interrupted);
+    git(first.projectDir, "checkout", "-q", "--detach", interrupted);
+    const journalPath = NodePath.join(input.root, "preparation.json");
+    const journal = JSON.parse(await NodeFSP.readFile(journalPath, "utf8"));
+    journal.checkout.target = interrupted;
+    await NodeFSP.writeFile(journalPath, JSON.stringify(journal));
+    const tip = advance(source, "after the crash");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
+  });
+
+  it("opens a moved box after the revision it was first cloned at is pruned", async () => {
+    const { input, source } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const tip = advance(source, "upstream");
+    await prepareRemoteHost(localPort, input);
+    git(first.projectDir, "reflog", "expire", "--expire=now", "--all");
+    git(first.projectDir, "gc", "-q", "--prune=now");
+    expect(() =>
+      git(first.projectDir, "cat-file", "-e", `${input.repository!.revision}^{commit}`),
+    ).toThrow();
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
+  });
 });
