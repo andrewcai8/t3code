@@ -1,29 +1,17 @@
-import {
-  isOffDeviceReachablePairingUrl,
-  provisionedGatewayPairingUrl,
-} from "@t3tools/client-runtime/connection";
+import { isOffDeviceReachablePairingUrl } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { type DiscoveredProvisionedEnvironment, type EnvironmentId } from "@t3tools/contracts";
-import { AsyncResult } from "effect/unstable/reactivity";
 import { useEffect, useId, useState } from "react";
-import { connectPairing } from "../../connection/onboarding";
-import { openProvisionedEnvironment } from "../../connection/provisioned";
+import { useProvisionedEnvironmentJoin } from "../../connection/useProvisionedEnvironmentJoin";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useThreadShell } from "../../state/entities";
-import { useEnvironmentHttpBaseUrl, useEnvironments } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { waitForThreadShell } from "../../state/waitForThreadShell";
 import { Button } from "../ui/button";
 import { QRCodeSvg } from "../ui/qr-code";
 import { toastManager } from "../ui/toast";
-import {
-  rememberProvisionedSandbox,
-  rememberProvisionedSandboxForEnvironment,
-} from "../../cloud/provisionedSandboxLeases";
 
 type DevicePairing =
   | { readonly kind: "minting" }
@@ -178,19 +166,7 @@ export function ProvisionedEnvironmentConnections({
       ? serverEnvironment.provisionedEnvironments({ environmentId: managerId, input: {} })
       : null,
   );
-  const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
-    reportFailure: false,
-  });
-  const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
-    reportFailure: false,
-  });
-  const pair = useAtomCommand(connectPairing, { reportFailure: false });
-  const { environments } = useEnvironments();
-  const managerHttpBaseUrl = useEnvironmentHttpBaseUrl(managerId);
-  const rewritePairingUrl = (pairingUrl: string, leaseId: string) =>
-    managerHttpBaseUrl
-      ? provisionedGatewayPairingUrl(managerHttpBaseUrl, leaseId, pairingUrl)
-      : pairingUrl;
+  const { mintPairingUrl, join } = useProvisionedEnvironmentJoin(managerId);
   const navigate = useNavigate();
   const [pending, setPending] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -201,65 +177,11 @@ export function ProvisionedEnvironmentConnections({
     const timer = globalThis.setInterval(refresh, 15_000);
     return () => globalThis.clearInterval(timer);
   }, [supported, refresh]);
-  const requestAttach = (environment: DiscoveredProvisionedEnvironment) =>
-    attach({
-      environmentId: managerId,
-      input: { requestId: environment.requestId },
-      showsOwnProgress: true,
-    });
-  async function attachForClient(environment: DiscoveredProvisionedEnvironment) {
-    if (environment.lifecycle === "paused") {
-      const resumed = await resume({
-        environmentId: managerId,
-        input: { environmentId: environment.environmentId },
-        showsOwnProgress: true,
-      });
-      if (AsyncResult.isFailure(resumed))
-        throw new Error("The manager could not resume this environment. Try again.");
-      if (resumed.value.kind === "refused") throw new Error(resumed.value.message);
-    }
-    const result = await requestAttach(environment);
-    if (AsyncResult.isFailure(result))
-      throw new Error("The manager could not issue a connection. Try again.");
-    if (result.value.kind === "refused") throw new Error(result.value.message);
-    return result.value;
-  }
-  async function mintPairingUrl(environment: DiscoveredProvisionedEnvironment): Promise<string> {
-    const result = await attachForClient(environment);
-    return rewritePairingUrl(result.pairingUrl, environment.leaseId);
-  }
   async function open(environment: DiscoveredProvisionedEnvironment) {
     setPending(environment.requestId);
     setMessage(null);
     try {
-      const ref = await openProvisionedEnvironment(environment, {
-        isConnected: (id) =>
-          environments.some(
-            (entry) => entry.environmentId === id && entry.connection.phase === "connected",
-          ),
-        attach: () => attachForClient(environment),
-        pair: async (pairingUrl) => {
-          const result = await pair({
-            pairingUrl,
-            expectedEnvironmentId: environment.environmentId,
-          });
-          if (AsyncResult.isFailure(result))
-            throw new Error("The environment could not be connected. Try again.");
-          return result.value;
-        },
-        rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
-        waitForThread: waitForThreadShell,
-        rememberLease: (ref) => {
-          const lease = {
-            leaseId: environment.leaseId,
-            sandboxId: environment.sandboxId,
-            managerEnvironmentId: managerId,
-          };
-          if (ref === null)
-            rememberProvisionedSandboxForEnvironment(environment.environmentId, lease);
-          else rememberProvisionedSandbox(ref, lease);
-        },
-      });
+      const ref = await join(environment);
       if (ref) await navigate({ to: "/$environmentId/$threadId", params: ref });
       else setMessage("Environment connected. Its threads will appear when they are available.");
     } catch (error) {
