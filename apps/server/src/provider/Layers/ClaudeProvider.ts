@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type ServerProvider,
   type ServerProviderSlashCommand,
+  type ServerProviderResetCredits,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -623,6 +624,8 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   modelCatalog: ClaudeModelCatalog = BUNDLED_CLAUDE_MODEL_CATALOG,
   /** Shared with the adapter so turn events reuse the scoped-bucket names this probe saw. */
   scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>,
+  /** Banked resets for a subscription login, given the CLI version for the user agent. */
+  resolveResetCredits?: (version: string) => Effect.Effect<ServerProviderResetCredits | undefined>,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -782,6 +785,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
           .limits
     : undefined;
+  const resetCredits =
+    resolveResetCredits &&
+    (capabilities?.subscriptionType ?? cliAuth?.subscriptionType) &&
+    usageLimits &&
+    !usageLimits.unavailable &&
+    parsedVersion
+      ? yield* resolveResetCredits(parsedVersion)
+      : undefined;
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
@@ -799,7 +810,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
-      ...(usageLimits ? { usageLimits } : {}),
+      ...(usageLimits
+        ? { usageLimits: resetCredits ? { ...usageLimits, resetCredits } : usageLimits }
+        : {}),
     },
   });
 });
@@ -830,12 +843,18 @@ export const overlayClaudeCapabilitiesOnSnapshot = Effect.fn("overlayClaudeCapab
       apiProviderAuthMetadata(capabilities.apiProvider) ??
       previousAuthMeta;
     const email = capabilities.email ?? previousEmail;
-    const usageLimits = !capabilities.usage
+    const readLimits = !capabilities.usage
       ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
       : ((scopedLimitNames
           ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
           : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
               .limits) ?? snapshot.usageLimits);
+    // The status check resolved banked resets; a fresh usage read must not drop them.
+    const resetCredits = snapshot.usageLimits?.resetCredits;
+    const usageLimits =
+      resetCredits && readLimits && !readLimits.unavailable && !readLimits.resetCredits
+        ? { ...readLimits, resetCredits }
+        : readLimits;
 
     return {
       ...snapshot,

@@ -407,3 +407,31 @@ it.effect("keeps the published windows when the usage turn ran recently", () =>
     assert.deepEqual(overlaid.usageLimits, published);
   }),
 );
+
+it.effect("keeps banked resets when a fresh usage read replaces the windows", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* makePendingClaudeProvider(decodeClaudeSettings({}));
+    const overlaid = yield* overlayClaudeCapabilitiesOnSnapshot(
+      {
+        ...snapshot,
+        usageLimits: {
+          checkedAt: "2026-09-23T19:10:00.000Z",
+          windows: [],
+          resetCredits: { availableCount: 2 },
+        },
+      } as unknown as ServerProvider,
+      {
+        email: undefined,
+        subscriptionType: "max",
+        tokenSource: undefined,
+        apiProvider: undefined,
+        slashCommands: [],
+        usage: {
+          source: "usageEndpoint",
+          response: { rate_limits_available: true, rate_limits: {} },
+        },
+      },
+    );
+    assert.deepEqual(overlaid.usageLimits?.resetCredits, { availableCount: 2 });
+  }),
+);

@@ -188,9 +188,7 @@ export class UsageAggregator {
 
     const priced = priceUsage(
       this.#options.rates,
-      record.model,
-      record.totals,
-      record.reportedCostUsd,
+      record,
       record.provider === "cursor" ? undefined : this.#options.priceOverrides,
     );
 
@@ -199,12 +197,7 @@ export class UsageAggregator {
     bucket.cacheSavingsUsd +=
       record.provider === "cursor"
         ? 0
-        : cacheSavingsUsd(
-            this.#options.rates,
-            record.model,
-            record.totals,
-            this.#options.priceOverrides,
-          );
+        : cacheSavingsUsd(this.#options.rates, record, this.#options.priceOverrides);
     bucket.records += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;

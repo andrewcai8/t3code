@@ -13,11 +13,13 @@
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
     "scripts": {
-      // Knip loads its preprocessor through a CLI option, not a source import.
-      // Cloud CLIs are invoked from docs (`node scripts/cloud/...`), not imports.
+      // Knip loads its preprocessor through a CLI option; native verification and
+      // worktree setup (from t3.json) run directly. Cloud CLIs are invoked from
+      // docs (`node scripts/cloud/...`), not imports.
       "entry": [
         "knip-schemas.ts",
         "mobile-native-client.ts",
+        "setup-worktree.ts",
         "cloud/*.mjs",
         "cloud/smoke-cloud-chat.ts",
       ],
@@ -44,6 +46,8 @@
         "src/snapShot/GlobalShiftShortcutWorker.ts!",
         "src/snapShot/RegionSnapShotWorker.ts!",
         "src/snapShot/SnapShotAccessibilityWorker.ts!",
+        "src/boot.ts!",
+        "src/compileCache.ts!",
         "src/main.ts!",
         "src/preload.ts!",
         "src/preview-pick-preload.ts!",
@@ -56,7 +60,7 @@
       "ignoreDependencies": ["playwright-core", "electron-builder"],
     },
     "apps/web": {
-      // Worktree setup invokes this directly from t3.json.
+      // Worktree setup (scripts/setup-worktree.ts) runs this directly.
       "entry": ["scripts/warm-dep-cache.ts"],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
