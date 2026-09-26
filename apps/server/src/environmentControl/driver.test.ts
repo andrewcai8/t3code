@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
-import { SandboxNotFoundError, type SandboxNetworkInfo } from "e2b";
+import { SandboxError, SandboxNotFoundError, type SandboxNetworkInfo } from "e2b";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createCloudDriver, ProvisionedSandboxMissing } from "./driver.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
@@ -320,6 +320,51 @@ describe("cloud SDK and controller boundary", () => {
       "retained",
       expect.objectContaining({ timeoutMs: 6 * 3_600_000 }),
     );
+  });
+  it("waits for and retries E2B when it cannot place a long-paused sandbox", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const retained = {
+        sandboxId: "retained",
+        metadata: { purpose: "t3-environment", account: "codex" },
+      };
+      sdk.getInfo
+        .mockResolvedValueOnce({ ...retained, state: "paused" })
+        .mockResolvedValueOnce({ ...retained, state: "running" });
+      sdk.connect
+        .mockRejectedValueOnce(
+          Object.assign(
+            new SandboxError(
+              "504: Failed to place sandbox: placement timed out after 2 attempt(s), please retry",
+            ),
+            { statusCode: 504 },
+          ),
+        )
+        .mockResolvedValueOnce({ sandboxId: "retained" });
+      const retries: unknown[] = [];
+      const resumed = createCloudDriver(config, (retry) => retries.push(retry)).resume({
+        leaseId: "retained",
+        sandboxId: "retained",
+        providerInstanceId: "codex",
+        environmentId: "child",
+      });
+      const [value] = await Promise.all([resumed, vi.runAllTimersAsync()]);
+      expect(value).toEqual({});
+      expect(sdk.connect.mock.calls.map(([, options]) => options.requestTimeoutMs)).toEqual([
+        120_000, 120_000,
+      ]);
+      expect(retries).toEqual([
+        {
+          sandboxId: "retained",
+          attempt: 1,
+          code: "http_504",
+          message:
+            "504: Failed to place sandbox: placement timed out after 2 attempt(s), please retry",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("refuses a provisioned sandbox owned by another account", async () => {
     sdk.getInfo.mockResolvedValue({
