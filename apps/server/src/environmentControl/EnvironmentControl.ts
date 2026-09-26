@@ -68,24 +68,10 @@ import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/Pro
 import { ProjectionThreadSessionRepository } from "../persistence/Services/ProjectionThreadSessions.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
-import {
-  ProvisionRefused,
-  resolveProvisioningProfiles,
-  resolveProvisioningProviderProfile,
-} from "./ProvisioningProviderProfile.ts";
+import { ProvisionRefused, resolveProvisioningProfiles } from "./ProvisioningProviderProfile.ts";
 import * as ServerConfig from "../config.ts";
-import {
-  readConfig,
-  resolveControlConfigPath,
-  type ManagedTarget,
-  type Provisioning as ProvisioningConfig,
-} from "./config.ts";
-import {
-  createCloudDriver,
-  ProvisionedSandboxMissing,
-  type CloudDriver,
-  type ProvisionRequest,
-} from "./driver.ts";
+import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
+import { createCloudDriver, ProvisionedSandboxMissing, type CloudDriver } from "./driver.ts";
 import {
   createProvisionedLeaseRegistry,
   decodeLegacyLeases,
@@ -634,13 +620,6 @@ export const layer = Layer.effect(
             });
       return result.profile;
     };
-    const resolveProfile = (
-      request: ProvisionRequest,
-      claudeOAuthTokens?: ProvisioningConfig["claudeOAuthTokens"],
-    ) =>
-      resolveAccounts((current) =>
-        resolveProvisioningProviderProfile(current, request, claudeOAuthTokens),
-      );
     const resolve = () =>
       (async () => {
         const path = await resolveControlConfigPath({
@@ -661,7 +640,7 @@ export const layer = Layer.effect(
         namespace = undefined;
         const service = (async () => {
           const config = await readConfig(path);
-          const cloud = createCloudDriver(config, resolveProfile);
+          const cloud = createCloudDriver(config);
           const control = createEnvironmentControl(
             config.targets,
             {

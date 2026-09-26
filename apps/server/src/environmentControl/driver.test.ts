@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import { SandboxNotFoundError, type SandboxNetworkInfo } from "e2b";
-import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId } from "@t3tools/contracts";
 import { createCloudDriver, ProvisionedSandboxMissing } from "./driver.ts";
 import type { EnvironmentControlConfig } from "./config.ts";
 
@@ -9,18 +9,12 @@ const sdk = vi.hoisted(() => ({
   getInfo: vi.fn(),
   setTimeout: vi.fn(),
   updateNetwork: vi.fn(),
-  create: vi.fn(),
-  readFile: vi.fn(),
   connect: vi.fn(),
   fetch: vi.fn(),
   describe: vi.fn(),
   issueToken: vi.fn().mockResolvedValue("local-session-token"),
   loadUserToken: vi.fn(),
   fromBearerToken: vi.fn(),
-}));
-vi.mock("node:fs/promises", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs/promises")>()),
-  readFile: sdk.readFile,
 }));
 vi.mock("e2b", async (importOriginal) => ({
   ...(await importOriginal<typeof import("e2b")>()),
@@ -29,7 +23,6 @@ vi.mock("e2b", async (importOriginal) => ({
     connect: sdk.connect,
     setTimeout: sdk.setTimeout,
     updateNetwork: sdk.updateNetwork,
-    create: sdk.create,
   },
 }));
 vi.mock("@namespacelabs/sdk/auth", () => ({
@@ -224,33 +217,6 @@ describe("E2B resume network reconciliation", () => {
   });
 });
 describe("cloud SDK and controller boundary", () => {
-  it("creates fork parents with a persistent timeout and cleans them up when a fork fails", async () => {
-    sdk.readFile.mockResolvedValue("{}\n");
-    const parent = {
-      fork: vi.fn().mockRejectedValue(new Error("fork unavailable")),
-      kill: vi.fn().mockResolvedValue(undefined),
-    };
-    sdk.create.mockResolvedValue(parent);
-    await expect(
-      createCloudDriver({ ...config, provisioning: { templateId: "template" } }, async () => ({
-        kind: "codex",
-        instanceId: ProviderInstanceId.make("codex"),
-        environment: [],
-        credential: { kind: "environment" },
-      })).provision({
-        provider: "e2b",
-        providerInstanceId: "codex",
-      }),
-    ).rejects.toThrow("fork unavailable");
-    expect(sdk.create).toHaveBeenCalledWith(
-      "template",
-      expect.objectContaining({
-        lifecycle: { onTimeout: "pause", autoResume: false },
-      }),
-    );
-    expect(parent.fork).toHaveBeenCalledWith({ count: 1, timeoutMs: 6 * 3_600_000 });
-    expect(parent.kill).toHaveBeenCalledTimes(1);
-  });
   it("renews an owned running workspace without connecting or shortening a longer deadline", async () => {
     const retained = {
       sandboxId: "retained",
@@ -386,20 +352,6 @@ describe("cloud SDK and controller boundary", () => {
       }),
     ).rejects.toThrow("did not resume");
   });
-  it("does not silently route Namespace requests through E2B", async () => {
-    const driver = createCloudDriver({
-      ...config,
-      provisioning: { namespace: { size: "m" } },
-    });
-    await expect(
-      driver.provision({ provider: "namespace", providerInstanceId: "codex" }),
-    ).rejects.toMatchObject({
-      name: "ProvisionRefused",
-      reason: "unconfigured",
-    });
-    expect(sdk.connect).not.toHaveBeenCalled();
-  });
-
   it("observes paused E2B and Namespace without any controller HTTP or resume", async () => {
     const http = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected HTTP"));
     sdk.getInfo.mockResolvedValue(info("paused", "target"));

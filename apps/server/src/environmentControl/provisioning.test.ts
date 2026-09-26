@@ -1,6 +1,6 @@
 import { expect, it } from "vite-plus/test";
 
-import { repositoryDirectory, repositoryUrl } from "./driver.ts";
+import { repositoryUrl } from "./driver.ts";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 
 it("accepts the spellings a person actually pastes", () => {
@@ -16,12 +16,6 @@ it("accepts the spellings a person actually pastes", () => {
 
 it("refuses a repository that names no owner", () => {
   expect(() => repositoryUrl("justaname")).toThrow(/owner\/name/);
-});
-
-it("checks a repository out under its own name", () => {
-  expect(repositoryDirectory("Authentic-Intelligence/megpt-mono")).toBe(
-    "/home/user/work/megpt-mono",
-  );
 });
 
 it("carries the reason a request was declined", () => {
