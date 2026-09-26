@@ -115,10 +115,12 @@ describe("requestLatencyState", () => {
     expect(getSlowRpcAckRequests().map((request) => request.requestId)).toEqual(["config"]);
   });
 
-  it("still flags a resume whose caller shows no progress", () => {
+  it("flags a resume whose caller shows no progress only once E2B's retries run long", () => {
     trackRpcRequestSent("resume", WS_METHODS.environmentControlResume);
-    vi.advanceTimersByTime(16_000);
+    vi.advanceTimersByTime(70_000);
+    expect(getSlowRpcAckRequests()).toEqual([]);
 
+    vi.advanceTimersByTime(50_000);
     expect(getSlowRpcAckRequests().map((request) => request.requestId)).toEqual(["resume"]);
   });
 
