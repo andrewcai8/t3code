@@ -10,7 +10,6 @@ import {
   defaultInstanceIdForDriver,
   type Automation,
   type EnvironmentId,
-  type AutomationError,
   type EnvironmentProvisionInput,
   type ProjectId,
   type ProvisionRequestId,
@@ -35,8 +34,13 @@ import {
 export interface AutomationRunnerPorts {
   readonly environmentControl: Pick<
     EnvironmentControl["Service"],
-    "provision" | "attach" | "claim" | "dispose"
+    "provision" | "attach" | "claim"
   >;
+  /**
+   * Disposes a failed run's machine, or finds it never existed; false when it must be retried.
+   * Called only once the run's own provision call has finished or been interrupted.
+   */
+  readonly dispose: (run: StoredRun) => Effect.Effect<boolean>;
   /** Where the host reaches a child it provisioned, and the admin token it holds for it. */
   readonly remoteAccess: (leaseId: string) => Effect.Effect<RemoteAccess | null>;
 }
@@ -119,11 +123,8 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
     authorization: `Bearer ${access.brokerToken}`,
   });
 
-  /**
-   * Polls the frozen request until it is ready. The first answer that is not a refusal is recorded
-   * as acceptance: from then on a machine may exist, so any later failure disposes it.
-   */
-  const provisioned = (run: StoredRun, accept: Effect.Effect<void, AutomationError>) => {
+  /** Polls the frozen request until it is ready. */
+  const provisioned = (run: StoredRun) => {
     let last = "The environment is still being prepared.";
     return Effect.gen(function* () {
       for (;;) {
@@ -132,7 +133,6 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
           Effect.mapError((error) => new RunFailed(error.message)),
         );
         if (result.kind === "refused") return yield* Effect.fail(new RunFailed(result.message));
-        yield* accept.pipe(Effect.mapError((error) => new RunFailed(error.message)));
         if (result.kind === "ready") return;
         last = result.message;
         yield* Effect.sleep(PROVISION_RETRY);
@@ -147,19 +147,6 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
       }),
     );
   };
-
-  /** One attempt to dispose a failed run's machine; the service's sweep retries a miss. */
-  const disposeMachine = Effect.fnUntraced(function* (run: StoredRun) {
-    const result = yield* ports.environmentControl
-      .dispose({ requestId: run.requestId })
-      .pipe(Effect.orElseSucceed(() => ({ kind: "refused" as const, message: "unreachable" })));
-    if (result.kind === "disposed") return DateTime.formatIso(yield* DateTime.now);
-    yield* Effect.logWarning("automation run could not dispose its machine yet", {
-      runId: run.id,
-      message: result.message,
-    });
-    return null;
-  });
 
   const attached = Effect.fnUntraced(function* (run: StoredRun) {
     const result = yield* ports.environmentControl.attach({ requestId: run.requestId }).pipe(
@@ -272,11 +259,10 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
   const step = (
     automation: Automation,
     run: StoredRun,
-    accept: Effect.Effect<void, AutomationError>,
   ): Effect.Effect<RunTransition, RunFailed, HttpClient.HttpClient> => {
     switch (run.state) {
       case "provisioning":
-        return provisioned(run, accept).pipe(Effect.as({ state: "attaching" as const }));
+        return provisioned(run).pipe(Effect.as({ state: "attaching" as const }));
       case "attaching":
         return attached(run).pipe(
           stepTimeout(STEP_TIMEOUT.attaching, "Connecting to the environment"),
@@ -298,28 +284,18 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
 
   return Effect.fn("AutomationRunner.run")(function* (automation: Automation, initial: StoredRun) {
     let run: StoredRun | null = initial;
-    // Whether a machine may exist. Only a run whose provision was never accepted has none.
-    let accepted = initial.provisionAccepted;
-    const accept = Effect.suspend(() =>
-      accepted
-        ? Effect.void
-        : store.markProvisionAccepted(initial.id).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                accepted = true;
-              }),
-            ),
-          ),
-    );
     while (run !== null && isInFlight(run)) {
       const current: StoredRun = run;
-      const next: RunTransition = yield* step(automation, current, accept).pipe(
+      const next: RunTransition = yield* step(automation, current).pipe(
         Effect.catch((failed) =>
           Effect.gen(function* () {
-            // Disposed before the run is marked failed, so a crash in between re-runs this step,
-            // fails the same way, and disposes again, which converges. A miss is retried by the
-            // service's sweep, which finds the run by its accepted flag and missing disposal.
-            const disposedAt = accepted ? yield* disposeMachine(current) : null;
+            // Any failure may leave a machine, even a refusal: the manager re-checks its
+            // configuration on every poll, so a refusal can follow an allocation. Disposed before
+            // the run is marked failed, so a crash in between fails and disposes again. A miss is
+            // retried by the service's sweep.
+            const disposedAt = (yield* ports.dispose(current))
+              ? DateTime.formatIso(yield* DateTime.now)
+              : null;
             return { state: "failed" as const, error: failed.message, disposedAt };
           }),
         ),

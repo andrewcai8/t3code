@@ -81,7 +81,6 @@ const hashWebhookToken = (token: string) =>
 const toWire = ({
   prompt: _prompt,
   provisionInput: _provisionInput,
-  provisionAccepted: _provisionAccepted,
   ...run
 }: StoredRun): AutomationRun => run;
 
@@ -130,6 +129,36 @@ function restartsSchedule(before: Automation, after: AutomationInput): boolean {
     (!before.enabled && after.enabled)
   );
 }
+
+/**
+ * Disposes a failed run's machine through the manager; true once it is gone. A request the
+ * manager never recorded has no machine, so it counts as disposed without a call: callers only
+ * dispose once the run's own provision call has finished or been interrupted, so no record can
+ * appear afterwards. The manager's dispose refuses an unknown request, which is right for a
+ * client whose first provision call may still be in flight, so that check lives here.
+ */
+export const makeDisposeMachine = Effect.fn("makeDisposeMachine")(function* (
+  environmentControl: Pick<EnvironmentControl["Service"], "dispose">,
+) {
+  const store = yield* AutomationStore;
+  return (run: StoredRun): Effect.Effect<boolean> =>
+    Effect.gen(function* () {
+      if (!(yield* store.provisionRecorded(run.requestId))) return true;
+      const result = yield* environmentControl.dispose({ requestId: run.requestId });
+      if (result.kind === "disposed") return true;
+      yield* Effect.logWarning("automation run machine not disposed yet", {
+        runId: run.id,
+        message: result.message,
+      });
+      return false;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("automation run machine not disposed yet", { runId: run.id, cause }).pipe(
+          Effect.as(false),
+        ),
+      ),
+    );
+});
 
 export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: AutomationPorts) {
   const store = yield* AutomationStore;
@@ -183,7 +212,6 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
         requestId,
         prompt: options.prompt,
         provisionInput: runProvisionInput(automation, requestId, createdAt),
-        provisionAccepted: false,
         state: "provisioning",
         environmentId: null,
         threadId: null,
@@ -235,7 +263,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
 
   /**
    * Keeps runs from outliving their purpose. A run in flight whose fiber died (a defect or a
-   * store error) is failed. Every failed run whose provision was accepted has its machine
+   * store error) is failed. Every failed run has its machine
    * disposed, retried each tick until the manager confirms or the retention deadline has
    * already ended the machine. Runs of deleted automations are forgotten once they owe nothing.
    */
@@ -432,8 +460,10 @@ export class Automations extends Context.Service<
       const sql = yield* SqlClient.SqlClient;
       const environmentControl = yield* EnvironmentControl;
       const leases = createProvisionedLeaseRegistry(sql);
+      const dispose = yield* makeDisposeMachine(environmentControl);
       const runner = yield* makeAutomationRunner({
         environmentControl,
+        dispose,
         remoteAccess: (leaseId) =>
           Effect.tryPromise(() => leases.findById(leaseId)).pipe(
             Effect.map((lease) => lease?.remoteAccess ?? null),
@@ -443,23 +473,7 @@ export class Automations extends Context.Service<
       const context = yield* Effect.context<HttpClient.HttpClient>();
       const automations = yield* makeAutomations({
         run: (automation, run) => runner(automation, run).pipe(Effect.provide(context)),
-        dispose: (run) =>
-          environmentControl.dispose({ requestId: run.requestId }).pipe(
-            Effect.flatMap((result) =>
-              result.kind === "disposed"
-                ? Effect.succeed(true)
-                : Effect.logWarning("automation run machine not disposed yet", {
-                    runId: run.id,
-                    message: result.message,
-                  }).pipe(Effect.as(false)),
-            ),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("automation run machine not disposed yet", {
-                runId: run.id,
-                cause,
-              }).pipe(Effect.as(false)),
-            ),
-          ),
+        dispose,
         listProvisioned: environmentControl.listProvisioned,
       });
       yield* forkParked(automations.start);

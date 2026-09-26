@@ -15,19 +15,14 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type * as SqlError from "effect/unstable/sql/SqlError";
 import type * as Statement from "effect/unstable/sql/Statement";
 
-/**
- * A run as the host keeps it: the wire shape plus what it sends, frozen when it was triggered,
- * and whether the manager ever accepted its provision request (so a machine may exist).
- */
+/** A run as the host keeps it: the wire shape plus what it sends, frozen when triggered. */
 export interface StoredRun extends AutomationRun {
   readonly prompt: string;
   readonly provisionInput: EnvironmentProvisionInput;
-  readonly provisionAccepted: boolean;
 }
 
 export interface StoredAutomation {
@@ -121,15 +116,6 @@ const decodeRunRow = Schema.decodeUnknownExit(
     ...AutomationRun.fields,
     prompt: Schema.String,
     provisionInput: Schema.fromJsonString(EnvironmentProvisionInput),
-    provisionAccepted: Schema.Number.pipe(
-      Schema.decodeTo(
-        Schema.Boolean,
-        SchemaTransformation.transform({
-          decode: (flag: number) => flag === 1,
-          encode: (accepted: boolean): number => (accepted ? 1 : 0),
-        }),
-      ),
-    ),
   }),
 );
 const encodeProvisionInput = Schema.encodeSync(Schema.fromJsonString(EnvironmentProvisionInput));
@@ -171,9 +157,9 @@ export class AutomationStore extends Context.Service<
      * still disposed after the automation is gone.
      */
     readonly remove: (id: AutomationId) => Effect.Effect<void, AutomationError>;
-    /** Records that the manager accepted a run's provision request, so a machine may exist. */
-    readonly markProvisionAccepted: (id: AutomationRunId) => Effect.Effect<void, AutomationError>;
-    /** Failed runs whose provision was accepted and whose machine is not disposed yet. */
+    /** Whether the manager ever recorded this provision request; without it no machine exists. */
+    readonly provisionRecorded: (requestId: string) => Effect.Effect<boolean, AutomationError>;
+    /** Failed runs whose machine is not disposed, or found absent, yet. */
     readonly pendingDisposals: Effect.Effect<ReadonlyArray<StoredRun>, AutomationError>;
     readonly markDisposed: (
       id: AutomationRunId,
@@ -228,8 +214,8 @@ export class AutomationStore extends Context.Service<
         );
       const runColumns = sql`
         id, automation_id AS "automationId", trigger, scheduled_for AS "scheduledFor",
-        request_id AS "requestId", prompt, provision_input AS "provisionInput",
-        provision_accepted AS "provisionAccepted", state, child_environment_id AS "environmentId",
+        request_id AS "requestId", prompt, provision_input AS "provisionInput", state,
+        child_environment_id AS "environmentId",
         thread_id AS "threadId", error, disposed_at AS "disposedAt", created_at AS "createdAt",
         updated_at AS "updatedAt"
       `;
@@ -274,14 +260,14 @@ export class AutomationStore extends Context.Service<
             Effect.asVoid,
             Effect.mapError(storeError),
           ),
-        markProvisionAccepted: (id) =>
-          sql`UPDATE automation_runs SET provision_accepted = 1 WHERE id = ${id}`.pipe(
-            Effect.asVoid,
+        provisionRecorded: (requestId) =>
+          sql`SELECT 1 FROM provision_operations WHERE request_id = ${requestId}`.pipe(
+            Effect.map((rows) => rows.length > 0),
             Effect.mapError(storeError),
           ),
         pendingDisposals: readRuns(sql`
           SELECT ${runColumns} FROM automation_runs
-          WHERE state = 'failed' AND provision_accepted = 1 AND disposed_at IS NULL
+          WHERE state = 'failed' AND disposed_at IS NULL
           ORDER BY created_at, id
         `),
         markDisposed: (id, at) =>
@@ -293,7 +279,7 @@ export class AutomationStore extends Context.Service<
           DELETE FROM automation_runs
           WHERE automation_id NOT IN (SELECT id FROM automations)
             AND state NOT IN ('provisioning', 'attaching', 'starting')
-            AND NOT (state = 'failed' AND provision_accepted = 1 AND disposed_at IS NULL)
+            AND NOT (state = 'failed' AND disposed_at IS NULL)
         `.pipe(Effect.asVoid, Effect.mapError(storeError)),
         insertRun: (run, hourlyCap) =>
           Effect.gen(function* () {

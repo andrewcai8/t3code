@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   type Automation,
   type EnvironmentProvisionInput,
+  EnvironmentControlError,
   type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionResult,
 } from "@t3tools/contracts";
@@ -46,11 +47,7 @@ const automation: Automation = {
 };
 
 const requestId = ProvisionRequestId.make("11111111-1111-4111-a111-000000000001");
-const run = (
-  state: StoredRun["state"],
-  environmentId: string | null = null,
-  provisionAccepted = state !== "provisioning",
-): StoredRun => ({
+const run = (state: StoredRun["state"], environmentId: string | null = null): StoredRun => ({
   id: AutomationRunId.make("run-1"),
   automationId: automation.id,
   trigger: "manual",
@@ -58,7 +55,6 @@ const run = (
   requestId,
   prompt: "Bump dependencies and open a PR.",
   provisionInput: runProvisionInput(automation, requestId, "2026-09-26T09:00:00.000Z"),
-  provisionAccepted,
   state,
   environmentId: environmentId === null ? null : EnvironmentId.make(environmentId),
   threadId: null,
@@ -117,7 +113,7 @@ const fakeManager = (
   provisioned: Array<EnvironmentProvisionInput>,
   overrides: {
     /** Answers to successive provision calls; the last one repeats. */
-    readonly provision?: ReadonlyArray<EnvironmentProvisionResult>;
+    readonly provision?: ReadonlyArray<EnvironmentProvisionResult | "error">;
     readonly attach?: EnvironmentProvisionAttachResult;
   } = {},
 ) => {
@@ -138,8 +134,16 @@ const fakeManager = (
               Effect.andThen(() => {
                 provisioned.push(input);
                 const answers = overrides.provision ?? [];
+                const answer = answers[Math.min(provisioned.length, answers.length) - 1];
+                if (answer === "error")
+                  return Effect.fail(
+                    new EnvironmentControlError({
+                      message:
+                        "Cloud provisioning could not be reconciled. Retry the same request.",
+                    }),
+                  );
                 return Effect.succeed(
-                  answers[Math.min(provisioned.length, answers.length) - 1] ?? {
+                  answer ?? {
                     kind: "ready" as const,
                     requestId: input.requestId,
                     environment: {
@@ -177,12 +181,6 @@ const fakeManager = (
               ),
             ),
           ),
-        dispose: (input) =>
-          withStore(
-            stateNow(`dispose ${"requestId" in input ? input.requestId : "?"}`).pipe(
-              Effect.as({ kind: "disposed" as const }),
-            ),
-          ),
         claim: (input) =>
           withStore(
             stateNow(`claim ${input.leaseId} ${input.environmentId} ${input.threadId}`).pipe(
@@ -190,6 +188,7 @@ const fakeManager = (
             ),
           ),
       },
+      dispose: (failed) => withStore(stateNow(`dispose ${failed.requestId}`).pipe(Effect.as(true))),
       remoteAccess: (leaseId) =>
         withStore(
           stateNow(`remoteAccess ${leaseId}`).pipe(
@@ -334,9 +333,10 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
     ),
   );
 
-  it.effect("fails the run with the manager's reason when provisioning is refused", () =>
+  it.effect("fails a first-call refusal with the manager's reason and still disposes", () =>
     withStore(
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
         const store = yield* AutomationStore;
         yield* store.save({
           automation,
@@ -362,22 +362,28 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           Effect.provideService(HttpClient.HttpClient, fakeChild(requests)),
         );
 
-        expect(seen).toEqual(["provision:provisioning"]);
+        // The manager re-checks credentials on every poll, so even a refusal may follow an
+        // allocation; disposal decides whether a machine exists.
+        expect(seen).toEqual([
+          "provision:provisioning",
+          "dispose 11111111-1111-4111-a111-000000000001:provisioning",
+        ]);
         expect(requests).toEqual([]);
         expect(finished).toMatchObject({
           state: "failed",
           environmentId: null,
           threadId: null,
           error: "The selected provider account is unavailable on this machine.",
-          disposedAt: null,
+          disposedAt: "2026-09-26T09:00:00.000Z",
         });
       }),
     ),
   );
 
-  it.effect("disposes the machine of a run that fails after its provision was accepted", () =>
+  it.effect("disposes the machine of a run whose attach is refused", () =>
     withStore(
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
         const store = yield* AutomationStore;
         yield* store.save({
           automation,
@@ -404,7 +410,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
         expect(finished).toMatchObject({
           state: "failed",
           error: "This environment's lease has ended.",
-          disposedAt: "1970-01-01T00:00:00.000Z",
+          disposedAt: "2026-09-26T09:00:00.000Z",
         });
       }),
     ),
@@ -413,6 +419,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
   it.effect("gives up on a provision still pending after 30 minutes and disposes it", () =>
     withStore(
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
         const store = yield* AutomationStore;
         yield* store.save({
           automation,
@@ -445,13 +452,13 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           state: "failed",
           error:
             "The environment was not ready after 30 minutes. The environment is still being prepared.",
-          disposedAt: "1970-01-01T00:30:00.000Z",
+          disposedAt: "2026-09-26T09:30:00.000Z",
         });
       }),
     ),
   );
 
-  it.effect("disposes the machine when a refusal comes after the request was accepted", () =>
+  it.effect("disposes the machine when a refusal comes after the machine was allocated", () =>
     withStore(
       Effect.gen(function* () {
         yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
@@ -491,7 +498,6 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
         expect(finished).toMatchObject({
           state: "failed",
           error: "codex_work is over its usage limit.",
-          provisionAccepted: true,
           disposedAt: "2026-09-26T09:00:10.000Z",
         });
       }),
@@ -575,6 +581,82 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           state: "failed",
           error: "Connecting to the environment did not finish in 5m.",
           disposedAt: "2026-09-26T09:05:00.000Z",
+        });
+      }),
+    ),
+  );
+
+  it.effect("disposes when the first provision call keeps erroring past its retries", () =>
+    withStore(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
+        const store = yield* AutomationStore;
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const seen: Array<string> = [];
+        const runner = yield* makeAutomationRunner(
+          yield* fakeManager(seen, [], { provision: ["error"] }),
+        );
+
+        const fiber = yield* runner(automation, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild([])),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("1 minute");
+        const finished = yield* Fiber.join(fiber);
+
+        expect(seen).toEqual([
+          "provision:provisioning",
+          "provision:provisioning",
+          "provision:provisioning",
+          "provision:provisioning",
+          "dispose 11111111-1111-4111-a111-000000000001:provisioning",
+        ]);
+        expect(finished).toMatchObject({
+          state: "failed",
+          error: "Cloud provisioning could not be reconciled. Retry the same request.",
+          disposedAt: "2026-09-26T09:00:14.000Z",
+        });
+      }),
+    ),
+  );
+
+  it.effect("disposes when the first provision call reports the allocation failed", () =>
+    withStore(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
+        const store = yield* AutomationStore;
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const seen: Array<string> = [];
+        const runner = yield* makeAutomationRunner(
+          yield* fakeManager(seen, [], {
+            provision: [
+              { kind: "refused", reason: "failed", message: "The sandbox did not become ready." },
+            ],
+          }),
+        );
+
+        const finished = yield* runner(automation, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild([])),
+        );
+
+        expect(seen).toEqual([
+          "provision:provisioning",
+          "dispose 11111111-1111-4111-a111-000000000001:provisioning",
+        ]);
+        expect(finished).toMatchObject({
+          state: "failed",
+          error: "The sandbox did not become ready.",
+          disposedAt: "2026-09-26T09:00:00.000Z",
         });
       }),
     ),

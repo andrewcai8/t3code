@@ -2,6 +2,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  AutomationId,
   AutomationRunId,
   EnvironmentId,
   ProviderDriverKind,
@@ -15,12 +16,14 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { AutomationStore, type StoredRun } from "./AutomationStore.ts";
 import {
   makeAutomations,
+  makeDisposeMachine,
   SCHEDULER_TICK,
   webhookPrompt,
   type WebhookDelivery,
@@ -76,14 +79,10 @@ const service = (
         );
       });
     const automations = yield* makeAutomations({
-      // A run that does not finish stands in for one whose provision was accepted and is booting.
+      // A run that does not finish stands in for one whose first provision call is in flight.
       run: (_automation, run) =>
         Effect.sync(() => launched.push(run)).pipe(
-          Effect.andThen(
-            options.finish === false
-              ? store.markProvisionAccepted(run.id).pipe(Effect.andThen(Effect.never))
-              : complete(run),
-          ),
+          Effect.andThen(options.finish === false ? Effect.never : complete(run)),
         ),
       dispose: (run) =>
         Effect.sync(() => {
@@ -191,7 +190,6 @@ it.effect("resumes the runs a restart interrupted and leaves finished ones alone
           provider: "namespace",
           providerInstanceId: "claudeAgent",
         },
-        provisionAccepted: state !== "provisioning",
         state,
         environmentId: null,
         threadId: null,
@@ -379,21 +377,23 @@ it.effect("keeps a webhook link across edits, and turning it off and on mints a 
   ),
 );
 
-it.effect("deleting an automation mid-run stops the run and disposes its machine", () =>
-  scoped(
-    Effect.gen(function* () {
-      yield* at("2026-09-26T08:00:00.000Z");
-      const { automations, store, launched, disposed } = yield* service({ finish: false });
-      const { automation } = yield* automations.create({ ...input, schedule: null });
-      const run = yield* automations.runNow(automation.id);
-      yield* settle;
-      expect(launched.map(({ id }) => id)).toEqual([run.id]);
+it.effect(
+  "deleting an automation during its run's first provision call stops it and disposes",
+  () =>
+    scoped(
+      Effect.gen(function* () {
+        yield* at("2026-09-26T08:00:00.000Z");
+        const { automations, store, launched, disposed } = yield* service({ finish: false });
+        const { automation } = yield* automations.create({ ...input, schedule: null });
+        const run = yield* automations.runNow(automation.id);
+        yield* settle;
+        expect(launched.map(({ id }) => id)).toEqual([run.id]);
 
-      yield* automations.remove(automation.id);
-      expect(disposed).toEqual([run.requestId]);
-      expect(yield* store.listRuns(automation.id as Automation["id"], 10)).toEqual([]);
-    }),
-  ),
+        yield* automations.remove(automation.id);
+        expect(disposed).toEqual([run.requestId]);
+        expect(yield* store.listRuns(automation.id as Automation["id"], 10)).toEqual([]);
+      }),
+    ),
 );
 
 it.effect("a trigger that raced a delete starts nothing and reports the automation gone", () =>
@@ -442,7 +442,7 @@ it.effect(
     ),
 );
 
-it.effect("fails a run left in flight with no fiber and disposes its accepted machine", () =>
+it.effect("fails a run left in flight with no fiber and disposes its machine", () =>
   scoped(
     Effect.gen(function* () {
       yield* at("2026-09-26T08:00:00.000Z");
@@ -457,7 +457,6 @@ it.effect("fails a run left in flight with no fiber and disposes its accepted ma
         requestId,
         prompt: "Triage new issues.",
         provisionInput: { requestId, provider: "namespace", providerInstanceId: "claudeAgent" },
-        provisionAccepted: false,
         state: "provisioning",
         environmentId: null,
         threadId: null,
@@ -466,7 +465,6 @@ it.effect("fails a run left in flight with no fiber and disposes its accepted ma
         createdAt: "2026-09-26T08:00:00.000Z",
         updatedAt: "2026-09-26T08:00:00.000Z",
       });
-      yield* store.markProvisionAccepted(AutomationRunId.make("orphan"));
 
       yield* at("2026-09-26T08:01:00.000Z");
       yield* automations.sweep;
@@ -497,3 +495,47 @@ it("fences a webhook body so its own backticks cannot close the block", () => {
     "Summarize.\n\nThis run was started by a webhook. Its request body:\n\n````\nsee ```code```\n````",
   );
 });
+
+it.effect("disposal calls the manager only for a request it recorded", () =>
+  scoped(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const calls: Array<string> = [];
+      const dispose = yield* makeDisposeMachine({
+        dispose: (input) =>
+          Effect.sync(() => {
+            calls.push("requestId" in input ? input.requestId : input.sandboxId);
+            return { kind: "refused" as const, reason: "unknown" as const, message: "pending" };
+          }),
+      });
+      const run = (suffix: string): StoredRun => {
+        const requestId = ProvisionRequestId.make(`11111111-1111-4111-a111-00000000000${suffix}`);
+        return {
+          id: AutomationRunId.make(`run-${suffix}`),
+          automationId: AutomationId.make("nightly"),
+          trigger: "manual",
+          scheduledFor: null,
+          requestId,
+          prompt: "Run.",
+          provisionInput: { requestId, provider: "e2b", providerInstanceId: "codex" },
+          state: "failed",
+          environmentId: null,
+          threadId: null,
+          error: "refused",
+          disposedAt: null,
+          createdAt: "2026-09-26T08:00:00.000Z",
+          updatedAt: "2026-09-26T08:00:00.000Z",
+        };
+      };
+      yield* sql`
+        INSERT INTO provision_operations (request_id, request_hash, request_json, state_json,
+          revision, created_at, updated_at)
+        VALUES ('11111111-1111-4111-a111-000000000002', 'h', '{}', '{"kind":"create_issued"}', 1,
+          '2026-09-26T08:00:00.000Z', '2026-09-26T08:00:00.000Z')
+      `;
+
+      expect([yield* dispose(run("1")), yield* dispose(run("2"))]).toEqual([true, false]);
+      expect(calls).toEqual(["11111111-1111-4111-a111-000000000002"]);
+    }),
+  ),
+);
