@@ -10,6 +10,7 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  boundedRunScript,
   prepareRemoteHost,
   refreshRemoteCheckout,
   remotePreparationScript,
@@ -951,4 +952,93 @@ describe("remote branch refresh", () => {
       /Preparation command failed/,
     );
   });
+
+  it("fetches only what is new since the checkout, not the whole snapshot", async () => {
+    const { input, source, tracking } = await following();
+    for (let index = 0; index < 40; index++)
+      await NodeFSP.writeFile(NodePath.join(source, `file-${index}.txt`), `${index}\n`);
+    git(source, "add", ".");
+    git(
+      source,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-q",
+      "--amend",
+      "-m",
+      "base",
+    );
+    // A root revision leaves no shallow boundary to stand in for a "have", and
+    // dropping the remote ref matches a box prepared before refs were fetched:
+    // HEAD is then the only commit the server can be told about.
+    const opened = {
+      ...input,
+      repository: { ...input.repository!, revision: git(source, "rev-parse", "HEAD") },
+    };
+    const first = await prepareRemoteHost(localPort, opened);
+    pids.add(first.serverPid);
+    git(first.projectDir, "update-ref", "-d", tracking);
+    git(first.projectDir, "config", "fetch.unpackLimit", "1");
+    const packs = async () =>
+      new Set(
+        (await NodeFSP.readdir(NodePath.join(first.projectDir, ".git/objects/pack"))).filter(
+          (name) => name.endsWith(".idx"),
+        ),
+      );
+    const before = await packs();
+    await NodeFSP.writeFile(NodePath.join(source, "new.txt"), "new\n");
+    git(source, "add", ".");
+    const pushed = advance(source, "one new file");
+    expect(await refreshRemoteCheckout(localPort, opened)).toEqual({ refreshError: null });
+    expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
+    const received = [...(await packs())].filter((name) => !before.has(name));
+    const objects = received.map(
+      (name) =>
+        git(first.projectDir, "verify-pack", "-v", `.git/objects/pack/${name}`)
+          .split("\n")
+          .filter((line) => /^[0-9a-f]{40} /.test(line)).length,
+    );
+    // The new commit, tree and blob plus the thin pack's base, not the 42 the
+    // checkout already holds.
+    expect(objects).toEqual([4]);
+  });
+
+  it("stays quiet when the followed branch was deleted upstream", async () => {
+    const { input: followed, source } = await following();
+    git(source, "checkout", "-q", "-b", "feature");
+    const input = { ...followed, follow: "feature" };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    git(source, "checkout", "-q", "-");
+    git(source, "branch", "-D", "feature");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+  });
+});
+
+describe("bounded preparation commands", () => {
+  it("returns on time even when a grandchild outlives the timed-out shell", async () => {
+    const marker = NodePath.join(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bounded-")),
+      "survived",
+    );
+    roots.push(NodePath.dirname(marker));
+    const startedAt = performance.now();
+    const result = await localPort.executePython({
+      script: [
+        "import contextlib, json, os, subprocess, sys",
+        boundedRunScript,
+        "try:",
+        `    run_bounded(['sh', '-c', 'sh -c "sleep 6; touch $0" & sleep 25', json.load(sys.stdin)], None, None, 1)`,
+        "except RuntimeError as error:",
+        "    print(error)",
+      ].join("\n"),
+      stdin: JSON.stringify(marker),
+    });
+    expect(result.stdout).toMatch(/timed out/);
+    expect(performance.now() - startedAt).toBeLessThan(11_000);
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    await expect(NodeFSP.access(marker)).rejects.toThrow();
+  }, 30_000);
 });

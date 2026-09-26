@@ -168,6 +168,33 @@ export async function refreshRemoteCheckout(
   return decodeRefreshed(result.stdout);
 }
 
+/** Runs one preparation command, killing its whole process group on timeout. Needs `contextlib`, `os` and `subprocess`. */
+export const boundedRunScript = String.raw`
+def run_bounded(args, cwd, env, timeout, pass_fds=()):
+    # Its own process group, so a timeout reaches every descendant: one left
+    # behind would hold the output pipes and the preparation lock.
+    child = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=pass_fds, start_new_session=True)
+    try:
+        stdout, stderr = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # SIGTERM first: Git removes its lock files on it, and a SIGKILLed
+        # fetch strands shallow.lock for every later fetch.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, 15)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=10)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, 9)
+        child.wait()
+        child.stdout.close()
+        child.stderr.close()
+        raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
+    if child.returncode != 0:
+        detail = (stderr or stdout or '').strip()
+        raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
+    return stdout.strip()
+`;
+
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
 import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
@@ -234,6 +261,7 @@ def artifact_snapshot(root):
             files[name] = digest(path)
     return files, links
 
+${boundedRunScript}
 def prepare(spec):
     phases = []
     entered = time.monotonic()
@@ -261,23 +289,7 @@ def prepare(spec):
             # A surviving Git or auth child retains the lock if its preparer dies.
             # Close stdin and disable terminal prompts so a private clone cannot
             # wait forever for credentials the sandbox will never type.
-            child = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=(lock.fileno(),))
-            try:
-                stdout, stderr = child.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                # SIGTERM first: Git removes its lock files on it, and a
-                # SIGKILLed fetch strands shallow.lock for every later fetch.
-                child.terminate()
-                try:
-                    child.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.communicate()
-                raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
-            if child.returncode != 0:
-                detail = (stderr or stdout or '').strip()
-                raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
-            return stdout.strip()
+            return run_bounded(args, cwd, env, timeout, (lock.fileno(),))
 
         # Start a command preparation needs only later, then finish() it there.
         def start(args, cwd, env):
@@ -431,18 +443,19 @@ def prepare(spec):
                     follow = default.group(1)
                 tracking = 'refs/remotes/origin/' + follow
                 run(['git', 'check-ref-format', tracking], project, env)
-                # No --depth: a shallow checkout already fetches only back to
-                # its boundary, and deepening would take shallow.lock.
-                run(['git', '-c', 'protocol.version=2', 'fetch', '--no-tags', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=30)
+                # The clone made no refs, so without HEAD as a negotiation tip
+                # the server resends the whole snapshot. No --depth, which
+                # would take shallow.lock.
+                run(['git', '-c', 'protocol.version=2', 'fetch', '--no-tags', '--negotiation-tip=HEAD', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=30)
                 return None
             except Exception as error:
-                return str(error)
+                # A deleted branch, usually a merged pull request's, has
+                # nothing new to show and is not worth a warning.
+                return None if "couldn't find remote ref" in str(error) else str(error)
         if spec.get('refreshOnly'):
             if not project.exists():
                 raise RuntimeError('The workspace has not been prepared')
-            with step('repositoryRefresh'):
-                refresh_error = fetch_followed()
-            return {'refreshError': refresh_error, 'phases': phases}
+            return {'refreshError': fetch_followed()}
         with step('homeFiles'):
             install_files('home')
         # Agent CLIs install into the isolated home, independent of the runtime

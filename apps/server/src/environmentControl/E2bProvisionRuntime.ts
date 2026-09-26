@@ -261,10 +261,12 @@ else:
       sandboxId: string,
       manifest: ProvisionPreparationManifest,
     ) =>
-      refreshRemoteCheckout(
-        e2bPythonPort(await connect(operation, sandboxId)),
-        guestInput(operation, sandboxId, manifest),
-      ),
+      followedBranch(manifest)
+        ? refreshRemoteCheckout(
+            e2bPythonPort(await connect(operation, sandboxId)),
+            guestInput(operation, sandboxId, manifest),
+          )
+        : { refreshError: null },
     attach: async (
       operation: ProvisionOperation,
       sandboxId: string,
