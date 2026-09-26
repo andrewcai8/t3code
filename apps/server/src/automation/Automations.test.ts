@@ -46,11 +46,18 @@ const settle = TestClock.adjust(0);
  * The service with a runner that records each run it is handed and, unless `finish` is false,
  * moves it straight to started, standing in for the provisioning a real run does.
  */
-const service = (options: { readonly finish?: boolean } = {}) =>
+const service = (
+  options: {
+    readonly finish?: boolean;
+    /** Answers to successive dispose calls; the last one repeats. */
+    readonly disposals?: ReadonlyArray<boolean>;
+  } = {},
+) =>
   Effect.gen(function* () {
     const store = yield* AutomationStore;
     const launched: Array<StoredRun> = [];
     const disposed: Array<string> = [];
+    const answers = options.disposals ?? [true];
     const complete = (run: StoredRun) =>
       Effect.gen(function* () {
         const now = run.createdAt;
@@ -69,11 +76,20 @@ const service = (options: { readonly finish?: boolean } = {}) =>
         );
       });
     const automations = yield* makeAutomations({
+      // A run that does not finish stands in for one whose provision was accepted and is booting.
       run: (_automation, run) =>
         Effect.sync(() => launched.push(run)).pipe(
-          Effect.andThen(options.finish === false ? Effect.never : complete(run)),
+          Effect.andThen(
+            options.finish === false
+              ? store.markProvisionAccepted(run.id).pipe(Effect.andThen(Effect.never))
+              : complete(run),
+          ),
         ),
-      dispose: (run) => Effect.sync(() => disposed.push(run.requestId)),
+      dispose: (run) =>
+        Effect.sync(() => {
+          disposed.push(run.requestId);
+          return answers[Math.min(disposed.length, answers.length) - 1]!;
+        }),
       listProvisioned: Effect.succeed([]),
     });
     const webhook = (token: string, delivery: WebhookDelivery) =>
@@ -170,6 +186,12 @@ it.effect("resumes the runs a restart interrupted and leaves finished ones alone
         scheduledFor: null,
         requestId: ProvisionRequestId.make(`11111111-1111-4111-a111-00000000000${suffix}`),
         prompt: "Triage new issues.",
+        provisionInput: {
+          requestId: ProvisionRequestId.make(`11111111-1111-4111-a111-00000000000${suffix}`),
+          provider: "namespace",
+          providerInstanceId: "claudeAgent",
+        },
+        provisionAccepted: state !== "provisioning",
         state,
         environmentId: null,
         threadId: null,
@@ -370,6 +392,102 @@ it.effect("deleting an automation mid-run stops the run and disposes its machine
       yield* automations.remove(automation.id);
       expect(disposed).toEqual([run.requestId]);
       expect(yield* store.listRuns(automation.id as Automation["id"], 10)).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("a trigger that raced a delete starts nothing and reports the automation gone", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations, launched } = yield* service();
+      const { automation } = yield* automations.create({ ...input, schedule: null });
+      // The webhook resolved its automation, then the automation was deleted before it ran.
+      yield* automations.remove(automation.id);
+
+      expect(yield* automations.deliverWebhook(automation, delivery("late"))).toEqual({
+        kind: "not-found",
+      });
+      expect((yield* Effect.flip(automations.runNow(automation.id))).message).toBe(
+        "This automation no longer exists.",
+      );
+      expect(launched).toEqual([]);
+    }),
+  ),
+);
+
+it.effect(
+  "keeps retrying a deleted run's disposal until the manager confirms, then forgets it",
+  () =>
+    scoped(
+      Effect.gen(function* () {
+        yield* at("2026-09-26T08:00:00.000Z");
+        const { automations, store, disposed } = yield* service({
+          finish: false,
+          disposals: [false, true],
+        });
+        const { automation } = yield* automations.create({ ...input, schedule: null });
+        const run = yield* automations.runNow(automation.id);
+        yield* settle;
+
+        yield* automations.remove(automation.id);
+        const pending = (yield* store.pendingDisposals).map((entry) => [entry.id, entry.error]);
+        expect(pending).toEqual([[run.id, "The automation was deleted."]]);
+
+        yield* automations.sweep;
+        expect(disposed).toEqual([run.requestId, run.requestId]);
+        expect(yield* store.pendingDisposals).toEqual([]);
+        expect(yield* store.listRuns(automation.id as Automation["id"], 10)).toEqual([]);
+      }),
+    ),
+);
+
+it.effect("fails a run left in flight with no fiber and disposes its accepted machine", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations, store, disposed } = yield* service();
+      const { automation } = yield* automations.create({ ...input, schedule: null });
+      const requestId = ProvisionRequestId.make("11111111-1111-4111-a111-000000000009");
+      yield* store.insertRun({
+        id: AutomationRunId.make("orphan"),
+        automationId: automation.id,
+        trigger: "manual",
+        scheduledFor: null,
+        requestId,
+        prompt: "Triage new issues.",
+        provisionInput: { requestId, provider: "namespace", providerInstanceId: "claudeAgent" },
+        provisionAccepted: false,
+        state: "provisioning",
+        environmentId: null,
+        threadId: null,
+        error: null,
+        disposedAt: null,
+        createdAt: "2026-09-26T08:00:00.000Z",
+        updatedAt: "2026-09-26T08:00:00.000Z",
+      });
+      yield* store.markProvisionAccepted(AutomationRunId.make("orphan"));
+
+      yield* at("2026-09-26T08:01:00.000Z");
+      yield* automations.sweep;
+      expect((yield* store.listRuns(automation.id, 1))[0]?.state).toBe("provisioning");
+
+      yield* at("2026-09-26T08:03:00.000Z");
+      yield* automations.sweep;
+      expect(disposed).toEqual([requestId]);
+      expect(
+        (yield* store.listRuns(automation.id, 1)).map(({ state, error, disposedAt }) => ({
+          state,
+          error,
+          disposedAt,
+        })),
+      ).toEqual([
+        {
+          state: "failed",
+          error: "The run stopped unexpectedly.",
+          disposedAt: "2026-09-26T08:03:00.000Z",
+        },
+      ]);
     }),
   ),
 );

@@ -2,6 +2,7 @@ import {
   Automation,
   AutomationError,
   AutomationRun,
+  EnvironmentProvisionInput,
   type AutomationId,
   type AutomationRunId,
   type AutomationRunState,
@@ -14,13 +15,19 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type * as SqlError from "effect/unstable/sql/SqlError";
 import type * as Statement from "effect/unstable/sql/Statement";
 
-/** A run as the host keeps it: the wire shape plus the message it sends. */
+/**
+ * A run as the host keeps it: the wire shape plus what it sends, frozen when it was triggered,
+ * and whether the manager ever accepted its provision request (so a machine may exist).
+ */
 export interface StoredRun extends AutomationRun {
   readonly prompt: string;
+  readonly provisionInput: EnvironmentProvisionInput;
+  readonly provisionAccepted: boolean;
 }
 
 export interface StoredAutomation {
@@ -53,11 +60,12 @@ const IN_FLIGHT_RUN_SKIPPED = "Skipped because the previous run was still starti
 export const isInFlight = (run: Pick<AutomationRun, "state">) =>
   run.state === "provisioning" || run.state === "attaching" || run.state === "starting";
 
-/** How a trigger's run was recorded. */
+/** How a trigger's run was recorded. `gone` means the automation was deleted meanwhile. */
 export type RunInsert =
   | { readonly kind: "created"; readonly run: StoredRun }
   | { readonly kind: "existing"; readonly run: StoredRun }
-  | { readonly kind: "capped" };
+  | { readonly kind: "capped" }
+  | { readonly kind: "gone" };
 
 const AutomationRow = Schema.Struct({
   id: Schema.String,
@@ -109,8 +117,22 @@ const decodeAutomationRow = (input: unknown): Exit.Exit<StoredAutomation, unknow
   );
 };
 const decodeRunRow = Schema.decodeUnknownExit(
-  Schema.Struct({ ...AutomationRun.fields, prompt: Schema.String }),
+  Schema.Struct({
+    ...AutomationRun.fields,
+    prompt: Schema.String,
+    provisionInput: Schema.fromJsonString(EnvironmentProvisionInput),
+    provisionAccepted: Schema.Number.pipe(
+      Schema.decodeTo(
+        Schema.Boolean,
+        SchemaTransformation.transform({
+          decode: (flag: number) => flag === 1,
+          encode: (accepted: boolean) => (accepted ? 1 : 0),
+        }),
+      ),
+    ),
+  }),
 );
+const encodeProvisionInput = Schema.encodeSync(Schema.fromJsonString(EnvironmentProvisionInput));
 
 /** Decodes each row on its own, so one row a newer or broken writer left cannot hide the rest. */
 function decodeEach<A>(
@@ -144,8 +166,21 @@ export class AutomationStore extends Context.Service<
     ) => Effect.Effect<Option.Option<StoredAutomation>, AutomationError>;
     /** Inserts or replaces an automation. `webhook` false in the automation clears the hash. */
     readonly save: (stored: StoredAutomation) => Effect.Effect<void, AutomationError>;
-    /** Deletes an automation and its run history. */
+    /**
+     * Deletes an automation. Its runs stay until `purgeOrphanRuns`, so a machine a run started is
+     * still disposed after the automation is gone.
+     */
     readonly remove: (id: AutomationId) => Effect.Effect<void, AutomationError>;
+    /** Records that the manager accepted a run's provision request, so a machine may exist. */
+    readonly markProvisionAccepted: (id: AutomationRunId) => Effect.Effect<void, AutomationError>;
+    /** Failed runs whose provision was accepted and whose machine is not disposed yet. */
+    readonly pendingDisposals: Effect.Effect<ReadonlyArray<StoredRun>, AutomationError>;
+    readonly markDisposed: (
+      id: AutomationRunId,
+      at: string,
+    ) => Effect.Effect<void, AutomationError>;
+    /** Forgets the runs of deleted automations that owe no disposal. */
+    readonly purgeOrphanRuns: Effect.Effect<void, AutomationError>;
     /**
      * Records a trigger's run in one statement. A `requestId` already recorded resolves to that
      * run, before any cap. Otherwise `hourlyCap` refuses the run once this automation recorded
@@ -193,7 +228,8 @@ export class AutomationStore extends Context.Service<
         );
       const runColumns = sql`
         id, automation_id AS "automationId", trigger, scheduled_for AS "scheduledFor",
-        request_id AS "requestId", prompt, state, child_environment_id AS "environmentId",
+        request_id AS "requestId", prompt, provision_input AS "provisionInput",
+        provision_accepted AS "provisionAccepted", state, child_environment_id AS "environmentId",
         thread_id AS "threadId", error, disposed_at AS "disposedAt", created_at AS "createdAt",
         updated_at AS "updatedAt"
       `;
@@ -234,14 +270,31 @@ export class AutomationStore extends Context.Service<
               updated_at = excluded.updated_at
           `.pipe(Effect.asVoid, Effect.mapError(storeError)),
         remove: (id) =>
-          sql
-            .withTransaction(
-              Effect.all([
-                sql`DELETE FROM automation_runs WHERE automation_id = ${id}`,
-                sql`DELETE FROM automations WHERE id = ${id}`,
-              ]),
-            )
-            .pipe(Effect.asVoid, Effect.mapError(storeError)),
+          sql`DELETE FROM automations WHERE id = ${id}`.pipe(
+            Effect.asVoid,
+            Effect.mapError(storeError),
+          ),
+        markProvisionAccepted: (id) =>
+          sql`UPDATE automation_runs SET provision_accepted = 1 WHERE id = ${id}`.pipe(
+            Effect.asVoid,
+            Effect.mapError(storeError),
+          ),
+        pendingDisposals: readRuns(sql`
+          SELECT ${runColumns} FROM automation_runs
+          WHERE state = 'failed' AND provision_accepted = 1 AND disposed_at IS NULL
+          ORDER BY created_at, id
+        `),
+        markDisposed: (id, at) =>
+          sql`UPDATE automation_runs SET disposed_at = ${at} WHERE id = ${id}`.pipe(
+            Effect.asVoid,
+            Effect.mapError(storeError),
+          ),
+        purgeOrphanRuns: sql`
+          DELETE FROM automation_runs
+          WHERE automation_id NOT IN (SELECT id FROM automations)
+            AND state NOT IN ('provisioning', 'attaching', 'starting')
+            AND NOT (state = 'failed' AND provision_accepted = 1 AND disposed_at IS NULL)
+        `.pipe(Effect.asVoid, Effect.mapError(storeError)),
         insertRun: (run, hourlyCap) =>
           Effect.gen(function* () {
             const inFlight = sql`
@@ -252,14 +305,15 @@ export class AutomationStore extends Context.Service<
             // in-flight check atomic against a burst of concurrent triggers.
             const inserted = yield* sql`
               INSERT INTO automation_runs (id, automation_id, trigger, scheduled_for, request_id,
-                prompt, state, child_environment_id, thread_id, error, disposed_at, created_at,
-                updated_at)
+                prompt, provision_input, state, child_environment_id, thread_id, error,
+                disposed_at, created_at, updated_at)
               SELECT ${run.id}, ${run.automationId}, ${run.trigger}, ${run.scheduledFor},
-                ${run.requestId}, ${run.prompt},
+                ${run.requestId}, ${run.prompt}, ${encodeProvisionInput(run.provisionInput)},
                 CASE WHEN ${inFlight} THEN 'skipped' ELSE ${run.state} END, NULL, NULL,
                 CASE WHEN ${inFlight} THEN ${IN_FLIGHT_RUN_SKIPPED} ELSE NULL END, NULL,
                 ${run.createdAt}, ${run.updatedAt}
               WHERE NOT EXISTS (SELECT 1 FROM automation_runs WHERE request_id = ${run.requestId})
+                AND EXISTS (SELECT 1 FROM automations WHERE id = ${run.automationId})
                 ${
                   hourlyCap === undefined
                     ? sql``
@@ -271,7 +325,15 @@ export class AutomationStore extends Context.Service<
               RETURNING id
             `.pipe(Effect.mapError(storeError));
             const stored = yield* runByRequest(run.requestId);
-            if (Option.isNone(stored)) return { kind: "capped" } as const;
+            if (Option.isNone(stored)) {
+              const automation =
+                yield* sql`SELECT 1 FROM automations WHERE id = ${run.automationId}`.pipe(
+                  Effect.mapError(storeError),
+                );
+              return automation.length === 0
+                ? ({ kind: "gone" } as const)
+                : ({ kind: "capped" } as const);
+            }
             return {
               kind: inserted.length > 0 ? "created" : "existing",
               run: stored.value,

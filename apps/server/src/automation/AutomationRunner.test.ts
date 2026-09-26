@@ -22,7 +22,11 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import * as TestClock from "effect/testing/TestClock";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { makeAutomationRunner, type AutomationRunnerPorts } from "./AutomationRunner.ts";
+import {
+  makeAutomationRunner,
+  runProvisionInput,
+  type AutomationRunnerPorts,
+} from "./AutomationRunner.ts";
 import { AutomationStore, type StoredRun } from "./AutomationStore.ts";
 
 const automation: Automation = {
@@ -41,13 +45,20 @@ const automation: Automation = {
   updatedAt: "2026-09-26T00:00:00.000Z",
 };
 
-const run = (state: StoredRun["state"], environmentId: string | null = null): StoredRun => ({
+const requestId = ProvisionRequestId.make("11111111-1111-4111-a111-000000000001");
+const run = (
+  state: StoredRun["state"],
+  environmentId: string | null = null,
+  provisionAccepted = state !== "provisioning",
+): StoredRun => ({
   id: AutomationRunId.make("run-1"),
   automationId: automation.id,
   trigger: "manual",
   scheduledFor: null,
-  requestId: ProvisionRequestId.make("11111111-1111-4111-a111-000000000001"),
+  requestId,
   prompt: "Bump dependencies and open a PR.",
+  provisionInput: runProvisionInput(automation, requestId, "2026-09-26T09:00:00.000Z"),
+  provisionAccepted,
   state,
   environmentId: environmentId === null ? null : EnvironmentId.make(environmentId),
   threadId: null,
@@ -105,7 +116,8 @@ const fakeManager = (
   seen: Array<string>,
   provisioned: Array<EnvironmentProvisionInput>,
   overrides: {
-    readonly provision?: EnvironmentProvisionResult;
+    /** Answers to successive provision calls; the last one repeats. */
+    readonly provision?: ReadonlyArray<EnvironmentProvisionResult>;
     readonly attach?: EnvironmentProvisionAttachResult;
   } = {},
 ) => {
@@ -125,8 +137,9 @@ const fakeManager = (
             stateNow("provision").pipe(
               Effect.andThen(() => {
                 provisioned.push(input);
+                const answers = overrides.provision ?? [];
                 return Effect.succeed(
-                  overrides.provision ?? {
+                  answers[Math.min(provisioned.length, answers.length) - 1] ?? {
                     kind: "ready" as const,
                     requestId: input.requestId,
                     environment: {
@@ -335,11 +348,13 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
         const requests: Array<ChildRequest> = [];
         const runner = yield* makeAutomationRunner(
           yield* fakeManager(seen, [], {
-            provision: {
-              kind: "refused",
-              reason: "credentials",
-              message: "The selected provider account is unavailable on this machine.",
-            },
+            provision: [
+              {
+                kind: "refused",
+                reason: "credentials",
+                message: "The selected provider account is unavailable on this machine.",
+              },
+            ],
           }),
         );
 
@@ -408,11 +423,13 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
         const seen: Array<string> = [];
         const runner = yield* makeAutomationRunner(
           yield* fakeManager(seen, [], {
-            provision: {
-              kind: "pending",
-              requestId: ProvisionRequestId.make("11111111-1111-4111-a111-000000000001"),
-              message: "The environment is still being prepared.",
-            },
+            provision: [
+              {
+                kind: "pending",
+                requestId,
+                message: "The environment is still being prepared.",
+              },
+            ],
           }),
         );
 
@@ -429,6 +446,135 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           error:
             "The environment was not ready after 30 minutes. The environment is still being prepared.",
           disposedAt: "1970-01-01T00:30:00.000Z",
+        });
+      }),
+    ),
+  );
+
+  it.effect("disposes the machine when a refusal comes after the request was accepted", () =>
+    withStore(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
+        const store = yield* AutomationStore;
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const seen: Array<string> = [];
+        const runner = yield* makeAutomationRunner(
+          yield* fakeManager(seen, [], {
+            provision: [
+              { kind: "pending", requestId, message: "Booting the Mac." },
+              {
+                kind: "refused",
+                reason: "credentials",
+                message: "codex_work is over its usage limit.",
+              },
+            ],
+          }),
+        );
+
+        const fiber = yield* runner(automation, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild([])),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("10 seconds");
+        const finished = yield* Fiber.join(fiber);
+
+        expect(seen).toEqual([
+          "provision:provisioning",
+          "provision:provisioning",
+          "dispose 11111111-1111-4111-a111-000000000001:provisioning",
+        ]);
+        expect(finished).toMatchObject({
+          state: "failed",
+          error: "codex_work is over its usage limit.",
+          provisionAccepted: true,
+          disposedAt: "2026-09-26T09:00:10.000Z",
+        });
+      }),
+    ),
+  );
+
+  it.effect("resumes from the request frozen at trigger time, not the edited automation", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* AutomationStore;
+        const edited = {
+          ...automation,
+          branch: "dev",
+          account: null,
+          agentDriver: ProviderDriverKind.make("cursor"),
+        };
+        yield* store.save({
+          automation: edited,
+          webhookSecretHash: null,
+          scheduleSince: edited.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const provisioned: Array<EnvironmentProvisionInput> = [];
+        const requests: Array<ChildRequest> = [];
+        const runner = yield* makeAutomationRunner(yield* fakeManager([], provisioned));
+
+        const finished = yield* runner(edited, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild(requests)),
+        );
+
+        expect(provisioned).toEqual([
+          {
+            requestId: "11111111-1111-4111-a111-000000000001",
+            provider: "e2b",
+            agentDriver: "codex",
+            providerInstanceId: "codex_work",
+            pinAccount: true,
+            repository: "andrewcai8/t3code",
+            branch: "main",
+            retentionDeadline: "2026-09-27T09:00:00.000Z",
+          },
+        ]);
+        expect(
+          (requests[1]?.body as { modelSelection?: unknown } | undefined)?.modelSelection,
+        ).toEqual({
+          instanceId: "codex",
+          model: "gpt-6-astra",
+        });
+        expect(finished?.state).toBe("started");
+      }),
+    ),
+  );
+
+  it.effect("fails a run whose attach hangs past its step limit and disposes the machine", () =>
+    withStore(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-09-26T09:00:00.000Z"));
+        const store = yield* AutomationStore;
+        yield* store.save({
+          automation,
+          webhookSecretHash: null,
+          scheduleSince: automation.createdAt,
+        });
+        yield* store.insertRun(run("attaching"));
+        const seen: Array<string> = [];
+        const manager = yield* fakeManager(seen, []);
+        const runner = yield* makeAutomationRunner({
+          ...manager,
+          environmentControl: { ...manager.environmentControl, attach: () => Effect.never },
+        });
+
+        const fiber = yield* runner(automation, run("attaching")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild([])),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("5 minutes");
+        const finished = yield* Fiber.join(fiber);
+
+        expect(seen).toEqual(["dispose 11111111-1111-4111-a111-000000000001:attaching"]);
+        expect(finished).toMatchObject({
+          state: "failed",
+          error: "Connecting to the environment did not finish in 5m.",
+          disposedAt: "2026-09-26T09:05:00.000Z",
         });
       }),
     ),

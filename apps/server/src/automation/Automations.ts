@@ -30,7 +30,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
 import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
-import { derivedRunId, makeAutomationRunner } from "./AutomationRunner.ts";
+import { derivedRunId, makeAutomationRunner, runProvisionInput } from "./AutomationRunner.ts";
 import {
   AutomationStore,
   isInFlight,
@@ -54,7 +54,8 @@ export type WebhookTarget =
 
 export type WebhookOutcome =
   | { readonly kind: "accepted"; readonly run: AutomationRun }
-  | { readonly kind: "rate-limited" };
+  | { readonly kind: "rate-limited" }
+  | { readonly kind: "not-found" };
 
 export interface WebhookDelivery {
   readonly body: string;
@@ -66,8 +67,8 @@ export interface WebhookDelivery {
 export interface AutomationPorts {
   /** Drives a recorded run to its end. The service owns when; this owns how. */
   readonly run: (automation: Automation, run: StoredRun) => Effect.Effect<unknown, AutomationError>;
-  /** Disposes the machine of a run that will not finish, such as one whose automation was deleted. */
-  readonly dispose: (run: StoredRun) => Effect.Effect<void>;
+  /** Disposes a failed run's machine; true once it is gone. Never fails. */
+  readonly dispose: (run: StoredRun) => Effect.Effect<boolean>;
   readonly listProvisioned: Effect.Effect<
     ReadonlyArray<DiscoveredProvisionedEnvironment>,
     EnvironmentControlError
@@ -77,7 +78,17 @@ export interface AutomationPorts {
 const hashWebhookToken = (token: string) =>
   NodeCrypto.createHash("sha256").update(token).digest("hex");
 
-const toWire = ({ prompt: _prompt, ...run }: StoredRun): AutomationRun => run;
+const toWire = ({
+  prompt: _prompt,
+  provisionInput: _provisionInput,
+  provisionAccepted: _provisionAccepted,
+  ...run
+}: StoredRun): AutomationRun => run;
+
+/** A run in flight with no fiber driving it is failed once it has been quiet this long. */
+const ORPHANED_RUN_GRACE_MS = 2 * 60 * 1000;
+const ORPHANED_RUN_ERROR = "The run stopped unexpectedly.";
+const DELETED_RUN_ERROR = "The automation was deleted.";
 
 function fenced(text: string): string {
   const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map(([run]) => run.length));
@@ -171,6 +182,8 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
         scheduledFor: options.scheduledFor,
         requestId,
         prompt: options.prompt,
+        provisionInput: runProvisionInput(automation, requestId, createdAt),
+        provisionAccepted: false,
         state: "provisioning",
         environmentId: null,
         threadId: null,
@@ -208,6 +221,40 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
     const token = NodeCrypto.randomBytes(32).toString("base64url");
     return { token, hash: hashWebhookToken(token) };
   };
+
+  /** Fails a run with no live fiber, leaving its machine to the disposal sweep. */
+  const failRun = (run: StoredRun, error: string) =>
+    Effect.gen(function* () {
+      yield* store.advanceRun(
+        run.id,
+        run.state,
+        { state: "failed", error, disposedAt: null },
+        yield* nowIso,
+      );
+    });
+
+  /**
+   * Keeps runs from outliving their purpose. A run in flight whose fiber died (a defect or a
+   * store error) is failed. Every failed run whose provision was accepted has its machine
+   * disposed, retried each tick until the manager confirms or the retention deadline has
+   * already ended the machine. Runs of deleted automations are forgotten once they owe nothing.
+   */
+  const sweep = Effect.gen(function* () {
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    for (const run of yield* store.unfinishedRuns) {
+      if (running.has(run.id)) continue;
+      if (now - Date.parse(run.updatedAt) < ORPHANED_RUN_GRACE_MS) continue;
+      yield* Effect.logWarning("automation run had no fiber driving it", { runId: run.id });
+      yield* failRun(run, ORPHANED_RUN_ERROR);
+    }
+    for (const run of yield* store.pendingDisposals) {
+      const deadline = run.provisionInput.retentionDeadline;
+      const expired = deadline !== undefined && Date.parse(deadline) <= now;
+      if (expired || (yield* ports.dispose(run)))
+        yield* store.markDisposed(run.id, expired ? deadline : yield* nowIso);
+    }
+    yield* store.purgeOrphanRuns;
+  });
 
   /** Fires each enabled automation's owed cron slot, at most one each. */
   const tick = Effect.gen(function* () {
@@ -250,15 +297,22 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
     }).pipe(
       Effect.catchCause((cause) => Effect.logError("automation runs could not resume", { cause })),
     );
-    yield* tick.pipe(
-      Effect.catchCause((cause) => Effect.logError("automation scheduler tick failed", { cause })),
-      Effect.repeat(Schedule.spaced(SCHEDULER_TICK)),
-    );
+    yield* Effect.all([
+      sweep.pipe(
+        Effect.catchCause((cause) => Effect.logError("automation sweep failed", { cause })),
+      ),
+      tick.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("automation scheduler tick failed", { cause }),
+        ),
+      ),
+    ]).pipe(Effect.repeat(Schedule.spaced(SCHEDULER_TICK)));
   });
 
   return {
     start,
     tick,
+    sweep,
     list: store.list.pipe(Effect.map((all) => all.map(({ automation }) => automation))),
     create: Effect.fn("Automations.create")(function* (input: AutomationInput) {
       const now = yield* nowIso;
@@ -289,16 +343,21 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
       yield* store.save(stored);
       return saved(stored, secret?.token ?? null);
     }),
-    /** Stops the automation's in-flight runs, disposes their machines, then forgets it. */
+    /**
+     * Deletes the automation first, so no trigger can start another run, then stops its runs in
+     * flight and disposes their machines. A disposal the manager cannot finish yet stays with the
+     * run, which outlives the automation until the sweep completes it.
+     */
     remove: Effect.fn("Automations.remove")(function* (id: AutomationId) {
+      yield* store.remove(id);
       for (const [runId, entry] of running)
         if (entry.automationId === id) {
           yield* Fiber.interrupt(entry.fiber);
           running.delete(runId);
         }
       for (const run of yield* store.unfinishedRuns)
-        if (run.automationId === id) yield* ports.dispose(run);
-      yield* store.remove(id);
+        if (run.automationId === id) yield* failRun(run, DELETED_RUN_ERROR);
+      yield* sweep;
     }),
     rotateWebhook: Effect.fn("Automations.rotateWebhook")(function* (id: AutomationId) {
       const current = yield* load(id);
@@ -320,6 +379,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
         scheduledFor: null,
         prompt: automation.prompt,
       });
+      if (inserted.kind === "gone") return yield* notFound();
       if (inserted.kind === "capped") return yield* invalid("This run could not be recorded.");
       return toWire(inserted.run);
     }),
@@ -354,6 +414,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
         prompt: webhookPrompt(automation.prompt, delivery),
         hourlyCap: WEBHOOK_RUNS_PER_HOUR,
       });
+      if (inserted.kind === "gone") return { kind: "not-found" };
       return inserted.kind === "capped"
         ? { kind: "rate-limited" }
         : { kind: "accepted", run: toWire(inserted.run) };
@@ -363,7 +424,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
 
 export class Automations extends Context.Service<
   Automations,
-  Omit<Effect.Success<ReturnType<typeof makeAutomations>>, "start" | "tick">
+  Omit<Effect.Success<ReturnType<typeof makeAutomations>>, "start" | "tick" | "sweep">
 >()("t3/automation/Automations") {
   static readonly layer = Layer.effect(
     Automations,
@@ -386,17 +447,17 @@ export class Automations extends Context.Service<
           environmentControl.dispose({ requestId: run.requestId }).pipe(
             Effect.flatMap((result) =>
               result.kind === "disposed"
-                ? Effect.void
-                : Effect.logWarning("deleted automation's run machine was not disposed", {
+                ? Effect.succeed(true)
+                : Effect.logWarning("automation run machine not disposed yet", {
                     runId: run.id,
                     message: result.message,
-                  }),
+                  }).pipe(Effect.as(false)),
             ),
             Effect.catchCause((cause) =>
-              Effect.logWarning("deleted automation's run machine was not disposed", {
+              Effect.logWarning("automation run machine not disposed yet", {
                 runId: run.id,
                 cause,
-              }),
+              }).pipe(Effect.as(false)),
             ),
           ),
         listProvisioned: environmentControl.listProvisioned,

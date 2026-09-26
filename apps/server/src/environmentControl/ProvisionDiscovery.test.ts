@@ -101,9 +101,10 @@ it.effect(
         const sql = yield* SqlClient.SqlClient;
         yield* sql`
           INSERT INTO automation_runs (id, automation_id, trigger, scheduled_for, request_id,
-            prompt, state, child_environment_id, thread_id, error, created_at, updated_at)
-          VALUES ('run-2', 'nightly', 'cron', NULL, ${id(2)}, 'Run.', 'attaching', NULL, NULL,
-            NULL, '2026-09-26T00:00:00.000Z', '2026-09-26T00:00:00.000Z')
+            prompt, provision_input, state, child_environment_id, thread_id, error, created_at,
+            updated_at)
+          VALUES ('run-2', 'nightly', 'cron', NULL, ${id(2)}, 'Run.', '{}', 'attaching', NULL,
+            NULL, NULL, '2026-09-26T00:00:00.000Z', '2026-09-26T00:00:00.000Z')
         `;
         const listed = yield* listProvisionedEnvironments(sql);
         expect(listed.map((row) => row.requestId).toSorted()).toEqual([

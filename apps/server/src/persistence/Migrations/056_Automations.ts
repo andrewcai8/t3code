@@ -29,8 +29,11 @@ export default Effect.gen(function* () {
   `;
   // `request_id` is the provision request the run drives, so a trigger that repeats (a cron slot
   // fired twice, a redelivered webhook) lands on the same row and the same machine. `prompt` is
-  // the message frozen at trigger time, webhook context included, so a resumed run sends it.
-  // `disposed_at` records that a failed run's machine was disposed.
+  // the message frozen at trigger time, webhook context included, so a resumed run sends it, and
+  // `provision_input` the request, so an edit mid-run cannot turn a resume into a conflict.
+  // `provision_accepted` records that the manager took the request, so a machine may exist, and
+  // `disposed_at` that a failed run's machine was disposed. Runs outlive a deleted automation until
+  // their machines are disposed.
   yield* sql`
     CREATE TABLE automation_runs (
       id TEXT PRIMARY KEY NOT NULL,
@@ -39,6 +42,8 @@ export default Effect.gen(function* () {
       scheduled_for TEXT,
       request_id TEXT NOT NULL UNIQUE,
       prompt TEXT NOT NULL,
+      provision_input TEXT NOT NULL,
+      provision_accepted INTEGER NOT NULL DEFAULT 0 CHECK (provision_accepted IN (0, 1)),
       state TEXT NOT NULL
         CHECK (state IN ('provisioning', 'attaching', 'starting', 'started', 'failed', 'skipped')),
       child_environment_id TEXT,
