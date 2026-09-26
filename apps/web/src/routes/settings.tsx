@@ -47,11 +47,15 @@ function RestoreDeviceDefaultsButton({ onRestored }: { onRestored: () => void })
   );
 }
 
-/** Pages whose every row is saved on this client; the scope selects are hidden there. */
+/**
+ * Pages that do not follow the scope selection, so the scope selects are hidden
+ * there: rows saved on this client, and automations, which belong to the host.
+ */
 const DEVICE_ONLY_PATHS = new Set([
   "/settings/appearance",
   "/settings/snap-shot",
   "/settings/connections",
+  "/settings/automations",
 ]);
 
 function SettingsScopeBoundary({ pathname, children }: { pathname: string; children: ReactNode }) {
