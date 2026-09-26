@@ -939,7 +939,7 @@ describe("Namespace runtime transport", () => {
     };
     expect(
       await first.resume(operation, resource, manifest, attached.namespaceProxy, upgraded),
-    ).toEqual(attached.namespaceProxy);
+    ).toEqual({ namespaceProxy: attached.namespaceProxy, refreshError: null });
     expect(
       JSON.parse(await NodeFSP.readFile(NodePath.join(root, "server.json"), "utf8")),
     ).toMatchObject({ sha256: upgraded.sha256, revision: upgraded.revision });
@@ -962,7 +962,7 @@ describe("Namespace runtime transport", () => {
     const second = makeRuntime(new NamespaceProxyManager());
     expect(
       await second.resume(operation, resource, manifest, attached.namespaceProxy, upgraded),
-    ).toEqual(attached.namespaceProxy);
+    ).toEqual({ namespaceProxy: attached.namespaceProxy, refreshError: null });
     expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
     expect(await started()).toBe("start\nstart\n");
     expect(archiveUploads()).toHaveLength(2);

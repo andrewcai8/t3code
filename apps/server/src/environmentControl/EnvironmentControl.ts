@@ -396,13 +396,6 @@ export function createEnvironmentControl(
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
           if (cause instanceof ProvisionedSandboxMissing)
             await leaseRegistry?.markMissing(input.leaseId);
-          else
-            await Effect.runPromise(
-              Effect.logError("cloud workspace could not be resumed", {
-                leaseId: input.leaseId,
-                cause,
-              }),
-            );
           return {
             kind: "refused",
             reason: cause instanceof ProvisionedSandboxMissing ? "missing" : "unknown",
@@ -603,6 +596,12 @@ export const layer = Layer.effect(
     const providerRegistry = yield* ProviderRegistry;
     const threadSessions = yield* ProjectionThreadSessionRepository;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
+    // Promise-side provider code logs through the server's logger, not the default one.
+    const runLogged = Effect.runPromiseWith(yield* Effect.context<never>());
+    const logRefresh = (leaseId: string, refreshError: string | null | undefined) =>
+      refreshError
+        ? Effect.logWarning("cloud checkout refresh incomplete", { leaseId, cause: refreshError })
+        : Effect.void;
     const resolveAccounts = async <A>(
       resolveFrom: (
         current: ServerSettings,
@@ -662,23 +661,36 @@ export const layer = Layer.effect(
               // prepared it, which reconverges it and refreshes its checkout.
               // Imported leases keep the legacy runner.
               resume: async (input) => {
-                if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
-                  return cloud.resume(input);
-                if (input.namespaceResource)
-                  return resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
-                const resumed = await cloud.resume(input);
-                // The sandbox is awake whatever preparation does, so the lease
-                // must say so. A box that cannot reconverge still resumes the
-                // way it did before resume reprepared it.
-                await reprepareProvisionedE2b(input.leaseId, config.e2bApiKey).catch((cause) =>
-                  Effect.runPromise(
-                    Effect.logWarning("E2B box resumed without repreparing", {
-                      leaseId: input.leaseId,
-                      cause,
-                    }),
-                  ),
-                );
-                return resumed;
+                try {
+                  if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
+                    return await cloud.resume(input);
+                  if (input.namespaceResource)
+                    return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
+                  const resumed = await cloud.resume(input);
+                  // The sandbox is awake whatever preparation does, so the lease
+                  // must say so. A box that cannot reconverge still resumes the
+                  // way it did before resume reprepared it.
+                  await reprepareProvisionedE2b(input.leaseId, config.e2bApiKey).then(
+                    (ready) => runLogged(logRefresh(input.leaseId, ready.refreshError)),
+                    (cause) =>
+                      runLogged(
+                        Effect.logWarning("E2B box resumed without repreparing", {
+                          leaseId: input.leaseId,
+                          cause,
+                        }),
+                      ),
+                  );
+                  return resumed;
+                } catch (cause) {
+                  if (!(cause instanceof ProvisionedSandboxMissing))
+                    await runLogged(
+                      Effect.logError("cloud workspace could not be resumed", {
+                        leaseId: input.leaseId,
+                        cause,
+                      }),
+                    );
+                  throw cause;
+                }
               },
             },
             leaseRegistry,
@@ -739,15 +751,15 @@ export const layer = Layer.effect(
       const manifest = await manifests.load(requestId);
       const build = await manifests.readRuntime(requestId);
       const { runtime } = await resolveNamespace();
-      return {
-        namespaceProxy: await runtime.resume(
-          operation,
-          operation.state.allocation.resource,
-          manifest,
-          recordedProxy,
-          build,
-        ),
-      };
+      const { namespaceProxy, refreshError } = await runtime.resume(
+        operation,
+        operation.state.allocation.resource,
+        manifest,
+        recordedProxy,
+        build,
+      );
+      await runLogged(logRefresh(requestId, refreshError));
+      return { namespaceProxy };
     };
     const reprepareProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
       const operation = await Effect.runPromise(store.get(requestId));
@@ -756,7 +768,7 @@ export const layer = Layer.effect(
         operation.state.allocation.resource.provider !== "e2b"
       )
         throw new Error("No ready E2B runtime");
-      await makeE2bProvisionRuntime({ apiKey }).prepare(
+      return makeE2bProvisionRuntime({ apiKey }).prepare(
         operation,
         operation.state.allocation.resource.sandboxId,
         await manifests.load(requestId),
@@ -873,6 +885,7 @@ export const layer = Layer.effect(
               }),
           });
         }).pipe(
+          Effect.tap((ready) => logRefresh(operation.request.requestId, ready.refreshError)),
           Effect.ensuring(
             logProvisionPhases(
               {
