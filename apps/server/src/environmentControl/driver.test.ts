@@ -490,9 +490,19 @@ describe("cloud SDK and controller boundary", () => {
 
   it("pauses an already paused sandbox without waking it", async () => {
     sdk.pause.mockResolvedValue(false);
+    sdk.getInfo.mockResolvedValue({ sandboxId: "target", state: "paused" });
     expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBeUndefined();
     expect(sdk.pause.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["target"]);
+    expect(sdk.getInfo.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["target"]);
     expect(sdk.connect.mock.calls).toEqual([]);
+  });
+
+  it("does not report a pause E2B refused while another connect resumes the sandbox", async () => {
+    sdk.pause.mockResolvedValue(false);
+    sdk.getInfo.mockResolvedValue({ sandboxId: "target", state: "running" });
+    await expect(createCloudDriver(config).pause({ sandboxId: "target" })).rejects.toThrow(
+      "E2B did not pause sandbox target; it is running",
+    );
   });
 
   it("disposes a paused sandbox by id without waking it", async () => {
