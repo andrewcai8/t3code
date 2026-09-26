@@ -10,6 +10,8 @@ const sdk = vi.hoisted(() => ({
   setTimeout: vi.fn(),
   updateNetwork: vi.fn(),
   connect: vi.fn(),
+  kill: vi.fn(),
+  pause: vi.fn(),
   fetch: vi.fn(),
   describe: vi.fn(),
   issueToken: vi.fn().mockResolvedValue("local-session-token"),
@@ -21,6 +23,8 @@ vi.mock("e2b", async (importOriginal) => ({
   Sandbox: {
     getInfo: sdk.getInfo,
     connect: sdk.connect,
+    kill: sdk.kill,
+    pause: sdk.pause,
     setTimeout: sdk.setTimeout,
     updateNetwork: sdk.updateNetwork,
   },
@@ -465,26 +469,57 @@ describe("cloud SDK and controller boundary", () => {
   });
 
   it("reports missing when E2B no longer has the sandbox", async () => {
-    sdk.connect.mockRejectedValue(new SandboxNotFoundError("gone"));
+    sdk.pause.mockRejectedValue(new SandboxNotFoundError("Sandbox target not found"));
     expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBe("missing");
   });
 
   it("does not classify untyped pause errors as missing", async () => {
-    sdk.connect.mockRejectedValue(new Error("proxy status 404"));
+    sdk.pause.mockRejectedValue(new Error("proxy status 404"));
     await expect(createCloudDriver(config).pause({ sandboxId: "target" })).rejects.toThrow(
       "proxy status 404",
     );
   });
 
-  it("pauses an E2B sandbox without killing it", async () => {
-    const pause = vi.fn().mockResolvedValue(true);
-    sdk.connect.mockResolvedValue({ pause });
-    await createCloudDriver(config).pause({ sandboxId: "target" });
-    expect(sdk.connect).toHaveBeenCalledWith(
-      "target",
-      expect.objectContaining({ timeoutMs: 90_000 }),
-    );
-    expect(pause).toHaveBeenCalledTimes(1);
+  it("pauses a running E2B sandbox by id without killing it", async () => {
+    sdk.pause.mockResolvedValue(true);
+    expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBeUndefined();
+    expect(sdk.pause.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["target"]);
+    expect(sdk.connect.mock.calls).toEqual([]);
+    expect(sdk.kill.mock.calls).toEqual([]);
+  });
+
+  it("pauses an already paused sandbox without waking it", async () => {
+    sdk.pause.mockResolvedValue(false);
+    expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBeUndefined();
+    expect(sdk.pause.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["target"]);
+    expect(sdk.connect.mock.calls).toEqual([]);
+  });
+
+  it("disposes a paused sandbox by id without waking it", async () => {
+    sdk.getInfo.mockResolvedValue({
+      sandboxId: "retained",
+      state: "paused",
+      metadata: { purpose: "t3-environment", account: "codex" },
+    });
+    sdk.kill.mockResolvedValue(true);
+    expect(await createCloudDriver(config).dispose({ sandboxId: "retained" })).toBeUndefined();
+    expect(sdk.kill.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["retained"]);
+    expect(sdk.connect.mock.calls).toEqual([]);
+  });
+
+  it("disposes a sandbox E2B no longer has", async () => {
+    sdk.getInfo.mockResolvedValue({
+      sandboxId: "retained",
+      state: "running",
+      metadata: { purpose: "t3-environment", account: "codex" },
+    });
+    sdk.kill.mockResolvedValue(false);
+    expect(await createCloudDriver(config).dispose({ sandboxId: "retained" })).toBeUndefined();
+    expect(sdk.kill.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["retained"]);
+
+    sdk.getInfo.mockRejectedValue(new SandboxNotFoundError("Sandbox retained not found"));
+    expect(await createCloudDriver(config).dispose({ sandboxId: "retained" })).toBeUndefined();
+    expect(sdk.kill.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["retained"]);
   });
 });
 
