@@ -54,6 +54,8 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   repository: Schema.NullOr(TrimmedNonEmptyString),
   projectDir: TrimmedNonEmptyString,
   threadId: Schema.NullOr(ThreadId),
+  /** Set when the host started this environment for an automation run rather than a client. */
+  automationId: Schema.optional(TrimmedNonEmptyString),
   createdAt: Schema.String,
   expiresAt: Schema.String,
 });
@@ -83,6 +85,11 @@ export const EnvironmentProvisionInput = Schema.Struct({
   agentDriver: Schema.optional(ProviderDriverKind),
   /** Which provider account the environment should run its agent on. */
   providerInstanceId: TrimmedNonEmptyString,
+  /**
+   * Run on `providerInstanceId` exactly. Without it the account is only a
+   * tiebreak, and the driver's account with the most usage left wins.
+   */
+  pinAccount: Schema.optional(Schema.Boolean),
   /** `owner/name`; omitted leaves the environment with an empty workspace. */
   repository: Schema.optional(TrimmedNonEmptyString),
   branch: Schema.optional(TrimmedNonEmptyString),
