@@ -75,7 +75,6 @@ export function webhookPrompt(
   let body = delivery.body;
   if (delivery.contentType?.includes("json")) {
     try {
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - only re-indents an opaque payload.
       body = JSON.stringify(JSON.parse(body), null, 2);
     } catch {
       // Not JSON after all; pass it on as text.
