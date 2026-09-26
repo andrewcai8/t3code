@@ -102,19 +102,26 @@ export function upsertProviderWorkspaceSnapshot(
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
-  const isCodex = provider.driver === ProviderDriverKind.make("codex");
-  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
+  // Codex discovers its models and Claude filters its catalog by CLI version.
+  const probeOwnsModels =
+    provider.driver === ProviderDriverKind.make("codex") ||
+    provider.driver === ProviderDriverKind.make("claudeAgent");
+  if (
+    !isAntigravity &&
+    !probeOwnsModels &&
+    provider.driver !== ProviderDriverKind.make("opencode")
+  ) {
     return true;
   }
 
   if (
-    (isAntigravity || isCodex) &&
+    (isAntigravity || probeOwnsModels) &&
     (!provider.enabled || provider.auth.status === "unauthenticated")
   ) {
     return false;
   }
 
-  // Successful discovery replaces these inventories so cached retired models disappear.
+  // A successful probe replaces these inventories so retired or version-gated models disappear.
   // Antigravity's local health check does not authenticate or discover models.
   const isPendingAntigravityAuthentication =
     isAntigravity && provider.status === "warning" && provider.auth.status === "unknown";
