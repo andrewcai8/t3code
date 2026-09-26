@@ -1425,8 +1425,6 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
   });
 
-  /** Deletes the run's threads, disposes the box twice, and confirms the lease is gone. */
-
   /** What the automation step created, so its cleanup finds it whichever check failed. */
   const automationCreated: {
     automationId: AutomationId | null;
@@ -1517,8 +1515,9 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       status: first.status,
       state: first.body.state,
     });
-    // The run's request freezes the default branch's tip on its first provision call, just after.
-    const tip = yield* remoteTip("automation.webhook", null);
+    // The run resolves the default branch's tip while it is being provisioned, somewhere between
+    // this reading and the one taken once it has started; a push in between moves it.
+    const tipBefore = yield* remoteTip("automation.webhook", null);
     const again = yield* deliver;
     yield* record(
       "automation.redelivery",
@@ -1563,6 +1562,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         error: run.error,
         disposedAt: run.disposedAt,
       });
+    const tipAfter = yield* remoteTip("automation.started", null);
     yield* record(
       "automation.started",
       true,
@@ -1624,14 +1624,14 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     const reply = [...progress.assistant.values()].join("\n");
     const markers = readMarkers(reply);
-    const head = tip.sha;
+    const heads = [tipBefore.sha, tipAfter.sha];
     const sentText = sent.message?.text ?? "";
     const evidence = {
       threadId,
       gateway: child.gateway,
       error: progress.error ?? watched,
       expectedNonce,
-      expectedHead: head,
+      expectedHeads: heads,
       markers,
       body: {
         expected: bodyToken,
@@ -1644,7 +1644,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       progress.error === null &&
       markers.nonce === expectedNonce &&
       markers.head !== null &&
-      markers.head === head &&
+      heads.includes(markers.head) &&
       evidence.body.inPrompt &&
       evidence.body.replied === bodyToken;
     yield* record("automation.reply", pass, markers.nonce, evidence);
@@ -1711,6 +1711,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     });
   });
 
+  /** Deletes the run's threads, disposes the box twice, and confirms the lease is gone. */
   const remove = Effect.fn("remove")(function* (manager: T3Client) {
     const box = created.box;
     if (!box && !created.requestId) return;
