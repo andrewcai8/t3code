@@ -1,5 +1,5 @@
 import type { EnvironmentId, UsageLimitsReport } from "@t3tools/contracts";
-import { displayUsageLimits, limitsNotice } from "@t3tools/shared/usageLimits";
+import { limitsNotice } from "@t3tools/shared/usageLimits";
 import { GaugeIcon } from "lucide-react";
 
 import { getDriverOption } from "../settings/providerDriverMeta";
@@ -84,8 +84,7 @@ function UsageLimitsBannerBody({
           const resetCreditInput =
             account.resetCreditInput ??
             (account.instanceId ? { instanceId: account.instanceId } : undefined);
-          const limits = displayUsageLimits(account.driver, account.limits);
-          const notice = limitsNotice(limits);
+          const notice = limitsNotice(account.limits);
           return (
             <div key={account.id} className="flex min-w-0 flex-col gap-1">
               {report.accounts.length > 1 ? (
@@ -96,7 +95,12 @@ function UsageLimitsBannerBody({
               {notice ? (
                 <span className="text-xs text-muted-foreground">{notice}</span>
               ) : (
-                <LimitWindows compact driver={account.driver} windows={limits.windows} now={now} />
+                <LimitWindows
+                  compact
+                  driver={account.driver}
+                  windows={account.limits.windows}
+                  now={now}
+                />
               )}
               {resetCreditInput && account.limits.resetCredits ? (
                 <ResetCredits

@@ -335,8 +335,8 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     usedPercent,
     resetsAt: "2026-09-07T00:00:00.000Z",
   });
-  const cursorMonthly = (usedPercent: number) => ({
-    id: "cursor_monthly",
+  const cursorOverall = (usedPercent: number) => ({
+    id: "totalPercentUsed",
     kind: "monthly" as const,
     label: "Monthly",
     usedPercent,
@@ -464,8 +464,8 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
           selected: [session(10)],
           codex: [session(100)],
           codex_ac1: [session(30)],
-          cursor: [cursorMonthly(100)],
-          cursorWork: [cursorMonthly(60)],
+          cursor: [cursorOverall(100)],
+          cursorWork: [cursorOverall(60)],
         },
         "claudeAgent",
       );

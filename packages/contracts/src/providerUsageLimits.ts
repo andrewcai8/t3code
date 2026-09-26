@@ -24,17 +24,8 @@ export const ServerProviderUsageWindow = Schema.Struct({
   usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
   resetsAt: Schema.optional(IsoDateTime),
   windowDurationMins: Schema.optional(NonNegativeInt),
-  budgetUsd: Schema.optional(
-    Schema.Struct({
-      used: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
-      limit: Schema.Finite.check(Schema.isGreaterThan(0)),
-    }),
-  ),
 });
 export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
-
-/** Cursor's included monthly allowance, the one window Cursor accounts show. */
-export const CURSOR_MONTHLY_WINDOW_ID = "cursor_monthly";
 
 /**
  * Reset credits a provider banks on the account. Codex grants these when it

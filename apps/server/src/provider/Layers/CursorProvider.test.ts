@@ -38,7 +38,7 @@ import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { cursorUsageResponseToLimits, readCursorUsageLimits } from "./cursorUsageLimits.ts";
-import { displayUsageLimits, limitsNotice } from "@t3tools/shared/usageLimits";
+import { limitsNotice } from "@t3tools/shared/usageLimits";
 import cursorPeriod from "../testFixtures/cursor/period.json" with { type: "json" };
 
 const runNode = <A, E>(
@@ -981,15 +981,51 @@ describe("resolveCursorAcpConfigUpdates", () => {
 describe("Cursor usage limits", () => {
   const checkedAt = "2026-09-16T00:00:00.000Z";
 
-  it("does not invent unused allowance for an absent Auto pool", () => {
+  it("uses the advertised percentages and billing-cycle reset", () => {
+    const limits = cursorUsageResponseToLimits(
+      {
+        billingCycleEnd: "1789876386000",
+        planUsage: { totalPercentUsed: 72.4, autoPercentUsed: 69.5, apiPercentUsed: 100 },
+      },
+      checkedAt,
+    );
+    expect(limits.windows).toEqual(
+      expect.arrayContaining([
+        {
+          id: "totalPercentUsed",
+          kind: "monthly",
+          label: "Overall",
+          usedPercent: 72.4,
+          resetsAt: "2026-09-20T03:53:06.000Z",
+        },
+        {
+          id: "autoPercentUsed",
+          kind: "monthly",
+          label: "Cursor Models",
+          usedPercent: 69.5,
+          resetsAt: "2026-09-20T03:53:06.000Z",
+        },
+        {
+          id: "apiPercentUsed",
+          kind: "monthly",
+          label: "Other Models",
+          usedPercent: 100,
+          resetsAt: "2026-09-20T03:53:06.000Z",
+        },
+      ]),
+    );
+  });
+
+  it("does not invent unused allowance for absent buckets", () => {
     expect(cursorUsageResponseToLimits({ planUsage: {} }, checkedAt).unavailable?.reason).toBe(
       "unsupported",
     );
     expect(
-      cursorUsageResponseToLimits({ planUsage: { autoPercentUsed: 150 } }, checkedAt).windows,
-    ).toEqual([
-      { id: "cursor_monthly", kind: "monthly", label: "Monthly usage", usedPercent: 100 },
-    ]);
+      cursorUsageResponseToLimits({ planUsage: { totalPercentUsed: 0 } }, checkedAt).windows,
+    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Overall", usedPercent: 0 }]);
+    expect(
+      cursorUsageResponseToLimits({ planUsage: { totalPercentUsed: 150 } }, checkedAt).windows,
+    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Overall", usedPercent: 100 }]);
   });
 
   it("reads the instance's credentials and endpoint even when usage enabled is false", async () => {
@@ -1045,6 +1081,10 @@ describe("Cursor usage limits", () => {
             {
               AGENT_CLI_CREDENTIAL_STORE: platform === "linux" ? "memory" : "default",
               ...(token ? { CURSOR_AUTH_TOKEN: token } : {}),
+            },
+            false,
+            async () => {
+              throw new Error("must not read Keychain before opt-in");
             },
           ).pipe(
             Effect.provideService(HostProcessPlatform, platform),
@@ -1116,7 +1156,7 @@ describe("Cursor usage limits", () => {
     ]);
   });
 
-  it("reports the monthly allowance in the window the Limits view shows", async () => {
+  it("gives each pool the billing cycle's pace marker", async () => {
     const limits = await runNode(
       readCursorUsageLimits({ apiEndpoint: "" }, { CURSOR_AUTH_TOKEN: "token" }).pipe(
         Effect.provideService(
@@ -1127,18 +1167,85 @@ describe("Cursor usage limits", () => {
         ),
       ),
     );
-    const displayed = displayUsageLimits(ProviderDriverKind.make("cursor"), limits);
-    expect(displayed.windows).toEqual([
-      {
-        id: "cursor_monthly",
-        kind: "monthly",
-        label: "Monthly usage",
-        usedPercent: 74.42733333333334,
-        resetsAt: "2026-09-11T16:26:43.000Z",
-        windowDurationMins: 44640,
-      },
-    ]);
-    expect(limitsNotice(displayed)).toBeNull();
+    expect(
+      limits.windows.map(({ id, usedPercent, windowDurationMins }) => ({
+        id,
+        usedPercent,
+        windowDurationMins,
+      })),
+    ).toEqual(
+      expect.arrayContaining([
+        { id: "totalPercentUsed", usedPercent: 78.14571428571429, windowDurationMins: 44640 },
+        { id: "autoPercentUsed", usedPercent: 74.42733333333334, windowDurationMins: 44640 },
+        { id: "apiPercentUsed", usedPercent: 100, windowDurationMins: 44640 },
+      ]),
+    );
+    expect(limitsNotice(limits)).toBeNull();
+  });
+
+  it("reads the default macOS Cursor login from Keychain for limits", async () => {
+    const limits = await runNode(
+      readCursorUsageLimits({ apiEndpoint: "" }, {}, true, async () => "keychain-token").pipe(
+        Effect.provideService(HostProcessPlatform, "darwin"),
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({
+            readFileString: () => Effect.die("must not read a stale credential file"),
+          }),
+        ),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            expect(request.headers.authorization).toBe("Bearer keychain-token");
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json({ planUsage: { totalPercentUsed: 42 } }),
+              ),
+            );
+          }),
+        ),
+      ),
+    );
+    expect(limits.windows[0]?.usedPercent).toBe(42);
+  });
+
+  it("reports a Keychain initialization failure without failing the provider refresh", async () => {
+    const limits = await runNode(
+      readCursorUsageLimits({ apiEndpoint: "" }, {}, true, async () => {
+        throw new Error("Keychain initialization failed");
+      }).pipe(
+        Effect.provideService(HostProcessPlatform, "darwin"),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("must not request limits without a login")),
+        ),
+      ),
+    );
+    expect(limits.unavailable?.reason).toBe("probeFailed");
+  });
+
+  it("does not read Keychain or send its token to a custom endpoint", async () => {
+    for (const [apiEndpoint, environment] of [
+      ["http://localhost:3000", {}],
+      ["", { CURSOR_API_ENDPOINT: "http://localhost:3000" }],
+      ["https://cursor-proxy.example", {}],
+      ["", { CURSOR_API_ENDPOINT: "https://cursor-proxy.example" }],
+    ] as const) {
+      const limits = await runNode(
+        readCursorUsageLimits({ apiEndpoint }, environment, true, async () => {
+          throw new Error("must not read Keychain for a custom endpoint");
+        }).pipe(
+          Effect.provideService(HostProcessPlatform, "darwin"),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("must not send a Keychain credential to a proxy")),
+          ),
+        ),
+      );
+      expect(limits.unavailable?.reason).toBe("unsupported");
+      expect(limits.unavailable?.message).toContain("default Cursor endpoint");
+    }
   });
 
   it("reports failed requests without exposing credentials or response bodies", async () => {

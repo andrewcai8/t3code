@@ -12,8 +12,7 @@
  *
  * @module usageAggregation
  */
-import { UsageBucket, type UsageResolution, type UsageTokenTotals } from "@t3tools/contracts";
-
+import type { UsageBucket, UsageDay, UsageResolution, UsageTokenTotals } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 import { addTotals, EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
@@ -45,8 +44,6 @@ function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
   }
   return (timestampMs) => format.format(new Date(timestampMs));
 }
-
-const decodeBucket = Schema.decodeUnknownSync(UsageBucket);
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -141,7 +138,7 @@ export class UsageAggregator {
    * can derive per-window facts (distinct sessions, for one) from the records
    * that landed rather than everything the mtime prefilter happened to admit.
    */
-  add(record: UsageRecord): boolean {
+  add(record: UsageRecord, sourcePath?: string): boolean {
     if (record.dedupeKey !== null) {
       if (this.#seen.has(record.dedupeKey)) {
         this.#duplicatesDropped += 1;
@@ -171,7 +168,7 @@ export class UsageAggregator {
             this.#hourlyWindow.sinceTimeMs +
               Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS) * HOUR_MS,
           ).toISOString();
-    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.sourceId ?? ""}`;
+    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${sourcePath ?? ""}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -186,18 +183,15 @@ export class UsageAggregator {
       this.#buckets.set(key, bucket);
     }
 
-    const priced = priceUsage(
-      this.#options.rates,
-      record,
-      record.provider === "cursor" ? undefined : this.#options.priceOverrides,
-    );
+    const priced = priceUsage(this.#options.rates, record, this.#options.priceOverrides);
 
     bucket.totals = addTotals(bucket.totals, record.totals);
     bucket.costUsd += priced.costUsd;
-    bucket.cacheSavingsUsd +=
-      record.provider === "cursor"
-        ? 0
-        : cacheSavingsUsd(this.#options.rates, record, this.#options.priceOverrides);
+    bucket.cacheSavingsUsd += cacheSavingsUsd(
+      this.#options.rates,
+      record,
+      this.#options.priceOverrides,
+    );
     bucket.records += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;
@@ -208,24 +202,22 @@ export class UsageAggregator {
   finish(): AggregateResult {
     const buckets: UsageBucket[] = [];
     for (const [key, bucket] of this.#buckets) {
-      const [day = "", hourStart = "", provider = "", model = "", sourceId = ""] =
+      const [day = "", hourStart = "", provider = "", model = "", sourcePath = ""] =
         key.split("\u0000");
-      buckets.push(
-        decodeBucket({
-          day,
-          ...(hourStart === "" ? {} : { hourStart }),
-          provider,
-          ...(provider === "cursor" ? { sourceId } : {}),
-          model,
-          totals: bucket.totals,
-          costUsd: bucket.costUsd,
-          cacheSavingsUsd: bucket.cacheSavingsUsd,
-          costSource: resolveCostSource(bucket),
-          records: bucket.records,
-          unpricedRecords: bucket.unpricedRecords,
-          sessions: bucket.sessions.size,
-        }),
-      );
+      buckets.push({
+        day: day as UsageDay,
+        ...(hourStart === "" ? {} : { hourStart }),
+        provider: provider as UsageBucket["provider"],
+        model,
+        ...(sourcePath === "" ? {} : { sourcePath }),
+        totals: bucket.totals,
+        costUsd: bucket.costUsd,
+        cacheSavingsUsd: bucket.cacheSavingsUsd,
+        costSource: resolveCostSource(bucket),
+        records: bucket.records,
+        unpricedRecords: bucket.unpricedRecords,
+        sessions: bucket.sessions.size,
+      });
     }
     // Stable ordering keeps payloads diffable and snapshot tests meaningful.
     buckets.sort(
@@ -278,6 +270,7 @@ export function addTranscript(
   aggregator: UsageAggregator,
   records: readonly UsageRecord[],
   sessionIds: Set<string>,
+  sourcePath?: string,
 ): void {
   const codexOccurrences = new Map<string, number>();
   for (const record of records) {
@@ -291,7 +284,7 @@ export function addTranscript(
     }
     // Only sessions contributing in-window count; the mtime slack can admit
     // boundary files whose records fall outside the range.
-    if (aggregator.add(usageRecord) && record.sessionId.length > 0) {
+    if (aggregator.add(usageRecord, sourcePath) && record.sessionId.length > 0) {
       sessionIds.add(record.sessionId);
     }
   }

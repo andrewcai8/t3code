@@ -9,7 +9,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   type LimitAccount,
-  displayUsageLimits,
   isUsageLimitsCommand,
   collectProviderUsageLimits,
   sameUsageLimitCommandCoverage,
@@ -17,6 +16,7 @@ import {
   collectLimitAccounts,
   collectLimitNotices,
   collectLimitPools,
+  displayLimitWindows,
   elapsedShare,
   formatResetsIn,
   limitsNotice,
@@ -689,6 +689,53 @@ describe("pooled account columns", () => {
   });
 });
 
+describe("Cursor limit presentation", () => {
+  const cursorAccount: LimitAccount = {
+    key: "cursor",
+    driver: ProviderDriverKind.make("cursor"),
+    displayName: "Cursor",
+    email: undefined,
+    plan: undefined,
+    accentColor: undefined,
+    environments: [],
+    sourceLabel: "Cursor",
+    redeem: null,
+    limits: {
+      checkedAt: "2026-09-03T11:00:00.000Z",
+      windows: [
+        { id: "apiPercentUsed", kind: "monthly", label: "Other Models", usedPercent: 49 },
+        { id: "autoPercentUsed", kind: "monthly", label: "Cursor Models", usedPercent: 9 },
+        { id: "totalPercentUsed", kind: "monthly", label: "Overall", usedPercent: 15 },
+      ],
+    },
+  };
+
+  it("hides the combined percentage and orders the two pools", () => {
+    const [pool] = collectLimitPools([cursorAccount], now);
+    const display = displayLimitWindows(pool!);
+    expect(display.map((window) => window.id)).toEqual(["autoPercentUsed", "apiPercentUsed"]);
+  });
+
+  it("keeps the combined percentage as a card if either allowance is missing", () => {
+    const [pool] = collectLimitPools(
+      [
+        {
+          ...cursorAccount,
+          limits: {
+            ...cursorAccount.limits,
+            windows: cursorAccount.limits.windows.filter(
+              (window) => window.id !== "apiPercentUsed",
+            ),
+          },
+        },
+      ],
+      now,
+    );
+    const display = displayLimitWindows(pool!);
+    expect(display.map((window) => window.id)).toEqual(["totalPercentUsed", "autoPercentUsed"]);
+  });
+});
+
 describe("collectLimitNotices", () => {
   const checkedAt = "2026-09-03T11:00:00.000Z";
   const claude = ProviderDriverKind.make("claudeAgent");
@@ -1011,80 +1058,6 @@ describe("isUsageLimitsCommand", () => {
   });
 });
 
-describe("Cursor account limits", () => {
-  it("shows only the monthly allowance", () => {
-    const limits = {
-      checkedAt: "2026-09-10T00:00:00Z",
-      windows: [
-        { ...window, id: "cursor_monthly", label: "Monthly usage", usedPercent: 74.4 },
-        { ...window, id: "apiPercentUsed", label: "Monthly · API", usedPercent: 100 },
-      ],
-    };
-    expect(displayUsageLimits(ProviderDriverKind.make("cursor"), limits).windows).toEqual([
-      { ...window, id: "cursor_monthly", label: "Monthly usage", usedPercent: 74.4 },
-    ]);
-    expect(displayUsageLimits(ProviderDriverKind.make("codex"), limits)).toBe(limits);
-  });
-
-  it("does not substitute API usage when the included allowance is unavailable", () => {
-    const cursor = provider({
-      driver: ProviderDriverKind.make("cursor"),
-      usageLimits: {
-        checkedAt: "2026-09-10T00:00:00Z",
-        windows: [{ ...window, id: "cursor_api", label: "API", usedPercent: 40 }],
-      },
-    });
-    const input = new Map([
-      [
-        EnvironmentId.make("local"),
-        {
-          entry: { target: { label: "Local" } },
-          serverConfig: { providers: [cursor] },
-        },
-      ],
-    ]);
-    expect(collectLimitAccounts(input)).toEqual([]);
-    expect(collectLimitNotices(input)).toEqual(["cursor: No limits reported."]);
-  });
-
-  it("deduplicates authoritative account identities while keeping two teams sharing an email separate", () => {
-    const cursor = (instance: string, accountIdentity: string, usedPercent: number) =>
-      provider({
-        instanceId: ProviderInstanceId.make(instance),
-        driver: ProviderDriverKind.make("cursor"),
-        auth: { status: "authenticated", email: "shared@example.com", accountIdentity },
-        usageLimits: {
-          checkedAt: "2026-09-10T00:00:00Z",
-          windows: [{ id: "cursor_monthly", kind: "monthly", label: "Monthly usage", usedPercent }],
-        },
-      });
-    const accounts = collectLimitAccounts(
-      new Map([
-        [
-          EnvironmentId.make("local"),
-          {
-            entry: { target: { label: "Local" } },
-            serverConfig: { providers: [cursor("a", "team-a", 50)] },
-          },
-        ],
-        [
-          EnvironmentId.make("remote"),
-          {
-            entry: { target: { label: "Remote" } },
-            serverConfig: { providers: [cursor("alias", "team-a", 50), cursor("b", "team-b", 20)] },
-          },
-        ],
-      ]),
-    );
-    expect(accounts).toHaveLength(2);
-    expect(accounts.map((account) => account.environments.length)).toEqual([2, 1]);
-    const pools = collectLimitPools(accounts, now);
-    expect(pools[0]?.windows.map((window) => [window.label, window.members.length])).toEqual([
-      ["Monthly usage", 2],
-    ]);
-  });
-});
-
 describe("rankAccounts", () => {
   const checkedAt = "2026-09-03T11:55:00.000Z";
   const session = (usedPercent: number, resetsAt = "2026-09-03T14:00:00.000Z") =>
@@ -1098,11 +1071,11 @@ describe("rankAccounts", () => {
       windowDurationMins: 10_080,
       resetsAt,
     }) as const;
-  const monthly = (usedPercent: number) =>
+  const pool = (id: string, usedPercent: number) =>
     ({
-      id: "cursor_monthly",
+      id,
       kind: "monthly",
-      label: "Monthly",
+      label: id,
       usedPercent,
       resetsAt: "2026-09-30T00:00:00.000Z",
     }) as const;
@@ -1153,15 +1126,62 @@ describe("rankAccounts", () => {
     expect(ids(ranked)).toEqual(["reset", "half"]);
   });
 
-  it("uses only Cursor's monthly allowance, like the Limits view", () => {
+  it("ranks Cursor by its combined figure, which Auto draws down from either pool", () => {
     const ranked = rankAccounts(
       [
-        account("a", { checkedAt, windows: [monthly(60)] }, "cursor"),
-        account("b", { checkedAt, windows: [monthly(30), { ...session(99), id: "x" }] }, "cursor"),
+        account(
+          "api-spent",
+          {
+            checkedAt,
+            windows: [
+              pool("totalPercentUsed", 40),
+              pool("autoPercentUsed", 20),
+              pool("apiPercentUsed", 100),
+            ],
+          },
+          "cursor",
+        ),
+        account(
+          "busier",
+          {
+            checkedAt,
+            windows: [
+              pool("totalPercentUsed", 70),
+              pool("autoPercentUsed", 60),
+              pool("apiPercentUsed", 80),
+            ],
+          },
+          "cursor",
+        ),
+        account("unknown", undefined, "cursor"),
       ],
       now,
     );
-    expect(ids(ranked)).toEqual(["b", "a"]);
+    expect(ids(ranked)).toEqual(["api-spent", "busier", "unknown"]);
+  });
+
+  it("without Cursor's combined figure, ranks on the roomier pool", () => {
+    const ranked = rankAccounts(
+      [
+        account(
+          "auto-left",
+          { checkedAt, windows: [pool("autoPercentUsed", 70), pool("apiPercentUsed", 100)] },
+          "cursor",
+        ),
+        account(
+          "both-spent",
+          { checkedAt, windows: [pool("autoPercentUsed", 100), pool("apiPercentUsed", 100)] },
+          "cursor",
+        ),
+        account(
+          "api-left",
+          { checkedAt, windows: [pool("autoPercentUsed", 100), pool("apiPercentUsed", 50)] },
+          "cursor",
+        ),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual(["api-left", "auto-left", "both-spent"]);
   });
 
   it("puts API keys at full headroom and unknown accounts last", () => {
