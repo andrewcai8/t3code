@@ -1072,6 +1072,7 @@ const buildAppUnderTest = (options?: {
           namespaceProxyOrigin: () => Effect.succeed(null),
           list: Effect.succeed([]),
           provisionProviders: Effect.succeed([]),
+          withProvisionedSkills: Effect.succeed,
           listProvisioned: Effect.succeed([]),
           provision: () =>
             Effect.succeed({

@@ -327,58 +327,73 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
       .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
 
     for (const entry of [...entries].sort()) {
-      const skillPath = path.join(root.directory, entry, "SKILL.md");
-      const contents = yield* fileSystem
-        .readFileString(skillPath)
-        .pipe(Effect.orElseSucceed(() => undefined));
-      if (contents === undefined) {
-        continue;
-      }
-
-      const frontmatter = parseSkillFrontmatter(contents);
-      // Malformed frontmatter means the skill won't load in Claude Code
-      // either — skip it rather than surfacing a broken entry under its
-      // directory name.
-      if (frontmatter.kind === "malformed") {
-        continue;
-      }
-
-      // Claude Code identifies a skill by its directory, not by the
-      // frontmatter `name`: verified against the CLI, a skill in `probe-alias/`
-      // declaring `name: probe-alias-frontmatter` is published as
-      // `probe-alias`, and only `skillOverrides["probe-alias"]` switches it
-      // off. Keying off the frontmatter name would report a command that does
-      // not exist and miss the override that disables it.
-      const name = entry.trim();
-      if (!name) {
-        continue;
-      }
-
       // First root wins, so a later root never displaces a higher-precedence
       // skill of the same name.
-      if (skillsByName.has(name)) {
+      if (skillsByName.has(entry.trim())) {
+        continue;
+      }
+      const skill = yield* readSkillDirectory(path.join(root.directory, entry), entry, root.scope);
+      if (!skill) {
         continue;
       }
 
-      const override = skillOverrides.get(name);
-      const userInvocationOnly =
-        (frontmatter.kind === "parsed" && frontmatter.userInvocationOnly === true) ||
-        override?.userInvocationOnly === true;
-      skillsByName.set(name, {
-        name,
-        path: skillPath,
+      const override = skillOverrides.get(skill.name);
+      skillsByName.set(skill.name, {
+        ...skill,
         enabled: override?.enabled ?? true,
-        scope: root.scope,
-        ...(frontmatter.kind === "parsed" && frontmatter.description
-          ? { description: frontmatter.description }
-          : {}),
-        ...(userInvocationOnly ? { userInvocationOnly: true } : {}),
-        ...(frontmatter.kind === "parsed" && frontmatter.userInvocable === false
-          ? { userInvocable: false }
-          : {}),
+        ...(override?.userInvocationOnly ? { userInvocationOnly: true } : {}),
       });
     }
   }
 
   return [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name));
+});
+
+/**
+ * Read `<directory>/SKILL.md` as the skill `name`, the way Claude Code loads
+ * one skill directory. `undefined` when the file is missing or its
+ * frontmatter is malformed, since Claude Code would not load it either.
+ *
+ * Claude Code identifies a skill by its directory, not by the frontmatter
+ * `name`: verified against the CLI, a skill in `probe-alias/` declaring
+ * `name: probe-alias-frontmatter` is published as `probe-alias`, and only
+ * `skillOverrides["probe-alias"]` switches it off.
+ */
+export const readSkillDirectory = Effect.fn("readSkillDirectory")(function* (
+  directory: string,
+  name: string,
+  scope: ClaudeSkillScope,
+): Effect.fn.Return<ServerProviderSkill | undefined, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    return undefined;
+  }
+  const skillPath = path.join(directory, "SKILL.md");
+  const contents = yield* fileSystem
+    .readFileString(skillPath)
+    .pipe(Effect.orElseSucceed(() => undefined));
+  if (contents === undefined) {
+    return undefined;
+  }
+  const frontmatter = parseSkillFrontmatter(contents);
+  if (frontmatter.kind === "malformed") {
+    return undefined;
+  }
+  return {
+    name: trimmedName,
+    path: skillPath,
+    enabled: true,
+    scope,
+    ...(frontmatter.kind === "parsed" && frontmatter.description
+      ? { description: frontmatter.description }
+      : {}),
+    ...(frontmatter.kind === "parsed" && frontmatter.userInvocationOnly === true
+      ? { userInvocationOnly: true }
+      : {}),
+    ...(frontmatter.kind === "parsed" && frontmatter.userInvocable === false
+      ? { userInvocable: false }
+      : {}),
+  };
 });

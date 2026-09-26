@@ -30,6 +30,7 @@ import {
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
   type ProvisionProvider,
+  type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -66,6 +67,7 @@ import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionThreadSessionRepository } from "../persistence/Services/ProjectionThreadSessions.ts";
 import { readAccountLoad } from "./accountLoad.ts";
+import { withProvisionedSkills } from "./provisionedSkills.ts";
 import {
   ProvisionRefused,
   resolveProvisioningProfiles,
@@ -516,6 +518,14 @@ export class EnvironmentControl extends Context.Service<
       ReadonlyArray<ProvisionProvider>,
       EnvironmentControlError
     >;
+    /**
+     * Provider snapshots as a chat's environment sees them. A host that runs
+     * no agents itself lists the skills provisioning copies into each
+     * environment; any other host returns the snapshots unchanged.
+     */
+    readonly withProvisionedSkills: (
+      providers: ReadonlyArray<ServerProvider>,
+    ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
     readonly listProvisioned: Effect.Effect<
       ReadonlyArray<DiscoveredProvisionedEnvironment>,
       EnvironmentControlError
@@ -556,7 +566,7 @@ export class EnvironmentControl extends Context.Service<
 export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
-    const { stateDir } = yield* ServerConfig.ServerConfig;
+    const { stateDir, localAgentRuns } = yield* ServerConfig.ServerConfig;
     const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
     const manifests = makeProvisionPreparationStore(stateDir);
@@ -1026,6 +1036,14 @@ export const layer = Layer.effect(
         }),
       list: run((service) => service.list(), []),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
+      withProvisionedSkills: (providers) =>
+        localAgentRuns
+          ? Effect.succeed(providers)
+          : run(async (service) => service.config.provisioning?.skills ?? [], []).pipe(
+              Effect.flatMap((bundles) => withProvisionedSkills(providers, bundles)),
+              Effect.provide(profileContext),
+              Effect.orElseSucceed(() => providers),
+            ),
       listProvisioned: listProvisionedEnvironments(sql),
       provision: provisionControl.provision,
       attach: provisionControl.attach,
