@@ -5,7 +5,7 @@ import { SandboxError } from "e2b";
  * One E2B connect request. Restoring a box paused for hours took 70 s before
  * E2B answered with a placement timeout, so the 15 s API timeout gave up first.
  */
-export const E2B_RESUME_REQUEST_TIMEOUT_MS = 80_000;
+const E2B_RESUME_REQUEST_TIMEOUT_MS = 80_000;
 const E2B_RESUME_ATTEMPTS = 3;
 const E2B_RESUME_BACKOFF_MS = 2_000;
 
