@@ -660,7 +660,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const snippet = [
       `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
       `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
-      `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/references/codex-tools.md" && f=claude-port`,
+      `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/references/codex-tools.md" && f=codex-adapted`,
+      `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/scripts/github-merge-queue-label.sh" || f=$f-no-overlay`,
+      ...(agent === "claudeAgent"
+        ? [`test -f "$HOME/.claude/agents/poteto-agent.md" || f=$f-no-agent`]
+        : []),
       `m=missing; test -f "${MODEL_SHEET[agent]}" && m=present; git check-ignore -q "${MODEL_SHEET[agent]}" 2>/dev/null && m=$m-ignored`,
       `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
       `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
@@ -805,6 +809,15 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       (provider) => provider.driver === primary && provider.enabled,
     );
     if (!instance) return yield* fail("provision.ready", `the manager has no ${primary} account`);
+    // A new-chat draft on the host lists these, so they must match what the box gets.
+    for (const agent of options.agents) {
+      const skills = config.value.provisionedSkills?.[agent];
+      yield* record(
+        `host.skills.${agent}`,
+        skills?.some((skill) => skill.name === "poteto-mode") === true,
+        skills?.length ?? null,
+      );
+    }
     const requestId = ProvisionRequestId.make(yield* uuid);
     created.requestId = requestId;
     const input = {
