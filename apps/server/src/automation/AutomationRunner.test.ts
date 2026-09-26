@@ -573,14 +573,14 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           Effect.provideService(HttpClient.HttpClient, fakeChild([])),
           Effect.forkChild,
         );
-        yield* TestClock.adjust("5 minutes");
+        yield* TestClock.adjust("8 minutes");
         const finished = yield* Fiber.join(fiber);
 
         expect(seen).toEqual(["dispose 11111111-1111-4111-a111-000000000001:attaching"]);
         expect(finished).toMatchObject({
           state: "failed",
-          error: "Connecting to the environment did not finish in 5m.",
-          disposedAt: "2026-09-26T09:05:00.000Z",
+          error: "Connecting to the environment did not finish in 8m.",
+          disposedAt: "2026-09-26T09:08:00.000Z",
         });
       }),
     ),

@@ -27,6 +27,7 @@ import {
 } from "./ProvisionPreparation.ts";
 
 import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
+import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -139,7 +140,10 @@ function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
   };
 }
 
-export function makeE2bProvisionRuntime(connection: E2BClientOpts) {
+export function makeE2bProvisionRuntime(
+  connection: E2BClientOpts,
+  onResumeRetry?: (retry: E2bResumeRetry) => void,
+) {
   const client = new E2B(connection);
   const verify = async (operation: ProvisionOperation, sandboxId: string) => {
     const info = await client.Sandbox.getInfo(sandboxId);
@@ -156,9 +160,15 @@ export function makeE2bProvisionRuntime(connection: E2BClientOpts) {
   };
   const connect = async (operation: ProvisionOperation, sandboxId: string) => {
     await verify(operation, sandboxId);
-    const sandbox = await client.Sandbox.connect(sandboxId, {
-      timeoutMs: retentionTimeoutMs(operation.request.retentionDeadline, 6 * 3_600_000),
-    });
+    const sandbox = await connectResumingE2b(
+      sandboxId,
+      (requestTimeoutMs) =>
+        client.Sandbox.connect(sandboxId, {
+          requestTimeoutMs,
+          timeoutMs: retentionTimeoutMs(operation.request.retentionDeadline, 6 * 3_600_000),
+        }),
+      onResumeRetry,
+    );
     await verifyRetentionDeadline(operation.request.retentionDeadline, {
       read: async () => (await verify(operation, sandboxId)).endAt,
       shorten: (timeoutMs) => sandbox.setTimeout(timeoutMs),

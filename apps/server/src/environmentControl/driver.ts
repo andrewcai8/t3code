@@ -21,6 +21,7 @@ import {
 import { createNamespaceSdkRunner } from "./namespaceSdkRunner.ts";
 import { namespaceTokenSource } from "./namespaceAllocation.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
+import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 
 export type Observation =
   | { readonly kind: "stopped" }
@@ -96,8 +97,17 @@ const Capabilities = Schema.Struct({
 const decodeCapabilities = Schema.decodeUnknownExit(Capabilities);
 const decodeControllerResult = Schema.decodeUnknownSync(ControllerResult);
 
-export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver {
+export function createCloudDriver(
+  config: EnvironmentControlConfig,
+  onResumeRetry?: (retry: E2bResumeRetry) => void,
+): CloudDriver {
   const api = { apiKey: config.e2bApiKey, requestTimeoutMs: 15_000 };
+  const resumeE2b = (sandboxId: string, timeoutMs: number) =>
+    connectResumingE2b(
+      sandboxId,
+      (requestTimeoutMs) => Sandbox.connect(sandboxId, { ...api, requestTimeoutMs, timeoutMs }),
+      onResumeRetry,
+    );
   const namespaceRunner = config.provisioning?.namespace
     ? createNamespaceSdkRunner(
         config.namespaceToken === undefined ? {} : { token: config.namespaceToken },
@@ -203,7 +213,7 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
     observeBroker: () => observeE2b(config.broker),
     bootstrapBroker: async () => {
       await e2bInfo(config.broker);
-      await Sandbox.connect(config.broker.sandboxId, { ...api, timeoutMs: 3_600_000 });
+      await resumeE2b(config.broker.sandboxId, 3_600_000);
       if ((await observeE2b(config.broker)).kind !== "running")
         throw new Error("Controller did not resume");
     },
@@ -231,12 +241,8 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
       if (info.sandboxId !== sandboxId || info.metadata.purpose !== "t3-environment") {
         throw new Error("Sandbox ownership or purpose changed");
       }
-      try {
-        const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
-        await sandbox.kill();
-      } catch (cause) {
-        if (!isMissingSandbox(cause)) throw cause;
-      }
+      // Kill by id so a paused box is deleted without waking it. False means already gone.
+      await Sandbox.kill(sandboxId, api);
     },
     resume: async ({
       sandboxId,
@@ -265,7 +271,7 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
       }
       try {
         await provisionedE2bInfo(sandboxId, providerInstanceId);
-        await Sandbox.connect(sandboxId, { ...api, timeoutMs: PROVISIONED_TIMEOUT_MS });
+        await resumeE2b(sandboxId, PROVISIONED_TIMEOUT_MS);
         const resumed = await provisionedE2bInfo(sandboxId, providerInstanceId);
         if (resumed.state !== "running") throw new Error("Sandbox did not resume");
         const allowed = config.provisioning?.egressAllow;
@@ -338,8 +344,12 @@ export function createCloudDriver(config: EnvironmentControlConfig): CloudDriver
         return namespaceRunner.destroyInstance(namespaceResource);
       }
       try {
-        const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
-        await sandbox.pause();
+        // Pause by id so a paused box is not woken. E2B answers 409 both for a
+        // paused box and for one another connect is resuming, so check which.
+        if (await Sandbox.pause(sandboxId, api)) return;
+        const info = await Sandbox.getInfo(sandboxId, api);
+        if (info.state !== "paused")
+          throw new Error(`E2B did not pause sandbox ${sandboxId}; it is ${info.state}`);
       } catch (cause) {
         if (cause instanceof SandboxNotFoundError) return "missing";
         throw cause;

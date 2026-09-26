@@ -95,9 +95,10 @@ const PROVISION_TIMEOUT = Duration.minutes(30);
 const PROVISION_RETRY = Duration.seconds(10);
 /**
  * The longest each later step may take before the run is failed and its machine disposed, so a
- * hung call cannot hold a run in flight. Provisioning has its own limit above.
+ * hung call cannot hold a run in flight. Provisioning has its own limit above. Attaching can wake a
+ * paused E2B box, whose connect retries alone may take about 4 minutes.
  */
-const STEP_TIMEOUT = { attaching: Duration.minutes(5), starting: Duration.minutes(10) };
+const STEP_TIMEOUT = { attaching: Duration.minutes(8), starting: Duration.minutes(10) };
 const PROJECT_WAIT = Duration.minutes(5);
 const PROJECT_POLL = Duration.seconds(3);
 /** Transient failures (a dropped request, a restarting child) get a few retries per step. */
