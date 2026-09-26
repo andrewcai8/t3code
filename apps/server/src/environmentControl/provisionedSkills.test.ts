@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -20,6 +21,8 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { EnvironmentControl, layer } from "./EnvironmentControl.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const provider = (driver: string, skills: ReadonlyArray<ServerProviderSkill> = []) =>
   ({
@@ -64,7 +67,7 @@ const withProvisionedSkillsOnHost = (
       await writeSkill(directory, "deploy-skill", "Deploy the app.");
       await NodeFSP.writeFile(
         NodePath.join(directory, "environment-control.json"),
-        JSON.stringify({
+        encodeJson({
           e2bApiKey: "unused-test-key",
           broker: {
             sandboxId: "unused",
