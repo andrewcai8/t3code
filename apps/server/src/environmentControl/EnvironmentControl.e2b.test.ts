@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - this test writes private manager config and manifest files.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
