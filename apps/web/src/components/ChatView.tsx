@@ -490,6 +490,7 @@ import {
   resolveBackgroundDraftWorkspaceOptions,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
+  buildCloudHandoff,
   getAntigravitySendBlockReason,
   resolveDraftHeroState,
   findRecordedWorktreeSetup,
@@ -8257,18 +8258,11 @@ export default function ChatView(props: ChatViewProps) {
       if (draftId === null) {
         return;
       }
-      const cloudModel = cloudAccount?.models.some((model) => model.slug === ctxSelectedModel)
-        ? ctxSelectedModel
-        : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-          ctxSelectedModel);
-      const cloudHandoff = {
+      const cloudHandoff = buildCloudHandoff({
         agentDriver: ctxSelectedProvider,
-        modelSelection: createModelSelection(
-          cloudAccount?.instanceId ?? ctxSelectedModelSelection.instanceId,
-          cloudModel,
-          ctxSelectedModelSelection.options,
-        ),
-      };
+        selection: ctxSelectedModelSelection,
+        cloudAccount,
+      });
       const retryHeld = heldCloudSendSnapshotRef.current;
       if (retryHeld) {
         if (draftId === null) {

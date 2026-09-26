@@ -25,6 +25,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import { createModelSelection } from "@t3tools/shared/model";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
   appendCodexArtifactTemplateUsePrompt,
@@ -554,6 +555,27 @@ export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "sessi
   return {
     threadId: thread.id,
     ...(runningTurnId !== null ? { turnId: runningTurnId } : {}),
+  };
+}
+
+/** The driver and model a cloud chat's draft carries onto the environment it provisions. */
+export function buildCloudHandoff(input: {
+  agentDriver: ProviderDriverKind;
+  selection: ModelSelection;
+  cloudAccount: Pick<ServerProvider, "instanceId" | "models"> | null;
+}): { agentDriver: ProviderDriverKind; modelSelection: ModelSelection } {
+  const { cloudAccount, selection } = input;
+  const cloudModel = cloudAccount?.models.some((model) => model.slug === selection.model)
+    ? selection.model
+    : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
+      selection.model);
+  return {
+    agentDriver: input.agentDriver,
+    modelSelection: createModelSelection(
+      cloudAccount?.instanceId ?? selection.instanceId,
+      cloudModel,
+      selection.options,
+    ),
   };
 }
 
