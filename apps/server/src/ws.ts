@@ -2666,7 +2666,12 @@ const makeWsRpcLayer = (
             automations.rotateWebhook(input.id),
           ),
         [WS_METHODS.automationsListRuns]: (input) =>
-          observeRpcEffect(WS_METHODS.automationsListRuns, automations.listRuns(input.id)),
+          observeRpcEffect(
+            WS_METHODS.automationsListRuns,
+            automations.listRuns(input.id, input.limit),
+          ),
+        [WS_METHODS.automationsListJoinable]: () =>
+          observeRpcEffect(WS_METHODS.automationsListJoinable, automations.listJoinable),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",

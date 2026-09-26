@@ -3,8 +3,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   AutomationRunId,
+  EnvironmentId,
   ProviderDriverKind,
   ProvisionRequestId,
+  ThreadId,
+  type Automation,
   type AutomationInput,
 } from "@t3tools/contracts";
 import type * as Crypto from "effect/Crypto";
@@ -16,7 +19,12 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { AutomationStore, type StoredRun } from "./AutomationStore.ts";
-import { makeAutomations, SCHEDULER_TICK, webhookPrompt } from "./Automations.ts";
+import {
+  makeAutomations,
+  SCHEDULER_TICK,
+  webhookPrompt,
+  type WebhookDelivery,
+} from "./Automations.ts";
 
 const input: AutomationInput = {
   name: "Hourly triage",
@@ -32,15 +40,53 @@ const input: AutomationInput = {
 };
 
 const at = (iso: string) => TestClock.setTime(Date.parse(iso));
+const settle = TestClock.adjust(0);
 
-/** The service with a runner that records each run it is handed instead of provisioning. */
-const service = Effect.gen(function* () {
-  const started: Array<StoredRun> = [];
-  const automations = yield* makeAutomations((_automation, run) =>
-    Effect.sync(() => started.push(run)),
-  );
-  return { automations, started };
-});
+/**
+ * The service with a runner that records each run it is handed and, unless `finish` is false,
+ * moves it straight to started, standing in for the provisioning a real run does.
+ */
+const service = (options: { readonly finish?: boolean } = {}) =>
+  Effect.gen(function* () {
+    const store = yield* AutomationStore;
+    const launched: Array<StoredRun> = [];
+    const disposed: Array<string> = [];
+    const complete = (run: StoredRun) =>
+      Effect.gen(function* () {
+        const now = run.createdAt;
+        yield* store.advanceRun(run.id, "provisioning", { state: "attaching" }, now);
+        yield* store.advanceRun(
+          run.id,
+          "attaching",
+          { state: "starting", environmentId: EnvironmentId.make("child") },
+          now,
+        );
+        yield* store.advanceRun(
+          run.id,
+          "starting",
+          { state: "started", threadId: ThreadId.make("thread") },
+          now,
+        );
+      });
+    const automations = yield* makeAutomations({
+      run: (_automation, run) =>
+        Effect.sync(() => launched.push(run)).pipe(
+          Effect.andThen(options.finish === false ? Effect.never : complete(run)),
+        ),
+      dispose: (run) => Effect.sync(() => disposed.push(run.requestId)),
+      listProvisioned: Effect.succeed([]),
+    });
+    const webhook = (token: string, delivery: WebhookDelivery) =>
+      Effect.gen(function* () {
+        const target = yield* automations.webhookTarget(token);
+        if (target.kind !== "found") return { kind: target.kind };
+        const outcome = yield* automations.deliverWebhook(target.automation, delivery);
+        return outcome.kind === "accepted"
+          ? { kind: outcome.kind, runId: outcome.run.id, state: outcome.run.state }
+          : { kind: outcome.kind };
+      });
+    return { automations, store, launched, disposed, webhook };
+  });
 
 const scoped = <A, E>(effect: Effect.Effect<A, E, AutomationStore | Crypto.Crypto | Scope.Scope>) =>
   Effect.scoped(effect).pipe(
@@ -52,23 +98,29 @@ const scoped = <A, E>(effect: Effect.Effect<A, E, AutomationStore | Crypto.Crypt
     ),
   );
 
+const delivery = (deliveryId: string | undefined, body = ""): WebhookDelivery => ({
+  body,
+  contentType: body === "" ? undefined : "application/json",
+  deliveryId,
+});
+
 it.effect("runs the latest missed cron slot once on startup, then keeps the schedule", () =>
   scoped(
     Effect.gen(function* () {
       yield* at("2026-09-26T08:30:00.000Z");
-      const { automations, started } = yield* service;
+      const { automations, launched } = yield* service();
       yield* automations.create(input);
 
       yield* at("2026-09-26T11:30:00.000Z");
       const scheduler = yield* Effect.forkChild(automations.start);
-      yield* TestClock.adjust(0);
+      yield* settle;
       yield* TestClock.adjust(SCHEDULER_TICK);
-      expect(started.map((run) => [run.trigger, run.scheduledFor])).toEqual([
+      expect(launched.map((run) => [run.trigger, run.scheduledFor])).toEqual([
         ["cron", "2026-09-26T11:00:00.000Z"],
       ]);
 
       yield* TestClock.adjust("30 minutes");
-      expect(started.map((run) => run.scheduledFor)).toEqual([
+      expect(launched.map((run) => run.scheduledFor)).toEqual([
         "2026-09-26T11:00:00.000Z",
         "2026-09-26T12:00:00.000Z",
       ]);
@@ -77,102 +129,200 @@ it.effect("runs the latest missed cron slot once on startup, then keeps the sche
   ),
 );
 
+it.effect("keeps a daily 2:30 schedule firing across the spring-forward change", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-03-06T12:00:00.000Z");
+      const { automations, launched } = yield* service();
+      yield* automations.create({
+        ...input,
+        schedule: { cron: "30 2 * * *", timeZone: "America/New_York" },
+      });
+      for (const now of [
+        "2026-03-07T08:00:00.000Z",
+        "2026-03-08T12:00:00.000Z",
+        "2026-03-09T03:00:00.000Z",
+        "2026-03-09T12:00:00.000Z",
+      ]) {
+        yield* at(now);
+        yield* automations.tick;
+        yield* settle;
+      }
+      expect(launched.map((run) => run.scheduledFor)).toEqual([
+        "2026-03-07T07:30:00.000Z",
+        "2026-03-08T07:30:00.000Z",
+        "2026-03-09T06:30:00.000Z",
+      ]);
+    }),
+  ),
+);
+
 it.effect("resumes the runs a restart interrupted and leaves finished ones alone", () =>
   scoped(
     Effect.gen(function* () {
       yield* at("2026-09-26T08:00:00.000Z");
-      const store = yield* AutomationStore;
-      const { automations, started } = yield* service;
+      const { automations, store, launched } = yield* service();
       const { automation } = yield* automations.create({ ...input, schedule: null });
-      const run = (id: string, state: StoredRun["state"]): StoredRun => ({
+      const run = (id: string, suffix: string, state: StoredRun["state"]): StoredRun => ({
         id: AutomationRunId.make(id),
         automationId: automation.id,
         trigger: "manual",
         scheduledFor: null,
-        requestId: ProvisionRequestId.make(`11111111-1111-4111-a111-00000000000${id.length}`),
+        requestId: ProvisionRequestId.make(`11111111-1111-4111-a111-00000000000${suffix}`),
         prompt: "Triage new issues.",
         state,
         environmentId: null,
         threadId: null,
         error: null,
+        disposedAt: null,
         createdAt: "2026-09-26T07:00:00.000Z",
         updatedAt: "2026-09-26T07:00:00.000Z",
       });
-      yield* store.insertRun(run("a", "attaching"));
-      yield* store.insertRun(run("bb", "failed"));
+      yield* store.insertRun(run("finished", "1", "failed"));
+      yield* store.insertRun(run("interrupted", "2", "attaching"));
 
       const scheduler = yield* Effect.forkChild(automations.start);
-      yield* TestClock.adjust(0);
-      expect(started.map(({ id, state }) => [id, state])).toEqual([["a", "attaching"]]);
+      yield* settle;
+      expect(launched.map(({ id, state }) => [id, state])).toEqual([["interrupted", "attaching"]]);
       yield* Fiber.interrupt(scheduler);
     }),
   ),
 );
 
-it.effect("owes nothing for slots before the schedule was set or while disabled", () =>
+it.effect("owes nothing for slots before the schedule started counting or while disabled", () =>
   scoped(
     Effect.gen(function* () {
       yield* at("2026-09-26T09:59:00.000Z");
-      const { automations, started } = yield* service;
+      const { automations, launched } = yield* service();
       const { automation } = yield* automations.create({ ...input, enabled: false });
       yield* at("2026-09-26T10:00:30.000Z");
       yield* automations.tick;
-      expect(started).toEqual([]);
+      expect(launched).toEqual([]);
 
       yield* at("2026-09-26T10:05:00.000Z");
       yield* automations.update(automation.id, input);
       yield* automations.tick;
-      expect(started).toEqual([]);
+      expect(launched).toEqual([]);
 
       yield* at("2026-09-26T11:00:05.000Z");
       yield* automations.tick;
+      yield* settle;
       yield* automations.tick;
-      expect(started.map((run) => run.scheduledFor)).toEqual(["2026-09-26T11:00:00.000Z"]);
+      yield* settle;
+      expect(launched.map((run) => run.scheduledFor)).toEqual(["2026-09-26T11:00:00.000Z"]);
     }),
   ),
 );
 
-it.effect("starts a webhook run per delivery, answers redeliveries, and caps the hour", () =>
+it.effect("moves the schedule's floor only when the schedule changes, not on other edits", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T09:30:00.000Z");
+      const { automations, launched } = yield* service();
+      const { automation } = yield* automations.create(input);
+
+      // 10:00 is owed. Rotating the link and renaming at 10:10 must not forgive it.
+      yield* at("2026-09-26T10:10:00.000Z");
+      yield* automations.rotateWebhook(automation.id);
+      yield* automations.update(automation.id, { ...input, name: "Renamed" });
+      yield* automations.tick;
+      yield* settle;
+      expect(launched.map((run) => run.scheduledFor)).toEqual(["2026-09-26T10:00:00.000Z"]);
+
+      // A new expression starts counting from the edit: 10:15 is not owed, 10:30 is.
+      yield* at("2026-09-26T10:20:00.000Z");
+      yield* automations.update(automation.id, {
+        ...input,
+        schedule: { cron: "15,45 * * * *", timeZone: "UTC" },
+      });
+      yield* at("2026-09-26T10:40:00.000Z");
+      yield* automations.tick;
+      yield* settle;
+      expect(launched.map((run) => run.scheduledFor)).toEqual(["2026-09-26T10:00:00.000Z"]);
+      yield* at("2026-09-26T10:50:00.000Z");
+      yield* automations.tick;
+      yield* settle;
+      expect(launched.map((run) => run.scheduledFor)).toEqual([
+        "2026-09-26T10:00:00.000Z",
+        "2026-09-26T10:45:00.000Z",
+      ]);
+    }),
+  ),
+);
+
+it.effect("skips a trigger while a run is in flight, but a redelivery still gets its run", () =>
   scoped(
     Effect.gen(function* () {
       yield* at("2026-09-26T08:00:00.000Z");
-      const { automations, started } = yield* service;
+      const { automations, launched, webhook } = yield* service({ finish: false });
+      const { automation, webhookToken } = yield* automations.create({ ...input, schedule: null });
+
+      const first = yield* webhook(webhookToken!, delivery("delivery-1"));
+      const manual = yield* automations.runNow(automation.id);
+      const redelivered = yield* webhook(webhookToken!, delivery("delivery-1"));
+      yield* settle;
+
+      expect([first.kind, "state" in first ? first.state : null]).toEqual([
+        "accepted",
+        "provisioning",
+      ]);
+      expect([manual.state, manual.error]).toEqual([
+        "skipped",
+        "Skipped because the previous run was still starting.",
+      ]);
+      expect(redelivered).toEqual(first);
+      expect(launched.map((run) => run.trigger)).toEqual(["webhook"]);
+    }),
+  ),
+);
+
+it.effect("caps webhook runs at 20 an hour even for a concurrent burst", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations, webhook } = yield* service();
       const { webhookToken } = yield* automations.create({ ...input, schedule: null });
-      const token = webhookToken!;
 
-      expect(
-        yield* automations.webhook("not-the-token", {
-          body: "",
-          contentType: undefined,
-          deliveryId: undefined,
-        }),
-      ).toEqual({ kind: "not-found" });
+      const outcomes = yield* Effect.all(
+        Array.from({ length: 25 }, (_, index) =>
+          webhook(webhookToken!, delivery(`burst-${index}`)),
+        ),
+        { concurrency: "unbounded" },
+      );
+      const kinds = outcomes.map((outcome) => outcome.kind);
+      expect([
+        kinds.filter((kind) => kind === "accepted").length,
+        kinds.filter((kind) => kind === "rate-limited").length,
+      ]).toEqual([20, 5]);
 
-      const delivery = {
-        body: '{"ref":"refs/heads/main"}',
-        contentType: "application/json",
-        deliveryId: "delivery-1",
-      };
-      const first = yield* automations.webhook(token, delivery);
-      const again = yield* automations.webhook(token, delivery);
-      expect(
-        first.kind === "started" && again.kind === "started" && first.run.id === again.run.id,
-      ).toBe(true);
-      expect(started.map((run) => run.prompt)).toEqual([
+      // A redelivery of an accepted delivery is answered with its run, not refused by the cap.
+      const acceptedIndex = kinds.indexOf("accepted");
+      expect((yield* webhook(webhookToken!, delivery(`burst-${acceptedIndex}`))).kind).toBe(
+        "accepted",
+      );
+
+      yield* TestClock.adjust("61 minutes");
+      expect((yield* webhook(webhookToken!, delivery("next-hour"))).kind).toBe("accepted");
+    }),
+  ),
+);
+
+it.effect("rejects unknown and disabled links and puts the body in the prompt", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations, launched, webhook } = yield* service();
+      const { automation, webhookToken } = yield* automations.create({ ...input, schedule: null });
+
+      expect(yield* webhook("not-the-token", delivery(undefined))).toEqual({ kind: "not-found" });
+      yield* webhook(webhookToken!, delivery("d-1", '{"ref":"refs/heads/main"}'));
+      yield* settle;
+      expect(launched.map((run) => run.prompt)).toEqual([
         'Triage new issues.\n\nThis run was started by a webhook. Its request body:\n\n```\n{\n  "ref": "refs/heads/main"\n}\n```',
       ]);
 
-      for (let delivered = 2; delivered <= 20; delivered++)
-        yield* automations.webhook(token, { ...delivery, deliveryId: `delivery-${delivered}` });
-      expect(yield* automations.webhook(token, { ...delivery, deliveryId: "delivery-21" })).toEqual(
-        { kind: "rate-limited" },
-      );
-      expect(started).toHaveLength(20);
-
-      yield* TestClock.adjust("61 minutes");
-      expect(
-        (yield* automations.webhook(token, { ...delivery, deliveryId: "delivery-21" })).kind,
-      ).toBe("started");
+      yield* automations.update(automation.id, { ...input, schedule: null, enabled: false });
+      expect(yield* webhook(webhookToken!, delivery("d-2"))).toEqual({ kind: "disabled" });
     }),
   ),
 );
@@ -181,7 +331,7 @@ it.effect("keeps a webhook link across edits, and turning it off and on mints a 
   scoped(
     Effect.gen(function* () {
       yield* at("2026-09-26T08:00:00.000Z");
-      const { automations } = yield* service;
+      const { automations, webhook } = yield* service();
       const created = yield* automations.create({ ...input, schedule: null });
       const edited = yield* automations.update(created.automation.id, {
         ...input,
@@ -189,23 +339,37 @@ it.effect("keeps a webhook link across edits, and turning it off and on mints a 
         prompt: "Triage and label new issues.",
       });
       expect(edited.webhookToken).toBe(null);
-      const empty = { body: "", contentType: undefined, deliveryId: undefined };
-      expect((yield* automations.webhook(created.webhookToken!, empty)).kind).toBe("started");
+      expect((yield* webhook(created.webhookToken!, delivery("a"))).kind).toBe("accepted");
 
       yield* automations.update(created.automation.id, {
         ...input,
         schedule: null,
         webhook: false,
       });
-      expect(yield* automations.webhook(created.webhookToken!, empty)).toEqual({
-        kind: "not-found",
-      });
+      expect(yield* webhook(created.webhookToken!, delivery("b"))).toEqual({ kind: "not-found" });
       const reopened = yield* automations.update(created.automation.id, {
         ...input,
         schedule: null,
       });
       expect(reopened.webhookToken).not.toBe(created.webhookToken);
-      expect((yield* automations.webhook(reopened.webhookToken!, empty)).kind).toBe("started");
+      expect((yield* webhook(reopened.webhookToken!, delivery("c"))).kind).toBe("accepted");
+    }),
+  ),
+);
+
+it.effect("deleting an automation mid-run stops the run and disposes its machine", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations, store, launched, disposed } = yield* service({ finish: false });
+      const { automation } = yield* automations.create({ ...input, schedule: null });
+      const run = yield* automations.runNow(automation.id);
+      yield* settle;
+      expect(launched.map(({ id }) => id)).toEqual([run.id]);
+
+      yield* automations.remove(automation.id);
+      expect(disposed).toEqual([run.requestId]);
+      expect(yield* store.listRuns(automation.id as Automation["id"], 10)).toEqual([]);
     }),
   ),
 );
