@@ -8387,13 +8387,19 @@ export default function ChatView(props: ChatViewProps) {
         const dockStarted = new Promise<void>((resolve) => {
           resolveDockStarted = resolve;
         });
-        const dockTransition = runMobileComposerTransition(() => {
-          flushSync(() => {
-            captureDraftHeroComposerRect();
-            setDockedDraftHeroThreadKey(activeThreadKey);
-          });
-          resolveDockStarted?.();
-        });
+        const dockTransition = runMobileComposerTransition(
+          () => {
+            flushSync(() => {
+              captureDraftHeroComposerRect();
+              setDockedDraftHeroThreadKey(activeThreadKey);
+            });
+            resolveDockStarted?.();
+          },
+          {
+            active: panelAnimationsActive,
+            durationMs: panelAnimationDurationMs,
+          },
+        );
         void dockTransition.catch(() => resolveDockStarted?.());
         await dockStarted;
       }
