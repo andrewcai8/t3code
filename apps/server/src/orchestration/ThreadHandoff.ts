@@ -75,6 +75,7 @@ export function handoffRejection(
     case "thread.unarchive":
     case "thread.settle":
     case "thread.auto-settle":
+    case "thread.auto-settle.set":
     case "thread.unsettle":
     case "thread.snooze":
     case "thread.unsnooze":
