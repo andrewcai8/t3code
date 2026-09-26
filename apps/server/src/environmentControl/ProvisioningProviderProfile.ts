@@ -9,7 +9,7 @@ import {
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
-import { rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
+import { isAccountSpent, rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -295,6 +295,17 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
       : Option.none<ProvisioningProviderProfile>();
   });
   const driver = input.agentDriver ?? instances[hint]?.driver;
+  // A pinned account is never swapped for another, so one known to be spent refuses here
+  // rather than starting a machine whose first turn fails.
+  if (
+    input.pinAccount &&
+    driver !== undefined &&
+    isAccountSpent(driver, limits.get(hint)?.usageLimits, usage.now)
+  )
+    return yield* new ProvisionRefused({
+      reason: "credentials",
+      message: `${instances[hint]?.displayName ?? hint} is over its usage limit.`,
+    });
   const routed =
     driver === undefined || input.pinAccount ? Option.none() : yield* firstPortable(driver);
   const primary = Option.isSome(routed)

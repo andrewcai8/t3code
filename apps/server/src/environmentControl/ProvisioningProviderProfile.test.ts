@@ -399,6 +399,26 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     }),
   );
 
+  it.effect("refuses a pinned account that is over its limit instead of routing around it", () =>
+    Effect.gen(function* () {
+      const refused = yield* Effect.flip(
+        accounts(
+          routedSettings(),
+          "selected",
+          undefined,
+          { selected: [session(100), weekly(40)], claudeSpare: [session(10)] },
+          "claudeAgent",
+          {},
+          true,
+        ),
+      );
+      expect([refused.reason, refused.message]).toEqual([
+        "credentials",
+        "selected is over its usage limit.",
+      ]);
+    }),
+  );
+
   it.effect("moves the chat and each companion off accounts that are already busy", () =>
     Effect.gen(function* () {
       expect(
