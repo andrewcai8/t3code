@@ -148,10 +148,15 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
               snapshot.auth.status === "authenticated"
             ),
           (snapshot) =>
-            readCursorUsageLimits(effectiveConfig, processEnv).pipe(
-              Effect.annotateLogs({ providerInstanceId: instanceId }),
-              Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),
-            ),
+            Effect.gen(function* () {
+              const settings = yield* serverSettings.getSettings;
+              const usageLimits = yield* readCursorUsageLimits(
+                effectiveConfig,
+                processEnv,
+                settings.cursorKeychainUsageEnabled,
+              );
+              return { ...snapshot, usageLimits };
+            }).pipe(Effect.annotateLogs({ providerInstanceId: instanceId })),
         ),
         // Populate the machine snapshot with user skills during the normal
         // provider check. The composer can open before a project cwd is

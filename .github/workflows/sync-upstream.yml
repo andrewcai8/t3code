@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   sync:
@@ -14,6 +15,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Merge upstream into the default branch
+        id: merge
         env:
           GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -24,12 +26,42 @@ jobs:
             echo "Merged pingdotgg/t3code into ${BRANCH}."
             exit 0
           fi
-          echo "GitHub could not merge upstream into ${BRANCH}." >&2
-          echo "This fork's ${BRANCH} has unique commits that conflict with pingdotgg/t3code." >&2
-          echo "Do not force-reset ${BRANCH}. That would drop this fork's work." >&2
-          echo "Resolve locally:" >&2
-          echo "  git fetch upstream" >&2
-          echo "  git checkout -b sync/upstream origin/${BRANCH}" >&2
-          echo "  git merge upstream/${BRANCH}" >&2
-          echo "If upstream changed GitHub Actions files, FORK_SYNC_TOKEN needs the workflow scope." >&2
+          hint=$(cat <<EOF
+          GitHub could not merge upstream into ${BRANCH}.
+          This fork's ${BRANCH} has unique commits that conflict with pingdotgg/t3code.
+          Do not force-reset ${BRANCH}. That would drop this fork's work.
+          Resolve locally:
+            git fetch upstream
+            git checkout -b sync/upstream origin/${BRANCH}
+            git merge upstream/${BRANCH}
+          If upstream changed GitHub Actions files, FORK_SYNC_TOKEN needs the workflow scope.
+          EOF
+          )
+          echo "$hint" >&2
+          echo "failed=true" >> "$GITHUB_OUTPUT"
+          echo "hint<<HINT" >> "$GITHUB_OUTPUT"
+          echo "$hint" >> "$GITHUB_OUTPUT"
+          echo "HINT" >> "$GITHUB_OUTPUT"
           exit 1
+
+      # A failed sync is otherwise silent. One open issue collects every failed
+      # day, so the fork cannot drift unnoticed and the issue never duplicates.
+      - name: Report a failed sync
+        if: failure() && steps.merge.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HINT: ${{ steps.merge.outputs.hint }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          title="Upstream sync needs a manual merge"
+          body=$(printf '%s: the daily upstream sync failed ([run](%s)).\n\n```\n%s\n```\n' \
+            "$(date -u +%Y-%m-%d)" "$RUN_URL" "$HINT")
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | first | .number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

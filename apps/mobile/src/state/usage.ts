@@ -16,7 +16,7 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
-import { refreshUsage } from "@t3tools/client-runtime/state/usage";
+import { needsCursorKeychainAccess, refreshUsage } from "@t3tools/client-runtime/state/usage";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -33,6 +33,7 @@ export interface EnvironmentUsageStatus {
   readonly isConnected: boolean;
   readonly error: string | null;
   readonly summary: UsageSummary | null;
+  readonly needsCursorKeychainAccess: boolean;
 }
 
 interface UsageQuery {
@@ -65,17 +66,23 @@ const usageByQueryAtom = Atom.family((queryKey: string) =>
           isConnected: presentation.connection.phase === "connected",
           error: null,
           summary: null,
+          needsCursorKeychainAccess: false,
         });
         continue;
       }
       const result = get(serverEnvironment.usageSummary({ environmentId, input }));
+      const summary = Option.getOrNull(AsyncResult.value(result));
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
         isPending: result.waiting,
         isConnected: presentation.connection.phase === "connected",
         error: result._tag === "Failure" ? "This environment could not report usage." : null,
-        summary: Option.getOrNull(AsyncResult.value(result)),
+        summary,
+        needsCursorKeychainAccess: needsCursorKeychainAccess(
+          summary,
+          get(serverEnvironment.providersValueAtom(environmentId)),
+        ),
       });
     }
     return statuses;
@@ -173,7 +180,7 @@ export function useUsage(
     environments,
     selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,
-    isPartial: (answeredCount > 0 && stillReporting > 0) || merged.coverageNotices.length > 0,
+    isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,
   };
 }

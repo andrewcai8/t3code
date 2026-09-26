@@ -6,7 +6,6 @@
  * @module usageLimits
  */
 import {
-  CURSOR_MONTHLY_WINDOW_ID,
   type EnvironmentId,
   type UsageLimitsReport,
   type ProviderInstanceId,
@@ -25,15 +24,31 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-export function displayUsageLimits(
-  driver: ServerProvider["driver"],
-  limits: ServerProviderUsageLimits,
-): ServerProviderUsageLimits {
-  if (driver !== "cursor") return limits;
-  return {
-    ...limits,
-    windows: limits.windows.filter((window) => window.id === CURSOR_MONTHLY_WINDOW_ID),
-  };
+export const CURSOR_USAGE_WINDOWS = [
+  {
+    id: "totalPercentUsed",
+    label: "Overall",
+    description: "Combined usage across both allowances, not a third quota.",
+  },
+  {
+    id: "autoPercentUsed",
+    label: "Cursor Models",
+    description: "Grok and Composer use this first. Auto can use either pool.",
+  },
+  {
+    id: "apiPercentUsed",
+    label: "Other Models",
+    description: "Claude, GPT, and Gemini use this pool. Grok and Composer fall back here.",
+  },
+] as const;
+
+export function cursorUsageWindowDetails(id: string) {
+  return CURSOR_USAGE_WINDOWS.find((window) => window.id === id);
+}
+
+function cursorUsageWindowRank(id: string): number {
+  const rank = CURSOR_USAGE_WINDOWS.findIndex((window) => window.id === id);
+  return rank < 0 ? CURSOR_USAGE_WINDOWS.length : rank;
 }
 
 /**
@@ -64,12 +79,7 @@ export type LimitPresentations = ReadonlyMap<
   }
 >;
 
-function accountKey(
-  driver: ServerProvider["driver"],
-  email: string | undefined,
-  identity?: string,
-): string | null {
-  if (identity) return `${driver}:account:${identity}`;
+function accountKey(driver: ServerProvider["driver"], email: string | undefined): string | null {
   const normalizedEmail = email?.trim().toLowerCase();
   return normalizedEmail ? `${driver}:${normalizedEmail}` : null;
 }
@@ -174,11 +184,9 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
   for (const [environmentId, presentation] of presentations) {
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
-      if (!provider.usageLimits) continue;
-      const limits = displayUsageLimits(provider.driver, provider.usageLimits);
-      if (limitsNotice(limits) !== null) continue;
+      if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
       merge(
-        accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity) ??
+        accountKey(provider.driver, provider.auth.email) ??
           `${environmentId}:${provider.instanceId}`,
         {
           key: `${environmentId}:${provider.instanceId}`,
@@ -190,7 +198,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           environments: [{ environmentId, label }],
           sourceLabel: null,
           redeem: { environmentId, input: { instanceId: provider.instanceId } },
-          limits,
+          limits: provider.usageLimits,
         },
       );
     }
@@ -205,8 +213,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         ? `${presentation.entry.target.label} · ${source.label}`
         : source.label;
       for (const account of source.accounts) {
-        const limits = displayUsageLimits(account.driver, account.usageLimits);
-        if (limitsNotice(limits) !== null) continue;
+        if (limitsNotice(account.usageLimits) !== null) continue;
         merge(accountKey(account.driver, account.email) ?? `${source.id}:${account.id}`, {
           key: `${source.id}:${account.id}`,
           driver: account.driver,
@@ -226,7 +233,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
                 },
               }
             : null,
-          limits,
+          limits: account.usageLimits,
         });
       }
     }
@@ -250,9 +257,7 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
       // An account that can never report (API key) is left out; one that
       // failed, or reported nothing at all, is worth a line.
       if (provider.usageLimits?.unavailable?.reason === "unsupported") continue;
-      const notice = provider.usageLimits
-        ? limitsNotice(displayUsageLimits(provider.driver, provider.usageLimits))
-        : null;
+      const notice = provider.usageLimits ? limitsNotice(provider.usageLimits) : null;
       const name = provider.displayName?.trim() || String(provider.driver);
       if (notice) notices.push(`${label(environmentLabel, name)}: ${notice}`);
     }
@@ -302,6 +307,17 @@ export interface LimitPool {
   readonly driver: ServerProvider["driver"];
   readonly accounts: readonly LimitAccount[];
   readonly windows: readonly LimitPoolWindow[];
+}
+
+/** Show Cursor's two usable pools instead of a combined percentage when both are available. */
+export function displayLimitWindows(pool: LimitPool) {
+  if (pool.driver !== "cursor") return pool.windows;
+  const hasAuto = pool.windows.some((window) => window.id === "autoPercentUsed");
+  const hasApi = pool.windows.some((window) => window.id === "apiPercentUsed");
+  const hasBothPools = hasAuto && hasApi;
+  return pool.windows
+    .filter((window) => !hasBothPools || window.id !== "totalPercentUsed")
+    .sort((left, right) => cursorUsageWindowRank(left.id) - cursorUsageWindowRank(right.id));
 }
 
 const WINDOW_KIND_ORDER: Record<ServerProviderUsageWindow["kind"], number> = {
@@ -574,7 +590,7 @@ export function collectProviderUsageLimits(
   );
   const nativeAccounts = new Set(
     native.flatMap((provider) => {
-      const key = accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity);
+      const key = accountKey(provider.driver, provider.auth.email);
       return key && provider.usageLimits?.windows.length && !provider.usageLimits.unavailable
         ? [key]
         : [];
@@ -584,7 +600,7 @@ export function collectProviderUsageLimits(
   const notices: string[] = [];
   for (const provider of native) {
     if (!provider.usageLimits) continue;
-    const key = accountKey(provider.driver, provider.auth.email, provider.auth.accountIdentity);
+    const key = accountKey(provider.driver, provider.auth.email);
     const hubCredits = sources
       .flatMap((source) => source.accounts.map((account) => ({ source, account })))
       .filter(
@@ -683,6 +699,34 @@ export interface AccountHeadroom {
   readonly resetsAt: number | null;
 }
 
+/**
+ * The windows that decide whether an account can take another turn.
+ *
+ * Cursor reports two pools and a combined figure. Cloud chats run Cursor's
+ * default model, Auto, which draws on either pool, so the combined figure is
+ * the account's remaining capacity. Ranking on the tighter pool would call an
+ * account spent while its Auto turns still succeed (the API pool reads 100%
+ * long before Auto stops). Without the combined figure, Auto keeps running
+ * while either pool has room, so the roomier pool stands in for it.
+ */
+function headroomWindows(
+  driver: ServerProvider["driver"],
+  windows: readonly ServerProviderUsageWindow[],
+  now: number,
+): readonly ServerProviderUsageWindow[] {
+  if (driver !== "cursor") return windows;
+  const overall = windows.filter((window) => window.id === "totalPercentUsed");
+  if (overall.length > 0) return overall;
+  // A pool past its reset is full again, which leaves the account room.
+  if (windows.some((window) => (resetMillis(window) ?? Infinity) <= now)) return [];
+  const roomiest = windows.reduce<ServerProviderUsageWindow | undefined>(
+    (best, window) =>
+      best === undefined || remainingPercent(window) > remainingPercent(best) ? window : best,
+    undefined,
+  );
+  return roomiest ? [roomiest] : [];
+}
+
 function accountHeadroom(
   driver: ServerProvider["driver"],
   limits: ServerProviderUsageLimits | undefined,
@@ -694,7 +738,7 @@ function accountHeadroom(
   const checkedAt = Date.parse(limits.checkedAt);
   if (!Number.isFinite(checkedAt) || now - checkedAt > USAGE_LIMITS_STALE_MS) return null;
   let tightest: AccountHeadroom = { remainingPercent: 100, resetsAt: null };
-  for (const window of displayUsageLimits(driver, limits).windows) {
+  for (const window of headroomWindows(driver, limits.windows, now)) {
     const resetsAt = resetMillis(window);
     if (resetsAt !== null && resetsAt <= now) continue;
     const remaining = remainingPercent(window);

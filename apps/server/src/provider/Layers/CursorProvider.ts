@@ -1,4 +1,3 @@
-import { readCursorDashboard } from "../cursorDashboard.ts";
 import * as NodeOS from "node:os";
 import type {
   CursorSettings,
@@ -1222,7 +1221,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
       discoveredModels = discoveryExit.value;
     }
   }
-  const snapshot = buildCursorProviderSnapshot({
+  return buildCursorProviderSnapshot({
     checkedAt,
     cursorSettings,
     parsed,
@@ -1232,25 +1231,6 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
     ),
     ...(discoveryWarning ? { discoveryWarning } : {}),
   });
-  const dashboardFileSystem = yield* FileSystem.FileSystem;
-  const account = yield* Effect.tryPromise(async () => {
-    const reader = await readCursorDashboard(environment ?? process.env, (filePath) =>
-      Effect.runPromise(dashboardFileSystem.readFileString(filePath)),
-    );
-    return await reader.identify();
-  }).pipe(Effect.catch(() => Effect.succeed(null)));
-  return {
-    ...snapshot,
-    auth: {
-      ...snapshot.auth,
-      ...(account
-        ? {
-            accountIdentity: account.sourceId,
-            ...(account.email ? { email: account.email } : {}),
-          }
-        : {}),
-    },
-  };
 });
 
 /**

@@ -1,13 +1,10 @@
 /**
- * Usage reporting contract. Cursor contributes account-wide dashboard history.
+ * Usage reporting contract.
  *
- * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
- * `~/.grok/sessions/**\/updates.jsonl`) rather than relying on T3 Code's own
- * orchestration projections, so usage stays complete even for turns that were
- * never driven through T3 Code. This mirrors the approach `ccusage` takes.
+ * Each environment scans native session files and databases, including work
+ * driven outside T3 Code. Source status describes gaps in local coverage.
  *
- * Environments return pre-aggregated `(day, hourStart?, provider, model)`
+ * Environments return pre-aggregated `(day, hourStart?, provider, model, sourcePath?)`
  * buckets. Raw transcript records never cross the wire.
  *
  * @module usage
@@ -26,11 +23,19 @@ export const USAGE_CONTRACT_VERSION = 6 as const;
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * v6 adds account-scoped Cursor usage. v4/v5 transcript summaries remain valid.
+ * v5/v6 add providers and optional source attribution; v4 Claude/Codex
+ * buckets remain valid in mixed-version environments.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex", "grok", "cursor"]);
+export const UsageProviderKind = Schema.Literals([
+  "claude",
+  "codex",
+  "grok",
+  "cursor",
+  "opencode",
+  "antigravity",
+]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -86,10 +91,13 @@ export type UsageTokenTotals = typeof UsageTokenTotals.Type;
  * whose tokens are included in the token totals but which contributed nothing
  * to `costUsd`.
  */
-const UsageBucketFields = {
+export const UsageBucket = Schema.Struct({
   day: UsageDay,
   hourStart: Schema.optional(TrimmedNonEmptyString),
+  provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
+  /** Source directory, so overlapping multi-home environments merge once per source. */
+  sourcePath: Schema.optional(TrimmedNonEmptyString),
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
   /**
@@ -99,20 +107,12 @@ const UsageBucketFields = {
    */
   cacheSavingsUsd: Schema.Number,
   costSource: UsageCostSource,
-  /** Transcript assistant responses, or Cursor dashboard requests. */
+  /** Distinct assistant responses, after de-duplication. */
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
-  /** Known transcript sessions or Cursor conversations contributing to this cell. */
+  /** Distinct transcript sessions that contributed to this cell. */
   sessions: NonNegativeInt,
-};
-export const UsageBucket = Schema.Union([
-  Schema.Struct({ ...UsageBucketFields, provider: Schema.Literals(["claude", "codex", "grok"]) }),
-  Schema.Struct({
-    ...UsageBucketFields,
-    provider: Schema.Literal("cursor"),
-    sourceId: TrimmedNonEmptyString,
-  }),
-]);
+});
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
@@ -122,7 +122,7 @@ export type UsageBucket = typeof UsageBucket.Type;
  * the same provider home and would otherwise double count. The client drops
  * duplicate fingerprints before merging.
  */
-const TranscriptSourceFingerprint = Schema.Struct({
+export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
   resolvedHomePath: TrimmedNonEmptyString,
@@ -137,15 +137,6 @@ const TranscriptSourceFingerprint = Schema.Struct({
    */
   volumeId: Schema.String,
 });
-export const UsageSourceFingerprint = Schema.Union([
-  TranscriptSourceFingerprint,
-  Schema.Struct({
-    kind: Schema.Literals(["account", "unavailable"]),
-    provider: Schema.Literal("cursor"),
-    sourceId: TrimmedNonEmptyString,
-    label: TrimmedNonEmptyString,
-  }),
-]);
 export type UsageSourceFingerprint = typeof UsageSourceFingerprint.Type;
 
 export const UsageSourceStatus = Schema.Literals(["ok", "missing", "partial", "failed"]);
@@ -154,7 +145,6 @@ export type UsageSourceStatus = typeof UsageSourceStatus.Type;
 export const UsageSource = Schema.Struct({
   fingerprint: UsageSourceFingerprint,
   status: UsageSourceStatus,
-  readAt: Schema.optional(Schema.String),
   scannedFiles: NonNegativeInt,
   skippedFiles: NonNegativeInt,
   /** Records that parsed but carried no recognisable usage payload. */
@@ -166,6 +156,8 @@ export const UsageSource = Schema.Struct({
    */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
+  /** An action the client can offer to make this source available. */
+  action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
 });
 export type UsageSource = typeof UsageSource.Type;
 

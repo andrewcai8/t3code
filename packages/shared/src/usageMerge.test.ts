@@ -2,21 +2,17 @@ import {
   USAGE_CONTRACT_VERSION,
   USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
-  UsageBucket,
-  type UsageSource,
+  type UsageBucket,
   type UsageDay,
   type UsageProviderKind,
   type UsageSummary,
 } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { isModelCostUnknown, mergeUsage, type EnvironmentUsage } from "./usageMerge.ts";
 
-const decodeBucket = Schema.decodeUnknownSync(UsageBucket);
-
 function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
-  return decodeBucket({
+  return {
     day: "2026-08-07" as UsageDay,
     provider: "claude",
     model: "claude-fable-5",
@@ -34,7 +30,7 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     unpricedRecords: 0,
     sessions: 1,
     ...overrides,
-  });
+  };
 }
 
 function summary(
@@ -79,6 +75,41 @@ function environment(id: string, usageSummary: UsageSummary): EnvironmentUsage {
 }
 
 describe("mergeUsage", () => {
+  it("counts a Cursor account once across servers while retaining each server's other providers", () => {
+    const account = {
+      provider: "cursor" as const,
+      hostId: "cursor.com",
+      homePath: "cursor-account:account-hash",
+      volumeId: "account-hash",
+    };
+    const merged = mergeUsage(
+      [
+        environment(
+          "mac",
+          summary([bucket({ provider: "cursor", sourcePath: account.homePath })], [account]),
+        ),
+        environment(
+          "linux",
+          summary(
+            [
+              bucket({ provider: "cursor", sourcePath: account.homePath }),
+              bucket({ provider: "opencode", sourcePath: "/opencode" }),
+            ],
+            [account, { provider: "opencode", hostId: "linux", homePath: "/opencode" }],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(
+      merged.providers.map((provider) => [provider.provider, provider.costUsd]).sort(),
+    ).toEqual([
+      ["cursor", 10],
+      ["opencode", 10],
+    ]);
+    expect(merged.duplicateSources).toHaveLength(1);
+  });
+
   it("sums environments that read different transcript directories", () => {
     const merged = mergeUsage(
       [
@@ -151,6 +182,31 @@ describe("mergeUsage", () => {
     ).toEqual({ claude: 1, codex: 1 });
   });
 
+  it("counts overlapping provider roots once while keeping each environment's unique root", () => {
+    const source = (homePath: string) => ({
+      provider: "opencode" as const,
+      hostId: "host",
+      homePath,
+    });
+    const usage = (sourcePath: string, costUsd: number) =>
+      bucket({ provider: "opencode", sourcePath, costUsd });
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary([usage("/shared", 10), usage("/a", 2)], [source("/shared"), source("/a")]),
+        ),
+        environment(
+          "env-b",
+          summary([usage("/shared", 10), usage("/b", 3)], [source("/shared"), source("/b")]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.costUsd).toBe(15);
+    expect(merged.sessions).toBe(3);
+  });
+
   it("uses the newest scan when environments share the same transcript directory", () => {
     const source = { provider: "claude" as const, hostId: "mac", homePath: "/home/theo/.claude" };
     const environments = [
@@ -169,6 +225,104 @@ describe("mergeUsage", () => {
       expect(merged.contributingEnvironments).toEqual(["env-b"]);
       expect(merged.duplicateSources).toEqual(["env-a: /home/theo/.claude"]);
     }
+  });
+
+  it("prefers a complete scan over a newer partial scan of the same directory", () => {
+    const source = { provider: "claude" as const, hostId: "mac", homePath: "/home/theo/.claude" };
+    const incomplete = summary([bucket({ costUsd: 4, records: 2 })], [source]);
+    const partial = environment("new", {
+      ...incomplete,
+      readAt: "2026-08-07T01:00:00.000Z",
+      sources: incomplete.sources.map((entry) => ({ ...entry, status: "partial" as const })),
+    });
+    const complete = environment("old", summary([bucket()], [source]));
+
+    for (const ordered of [
+      [partial, complete],
+      [complete, partial],
+    ]) {
+      const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+      expect(merged.costUsd).toBe(10);
+      expect(merged.contributingEnvironments).toEqual(["old"]);
+      expect(merged.duplicateSources).toEqual(["new: /home/theo/.claude"]);
+    }
+    expect(mergeUsage([partial], USAGE_CONTRACT_VERSION).costUsd).toBe(4);
+  });
+
+  it("keeps new cells from a later partial scan without recounting older cells", () => {
+    const source = { provider: "claude" as const, hostId: "mac", homePath: "/home/theo/.claude" };
+    const complete = environment(
+      "old",
+      summary([bucket()], [source], USAGE_MERGE_COMPATIBLE_SINCE),
+    );
+    const partialSummary = summary(
+      [
+        bucket({ sourcePath: source.homePath, costUsd: 4, records: 2 }),
+        bucket({
+          day: "2026-08-08" as UsageDay,
+          sourcePath: source.homePath,
+          costUsd: 3,
+          records: 1,
+        }),
+      ],
+      [{ ...source, distinctSessions: 2 }],
+    );
+    const partial = environment("new", {
+      ...partialSummary,
+      readAt: "2026-08-08T01:00:00.000Z",
+      sources: partialSummary.sources.map((entry) => ({ ...entry, status: "partial" as const })),
+    });
+
+    for (const ordered of [
+      [complete, partial],
+      [partial, complete],
+    ]) {
+      const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+      expect(merged.costUsd).toBe(13);
+      expect(merged.records).toBe(6);
+      expect(merged.sessions).toBe(2);
+      expect(merged.daily.map(({ day, costUsd }) => [day, costUsd])).toEqual([
+        ["2026-08-07", 10],
+        ["2026-08-08", 3],
+      ]);
+      expect(merged.contributingEnvironments).toEqual(
+        ordered.map(({ environmentId }) => environmentId),
+      );
+      expect(merged.duplicateSources).toEqual(["new: /home/theo/.claude"]);
+    }
+  });
+
+  it("retains a complete cell when a larger partial cell may have skipped old records", () => {
+    const source = { provider: "claude" as const, hostId: "mac", homePath: "/home/theo/.claude" };
+    const complete = environment("old", summary([bucket()], [source]));
+    const partialSummary = summary(
+      [
+        bucket({
+          costUsd: 4,
+          records: 6,
+          totals: {
+            uncachedInputTokens: 80,
+            cachedInputTokens: 500,
+            cacheCreationTokens: 10,
+            outputTokens: 30,
+            reasoningTokens: 0,
+          },
+        }),
+      ],
+      [{ ...source, distinctSessions: 2 }],
+    );
+    const partial = environment("new", {
+      ...partialSummary,
+      readAt: "2026-08-07T01:00:00.000Z",
+      sources: partialSummary.sources.map((entry) => ({ ...entry, status: "partial" as const })),
+    });
+
+    const merged = mergeUsage([complete, partial], USAGE_CONTRACT_VERSION);
+    expect(merged.costUsd).toBe(10);
+    expect(merged.totalTokens).toBe(1160);
+    expect(merged.records).toBe(5);
+    expect(merged.sessions).toBe(1);
+    expect(merged.contributingEnvironments).toEqual(["old"]);
   });
 
   it("excludes an environment reporting an older contract version", () => {
@@ -418,136 +572,4 @@ describe("mergeUsage", () => {
     expect(merged.daily).toHaveLength(1);
     expect(merged.daily[0]?.costUsd).toBe(10);
   });
-});
-
-describe("Cursor account ownership", () => {
-  function account(
-    id: string,
-    status: UsageSource["status"] = "ok",
-    readAt = "2026-09-10T00:00:00Z",
-  ): UsageSource {
-    return {
-      fingerprint: { kind: "account", provider: "cursor", sourceId: id, label: id },
-      status,
-      readAt,
-      scannedFiles: 0,
-      skippedFiles: 0,
-      malformedRecords: 0,
-      distinctSessions: status === "failed" ? 0 : 1,
-      message: status === "ok" ? null : "Incomplete account",
-    };
-  }
-  function accountSummary(ids: readonly string[], sources: readonly UsageSource[]) {
-    return {
-      ...summary(
-        ids.map((id) => bucket({ provider: "cursor", sourceId: id })),
-        [],
-      ),
-      sources,
-    };
-  }
-  it("counts overlapping account sets once without dropping the second account on a host", () => {
-    const merged = mergeUsage(
-      [
-        environment("host-a", accountSummary(["a"], [account("a")])),
-        environment("host-b", accountSummary(["a", "b"], [account("a"), account("b")])),
-      ],
-      USAGE_CONTRACT_VERSION,
-    );
-    expect(merged.costUsd).toBe(20);
-    expect(merged.sessions).toBe(2);
-    expect(merged.records).toBe(10);
-    expect(merged.providers.map((provider) => provider.provider)).toEqual(["cursor"]);
-  });
-  it("selects complete then fresh account copies even when interleaved with physical sources", () => {
-    const physical = summary(
-      [bucket()],
-      [{ provider: "claude", hostId: "host-a", homePath: "/claude" }],
-    );
-    const broken = accountSummary(["a"], [account("a", "failed", "2026-09-11T00:00:00Z")]);
-    const partial = accountSummary(["a"], [account("a", "partial", "2026-09-12T00:00:00Z")]);
-    const complete = accountSummary(["a"], [account("a")]);
-    const newest = {
-      ...accountSummary(["a"], [account("a", "ok", "2026-09-10T12:00:00Z")]),
-      buckets: [bucket({ provider: "cursor", sourceId: "a", costUsd: 30 })],
-    };
-    const candidates = [
-      environment("a", {
-        ...broken,
-        buckets: [...broken.buckets, ...physical.buckets],
-        sources: [...broken.sources, ...physical.sources],
-      }),
-      environment("b", partial),
-      environment("c", complete),
-      environment("d", newest),
-    ];
-    for (const inputs of [candidates, candidates.toReversed()]) {
-      const merged = mergeUsage(inputs, USAGE_CONTRACT_VERSION);
-      expect(merged.costUsd).toBe(40);
-      expect(merged.coverageNotices).toEqual([]);
-      expect(merged.contributingEnvironments).toContain("d");
-    }
-  });
-  it("reports a partial winning source and rejects unreferenced Cursor buckets", () => {
-    const merged = mergeUsage(
-      [environment("host", accountSummary(["a", "unclaimed"], [account("a", "partial")]))],
-      USAGE_CONTRACT_VERSION,
-    );
-    expect(merged.costUsd).toBe(10);
-    expect(merged.coverageNotices).toEqual(["host · a: Incomplete account"]);
-    expect(() => bucket({ provider: "cursor" })).toThrow();
-  });
-  it("keeps v4 and v5 transcript summaries alongside v6 account usage", () => {
-    const merged = mergeUsage(
-      [
-        environment(
-          "v4",
-          summary([bucket()], [{ provider: "claude", hostId: "old4", homePath: "/claude" }], 4),
-        ),
-        environment(
-          "v5",
-          summary(
-            [bucket({ provider: "grok" })],
-            [{ provider: "grok", hostId: "old5", homePath: "/grok" }],
-            5,
-          ),
-        ),
-        environment("v6", accountSummary(["a"], [account("a")])),
-      ],
-      USAGE_CONTRACT_VERSION,
-    );
-    expect(merged.costUsd).toBe(30);
-    expect(merged.staleEnvironments).toEqual([]);
-    expect(merged.providers.map((provider) => provider.provider)).toEqual([
-      "claude",
-      "grok",
-      "cursor",
-    ]);
-  });
-});
-
-it("keeps unidentified Cursor instances local to each environment and admits no history from them", () => {
-  const unavailable: UsageSource = {
-    fingerprint: { kind: "unavailable", provider: "cursor", sourceId: "cursor", label: "Cursor" },
-    status: "failed",
-    scannedFiles: 0,
-    skippedFiles: 0,
-    malformedRecords: 0,
-    distinctSessions: 0,
-    message: "Login unavailable",
-  };
-  const unavailableSummary = {
-    ...summary([bucket({ provider: "cursor", sourceId: "cursor" })], []),
-    sources: [unavailable],
-  };
-  const result = mergeUsage(
-    [environment("local", unavailableSummary), environment("remote", unavailableSummary)],
-    USAGE_CONTRACT_VERSION,
-  );
-  expect(result.costUsd).toBe(0);
-  expect(result.coverageNotices).toEqual([
-    "local · Cursor: Login unavailable",
-    "remote · Cursor: Login unavailable",
-  ]);
-  expect(result.duplicateSources).toEqual([]);
 });

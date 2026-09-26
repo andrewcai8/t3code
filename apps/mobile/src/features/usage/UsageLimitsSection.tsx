@@ -9,7 +9,6 @@ import type {
   UsageProviderKind,
 } from "@t3tools/contracts";
 import {
-  displayUsageLimits,
   elapsedShare,
   formatDuration,
   formatResetsIn,
@@ -143,8 +142,7 @@ export function AccountLimits(props: {
   readonly trailing?: ReactNode;
   readonly footer?: ReactNode;
 }) {
-  const { now, dense = false } = props;
-  const limits = props.limits ? displayUsageLimits(props.driver, props.limits) : undefined;
+  const { limits, now, dense = false } = props;
   const color = useBarColor(props.driver);
   if (!limits) return null;
   const notice = limitsNotice(limits);
@@ -302,7 +300,7 @@ export function useRefreshLimits(
   const [failedEnvironments, setFailedEnvironments] = useState<
     readonly { environmentId: EnvironmentId; label: string }[]
   >([]);
-  const refresh = async (automatic = false) => {
+  const refresh = async (automatic = false, afterPending = false) => {
     const connected = [...presentations].filter(
       ([environmentId, presentation]) =>
         presentation.connection.phase === "connected" &&
@@ -315,6 +313,7 @@ export function useRefreshLimits(
             environmentId,
             () => refreshProviders({ environmentId, input: {} }),
             automatic,
+            afterPending,
           );
           if (result === undefined) return;
           setFailedEnvironments((previous) => [
@@ -362,5 +361,11 @@ export function useRefreshLimits(
         selectedEnvironmentIds === null || selectedEnvironmentIds.has(environmentId),
     )
     .map(({ label }) => label);
-  return { now, refreshing, failedLabels, refresh: refreshManually };
+  return {
+    now,
+    refreshing,
+    failedLabels,
+    refresh: refreshManually,
+    refreshAfterEnable: () => refresh(false, true),
+  };
 }

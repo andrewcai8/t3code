@@ -43,6 +43,7 @@ vi.mock("./server", () => ({
       testState.asked.push(environmentId);
       return Atom.make(AsyncResult.success(summary(environmentId, input)));
     },
+    providersValueAtom: () => Atom.make([]),
   },
 }));
 
