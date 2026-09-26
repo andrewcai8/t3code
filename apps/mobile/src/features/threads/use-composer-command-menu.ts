@@ -3,6 +3,7 @@ import type {
   ProjectId,
   ProviderInteractionMode,
   ServerProvider,
+  ServerProvisionedSkills,
 } from "@t3tools/contracts";
 import { COMPOSER_CONTEXT_MAX_RECORDS } from "@t3tools/contracts";
 import { Alert } from "react-native";
@@ -168,6 +169,7 @@ export function useComposerCommandMenu({
   pullRequestProjectId = null,
   pullRequestRepository = null,
   selectedProviderStatus,
+  provisionedSkills,
   hasThread,
   hasCompactableConversation,
   offersUsageLimits = false,
@@ -183,6 +185,8 @@ export function useComposerCommandMenu({
   readonly pullRequestProjectId?: ProjectId | null;
   readonly pullRequestRepository?: string | null;
   readonly selectedProviderStatus: ServerProvider | null;
+  /** What a chat from this host will find in its provisioned environment. */
+  readonly provisionedSkills: ServerProvisionedSkills | undefined;
   readonly hasThread: boolean;
   readonly hasCompactableConversation: boolean;
   /** Whether T3 itself offers /usage-limits for the selected provider. */
@@ -227,8 +231,10 @@ export function useComposerCommandMenu({
 
   const skills = useMemo(
     () =>
-      selectedProviderStatus ? resolveProviderSkillsForCwd(selectedProviderStatus, projectCwd) : [],
-    [projectCwd, selectedProviderStatus],
+      selectedProviderStatus
+        ? resolveProviderSkillsForCwd(selectedProviderStatus, projectCwd, provisionedSkills)
+        : [],
+    [projectCwd, provisionedSkills, selectedProviderStatus],
   );
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,

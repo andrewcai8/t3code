@@ -30,7 +30,7 @@ import {
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
   type ProvisionProvider,
-  type ServerProvider,
+  type ServerProvisionedSkills,
   type ServerSettings,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -67,7 +67,7 @@ import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionThreadSessionRepository } from "../persistence/Services/ProjectionThreadSessions.ts";
 import { readAccountLoad } from "./accountLoad.ts";
-import { withProvisionedSkills } from "./provisionedSkills.ts";
+import { readProvisionedSkills } from "./provisionedSkills.ts";
 import {
   ProvisionRefused,
   resolveProvisioningProfiles,
@@ -519,13 +519,11 @@ export class EnvironmentControl extends Context.Service<
       EnvironmentControlError
     >;
     /**
-     * Provider snapshots as a chat's environment sees them. A host that runs
-     * no agents itself lists the skills provisioning copies into each
-     * environment; any other host returns the snapshots unchanged.
+     * The skills provisioning copies into each environment, by driver. Only a
+     * host that runs no agents itself reports them, because its own provider
+     * snapshots cannot see them. Absent on every other host.
      */
-    readonly withProvisionedSkills: (
-      providers: ReadonlyArray<ServerProvider>,
-    ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+    readonly provisionedSkills: Effect.Effect<ServerProvisionedSkills | undefined>;
     readonly listProvisioned: Effect.Effect<
       ReadonlyArray<DiscoveredProvisionedEnvironment>,
       EnvironmentControlError
@@ -602,6 +600,13 @@ export const layer = Layer.effect(
           runtime: ReturnType<typeof makeNamespaceProvisionRuntime>;
         }>
       | undefined;
+    let scannedSkills:
+      | {
+          readonly service: ManagerService;
+          readonly mtimes: string;
+          readonly skills: Promise<ServerProvisionedSkills>;
+        }
+      | undefined;
     const settings = yield* ServerSettingsService;
     const providerRegistry = yield* ProviderRegistry;
     const threadSessions = yield* ProjectionThreadSessionRepository;
@@ -674,11 +679,10 @@ export const layer = Layer.effect(
           );
           return { ...control, config };
         })();
+        // A config that fails to load stays failed until the file changes, so
+        // callers polling it do not re-read and re-parse a broken file.
         loaded = { path, mtimeMs, service };
-        return service.catch((error: unknown) => {
-          if (loaded?.path === path && loaded.mtimeMs === mtimeMs) loaded = undefined;
-          throw error;
-        });
+        return service;
       })();
     const resolveNamespace = () => {
       namespace ??= (async () => {
@@ -1036,14 +1040,28 @@ export const layer = Layer.effect(
         }),
       list: run((service) => service.list(), []),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
-      withProvisionedSkills: (providers) =>
-        localAgentRuns
-          ? Effect.succeed(providers)
-          : run(async (service) => service.config.provisioning?.skills ?? [], []).pipe(
-              Effect.flatMap((bundles) => withProvisionedSkills(providers, bundles)),
-              Effect.provide(profileContext),
-              Effect.orElseSucceed(() => providers),
-            ),
+      provisionedSkills: localAgentRuns
+        ? Effect.succeed(undefined)
+        : run(async (service) => {
+            const bundles = service.config.provisioning?.skills ?? [];
+            if (bundles.length === 0) return undefined;
+            // A bundle directory's mtime moves when a skill is added or
+            // removed, so the list follows the bundles without a rescan per
+            // request. The service itself is replaced when the config changes.
+            const mtimes = (
+              await Promise.all(
+                bundles.map((bundle) =>
+                  NodeFSP.stat(bundle.source).then(
+                    (stats) => stats.mtimeMs,
+                    () => null,
+                  ),
+                ),
+              )
+            ).join(",");
+            if (scannedSkills?.service !== service || scannedSkills.mtimes !== mtimes)
+              scannedSkills = { service, mtimes, skills: readProvisionedSkills(bundles) };
+            return scannedSkills.skills;
+          }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
       listProvisioned: listProvisionedEnvironments(sql),
       provision: provisionControl.provision,
       attach: provisionControl.attach,

@@ -1,69 +1,105 @@
-import type { ServerProvider, ServerProviderSkill } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
+// @effect-diagnostics nodeBuiltinImport:off - bundles are read at the same Promise-based boundary provisioning copies them from.
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import type { ServerProvisionedSkill, ServerProvisionedSkills } from "@t3tools/contracts";
 
-import { readSkillDirectory } from "../provider/Drivers/ClaudeSkills.ts";
+import {
+  parseSkillFrontmatter,
+  type CursorSkillFrontmatter,
+} from "../provider/Drivers/CursorSkills.ts";
 import type { Provisioning } from "./config.ts";
 
 type SkillBundle = NonNullable<Provisioning["skills"]>[number];
-type ProvisionedDriver = NonNullable<SkillBundle["agents"]>[number];
+type ProvisionedDriver = keyof ServerProvisionedSkills;
 
-const ALL_DRIVERS: ReadonlyArray<ProvisionedDriver> = ["codex", "cursor", "claudeAgent"];
+const ALL_DRIVERS: ReadonlyArray<ProvisionedDriver> = ["codex", "claudeAgent", "cursor"];
 
-/** Skills a provisioned environment receives, by the driver whose root they land in. */
-type ProvisionedSkills = ReadonlyMap<string, ReadonlyArray<ServerProviderSkill>>;
+const invocation = (frontmatter: CursorSkillFrontmatter) => ({
+  ...(frontmatter.description ? { description: frontmatter.description } : {}),
+  ...(frontmatter.userInvocationOnly ? { userInvocationOnly: true } : {}),
+  ...(frontmatter.userInvocable === false ? { userInvocable: false } : {}),
+});
 
-const readProvisionedSkills = Effect.fn("readProvisionedSkills")(function* (
+/**
+ * The entry each driver's adapter in the environment would report for one
+ * skill directory, or `undefined` when that adapter would not offer it.
+ * Claude and Cursor key a skill by its directory, Codex by its frontmatter
+ * `name`. Cursor hides a skill whose `metadata.surfaces` leaves out the CLI.
+ */
+const entryFor: Record<
+  ProvisionedDriver,
+  (directory: string, frontmatter: CursorSkillFrontmatter) => ServerProvisionedSkill | undefined
+> = {
+  claudeAgent: (directory, frontmatter) => ({
+    name: directory,
+    enabled: true,
+    scope: "user",
+    ...invocation(frontmatter),
+  }),
+  codex: (_directory, frontmatter) =>
+    frontmatter.displayName
+      ? {
+          name: frontmatter.displayName,
+          enabled: true,
+          scope: "user",
+          ...(frontmatter.description ? { description: frontmatter.description } : {}),
+        }
+      : undefined,
+  cursor: (directory, frontmatter) =>
+    frontmatter.cliVisible
+      ? {
+          name: directory,
+          enabled: true,
+          scope: "user",
+          ...(frontmatter.displayName && frontmatter.displayName !== directory
+            ? { displayName: frontmatter.displayName }
+            : {}),
+          ...invocation(frontmatter),
+        }
+      : undefined,
+};
+
+/**
+ * Mirrors provisioning's layout: a named bundle is one skill, otherwise each
+ * child directory of the source is one. Provisioning copies no linked
+ * directory, so a linked child never reaches an environment.
+ */
+async function skillDirectories(bundle: SkillBundle) {
+  if (bundle.name) return [{ path: bundle.source, name: bundle.name }];
+  const entries = await NodeFSP.readdir(bundle.source, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ path: NodePath.join(bundle.source, entry.name), name: entry.name }));
+}
+
+export async function readProvisionedSkills(
   bundles: ReadonlyArray<SkillBundle>,
-): Effect.fn.Return<ProvisionedSkills, never, FileSystem.FileSystem | Path.Path> {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const byDriver = new Map<string, Map<string, ServerProviderSkill>>();
+): Promise<ServerProvisionedSkills> {
+  const byDriver = new Map<ProvisionedDriver, Map<string, ServerProvisionedSkill>>();
   for (const bundle of bundles) {
-    // Mirrors provisioning's layout: a named bundle is one skill directory,
-    // otherwise each child of the source lands in the skill root.
-    const directories = bundle.name
-      ? [{ directory: bundle.source, name: bundle.name }]
-      : (yield* fileSystem
-          .readDirectory(bundle.source)
-          .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))
-          .toSorted()
-          .map((entry) => ({ directory: path.join(bundle.source, entry), name: entry }));
-    for (const { directory, name } of directories) {
-      const skill = yield* readSkillDirectory(directory, name, "user");
-      if (!skill) continue;
+    for (const directory of await skillDirectories(bundle)) {
+      const contents = await NodeFSP.readFile(
+        NodePath.join(directory.path, "SKILL.md"),
+        "utf8",
+      ).catch(() => undefined);
+      const frontmatter = contents === undefined ? undefined : parseSkillFrontmatter(contents);
+      if (!frontmatter) continue;
       for (const driver of bundle.agents ?? ALL_DRIVERS) {
-        const skills = byDriver.get(driver) ?? new Map<string, ServerProviderSkill>();
+        const skill = entryFor[driver](directory.name, frontmatter);
+        if (!skill) continue;
+        const skills = byDriver.get(driver) ?? new Map<string, ServerProvisionedSkill>();
         skills.set(skill.name, skill);
         byDriver.set(driver, skills);
       }
     }
   }
-  return new Map([...byDriver].map(([driver, skills]) => [driver, [...skills.values()]]));
-});
-
-/**
- * Describe what a provisioned environment's agents can run, for a host that
- * runs every chat in one. The host's own probe cannot see these skills: they
- * exist on it only as copy sources. A provisioned skill replaces a probed one
- * of the same name, since the environment's copy is the one that runs.
- */
-export const withProvisionedSkills = Effect.fn("withProvisionedSkills")(function* (
-  providers: ReadonlyArray<ServerProvider>,
-  bundles: ReadonlyArray<SkillBundle>,
-): Effect.fn.Return<ReadonlyArray<ServerProvider>, never, FileSystem.FileSystem | Path.Path> {
-  if (bundles.length === 0) return providers;
-  const provisioned = yield* readProvisionedSkills(bundles);
-  return providers.map((provider) => {
-    const skills = provisioned.get(provider.driver);
-    if (!skills) return provider;
-    const names = new Set(skills.map((skill) => skill.name));
-    return {
-      ...provider,
-      skills: [...provider.skills.filter((skill) => !names.has(skill.name)), ...skills].toSorted(
-        (left, right) => left.name.localeCompare(right.name),
-      ),
-    };
-  });
-});
+  const sorted = (driver: ProvisionedDriver) =>
+    [...(byDriver.get(driver)?.values() ?? [])].toSorted((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+  return {
+    ...(byDriver.has("codex") ? { codex: sorted("codex") } : {}),
+    ...(byDriver.has("claudeAgent") ? { claudeAgent: sorted("claudeAgent") } : {}),
+    ...(byDriver.has("cursor") ? { cursor: sorted("cursor") } : {}),
+  };
+}

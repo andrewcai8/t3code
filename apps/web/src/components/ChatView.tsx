@@ -10841,7 +10841,11 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 skills={
                   activeProviderStatus
-                    ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)
+                    ? resolveProviderSkillsForCwd(
+                        activeProviderStatus,
+                        gitCwd,
+                        serverConfig?.provisionedSkills,
+                      )
                     : EMPTY_PROVIDER_SKILLS
                 }
                 anchorMessageId={paintOnlyDisplayedTimeline ? null : timelineAnchorMessageId}
@@ -11058,6 +11062,7 @@ export default function ChatView(props: ChatViewProps) {
                             interactionMode={interactionMode}
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}
+                            provisionedSkills={serverConfig?.provisionedSkills}
                             providerCatalogKnown={serverConfig !== null}
                             activeProjectDefaultModelSelection={activeProjectDefaultModelSelection}
                             activeThreadModelSelection={activeThread?.modelSelection}

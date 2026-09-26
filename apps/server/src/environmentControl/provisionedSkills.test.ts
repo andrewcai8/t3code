@@ -5,12 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
-import {
-  ProviderDriverKind,
-  ProviderInstanceId,
-  type ServerProvider,
-  type ServerProviderSkill,
-} from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -24,33 +19,15 @@ import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-const provider = (driver: string, skills: ReadonlyArray<ServerProviderSkill> = []) =>
-  ({
-    instanceId: ProviderInstanceId.make(driver),
-    driver: ProviderDriverKind.make(driver),
-    enabled: true,
-    installed: true,
-    version: "1.0.0",
-    status: "ready",
-    auth: { status: "authenticated" },
-    checkedAt: "2026-09-26T00:00:00.000Z",
-    models: [],
-    slashCommands: [],
-    skills,
-  }) satisfies ServerProvider;
-
-const writeSkill = (root: string, name: string, description: string) =>
-  NodeFSP.mkdir(NodePath.join(root, name), { recursive: true }).then(() =>
-    NodeFSP.writeFile(
-      NodePath.join(root, name, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`,
-    ),
+const writeSkill = async (root: string, directory: string, frontmatter: ReadonlyArray<string>) => {
+  await NodeFSP.mkdir(NodePath.join(root, directory), { recursive: true });
+  await NodeFSP.writeFile(
+    NodePath.join(root, directory, "SKILL.md"),
+    ["---", ...frontmatter, "---", "", `# ${directory}`, ""].join("\n"),
   );
+};
 
-const withProvisionedSkillsOnHost = (
-  localAgentRuns: boolean,
-  providers: ReadonlyArray<ServerProvider>,
-) =>
+const onHost = (localAgentRuns: boolean) =>
   Effect.gen(function* () {
     const directory = yield* Effect.acquireRelease(
       Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "provisioned-skills-"))),
@@ -58,13 +35,23 @@ const withProvisionedSkillsOnHost = (
     );
     const claudeBundle = NodePath.join(directory, "claude-skills");
     const codexCursorBundle = NodePath.join(directory, "codex-cursor-skills");
-    const deploySkill = NodePath.join(directory, "deploy-skill");
     yield* Effect.promise(async () => {
-      await writeSkill(claudeBundle, "poteto-mode", "Claude port.");
-      await writeSkill(claudeBundle, "why", "Explain history.");
-      await writeSkill(codexCursorBundle, "poteto-mode", "Codex and Cursor port.");
-      await writeSkill(codexCursorBundle, "how", "Explain a subsystem.");
-      await writeSkill(directory, "deploy-skill", "Deploy the app.");
+      await writeSkill(claudeBundle, "poteto-mode", ["name: poteto-mode", "description: Claude."]);
+      await writeSkill(claudeBundle, "why", ["name: why", "description: Explain history."]);
+      await writeSkill(codexCursorBundle, "poteto-mode", ["name: poteto-mode"]);
+      // Codex matches the frontmatter name; Claude and Cursor match the folder.
+      await writeSkill(codexCursorBundle, "how-folder", ["name: how", "description: Explain."]);
+      await writeSkill(codexCursorBundle, "desktop-only", [
+        "name: desktop-only",
+        "metadata:",
+        "  surfaces: [desktop]",
+      ]);
+      // Provisioning copies no linked folder, so none is listed.
+      await NodeFSP.symlink(
+        NodePath.join(claudeBundle, "why"),
+        NodePath.join(codexCursorBundle, "linked"),
+      );
+      await writeSkill(directory, "deploy-skill", ["name: deploy-skill", "description: Ship."]);
       await NodeFSP.writeFile(
         NodePath.join(directory, "environment-control.json"),
         encodeJson({
@@ -80,7 +67,7 @@ const withProvisionedSkillsOnHost = (
             skills: [
               { source: claudeBundle, agents: ["claudeAgent"] },
               { source: codexCursorBundle, agents: ["codex", "cursor"] },
-              { source: deploySkill, name: "deploy" },
+              { source: NodePath.join(directory, "deploy-skill"), name: "deploy" },
             ],
           },
         }),
@@ -91,76 +78,94 @@ const withProvisionedSkillsOnHost = (
       NodePath.join(directory, "environment-control.json"),
     );
     yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
-    const result = yield* Effect.gen(function* () {
-      const control = yield* EnvironmentControl;
-      return yield* control.withProvisionedSkills(providers);
-    }).pipe(
-      Effect.provide(
-        Layer.merge(layer, ProvisionOperationStore.layer).pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
-          Layer.provide(ServerSettings.layerTest()),
-          Layer.provide(makeProviderRegistryLayer()),
-          Layer.provideMerge(
-            Layer.effect(
-              ServerConfig.ServerConfig,
-              Effect.gen(function* () {
-                return { ...(yield* ServerConfig.ServerConfig), localAgentRuns };
-              }),
-            ).pipe(Layer.provide(ServerConfig.layerTest(directory, directory))),
-          ),
-          Layer.provide(NodeServices.layer),
+    const services = yield* Layer.build(
+      Layer.merge(layer, ProvisionOperationStore.layer).pipe(
+        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(makeProviderRegistryLayer()),
+        Layer.provideMerge(
+          Layer.effect(
+            ServerConfig.ServerConfig,
+            Effect.gen(function* () {
+              return { ...(yield* ServerConfig.ServerConfig), localAgentRuns };
+            }),
+          ).pipe(Layer.provide(ServerConfig.layerTest(directory, directory))),
         ),
+        Layer.provide(NodeServices.layer),
       ),
     );
-    return { result, directory };
+    return {
+      control: Context.get(services, EnvironmentControl),
+      codexCursorBundle,
+      configPath: NodePath.join(directory, "environment-control.json"),
+    };
   });
 
-const skillNamesByDriver = (providers: ReadonlyArray<ServerProvider>) =>
+const namesByDriver = (
+  skills: Record<string, ReadonlyArray<{ readonly name: string }> | undefined> | undefined,
+) =>
+  skills &&
   Object.fromEntries(
-    providers.map((entry) => [entry.driver, entry.skills.map((skill) => skill.name)]),
+    Object.entries(skills).map(([driver, list]) => [driver, list?.map((skill) => skill.name)]),
   );
 
 it.effect("lists each driver's provisioned skills on a host that runs no agents", () =>
   Effect.gen(function* () {
-    const { result, directory } = yield* withProvisionedSkillsOnHost(false, [
-      provider("codex", [
-        { name: "how", path: "/host/.codex/skills/how/SKILL.md", enabled: true },
-        { name: "skill-creator", path: "/codex/system/skill-creator/SKILL.md", enabled: true },
-      ]),
-      provider("claudeAgent"),
-      provider("cursor"),
-      provider("opencode"),
-    ]);
+    const { control, codexCursorBundle } = yield* onHost(false);
+    const skills = yield* control.provisionedSkills;
 
-    assert.deepEqual(skillNamesByDriver(result), {
-      codex: ["deploy", "how", "poteto-mode", "skill-creator"],
+    assert.deepEqual(namesByDriver(skills), {
+      codex: ["deploy-skill", "desktop-only", "how", "poteto-mode"],
       claudeAgent: ["deploy", "poteto-mode", "why"],
-      cursor: ["deploy", "how", "poteto-mode"],
-      opencode: [],
+      cursor: ["deploy", "how-folder", "poteto-mode"],
     });
-    assert.deepEqual(
-      result
-        .find((entry) => entry.driver === "codex")
-        ?.skills.find((skill) => skill.name === "how"),
-      {
-        name: "how",
-        path: NodePath.join(directory, "codex-cursor-skills", "how", "SKILL.md"),
-        enabled: true,
-        scope: "user",
-        description: "Explain a subsystem.",
-      },
+    assert.deepEqual(skills?.claudeAgent?.[2], {
+      name: "why",
+      enabled: true,
+      scope: "user",
+      description: "Explain history.",
+    });
+
+    assert.strictEqual(yield* control.provisionedSkills, skills, "unchanged bundles are cached");
+    yield* Effect.promise(() =>
+      writeSkill(codexCursorBundle, "added", ["name: added", "description: New."]),
     );
+    assert.deepEqual(namesByDriver(yield* control.provisionedSkills)?.cursor, [
+      "added",
+      "deploy",
+      "how-folder",
+      "poteto-mode",
+    ]);
   }).pipe(Effect.scoped),
 );
 
-it.effect("leaves snapshots alone on a host that runs agents itself", () =>
+it.effect("reports no provisioned skills on a host that runs agents itself", () =>
   Effect.gen(function* () {
-    const { result } = yield* withProvisionedSkillsOnHost(true, [
-      provider("codex"),
-      provider("claudeAgent"),
-      provider("cursor"),
-    ]);
+    const { control } = yield* onHost(true);
+    assert.strictEqual(yield* control.provisionedSkills, undefined);
+  }).pipe(Effect.scoped),
+);
 
-    assert.deepEqual(skillNamesByDriver(result), { codex: [], claudeAgent: [], cursor: [] });
+it.effect("keeps a config that failed to load failed until the file changes", () =>
+  Effect.gen(function* () {
+    const { control, configPath } = yield* onHost(false);
+    const valid = yield* Effect.promise(() => NodeFSP.readFile(configPath, "utf8"));
+    const rewrite = (contents: string, mtime: Date) =>
+      Effect.promise(async () => {
+        await NodeFSP.writeFile(configPath, contents);
+        await NodeFSP.utimes(configPath, mtime, mtime);
+      });
+    const broken = new Date("2026-01-01T00:00:00.000Z");
+
+    yield* rewrite("{", broken);
+    assert.strictEqual(yield* control.provisionedSkills, undefined);
+    yield* rewrite(valid, broken);
+    assert.strictEqual(yield* control.provisionedSkills, undefined, "same mtime, cached failure");
+    yield* rewrite(valid, new Date("2026-01-02T00:00:00.000Z"));
+    assert.deepEqual(namesByDriver(yield* control.provisionedSkills)?.claudeAgent, [
+      "deploy",
+      "poteto-mode",
+      "why",
+    ]);
   }).pipe(Effect.scoped),
 );

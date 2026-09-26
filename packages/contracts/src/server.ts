@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import {
   type EnvironmentMachineKind,
   ExecutionEnvironmentDescriptor,
@@ -97,7 +98,8 @@ export type ServerProviderSlashCommand = typeof ServerProviderSlashCommand.Type;
 export const ServerProviderSkill = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
-  path: TrimmedNonEmptyString,
+  /** Where the skill lives on the server. Absent for a provisioned skill, which lives elsewhere. */
+  path: Schema.optional(TrimmedNonEmptyString),
   scope: Schema.optional(TrimmedNonEmptyString),
   enabled: Schema.Boolean,
   displayName: Schema.optional(TrimmedNonEmptyString),
@@ -116,6 +118,21 @@ export const ServerProviderSkill = Schema.Struct({
   userInvocable: Schema.optional(Schema.Boolean),
 });
 export type ServerProviderSkill = typeof ServerProviderSkill.Type;
+
+export const ServerProvisionedSkill = ServerProviderSkill.mapFields(Struct.omit(["path"]));
+export type ServerProvisionedSkill = typeof ServerProvisionedSkill.Type;
+
+/**
+ * Skills every provisioned environment receives, by the driver that runs
+ * them. Sent once per config rather than on each provider instance, since
+ * every instance of a driver shares the list.
+ */
+export const ServerProvisionedSkills = Schema.Struct({
+  codex: Schema.optionalKey(Schema.Array(ServerProvisionedSkill)),
+  claudeAgent: Schema.optionalKey(Schema.Array(ServerProvisionedSkill)),
+  cursor: Schema.optionalKey(Schema.Array(ServerProvisionedSkill)),
+});
+export type ServerProvisionedSkills = typeof ServerProvisionedSkills.Type;
 
 export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   cwd: TrimmedNonEmptyString,
@@ -565,6 +582,12 @@ export const ServerConfig = Schema.Struct({
    * predate it, which always ran them.
    */
   localAgentRuns: Schema.optionalKey(Schema.Boolean),
+  /**
+   * What a chat on this host will find in its provisioned environment. Set
+   * only when `localAgentRuns` is false, where the host's own providers
+   * cannot see these skills.
+   */
+  provisionedSkills: Schema.optionalKey(ServerProvisionedSkills),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

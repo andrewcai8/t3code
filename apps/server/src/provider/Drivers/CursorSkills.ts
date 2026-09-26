@@ -28,7 +28,7 @@ const MAX_SKILL_BYTES = ByteSize.bytes(1_000_000);
 const MAX_SKILL_SCAN_ENTRIES = 10_000;
 const MAX_SKILL_SCAN_BYTES = ByteSize.bytes(8_000_000);
 
-interface CursorSkillFrontmatter {
+export interface CursorSkillFrontmatter {
   readonly description?: string;
   readonly displayName?: string;
   readonly userInvocationOnly?: boolean;
@@ -88,7 +88,7 @@ function parseFrontmatterBoolean(value: unknown): boolean | undefined {
   }
 }
 
-function parseSkillFrontmatter(contents: string): CursorSkillFrontmatter | undefined {
+export function parseSkillFrontmatter(contents: string): CursorSkillFrontmatter | undefined {
   const match = FRONTMATTER_PATTERN.exec(contents);
   if (!match) return { cliVisible: true };
 

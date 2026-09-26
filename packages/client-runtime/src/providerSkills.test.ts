@@ -253,3 +253,29 @@ describe("workspace provider snapshots", () => {
     expect(resolveProviderSlashCommandsForCwd(provider, null)).toEqual(provider.slashCommands);
   });
 });
+
+describe("provisioned skills", () => {
+  it("lists the provider driver's provisioned skills first, winning a name clash", () => {
+    expect(
+      resolveProviderSkillsForCwd(provider, "/workspace/project-a", {
+        codex: [
+          { name: "project", description: "Provisioned copy.", enabled: true, scope: "user" },
+          { name: "how", enabled: true, scope: "user" },
+        ],
+        claudeAgent: [{ name: "claude-only", enabled: true, scope: "user" }],
+      }),
+    ).toEqual([
+      { name: "project", description: "Provisioned copy.", enabled: true, scope: "user" },
+      { name: "how", enabled: true, scope: "user" },
+      { name: "global", path: "/global/SKILL.md", enabled: true },
+    ]);
+  });
+
+  it("keeps the provider's own skills when its driver has none provisioned", () => {
+    expect(
+      resolveProviderSkillsForCwd(provider, null, {
+        claudeAgent: [{ name: "claude-only", enabled: true, scope: "user" }],
+      }),
+    ).toEqual([{ name: "global", path: "/global/SKILL.md", enabled: true }]);
+  });
+});

@@ -1767,9 +1767,7 @@ const makeWsRpcLayer = (
       const loadServerConfig = (options: { readonly usageLimitsCommand: boolean }) =>
         Effect.gen(function* () {
           const keybindingsConfig = yield* keybindings.loadConfigState;
-          const currentProviders = yield* providerRegistry.getProviders.pipe(
-            Effect.flatMap(environmentControl.withProvisionedSkills),
-          );
+          const currentProviders = yield* providerRegistry.getProviders;
           const providers = options.usageLimitsCommand
             ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
             : currentProviders;
@@ -1777,6 +1775,7 @@ const makeWsRpcLayer = (
             yield* serverSettings.getSettings,
           );
           const environment = yield* serverEnvironment.getDescriptor;
+          const provisionedSkills = yield* environmentControl.provisionedSkills;
           const auth = yield* serverAuth.getDescriptor();
           const availableEditors: ReadonlyArray<EditorId> = yield* resolveAvailableEditorsForConfig(
             externalLauncher.resolveAvailableEditors(),
@@ -1798,6 +1797,7 @@ const makeWsRpcLayer = (
             provisionProviders: yield* environmentControl.provisionProviders.pipe(
               Effect.orElseSucceed(() => []),
             ),
+            ...(provisionedSkills ? { provisionedSkills } : {}),
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
@@ -3606,7 +3606,6 @@ const makeWsRpcLayer = (
                 (providers, sources) =>
                   usageLimitsCommand ? withUsageLimitsCommands(providers, sources) : providers,
               ).pipe(
-                Stream.mapEffect(environmentControl.withProvisionedSkills),
                 // Both sides replay their current value, so the first pairing normally
                 // repeats the snapshot the client already holds. Compare against that
                 // snapshot rather than dropping blindly: a refresh that landed between

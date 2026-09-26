@@ -686,7 +686,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       (candidate) => candidate.instanceId === selectedInstanceId,
     );
     return provider
-      ? resolveProviderSkillsForCwd(provider, props.threadCwd ?? props.projectWorkspaceRoot)
+      ? resolveProviderSkillsForCwd(
+          provider,
+          props.threadCwd ?? props.projectWorkspaceRoot,
+          props.serverConfig?.provisionedSkills,
+        )
       : [];
   }, [props.projectWorkspaceRoot, props.serverConfig, props.threadCwd, selectedInstanceId]);
 
