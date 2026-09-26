@@ -24,14 +24,14 @@ export function parseAutomationCron(cron: string, timeZone: string) {
 }
 
 /** Each run starts a paid machine, so a schedule may fire at most this often. */
-export const AUTOMATION_MIN_INTERVAL_MINUTES = 15;
+const AUTOMATION_MIN_INTERVAL_MINUTES = 15;
 
 /**
  * The shortest gap, in minutes, between two firings. Only the minute and hour fields can put
  * firings closer than an hour apart, and an empty set is the wildcard. Hour 23 is treated as
  * next to hour 0, which can only overstate how close firings get.
  */
-export function automationCronMinGapMinutes(cron: Cron.Cron): number {
+function automationCronMinGapMinutes(cron: Cron.Cron): number {
   const minutes =
     cron.minutes.size === 0
       ? Array.from({ length: 60 }, (_, minute) => minute)
@@ -145,8 +145,8 @@ export const AutomationListRunsInput = Schema.Struct({
 export type AutomationListRunsInput = typeof AutomationListRunsInput.Type;
 
 /** How far back, and how many, automation runs a client joins without being asked. */
-export const AUTOMATION_JOIN_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const AUTOMATION_JOIN_LIMIT = 10;
+const AUTOMATION_JOIN_WINDOW_MS = 24 * 60 * 60 * 1000;
+const AUTOMATION_JOIN_LIMIT = 10;
 
 /**
  * The automation-run environments worth joining unasked: active (a paused box stays paused),
