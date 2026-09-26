@@ -980,7 +980,11 @@ describe("remote branch refresh", () => {
     const first = await prepareRemoteHost(localPort, opened);
     pids.add(first.serverPid);
     git(first.projectDir, "update-ref", "-d", tracking);
+    // Keep each fetch's pack as received: no unpacking, and no background gc
+    // folding it away while the test reads it.
     git(first.projectDir, "config", "fetch.unpackLimit", "1");
+    git(first.projectDir, "config", "gc.auto", "0");
+    git(first.projectDir, "config", "maintenance.auto", "false");
     const packs = async () =>
       new Set(
         (await NodeFSP.readdir(NodePath.join(first.projectDir, ".git/objects/pack"))).filter(
