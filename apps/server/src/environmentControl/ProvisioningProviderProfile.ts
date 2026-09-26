@@ -19,8 +19,10 @@ import * as Schema from "effect/Schema";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import {
+  CODEX_LOGIN_COPY_MIN_LIFETIME_MS,
   codexLoginExpiredMessage,
   codexLoginExpiring,
+  codexLoginRefreshDue,
   parseCodexLogin,
 } from "../provider/codexLoginCopy.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
@@ -85,11 +87,15 @@ const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
 const decodeCursorSettings = Schema.decodeUnknownEffect(CursorSettings);
 
+/** Has Codex refresh an account's login on this machine, one refresh or probe at a time. */
+export type RefreshCodexLogin = (instanceId: ProviderInstanceId) => Effect.Effect<void>;
+
 export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioningProviderProfile")(
   function* (
     settings: ServerSettings,
     input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
     claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
+    refreshCodexLogin?: RefreshCodexLogin,
   ) {
     const instanceId = ProviderInstanceId.make(input.providerInstanceId);
     const instance = deriveProviderInstanceConfigMap(settings)[instanceId];
@@ -203,11 +209,24 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
             : "The selected account credentials could not be found on this machine.",
       });
     // Every environment gets a copy that cannot refresh (`stripCodexRefreshToken`),
-    // so its access token must outlive the run.
+    // so its access token must outlive the run. A login this machine owns is
+    // refreshed first when a copy would not last a day, and provisioning
+    // copies the file only after this returns.
     if (kind === "codex") {
-      const login = parseCodexLogin(
-        yield* fs.readFileString(source).pipe(Effect.orElseSucceed(() => "")),
+      const readLogin = fs.readFileString(source).pipe(
+        Effect.orElseSucceed(() => ""),
+        Effect.map(parseCodexLogin),
       );
+      const current = yield* readLogin;
+      const login =
+        refreshCodexLogin &&
+        codexLoginRefreshDue(
+          current,
+          yield* Clock.currentTimeMillis,
+          CODEX_LOGIN_COPY_MIN_LIFETIME_MS,
+        )
+          ? yield* refreshCodexLogin(instanceId).pipe(Effect.andThen(readLogin))
+          : current;
       if (codexLoginExpiring(login, yield* Clock.currentTimeMillis))
         return yield* new ProvisionRefused({
           reason: "credentials",
@@ -255,6 +274,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
     readonly now: number;
     readonly load?: AccountLoad;
   },
+  refreshCodexLogin?: RefreshCodexLogin,
 ) {
   const instances = deriveProviderInstanceConfigMap(settings);
   const hint = ProviderInstanceId.make(input.providerInstanceId);
@@ -284,6 +304,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
           settings,
           { providerInstanceId: instanceId, agentDriver: driver },
           claudeOAuthTokens,
+          refreshCodexLogin,
         ),
       );
       if (profile._tag === "Success") return Option.some(profile.success);
@@ -315,6 +336,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
         settings,
         { providerInstanceId: input.providerInstanceId, agentDriver: input.agentDriver },
         claudeOAuthTokens,
+        refreshCodexLogin,
       );
   const companions: ProvisioningProviderProfile[] = [];
   for (const companionDriver of Object.keys(credentialVariables)) {

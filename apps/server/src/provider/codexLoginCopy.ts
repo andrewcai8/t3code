@@ -1,10 +1,11 @@
 /**
  * Codex rotates a ChatGPT login's refresh token on every refresh and rejects
  * reuse, so when copies of one `auth.json` exist, whichever refreshes first
- * logs out every other copy. The user's own machine is the only copy that
- * refreshes. A copy for a manager or a cloud environment keeps the access
- * token and gets a refresh token that can never be redeemed, so it works
- * until that access token expires.
+ * logs out every other copy. Each login therefore has one owner that
+ * refreshes it: the user's machine for its own logins, and a host for the
+ * separate logins made for it. Every other copy keeps the access token and
+ * gets a refresh token that can never be redeemed, so it works until that
+ * access token expires.
  *
  * Codex still loads the file (`refresh_token` is a required string), and a
  * refresh attempt fails with a 401 that Codex records as permanent. An empty
@@ -15,6 +16,15 @@ const UNREDEEMABLE_CODEX_REFRESH_TOKEN = "t3-copy-cannot-refresh";
 
 /** A run started on a login this close to expiry would lose it partway through. */
 const CODEX_LOGIN_MIN_LIFETIME_MS = 30 * 60 * 1000;
+
+/**
+ * The owner refreshes its login once this little is left, well before Codex
+ * would (5 minutes), so every copy it hands out has days to live.
+ */
+export const CODEX_LOGIN_REFRESH_AHEAD_MS = 48 * 60 * 60 * 1000;
+
+/** Provisioning refreshes a login it is about to copy when less than this is left. */
+export const CODEX_LOGIN_COPY_MIN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /** Text Codex could not load, or a login without a refresh token, is returned unchanged. */
 export function stripCodexRefreshToken(authJson: string): string {
@@ -47,6 +57,15 @@ export function parseCodexLogin(authJson: string): CodexLogin {
     ? { accessTokenExpiresAt: payload.exp * 1000, refreshable }
     : { refreshable };
 }
+
+/**
+ * Whether this machine should refresh its own login now. A copy never refreshes,
+ * and a login with no readable expiry is left to Codex.
+ */
+export const codexLoginRefreshDue = (login: CodexLogin, now: number, within: number) =>
+  login.refreshable &&
+  login.accessTokenExpiresAt !== undefined &&
+  login.accessTokenExpiresAt - now < within;
 
 /** An unknown expiry counts as usable: Codex decides then, not this guess. */
 export const codexLoginExpiring = (login: CodexLogin, now: number) =>

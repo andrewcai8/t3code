@@ -365,6 +365,45 @@ describe("packHostState", () => {
     );
   });
 
+  it("carries the host's own Codex login whole and a copy of this machine's otherwise", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pack-host-state-"));
+    const write = async (path: string, data: string) => {
+      await NodeFSP.mkdir(NodePath.dirname(NodePath.join(home, path)), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(home, path), data);
+    };
+    const login = (refreshToken: string) =>
+      `{"tokens":{"id_token":"eyJ.id.sig","access_token":"eyJ.access.sig","refresh_token":"${refreshToken}","account_id":"acct-1"},"last_refresh":"2026-09-26T10:00:00Z"}`;
+    try {
+      await write(".codex/auth.json", login("rt_laptop"));
+      await write(".codex_uci/auth.json", login("rt_laptop_uci"));
+      await write("host-codex/codex/auth.json", login("rt_host"));
+      const packed = await packHostState({
+        config: { e2bApiKey: "e2b-key", provisioning: { templateId: "t3-common" } },
+        settings: {
+          providerInstances: {
+            codex: { driver: "codex" },
+            codex_uci: { driver: "codex", config: { homePath: "~/.codex_uci" } },
+          },
+        },
+        host: { homedir: home, platform: "linux", environment: {} },
+        baseDir: "/data/t3",
+        skillsDir: "/data/t3/skills",
+        codexHostLogins: NodePath.join(home, "host-codex"),
+      });
+      assert.deepEqual(packed.codexLogins, { codex: "host", codex_uci: "copy" });
+      const carried = (account: string) =>
+        String(
+          packed.files.find((file) => file.path === `/data/t3/codex-homes/${account}/auth.json`)
+            ?.data,
+        );
+      assert.equal(carried("codex"), login("rt_host"));
+      assert.equal(JSON.parse(carried("codex_uci")).tokens.refresh_token, "t3-copy-cannot-refresh");
+      assert.equal(JSON.parse(carried("codex_uci")).tokens.access_token, "eyJ.access.sig");
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("writes a seed tarball rooted at the base dir with private files", async () => {
     const { home, packed } = await fixture();
     try {

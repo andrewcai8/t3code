@@ -39,7 +39,17 @@ Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. A m
 
 ## Codex accounts
 
-Codex rotates a ChatGPT login's refresh token too, and rejects a reused one, so every copy of one `auth.json` that refreshes signs out all the others, including the machine it came from. The packer and provisioning copy a Codex login with its access token but with a refresh token that cannot be redeemed ([`stripCodexRefreshToken`](../../apps/server/src/provider/codexLoginCopy.ts)), so only the source machine refreshes. A copy stops working when its access token expires, about ten days after the source's last refresh. Routing skips a Codex account whose access token expires within 30 minutes, and the host reports such a copied login as signed out. Re-pack a host to hand it a fresh one. A manager that reads the source machine's own files hands each new environment whatever that machine last refreshed.
+Codex rotates a ChatGPT login's refresh token too, and rejects a reused one, so every copy of one `auth.json` that refreshes signs out all the others. Each login therefore has one owner that refreshes it, and every other copy carries a refresh token that cannot be redeemed ([`stripCodexRefreshToken`](../../apps/server/src/provider/codexLoginCopy.ts)). Such a copy stops working when its access token expires, about ten days after the owner's last refresh.
+
+Give a container host its own login per account, separate from your computer's:
+
+```bash
+CODEX_HOME=~/.t3/host-codex/codex_personal codex login --device-auth
+```
+
+`pack-host-state.ts` carries `~/.t3/host-codex/<instanceId>/auth.json` whole (`--codex-host-logins` names another directory) and falls back to a copy of your computer's login, logging each account that does. The host owns what it was given. Its status probe asks Codex to refresh a login once less than 48 hours are left, checking hourly, and provisioning refreshes a login with less than a day left before copying it into a new environment. Never run Codex on that directory again once it is packed. The host's entrypoint keeps a login it refreshed over an older one from a later seed. `deploy-provision-manager.mjs` carries copies only, since one login cannot have two owners.
+
+Routing skips a Codex account whose access token expires within 30 minutes, and a server reports such a copied login as signed out. Re-pack a host to hand it fresh copies. A manager that reads its own logins hands each new environment a copy of whatever it last refreshed.
 
 ## Which account a cloud environment uses
 

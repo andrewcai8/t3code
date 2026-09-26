@@ -1,6 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { codexLoginExpiring, parseCodexLogin, stripCodexRefreshToken } from "./codexLoginCopy.ts";
+import {
+  CODEX_LOGIN_COPY_MIN_LIFETIME_MS,
+  CODEX_LOGIN_REFRESH_AHEAD_MS,
+  codexLoginExpiring,
+  codexLoginRefreshDue,
+  parseCodexLogin,
+  stripCodexRefreshToken,
+} from "./codexLoginCopy.ts";
 
 describe("stripCodexRefreshToken", () => {
   it("replaces only the refresh token of a ChatGPT login", () => {
@@ -72,4 +79,55 @@ describe("codexLoginExpiring", () => {
   ])("a login that $login is expiring: $expiring", ({ authJson, expiring }) => {
     expect(codexLoginExpiring(parseCodexLogin(authJson), now)).toBe(expiring);
   });
+});
+
+describe("codexLoginRefreshDue", () => {
+  const now = Date.parse("2026-09-28T14:00:00Z");
+  it.each([
+    {
+      login: "expires in 49 hours",
+      authJson: login('{"exp":1790780400}'),
+      ahead: false,
+      copy: false,
+    },
+    {
+      login: "expires in 47 hours",
+      authJson: login('{"exp":1790773200}'),
+      ahead: true,
+      copy: false,
+    },
+    {
+      login: "expires in 20 hours",
+      authJson: login('{"exp":1790676000}'),
+      ahead: true,
+      copy: true,
+    },
+    {
+      login: "expired an hour ago",
+      authJson: login('{"exp":1790600400}'),
+      ahead: true,
+      copy: true,
+    },
+    {
+      login: "is a copy expiring in 20 hours",
+      authJson: stripCodexRefreshToken(login('{"exp":1790676000}')),
+      ahead: false,
+      copy: false,
+    },
+    {
+      login: "has no readable expiry",
+      authJson: login('{"sub":"user-1"}'),
+      ahead: false,
+      copy: false,
+    },
+  ])(
+    "a login that $login refreshes ahead: $ahead, before a copy: $copy",
+    ({ authJson, ahead, copy }) => {
+      const parsed = parseCodexLogin(authJson);
+      expect([
+        codexLoginRefreshDue(parsed, now, CODEX_LOGIN_REFRESH_AHEAD_MS),
+        codexLoginRefreshDue(parsed, now, CODEX_LOGIN_COPY_MIN_LIFETIME_MS),
+      ]).toEqual([ahead, copy]);
+    },
+  );
 });

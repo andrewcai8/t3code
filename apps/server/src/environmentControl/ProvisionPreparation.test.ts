@@ -10,6 +10,8 @@ import {
   ProviderInstanceId,
   ProvisionRequestConflict,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ServerSettings } from "@t3tools/contracts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
@@ -21,7 +23,10 @@ import {
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
-import type { ProvisioningProviderProfile } from "./ProvisioningProviderProfile.ts";
+import {
+  resolveProvisioningProfiles,
+  type ProvisioningProviderProfile,
+} from "./ProvisioningProviderProfile.ts";
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const evidence = {
   destination: ".repair/evidence.txt",
@@ -357,6 +362,66 @@ it("writes a Codex login whose refresh token the environment cannot redeem", asy
         account_id: "acct-1",
       },
     });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("refreshes a host-owned Codex login due within a day before copying it, stripped", async () => {
+  const f = await fixture();
+  const now = Date.now();
+  const login = (hoursLeft: number, refreshToken: string) =>
+    JSON.stringify({
+      tokens: {
+        id_token: "eyJ.id.sig",
+        access_token: `eyJ.${Buffer.from(JSON.stringify({ exp: Math.floor(now / 1000) + hoursLeft * 3600 })).toString("base64url")}.sig`,
+        refresh_token: refreshToken,
+        account_id: "acct-1",
+      },
+    });
+  const authPath = NodePath.join(f.root, ".codex/auth.json");
+  const refreshed = login(240, "rt_rotated");
+  const refreshedAccounts: Array<string> = [];
+  try {
+    await NodeFSP.writeFile(authPath, login(20, "rt_host"));
+    const settings = decodeServerSettings({
+      providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+      providerInstances: {
+        codex_host: { driver: "codex", config: { homePath: NodePath.join(f.root, ".codex") } },
+        cursor: { driver: "cursor", enabled: false },
+      },
+    });
+    const manifest = await f.store.freeze(
+      { ...input, providerInstanceId: "codex_host" },
+      f.config,
+      f.resolver,
+      () =>
+        Effect.runPromise(
+          resolveProvisioningProfiles(
+            settings,
+            { providerInstanceId: "codex_host" },
+            undefined,
+            { providers: [], now },
+            (instanceId) =>
+              Effect.promise(async () => {
+                refreshedAccounts.push(instanceId);
+                await NodeFSP.writeFile(authPath, refreshed);
+              }),
+          ).pipe(Effect.provide(NodeServices.layer)),
+        ),
+    );
+    expect(refreshedAccounts).toEqual(["codex_host"]);
+    expect(
+      JSON.parse(
+        Buffer.from(
+          homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
+          "base64",
+        ).toString(),
+      ).tokens,
+    ).toEqual({ ...JSON.parse(refreshed).tokens, refresh_token: "t3-copy-cannot-refresh" });
+    expect(JSON.parse(await NodeFSP.readFile(authPath, "utf8")).tokens.refresh_token).toBe(
+      "rt_rotated",
+    );
   } finally {
     await f.cleanup();
   }

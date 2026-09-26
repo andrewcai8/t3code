@@ -419,6 +419,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly refreshLogin?: boolean;
 }) {
   const { client, initialize } = yield* withCodexAppServerClient(input);
 
@@ -426,7 +427,12 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
   const version = versionMatch ? versionMatch[1] : undefined;
 
-  const accountResponse = yield* client.request("account/read", {});
+  // Codex refreshes the login before answering and rewrites auth.json. It
+  // rereads the file first and skips the refresh if another process already did.
+  const accountResponse = yield* client.request(
+    "account/read",
+    input.refreshLogin ? { refreshToken: true } : {},
+  );
   if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
     return {
       account: accountResponse,
@@ -570,12 +576,15 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly cwd: string;
     readonly customModels: ReadonlyArray<CustomModelSetting>;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly refreshLogin?: boolean;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   > = probeCodexAppServerProvider,
   environment?: NodeJS.ProcessEnv,
+  /** Ask Codex to refresh this machine's own login during the probe. */
+  refreshLogin = false,
 ): Effect.fn.Return<
   ServerProviderDraft,
   ServerSettingsError,
@@ -609,6 +618,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,
+    ...(refreshLogin ? { refreshLogin } : {}),
   }).pipe(Effect.scoped, Effect.timeoutOption(CODEX_APP_SERVER_PROBE_TIMEOUT), Effect.result);
 
   if (Result.isFailure(probeResult)) {
