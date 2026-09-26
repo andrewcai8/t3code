@@ -92,7 +92,7 @@ export function automationJoinsToDrop(
     readonly incoming: number;
   },
 ): ReadonlyArray<typeof AutomationJoin.Type> {
-  const listed = new Set(device.joinable.map((environment) => environment.requestId));
+  const listed = new Set<string>(device.joinable.map((environment) => environment.requestId));
   const unopened = joins.filter(
     (join) => device.known.has(join.environmentId) && !device.opened.has(join.requestId),
   );
