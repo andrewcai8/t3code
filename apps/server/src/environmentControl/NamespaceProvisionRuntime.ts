@@ -338,13 +338,14 @@ export function makeNamespaceProvisionRuntime(config: {
       const acknowledged = newDeadline
         ? Number(newDeadline.seconds) * 1000 + newDeadline.nanos / 1_000_000
         : 0;
+      // Namespace caps an instance at creation + 5h and acknowledges the capped deadline.
       if (deadline !== undefined) {
-        if (acknowledged !== deadline)
-          throw new Error("Namespace did not acknowledge the exact retention deadline");
-        if ((await describe()) !== deadline)
-          throw new Error("Namespace instance deadline readback differs from its retention cap");
+        // The retention deadline bounds the Mac's life, so stopping earlier still honors it.
+        if (acknowledged <= now || acknowledged > deadline)
+          throw new Error("Namespace did not acknowledge a deadline within the retention cap");
+        if ((await describe()) !== acknowledged)
+          throw new Error("Namespace instance deadline readback differs from its acknowledgment");
       } else {
-        // Namespace caps an instance at creation + 5h, so accept any deadline that did not shrink.
         if (acknowledged <= now || acknowledged < before)
           throw new Error("Namespace did not extend the captured instance deadline");
         if ((await describe()) < acknowledged)

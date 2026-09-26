@@ -1,6 +1,9 @@
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+
+import { provisionFailureMessage } from "./provisionFailure.ts";
 
 /** The stable log message every provisioning phase shares, so one grep reads a whole provision back. */
 const PROVISION_PHASE_MESSAGE = "provision phase";
@@ -51,6 +54,19 @@ export const logProvisionPhases = (
     { discard: true },
   );
 
+/** Names a failed phase's error in the log with secrets redacted, since the persisted state may not keep it. */
+const describeFailure = (cause: Cause.Cause<unknown>) => {
+  const error = Cause.squash(cause);
+  const tag =
+    typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string"
+      ? error._tag
+      : undefined;
+  return {
+    ...(tag === undefined ? {} : { errorTag: tag }),
+    error: provisionFailureMessage(error, "No error message"),
+  };
+};
+
 export const timeProvisionPhase =
   (phase: string, context: ProvisionPhaseContext) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
@@ -62,7 +78,7 @@ export const timeProvisionPhase =
               ...context,
               phase,
               durationMs: ended - started,
-              ...(Exit.isSuccess(exit) ? {} : { failed: true }),
+              ...(Exit.isSuccess(exit) ? {} : { failed: true, ...describeFailure(exit.cause) }),
             }),
           ),
         ),
