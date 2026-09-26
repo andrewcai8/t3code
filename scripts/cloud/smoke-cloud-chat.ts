@@ -250,6 +250,7 @@ const exchangePairingToken = Effect.fn("exchangePairingToken")(function* (
 interface Markers {
   readonly head: string | null;
   readonly branch: string | null;
+  readonly origin: string | null;
   readonly skill: string | null;
   readonly flavor: string | null;
   readonly models: string | null;
@@ -261,6 +262,7 @@ const readMarker = (reply: string, key: string) =>
 const readMarkers = (reply: string): Markers => ({
   head: readMarker(reply, "HEAD"),
   branch: readMarker(reply, "BRANCH"),
+  origin: readMarker(reply, "ORIGIN"),
   skill: readMarker(reply, "SKILL"),
   flavor: readMarker(reply, "FLAVOR"),
   models: readMarker(reply, "MODELS"),
@@ -496,6 +498,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     projectId: ProjectId | null;
     workspaceRoot: string | null;
     readonly threads: Array<ChildThread>;
+    /** The repo's default branch on GitHub. */
+    branch: string | null;
+    /** Tips of that branch seen around provision and resume; a fresh checkout sits on one. */
+    heads: ReadonlyArray<string>;
   } = {
     requestId: null,
     box: null,
@@ -503,14 +509,26 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     projectId: null,
     workspaceRoot: null,
     threads: [],
+    branch: null,
+    heads: [],
   };
 
-  const expectedHead = Effect.fn("expectedHead")(function* () {
-    if (created.box?.sourceRevision) return created.box.sourceRevision;
-    const output = yield* spawner
-      .string(ChildProcess.make("git", ["ls-remote", `https://github.com/${options.repo}`, "HEAD"]))
-      .pipe(Effect.orElseSucceed(() => ""));
-    return output.split(/\s/)[0] || null;
+  /** The repo's default branch and its tip on GitHub now; failing records `check` as failed. */
+  const remoteTip = Effect.fn("remoteTip")(function* (check: string) {
+    const output = yield* bounded(
+      spawner.string(
+        ChildProcess.make("git", [
+          "ls-remote",
+          "--symref",
+          `https://github.com/${options.repo}`,
+          "HEAD",
+        ]),
+      ),
+      "git ls-remote",
+    ).pipe(Effect.catch((cause) => fail(check, `git ls-remote: ${describe(cause)}`)));
+    const parsed = output.match(/^ref: refs\/heads\/(\S+)\tHEAD\n([0-9a-f]+)\tHEAD$/m);
+    if (!parsed) return yield* fail(check, "unparseable git ls-remote output", { output });
+    return { branch: parsed[1]!, sha: parsed[2]! };
   });
 
   const awaitProvider = Effect.fn("awaitProvider")(function* (
@@ -659,11 +677,12 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const expectedNonce = (yield* sha256(seed)).slice(0, 16);
     const snippet = [
       `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
+      `o=$(git rev-parse -q --verify refs/remotes/origin/${created.branch} || echo missing)`,
       `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
       `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/references/codex-tools.md" && f=claude-port`,
       `m=missing; test -f "${MODEL_SHEET[agent]}" && m=present; git check-ignore -q "${MODEL_SHEET[agent]}" 2>/dev/null && m=$m-ignored`,
       `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
-      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
+      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_ORIGIN=$o SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
     ].join("; ");
     const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
     const turn = yield* sendTurn(client, agent, label, thread, prompt, {
@@ -676,15 +695,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       expectedNonce,
       markers,
     });
-    const head = yield* expectedHead();
     yield* record(
       `${label}.checkout`,
-      markers.head !== null && markers.head === head,
+      markers.head !== null && created.heads.includes(markers.head),
       markers.head,
-      {
-        expectedHead: head,
-        branch: markers.branch,
-      },
+      { acceptedHeads: created.heads, branch: markers.branch, origin: markers.origin },
     );
     yield* record(`${label}.skill`, markers.skill === "present", markers.skill, {
       path: `$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md`,
@@ -695,7 +710,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     yield* record(`${label}.models`, markers.models !== null, markers.models, {
       path: MODEL_SHEET[agent],
     });
-    return turn;
+    return { ...turn, markers };
   });
 
   /**
@@ -814,6 +829,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       agentDriver: ProviderDriverKind.make(primary),
       repository: options.repo,
     };
+    const tipBefore = yield* remoteTip("provision.sourceRevision");
     const started = yield* Clock.currentTimeMillis;
     const phases: Array<{ readonly at: number; readonly kind: string; readonly message: string }> =
       [];
@@ -853,6 +869,15 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       sourceRevision: box.sourceRevision,
       t3Revision: box.t3Revision,
     });
+    const tipAfter = yield* remoteTip("provision.sourceRevision");
+    created.branch = tipAfter.branch;
+    created.heads = [...new Set([tipBefore.sha, tipAfter.sha])];
+    yield* record(
+      "provision.sourceRevision",
+      box.sourceRevision !== null && created.heads.includes(box.sourceRevision),
+      box.sourceRevision,
+      { tipBefore, tipAfter },
+    );
 
     const attached = yield* bounded(manager["environmentControl.attach"]({ requestId }), "attach");
     if (attached.kind !== "attached")
@@ -1176,6 +1201,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const lifecycle = Option.getOrUndefined(listed)?.lifecycle ?? "not paused in time";
     yield* record("resume.paused", lifecycle === "paused", lifecycle);
 
+    const tipBefore = yield* remoteTip("resume.turn.origin");
     const resumeAt = yield* Clock.currentTimeMillis;
     const resumed = yield* bounded(
       manager["environmentControl.resume"]({ environmentId: box.environmentId }),
@@ -1183,6 +1209,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     if (resumed.kind !== "resumed") return yield* fail("resume.resumed", resumed.kind, resumed);
     yield* record("resume.resumed", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
+    const tipAfter = yield* remoteTip("resume.turn.origin");
+    const resumeTips = [tipBefore.sha, tipAfter.sha];
+    created.branch = tipAfter.branch;
+    // A box an earlier step dirtied keeps its old HEAD, so earlier tips stay accepted.
+    created.heads = [...new Set([...created.heads, ...resumeTips])];
     yield* withRpc(access.httpBaseUrl, access.bearer, (client) =>
       Effect.gen(function* () {
         const reconnected = yield* client["server.getConfig"]({}).pipe(
@@ -1193,6 +1224,12 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           return yield* fail("resume.reconnect", `child unreachable after ${RECONNECT_TIMEOUT}`);
         yield* record("resume.reconnect", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
         const turn = yield* runTurn(client, thread.agent, "resume.turn", thread);
+        yield* record(
+          "resume.turn.origin",
+          turn.markers.origin !== null && resumeTips.includes(turn.markers.origin),
+          turn.markers.origin,
+          { tipBefore, tipAfter },
+        );
         if (turn.firstOutputAt !== null)
           yield* record("resume.toFirstOutput", true, seconds(resumeAt, turn.firstOutputAt), {
             from: "resume request",
