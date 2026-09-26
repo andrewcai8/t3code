@@ -103,7 +103,9 @@ const service = (
     return { automations, store, launched, disposed, webhook };
   });
 
-const scoped = <A, E>(effect: Effect.Effect<A, E, AutomationStore | Crypto.Crypto | Scope.Scope>) =>
+const scoped = <A, E>(
+  effect: Effect.Effect<A, E, AutomationStore | Crypto.Crypto | Scope.Scope | SqlClient.SqlClient>,
+) =>
   Effect.scoped(effect).pipe(
     Effect.provide(
       Layer.mergeAll(
