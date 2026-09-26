@@ -16,6 +16,7 @@ import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
 import { credentialDestinations } from "../../apps/server/src/environmentControl/credentialDestinations.ts";
+import { stripCodexRefreshToken } from "../../apps/server/src/environmentControl/stripCodexRefreshToken.ts";
 import { planManagerAccounts, type PlanInput } from "./provision-manager-accounts.ts";
 
 interface ConfiguredFile {
@@ -145,8 +146,13 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       }),
     },
   ];
-  for (const file of plan.files)
-    files.push({ path: file.destination, data: await NodeFSP.readFile(file.source) });
+  for (const file of plan.files) {
+    const data = await NodeFSP.readFile(file.source);
+    files.push({
+      path: file.destination,
+      data: file.codexLogin ? stripCodexRefreshToken(data.toString("utf8")) : data,
+    });
+  }
   if (input.namespaceSession) {
     // Errors name the file and never its contents, since a JSON.parse message quotes the input.
     let sessionToken: unknown;

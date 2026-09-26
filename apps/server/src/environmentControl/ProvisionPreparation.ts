@@ -22,6 +22,7 @@ import {
 } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
+import { stripCodexRefreshToken } from "./stripCodexRefreshToken.ts";
 import {
   credentialVariables,
   guestCredentialDestination,
@@ -578,7 +579,15 @@ export function makeProvisionPreparationStore(stateDir: string) {
             message: "The selected provider account has no credentials on this manager.",
           });
         });
-        files.push(file("home", destination, credential));
+        files.push(
+          file(
+            "home",
+            destination,
+            profile.kind === "codex"
+              ? Buffer.from(stripCodexRefreshToken(credential.toString("utf8")))
+              : credential,
+          ),
+        );
       }
       const settingsPath = ".t3/userdata/settings.json";
       const settingsIndex = files.findIndex(
