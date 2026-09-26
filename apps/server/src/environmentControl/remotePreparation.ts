@@ -443,10 +443,14 @@ def prepare(spec):
                     follow = default.group(1)
                 tracking = 'refs/remotes/origin/' + follow
                 run(['git', 'check-ref-format', tracking], project, env)
-                # The clone made no refs, so without HEAD as a negotiation tip
-                # the server resends the whole snapshot. No --depth, which
-                # would take shallow.lock.
-                run(['git', '-c', 'protocol.version=2', 'fetch', '--no-tags', '--negotiation-tip=HEAD', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=30)
+                # Offer HEAD and the last fetched tips, or the server resends
+                # everything since the checkout: the clone made no refs, and
+                # HEAD never moves. An unborn HEAD is left out rather than
+                # failing the fetch. No --depth, which would take shallow.lock.
+                tips = ['--negotiation-tip=refs/remotes/origin/*']
+                with contextlib.suppress(RuntimeError):
+                    tips.append('--negotiation-tip=' + run(['git', 'rev-parse', '--verify', 'HEAD'], project, env))
+                run(['git', '-c', 'protocol.version=2', 'fetch', '--no-tags', *tips, 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=30)
                 return None
             except Exception as error:
                 # A deleted branch, usually a merged pull request's, has

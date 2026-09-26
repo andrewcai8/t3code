@@ -987,22 +987,37 @@ describe("remote branch refresh", () => {
           (name) => name.endsWith(".idx"),
         ),
       );
-    const before = await packs();
-    await NodeFSP.writeFile(NodePath.join(source, "new.txt"), "new\n");
-    git(source, "add", ".");
-    const pushed = advance(source, "one new file");
-    expect(await refreshRemoteCheckout(localPort, opened)).toEqual({ refreshError: null });
+    // Pushes one file and returns how many objects the refresh received.
+    const pushAndRefresh = async (name: string) => {
+      const before = await packs();
+      await NodeFSP.writeFile(NodePath.join(source, name), `${name}\n`);
+      git(source, "add", ".");
+      const pushed = advance(source, name);
+      expect(await refreshRemoteCheckout(localPort, opened)).toEqual({ refreshError: null });
+      expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
+      return [...(await packs())]
+        .filter((pack) => !before.has(pack))
+        .map(
+          (pack) =>
+            git(first.projectDir, "verify-pack", "-v", `.git/objects/pack/${pack}`)
+              .split("\n")
+              .filter((line) => /^[0-9a-f]{40} /.test(line)).length,
+        );
+    };
+    // Each push is one commit, tree and blob plus the thin pack's base: not the
+    // 42 objects the checkout holds, nor, on the second, the first push again.
+    expect(await pushAndRefresh("first.txt")).toEqual([4]);
+    expect(await pushAndRefresh("second.txt")).toEqual([4]);
+  });
+
+  it("fetches while a thread sits on an unborn orphan branch", async () => {
+    const { input, source, tracking } = await following();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    git(first.projectDir, "switch", "-q", "--orphan", "scratch");
+    const pushed = advance(source, "pushed");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
     expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
-    const received = [...(await packs())].filter((name) => !before.has(name));
-    const objects = received.map(
-      (name) =>
-        git(first.projectDir, "verify-pack", "-v", `.git/objects/pack/${name}`)
-          .split("\n")
-          .filter((line) => /^[0-9a-f]{40} /.test(line)).length,
-    );
-    // The new commit, tree and blob plus the thin pack's base, not the 42 the
-    // checkout already holds.
-    expect(objects).toEqual([4]);
   });
 
   it("stays quiet when the followed branch was deleted upstream", async () => {
