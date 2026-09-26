@@ -554,7 +554,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
 
   /** Calls the GitHub API as the local gh CLI's user; a refusal fails with GitHub's answer. */
   const gh = <A>(
-    decode: (output: string) => Effect.Effect<A, unknown>,
+    decode: (output: string) => Effect.Effect<A, Schema.SchemaError>,
     endpoint: string,
     ...fields: ReadonlyArray<string>
   ) =>
