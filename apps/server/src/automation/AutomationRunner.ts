@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
   DEFAULT_MODEL_BY_PROVIDER,
+  type ClientOrchestrationCommand,
   EnvironmentHttpApi,
   MessageId,
   ThreadId,
@@ -150,13 +151,17 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
       instanceId: defaultInstanceIdForDriver(automation.agentDriver),
       model,
     };
-    const dispatch = (payload: Parameters<typeof client.orchestration.dispatch>[0]["payload"]) =>
-      client.orchestration.dispatch({ headers: authorization(access), payload }).pipe(
-        Effect.retry(transient),
-        Effect.mapError(
-          (error) => new RunFailed(`The chat could not be started: ${describe(error)}`),
-        ),
-      );
+    const dispatch = (payload: ClientOrchestrationCommand) =>
+      client.orchestration
+        .dispatch({ headers: authorization(access), payload } as Parameters<
+          typeof client.orchestration.dispatch
+        >[0])
+        .pipe(
+          Effect.retry(transient),
+          Effect.mapError(
+            (error) => new RunFailed(`The chat could not be started: ${describe(error)}`),
+          ),
+        );
     yield* dispatch({
       type: "thread.create",
       commandId: CommandId.make(derivedRunId(run.requestId, "thread.create")),

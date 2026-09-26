@@ -1067,8 +1067,9 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
-      Layer.provide(Layer.mergeAll(resourceTelemetryLayer, UsageService.layerTest)),
-      Layer.provide(Layer.mock(Automations)({})),
+      Layer.provide(
+        Layer.mergeAll(resourceTelemetryLayer, UsageService.layerTest, Layer.mock(Automations)({})),
+      ),
       Layer.provide(
         Layer.succeed(EnvironmentControl.EnvironmentControl, {
           namespaceProxyOrigin: () => Effect.succeed(null),

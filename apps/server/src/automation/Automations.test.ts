@@ -7,9 +7,11 @@ import {
   ProvisionRequestId,
   type AutomationInput,
 } from "@t3tools/contracts";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import type * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -40,7 +42,7 @@ const service = Effect.gen(function* () {
   return { automations, started };
 });
 
-const scoped = <A, E>(effect: Effect.Effect<A, E, AutomationStore>) =>
+const scoped = <A, E>(effect: Effect.Effect<A, E, AutomationStore | Crypto.Crypto | Scope.Scope>) =>
   Effect.scoped(effect).pipe(
     Effect.provide(
       Layer.mergeAll(
