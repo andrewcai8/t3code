@@ -22,6 +22,7 @@ import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInst
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { cursorFileCredentialPath } from "../provider/cursorCredentialPath.ts";
 import { canonicalRepository, type Provisioning } from "./config.ts";
+import { credentialDestinations } from "./credentialDestinations.ts";
 
 export class ProvisionRefused extends Schema.TaggedError<ProvisionRefused>()("ProvisionRefused", {
   reason: Schema.Literals(["unconfigured", "credentials", "unsupported"]),
@@ -42,20 +43,6 @@ export const credentialVariables = {
   codex: ["OPENAI_API_KEY"],
   cursor: ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"],
   claudeAgent: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
-};
-
-/**
- * Where each driver reads its login inside a provisioned home, relative to it.
- *
- * The counterpart of `credentialVariables`: whichever of these a provisioned
- * environment gets, it must not get both. A CLI that finds a credential file
- * prefers it over the variables, so a file left behind by a home-file copy
- * silently replaces the credential provisioning selected.
- */
-export const credentialDestinations = {
-  codex: [".codex/auth.json"],
-  cursor: [".cursor/auth.json", ".config/cursor/auth.json"],
-  claudeAgent: [".claude/.credentials.json"],
 };
 
 /**

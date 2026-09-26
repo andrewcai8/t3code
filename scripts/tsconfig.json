@@ -5,7 +5,11 @@
     "types": ["node"],
     "lib": ["ESNext", "esnext.disposable"]
   },
-  // The cloud deploy planner resolves host credential paths with the server's
-  // own resolver so the two cannot drift; the file has no dependencies.
-  "include": ["**/*.ts", "../apps/server/src/provider/cursorCredentialPath.ts"]
+  // The cloud deploy scripts share the server's credential paths so the two
+  // cannot drift; these files have no dependencies.
+  "include": [
+    "**/*.ts",
+    "../apps/server/src/provider/cursorCredentialPath.ts",
+    "../apps/server/src/environmentControl/credentialDestinations.ts"
+  ]
 }

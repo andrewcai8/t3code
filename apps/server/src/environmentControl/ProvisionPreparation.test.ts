@@ -711,6 +711,70 @@ it("carries a link that stays inside the bundle", async () => {
   }
 });
 
+it("lands a skill bundle only in the skill roots of the drivers it names", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.mkdir(NodePath.join(f.root, "cursor"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(f.root, "cursor/auth.json"), "cursor-login");
+    const bundle = async (name: string, skill: string) => {
+      const source = NodePath.join(f.root, "bundles", name);
+      await NodeFSP.mkdir(NodePath.join(source, skill), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(source, skill, "SKILL.md"), `${name}\n`);
+      return source;
+    };
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        skills: [
+          { source: await bundle("cursor-pstack", "why"), agents: ["cursor"] as const },
+          {
+            source: await bundle("claude-pstack", "why"),
+            agents: ["claudeAgent", "codex"] as const,
+          },
+          { source: await bundle("shared", "review") },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, [
+      f.profile,
+      {
+        kind: "cursor",
+        instanceId: ProviderInstanceId.make("cursor"),
+        environment: [],
+        credential: {
+          kind: "file",
+          source: NodePath.join(f.root, "cursor/auth.json"),
+          destination: ".cursor/auth.json",
+        },
+      },
+      {
+        kind: "claudeAgent",
+        instanceId: ProviderInstanceId.make("claude_work"),
+        environment: [
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-x", sensitive: true },
+        ],
+        credential: { kind: "environment" },
+      },
+    ]);
+    expect(
+      manifest.preparation.files
+        .filter((item) => item.scope === "home" && item.destination.includes("/skills/"))
+        .map((item) => [item.destination, item.sha256])
+        .toSorted(),
+    ).toEqual([
+      [".claude/skills/review/SKILL.md", provisionDigest("shared\n")],
+      [".claude/skills/why/SKILL.md", provisionDigest("claude-pstack\n")],
+      [".codex/skills/review/SKILL.md", provisionDigest("shared\n")],
+      [".codex/skills/why/SKILL.md", provisionDigest("claude-pstack\n")],
+      [".cursor/skills/review/SKILL.md", provisionDigest("shared\n")],
+      [".cursor/skills/why/SKILL.md", provisionDigest("cursor-pstack\n")],
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("lands a plugin holding many skills flat, where the CLI will find each one", async () => {
   const f = await fixture();
   try {

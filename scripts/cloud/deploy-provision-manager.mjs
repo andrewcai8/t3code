@@ -157,7 +157,7 @@ const managerConfig = {
 
 // A previous deploy's accounts must not outlive the settings that named them.
 await sandbox.commands.run(
-  `rm -rf ${MANAGER_BASE_DIR}/codex-homes ${MANAGER_BASE_DIR}/cursor-homes ${MANAGER_BASE_DIR}/shell-environment`,
+  `rm -rf ${MANAGER_BASE_DIR}/codex-homes ${MANAGER_BASE_DIR}/cursor-homes ${MANAGER_BASE_DIR}/shell-environment ${MANAGER_BASE_DIR}/home-files ${MANAGER_BASE_DIR}/workspace-files`,
   { timeoutMs: 30_000 },
 );
 const privateFiles = [

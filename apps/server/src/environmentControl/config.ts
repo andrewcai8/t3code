@@ -191,6 +191,14 @@ const Provisioning = Schema.Struct({
          * plugin holding many skills needs the flat form to be found at all.
          */
         name: Schema.optional(TrimmedNonEmptyString),
+        /**
+         * Drivers that receive this bundle. Omitted, every driver does. Two
+         * bundles holding the same skill name collide in any root they share,
+         * so ports of one bundle for different CLIs each name their drivers.
+         */
+        agents: Schema.optional(
+          Schema.NonEmptyArray(Schema.Literals(["codex", "cursor", "claudeAgent"])),
+        ),
       }),
     ),
   ),

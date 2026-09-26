@@ -15,7 +15,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
+import { credentialDestinations } from "../../apps/server/src/environmentControl/credentialDestinations.ts";
 import { planManagerAccounts, type PlanInput } from "./provision-manager-accounts.ts";
+
+interface ConfiguredFile {
+  readonly source: string;
+  readonly destination: string;
+}
 
 /** The host's `environment-control.json`, as written. */
 export interface HostConfig {
@@ -33,7 +39,13 @@ export interface HostConfig {
       readonly namespace?: unknown;
     }>;
     readonly egressAllow?: unknown;
-    readonly skills?: ReadonlyArray<{ readonly source: string; readonly name?: string }>;
+    readonly homeFiles?: ReadonlyArray<ConfiguredFile>;
+    readonly workspaceFiles?: ReadonlyArray<ConfiguredFile>;
+    readonly skills?: ReadonlyArray<{
+      readonly source: string;
+      readonly name?: string;
+      readonly agents?: ReadonlyArray<string>;
+    }>;
   };
 }
 
@@ -153,6 +165,46 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     });
   }
 
+  // Configured files name paths on this machine, so each travels as a copy the
+  // host owns and the entry is re-pointed at it, like `shellEnvironment`. A
+  // login file stays behind: the host installs each account's own, and a
+  // copied one would replace it.
+  const credentialFiles = new Set<string>(Object.values(credentialDestinations).flat());
+  // Provisioning writes these for `githubToken` (ProvisionPreparation), and a
+  // guest refuses a second, different file at the same path.
+  const githubFiles = new Set(
+    config.provisioning?.githubToken
+      ? [".gitconfig", ".git-credentials", ".config/gh/hosts.yml"]
+      : [],
+  );
+  const skippedFiles: Array<{ id: string; reason: string }> = [];
+  const carry = async (key: "homeFiles" | "workspaceFiles", directory: string) => {
+    const carried: Array<ConfiguredFile> = [];
+    for (const [index, entry] of (config.provisioning?.[key] ?? []).entries()) {
+      const destination = NodePath.posix.normalize(entry.destination);
+      if (key === "homeFiles" && credentialFiles.has(destination)) {
+        skippedFiles.push({
+          id: `homeFiles ${entry.destination}`,
+          reason: "the host installs each account's own login",
+        });
+        continue;
+      }
+      if (key === "homeFiles" && githubFiles.has(destination))
+        throw new Error(
+          `homeFiles ${entry.destination} clashes with the file provisioning writes for githubToken`,
+        );
+      const data = await NodeFSP.readFile(entry.source).catch((error: NodeJS.ErrnoException) => {
+        throw new Error(`${key} source ${entry.source} could not be read (${error.code})`);
+      });
+      const source = NodePath.posix.join(input.baseDir, directory, String(index));
+      files.push({ path: source, data });
+      carried.push({ source, destination: entry.destination });
+    }
+    return carried;
+  };
+  const homeFiles = await carry("homeFiles", "home-files");
+  const workspaceFiles = await carry("workspaceFiles", "workspace-files");
+
   const bundles = (config.provisioning?.skills ?? []).map((skill, index) => {
     const directory = NodePath.posix.join(input.skillsDir, String(index));
     const name = NodePath.basename(skill.source);
@@ -162,6 +214,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       source: {
         source: NodePath.posix.join(directory, name),
         ...(skill.name ? { name: skill.name } : {}),
+        ...(skill.agents ? { agents: skill.agents } : {}),
       },
     };
   });
@@ -185,7 +238,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     : [];
   return {
     accounts: plan.accounts,
-    skipped: plan.skipped,
+    skipped: [...plan.skipped, ...skippedFiles],
     files,
     skills: bundles.map(({ directory, archive }) => ({ directory, archive })),
     config: {
@@ -204,6 +257,8 @@ export async function packHostState(input: PackInput): Promise<HostState> {
         // gets point at copies it owns. Carrying the host's paths verbatim made
         // every provision fail with an ENOENT naming another machine.
         ...(plan.shellEnvironment ? { shellEnvironment: plan.shellEnvironment } : {}),
+        ...(homeFiles.length ? { homeFiles } : {}),
+        ...(workspaceFiles.length ? { workspaceFiles } : {}),
         skills: bundles.map((bundle) => bundle.source),
         ...(namespaceAuthorized && provisioning?.namespace
           ? { namespace: provisioning.namespace }
