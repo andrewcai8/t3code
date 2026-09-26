@@ -541,3 +541,27 @@ it.effect("disposal calls the manager only for a request it recorded", () =>
     }),
   ),
 );
+
+it.effect("a run a trigger launched is not launched again by startup's resume", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations, store, launched, disposed } = yield* service({ finish: false });
+      const { automation } = yield* automations.create({ ...input, schedule: null });
+      // A request served at activation launches its run before startup lists unfinished runs.
+      const run = yield* automations.runNow(automation.id);
+      const scheduler = yield* Effect.forkChild(automations.start);
+      yield* settle;
+      expect(launched.map(({ id }) => id)).toEqual([run.id]);
+
+      // The single fiber still owns the run, so the orphan sweep leaves it alone.
+      yield* at("2026-09-26T08:05:00.000Z");
+      yield* automations.sweep;
+      expect([(yield* store.listRuns(automation.id, 1))[0]?.state, disposed]).toEqual([
+        "provisioning",
+        [],
+      ]);
+      yield* Fiber.interrupt(scheduler);
+    }),
+  ),
+);

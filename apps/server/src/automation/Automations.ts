@@ -165,28 +165,47 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
   const uuid = (yield* Crypto.Crypto).randomUUIDv4.pipe(Effect.orDie);
   const fibers = yield* FiberSet.make();
   /** The fiber driving each run this process launched, so deleting an automation can stop it. */
+  /**
+   * The runs this process is driving, with the fiber once it has one. A run is reserved here
+   * before its fiber forks, so a second launch of the same run is a no-op.
+   */
   const running = new Map<
     string,
-    { readonly automationId: AutomationId; readonly fiber: Fiber.Fiber<void> }
+    { readonly automationId: AutomationId; fiber: Fiber.Fiber<void> | null }
   >();
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
   /**
-   * Runs a run in the background. Only a trigger that created the run and startup's resume
-   * pass call this, so no run is launched twice in one process.
+   * Runs a run in the background, once per process. Triggers launch the runs they create and
+   * startup resumes the rest; requests are served from the same activation that releases
+   * startup, so both can reach one run and the reservation keeps it to a single fiber.
    */
   const launch = (automation: Automation, run: StoredRun) =>
-    ports.run(automation, run).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logError("automation run stopped", { runId: run.id, cause }),
-      ),
-      Effect.asVoid,
-      Effect.ensuring(Effect.sync(() => running.delete(run.id))),
-      FiberSet.run(fibers),
-      Effect.map((fiber) => {
-        running.set(run.id, { automationId: automation.id, fiber });
-      }),
-    );
+    Effect.suspend(() => {
+      if (running.has(run.id)) return Effect.void;
+      const entry: { readonly automationId: AutomationId; fiber: Fiber.Fiber<void> | null } = {
+        automationId: automation.id,
+        fiber: null,
+      };
+      running.set(run.id, entry);
+      return ports.run(automation, run).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("automation run stopped", { runId: run.id, cause }),
+        ),
+        Effect.asVoid,
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (running.get(run.id) === entry) running.delete(run.id);
+          }),
+        ),
+        FiberSet.run(fibers),
+        Effect.flatMap((fiber) => {
+          entry.fiber = fiber;
+          // A delete that landed before the fork found no fiber to stop; stop it now.
+          return running.get(run.id) === entry ? Effect.void : Fiber.interrupt(fiber);
+        }),
+      );
+    });
 
   const trigger = Effect.fnUntraced(function* (
     automation: Automation,
@@ -380,7 +399,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (ports: Au
       yield* store.remove(id);
       for (const [runId, entry] of running)
         if (entry.automationId === id) {
-          yield* Fiber.interrupt(entry.fiber);
+          if (entry.fiber) yield* Fiber.interrupt(entry.fiber);
           running.delete(runId);
         }
       for (const run of yield* store.unfinishedRuns)
