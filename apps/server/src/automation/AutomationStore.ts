@@ -15,6 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlError from "effect/unstable/sql/SqlError";
 import type * as Statement from "effect/unstable/sql/Statement";
 
 /** A run as the host keeps it: the wire shape plus the message it sends. */
@@ -159,7 +160,7 @@ export class AutomationStore extends Context.Service<
         request_id AS "requestId", prompt, state, child_environment_id AS "environmentId",
         thread_id AS "threadId", error, created_at AS "createdAt", updated_at AS "updatedAt"
       `;
-      const readRuns = (query: Effect.Effect<ReadonlyArray<unknown>, unknown>) =>
+      const readRuns = (query: Effect.Effect<ReadonlyArray<unknown>, SqlError.SqlError>) =>
         query.pipe(
           Effect.flatMap(decodeRunRows),
           Effect.map((rows): ReadonlyArray<StoredRun> => rows),

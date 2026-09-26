@@ -1,4 +1,5 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -78,6 +79,11 @@ it.effect("the webhook link starts a run, hides unknown tokens, and caps the hou
     }).pipe(Effect.provide(http));
   }).pipe(
     Effect.scoped,
-    Effect.provide(AutomationStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory))),
+    Effect.provide(
+      Layer.mergeAll(
+        AutomationStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+        NodeServices.layer,
+      ),
+    ),
   ),
 );

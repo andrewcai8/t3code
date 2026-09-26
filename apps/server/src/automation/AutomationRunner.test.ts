@@ -1,3 +1,4 @@
+// @effect-diagnostics preferSchemaOverJson:off - the fake child speaks raw JSON like a real one.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {

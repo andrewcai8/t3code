@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - cron slots are compared as epoch millis at a pure boundary.
 import { parseAutomationCron, type AutomationSchedule } from "@t3tools/contracts";
 import * as Cron from "effect/Cron";
 

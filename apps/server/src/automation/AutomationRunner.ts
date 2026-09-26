@@ -48,7 +48,7 @@ export function derivedRunId(seed: string, purpose: string): string {
 }
 
 /** The provision request a run drives. A pinned account is required, not just preferred. */
-export function runProvisionInput(
+function runProvisionInput(
   run: Pick<StoredRun, "requestId">,
   automation: Automation,
 ): EnvironmentProvisionInput {

@@ -12,6 +12,7 @@ import {
   type AutomationTrigger,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -32,9 +33,9 @@ import { dueCronSlot } from "./schedule.ts";
 /** How often the scheduler looks for owed cron slots. Cron has minute resolution. */
 export const SCHEDULER_TICK = Duration.seconds(30);
 /** Webhook runs one automation may start per rolling hour before the link answers 429. */
-export const WEBHOOK_RUNS_PER_HOUR = 20;
+const WEBHOOK_RUNS_PER_HOUR = 20;
 /** How much of a webhook request body reaches the prompt. */
-export const WEBHOOK_CONTEXT_BYTES = 16 * 1024;
+const WEBHOOK_CONTEXT_BYTES = 16 * 1024;
 
 export type WebhookOutcome =
   | { readonly kind: "started"; readonly run: AutomationRun }
@@ -53,9 +54,9 @@ export interface WebhookDelivery {
 export type RunAutomation = (
   automation: Automation,
   run: StoredRun,
-) => Effect.Effect<unknown, unknown>;
+) => Effect.Effect<unknown, AutomationError>;
 
-export const hashWebhookToken = (token: string) =>
+const hashWebhookToken = (token: string) =>
   NodeCrypto.createHash("sha256").update(token).digest("hex");
 
 const toWire = ({ prompt: _prompt, ...run }: StoredRun): AutomationRun => run;
@@ -74,6 +75,7 @@ export function webhookPrompt(
   let body = delivery.body;
   if (delivery.contentType?.includes("json")) {
     try {
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - only re-indents an opaque payload.
       body = JSON.stringify(JSON.parse(body), null, 2);
     } catch {
       // Not JSON after all; pass it on as text.
@@ -95,6 +97,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (
   runAutomation: RunAutomation,
 ) {
   const store = yield* AutomationStore;
+  const uuid = (yield* Crypto.Crypto).randomUUIDv4.pipe(Effect.orDie);
   const fibers = yield* FiberSet.make();
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
@@ -122,12 +125,10 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (
   ) {
     const now = yield* nowIso;
     const requestId = ProvisionRequestId.make(
-      options.requestKey === null
-        ? NodeCrypto.randomUUID()
-        : derivedRunId(automation.id, options.requestKey),
+      options.requestKey === null ? yield* uuid : derivedRunId(automation.id, options.requestKey),
     );
     const { run, created } = yield* store.insertRun({
-      id: AutomationRunId.make(NodeCrypto.randomUUID()),
+      id: AutomationRunId.make(yield* uuid),
       automationId: automation.id,
       trigger,
       scheduledFor: options.scheduledFor,
@@ -205,7 +206,7 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (
       const secret = input.webhook ? mintSecret() : null;
       const stored: StoredAutomation = {
         automation: {
-          id: AutomationId.make(NodeCrypto.randomUUID()),
+          id: AutomationId.make(yield* uuid),
           ...input,
           createdAt: now,
           updatedAt: now,

@@ -1,3 +1,5 @@
+// @effect-diagnostics globalDate:off - fixed wall-clock times drive the TestClock.
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   AutomationRunId,
@@ -40,7 +42,12 @@ const service = Effect.gen(function* () {
 
 const scoped = <A, E>(effect: Effect.Effect<A, E, AutomationStore>) =>
   Effect.scoped(effect).pipe(
-    Effect.provide(AutomationStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory))),
+    Effect.provide(
+      Layer.mergeAll(
+        AutomationStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+        NodeServices.layer,
+      ),
+    ),
   );
 
 it.effect("runs the latest missed cron slot once on startup, then keeps the schedule", () =>
