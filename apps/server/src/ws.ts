@@ -1,4 +1,5 @@
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
+import { Automations } from "./automation/Automations.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -666,6 +667,7 @@ const makeWsRpcLayer = (
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
       const environmentControl = yield* EnvironmentControl.EnvironmentControl;
+      const automations = yield* Automations;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -2642,6 +2644,29 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.environmentControlClaim, environmentControl.claim(input)),
         [WS_METHODS.environmentControlTouch]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlTouch, environmentControl.touch(input)),
+        [WS_METHODS.automationsList]: () =>
+          observeRpcEffect(WS_METHODS.automationsList, automations.list),
+        [WS_METHODS.automationsCreate]: (input) =>
+          observeRpcEffect(WS_METHODS.automationsCreate, automations.create(input)),
+        [WS_METHODS.automationsUpdate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.automationsUpdate,
+            automations.update(input.id, input.automation),
+          ),
+        [WS_METHODS.automationsDelete]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.automationsDelete,
+            automations.remove(input.id).pipe(Effect.as({})),
+          ),
+        [WS_METHODS.automationsRunNow]: (input) =>
+          observeRpcEffect(WS_METHODS.automationsRunNow, automations.runNow(input.id)),
+        [WS_METHODS.automationsRotateWebhook]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.automationsRotateWebhook,
+            automations.rotateWebhook(input.id),
+          ),
+        [WS_METHODS.automationsListRuns]: (input) =>
+          observeRpcEffect(WS_METHODS.automationsListRuns, automations.listRuns(input.id)),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",
