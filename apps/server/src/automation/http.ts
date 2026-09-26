@@ -1,5 +1,4 @@
 import { AUTOMATION_WEBHOOK_PATH_PREFIX } from "@t3tools/contracts";
-import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -12,28 +11,42 @@ import { Automations } from "./Automations.ts";
 /** Only the first 16 KB of a body reaches the prompt; a body over this is refused. */
 const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
 /**
- * An oversized body is read to its end and dropped, so the caller gets its 413 instead of a reset
- * connection. Past this many bytes the connection is closed without reading further.
+ * An oversized body up to this size is read and dropped, so a caller that sends it whole gets its
+ * 413. Past it the read stops and the connection is closed, so no sender can hold a handler.
  */
 const MAX_DRAINED_BODY_BYTES = 1024 * 1024;
 
-/** Reads a body, keeping at most `MAX_WEBHOOK_BODY_BYTES`; null when it was longer. */
+type BodyRead =
+  | { readonly kind: "body"; readonly text: string }
+  | { readonly kind: "too-large"; readonly drained: boolean };
+
+/**
+ * Reads a body, keeping at most `MAX_WEBHOOK_BODY_BYTES`. `MaxBodySize` does not bound
+ * `request.stream` on Node, so the fold counts bytes itself and stops past the drain limit.
+ */
 const readBoundedBody = (request: HttpServerRequest.HttpServerRequest) =>
   request.stream.pipe(
-    Stream.runFold(
+    Stream.runFoldEffect(
       () => ({ kept: [] as Array<Uint8Array>, size: 0 }),
       (read, chunk) => {
         const size = read.size + chunk.length;
+        if (size > MAX_DRAINED_BODY_BYTES) return Effect.fail("too-large" as const);
         if (size <= MAX_WEBHOOK_BODY_BYTES) read.kept.push(chunk);
-        return { kept: read.kept, size };
+        return Effect.succeed({ kept: read.kept, size });
       },
     ),
-    Effect.map(({ kept, size }) =>
-      size > MAX_WEBHOOK_BODY_BYTES ? null : Buffer.concat(kept).toString("utf8"),
+    Effect.map(({ kept, size }): BodyRead =>
+      size > MAX_WEBHOOK_BODY_BYTES
+        ? { kind: "too-large", drained: true }
+        : { kind: "body", text: Buffer.concat(kept).toString("utf8") },
     ),
-    Effect.provideService(HttpServerRequest.MaxBodySize, ByteSize.bytes(MAX_DRAINED_BODY_BYTES)),
-    Effect.option,
-    Effect.map(Option.getOrNull),
+    Effect.orElseSucceed((): BodyRead => ({ kind: "too-large", drained: false })),
+  );
+
+const tooLarge = (drained: boolean) =>
+  HttpServerResponse.jsonUnsafe(
+    { error: "payload_too_large" },
+    { status: 413, ...(drained ? {} : { headers: { connection: "close" } }) },
   );
 
 const status = (code: number, error: string) =>
@@ -57,13 +70,12 @@ export const automationWebhookRouteLayer = HttpRouter.add(
     if (Option.isNone(target)) return status(500, "internal_error");
     if (target.value.kind === "not-found") return status(404, "not_found");
     if (target.value.kind === "disabled") return status(409, "automation_disabled");
-    if (Number(request.headers["content-length"]) > MAX_DRAINED_BODY_BYTES)
-      return status(413, "payload_too_large");
+    if (Number(request.headers["content-length"]) > MAX_DRAINED_BODY_BYTES) return tooLarge(false);
     const body = yield* readBoundedBody(request);
-    if (body === null) return status(413, "payload_too_large");
+    if (body.kind === "too-large") return tooLarge(body.drained);
     const outcome = yield* automations
       .deliverWebhook(target.value.automation, {
-        body,
+        body: body.text,
         contentType: request.headers["content-type"],
         deliveryId: request.headers["idempotency-key"] ?? request.headers["x-github-delivery"],
       })

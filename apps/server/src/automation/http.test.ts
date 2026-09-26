@@ -70,6 +70,19 @@ it.effect(
         );
         // A streamed body carries no length, so only reading it can find it too long.
         expect(chunked.status).toBe(413);
+        // Past 1 MB the read stops and the connection closes rather than draining the sender.
+        const endless = yield* client
+          .execute(
+            HttpClientRequest.post(`/api/automations/hooks/${webhookToken}`).pipe(
+              HttpClientRequest.bodyStream(Stream.forever(Stream.make(new Uint8Array(64 * 1024)))),
+            ),
+          )
+          .pipe(
+            Effect.map((response) => response.status),
+            Effect.orElseSucceed(() => "closed"),
+            Effect.timeoutOption("10 seconds"),
+          );
+        expect(endless._tag).toBe("Some");
 
         const accepted = yield* post(webhookToken!, "deploy 42 finished");
         expect(accepted.status).toBe(202);
