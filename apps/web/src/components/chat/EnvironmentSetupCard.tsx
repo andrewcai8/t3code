@@ -100,7 +100,7 @@ export function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCar
           {running ? (
             <Spinner className="size-4 shrink-0" />
           ) : (
-            <CloudIcon aria-hidden className="size-4 shrink-0 stroke-[1.8]" />
+            <CloudIcon aria-hidden className="size-4 shrink-0" />
           )}
         </span>
         <span className="min-w-0 flex-1 truncate">{environmentSetupHeader(snapshot)}</span>

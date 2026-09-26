@@ -122,7 +122,7 @@ function ProvisionedEnvironmentRow({
                   machine.
                 </p>
                 <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5">
-                  <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                  <code className="min-w-0 flex-1 truncate font-mono text-2xs text-muted-foreground">
                     {pairing.url}
                   </code>
                   <Button

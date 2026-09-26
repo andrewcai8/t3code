@@ -485,167 +485,170 @@ function AutomationEditor({
             Each run starts a cloud box, clones the repository, and opens a chat with this prompt.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-4">
-          <Field label="Name" error={errorFor("name")}>
-            <Input
-              autoFocus
-              value={draft.name}
-              disabled={saving}
-              onChange={(event) => set({ name: event.target.value })}
-              placeholder="Nightly dependency check"
-            />
-          </Field>
-          <div className="grid grid-cols-[minmax(0,1fr)_10rem] gap-3">
-            <Field label="Repository" error={errorFor("repository")}>
+        <DialogPanel>
+          <div className="flex flex-col gap-4">
+            <Field label="Name" error={errorFor("name")}>
               <Input
-                value={draft.repository}
+                autoFocus
+                value={draft.name}
                 disabled={saving}
-                onChange={(event) => set({ repository: event.target.value })}
-                placeholder="owner/name"
+                onChange={(event) => set({ name: event.target.value })}
+                placeholder="Nightly dependency check"
               />
             </Field>
-            <Field label="Branch" error={errorFor("branch")}>
-              <Input
-                value={draft.branch}
+            <div className="grid grid-cols-[minmax(0,1fr)_10rem] gap-3">
+              <Field label="Repository" error={errorFor("repository")}>
+                <Input
+                  value={draft.repository}
+                  disabled={saving}
+                  onChange={(event) => set({ repository: event.target.value })}
+                  placeholder="owner/name"
+                />
+              </Field>
+              <Field label="Branch" error={errorFor("branch")}>
+                <Input
+                  value={draft.branch}
+                  disabled={saving}
+                  onChange={(event) => set({ branch: event.target.value })}
+                  placeholder="Default"
+                />
+              </Field>
+            </div>
+            <Field label="Prompt" error={errorFor("prompt")}>
+              <Textarea
+                value={draft.prompt}
                 disabled={saving}
-                onChange={(event) => set({ branch: event.target.value })}
-                placeholder="Default"
+                rows={5}
+                onChange={(event) => set({ prompt: event.target.value })}
+                placeholder="Look for failing tests on main and open a PR that fixes them."
               />
             </Field>
-          </div>
-          <Field label="Prompt" error={errorFor("prompt")}>
-            <Textarea
-              value={draft.prompt}
-              disabled={saving}
-              rows={5}
-              onChange={(event) => set({ prompt: event.target.value })}
-              placeholder="Look for failing tests on main and open a PR that fixes them."
-            />
-          </Field>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="Agent" error={errorFor("agentDriver")}>
-              <Select
-                value={draft.agentDriver}
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="Agent" error={errorFor("agentDriver")}>
+                <Select
+                  value={draft.agentDriver}
+                  disabled={saving}
+                  onValueChange={(agentDriver) =>
+                    set({
+                      agentDriver: agentDriver ?? "",
+                      account: agentDriver === draft.agentDriver ? draft.account : "",
+                    })
+                  }
+                >
+                  <SelectTrigger size="sm" aria-label="Agent">
+                    <SelectValue>
+                      {agents.find((entry) => entry.driverKind === draft.agentDriver)
+                        ?.displayName ??
+                        (draft.agentDriver || "Choose")}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {agents.map((entry) => (
+                      <SelectItem key={entry.driverKind} value={entry.driverKind}>
+                        {entry.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </Field>
+              <Field label="Account" error={errorFor("account")}>
+                <Select
+                  value={draft.account === "" ? MOST_USAGE_LEFT : draft.account}
+                  disabled={saving}
+                  onValueChange={(account) =>
+                    set({ account: !account || account === MOST_USAGE_LEFT ? "" : account })
+                  }
+                >
+                  <SelectTrigger size="sm" aria-label="Account">
+                    <SelectValue>
+                      {draft.account === ""
+                        ? "Most usage left"
+                        : (accounts.find((entry) => entry.instanceId === draft.account)
+                            ?.displayName ?? draft.account)}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value={MOST_USAGE_LEFT}>Most usage left</SelectItem>
+                    {accounts.map((entry) => (
+                      <SelectItem key={entry.instanceId} value={entry.instanceId}>
+                        {entry.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </Field>
+              <Field label="Runs on" error={errorFor("provider")}>
+                <Select
+                  value={draft.provider}
+                  disabled={saving}
+                  onValueChange={(provider) => set({ provider: provider ?? "" })}
+                >
+                  <SelectTrigger size="sm" aria-label="Runs on">
+                    <SelectValue>
+                      {draft.provider === "" ? "Choose" : PROVIDER_LABELS[draft.provider]}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {places.map((provider) => (
+                      <SelectItem key={provider} value={provider}>
+                        {PROVIDER_LABELS[provider]}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </Field>
+            </div>
+            <div className="space-y-2">
+              <ToggleRow
+                label="Run on a schedule"
+                checked={draft.scheduled}
                 disabled={saving}
-                onValueChange={(agentDriver) =>
-                  set({
-                    agentDriver: agentDriver ?? "",
-                    account: agentDriver === draft.agentDriver ? draft.account : "",
-                  })
-                }
-              >
-                <SelectTrigger size="sm" aria-label="Agent">
-                  <SelectValue>
-                    {agents.find((entry) => entry.driverKind === draft.agentDriver)?.displayName ??
-                      (draft.agentDriver || "Choose")}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  {agents.map((entry) => (
-                    <SelectItem key={entry.driverKind} value={entry.driverKind}>
-                      {entry.displayName}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            </Field>
-            <Field label="Account" error={errorFor("account")}>
-              <Select
-                value={draft.account === "" ? MOST_USAGE_LEFT : draft.account}
+                onChange={(scheduled) => set({ scheduled })}
+              />
+              {draft.scheduled ? (
+                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3">
+                  <Field label="Cron">
+                    <Input
+                      value={draft.cron}
+                      disabled={saving}
+                      aria-invalid={errors.schedule !== undefined || undefined}
+                      onChange={(event) => set({ cron: event.target.value })}
+                      placeholder="0 9 * * 1-5"
+                    />
+                  </Field>
+                  <Field label="Time zone">
+                    <Input
+                      value={draft.timeZone}
+                      disabled={saving}
+                      aria-invalid={errors.schedule !== undefined || undefined}
+                      onChange={(event) => set({ timeZone: event.target.value })}
+                      placeholder="America/New_York"
+                    />
+                  </Field>
+                  {errors.schedule ? (
+                    <p className="col-span-2 text-xs text-destructive">{errors.schedule}</p>
+                  ) : null}
+                </div>
+              ) : null}
+              <ToggleRow
+                label="Run when the webhook link is called"
+                checked={draft.webhook}
                 disabled={saving}
-                onValueChange={(account) =>
-                  set({ account: !account || account === MOST_USAGE_LEFT ? "" : account })
-                }
-              >
-                <SelectTrigger size="sm" aria-label="Account">
-                  <SelectValue>
-                    {draft.account === ""
-                      ? "Most usage left"
-                      : (accounts.find((entry) => entry.instanceId === draft.account)
-                          ?.displayName ?? draft.account)}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  <SelectItem value={MOST_USAGE_LEFT}>Most usage left</SelectItem>
-                  {accounts.map((entry) => (
-                    <SelectItem key={entry.instanceId} value={entry.instanceId}>
-                      {entry.displayName}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            </Field>
-            <Field label="Runs on" error={errorFor("provider")}>
-              <Select
-                value={draft.provider}
+                onChange={(webhook) => set({ webhook })}
+              />
+              <ToggleRow
+                label="On"
+                checked={draft.enabled}
                 disabled={saving}
-                onValueChange={(provider) => set({ provider: provider ?? "" })}
-              >
-                <SelectTrigger size="sm" aria-label="Runs on">
-                  <SelectValue>
-                    {draft.provider === "" ? "Choose" : PROVIDER_LABELS[draft.provider]}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  {places.map((provider) => (
-                    <SelectItem key={provider} value={provider}>
-                      {PROVIDER_LABELS[provider]}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            </Field>
-          </div>
-          <div className="space-y-2">
-            <ToggleRow
-              label="Run on a schedule"
-              checked={draft.scheduled}
-              disabled={saving}
-              onChange={(scheduled) => set({ scheduled })}
-            />
-            {draft.scheduled ? (
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3">
-                <Field label="Cron">
-                  <Input
-                    value={draft.cron}
-                    disabled={saving}
-                    aria-invalid={errors.schedule !== undefined || undefined}
-                    onChange={(event) => set({ cron: event.target.value })}
-                    placeholder="0 9 * * 1-5"
-                  />
-                </Field>
-                <Field label="Time zone">
-                  <Input
-                    value={draft.timeZone}
-                    disabled={saving}
-                    aria-invalid={errors.schedule !== undefined || undefined}
-                    onChange={(event) => set({ timeZone: event.target.value })}
-                    placeholder="America/New_York"
-                  />
-                </Field>
-                {errors.schedule ? (
-                  <p className="col-span-2 text-xs text-destructive">{errors.schedule}</p>
-                ) : null}
-              </div>
+                onChange={(enabled) => set({ enabled })}
+              />
+            </div>
+            {saveError ? (
+              <p role="alert" className="text-xs text-destructive">
+                {saveError}
+              </p>
             ) : null}
-            <ToggleRow
-              label="Run when the webhook link is called"
-              checked={draft.webhook}
-              disabled={saving}
-              onChange={(webhook) => set({ webhook })}
-            />
-            <ToggleRow
-              label="On"
-              checked={draft.enabled}
-              disabled={saving}
-              onChange={(enabled) => set({ enabled })}
-            />
           </div>
-          {saveError ? (
-            <p role="alert" className="text-xs text-destructive">
-              {saveError}
-            </p>
-          ) : null}
         </DialogPanel>
         <DialogFooter>
           <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>
@@ -734,32 +737,34 @@ function WebhookLinkDialog({
             can.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-2">
-          {url === null ? (
-            <p className="text-xs text-muted-foreground">
-              This client does not know the host&apos;s web address, so it cannot show the full
-              link. Put the host&apos;s address in front of this path.
-            </p>
-          ) : null}
-          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5">
-            {url === null ? <span className="text-xs text-muted-foreground">Path</span> : null}
-            <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
-              {url ?? path}
-            </code>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => copyToClipboard(url ?? path, undefined)}
-            >
-              {isCopied ? "Copied" : url === null ? "Copy path" : "Copy link"}
-            </Button>
+        <DialogPanel>
+          <div className="flex flex-col gap-2">
+            {url === null ? (
+              <p className="text-xs text-muted-foreground">
+                This client does not know the host&apos;s web address, so it cannot show the full
+                link. Put the host&apos;s address in front of this path.
+              </p>
+            ) : null}
+            <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5">
+              {url === null ? <span className="text-xs text-muted-foreground">Path</span> : null}
+              <code className="min-w-0 flex-1 truncate font-mono text-2xs text-muted-foreground">
+                {url ?? path}
+              </code>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => copyToClipboard(url ?? path, undefined)}
+              >
+                {isCopied ? "Copied" : url === null ? "Copy path" : "Copy link"}
+              </Button>
+            </div>
+            {url !== null && !isOffDeviceReachablePairingUrl(url) ? (
+              <p className="text-xs text-muted-foreground">
+                This host is reached through a local address, so only this computer can call the
+                link. Connect to the host by its network or tunnel address to get a shareable link.
+              </p>
+            ) : null}
           </div>
-          {url !== null && !isOffDeviceReachablePairingUrl(url) ? (
-            <p className="text-xs text-muted-foreground">
-              This host is reached through a local address, so only this computer can call the link.
-              Connect to the host by its network or tunnel address to get a shareable link.
-            </p>
-          ) : null}
         </DialogPanel>
         <DialogFooter>
           {confirmingClose ? (
