@@ -161,6 +161,45 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("reports only the Cursor instance whose saved login cannot be read", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const invalidAuthPath = NodePath.join(home, "config-invalid", "cursor", "auth.json");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.dirname(invalidAuthPath), { recursive: true });
+        await NodeFSP.writeFile(invalidAuthPath, "invalid json");
+      });
+      const cursorInstance = (config: string) => ({
+        driver: ProviderDriverKind.make("cursor"),
+        environment: [
+          { name: "XDG_CONFIG_HOME", value: NodePath.join(home, config), sensitive: false },
+        ],
+      });
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-cursor-invalid-and-missing",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("cursor")]: cursorInstance("config-invalid"),
+                [ProviderInstanceId.make("cursor-empty")]: cursorInstance("config-empty"),
+              },
+            },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      assert.deepStrictEqual(
+        summary.sources
+          .filter((source) => source.fingerprint.provider === "cursor")
+          .map((source) => source.message),
+        ["Cursor credentials could not be read."],
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live("does not read the macOS Cursor Keychain before account usage is enabled", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
