@@ -241,12 +241,8 @@ export function createCloudDriver(
       if (info.sandboxId !== sandboxId || info.metadata.purpose !== "t3-environment") {
         throw new Error("Sandbox ownership or purpose changed");
       }
-      try {
-        const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
-        await sandbox.kill();
-      } catch (cause) {
-        if (!isMissingSandbox(cause)) throw cause;
-      }
+      // Kill by id so a paused box is deleted without waking it. False means already gone.
+      await Sandbox.kill(sandboxId, api);
     },
     resume: async ({
       sandboxId,
@@ -348,8 +344,8 @@ export function createCloudDriver(
         return namespaceRunner.destroyInstance(namespaceResource);
       }
       try {
-        const sandbox = await Sandbox.connect(sandboxId, { ...api, timeoutMs: 90_000 });
-        await sandbox.pause();
+        // Pause by id: false means E2B already had it paused, which is success.
+        await Sandbox.pause(sandboxId, api);
       } catch (cause) {
         if (cause instanceof SandboxNotFoundError) return "missing";
         throw cause;
