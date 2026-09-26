@@ -61,6 +61,15 @@ const SKILL_ROOT = {
   claudeAgent: ".claude/skills",
   cursor: ".cursor/skills",
 };
+/**
+ * Each driver's pstack per-role model sheet: HOME-relative for Claude and Codex, and
+ * checkout-relative for Cursor, whose CLI reads rules only from the checkout and its parents.
+ */
+const MODEL_SHEET = {
+  codex: "$HOME/.codex/pstack-models.md",
+  claudeAgent: "$HOME/.claude/pstack-models.md",
+  cursor: ".cursor/rules/pstack-models.mdc",
+};
 type Agent = keyof typeof SKILL_ROOT;
 const AGENTS = Object.keys(SKILL_ROOT) as ReadonlyArray<Agent>;
 /** Cheapest model per driver; falls back to the driver's default, then its first model. */
@@ -242,6 +251,8 @@ interface Markers {
   readonly head: string | null;
   readonly branch: string | null;
   readonly skill: string | null;
+  readonly flavor: string | null;
+  readonly models: string | null;
   readonly nonce: string | null;
 }
 /** The last `SMOKE_<key>=<value>` the agent printed: a reply may quote the prompt's example first. */
@@ -251,6 +262,8 @@ const readMarkers = (reply: string): Markers => ({
   head: readMarker(reply, "HEAD"),
   branch: readMarker(reply, "BRANCH"),
   skill: readMarker(reply, "SKILL"),
+  flavor: readMarker(reply, "FLAVOR"),
+  models: readMarker(reply, "MODELS"),
   nonce: readMarker(reply, "NONCE"),
 });
 
@@ -647,8 +660,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const snippet = [
       `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
       `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
+      `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/references/codex-tools.md" && f=claude-port`,
+      `m=missing; test -f "${MODEL_SHEET[agent]}" && m=present; git check-ignore -q "${MODEL_SHEET[agent]}" 2>/dev/null && m=$m-ignored`,
       `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
-      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_NONCE=$n"`,
+      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
     ].join("; ");
     const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
     const turn = yield* sendTurn(client, agent, label, thread, prompt, {
@@ -673,6 +688,12 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     yield* record(`${label}.skill`, markers.skill === "present", markers.skill, {
       path: `$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md`,
+    });
+    // Which pstack bundle and model sheet the box carries depends on the host's config, so these
+    // only require that the agent reported them; the report keeps the values.
+    yield* record(`${label}.pstack`, markers.flavor !== null, markers.flavor, {});
+    yield* record(`${label}.models`, markers.models !== null, markers.models, {
+      path: MODEL_SHEET[agent],
     });
     return turn;
   });
