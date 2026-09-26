@@ -2643,15 +2643,11 @@ describe("buildCloudHandoff", () => {
   ]);
 
   /** What the box composer sends after the draft is handed off to it. */
-  function sendOnBox(hostAccount: ServerProvider) {
+  function sendOnBox() {
     const draftId = DraftId.make("draft-cloud-handoff");
     const store = useComposerDraftStore.getState();
     store.setModelSelection(draftId, picked, { explicit: true });
-    const handoff = buildCloudHandoff({
-      agentDriver: claudeAgent,
-      selection: picked,
-      cloudAccount: hostAccount,
-    });
+    const handoff = buildCloudHandoff({ agentDriver: claudeAgent, selection: picked });
     store.setModelSelection(draftId, handoff.modelSelection);
 
     const boxProviders = [
@@ -2697,7 +2693,6 @@ describe("buildCloudHandoff", () => {
       buildCloudHandoff({
         agentDriver: ProviderDriverKind.make(driver),
         selection,
-        cloudAccount: null,
       }).modelSelection,
     ).toEqual({
       instanceId: boxId,
@@ -2707,9 +2702,7 @@ describe("buildCloudHandoff", () => {
   });
 
   it("keeps the model and options picked for a host account on the box's own instance", () => {
-    expect(
-      sendOnBox(claudeSnapshot("claude_work", models("claude-fable-5-1", "claude-opus-5-5"))),
-    ).toEqual({
+    expect(sendOnBox()).toEqual({
       instanceId: "claudeAgent",
       model: "claude-opus-5-5",
       options: [

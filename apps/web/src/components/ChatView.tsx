@@ -8261,7 +8261,6 @@ export default function ChatView(props: ChatViewProps) {
       const cloudHandoff = buildCloudHandoff({
         agentDriver: ctxSelectedProvider,
         selection: ctxSelectedModelSelection,
-        cloudAccount,
       });
       const retryHeld = heldCloudSendSnapshotRef.current;
       if (retryHeld) {

@@ -562,24 +562,19 @@ export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "sessi
 /**
  * The driver and model a cloud chat's draft carries onto the environment it provisions.
  * The box keys its one account per driver by the driver's default instance id, not the
- * manager's account id, so the selection moves to that key.
+ * manager's account id, so the selection moves to that key. The model is not checked
+ * against the manager's catalog: the box runs the chat and resolves it against its own.
  */
 export function buildCloudHandoff(input: {
   agentDriver: ProviderDriverKind;
   selection: ModelSelection;
-  cloudAccount: Pick<ServerProvider, "instanceId" | "models"> | null;
 }): { agentDriver: ProviderDriverKind; modelSelection: ModelSelection } {
-  const { cloudAccount, selection } = input;
-  const cloudModel = cloudAccount?.models.some((model) => model.slug === selection.model)
-    ? selection.model
-    : (cloudAccount?.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-      selection.model);
   return {
     agentDriver: input.agentDriver,
     modelSelection: createModelSelection(
       defaultInstanceIdForDriver(input.agentDriver),
-      cloudModel,
-      selection.options,
+      input.selection.model,
+      input.selection.options,
     ),
   };
 }
