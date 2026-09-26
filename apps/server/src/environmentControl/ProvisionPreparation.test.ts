@@ -316,6 +316,34 @@ const homeFile = (
     (item) => item.scope === "home" && item.destination === destination,
   );
 
+it("writes a Codex login whose refresh token the environment cannot redeem", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.writeFile(
+      NodePath.join(f.root, ".codex/auth.json"),
+      '{"tokens":{"id_token":"eyJ.id.sig","access_token":"eyJ.access.sig","refresh_token":"rt_live","account_id":"acct-1"}}',
+    );
+    const manifest = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
+    expect(
+      JSON.parse(
+        Buffer.from(
+          homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
+          "base64",
+        ).toString(),
+      ),
+    ).toEqual({
+      tokens: {
+        id_token: "eyJ.id.sig",
+        access_token: "eyJ.access.sig",
+        refresh_token: "t3-copy-cannot-refresh",
+        account_id: "acct-1",
+      },
+    });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("uses staged HTTPS credentials for GitHub SSH dependency URLs", async () => {
   const f = await fixture();
   try {
