@@ -17,7 +17,7 @@ Clients offer only what a manager can provision. E2B appears when `provisioning.
 
 `provisioning.skills` is optional and names skill bundles copied into every new environment. Each entry has a `source` directory on the manager. Give it a `name` when the source is one skill; omit `name` when the source is a directory of skills, because every supported CLI resolves a skill as `<root>/<directory>/SKILL.md` and looks no deeper.
 
-Skills land in the home directory and follow the selected driver. Codex reads `.codex/skills`, Cursor reads `.cursor/skills`, Claude reads `.claude/skills`. They never land in the checkout, which is what the agent opens a pull request from.
+Skills land in the home directory and follow the selected driver. Codex reads `.codex/skills`, Cursor reads `.cursor/skills`, Claude reads `.claude/skills`. They never land in the checkout, which is what the agent opens a pull request from. An entry's optional `agents` list (`codex`, `cursor`, `claudeAgent`) limits it to those drivers, so a Cursor bundle and a Claude/Codex port of it can share skill names.
 
 ## Sign in Claude accounts
 

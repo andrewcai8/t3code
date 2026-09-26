@@ -543,8 +543,13 @@ export function makeProvisionPreparationStore(stateDir: string) {
         }
       }
       const skillLimit = { remaining: provisionInputLimit };
-      const skillRoots = new Set(profiles.map(({ kind }) => skillRoot(kind)));
       for (const skill of provisioning.skills ?? []) {
+        const skillRoots = new Set(
+          profiles
+            .filter(({ kind }) => !skill.agents || skill.agents.includes(kind))
+            .map(({ kind }) => skillRoot(kind)),
+        );
+        if (skillRoots.size === 0) continue;
         const prefix = skill.name ? `${relativePath(skill.name)}/` : "";
         for (const entry of await skillFiles(skill.source, skillLimit)) {
           for (const root of skillRoots)

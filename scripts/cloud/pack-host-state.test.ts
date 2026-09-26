@@ -9,7 +9,11 @@ import { assert, describe, it } from "@effect/vitest";
 import { packHostState, writeSeedArchive, type HostConfig } from "./pack-host-state.ts";
 
 const fixture = async (
-  extra: Pick<HostConfig, "namespaceToken"> = {},
+  {
+    skills,
+    ...extra
+  }: Pick<HostConfig, "namespaceToken"> &
+    Pick<NonNullable<HostConfig["provisioning"]>, "skills"> = {},
   namespaceSession?: string,
   namespaceFederated?: boolean,
 ) => {
@@ -21,6 +25,8 @@ const fixture = async (
   await write(".codex/auth.json", '{"token":"codex"}');
   await write("secrets/github.bin", "gh-secret");
   await write("plugins/review-skills/review/SKILL.md", "# Review\n");
+  await write("cursor/pstack/skills/why/SKILL.md", "cursor why\n");
+  await write("claude/pstack/skills/why/SKILL.md", "claude why\n");
   if (namespaceSession !== undefined) await write("ns/token.json", namespaceSession);
   const packed = await packHostState({
     config: {
@@ -50,7 +56,10 @@ const fixture = async (
         ],
         claudeOAuthTokens: { claude_work: "sk-ant-oat01-work" },
         shellEnvironment: [{ name: "GH_TOKEN", source: NodePath.join(home, "secrets/github.bin") }],
-        skills: [{ source: NodePath.join(home, "plugins/review-skills"), name: "review" }],
+        skills: skills?.map((skill) => ({
+          ...skill,
+          source: NodePath.join(home, skill.source),
+        })) ?? [{ source: NodePath.join(home, "plugins/review-skills"), name: "review" }],
       },
     },
     settings: {
@@ -230,6 +239,32 @@ describe("packHostState", () => {
       await rejection('{"bearer_token":"nsct_secret"}'),
       "<file> has no session_token; run `nsc login`",
     );
+  });
+
+  it("keeps each skill bundle's agent filter and a separate directory for same-named sources", async () => {
+    const { home, packed } = await fixture({
+      skills: [
+        { source: "cursor/pstack/skills", agents: ["cursor"] },
+        { source: "claude/pstack/skills", agents: ["claudeAgent", "codex"] },
+      ],
+    });
+    try {
+      assert.deepEqual(packed.config.provisioning.skills, [
+        { source: "/data/t3/skills/0/skills", agents: ["cursor"] },
+        { source: "/data/t3/skills/1/skills", agents: ["claudeAgent", "codex"] },
+      ]);
+      const extracted = await extractSeed(home, packed);
+      assert.deepEqual(
+        await Promise.all(
+          ["skills/0/skills/why/SKILL.md", "skills/1/skills/why/SKILL.md"].map((path) =>
+            NodeFSP.readFile(NodePath.join(extracted, path), "utf8"),
+          ),
+        ),
+        ["cursor why\n", "claude why\n"],
+      );
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
   });
 
   it("writes a seed tarball rooted at the base dir with private files", async () => {

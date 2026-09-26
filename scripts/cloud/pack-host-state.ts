@@ -33,7 +33,11 @@ export interface HostConfig {
       readonly namespace?: unknown;
     }>;
     readonly egressAllow?: unknown;
-    readonly skills?: ReadonlyArray<{ readonly source: string; readonly name?: string }>;
+    readonly skills?: ReadonlyArray<{
+      readonly source: string;
+      readonly name?: string;
+      readonly agents?: ReadonlyArray<string>;
+    }>;
   };
 }
 
@@ -162,6 +166,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       source: {
         source: NodePath.posix.join(directory, name),
         ...(skill.name ? { name: skill.name } : {}),
+        ...(skill.agents ? { agents: skill.agents } : {}),
       },
     };
   });
