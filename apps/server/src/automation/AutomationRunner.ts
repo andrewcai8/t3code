@@ -88,7 +88,9 @@ function runProvisionInput(
     ...(automation.account === null ? {} : { pinAccount: true }),
     repository: automation.repository,
     ...(automation.branch === null ? {} : { branch: automation.branch }),
-    retentionDeadline: new Date(Date.parse(run.createdAt) + RUN_RETENTION_MS).toISOString(),
+    retentionDeadline: DateTime.formatIso(
+      DateTime.add(DateTime.makeUnsafe(run.createdAt), { milliseconds: RUN_RETENTION_MS }),
+    ),
   };
 }
 

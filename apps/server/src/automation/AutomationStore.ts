@@ -80,7 +80,7 @@ const decodeRow = Schema.decodeUnknownExit(AutomationRow);
 const decodeAutomation = Schema.decodeUnknownExit(Automation);
 const decodeAutomationRow = (input: unknown): Exit.Exit<StoredAutomation, unknown> => {
   const decoded = decodeRow(input);
-  if (Exit.isFailure(decoded)) return decoded;
+  if (Exit.isFailure(decoded)) return Exit.failCause(decoded.cause);
   const row = decoded.value;
   return Exit.map(
     decodeAutomation({

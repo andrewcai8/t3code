@@ -4,6 +4,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ProviderInstanceEnvironment,
   type ServerProvider,
@@ -300,7 +301,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
   if (
     input.pinAccount &&
     driver !== undefined &&
-    isAccountSpent(driver, limits.get(hint)?.usageLimits, usage.now)
+    isAccountSpent(ProviderDriverKind.make(driver), limits.get(hint)?.usageLimits, usage.now)
   )
     return yield* new ProvisionRefused({
       reason: "credentials",
