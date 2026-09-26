@@ -60,8 +60,10 @@ export interface PackInput {
    */
   readonly namespaceSession?: string | undefined;
   /**
-   * The host keeps its own federated Namespace token at
-   * `<baseDir>/ns/token.json`, so the settings travel with no packed credential.
+   * The host keeps and refreshes its own federated Namespace token wherever
+   * the server's Namespace SDK resolves it (`$XDG_CONFIG_HOME/ns/token.json`,
+   * or `~/.config/ns/token.json` on Linux), so the settings travel with no
+   * packed credential.
    */
   readonly namespaceFederated?: boolean | undefined;
 }
@@ -273,8 +275,9 @@ config or a --namespace-session, the token.json of an \`nsc login\` (on macOS,
 ~/Library/Application Support/ns/token.json). Its session token lands at
 <base-dir>/ns/token.json, so run the host with XDG_CONFIG_HOME=<base-dir>, and
 re-pack after each monthly login. --namespace-federated carries the settings
-with no credential, for a host that keeps a federated workload token at that
-same path itself. The workspace is whichever tenant the credential names;
+with no credential, for a host that keeps a federated workload token wherever
+the server's Namespace SDK resolves it ($XDG_CONFIG_HOME/ns/token.json, or
+~/.config/ns/token.json on Linux) and refreshes it there. The workspace is whichever tenant the credential names;
 Namespace settings do not choose one. Runtime artifacts are never carried; the
 host adds its own.`;
 
