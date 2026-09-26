@@ -35,7 +35,7 @@ function automationCronMinGapMinutes(cron: Cron.Cron): number {
   const minutes =
     cron.minutes.size === 0
       ? Array.from({ length: 60 }, (_, minute) => minute)
-      : [...cron.minutes].toSorted((left, right) => left - right);
+      : [...cron.minutes].sort((left, right) => left - right);
   const hours = cron.hours.size === 0 ? null : cron.hours;
   const adjacentHours = hours === null || [...hours].some((hour) => hours.has((hour + 1) % 24));
   const gaps = minutes.slice(1).map((minute, index) => minute - minutes[index]!);
@@ -164,7 +164,7 @@ export function recentAutomationEnvironments(
         environment.lifecycle === "active" &&
         Date.parse(environment.createdAt) >= now - AUTOMATION_JOIN_WINDOW_MS,
     )
-    .toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
     .slice(0, AUTOMATION_JOIN_LIMIT);
 }
 
