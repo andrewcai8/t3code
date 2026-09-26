@@ -1,6 +1,7 @@
 import type {
   ServerProvider,
   ServerProviderSkill,
+  ServerProvisionedSkills,
   ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 
@@ -76,7 +77,7 @@ export function getProviderSlashCommandsForSlashMenu(
 export function resolveProviderSkillSourceKind(
   skill: Pick<ServerProviderSkill, "path" | "scope">,
 ): ProviderSkillSourceKind {
-  const normalizedPath = normalizePathSeparators(skill.path);
+  const normalizedPath = normalizePathSeparators(skill.path ?? "");
   if (normalizedPath.includes("/.codex/plugins/") || normalizedPath.includes("/.agents/plugins/")) {
     return "app";
   }
@@ -111,14 +112,22 @@ function resolveProviderWorkspaceSnapshot(
   return provider.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd);
 }
 
+/**
+ * The skills a chat with this provider can start. On a host that runs chats
+ * in provisioned environments, `provisionedSkills` from its server config
+ * lists what those environments hold, and it wins a name clash because that
+ * copy is the one that runs. Then workspace skills, then the provider's own.
+ */
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
+  provisionedSkills?: ServerProvisionedSkills,
 ): ServerProvider["skills"] {
-  const workspaceSkills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills;
-  return workspaceSkills
-    ? dedupeProviderSkillsByName([...workspaceSkills, ...provider.skills])
-    : provider.skills;
+  const provisioned = provisionedSkills?.[provider.driver as keyof ServerProvisionedSkills] ?? [];
+  const workspaceSkills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? [];
+  return provisioned.length === 0 && workspaceSkills.length === 0
+    ? provider.skills
+    : dedupeProviderSkillsByName([...provisioned, ...workspaceSkills, ...provider.skills]);
 }
 
 export function resolveProviderSlashCommandsForCwd(

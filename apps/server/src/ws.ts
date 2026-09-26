@@ -1775,6 +1775,7 @@ const makeWsRpcLayer = (
             yield* serverSettings.getSettings,
           );
           const environment = yield* serverEnvironment.getDescriptor;
+          const provisionedSkills = yield* environmentControl.provisionedSkills;
           const auth = yield* serverAuth.getDescriptor();
           const availableEditors: ReadonlyArray<EditorId> = yield* resolveAvailableEditorsForConfig(
             externalLauncher.resolveAvailableEditors(),
@@ -1796,6 +1797,7 @@ const makeWsRpcLayer = (
             provisionProviders: yield* environmentControl.provisionProviders.pipe(
               Effect.orElseSucceed(() => []),
             ),
+            ...(provisionedSkills ? { provisionedSkills } : {}),
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,

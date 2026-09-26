@@ -1072,6 +1072,7 @@ const buildAppUnderTest = (options?: {
           namespaceProxyOrigin: () => Effect.succeed(null),
           list: Effect.succeed([]),
           provisionProviders: Effect.succeed([]),
+          provisionedSkills: Effect.succeed(undefined),
           listProvisioned: Effect.succeed([]),
           provision: () =>
             Effect.succeed({
@@ -6962,6 +6963,64 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const [first, second] = Array.from(events);
         assert.equal(first?.type, "snapshot");
         if (first?.type === "snapshot") {
+          assert.deepEqual(first.config.providers, [codex]);
+        }
+        assert.deepEqual(second, {
+          version: 1,
+          type: "providerStatuses",
+          payload: { providers: [{ ...codex, version: "1.0.1" }] },
+        });
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes websocket rpc subscribeServerConfig sends provisioned skills once, outside provider snapshots",
+    () =>
+      Effect.gen(function* () {
+        const codex = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "1.0.0",
+          status: "ready" as const,
+          auth: { status: "authenticated" as const },
+          checkedAt: "2026-04-11T00:00:00.000Z",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Effect.succeed({ keybindings: [], issues: [] }),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: {
+              getProviders: Effect.succeed([codex]),
+              streamChanges: Stream.succeed([{ ...codex, version: "1.0.1" }]),
+            },
+            environmentControl: {
+              provisionedSkills: Effect.succeed({
+                codex: [{ name: "how", enabled: true, scope: "user" }],
+              }),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const events = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
+          ),
+        );
+
+        const [first, second] = Array.from(events);
+        assert.equal(first?.type, "snapshot");
+        if (first?.type === "snapshot") {
+          assert.deepEqual(first.config.provisionedSkills, {
+            codex: [{ name: "how", enabled: true, scope: "user" }],
+          });
           assert.deepEqual(first.config.providers, [codex]);
         }
         assert.deepEqual(second, {
