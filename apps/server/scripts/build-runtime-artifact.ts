@@ -87,8 +87,9 @@ try {
   if (lock.status !== 0) throw new Error("npm could not resolve the runtime artifact lockfile");
   if (install) {
     if (platform) {
-      // E2B templates are linux/amd64. Compile node-pty here so the sandbox
-      // never fetches Node headers from nodejs.org (often egress-blocked).
+      // E2B templates are linux/amd64. Install node-pty's native addon here so
+      // the sandbox never fetches Node headers from nodejs.org (often
+      // egress-blocked).
       const docker = NodeChildProcess.spawnSync(
         "docker",
         [
@@ -108,6 +109,10 @@ try {
           "-lc",
           [
             "set -euo pipefail",
+            // The container runs as root. On Linux the bind mount keeps that
+            // ownership, so hand the stage back even when a step fails, or the
+            // caller cannot delete it and its EACCES hides the real error.
+            `trap 'chown -R ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0} /src' EXIT`,
             "apt-get update -qq",
             "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 make g++",
             "npm ci --omit=dev --no-audit --no-fund --foreground-scripts",
@@ -116,10 +121,9 @@ try {
             "rm -rf node_modules/@ff-labs/fff-bin-linux-x64-musl",
             "rm -rf node_modules/@yuuang/ffi-rs-linux-x64-musl",
             "find . -name '*.map' -delete",
-            "test -f node_modules/node-pty/build/Release/pty.node",
-            // The container runs as root. On Linux the bind mount keeps that
-            // ownership, and the caller could not delete its own stage.
-            `chown -R ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0} /src`,
+            // node-pty uses its linux-x64 prebuild when it ships one and
+            // compiles otherwise. Spawning a PTY proves whichever it picked loads.
+            `node -e "require('node-pty').spawn('true', []).onExit((e) => process.exit(e.exitCode))"`,
           ].join("; "),
         ],
         { stdio: "inherit" },
