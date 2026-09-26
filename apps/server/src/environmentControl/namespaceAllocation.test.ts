@@ -10,30 +10,38 @@ import {
   createNamespaceAllocationClient,
   makeNamespaceAllocationPorts,
   namespaceMacImage,
+  resolveNamespaceIdentity,
 } from "./namespaceAllocation.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
-const operation = Schema.decodeUnknownSync(ProvisionOperation)({
-  request: {
-    requestId: "7314a443-30af-4c88-bc3a-9b70940eb563",
-    provider: "namespace",
-    creator: "user-test",
-    tenantId: "tenant-test",
-    providerInstanceId: "codex",
-    sourceRevision: null,
-    preparationHash: "a".repeat(64),
-    size: "m",
-    image: namespaceMacImage,
-    region: "iad",
-    idleTimeoutMinutes: 30,
-  },
-  requestHash: "b".repeat(64),
-  revision: 1,
-  createdAt: "2026-09-14T00:00:00.000Z",
-  updatedAt: "2026-09-14T00:00:00.000Z",
-  state: { kind: "create_issued" },
-});
+const workloadRequest = {
+  requestId: "7314a443-30af-4c88-bc3a-9b70940eb563",
+  provider: "namespace",
+  tenantId: "tenant-test",
+  providerInstanceId: "codex",
+  sourceRevision: null,
+  preparationHash: "a".repeat(64),
+  size: "m",
+  image: namespaceMacImage,
+  region: "iad",
+  idleTimeoutMinutes: 30,
+};
+const makeOperation = (request: object) =>
+  Schema.decodeUnknownSync(ProvisionOperation)({
+    request,
+    requestHash: "b".repeat(64),
+    revision: 1,
+    createdAt: "2026-09-14T00:00:00.000Z",
+    updatedAt: "2026-09-14T00:00:00.000Z",
+    state: { kind: "create_issued" },
+  });
+const operation = makeOperation({ ...workloadRequest, creator: "user-test" });
+// A federated workload credential has a tenant but no actor, so its request has no creator.
+const workloadOperation = makeOperation(workloadRequest);
+
+const jwt = (claims: object) =>
+  `nsct_e30.${Buffer.from(encodeJson(claims)).toString("base64url")}.signature`;
 
 function devbox(id = "box-1") {
   return {
@@ -97,6 +105,25 @@ async function makeFixture(respond: (method: string, body: string) => unknown) {
 const fixture = Effect.fn("namespaceAllocation.test.fixture")(
   (respond: Parameters<typeof makeFixture>[0]) => Effect.promise(() => makeFixture(respond)),
 );
+
+describe("Namespace identity", () => {
+  it.effect("owns by actor for a user login and by tenant alone for a federated credential", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* Effect.promise(() =>
+          resolveNamespaceIdentity(jwt({ actor_id: "user-test", tenant_id: "tenant-test" })),
+        ),
+      ).toEqual({ creator: "user-test", tenantId: "tenant-test" });
+      expect(
+        yield* Effect.promise(() => resolveNamespaceIdentity(jwt({ tenant_id: "tenant-test" }))),
+      ).toEqual({ tenantId: "tenant-test" });
+      // Every credential must still name its tenant.
+      yield* Effect.flip(
+        Effect.tryPromise(() => resolveNamespaceIdentity(jwt({ actor_id: "user-test" }))),
+      );
+    }),
+  );
+});
 
 describe("Namespace durable allocation through the SDK", () => {
   it.effect("refuses a changed account before creating or discovering resources", () =>
@@ -283,6 +310,54 @@ describe("Namespace durable allocation through the SDK", () => {
       });
       expect((yield* Effect.flip(ports.recoverCreate(operation))).message).toContain("unresolved");
       expect(server.requests.map(({ method }) => method)).toEqual(["List"]);
+    }),
+  );
+  it.effect(
+    "creates a workspace-shared Mac for a credential with no actor and adopts it by tenant",
+    () =>
+      Effect.gen(function* () {
+        const shared = { ...devbox(), creator: "", accessMode: "TENANT_WIDE" };
+        const server = yield* fixture((method) =>
+          method === "List"
+            ? { devboxes: [shared, { ...devbox("private"), creator: "" }] }
+            : { devbox: shared, instanceId: "instance-1" },
+        );
+        const commands: ReadonlyArray<string>[] = [];
+        const ports = makeNamespaceAllocationPorts({
+          identity: { tenantId: "tenant-test" },
+          client: server.client,
+          execute: async (args) => {
+            commands.push(args);
+          },
+        });
+        expect(yield* ports.create(workloadOperation)).toMatchObject({ devboxId: "box-1" });
+        expect(commands[0]?.slice(-2)).toEqual(["--access_mode", "shared"]);
+        expect(server.requests.map(({ method }) => method)).toEqual(["List", "Fetch"]);
+        expect(decodeJson(server.requests[0]?.body ?? "null")).not.toHaveProperty("matchCreator");
+      }),
+  );
+
+  it.effect("keeps a user login's requests and a federated credential's requests apart", () =>
+    Effect.gen(function* () {
+      const server = yield* fixture(() => ({ devboxes: [devbox()] }));
+      const execute = async () => {
+        throw new Error("must not create");
+      };
+      const workload = makeNamespaceAllocationPorts({
+        identity: { tenantId: "tenant-test" },
+        client: server.client,
+        execute,
+      });
+      const user = makeNamespaceAllocationPorts({
+        identity: { creator: "user-test", tenantId: "tenant-test" },
+        client: server.client,
+        execute,
+      });
+      expect((yield* Effect.flip(workload.recoverCreate(operation))).message).toContain("account");
+      expect((yield* Effect.flip(user.recoverCreate(workloadOperation))).message).toContain(
+        "account",
+      );
+      expect(server.requests).toEqual([]);
     }),
   );
 });

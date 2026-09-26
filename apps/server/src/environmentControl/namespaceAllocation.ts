@@ -25,26 +25,45 @@ const namespaceMacImageSelectors = [
 
 const decodeIdentity = Schema.decodeUnknownSync(
   Schema.Struct({
-    actor_id: Schema.String.check(Schema.isMinLength(1)),
+    actor_id: Schema.optional(Schema.String),
     tenant_id: Schema.String.check(Schema.isMinLength(1)),
   }),
 );
 const decodeResource = Schema.decodeUnknownSync(ProvisionResource);
 
+/**
+ * An explicit token is fixed. Otherwise the user token file is read on every
+ * issue, so a credential another process rewrites in place (a federated
+ * workload token refreshed before its hour runs out) is picked up.
+ */
+export function namespaceTokenSource(token?: string) {
+  return token
+    ? fromBearerToken(token)
+    : {
+        issueToken: async (minDuration: number, force?: boolean) =>
+          (await loadUserToken()).issueToken(minDuration, force),
+      };
+}
+
+/**
+ * A user login names its actor, which owns the Macs it creates. A federated
+ * workload credential names only its tenant (workspace), so it has no creator.
+ */
 export async function resolveNamespaceIdentity(token?: string) {
-  const source = token ? fromBearerToken(token) : await loadUserToken();
-  const claims = decodeIdentity(extractClaims(await source.issueToken(1_000)));
-  return { creator: claims.actor_id, tenantId: claims.tenant_id };
+  const claims = decodeIdentity(extractClaims(await namespaceTokenSource(token).issueToken(1_000)));
+  return {
+    ...(claims.actor_id ? { creator: claims.actor_id } : {}),
+    tenantId: claims.tenant_id,
+  };
 }
 
 export async function createNamespaceAllocationClient(
   options: { readonly token?: string; readonly baseUrl?: string } = {},
 ) {
-  const tokenSource = options.token ? fromBearerToken(options.token) : await loadUserToken();
   return createClient(
     DevBoxService,
     createGlobalTransport({
-      tokenSource,
+      tokenSource: namespaceTokenSource(options.token),
       baseUrl: options.baseUrl ?? "https://private-api.global.namespaceapis.com",
     }),
   );
@@ -95,14 +114,21 @@ const selectorIdentity = (
   );
 const imageIdentity = selectorIdentity(namespaceMacImageSelectors);
 
+/**
+ * With an actor, a Mac is ours only if that actor created it, private to them.
+ * Without one (a federated credential), Namespace refuses private Macs, so a
+ * Mac is shared with the workspace and ours by tenant alone: the API only
+ * shows the credential's tenant, and the name carries our unique request id.
+ */
 export function namespaceResourceMatches(box: DevBox, request: NamespaceRequest) {
   return (
     box.name === `t3-${request.requestId}` &&
-    box.creator === request.creator &&
+    (request.creator === undefined || box.creator === request.creator) &&
     box.site === request.region &&
     box.repository === "" &&
     box.imageRef === "" &&
-    box.accessMode === AccessMode.USER_PRIVATE &&
+    box.accessMode ===
+      (request.creator === undefined ? AccessMode.TENANT_WIDE : AccessMode.USER_PRIVATE) &&
     box.instanceShape?.os === "macos" &&
     box.instanceShape.machineArch === "arm64" &&
     box.instanceShape.virtualCpu === (request.size === "l" ? 12 : 6) &&
@@ -125,7 +151,11 @@ export function makeNamespaceAllocationPorts(
       const response = await config.client.list(
         {
           paginationCursor: cursor,
-          matchCreator: { values: [request.creator], op: StringMatcher_Operator.IS_ANY_OF },
+          ...(request.creator === undefined
+            ? {}
+            : {
+                matchCreator: { values: [request.creator], op: StringMatcher_Operator.IS_ANY_OF },
+              }),
         },
         { signal, timeoutMs: 30_000 },
       );
@@ -190,7 +220,7 @@ export function makeNamespaceAllocationPorts(
               `${request.idleTimeoutMinutes}m`,
               "--no_checkout",
               "--access_mode",
-              "private",
+              request.creator === undefined ? "shared" : "private",
             ],
             signal,
           );

@@ -11,6 +11,7 @@ import { packHostState, writeSeedArchive, type HostConfig } from "./pack-host-st
 const fixture = async (
   extra: Pick<HostConfig, "namespaceToken"> = {},
   namespaceSession?: string,
+  namespaceFederated?: boolean,
 ) => {
   const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pack-host-state-"));
   const write = async (path: string, data: string) => {
@@ -63,6 +64,7 @@ const fixture = async (
     skillsDir: "/data/t3/skills",
     namespaceSession:
       namespaceSession === undefined ? undefined : NodePath.join(home, "ns/token.json"),
+    namespaceFederated,
   });
   return { home, packed };
 };
@@ -192,6 +194,26 @@ describe("packHostState", () => {
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });
     }
+  });
+
+  it("carries Namespace settings with no credential for a federated host", async () => {
+    const { home, packed } = await fixture({}, undefined, true);
+    try {
+      assert.isFalse(packed.files.some((file) => file.path.endsWith("/ns/token.json")));
+      assert.isUndefined(packed.config.namespaceToken);
+      assert.deepEqual(packed.config.provisioning.namespace, { size: "m" });
+      assert.deepEqual(packed.config.provisioning.repositories, [
+        { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
+      ]);
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+    // A packed credential would shadow or replace the host's own token file.
+    const conflict = await fixture({ namespaceToken: "nsc-token" }, undefined, true).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    );
+    assert.include(conflict, "--namespace-federated");
   });
 
   it("rejects a Namespace session file without quoting it", async () => {

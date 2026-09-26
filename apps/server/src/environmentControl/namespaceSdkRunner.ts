@@ -7,11 +7,11 @@ import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 import * as Schema from "effect/Schema";
-import { fromBearerToken, loadUserToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import { namespaceTokenSource } from "./namespaceAllocation.ts";
 import {
   namespaceT3Port,
   type NamespaceResource,
@@ -221,12 +221,7 @@ export function createNamespaceSdkRunner(options: NamespaceSdkRunnerOptions = {}
         maxBuffer: 8 * 1024 * 1024,
       });
     });
-  const tokenSource = options.token
-    ? fromBearerToken(options.token)
-    : {
-        issueToken: async (minDuration: number, force?: boolean) =>
-          (await loadUserToken()).issueToken(minDuration, force),
-      };
+  const tokenSource = namespaceTokenSource(options.token);
   const client = createClient(
     DevBoxService,
     createGlobalTransport({ tokenSource, baseUrl: DEVBOX_API }),

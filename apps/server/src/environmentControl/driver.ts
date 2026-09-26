@@ -10,7 +10,6 @@ import * as NodeOS from "node:os";
 import * as NodeUtil from "node:util";
 import { ALL_TRAFFIC, Sandbox, SandboxNotFoundError } from "e2b";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
-import { loadUserToken, fromBearerToken } from "@namespacelabs/sdk/auth";
 import { createClient, createGlobalTransport, createRegionTransport } from "@namespacelabs/sdk/api";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
@@ -24,6 +23,7 @@ import {
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
 import { disposeNamespace, namespaceT3Port, provisionNamespace } from "./namespaceProvisioner.ts";
 import { createNamespaceSdkRunner } from "./namespaceSdkRunner.ts";
+import { namespaceTokenSource } from "./namespaceAllocation.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import {
   resolvePreparation,
@@ -358,14 +358,9 @@ export function createCloudDriver(
       )
     : undefined;
   const namespaceProxy = new NamespaceProxyManager();
-  const namespaceTokenSource = config.namespaceToken
-    ? fromBearerToken(config.namespaceToken)
-    : {
-        issueToken: async (minDuration: number, force?: boolean) =>
-          (await loadUserToken()).issueToken(minDuration, force),
-      };
+  const namespaceTokens = namespaceTokenSource(config.namespaceToken);
   const getNamespaceAuthorization = async () =>
-    `Bearer ${await namespaceTokenSource.issueToken(60_000)}`;
+    `Bearer ${await namespaceTokens.issueToken(60_000)}`;
   async function e2bInfo(
     identity:
       | EnvironmentControlConfig["broker"]
@@ -432,7 +427,7 @@ export function createCloudDriver(
     observe: async (target) => {
       const machine = target.machine;
       if (machine.provider === "e2b") return observeE2b(machine);
-      const tokenSource = namespaceTokenSource;
+      const tokenSource = namespaceTokens;
       const devbox = createClient(
         DevBoxService,
         createGlobalTransport({
