@@ -25,7 +25,7 @@ export const proxyWebSocket = Effect.fn("HttpWebSocketProxy.proxyWebSocket")(fun
         pumpFrames(client, writeToUpstream),
       );
     }),
-  ).pipe(Effect.catchCause(() => Effect.void));
+  ).pipe(Effect.ignoreCause);
   return HttpServerResponse.empty();
 });
 

@@ -65,7 +65,7 @@ function DraftChatThreadRouteView() {
 
   if (!draftSession) return null;
   return (
-    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
+    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
       <ChatView
         draftId={draftId}
         environmentId={draftSession.environmentId}

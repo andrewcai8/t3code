@@ -127,6 +127,7 @@ export async function readCursorUsage(input: {
             reasoningTokens: 0,
           },
           reportedCostUsd: (usage.totalCents ?? 0) / 100,
+          fast: false,
         }) &&
         event.conversationId
       )
