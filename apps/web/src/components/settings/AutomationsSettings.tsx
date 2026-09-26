@@ -62,6 +62,8 @@ import {
 } from "./AutomationsSettings.logic";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
+/** The account menu's value for "run on the account with the most usage left". */
+const MOST_USAGE_LEFT = "most-usage-left";
 const PROVIDER_LABELS: Record<ProvisionProvider, string> = { e2b: "E2B", namespace: "Mac" };
 const TRIGGER_LABELS: Record<AutomationRun["trigger"], string> = {
   cron: "Schedule",
@@ -514,9 +516,11 @@ function AutomationEditor({
             </Field>
             <Field label="Account">
               <Select
-                value={draft.account}
+                value={draft.account === "" ? MOST_USAGE_LEFT : draft.account}
                 disabled={saving}
-                onValueChange={(account) => set({ account: account ?? "" })}
+                onValueChange={(account) =>
+                  set({ account: !account || account === MOST_USAGE_LEFT ? "" : account })
+                }
               >
                 <SelectTrigger size="sm" aria-label="Account">
                   <SelectValue>
@@ -527,7 +531,7 @@ function AutomationEditor({
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
-                  <SelectItem value="">Most usage left</SelectItem>
+                  <SelectItem value={MOST_USAGE_LEFT}>Most usage left</SelectItem>
                   {accounts.map((entry) => (
                     <SelectItem key={entry.instanceId} value={entry.instanceId}>
                       {entry.displayName}
