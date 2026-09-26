@@ -28,7 +28,10 @@ const fixture = async (
     await NodeFSP.mkdir(NodePath.dirname(NodePath.join(home, path)), { recursive: true });
     await NodeFSP.writeFile(NodePath.join(home, path), data);
   };
-  await write(".codex/auth.json", '{"token":"codex"}');
+  await write(
+    ".codex/auth.json",
+    '{"tokens":{"id_token":"eyJ.id.sig","access_token":"eyJ.access.sig","refresh_token":"rt_live","account_id":"acct-1"},"last_refresh":"2026-09-18T14:34:00Z"}',
+  );
   await write("secrets/github.bin", "gh-secret");
   await write("plugins/review-skills/review/SKILL.md", "# Review\n");
   await write("cursor/pstack/skills/why/SKILL.md", "cursor why\n");
@@ -157,7 +160,18 @@ describe("packHostState", () => {
               },
             }),
           ],
-          ["/data/t3/codex-homes/codex/auth.json", '{"token":"codex"}'],
+          [
+            "/data/t3/codex-homes/codex/auth.json",
+            `{
+  "tokens": {
+    "id_token": "eyJ.id.sig",
+    "access_token": "eyJ.access.sig",
+    "refresh_token": "t3-copy-cannot-refresh",
+    "account_id": "acct-1"
+  },
+  "last_refresh": "2026-09-18T14:34:00Z"
+}`,
+          ],
           ["/data/t3/shell-environment/GH_TOKEN", "gh-secret"],
         ],
       );
@@ -371,9 +385,14 @@ describe("packHostState", () => {
       );
       assert.equal(config.broker.url, "https://host.example");
       assert.equal(config.provisioning.runtimeArtifacts, undefined);
-      const mode = (await NodeFSP.stat(NodePath.join(extracted, "codex-homes/codex/auth.json")))
-        .mode;
-      assert.equal(mode & 0o777, 0o600);
+      const codexLogin = NodePath.join(extracted, "codex-homes/codex/auth.json");
+      assert.equal((await NodeFSP.stat(codexLogin)).mode & 0o777, 0o600);
+      assert.deepEqual(JSON.parse(await NodeFSP.readFile(codexLogin, "utf8")).tokens, {
+        id_token: "eyJ.id.sig",
+        access_token: "eyJ.access.sig",
+        refresh_token: "t3-copy-cannot-refresh",
+        account_id: "acct-1",
+      });
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });
     }

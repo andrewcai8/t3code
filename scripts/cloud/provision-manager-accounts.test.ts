@@ -77,10 +77,12 @@ describe("planManagerAccounts", () => {
       {
         source: "/Users/op/.codex/auth.json",
         destination: "/home/user/manager-state/codex-homes/codex/auth.json",
+        codexLogin: true,
       },
       {
         source: "/Users/op/.codex_ac1/auth.json",
         destination: "/home/user/manager-state/codex-homes/codex_ac1/auth.json",
+        codexLogin: true,
       },
       {
         source: "/Users/op/.t3/userdata/cursor-homes/cursor_work/.cursor/auth.json",
@@ -187,6 +189,7 @@ describe("planManagerAccounts", () => {
       {
         source: "/Users/op/.codex/auth.json",
         destination: "/home/user/manager-state/codex-homes/codex/auth.json",
+        codexLogin: true,
       },
       {
         source: "/Users/op/.t3/userdata/secrets/provider-env-cursor.bin",
@@ -215,6 +218,7 @@ describe("planManagerAccounts", () => {
       {
         source: "/Users/op/.codex/auth.json",
         destination: "/home/user/manager-state/codex-homes/codex/auth.json",
+        codexLogin: true,
       },
     ]);
     assert.deepEqual(

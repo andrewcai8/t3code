@@ -37,9 +37,13 @@ Use the account's config directory, or drop `CLAUDE_CONFIG_DIR=` for the default
 
 Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. A manager deployed by `deploy-provision-manager.mjs` or `pack-host-state.ts` runs that account on the token too, so the manager can chat on it and read its usage. Local runs keep using the keychain login. A credential set in the instance's own environment variables still wins, and an account with a `.credentials.json` file needs no token.
 
+## Codex accounts
+
+Codex rotates a ChatGPT login's refresh token too, and rejects a reused one, so every copy of one `auth.json` that refreshes signs out all the others, including the machine it came from. The packer and provisioning copy a Codex login with its access token but with a refresh token that cannot be redeemed ([`stripCodexRefreshToken`](../../apps/server/src/provider/codexLoginCopy.ts)), so only the source machine refreshes. A copy stops working when its access token expires, about ten days after the source's last refresh. Routing skips a Codex account whose access token expires within 30 minutes, and the host reports such a copied login as signed out. Re-pack a host to hand it a fresh one. A manager that reads the source machine's own files hands each new environment whatever that machine last refreshed.
+
 ## Which account a cloud environment uses
 
-The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left per chat, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh, split among the chats already running on it: awake cloud machines using that account for any of their agents and local threads with a turn in progress. An account with no known usage ranks below accounts with room left but above spent ones, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. The choice is frozen with the request, so retrying or resuming keeps the same account.
+The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left per chat, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh, split among the chats already running on it: awake cloud machines using that account for any of their agents and local threads with a turn in progress. An account with no known usage ranks below accounts with room left but above spent ones, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. A Codex account whose login is about to expire is skipped too. The choice is frozen with the request, so retrying or resuming keeps the same account.
 
 ## Stand up a manager
 

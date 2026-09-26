@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
-import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -39,12 +38,6 @@ function setup(initial: Observation = { kind: "stopped" }) {
   let state = initial;
   const calls: string[] = [];
   const driver: CloudDriver = {
-    // Provisioning creates environments rather than controlling declared ones,
-    // so the control cases never reach it; the provisioning case below does.
-    provision: async () => {
-      calls.push("provision");
-      throw new ProvisionRefused({ reason: "unconfigured", message: "no template here" });
-    },
     dispose: async () => {
       calls.push("dispose");
     },

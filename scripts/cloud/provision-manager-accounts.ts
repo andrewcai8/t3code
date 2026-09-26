@@ -58,8 +58,15 @@ export interface PlanInput {
 export interface ManagerPlan {
   readonly accounts: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
-  /** Host files to copy, by absolute source and absolute manager destination. */
-  readonly files: ReadonlyArray<{ readonly source: string; readonly destination: string }>;
+  /**
+   * Host files to copy, by absolute source and absolute manager destination.
+   * A `codexLogin` travels without a usable refresh token (`stripCodexRefreshToken`).
+   */
+  readonly files: ReadonlyArray<{
+    readonly source: string;
+    readonly destination: string;
+    readonly codexLogin?: true;
+  }>;
   readonly settingsPath: string;
   readonly providerInstances: Record<string, ManagerInstance>;
   readonly shellEnvironment?: ReadonlyArray<{ readonly name: string; readonly source: string }>;
@@ -129,7 +136,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
 
   const accounts: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
-  const files: Array<{ source: string; destination: string }> = [];
+  const files: Array<{ source: string; destination: string; codexLogin?: true }> = [];
   const providerInstances: Record<string, ManagerInstance> = {};
 
   for (const [id, instance] of Object.entries(instances)) {
@@ -157,6 +164,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
         files.push({
           source: codexAuthSource(instance.config, input.host.homedir),
           destination: posix.join(homePath, "auth.json"),
+          codexLogin: true,
         });
         providerInstances[id] = { driver: "codex", ...named, enabled: true, config: { homePath } };
         break;

@@ -9,12 +9,12 @@ import {
   type ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
-  resolvePreparation,
   resolveProvisioningProfiles,
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
@@ -225,13 +225,12 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
           { providerInstanceId: "selected" },
           { selected: "sk-ant-oat01-cloud-only" },
         );
-        const prepared = yield* Effect.promise(() => resolvePreparation(profile, {}, "e2b"));
-        expect(prepared.environment).toContainEqual({
+        expect(profile.environment).toContainEqual({
           name: "CLAUDE_CODE_OAUTH_TOKEN",
           value: "sk-ant-oat01-cloud-only",
           sensitive: true,
         });
-        expect(prepared.files).toEqual([]);
+        expect(profile.credential).toEqual({ kind: "environment" });
       }),
   );
 
@@ -440,6 +439,47 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     }),
   );
 
+  it.effect("skips a Codex account whose copied login would expire, however much room it has", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-09-03T12:00:00.000Z"));
+      const codexLogin = (exp: number) =>
+        JSON.stringify({
+          tokens: {
+            id_token: "eyJ.id.sig",
+            access_token: `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(`{"exp":${exp}}`).toString("base64url")}.sig`,
+            refresh_token: "t3-copy-cannot-refresh",
+            account_id: "acct-1",
+          },
+        });
+      yield* file("codex-roomy/auth.json", codexLogin(1788433200));
+      yield* file("codex-spare/auth.json", codexLogin(1789041600));
+      const settings = (spareHome: string) =>
+        decodeSettings({
+          providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+          providerInstances: {
+            roomy: {
+              driver: "codex",
+              displayName: "Codex · roomy",
+              config: { homePath: NodePath.join(directory, "codex-roomy") },
+            },
+            spare: { driver: "codex", config: { homePath: NodePath.join(directory, spareHome) } },
+            cursor: { driver: "cursor", enabled: false },
+          },
+        });
+      const usage = { roomy: [session(5)], spare: [session(90)] };
+      const expired = "Codex · roomy's Codex login expired; sign in on your computer and reseed.";
+      expect(yield* accounts(settings("codex-spare"), "roomy", undefined, usage)).toEqual([
+        ["codex", "spare", "file"],
+      ]);
+      expect((yield* Effect.flip(resolve(settings("codex-spare"), "roomy", "codex"))).message).toBe(
+        expired,
+      );
+      expect(
+        (yield* Effect.flip(accounts(settings("codex-roomy"), "roomy", undefined, usage))).message,
+      ).toBe(expired);
+    }),
+  );
+
   it.effect("keeps the hinted account when no account reports usage", () =>
     Effect.gen(function* () {
       expect(yield* accounts(routedSettings(), "selected")).toEqual([
@@ -485,309 +525,5 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
         `This Claude account stores its login in the macOS keychain, which can't be copied safely. Run \`CLAUDE_CONFIG_DIR=${directory} claude setup-token\` and add the token under provisioning.claudeOAuthTokens.selected in environment-control.json.`,
       );
     }),
-  );
-});
-
-it.layer(NodeServices.layer)("Namespace preparation precedence", (it) => {
-  it.effect("ignores missing overridden env sources while preserving independent variables", () =>
-    Effect.gen(function* () {
-      const settings = decodeSettings({
-        providerInstances: {
-          selected: {
-            driver: "claudeAgent",
-            environment: [
-              { name: "ANTHROPIC_API_KEY", value: "selected-token", sensitive: true },
-              { name: "ACCOUNT_LABEL", value: "selected-account", sensitive: false },
-            ],
-          },
-        },
-      });
-      const profile = yield* resolve(settings);
-      const independent = yield* file("independent", "independent-value\n");
-      const missing = NodePath.join(directory, "missing");
-      const prepared = yield* Effect.promise(() =>
-        resolvePreparation(
-          profile,
-          {
-            shellEnvironment: [
-              { name: "ANTHROPIC_API_KEY", source: missing },
-              { name: "ANTHROPIC_AUTH_TOKEN", source: missing },
-              { name: "CURSOR_API_KEY", source: missing },
-              { name: "ACCOUNT_LABEL", source: missing },
-              { name: "PATH", source: missing },
-              { name: "HOME", source: missing },
-              { name: "INDEPENDENT", source: independent },
-            ],
-          },
-          "namespace",
-        ),
-      );
-      expect(prepared.environment).toContainEqual({
-        name: "ANTHROPIC_API_KEY",
-        value: "selected-token",
-        sensitive: true,
-      });
-      expect(prepared.environment).toContainEqual({
-        name: "ANTHROPIC_AUTH_TOKEN",
-        value: "",
-        sensitive: true,
-      });
-      expect(prepared.environment).toContainEqual({
-        name: "ACCOUNT_LABEL",
-        value: "selected-account",
-        sensitive: false,
-      });
-      expect(prepared.environment).toContainEqual({
-        name: "INDEPENDENT",
-        value: "independent-value",
-        sensitive: true,
-      });
-      // Another driver's login is not this account's to carry.
-      expect(prepared.environment.map(({ name }) => name)).not.toContain("CURSOR_API_KEY");
-      yield* Effect.promise(() =>
-        expect(
-          resolvePreparation(
-            profile,
-            {
-              shellEnvironment: [{ name: "INDEPENDENT", source: missing }],
-            },
-            "namespace",
-          ),
-        ).rejects.toThrow("The source for INDEPENDENT could not be read."),
-      );
-    }),
-  );
-  it.effect(
-    "deduplicates normalized destinations in favor of selected auth and preserves explicit account env",
-    () =>
-      Effect.gen(function* () {
-        const source = yield* file(cursorAuthRelative);
-        const genericToken = yield* file("token", "generic-token\n");
-        const genericValue = yield* file("value", "  literal value \n\n");
-        const settings = decodeSettings({
-          providerInstances: {
-            selected: {
-              driver: "cursor",
-              enabled: true,
-              environment: [
-                ...cursorEnvironment(),
-                { name: "CUSTOM_ACCOUNT", value: "selected-account", sensitive: true },
-              ],
-            },
-          },
-        });
-        const profile = yield* resolve(settings);
-        const prepared = yield* Effect.promise(() =>
-          resolvePreparation(
-            profile,
-            {
-              homeFiles: [
-                {
-                  source: "/generic/auth.json",
-                  destination: "/Users/runner/.cursor/./auth.json",
-                },
-              ],
-              shellEnvironment: [
-                { name: "CURSOR_API_KEY", source: genericToken },
-                { name: "CUSTOM_ACCOUNT", source: genericToken },
-                { name: "EXACT_BYTES", source: genericValue },
-              ],
-              namespace: { size: "m", prepareCommands: ["./prepare-native.sh"] },
-            },
-            "namespace",
-          ),
-        );
-        expect(prepared.files).toEqual([{ source, destination: ".cursor/auth.json", mode: "600" }]);
-        expect(prepared.environment).toContainEqual({
-          name: "CURSOR_API_KEY",
-          value: "",
-          sensitive: true,
-        });
-        expect(prepared.environment).toContainEqual({
-          name: "CUSTOM_ACCOUNT",
-          value: "selected-account",
-          sensitive: true,
-        });
-        expect(prepared.environment).toContainEqual({
-          name: "EXACT_BYTES",
-          value: "  literal value \n",
-          sensitive: true,
-        });
-        expect(prepared.environment).toContainEqual({
-          name: "CURSOR_CONFIG_DIR",
-          value: "/Users/runner/.cursor",
-          sensitive: false,
-        });
-        expect(prepared.prepareCommands).toEqual(["./prepare-native.sh"]);
-      }),
-  );
-
-  it.effect("lets selected API auth override generic tokens without erasing it", () =>
-    Effect.gen(function* () {
-      const environment = [{ name: "ANTHROPIC_API_KEY", value: "selected-api", sensitive: true }];
-      const settings = decodeSettings({
-        providerInstances: { selected: { driver: "claudeAgent", environment } },
-      });
-      const profile = yield* resolve(settings);
-      const generic = yield* file("generic", "generic-api");
-      const prepared = yield* Effect.promise(() =>
-        resolvePreparation(
-          profile,
-          {
-            shellEnvironment: [{ name: "ANTHROPIC_API_KEY", source: generic }],
-          },
-          "namespace",
-        ),
-      );
-      expect(prepared.environment.filter(({ name }) => name === "ANTHROPIC_API_KEY")).toEqual(
-        environment,
-      );
-    }),
-  );
-
-  it.effect("rejects escaping destinations before transferring anything", () =>
-    Effect.gen(function* () {
-      const settings = decodeSettings({
-        providerInstances: {
-          selected: {
-            driver: "claudeAgent",
-            environment: [{ name: "ANTHROPIC_API_KEY", value: "synthetic", sensitive: true }],
-          },
-        },
-      });
-      const profile = yield* resolve(settings);
-      yield* Effect.promise(() =>
-        expect(
-          resolvePreparation(
-            profile,
-            {
-              homeFiles: [{ source: "/source", destination: "../outside" }],
-            },
-            "namespace",
-          ),
-        ).rejects.toThrow("escapes"),
-      );
-    }),
-  );
-});
-
-it.layer(NodeServices.layer)("shared preparation", (it) => {
-  it.effect(
-    "selects exact repository files and platform commands with explicit empty overrides",
-    () =>
-      Effect.gen(function* () {
-        const source = yield* file("workspace.env");
-        const profile = yield* resolve(
-          decodeSettings({
-            providerInstances: {
-              selected: {
-                driver: "claudeAgent",
-                environment: [{ name: "ANTHROPIC_API_KEY", value: "selected", sensitive: true }],
-              },
-            },
-          }),
-        );
-        const provisioning = {
-          workspaceFiles: [{ source: "/missing-global", destination: "global.env" }],
-          namespace: {
-            size: "m",
-            prepareCommands: ["global-prepare"],
-            verifyCommands: ["global-verify"],
-            artifacts: [{ path: "global", destination: ".cache", sha256: "a".repeat(64) }],
-          },
-          repositories: [
-            {
-              repository: "owner/name",
-              workspaceFiles: [{ source, destination: ".env" }],
-              e2b: { prepareCommands: ["linux-prepare"], verifyCommands: ["linux-verify"] },
-              namespace: { prepareCommands: [], artifacts: [] },
-            },
-          ],
-        };
-        const linux = yield* Effect.promise(() =>
-          resolvePreparation(profile, provisioning, "e2b", "https://github.com/OWNER/NAME.git"),
-        );
-        expect(linux.workspaceFiles).toEqual([{ source, destination: ".env" }]);
-        expect(linux.prepareCommands).toEqual(["linux-prepare"]);
-        expect(linux.verifyCommands).toEqual(["linux-verify"]);
-        expect(linux.environment).toContainEqual({
-          name: "CLAUDE_CONFIG_DIR",
-          value: "/home/user/.claude",
-          sensitive: false,
-        });
-        const mac = yield* Effect.promise(() =>
-          resolvePreparation(profile, provisioning, "namespace", "owner/name"),
-        );
-        expect(mac.prepareCommands).toEqual([]);
-        expect(mac.verifyCommands).toEqual(["global-verify"]);
-        expect(mac.artifacts).toEqual([]);
-        yield* Effect.promise(() =>
-          expect(
-            resolvePreparation(profile, provisioning, "e2b", "owner/namesake"),
-          ).rejects.toThrow("missing-global"),
-        );
-        const empty = yield* Effect.promise(() =>
-          resolvePreparation(
-            profile,
-            { ...provisioning, repositories: [{ repository: "owner/name", workspaceFiles: [] }] },
-            "e2b",
-            "owner/name",
-          ),
-        );
-        expect(empty.workspaceFiles).toEqual([]);
-      }),
-  );
-  it.effect(
-    "uses selected Cursor credentials on Linux and ignores generic Claude files for API auth",
-    () =>
-      Effect.gen(function* () {
-        const source = yield* file(cursorAuthRelative);
-        const profile = yield* resolve(
-          decodeSettings({
-            providerInstances: {
-              selected: { driver: "cursor", enabled: true, environment: cursorEnvironment() },
-            },
-          }),
-        );
-        const prepared = yield* Effect.promise(() =>
-          resolvePreparation(
-            profile,
-            {
-              homeFiles: [{ source: "/missing-generic", destination: ".config/cursor/auth.json" }],
-            },
-            "e2b",
-          ),
-        );
-        expect(prepared.files).toEqual([
-          { source, destination: ".config/cursor/auth.json", mode: "600" },
-        ]);
-        expect(prepared.environment).toContainEqual({
-          name: "CURSOR_CONFIG_DIR",
-          value: "/home/user/.config/cursor",
-          sensitive: false,
-        });
-        const claude = yield* resolve(
-          decodeSettings({
-            providerInstances: {
-              selected: {
-                driver: "claudeAgent",
-                environment: [{ name: "ANTHROPIC_API_KEY", value: "selected", sensitive: true }],
-              },
-            },
-          }),
-        );
-        const api = yield* Effect.promise(() =>
-          resolvePreparation(
-            claude,
-            {
-              homeFiles: [
-                { source: "/missing-other-account", destination: ".claude/.credentials.json" },
-              ],
-            },
-            "e2b",
-          ),
-        );
-        expect(api.files).toEqual([]);
-      }),
   );
 });

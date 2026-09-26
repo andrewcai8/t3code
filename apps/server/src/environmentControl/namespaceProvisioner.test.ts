@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   disposeNamespace,
-  provisionNamespace,
   type NamespaceResource,
   type NamespaceRunner,
 } from "./namespaceProvisioner.ts";
@@ -19,17 +18,6 @@ function runner(): NamespaceRunner & { calls: string[] } {
   return {
     calls,
     resume: vi.fn(async () => ({ resource, upstreamOrigin: "https://retained.example" })),
-    create: vi.fn(async () => {
-      calls.push("create");
-      return resource;
-    }),
-    bootstrap: vi.fn(async () => {
-      calls.push("bootstrap");
-    }),
-    expose: vi.fn(async () => {
-      calls.push("expose");
-      return "https://client.example/pair#token=pairing-token";
-    }),
     destroyInstance: vi.fn(async () => {
       calls.push("destroy");
     }),
@@ -39,31 +27,7 @@ function runner(): NamespaceRunner & { calls: string[] } {
   };
 }
 
-describe("Namespace provisioning seam", () => {
-  it("creates, bootstraps, then exposes the client endpoint", async () => {
-    const r = runner();
-    await expect(
-      provisionNamespace(r, { size: "m", providerInstanceId: "codex" }),
-    ).resolves.toEqual({
-      resource,
-      pairingUrl: "https://client.example/pair#token=pairing-token",
-      projectDir: "/Users/runner/workspaces",
-    });
-    expect(r.calls).toEqual(["create", "bootstrap", "expose"]);
-  });
-
-  it("cleans up a Devbox when bootstrap fails", async () => {
-    const r = runner();
-    vi.spyOn(r, "bootstrap").mockImplementation(async () => {
-      r.calls.push("bootstrap");
-      throw new Error("bootstrap failed");
-    });
-    await expect(provisionNamespace(r, { size: "m", providerInstanceId: "codex" })).rejects.toThrow(
-      "bootstrap failed",
-    );
-    expect(r.calls).toEqual(["create", "bootstrap", "destroy", "expire"]);
-  });
-
+describe("Namespace disposal", () => {
   it("destroys the active instance before expiring the Devbox", async () => {
     const r = runner();
     await disposeNamespace(r, resource);

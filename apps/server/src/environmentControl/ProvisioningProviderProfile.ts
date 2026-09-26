@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off - portable credentials are resolved at the provisioning boundary.
-import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import {
   ClaudeSettings,
@@ -11,17 +10,23 @@ import {
   type ServerSettings,
 } from "@t3tools/contracts";
 import { rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import {
+  codexLoginExpiredMessage,
+  codexLoginExpiring,
+  parseCodexLogin,
+} from "../provider/codexLoginCopy.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { cursorFileCredentialPath } from "../provider/cursorCredentialPath.ts";
-import { canonicalRepository, type Provisioning } from "./config.ts";
+import type { Provisioning } from "./config.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
 
 export class ProvisionRefused extends Schema.TaggedError<ProvisionRefused>()("ProvisionRefused", {
@@ -196,6 +201,18 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
             ? `This Claude account stores its login in the macOS keychain, which can't be copied safely. Run \`${claudeLoginDirectory ? `CLAUDE_CONFIG_DIR=${claudeLoginDirectory} ` : ""}claude setup-token\` and add the token under provisioning.claudeOAuthTokens.${instanceId} in environment-control.json.`
             : "The selected account credentials could not be found on this machine.",
       });
+    // Every environment gets a copy that cannot refresh (`stripCodexRefreshToken`),
+    // so its access token must outlive the run.
+    if (kind === "codex") {
+      const login = parseCodexLogin(
+        yield* fs.readFileString(source).pipe(Effect.orElseSucceed(() => "")),
+      );
+      if (codexLoginExpiring(login, yield* Clock.currentTimeMillis))
+        return yield* new ProvisionRefused({
+          reason: "credentials",
+          message: codexLoginExpiredMessage(instance.displayName ?? instanceId),
+        });
+    }
     return {
       kind,
       instanceId,
@@ -211,7 +228,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
  *
  * Each driver runs on its account with the largest share of usage left once
  * its active sessions are counted (`rankAccounts`), walking down the ranking past any account whose login cannot leave this
- * machine. The requested driver must resolve to some account; every other
+ * machine or would expire before the run could use it. The requested driver must resolve to some account; every other
  * driver comes along when one of its accounts is portable and is left off
  * the guest otherwise, so one unusable login never blocks the chat asked for.
  * `providerInstanceId` names the driver when `agentDriver` is absent and wins
@@ -288,153 +305,3 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
   const profiles: ProvisioningProviderProfiles = [primary, ...companions];
   return profiles;
 });
-
-export async function resolvePreparation(
-  profile: ProvisioningProviderProfile,
-  provisioning: Provisioning,
-  provider: "e2b" | "namespace",
-  repository?: string,
-) {
-  const canonical = repository ? canonicalRepository(repository) : undefined;
-  const selected = canonical
-    ? provisioning.repositories?.find(
-        (entry) => canonicalRepository(entry.repository) === canonical,
-      )
-    : undefined;
-  const setup = selected?.[provider];
-  const defaults = provider === "namespace" ? provisioning.namespace : undefined;
-  const home = provider === "e2b" ? "/home/user" : "/Users/runner";
-  const files = new Map<string, { source: string; destination: string; mode: string }>();
-  for (const file of [
-    ...(provisioning.homeFiles ?? []),
-    ...(profile.credential.kind === "file" ? [profile.credential] : []),
-  ]) {
-    const destination = NodePath.posix.normalize(
-      file.destination.replace(/^\/(?:Users\/runner|home\/user)\//, ""),
-    );
-    if (
-      NodePath.posix.isAbsolute(destination) ||
-      destination === ".." ||
-      destination.startsWith("../") ||
-      destination === "." ||
-      file.destination.includes("\\") ||
-      file.destination.includes("\0") ||
-      file.destination.split("/").includes("..")
-    )
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "A configured home file escapes the workspace home.",
-      });
-    if (files.has(destination) && file !== profile.credential)
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "Configured home file destinations must be unique.",
-      });
-    files.set(destination, { source: file.source, destination, mode: "600" });
-  }
-  if (profile.credential.kind === "file") {
-    const from = profile.credential.destination;
-    const to = guestCredentialDestination(profile.kind, from, provider);
-    const credential = files.get(from);
-    if (to !== from && credential) {
-      files.delete(from);
-      files.set(to, { ...credential, destination: to });
-    }
-  }
-  if (profile.credential.kind === "environment")
-    for (const destination of credentialDestinations[profile.kind]) files.delete(destination);
-  const paths = {
-    HOME: home,
-    PATH: `${home}/.local/bin:${home}/.bun/bin:${provider === "namespace" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`,
-    XDG_CONFIG_HOME: `${home}/.config`,
-    ...(profile.kind === "codex" ? { CODEX_HOME: `${home}/.codex` } : {}),
-    ...(profile.kind === "claudeAgent" ? { CLAUDE_CONFIG_DIR: `${home}/.claude` } : {}),
-    ...(profile.kind === "cursor"
-      ? {
-          AGENT_CLI_CREDENTIAL_STORE: "file",
-          CURSOR_CONFIG_DIR: `${home}/${provider === "e2b" ? ".config/cursor" : ".cursor"}`,
-        }
-      : {}),
-  };
-  const selectedNames = new Set([
-    ...credentialVariables[profile.kind],
-    ...profile.environment.map(({ name }) => name),
-    ...Object.keys(paths),
-  ]);
-  const environment = new Map<string, { name: string; value: string; sensitive: boolean }>();
-  for (const variable of provisioning.shellEnvironment ?? []) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name))
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "A configured environment variable name is invalid.",
-      });
-    if (
-      selectedNames.has(variable.name) ||
-      isForeignCredentialVariable([profile.kind], variable.name)
-    )
-      continue;
-    const value = (
-      await NodeFSP.readFile(variable.source, "utf8").catch(() => {
-        throw new ProvisionRefused({
-          reason: "unconfigured",
-          message: `The source for ${variable.name} could not be read.`,
-        });
-      })
-    ).replace(/\r?\n$/, "");
-    if (!value)
-      throw new ProvisionRefused({
-        reason: "credentials",
-        message: `The source for ${variable.name} is empty.`,
-      });
-    environment.set(variable.name, { name: variable.name, value, sensitive: true });
-  }
-  for (const name of credentialVariables[profile.kind])
-    environment.set(name, { name, value: "", sensitive: true });
-  for (const variable of profile.environment) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name))
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "A selected environment variable name is invalid.",
-      });
-    environment.set(variable.name, variable);
-  }
-
-  for (const [name, value] of Object.entries(paths))
-    environment.set(name, { name, value, sensitive: false });
-  const workspaceFiles = selected?.workspaceFiles ?? provisioning.workspaceFiles ?? [];
-  const destinations = new Set<string>();
-  for (const file of workspaceFiles) {
-    const destination = NodePath.posix.normalize(file.destination);
-    if (
-      NodePath.posix.isAbsolute(destination) ||
-      destination === "." ||
-      file.destination.includes("\\") ||
-      file.destination.includes("\0") ||
-      file.destination.split("/").includes("..") ||
-      destinations.has(destination)
-    )
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "Workspace file destinations must be unique paths within the checkout.",
-      });
-    destinations.add(destination);
-  }
-  for (const file of [...files.values(), ...workspaceFiles]) {
-    await NodeFSP.access(file.source).catch(() => {
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: `Configured file '${file.source}' could not be read.`,
-      });
-    });
-  }
-  return {
-    profile,
-    files: [...files.values()],
-    environment: [...environment.values()],
-    workspaceFiles,
-    prepareCommands: setup?.prepareCommands ?? defaults?.prepareCommands ?? [],
-    verifyCommands: setup?.verifyCommands ?? defaults?.verifyCommands ?? [],
-    artifacts:
-      provider === "namespace" ? (selected?.namespace?.artifacts ?? defaults?.artifacts ?? []) : [],
-  };
-}
