@@ -108,6 +108,14 @@ export function desiredRuntime(
     },
   };
 }
+/**
+ * The branch a box's checkout follows each time it opens: the requested one, or
+ * `HEAD` for the default. A request that pinned an exact revision follows none.
+ */
+export function followedBranch(manifest: ProvisionPreparationManifest): string | undefined {
+  const { repository, branch, sourceRevision } = manifest.input;
+  return repository && !sourceRevision ? (branch ?? "HEAD") : undefined;
+}
 /** The build this manager currently pins for a provider's guests, or null when none is configured. */
 export function configuredRuntimeArtifact(
   config: EnvironmentControlConfig,

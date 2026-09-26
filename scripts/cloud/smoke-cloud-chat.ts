@@ -78,7 +78,7 @@ const CHEAP_MODEL: Record<Agent, RegExp> = {
   claudeAgent: /haiku/i,
   cursor: /^(auto|composer|cheetah)/i,
 };
-const STEPS = ["provision", "turns", "device", "resume", "delete"] as const;
+const STEPS = ["provision", "turns", "device", "resume", "refresh", "delete"] as const;
 type Step = (typeof STEPS)[number];
 
 const PROVISION_TIMEOUT = "20 minutes";
@@ -132,6 +132,14 @@ const decodeFrozenAccounts = Schema.decodeUnknownEffect(
       }),
     }),
   ),
+);
+const GitObject = Schema.Struct({ sha: Schema.String });
+const decodeGitObject = Schema.decodeUnknownEffect(Schema.fromJsonString(GitObject));
+const decodeGitRef = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ object: GitObject })),
+);
+const decodeGitCommit = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ tree: GitObject })),
 );
 const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
 const decodeBearerCache = Schema.decodeUnknownEffect(BearerCache);
@@ -250,6 +258,7 @@ const exchangePairingToken = Effect.fn("exchangePairingToken")(function* (
 interface Markers {
   readonly head: string | null;
   readonly branch: string | null;
+  readonly origin: string | null;
   readonly skill: string | null;
   readonly flavor: string | null;
   readonly models: string | null;
@@ -261,6 +270,7 @@ const readMarker = (reply: string, key: string) =>
 const readMarkers = (reply: string): Markers => ({
   head: readMarker(reply, "HEAD"),
   branch: readMarker(reply, "BRANCH"),
+  origin: readMarker(reply, "ORIGIN"),
   skill: readMarker(reply, "SKILL"),
   flavor: readMarker(reply, "FLAVOR"),
   models: readMarker(reply, "MODELS"),
@@ -496,6 +506,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     projectId: ProjectId | null;
     workspaceRoot: string | null;
     readonly threads: Array<ChildThread>;
+    /** The branch the box follows on GitHub: the default, or the scratch branch under `refresh`. */
+    branch: string | null;
+    /** The box's HEAD: the tip it was prepared at, which resume never moves. */
+    head: string | null;
   } = {
     requestId: null,
     box: null,
@@ -503,14 +517,135 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     projectId: null,
     workspaceRoot: null,
     threads: [],
+    branch: null,
+    head: null,
   };
 
-  const expectedHead = Effect.fn("expectedHead")(function* () {
-    if (created.box?.sourceRevision) return created.box.sourceRevision;
-    const output = yield* spawner
-      .string(ChildProcess.make("git", ["ls-remote", `https://github.com/${options.repo}`, "HEAD"]))
-      .pipe(Effect.orElseSucceed(() => ""));
-    return output.split(/\s/)[0] || null;
+  /** Under `refresh`, a branch made for this run, so the smoke can commit to what the box follows. */
+  const scratch = options.steps.has("refresh")
+    ? `smoke/refresh-${(yield* uuid).slice(0, 8)}`
+    : null;
+
+  /**
+   * `branch` (the default branch when null) and its tip on GitHub now; failing records `check` as
+   * failed.
+   */
+  const remoteTip = Effect.fn("remoteTip")(function* (check: string, branch: string | null) {
+    const output = yield* bounded(
+      spawner.string(
+        ChildProcess.make("git", [
+          "ls-remote",
+          ...(branch ? [] : ["--symref"]),
+          `https://github.com/${options.repo}`,
+          branch ? `refs/heads/${branch}` : "HEAD",
+        ]),
+      ),
+      "git ls-remote",
+    ).pipe(Effect.catch((cause) => fail(check, `git ls-remote: ${describe(cause)}`)));
+    if (branch) {
+      const sha = output.match(/^([0-9a-f]{40})\t/m)?.[1];
+      if (!sha) return yield* fail(check, "unparseable git ls-remote output", { output });
+      return { branch, sha };
+    }
+    const parsed = output.match(/^ref: refs\/heads\/(\S+)\tHEAD\n([0-9a-f]+)\tHEAD$/m);
+    if (!parsed) return yield* fail(check, "unparseable git ls-remote output", { output });
+    return { branch: parsed[1]!, sha: parsed[2]! };
+  });
+
+  /** Calls the GitHub API as the local gh CLI's user; a refusal fails with GitHub's answer. */
+  const gh = <A>(
+    decode: (output: string) => Effect.Effect<A, Schema.SchemaError>,
+    endpoint: string,
+    ...fields: ReadonlyArray<string>
+  ) =>
+    bounded(spawner.string(ChildProcess.make("gh", ["api", endpoint, ...fields])), "gh api").pipe(
+      Effect.flatMap((output) =>
+        decode(output).pipe(
+          Effect.mapError(
+            () => new SmokeFailure({ message: `gh api ${endpoint}: ${output.slice(0, 300)}` }),
+          ),
+        ),
+      ),
+    );
+
+  /** Cleanup deletes the scratch branch only once this run has made it. */
+  let scratchCreated = false;
+  const createScratch = Effect.fn("createScratch")(function* (branch: string) {
+    const base = yield* remoteTip("refresh.branch", null);
+    const made = yield* gh(
+      decodeGitRef,
+      `repos/${options.repo}/git/refs`,
+      "-f",
+      `ref=refs/heads/${branch}`,
+      "-f",
+      `sha=${base.sha}`,
+    ).pipe(Effect.catch((cause) => fail("refresh.branch", describe(cause))));
+    scratchCreated = true;
+    yield* record("refresh.branch", made.object.sha === base.sha, branch, { from: base });
+  });
+
+  /** Fast-forwards the scratch branch by one commit and returns the new tip. */
+  const advanceScratch = Effect.fn("advanceScratch")(function* (branch: string) {
+    const repo = `repos/${options.repo}`;
+    const parent = (yield* gh(decodeGitRef, `${repo}/git/ref/heads/${branch}`)).object.sha;
+    const base = yield* gh(decodeGitCommit, `${repo}/git/commits/${parent}`);
+    const tree = yield* gh(
+      decodeGitObject,
+      `${repo}/git/trees`,
+      "-f",
+      `base_tree=${base.tree.sha}`,
+      "-f",
+      `tree[][path]=${branch}.txt`,
+      "-f",
+      "tree[][mode]=100644",
+      "-f",
+      "tree[][type]=blob",
+      "-f",
+      `tree[][content]=${branch}\n`,
+    );
+    const commit = yield* gh(
+      decodeGitObject,
+      `${repo}/git/commits`,
+      "-f",
+      `message=${branch}: a commit the box must pick up on resume`,
+      "-f",
+      `tree=${tree.sha}`,
+      "-f",
+      `parents[]=${parent}`,
+    );
+    const moved = yield* gh(
+      decodeGitRef,
+      `${repo}/git/refs/heads/${branch}`,
+      "-X",
+      "PATCH",
+      "-f",
+      `sha=${commit.sha}`,
+      "-F",
+      "force=false",
+    );
+    if (moved.object.sha !== commit.sha)
+      return yield* new SmokeFailure({ message: `the branch sits on ${moved.object.sha}` });
+    return { parent, sha: commit.sha };
+  });
+
+  const deleteScratch = Effect.fn("deleteScratch")(function* (branch: string) {
+    const exit = yield* bounded(
+      spawner.exitCode(
+        ChildProcess.make("gh", [
+          "api",
+          "-X",
+          "DELETE",
+          `repos/${options.repo}/git/refs/heads/${branch}`,
+        ]),
+      ),
+      "gh api",
+    ).pipe(Effect.catch((cause) => Effect.succeed(describe(cause))));
+    yield* record(
+      "refresh.cleanup",
+      exit === 0,
+      branch,
+      typeof exit === "string" ? { error: exit } : { exitCode: exit },
+    );
   });
 
   const awaitProvider = Effect.fn("awaitProvider")(function* (
@@ -659,6 +794,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const expectedNonce = (yield* sha256(seed)).slice(0, 16);
     const snippet = [
       `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
+      `o=$(git rev-parse -q --verify refs/remotes/origin/${created.branch} || echo missing)`,
       `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
       `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/references/codex-tools.md" && f=codex-adapted`,
       `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/scripts/github-merge-queue-label.sh" || f=$f-no-overlay`,
@@ -667,7 +803,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         : []),
       `m=missing; test -f "${MODEL_SHEET[agent]}" && m=present; git check-ignore -q "${MODEL_SHEET[agent]}" 2>/dev/null && m=$m-ignored`,
       `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
-      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
+      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_ORIGIN=$o SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
     ].join("; ");
     const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
     const turn = yield* sendTurn(client, agent, label, thread, prompt, {
@@ -680,15 +816,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       expectedNonce,
       markers,
     });
-    const head = yield* expectedHead();
     yield* record(
       `${label}.checkout`,
-      markers.head !== null && markers.head === head,
+      markers.head !== null && markers.head === created.head,
       markers.head,
-      {
-        expectedHead: head,
-        branch: markers.branch,
-      },
+      { expected: created.head, branch: markers.branch, origin: markers.origin },
     );
     yield* record(`${label}.skill`, markers.skill === "present", markers.skill, {
       path: `$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md`,
@@ -699,7 +831,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     yield* record(`${label}.models`, markers.models !== null, markers.models, {
       path: MODEL_SHEET[agent],
     });
-    return turn;
+    return { ...turn, markers };
   });
 
   /**
@@ -826,7 +958,9 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       providerInstanceId: instance.instanceId,
       agentDriver: ProviderDriverKind.make(primary),
       repository: options.repo,
+      ...(scratch ? { branch: scratch } : {}),
     };
+    const tipBefore = yield* remoteTip("provision.sourceRevision", scratch);
     const started = yield* Clock.currentTimeMillis;
     const phases: Array<{ readonly at: number; readonly kind: string; readonly message: string }> =
       [];
@@ -866,6 +1000,15 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       sourceRevision: box.sourceRevision,
       t3Revision: box.t3Revision,
     });
+    const tipAfter = yield* remoteTip("provision.sourceRevision", scratch);
+    created.branch = tipAfter.branch;
+    created.head = box.sourceRevision;
+    yield* record(
+      "provision.sourceRevision",
+      box.sourceRevision !== null && [tipBefore.sha, tipAfter.sha].includes(box.sourceRevision),
+      box.sourceRevision,
+      { tipBefore, tipAfter },
+    );
 
     const attached = yield* bounded(manager["environmentControl.attach"]({ requestId }), "attach");
     if (attached.kind !== "attached")
@@ -1189,6 +1332,12 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const lifecycle = Option.getOrUndefined(listed)?.lifecycle ?? "not paused in time";
     yield* record("resume.paused", lifecycle === "paused", lifecycle);
 
+    const pushed = scratch
+      ? yield* advanceScratch(scratch).pipe(
+          Effect.catch((cause) => fail("refresh.commit", describe(cause))),
+        )
+      : null;
+    if (pushed) yield* record("refresh.commit", true, pushed.sha, { parent: pushed.parent });
     const resumeAt = yield* Clock.currentTimeMillis;
     const resumed = yield* bounded(
       manager["environmentControl.resume"]({ environmentId: box.environmentId }),
@@ -1206,6 +1355,15 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           return yield* fail("resume.reconnect", `child unreachable after ${RECONNECT_TIMEOUT}`);
         yield* record("resume.reconnect", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
         const turn = yield* runTurn(client, thread.agent, "resume.turn", thread);
+        if (pushed) {
+          yield* record("refresh.head", turn.markers.head === created.head, turn.markers.head, {
+            expected: created.head,
+            pushed: pushed.sha,
+          });
+          yield* record("refresh.origin", turn.markers.origin === pushed.sha, turn.markers.origin, {
+            expected: pushed.sha,
+          });
+        }
         if (turn.firstOutputAt !== null)
           yield* record("resume.toFirstOutput", true, seconds(resumeAt, turn.firstOutputAt), {
             from: "resume request",
@@ -1300,6 +1458,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
   if (Option.isSome(bearer)) {
     yield* withRpc(options.origin, bearer.value, (manager) => {
       const steps = Effect.gen(function* () {
+        if (scratch) yield* createScratch(scratch);
         const paired = yield* provision(manager);
         yield* turns(manager, paired);
         if (options.steps.has("resume")) yield* resume(manager);
@@ -1317,6 +1476,9 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         Effect.catchTag("SmokeFailure", () => Effect.void),
         Effect.catch((cause) => record("harness", false, null, describe(cause))),
         Effect.ensuring(cleanup),
+        Effect.ensuring(
+          Effect.suspend(() => (scratch && scratchCreated ? deleteScratch(scratch) : Effect.void)),
+        ),
       );
     }).pipe(
       Effect.catch((cause) => record("manager.connect", false, null, { error: describe(cause) })),
@@ -1391,7 +1553,7 @@ const command = Command.make(
     agents: Flag.String("agents").pipe(Flag.withDefault("codex,claudeAgent,cursor")),
     repo: Flag.String("repo").pipe(Flag.withDefault("andrewcai8/t3code")),
     steps: Flag.String("steps").pipe(
-      Flag.withDefault(STEPS.filter((step) => step !== "device").join(",")),
+      Flag.withDefault(STEPS.filter((step) => step !== "device" && step !== "refresh").join(",")),
     ),
     deviceAgent: Flag.Literals("device-agent", AGENTS).pipe(Flag.withDefault("claudeAgent")),
     managerLog: Flag.String("manager-log").pipe(
@@ -1420,6 +1582,15 @@ const command = Command.make(
       if (steps.has("resume") && !steps.has("turns"))
         return yield* new SmokeFailure({
           message: "--steps: resume continues a thread from turns",
+        });
+      if (steps.has("refresh") && !steps.has("resume"))
+        return yield* new SmokeFailure({
+          message: "--steps: refresh commits while the box is paused, so include resume",
+        });
+      if (steps.has("refresh") && steps.has("device"))
+        return yield* new SmokeFailure({
+          message:
+            "--steps: device and refresh each drive the box's workspace; run them in separate smokes",
         });
       if (steps.has("device") && flags.provider !== "namespace")
         return yield* new SmokeFailure({

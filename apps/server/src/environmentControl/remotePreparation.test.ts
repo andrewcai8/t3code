@@ -10,7 +10,9 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  boundedRunScript,
   prepareRemoteHost,
+  refreshRemoteCheckout,
   remotePreparationScript,
   type RemotePreparationInput,
   type RemotePreparationPort,
@@ -861,4 +863,207 @@ describe("remote preparation artifacts", () => {
       }),
     ).rejects.toThrow("Artifact has no download source");
   });
+});
+
+/** Commits once on the fixture's source repository and returns the new SHA. */
+function advance(repository: string, message: string) {
+  git(
+    repository,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    message,
+  );
+  return git(repository, "rev-parse", "HEAD");
+}
+
+async function following() {
+  const input = await fixture();
+  const source = input.repository!.url;
+  const branch = git(source, "symbolic-ref", "--short", "HEAD");
+  return { input: { ...input, follow: "HEAD" }, source, tracking: `refs/remotes/origin/${branch}` };
+}
+
+describe("remote branch refresh", () => {
+  it("shows every open what was pushed, without moving HEAD or rerunning setup", async () => {
+    const { input: followed, source, tracking } = await following();
+    const input = { ...followed, prepareCommands: ["echo ran >> ../setup-runs"] };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    expect(git(first.projectDir, "rev-parse", tracking)).toBe(first.headRevision);
+    const pushed = advance(source, "pushed while open");
+    const reopened = await prepareRemoteHost(localPort, input);
+    expect([reopened.headRevision, git(first.projectDir, "rev-parse", tracking)]).toEqual([
+      first.headRevision,
+      pushed,
+    ]);
+    const later = advance(source, "pushed while paused");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect([
+      git(first.projectDir, "rev-parse", "HEAD"),
+      git(first.projectDir, "rev-parse", tracking),
+      await NodeFSP.readFile(NodePath.join(input.root, "setup-runs"), "utf8"),
+    ]).toEqual([first.headRevision, later, "ran\nran\n"]);
+  });
+
+  it("fetches past a shallow.lock a killed fetch left behind", async () => {
+    const { input, source, tracking } = await following();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    await NodeFSP.writeFile(NodePath.join(first.projectDir, ".git/shallow.lock"), "");
+    const pushed = advance(source, "pushed");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
+  });
+
+  it("retries a partial clone whose killed fetch left shallow.lock behind", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    await fetch(`http://127.0.0.1:${input.port}/stop`);
+    await localPort.executePython({
+      script:
+        "import fcntl,sys\nwith open(sys.stdin.read(), 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+      stdin: NodePath.join(input.root, "server.lock"),
+    });
+    pids.delete(first.serverPid);
+    const stage = NodePath.join(input.root, "workspace.partial");
+    await NodeFSP.rename(first.projectDir, stage);
+    await NodeFSP.writeFile(NodePath.join(stage, ".git/shallow.lock"), "");
+    const retry = await prepareRemoteHost(localPort, input);
+    pids.add(retry.serverPid);
+    expect(retry.headRevision).toBe(input.repository!.revision);
+  });
+
+  it("still opens and resumes when the remote cannot be reached", async () => {
+    const { input, source } = await following();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    await NodeFSP.rename(source, `${source}-gone`);
+    const reopened = await prepareRemoteHost(localPort, input);
+    expect(reopened.headRevision).toBe(first.headRevision);
+    expect(reopened.refreshError).toMatch(/Preparation command failed/);
+    expect((await refreshRemoteCheckout(localPort, input)).refreshError).toMatch(
+      /Preparation command failed/,
+    );
+  });
+
+  it("fetches only what is new since the checkout, not the whole snapshot", async () => {
+    const { input, source, tracking } = await following();
+    for (let index = 0; index < 40; index++)
+      await NodeFSP.writeFile(NodePath.join(source, `file-${index}.txt`), `${index}\n`);
+    git(source, "add", ".");
+    git(
+      source,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-q",
+      "--amend",
+      "-m",
+      "base",
+    );
+    // A root revision leaves no shallow boundary to stand in for a "have", and
+    // dropping the remote ref matches a box prepared before refs were fetched:
+    // HEAD is then the only commit the server can be told about.
+    const opened = {
+      ...input,
+      repository: { ...input.repository!, revision: git(source, "rev-parse", "HEAD") },
+    };
+    const first = await prepareRemoteHost(localPort, opened);
+    pids.add(first.serverPid);
+    git(first.projectDir, "update-ref", "-d", tracking);
+    // Keep each fetch's pack as received: no unpacking, and no background gc
+    // folding it away while the test reads it.
+    git(first.projectDir, "config", "fetch.unpackLimit", "1");
+    git(first.projectDir, "config", "gc.auto", "0");
+    git(first.projectDir, "config", "maintenance.auto", "false");
+    const packs = async () =>
+      new Set(
+        (await NodeFSP.readdir(NodePath.join(first.projectDir, ".git/objects/pack"))).filter(
+          (name) => name.endsWith(".idx"),
+        ),
+      );
+    // Pushes one file and returns how many objects the refresh received.
+    const pushAndRefresh = async (name: string) => {
+      const before = await packs();
+      await NodeFSP.writeFile(NodePath.join(source, name), `${name}\n`);
+      git(source, "add", ".");
+      const pushed = advance(source, name);
+      expect(await refreshRemoteCheckout(localPort, opened)).toEqual({ refreshError: null });
+      expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
+      return [...(await packs())]
+        .filter((pack) => !before.has(pack))
+        .map(
+          (pack) =>
+            git(first.projectDir, "verify-pack", "-v", `.git/objects/pack/${pack}`)
+              .split("\n")
+              .filter((line) => /^[0-9a-f]{40} /.test(line)).length,
+        );
+    };
+    // Each push is one commit, tree and blob plus the thin pack's base: not the
+    // 42 objects the checkout holds, nor, on the second, the first push again.
+    expect(await pushAndRefresh("first.txt")).toEqual([4]);
+    expect(await pushAndRefresh("second.txt")).toEqual([4]);
+  });
+
+  it("fetches while a thread sits on an unborn orphan branch", async () => {
+    const { input, source, tracking } = await following();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    git(first.projectDir, "switch", "-q", "--orphan", "scratch");
+    const pushed = advance(source, "pushed");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
+  });
+
+  it("stays quiet when the followed branch was deleted upstream", async () => {
+    const { input: followed, source } = await following();
+    git(source, "checkout", "-q", "-b", "feature");
+    const input = { ...followed, follow: "feature" };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    git(source, "checkout", "-q", "-");
+    git(source, "branch", "-D", "feature");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+  });
+});
+
+describe("bounded preparation commands", () => {
+  it("returns on time even when a grandchild outlives the timed-out shell", async () => {
+    const marker = NodePath.join(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-bounded-")),
+      "survived",
+    );
+    roots.push(NodePath.dirname(marker));
+    // The grandchild would touch the marker after 6 s if it outlived the timeout.
+    const result = await localPort.executePython({
+      script: [
+        "import contextlib, json, os, pathlib, subprocess, sys, time",
+        boundedRunScript,
+        "marker = json.load(sys.stdin)",
+        "started = time.monotonic()",
+        "try:",
+        `    run_bounded(['sh', '-c', 'sh -c "sleep 6; touch $0" & sleep 25', marker], None, None, 1)`,
+        "except RuntimeError as error:",
+        "    failure = str(error)",
+        "elapsed = time.monotonic() - started",
+        "time.sleep(7)",
+        "print(json.dumps({'failure': failure, 'onTime': elapsed < 11, 'survived': pathlib.Path(marker).exists()}))",
+      ].join("\n"),
+      stdin: JSON.stringify(marker),
+    });
+    expect(JSON.parse(result.stdout)).toEqual({
+      failure: expect.stringMatching(/timed out/),
+      onTime: true,
+      survived: false,
+    });
+  }, 45_000);
 });

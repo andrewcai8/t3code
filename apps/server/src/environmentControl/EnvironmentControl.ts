@@ -611,6 +611,15 @@ export const layer = Layer.effect(
     const providerRegistry = yield* ProviderRegistry;
     const threadSessions = yield* ProjectionThreadSessionRepository;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
+    // Promise-side provider code logs through the server's logger, not the default one.
+    const runLogged = Effect.runPromiseWith(yield* Effect.context<never>());
+    const logRefresh = (leaseId: string, refreshError: string | null | undefined) =>
+      refreshError
+        ? Effect.logWarning("cloud checkout could not fetch its branch", {
+            leaseId,
+            cause: refreshError,
+          })
+        : Effect.void;
     const resolveAccounts = async <A>(
       resolveFrom: (
         current: ServerSettings,
@@ -666,14 +675,34 @@ export const layer = Layer.effect(
             config.targets,
             {
               ...cloud,
-              // A Mac this manager provisioned resumes through the runtime that
-              // prepared it. Imported leases keep the legacy runner.
-              resume: (input) =>
-                input.namespaceResource &&
-                !importedLeases.has(input.leaseId) &&
-                isProvisionRequestId(input.leaseId)
-                  ? resumeProvisionedNamespace(input.leaseId, input.namespaceProxy)
-                  : cloud.resume(input),
+              // A box this manager provisioned resumes through the runtime that
+              // prepared it, and fetches its followed branch so the thread sees
+              // what was pushed while it slept. Imported leases keep the legacy
+              // runner.
+              resume: async (input) => {
+                try {
+                  if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
+                    return await cloud.resume(input);
+                  if (input.namespaceResource)
+                    return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
+                  const resumed = await cloud.resume(input);
+                  // Best effort: the sandbox is awake and resumed either way.
+                  await refreshProvisionedE2b(input.leaseId, config.e2bApiKey).then(
+                    ({ refreshError }) => runLogged(logRefresh(input.leaseId, refreshError)),
+                    (cause) => runLogged(logRefresh(input.leaseId, String(cause))),
+                  );
+                  return resumed;
+                } catch (cause) {
+                  if (!(cause instanceof ProvisionedSandboxMissing))
+                    await runLogged(
+                      Effect.logError("cloud workspace could not be resumed", {
+                        leaseId: input.leaseId,
+                        cause,
+                      }),
+                    );
+                  throw cause;
+                }
+              },
             },
             leaseRegistry,
           );
@@ -733,15 +762,28 @@ export const layer = Layer.effect(
       const manifest = await manifests.load(requestId);
       const build = await manifests.readRuntime(requestId);
       const { runtime } = await resolveNamespace();
-      return {
-        namespaceProxy: await runtime.resume(
-          operation,
-          operation.state.allocation.resource,
-          manifest,
-          recordedProxy,
-          build,
-        ),
-      };
+      const { namespaceProxy, refreshError } = await runtime.resume(
+        operation,
+        operation.state.allocation.resource,
+        manifest,
+        recordedProxy,
+        build,
+      );
+      await runLogged(logRefresh(requestId, refreshError));
+      return { namespaceProxy };
+    };
+    const refreshProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
+      const operation = await Effect.runPromise(store.get(requestId));
+      if (
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "e2b"
+      )
+        throw new Error("No ready E2B runtime");
+      return makeE2bProvisionRuntime({ apiKey }).refresh(
+        operation,
+        operation.state.allocation.resource.sandboxId,
+        await manifests.load(requestId),
+      );
     };
     const provider = (operation: ProvisionOperation) =>
       Effect.tryPromise(async () => {
@@ -852,6 +894,7 @@ export const layer = Layer.effect(
               }),
           });
         }).pipe(
+          Effect.tap((ready) => logRefresh(operation.request.requestId, ready.refreshError)),
           Effect.ensuring(
             logProvisionPhases(
               {

@@ -28,6 +28,7 @@ import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTimin
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
   desiredRuntime,
+  followedBranch,
   provisionDigest,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
@@ -526,6 +527,7 @@ except FileExistsError:
     }
     await stageArtifact(resource, manifest, desired, guest, record);
     const artifactSources = await resolveArtifactSources(manifest, record);
+    const follow = followedBranch(manifest);
     const stopPrepare = startProvisionPhase(record);
     const ready = await prepareRemoteHost(
       port(resource, manifest),
@@ -537,6 +539,7 @@ except FileExistsError:
           preparationHash: operation.request.preparationHash,
           ...(artifactSources.length ? { artifactSources } : {}),
           ...(runtime ? { runtime: guest } : {}),
+          ...(follow ? { follow } : {}),
         },
         operation.request.agentDriver,
       ),
@@ -685,7 +688,10 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       const ready = await prepare(operation, resource, manifest, undefined, runtime);
       if (ready.environmentId !== operation.state.readiness.environmentId)
         throw new Error("Namespace retained environment identity changed");
-      return publish(operation, resource, manifest, recordedProxy);
+      return {
+        namespaceProxy: await publish(operation, resource, manifest, recordedProxy),
+        refreshError: ready.refreshError ?? null,
+      };
     },
     touch: async (operation: ProvisionOperation, resource: NamespaceResource) => {
       // Only a vanished Devbox record is "missing". A record with no instance

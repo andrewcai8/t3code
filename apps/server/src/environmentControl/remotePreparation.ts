@@ -63,11 +63,19 @@ export interface RemotePreparationInput {
    * existed still recognises its journal.
    */
   readonly runtime?: RemotePreparationInput["artifact"] | undefined;
+  /**
+   * The branch whose tip every open fetches into `refs/remotes/origin/<branch>`,
+   * or `HEAD` for the remote's default branch. HEAD itself never moves after
+   * the first prepare. Excluded from the intent hash like `runtime`.
+   */
+  readonly follow?: string | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
   ...ProvisionReadiness.fields,
   headRevision: ProvisionReadiness.fields.t3Revision,
+  /** Why this open could not fetch the followed branch. */
+  refreshError: Schema.optional(Schema.NullOr(Schema.String)),
   artifactSha256: ProvisionReadiness.fields.preparationHash,
   runtimeVersion: Schema.String,
   serverPid: Schema.Int,
@@ -136,6 +144,57 @@ export async function prepareRemoteHost(
   return ready;
 }
 
+const decodeRefreshed = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ refreshError: Schema.NullOr(Schema.String) })),
+);
+
+/**
+ * Fetches the followed branch into an already prepared box, and nothing else:
+ * the step a resume runs so the thread can see what was pushed while it slept.
+ * Takes the same input as preparation, whose intent it verifies.
+ */
+export async function refreshRemoteCheckout(
+  port: RemotePreparationPort,
+  input: RemotePreparationInput,
+): Promise<{ readonly refreshError: string | null }> {
+  const result = await port.executePython({
+    script: remotePreparationScript,
+    stdin: JSON.stringify({ ...input, refreshOnly: true }),
+  });
+  if (result.exitCode !== 0) {
+    const detail = result.stderr?.trim();
+    throw new Error(detail && detail.length > 0 ? detail : "Remote refresh failed.");
+  }
+  return decodeRefreshed(result.stdout);
+}
+
+/** Runs one preparation command, killing its whole process group on timeout. Needs `contextlib`, `os` and `subprocess`. */
+export const boundedRunScript = String.raw`
+def run_bounded(args, cwd, env, timeout, pass_fds=()):
+    # Its own process group, so a timeout reaches every descendant: one left
+    # behind would hold the output pipes and the preparation lock.
+    child = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=pass_fds, start_new_session=True)
+    try:
+        stdout, stderr = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # SIGTERM first: Git removes its lock files on it, and a SIGKILLed
+        # fetch strands shallow.lock for every later fetch.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, 15)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=10)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, 9)
+        child.wait()
+        child.stdout.close()
+        child.stderr.close()
+        raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
+    if child.returncode != 0:
+        detail = (stderr or stdout or '').strip()
+        raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
+    return stdout.strip()
+`;
+
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
 import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
@@ -202,6 +261,7 @@ def artifact_snapshot(root):
             files[name] = digest(path)
     return files, links
 
+${boundedRunScript}
 def prepare(spec):
     phases = []
     entered = time.monotonic()
@@ -229,24 +289,7 @@ def prepare(spec):
             # A surviving Git or auth child retains the lock if its preparer dies.
             # Close stdin and disable terminal prompts so a private clone cannot
             # wait forever for credentials the sandbox will never type.
-            try:
-                result = subprocess.run(
-                    args,
-                    cwd=cwd,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    pass_fds=(lock.fileno(),),
-                    timeout=timeout,
-                )
-            except subprocess.TimeoutExpired:
-                raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
-            if result.returncode != 0:
-                detail = (result.stderr or result.stdout or '').strip()
-                raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
-            return result.stdout.strip()
+            return run_bounded(args, cwd, env, timeout, (lock.fileno(),))
 
         # Start a command preparation needs only later, then finish() it there.
         def start(args, cwd, env):
@@ -318,7 +361,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
@@ -378,6 +421,45 @@ def prepare(spec):
                 target.chmod(0o600)
                 journal['installedFiles'].append(index)
                 atomic(journal_path, json.dumps(journal))
+        git_env = dict(env)
+        if repository is not None and repository.get('accessToken'):
+            token = repository['accessToken']
+            git_env.update({
+                'GIT_CONFIG_COUNT': '1',
+                'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode(),
+            })
+        def fetch_followed():
+            # Best effort: the thread sees new pushes through the remote ref
+            # and pulls them itself. HEAD is never moved under its work.
+            follow = spec.get('follow')
+            if repository is None or not follow:
+                return None
+            try:
+                if follow == 'HEAD':
+                    default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env, timeout=30), re.M)
+                    if default is None:
+                        raise RuntimeError('The repository does not advertise a default branch')
+                    follow = default.group(1)
+                tracking = 'refs/remotes/origin/' + follow
+                run(['git', 'check-ref-format', tracking], project, env)
+                # Offer HEAD and the last fetched tips, or the server resends
+                # everything since the checkout: the clone made no refs, and
+                # HEAD never moves. An unborn HEAD is left out rather than
+                # failing the fetch. No --depth, which would take shallow.lock.
+                tips = ['--negotiation-tip=refs/remotes/origin/*']
+                with contextlib.suppress(RuntimeError):
+                    tips.append('--negotiation-tip=' + run(['git', 'rev-parse', '--verify', 'HEAD'], project, env))
+                run(['git', '-c', 'protocol.version=2', 'fetch', '--no-tags', *tips, 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=30)
+                return None
+            except Exception as error:
+                # A deleted branch, usually a merged pull request's, has
+                # nothing new to show and is not worth a warning.
+                return None if "couldn't find remote ref" in str(error) else str(error)
+        if spec.get('refreshOnly'):
+            if not project.exists():
+                raise RuntimeError('The workspace has not been prepared')
+            return {'refreshError': fetch_followed()}
         with step('homeFiles'):
             install_files('home')
         # Agent CLIs install into the isolated home, independent of the runtime
@@ -389,14 +471,6 @@ def prepare(spec):
             if not isinstance(install, str) or not install.strip() or '\0' in install:
                 raise RuntimeError('Invalid provider install command')
             installing = start(['sh', '-c', install], home, env)
-        git_env = dict(env)
-        if repository is not None and repository.get('accessToken'):
-            token = repository['accessToken']
-            git_env.update({
-                'GIT_CONFIG_COUNT': '1',
-                'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
-                'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode(),
-            })
         checkout = root / 'workspace.partial'
         fetching = None
         if repository is not None and not project.exists():
@@ -410,6 +484,9 @@ def prepare(spec):
                 run(['git', 'remote', 'add', 'origin', repository['url']], checkout, git_env)
             elif run(['git', 'remote', 'get-url', 'origin'], checkout, env) != repository['url']:
                 raise RuntimeError('Repository identity conflict')
+            # Nothing but this locked preparer touches the partial clone, so a
+            # shallow.lock here was stranded by a fetch killed mid-way.
+            (checkout / '.git' / 'shallow.lock').unlink(missing_ok=True)
             # Shallow, with blobs: checkout needs every blob of this one
             # commit, and fetching them in the pack is about twice as fast
             # as a blobless fetch that backfills them on checkout. It
@@ -540,6 +617,8 @@ def prepare(spec):
                 if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
                     raise RuntimeError('Repository identity conflict')
                 run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
+        with step('repositoryRefresh'):
+            refresh_error = fetch_followed()
         with step('workspaceFiles'):
             install_files('workspace')
         def fetch_artifact(url, target, expected):
@@ -689,7 +768,7 @@ def prepare(spec):
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
         mark('prepareTotal', entered)
-        return {'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
+        return {'refreshError': refresh_error, 'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 
 SUPERVISOR = r"""
 import fcntl,json,os,pathlib,sys
