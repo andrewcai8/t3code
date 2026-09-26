@@ -1517,6 +1517,8 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       status: first.status,
       state: first.body.state,
     });
+    // The run's request freezes the default branch's tip on its first provision call, just after.
+    const tip = yield* remoteTip("automation.webhook", null);
     const again = yield* deliver;
     yield* record(
       "automation.redelivery",
@@ -1622,7 +1624,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     const reply = [...progress.assistant.values()].join("\n");
     const markers = readMarkers(reply);
-    const head = yield* expectedHead();
+    const head = tip.sha;
     const sentText = sent.message?.text ?? "";
     const evidence = {
       threadId,
