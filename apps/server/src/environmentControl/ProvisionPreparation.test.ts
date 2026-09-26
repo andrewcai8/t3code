@@ -89,6 +89,24 @@ async function fixture() {
     cleanup: () => NodeFSP.rm(root, { recursive: true, force: true }),
   };
 }
+it("routes accounts for a new request only, so a retry cannot be refused by routing", async () => {
+  const f = await fixture();
+  try {
+    const routings: Array<string> = [];
+    const first = await f.store.freeze(input, f.config, f.resolver, async () => {
+      routings.push("routed");
+      return [f.profile];
+    });
+    const retry = await f.store.freeze(input, f.config, f.resolver, async () => {
+      routings.push("routed again");
+      throw new Error("The pinned account is over its usage limit.");
+    });
+    expect([routings, retry]).toEqual([["routed"], first]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("freezes source, template, artifact and credentials across manager restart and rejects changed intent", async () => {
   const f = await fixture();
   try {

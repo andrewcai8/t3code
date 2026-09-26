@@ -932,27 +932,28 @@ export const layer = Layer.effect(
             // rather than paths this module guesses from driver names.
             // Each driver runs on the account with the most usage left per
             // active session right now. The manifest freezes that choice, so
-            // a retry keeps it.
-            await resolveAccounts((current) =>
-              Effect.all({
-                providers: providerRegistry.getProviders,
-                now: Clock.currentTimeMillis,
-                load: readAccountLoad(leaseRegistry, threadSessions),
-              }).pipe(
-                Effect.flatMap((usage) =>
-                  resolveProvisioningProfiles(
-                    current,
-                    {
-                      providerInstanceId: input.providerInstanceId,
-                      ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
-                      pinAccount: input.pinAccount,
-                    },
-                    manager.config.provisioning?.claudeOAuthTokens,
-                    usage,
+            // a retry keeps it without routing again.
+            () =>
+              resolveAccounts((current) =>
+                Effect.all({
+                  providers: providerRegistry.getProviders,
+                  now: Clock.currentTimeMillis,
+                  load: readAccountLoad(leaseRegistry, threadSessions),
+                }).pipe(
+                  Effect.flatMap((usage) =>
+                    resolveProvisioningProfiles(
+                      current,
+                      {
+                        providerInstanceId: input.providerInstanceId,
+                        ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
+                        pinAccount: input.pinAccount,
+                      },
+                      manager.config.provisioning?.claudeOAuthTokens,
+                      usage,
+                    ),
                   ),
                 ),
               ),
-            ),
           );
         },
         load: manifests.load,
