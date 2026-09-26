@@ -10,6 +10,7 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  checkoutDecisionScript,
   prepareRemoteHost,
   remotePreparationScript,
   type RemotePreparationInput,
@@ -860,5 +861,116 @@ describe("remote preparation artifacts", () => {
         ],
       }),
     ).rejects.toThrow("Artifact has no download source");
+  });
+});
+
+/** Commits one new file on `branch` of the fixture's source repository and returns its SHA. */
+function advance(repository: string, name: string, branch?: string) {
+  if (branch) git(repository, "checkout", "-q", branch);
+  NodeChildProcess.execFileSync("git", ["commit", "-q", "--allow-empty", "-m", name], {
+    cwd: repository,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "test@example.invalid",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "test@example.invalid",
+    },
+  });
+  return git(repository, "rev-parse", "HEAD");
+}
+
+async function followed(follow = "HEAD") {
+  const input = await fixture();
+  const source = input.repository!.url;
+  return {
+    input: { ...input, follow },
+    source,
+    branch: git(source, "symbolic-ref", "--short", "HEAD"),
+  };
+}
+
+describe("checkout refresh", () => {
+  it("decides from where preparation placed HEAD, not from the frozen revision", async () => {
+    const cases = [
+      ["a", "a", true, false, "a"],
+      ["a", "a", true, false, "b"],
+      ["a", "a", true, true, "b"],
+      ["a", "c", true, false, "b"],
+      ["a", "a", false, false, "b"],
+      ["a", "c", true, false, "a"],
+      ["a", "b", true, false, "b"],
+    ];
+    const result = await localPort.executePython({
+      script: `${checkoutDecisionScript}\nimport json, sys\nprint(json.dumps([checkout_action(*case) for case in json.load(sys.stdin)]))`,
+      stdin: JSON.stringify(cases),
+    });
+    expect(JSON.parse(result.stdout)).toEqual([
+      "up-to-date",
+      "fast-forward",
+      "behind",
+      "behind",
+      "behind",
+      "up-to-date",
+      "up-to-date",
+    ]);
+  });
+
+  it("opens a box at the tip even when its revision was frozen before a later push", async () => {
+    const { input, source, branch } = await followed();
+    const tip = advance(source, "pushed after submit");
+    const ready = await prepareRemoteHost(localPort, input);
+    pids.add(ready.serverPid);
+    expect(ready.sourceRevision).toBe(input.repository!.revision);
+    expect(ready.headRevision).toBe(tip);
+    expect(git(ready.projectDir, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(tip);
+  });
+
+  it("moves an untouched box to the new tip every time it reopens", async () => {
+    const { input, source } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const second = advance(source, "second");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(second);
+    const third = advance(source, "third");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(third);
+  });
+
+  it.each([
+    ["a commit", (dir: string) => advance(dir, "fix")],
+    ["an edit", (dir: string) => NodeFSP.writeFile(NodePath.join(dir, "README.md"), "edited\n")],
+    ["a new file", (dir: string) => NodeFSP.writeFile(NodePath.join(dir, "notes.txt"), "draft\n")],
+    ["a branch", (dir: string) => git(dir, "checkout", "-q", "-b", "thread")],
+  ])("leaves %s where the thread put it and shows the tip beside it", async (_, touch) => {
+    const { input, source, branch } = await followed();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    await touch(first.projectDir);
+    const head = git(first.projectDir, "rev-parse", "HEAD");
+    const tip = advance(source, "upstream");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(head);
+    expect(git(first.projectDir, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(tip);
+  });
+
+  it("keeps a pinned revision where it was requested", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    advance(input.repository!.url, "upstream");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(
+      input.repository!.revision,
+    );
+  });
+
+  it("follows a named branch and still opens once that branch is deleted", async () => {
+    const { input, source, branch } = await followed("feature");
+    git(source, "checkout", "-q", "-b", "feature");
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const tip = advance(source, "feature work");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
+    advance(source, "default moved on", branch);
+    git(source, "branch", "-D", "feature");
+    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
   });
 });

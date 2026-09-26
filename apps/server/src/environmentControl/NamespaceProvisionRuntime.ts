@@ -28,6 +28,7 @@ import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTimin
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
   desiredRuntime,
+  followedBranch,
   provisionDigest,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
@@ -526,6 +527,7 @@ except FileExistsError:
     }
     await stageArtifact(resource, manifest, desired, guest, record);
     const artifactSources = await resolveArtifactSources(manifest, record);
+    const follow = followedBranch(manifest);
     const stopPrepare = startProvisionPhase(record);
     const ready = await prepareRemoteHost(
       port(resource, manifest),
@@ -537,6 +539,7 @@ except FileExistsError:
           preparationHash: operation.request.preparationHash,
           ...(artifactSources.length ? { artifactSources } : {}),
           ...(runtime ? { runtime: guest } : {}),
+          ...(follow ? { follow } : {}),
         },
         operation.request.agentDriver,
       ),

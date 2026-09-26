@@ -17,6 +17,7 @@ import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
   desiredRuntime,
+  followedBranch,
   provisionDigest,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
@@ -210,6 +211,7 @@ else:
         );
         stopUpload("artifact.upload", { bytes: archive.byteLength });
       }
+      const follow = followedBranch(manifest);
       const stopPrepare = startProvisionPhase(record);
       const result = await prepareRemoteHost(
         transport,
@@ -220,6 +222,7 @@ else:
             requestHash: operation.requestHash,
             preparationHash: operation.request.preparationHash,
             ...(runtime ? { runtime: guest } : {}),
+            ...(follow ? { follow } : {}),
           },
           operation.request.agentDriver,
         ),

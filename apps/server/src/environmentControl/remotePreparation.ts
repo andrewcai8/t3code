@@ -63,6 +63,12 @@ export interface RemotePreparationInput {
    * existed still recognises its journal.
    */
   readonly runtime?: RemotePreparationInput["artifact"] | undefined;
+  /**
+   * The branch the checkout follows every time the box opens, or `HEAD` for
+   * the remote's default branch. Omitted when the request pinned an exact
+   * revision. Excluded from the intent hash like `runtime`.
+   */
+  readonly follow?: string | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
@@ -136,9 +142,24 @@ export async function prepareRemoteHost(
   return ready;
 }
 
+/**
+ * How a box's checkout meets the tip of the branch it follows. HEAD moves only
+ * while it is clean, detached, and still where preparation last placed it, so a
+ * thread's commits, edits and branches stay where the thread left them.
+ */
+export const checkoutDecisionScript = String.raw`
+def checkout_action(placed, head, detached, dirty, tip):
+    if tip in (placed, head):
+        return 'up-to-date'
+    if head == placed and detached and not dirty:
+        return 'fast-forward'
+    return 'behind'
+`;
+
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
 import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
+${checkoutDecisionScript}
 
 INTERPRETER_START = time.monotonic()
 STARTUP = []
@@ -318,7 +339,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
@@ -535,11 +556,44 @@ def prepare(spec):
                     finish(fetching, 600)
                     run(['git', 'checkout', '--detach', repository['revision']], checkout, git_env, timeout=600)
                 os.rename(checkout, project)
+        def refresh_checkout(follow):
+            if follow == 'HEAD':
+                default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env), re.M)
+                if default is None:
+                    raise RuntimeError('The repository does not advertise a default branch')
+                follow = default.group(1)
+            elif not run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + follow], project, git_env):
+                # Deleted upstream, usually once its pull request merged.
+                return
+            tracking = 'refs/remotes/origin/' + follow
+            run(['git', 'check-ref-format', tracking], project, env)
+            run(['git', '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', '+refs/heads/' + follow + ':' + tracking], project, git_env, timeout=600)
+            tip = run(['git', 'rev-parse', tracking], project, env)
+            head = run(['git', 'rev-parse', 'HEAD'], project, env)
+            detached = run(['git', 'rev-parse', '--symbolic-full-name', 'HEAD'], project, env) == 'HEAD'
+            # Files preparation installed into the workspace are not a thread's edits.
+            installed = {str(pathlib.PurePosixPath(file['destination'])) for file in spec['files'] if file['scope'] == 'workspace'}
+            untracked = run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], project, env).split('\0')
+            dirty = bool(run(['git', 'diff', '--name-only', 'HEAD'], project, env)) or any(path and path not in installed for path in untracked)
+            placed = journal.get('checkoutRevision', repository['revision'])
+            if checkout_action(placed, head, detached, dirty, tip) == 'fast-forward':
+                run(['git', 'checkout', '-q', '--detach', tip], project, env, timeout=600)
+                head = tip
+            # Recorded after the move: a crash in between leaves HEAD at the tip,
+            # and the next open records it.
+            if head == tip and placed != tip:
+                journal['checkoutRevision'] = tip
+                atomic(journal_path, json.dumps(journal))
         if repository is not None:
             with step('repositoryVerify'):
                 if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
                     raise RuntimeError('Repository identity conflict')
-                run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
+                # A refreshed shallow checkout cannot show the prepared revision
+                # is its ancestor, only that it was cloned from it.
+                run(['git', 'cat-file', '-e', repository['revision'] + '^{commit}'], project, env)
+            if spec.get('follow'):
+                with step('repositoryRefresh'):
+                    refresh_checkout(spec['follow'])
         with step('workspaceFiles'):
             install_files('workspace')
         def fetch_artifact(url, target, expected):
