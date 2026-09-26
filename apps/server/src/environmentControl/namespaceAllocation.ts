@@ -16,12 +16,11 @@ import * as Schema from "effect/Schema";
 
 import { ProvisionProviderError, type ProvisionProviderPorts } from "./Provisioning.ts";
 
-export const namespaceMacImage = "tahoe-xcode-26.4.x-latest";
+export const namespaceMacImage = "tahoe-slim";
 const namespaceMacImageSelectors = [
   { name: "macos.version", value: "26.x" },
   { name: "macos.purpose", value: "githubrunner" },
-  { name: "image.with", value: "xcode-26.4.x" },
-  { name: "image.with", value: "xcode-beta" },
+  { name: "image.with", value: "xcode-latest" },
 ];
 
 const decodeIdentity = Schema.decodeUnknownSync(
