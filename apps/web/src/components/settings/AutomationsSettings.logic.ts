@@ -127,7 +127,7 @@ export function automationWebhookUrl(managerHttpBaseUrl: string, token: string):
   return base.toString();
 }
 
-/** A run that has not reached `started` or `failed` yet. */
+/** A run still on its way to `started` or `failed`. */
 export function isAutomationRunActive(state: AutomationRunState): boolean {
   return state === "provisioning" || state === "attaching" || state === "starting";
 }

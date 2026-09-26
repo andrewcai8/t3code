@@ -9,21 +9,25 @@ import {
   type ProvisionProvider,
   type ServerConfig,
 } from "@t3tools/contracts";
-import { Link } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { MoreVertical, PlusIcon } from "lucide-react";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
+import { useAutomationHosts } from "../../cloud/automationHosts";
+import { useProvisionedEnvironmentJoin } from "../../connection/useProvisionedEnvironmentJoin";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useVisibleInterval } from "../../hooks/useVisibleInterval";
 import {
   cloudProviderEntries,
   deriveProviderInstanceEntries,
   isProviderInstancePickerVisible,
 } from "../../providerInstances";
-import { useEnvironmentHttpBaseUrl, useEnvironments } from "../../state/environments";
+import { useEnvironmentHttpBaseUrl } from "../../state/environments";
 import { formatEnvironmentQueryError, useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
   AlertDialog,
@@ -76,18 +80,15 @@ const RUN_STATE_LABELS: Record<AutomationRun["state"], string> = {
   starting: "Starting the chat",
   started: "Started",
   failed: "Failed",
+  skipped: "Skipped",
 };
-const RUN_HISTORY_LIMIT = 5;
 const RUN_POLL_MS = 5_000;
 
 const browserTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export function AutomationsSettings() {
-  const { environments } = useEnvironments();
-  const managers = environments.flatMap(({ environmentId, label, connection, serverConfig }) =>
-    connection.phase === "connected" && serverConfig?.environmentControl === true
-      ? [{ environmentId, label, serverConfig }]
-      : [],
+  const managers = useAutomationHosts().flatMap(({ environmentId, label, serverConfig }) =>
+    serverConfig ? [{ environmentId, label, serverConfig }] : [],
   );
   return (
     <SettingsPageContainer>
@@ -325,14 +326,41 @@ function AutomationRuns({
       input: { id: automationId },
     }),
   );
-  const runs = query.data?.slice(0, RUN_HISTORY_LIMIT) ?? [];
-  const active = query.data?.some((run) => isAutomationRunActive(run.state)) ?? false;
-  const refresh = query.refresh;
-  useEffect(() => {
-    if (!active) return;
-    const timer = globalThis.setInterval(refresh, RUN_POLL_MS);
-    return () => globalThis.clearInterval(timer);
-  }, [active, refresh]);
+  const runs = query.data ?? [];
+  useVisibleInterval(
+    query.refresh,
+    RUN_POLL_MS,
+    runs.some((run) => isAutomationRunActive(run.state)),
+  );
+  const listProvisioned = useAtomQueryRunner(serverEnvironment.provisionedEnvironments, {
+    reportFailure: false,
+    refresh: true,
+  });
+  const { join } = useProvisionedEnvironmentJoin(managerId);
+  const navigate = useNavigate();
+  const [opening, setOpening] = useState<AutomationRun["id"] | null>(null);
+
+  // A run's chat is reachable only once this device has joined its box, as Connections does.
+  async function openChat(run: AutomationRun) {
+    setOpening(run.id);
+    try {
+      const listed = await listProvisioned({ environmentId: managerId, input: {} });
+      if (!AsyncResult.isSuccess(listed)) throw new Error("Could not reach the host. Try again.");
+      const environment = listed.value.find((entry) => entry.requestId === run.requestId);
+      if (!environment) throw new Error("This run's box no longer exists.");
+      const ref = await join(environment);
+      if (ref) await navigate({ to: "/$environmentId/$threadId", params: ref });
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Could not open the chat",
+        description: error instanceof Error ? error.message : "The chat could not be opened.",
+      });
+    } finally {
+      setOpening(null);
+    }
+  }
+
   if (query.error) return <p className="mt-2 text-xs text-destructive">{query.error}</p>;
   if (runs.length === 0) return null;
   return (
@@ -345,18 +373,21 @@ function AutomationRuns({
             <span className={run.state === "failed" ? "text-destructive" : undefined}>
               {RUN_STATE_LABELS[run.state]}
             </span>
-            {run.environmentId !== null && run.threadId !== null ? (
-              <Link
-                className="text-foreground underline-offset-2 hover:underline"
-                to="/$environmentId/$threadId"
-                params={{ environmentId: run.environmentId, threadId: run.threadId }}
+            {run.threadId !== null ? (
+              <button
+                type="button"
+                className="text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+                disabled={opening !== null}
+                onClick={() => void openChat(run)}
               >
-                Open chat
-              </Link>
+                {opening === run.id ? "Opening…" : "Open chat"}
+              </button>
             ) : null}
           </div>
-          {run.state === "failed" && run.error ? (
-            <p className="break-words text-destructive">{run.error}</p>
+          {(run.state === "failed" || run.state === "skipped") && run.error ? (
+            <p className={run.state === "failed" ? "break-words text-destructive" : "break-words"}>
+              {run.error}
+            </p>
           ) : null}
         </li>
       ))}
