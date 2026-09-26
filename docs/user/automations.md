@@ -3,12 +3,13 @@
 An automation runs an agent on a repository without you starting the chat. It pairs a
 repository, a prompt, an agent, and a cloud machine (E2B or a Mac). It runs on a schedule, when
 its webhook link is called, or when you choose **Run now**. Each run opens a normal chat that
-shows in the sidebar of the web and desktop apps connected to that host.
+shows in the sidebar of the web and desktop apps connected to that host. The mobile app does not
+support automations yet.
 
 ## Create an automation
 
-Open **Settings → Automations** and choose **New automation**. The page needs a connected host
-that is set up for cloud chats.
+Open **Settings → Automations** and choose **New automation**. Automations need a connected host
+with cloud environments configured. Other hosts do not offer them.
 
 - **Repository** is `owner/name`. Leave **Branch** empty to use the default branch.
 - **Prompt** is the first message of every run's chat.
@@ -25,7 +26,8 @@ repository, so a prompt can ask the agent to open a pull request.
 
 Turn on **Run on a schedule** and enter a five-field cron expression and an IANA time zone, such as
 `America/New_York`. The time zone defaults to this device's. For example, `0 9 * * 1-5` runs at
-9:00 on weekdays. The smallest unit is a minute.
+9:00 on weekdays. Runs must be at least 15 minutes apart, so a schedule such as `*/5 * * * *` is
+not accepted.
 
 ## Run from a webhook
 
@@ -48,11 +50,19 @@ working and the new one is shown once.
 The link uses the address your client uses to reach the host. A link with a local address such as
 `127.0.0.1` only works on that machine. To call it from another service, open Settings from a
 client connected through the host's network or tunnel address, such as
-[T3 Connect or Tailscale](./remote-access.md).
+[T3 Connect or Tailscale](./remote-access.md). If your client does not know the host's web
+address, it shows the link's path instead. Put the host's address in front of it.
 
 ## Follow runs
 
-Each automation lists its recent runs with what started them, when, and how far they got. A failed
-run shows its error. **Open chat** goes to the run's chat. Web and desktop apps connected to the
-host add new run chats to the sidebar within about a minute. If you remove a run's environment
-from your sidebar, it stays removed.
+Each automation lists its five most recent runs with what started them, when, and how far they
+got. **Open chat** connects to the run's machine, waking it if it is paused, and opens its chat.
+
+A run that fails to start shows its error, and its machine is cleaned up. A run that is triggered
+while the previous one is still starting is skipped, and the history shows it as **Skipped** with
+the reason.
+
+While the web or desktop app is open and visible, it checks the host about once a minute and adds
+the chats of up to 10 of the newest runs started in the last 24 hours to the sidebar. A run's
+machine pauses when idle until you open its chat, after which it stays awake while the app is open.
+If you remove a run's environment from your sidebar, it stays removed.
