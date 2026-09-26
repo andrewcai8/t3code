@@ -150,18 +150,18 @@ it.effect("keeps a config that failed to load failed until the file changes", ()
   Effect.gen(function* () {
     const { control, configPath } = yield* onHost(false);
     const valid = yield* Effect.promise(() => NodeFSP.readFile(configPath, "utf8"));
-    const rewrite = (contents: string, mtime: Date) =>
+    const rewrite = (contents: string, mtimeSeconds: number) =>
       Effect.promise(async () => {
         await NodeFSP.writeFile(configPath, contents);
-        await NodeFSP.utimes(configPath, mtime, mtime);
+        await NodeFSP.utimes(configPath, mtimeSeconds, mtimeSeconds);
       });
-    const broken = new Date("2026-01-01T00:00:00.000Z");
+    const broken = 1_767_225_600;
 
     yield* rewrite("{", broken);
     assert.strictEqual(yield* control.provisionedSkills, undefined);
     yield* rewrite(valid, broken);
     assert.strictEqual(yield* control.provisionedSkills, undefined, "same mtime, cached failure");
-    yield* rewrite(valid, new Date("2026-01-02T00:00:00.000Z"));
+    yield* rewrite(valid, broken + 86_400);
     assert.deepEqual(namesByDriver(yield* control.provisionedSkills)?.claudeAgent, [
       "deploy",
       "poteto-mode",
