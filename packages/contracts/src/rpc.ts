@@ -26,6 +26,7 @@ import {
   AutomationError,
   AutomationIdInput,
   AutomationInput,
+  AutomationListRunsInput,
   AutomationRun,
   AutomationSaveResult,
   AutomationUpdateInput,
@@ -431,6 +432,7 @@ export const WS_METHODS = {
   automationsRunNow: "automations.runNow",
   automationsRotateWebhook: "automations.rotateWebhook",
   automationsListRuns: "automations.listRuns",
+  automationsListJoinable: "automations.listJoinable",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -777,8 +779,13 @@ const AutomationsRotateWebhookRpc = Rpc.make(WS_METHODS.automationsRotateWebhook
   error: AutomationsError,
 });
 const AutomationsListRunsRpc = Rpc.make(WS_METHODS.automationsListRuns, {
-  payload: AutomationIdInput,
+  payload: AutomationListRunsInput,
   success: Schema.Array(AutomationRun),
+  error: AutomationsError,
+});
+const AutomationsListJoinableRpc = Rpc.make(WS_METHODS.automationsListJoinable, {
+  payload: Schema.Struct({}),
+  success: ProvisionedEnvironmentList,
   error: AutomationsError,
 });
 
@@ -1582,6 +1589,7 @@ export const WsRpcGroup = RpcGroup.make(
   AutomationsRunNowRpc,
   AutomationsRotateWebhookRpc,
   AutomationsListRunsRpc,
+  AutomationsListJoinableRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,

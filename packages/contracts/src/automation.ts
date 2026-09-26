@@ -2,7 +2,11 @@ import * as Cron from "effect/Cron";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
-import { ProvisionProvider, ProvisionRequestId } from "./environmentControl.ts";
+import {
+  ProvisionProvider,
+  ProvisionRequestId,
+  type DiscoveredProvisionedEnvironment,
+} from "./environmentControl.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 export const AutomationId = TrimmedNonEmptyString.pipe(Schema.brand("AutomationId"));
@@ -19,16 +23,39 @@ export function parseAutomationCron(cron: string, timeZone: string) {
   return Result.getOrNull(Cron.parse(cron, timeZone));
 }
 
+/** Each run starts a paid machine, so a schedule may fire at most this often. */
+export const AUTOMATION_MIN_INTERVAL_MINUTES = 15;
+
+/**
+ * The shortest gap, in minutes, between two firings. Only the minute and hour fields can put
+ * firings closer than an hour apart, and an empty set is the wildcard. Hour 23 is treated as
+ * next to hour 0, which can only overstate how close firings get.
+ */
+export function automationCronMinGapMinutes(cron: Cron.Cron): number {
+  const minutes =
+    cron.minutes.size === 0
+      ? Array.from({ length: 60 }, (_, minute) => minute)
+      : [...cron.minutes].toSorted((left, right) => left - right);
+  const hours = cron.hours.size === 0 ? null : cron.hours;
+  const adjacentHours = hours === null || [...hours].some((hour) => hours.has((hour + 1) % 24));
+  const gaps = minutes.slice(1).map((minute, index) => minute - minutes[index]!);
+  if (adjacentHours) gaps.push(60 - minutes.at(-1)! + minutes[0]!);
+  return gaps.length === 0 ? Infinity : Math.min(...gaps);
+}
+
 export const AutomationSchedule = Schema.Struct({
   cron: TrimmedNonEmptyString,
   /** IANA zone the cron expression is read in, such as `America/New_York`. */
   timeZone: TrimmedNonEmptyString,
 }).check(
-  Schema.makeFilter(
-    ({ cron, timeZone }) =>
-      parseAutomationCron(cron, timeZone) !== null ||
-      "Use a five-field cron expression and an IANA time zone.",
-  ),
+  Schema.makeFilter(({ cron, timeZone }) => {
+    const parsed = parseAutomationCron(cron, timeZone);
+    if (parsed === null) return "Use a five-field cron expression and an IANA time zone.";
+    return (
+      automationCronMinGapMinutes(parsed) >= AUTOMATION_MIN_INTERVAL_MINUTES ||
+      `Runs must be at least ${AUTOMATION_MIN_INTERVAL_MINUTES} minutes apart.`
+    );
+  }),
 );
 export type AutomationSchedule = typeof AutomationSchedule.Type;
 
@@ -64,7 +91,8 @@ export type AutomationTrigger = typeof AutomationTrigger.Type;
 /**
  * A run moves `provisioning → attaching → starting → started`, or to `failed`
  * from any of those. `environmentId` is known from `starting` on, `threadId`
- * once `started`.
+ * once `started`. A trigger that arrives while another run is still in flight
+ * is recorded as `skipped` and starts nothing.
  */
 export const AutomationRunState = Schema.Literals([
   "provisioning",
@@ -72,6 +100,7 @@ export const AutomationRunState = Schema.Literals([
   "starting",
   "started",
   "failed",
+  "skipped",
 ]);
 export type AutomationRunState = typeof AutomationRunState.Type;
 
@@ -85,6 +114,8 @@ export const AutomationRun = Schema.Struct({
   environmentId: Schema.NullOr(EnvironmentId),
   threadId: Schema.NullOr(ThreadId),
   error: Schema.NullOr(Schema.String),
+  /** When a failed run's machine was disposed. Null while it exists or never did. */
+  disposedAt: Schema.NullOr(IsoDateTime),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -105,6 +136,37 @@ export type AutomationUpdateInput = typeof AutomationUpdateInput.Type;
 
 export const AutomationIdInput = Schema.Struct({ id: AutomationId });
 export type AutomationIdInput = typeof AutomationIdInput.Type;
+
+/** Newest runs first. `limit` defaults to, and is capped at, 50. */
+export const AutomationListRunsInput = Schema.Struct({
+  id: AutomationId,
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),
+});
+export type AutomationListRunsInput = typeof AutomationListRunsInput.Type;
+
+/** How far back, and how many, automation runs a client joins without being asked. */
+export const AUTOMATION_JOIN_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const AUTOMATION_JOIN_LIMIT = 10;
+
+/**
+ * The automation-run environments worth joining unasked: active (a paused box stays paused),
+ * started within the join window, newest first, at most `AUTOMATION_JOIN_LIMIT`. Older or
+ * paused runs stay reachable from run history.
+ */
+export function recentAutomationEnvironments(
+  discovered: ReadonlyArray<DiscoveredProvisionedEnvironment>,
+  now: number,
+): ReadonlyArray<DiscoveredProvisionedEnvironment> {
+  return discovered
+    .filter(
+      (environment) =>
+        environment.automationId !== undefined &&
+        environment.lifecycle === "active" &&
+        Date.parse(environment.createdAt) >= now - AUTOMATION_JOIN_WINDOW_MS,
+    )
+    .toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .slice(0, AUTOMATION_JOIN_LIMIT);
+}
 
 export class AutomationError extends Schema.TaggedError<AutomationError>()("AutomationError", {
   message: Schema.String,

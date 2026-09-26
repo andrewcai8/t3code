@@ -12,4 +12,18 @@ describe("AutomationSchedule", () => {
     expect(decode({ cron: "0 9 * * 1-5", timeZone: "Mars/Olympus" })._tag).toBe("Failure");
     expect(decode({ cron: "61 9 * * *", timeZone: "UTC" })._tag).toBe("Failure");
   });
+
+  it("refuses schedules that fire less than 15 minutes apart", () => {
+    const verdict = (cron: string) => decode({ cron, timeZone: "UTC" })._tag;
+    expect(
+      [
+        "*/15 * * * *",
+        "*/10 * * * *",
+        "0,50 9 * * *",
+        "50 9,10 * * *",
+        "0,50 9-10 * * *",
+        "* 9 * * *",
+      ].map(verdict),
+    ).toEqual(["Success", "Failure", "Success", "Success", "Failure", "Failure"]);
+  });
 });
