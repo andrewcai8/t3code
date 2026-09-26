@@ -290,6 +290,12 @@ function file(scope: "home" | "workspace", destination: string, data: Uint8Array
     contentsBase64: Buffer.from(data).toString("base64"),
   };
 }
+/** Every Codex login a home receives goes out unable to refresh (`stripCodexRefreshToken`). */
+function homeFileData(destination: string, data: Buffer) {
+  return credentialDestinations.codex.includes(relativePath(destination))
+    ? Buffer.from(stripCodexRefreshToken(data.toString("utf8")))
+    : data;
+}
 function submittedFiles(input: EnvironmentProvisionInput) {
   let size = 0;
   return (input.workspaceFiles ?? []).map((item) => {
@@ -538,8 +544,13 @@ export function makeProvisionPreparationStore(stateDir: string) {
       for (const scope of ["home", "workspace"] as const) {
         for (const configured of provisioning[scope === "home" ? "homeFiles" : "workspaceFiles"] ??
           []) {
+          const data = await NodeFSP.readFile(configured.source);
           files.push(
-            file(scope, configured.destination, await NodeFSP.readFile(configured.source)),
+            file(
+              scope,
+              configured.destination,
+              scope === "home" ? homeFileData(configured.destination, data) : data,
+            ),
           );
         }
       }
@@ -579,15 +590,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
             message: "The selected provider account has no credentials on this manager.",
           });
         });
-        files.push(
-          file(
-            "home",
-            destination,
-            profile.kind === "codex"
-              ? Buffer.from(stripCodexRefreshToken(credential.toString("utf8")))
-              : credential,
-          ),
-        );
+        files.push(file("home", destination, homeFileData(destination, credential)));
       }
       const settingsPath = ".t3/userdata/settings.json";
       const settingsIndex = files.findIndex(

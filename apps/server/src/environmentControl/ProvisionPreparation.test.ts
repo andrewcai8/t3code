@@ -344,6 +344,53 @@ it("writes a Codex login whose refresh token the environment cannot redeem", asy
   }
 });
 
+it("strips a Codex login copied as a configured home file when no Codex account is selected", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.writeFile(
+      NodePath.join(f.root, ".codex/auth.json"),
+      '{"tokens":{"id_token":"eyJ.id.sig","access_token":"eyJ.access.sig","refresh_token":"rt_live","account_id":"acct-1"}}',
+    );
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        homeFiles: [
+          { source: NodePath.join(f.root, ".codex/auth.json"), destination: ".codex/auth.json" },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(
+      inputFor("claudeAgent", "claude_work"),
+      config,
+      f.resolver,
+      [
+        {
+          kind: "claudeAgent",
+          instanceId: ProviderInstanceId.make("claude_work"),
+          environment: [{ name: "ANTHROPIC_API_KEY", value: "work-key", sensitive: true }],
+          credential: { kind: "environment" },
+        },
+      ],
+    );
+    expect(
+      JSON.parse(
+        Buffer.from(
+          homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
+          "base64",
+        ).toString(),
+      ).tokens,
+    ).toEqual({
+      id_token: "eyJ.id.sig",
+      access_token: "eyJ.access.sig",
+      refresh_token: "t3-copy-cannot-refresh",
+      account_id: "acct-1",
+    });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("uses staged HTTPS credentials for GitHub SSH dependency URLs", async () => {
   const f = await fixture();
   try {
