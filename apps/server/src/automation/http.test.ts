@@ -4,6 +4,7 @@ import { expect, it } from "@effect/vitest";
 import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
@@ -60,6 +61,15 @@ it.effect(
           body: { error: "not_found" },
         });
         expect((yield* post(webhookToken!, "x".repeat(64 * 1024 + 1))).status).toBe(413);
+        const chunked = yield* client.execute(
+          HttpClientRequest.post(`/api/automations/hooks/${webhookToken}`).pipe(
+            HttpClientRequest.bodyStream(
+              Stream.make(new Uint8Array(40 * 1024), new Uint8Array(40 * 1024)),
+            ),
+          ),
+        );
+        // A streamed body carries no length, so only reading it can find it too long.
+        expect(chunked.status).toBe(413);
 
         const accepted = yield* post(webhookToken!, "deploy 42 finished");
         expect(accepted.status).toBe(202);
