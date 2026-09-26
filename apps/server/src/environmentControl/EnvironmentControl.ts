@@ -651,14 +651,18 @@ export const layer = Layer.effect(
             config.targets,
             {
               ...cloud,
-              // A Mac this manager provisioned resumes through the runtime that
-              // prepared it. Imported leases keep the legacy runner.
-              resume: (input) =>
-                input.namespaceResource &&
-                !importedLeases.has(input.leaseId) &&
-                isProvisionRequestId(input.leaseId)
-                  ? resumeProvisionedNamespace(input.leaseId, input.namespaceProxy)
-                  : cloud.resume(input),
+              // A box this manager provisioned resumes through the runtime that
+              // prepared it, which reconverges it and refreshes its checkout.
+              // Imported leases keep the legacy runner.
+              resume: async (input) => {
+                if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
+                  return cloud.resume(input);
+                if (input.namespaceResource)
+                  return resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
+                const resumed = await cloud.resume(input);
+                await reprepareProvisionedE2b(input.leaseId, config.e2bApiKey);
+                return resumed;
+              },
             },
             leaseRegistry,
           );
@@ -727,6 +731,21 @@ export const layer = Layer.effect(
           build,
         ),
       };
+    };
+    const reprepareProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
+      const operation = await Effect.runPromise(store.get(requestId));
+      if (
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "e2b"
+      )
+        throw new Error("No ready E2B runtime");
+      await makeE2bProvisionRuntime({ apiKey }).prepare(
+        operation,
+        operation.state.allocation.resource.sandboxId,
+        await manifests.load(requestId),
+        undefined,
+        await manifests.readRuntime(requestId),
+      );
     };
     const provider = (operation: ProvisionOperation) =>
       Effect.tryPromise(async () => {
