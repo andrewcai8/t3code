@@ -87,15 +87,19 @@ const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
 const decodeCursorSettings = Schema.decodeUnknownEffect(CursorSettings);
 
-/** Has Codex refresh an account's login on this machine, one refresh or probe at a time. */
-export type RefreshCodexLogin = (instanceId: ProviderInstanceId) => Effect.Effect<void>;
+/** How this server holds its Codex logins (`CodexLoginContext`). */
+export interface CodexLoginOwner {
+  readonly localAgentRuns: boolean;
+  /** Has Codex refresh an account's login here, one refresh or probe at a time. */
+  readonly refresh: (instanceId: ProviderInstanceId) => Effect.Effect<void>;
+}
 
 export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioningProviderProfile")(
   function* (
     settings: ServerSettings,
     input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
     claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
-    refreshCodexLogin?: RefreshCodexLogin,
+    codexLogins?: CodexLoginOwner,
   ) {
     const instanceId = ProviderInstanceId.make(input.providerInstanceId);
     const instance = deriveProviderInstanceConfigMap(settings)[instanceId];
@@ -217,20 +221,19 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
         Effect.orElseSucceed(() => ""),
         Effect.map(parseCodexLogin),
       );
+      const context = {
+        now: yield* Clock.currentTimeMillis,
+        localAgentRuns: codexLogins?.localAgentRuns ?? true,
+      };
       const current = yield* readLogin;
       const login =
-        refreshCodexLogin &&
-        codexLoginRefreshDue(
-          current,
-          yield* Clock.currentTimeMillis,
-          CODEX_LOGIN_COPY_MIN_LIFETIME_MS,
-        )
-          ? yield* refreshCodexLogin(instanceId).pipe(Effect.andThen(readLogin))
+        codexLogins && codexLoginRefreshDue(current, CODEX_LOGIN_COPY_MIN_LIFETIME_MS, context)
+          ? yield* codexLogins.refresh(instanceId).pipe(Effect.andThen(readLogin))
           : current;
-      if (codexLoginExpiring(login, yield* Clock.currentTimeMillis))
+      if (codexLoginExpiring(login, context.now))
         return yield* new ProvisionRefused({
           reason: "credentials",
-          message: codexLoginExpiredMessage(instance.displayName ?? instanceId),
+          message: codexLoginExpiredMessage(instance.displayName ?? instanceId, login, context),
         });
     }
     return {
@@ -274,7 +277,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
     readonly now: number;
     readonly load?: AccountLoad;
   },
-  refreshCodexLogin?: RefreshCodexLogin,
+  codexLogins?: CodexLoginOwner,
 ) {
   const instances = deriveProviderInstanceConfigMap(settings);
   const hint = ProviderInstanceId.make(input.providerInstanceId);
@@ -304,7 +307,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
           settings,
           { providerInstanceId: instanceId, agentDriver: driver },
           claudeOAuthTokens,
-          refreshCodexLogin,
+          codexLogins,
         ),
       );
       if (profile._tag === "Success") return Option.some(profile.success);
@@ -336,7 +339,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
         settings,
         { providerInstanceId: input.providerInstanceId, agentDriver: input.agentDriver },
         claudeOAuthTokens,
-        refreshCodexLogin,
+        codexLogins,
       );
   const companions: ProvisioningProviderProfile[] = [];
   for (const companionDriver of Object.keys(credentialVariables)) {

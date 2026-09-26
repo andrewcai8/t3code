@@ -43,10 +43,12 @@ const input = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
   workspaceFiles: [evidence],
   retentionDeadline: "2099-01-01T00:00:00.000Z",
 });
+/** An API-key login, which has no refresh token and travels unchanged. */
+const fixtureCredential = '{"OPENAI_API_KEY":"sk-private-fixture"}';
 async function fixture() {
   const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "provision-preparation-"));
   await NodeFSP.mkdir(NodePath.join(root, ".codex"));
-  await NodeFSP.writeFile(NodePath.join(root, ".codex/auth.json"), "private-fixture-credential");
+  await NodeFSP.writeFile(NodePath.join(root, ".codex/auth.json"), fixtureCredential);
   await NodeFSP.writeFile(NodePath.join(root, "runtime.tar"), "artifact");
   const config: EnvironmentControlConfig = {
     targets: [],
@@ -142,7 +144,7 @@ it("freezes source, template, artifact and credentials across manager restart an
     expect(
       first.preparation.files.find((file) => file.destination === ".codex/auth.json")
         ?.contentsBase64,
-    ).toBe(Buffer.from("private-fixture-credential").toString("base64"));
+    ).toBe(Buffer.from(fixtureCredential).toString("base64"));
     expect(await NodeFSP.readFile(first.localArtifact.path, "utf8")).toBe("artifact");
     expect((await NodeFSP.stat(NodePath.join(f.root, "provisioning"))).mode & 0o777).toBe(0o700);
     expect(
@@ -297,13 +299,13 @@ it("records each companion's account and keeps it when a retry or resume would r
     const request = inputFor("claudeAgent", "claudeAgent");
     const first = await f.store.freeze(request, f.config, f.resolver, [
       claude,
-      await codex("codex_ac1", "spare-login"),
+      await codex("codex_ac1", '{"OPENAI_API_KEY":"spare-login"}'),
     ]);
     const retry = await makeProvisionPreparationStore(f.root).freeze(
       request,
       f.config,
       f.resolver,
-      [claude, await codex("codex", "exhausted-login")],
+      [claude, await codex("codex", '{"OPENAI_API_KEY":"exhausted-login"}')],
     );
     const resumed = await makeProvisionPreparationStore(f.root).load(request.requestId);
     expect(
@@ -316,9 +318,9 @@ it("records each companion's account and keeps it when a retry or resume would r
         ).toString(),
       ]),
     ).toEqual([
-      ["claude_work", ["codex_ac1"], "spare-login"],
-      ["claude_work", ["codex_ac1"], "spare-login"],
-      ["claude_work", ["codex_ac1"], "spare-login"],
+      ["claude_work", ["codex_ac1"], '{"OPENAI_API_KEY":"spare-login"}'],
+      ["claude_work", ["codex_ac1"], '{"OPENAI_API_KEY":"spare-login"}'],
+      ["claude_work", ["codex_ac1"], '{"OPENAI_API_KEY":"spare-login"}'],
     ]);
   } finally {
     await f.cleanup();
@@ -379,63 +381,110 @@ const hostLogin = (expiresAt: number, refreshToken: string) =>
     },
   });
 const codexTokens = (authJson: string | Uint8Array) => JSON.parse(String(authJson)).tokens;
+const accessTokenExpiry = (accessToken: string) =>
+  new Date(
+    JSON.parse(Buffer.from(accessToken.split(".")[1] ?? "", "base64url").toString()).exp * 1000,
+  ).toISOString();
 
-effectIt.effect(
-  "refreshes a host-owned Codex login due within a day before copying it, stripped",
-  () =>
-    Effect.gen(function* () {
-      const f = yield* Effect.promise(fixture);
-      const now = Date.parse("2026-09-28T14:00:00Z");
-      yield* TestClock.setTime(now);
-      const authPath = NodePath.join(f.root, ".codex/auth.json");
-      const refreshed = hostLogin(now / 1000 + 240 * 3600, "rt_rotated");
-      const refreshedAccounts: Array<string> = [];
-      yield* Effect.gen(function* () {
-        yield* Effect.promise(() =>
-          NodeFSP.writeFile(authPath, hostLogin(now / 1000 + 20 * 3600, "rt_host")),
-        );
-        const settings = decodeServerSettings({
-          providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
-          providerInstances: {
-            codex_host: { driver: "codex", config: { homePath: NodePath.join(f.root, ".codex") } },
-            cursor: { driver: "cursor", enabled: false },
-          },
-        });
-        // Provisioning reads the credential only once routing has returned.
-        const profiles = yield* resolveProvisioningProfiles(
-          settings,
-          { providerInstanceId: "codex_host" },
-          undefined,
-          { providers: [], now },
-          (instanceId) =>
+const hostOwnedCopy = (localAgentRuns: boolean) =>
+  Effect.gen(function* () {
+    const f = yield* Effect.promise(fixture);
+    const now = Date.parse("2026-09-28T14:00:00Z");
+    yield* TestClock.setTime(now);
+    const authPath = NodePath.join(f.root, ".codex/auth.json");
+    const refreshedAccounts: Array<string> = [];
+    return yield* Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(authPath, hostLogin(now / 1000 + 20 * 3600, "rt_host")),
+      );
+      const settings = decodeServerSettings({
+        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+        providerInstances: {
+          codex_host: { driver: "codex", config: { homePath: NodePath.join(f.root, ".codex") } },
+          cursor: { driver: "cursor", enabled: false },
+        },
+      });
+      // Provisioning reads the credential only once routing has returned.
+      const profiles = yield* resolveProvisioningProfiles(
+        settings,
+        { providerInstanceId: "codex_host" },
+        undefined,
+        { providers: [], now },
+        {
+          localAgentRuns,
+          refresh: (instanceId) =>
             Effect.promise(async () => {
               refreshedAccounts.push(instanceId);
-              await NodeFSP.writeFile(authPath, refreshed);
+              await NodeFSP.writeFile(authPath, hostLogin(now / 1000 + 240 * 3600, "rt_rotated"));
             }),
-        );
-        const manifest = yield* Effect.promise(() =>
-          f.store.freeze(
-            { ...input, providerInstanceId: "codex_host" },
-            f.config,
-            f.resolver,
-            profiles,
-          ),
-        );
-        const boxCopy = Buffer.from(
-          homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
-          "base64",
-        );
-        expect(refreshedAccounts).toEqual(["codex_host"]);
-        expect(codexTokens(boxCopy)).toEqual({
-          ...codexTokens(refreshed),
-          refresh_token: "t3-copy-cannot-refresh",
-        });
-        expect(
-          codexTokens(yield* Effect.promise(() => NodeFSP.readFile(authPath))).refresh_token,
-        ).toBe("rt_rotated");
-      }).pipe(Effect.ensuring(Effect.promise(f.cleanup)));
-    }).pipe(Effect.provide(NodeServices.layer)),
+        },
+      );
+      const manifest = yield* Effect.promise(() =>
+        f.store.freeze(
+          { ...input, providerInstanceId: "codex_host" },
+          f.config,
+          f.resolver,
+          profiles,
+        ),
+      );
+      const boxCopy = codexTokens(
+        Buffer.from(homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "", "base64"),
+      );
+      const hostFile = codexTokens(yield* Effect.promise(() => NodeFSP.readFile(authPath)));
+      return {
+        refreshedAccounts,
+        boxCopyExpiresAt: accessTokenExpiry(boxCopy.access_token),
+        boxCopyRefreshToken: boxCopy.refresh_token,
+        hostRefreshToken: hostFile.refresh_token,
+      };
+    }).pipe(Effect.ensuring(Effect.promise(f.cleanup)));
+  }).pipe(Effect.provide(NodeServices.layer));
+
+effectIt.effect(
+  "a host refreshes its own Codex login due within a day before copying it, stripped",
+  () =>
+    Effect.gen(function* () {
+      expect(yield* hostOwnedCopy(false)).toEqual({
+        refreshedAccounts: ["codex_host"],
+        boxCopyExpiresAt: "2026-10-08T14:00:00.000Z",
+        boxCopyRefreshToken: "t3-copy-cannot-refresh",
+        hostRefreshToken: "rt_rotated",
+      });
+    }),
 );
+
+effectIt.effect(
+  "a server that runs agents copies its Codex login as it is and leaves refreshing to Codex",
+  () =>
+    Effect.gen(function* () {
+      expect(yield* hostOwnedCopy(true)).toEqual({
+        refreshedAccounts: [],
+        boxCopyExpiresAt: "2026-09-29T10:00:00.000Z",
+        boxCopyRefreshToken: "t3-copy-cannot-refresh",
+        hostRefreshToken: "rt_host",
+      });
+    }),
+);
+
+it("refuses to copy a Codex login it cannot parse, and never hands it on raw", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.writeFile(
+      NodePath.join(f.root, ".codex/auth.json"),
+      '{"tokens":{"id_token":"eyJ.id.sig","access_token":"eyJ.acc',
+    );
+    await expect(f.store.freeze(input, f.config, f.resolver, [f.profile])).rejects.toThrow(
+      "A Codex login on this manager could not be read, so it was not copied. Try again.",
+    );
+    await expect(
+      NodeFSP.readdir(NodePath.join(f.root, "provisioning")).then((names) =>
+        names.filter((name) => name.endsWith(".json")),
+      ),
+    ).resolves.toEqual([]);
+  } finally {
+    await f.cleanup();
+  }
+});
 
 it("strips a Codex login copied as a configured home file when no Codex account is selected", async () => {
   const f = await fixture();
@@ -793,9 +842,7 @@ it("drops a copied credential file that the cloud token replaces", async () => {
     expect(homeFile(manifest, ".claude/.credentials.json")).toBeUndefined();
     // Only the selected driver's login is replaced. Copying the others is why
     // homeFiles exists.
-    expect(homeFile(manifest, ".codex/auth.json")?.sha256).toBe(
-      provisionDigest("private-fixture-credential"),
-    );
+    expect(homeFile(manifest, ".codex/auth.json")?.sha256).toBe(provisionDigest(fixtureCredential));
     expect(homeFile(manifest, ".gitignore-global")?.sha256).toBe(provisionDigest("node_modules\n"));
   } finally {
     await f.cleanup();

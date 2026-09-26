@@ -6,7 +6,12 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 
-import { packHostState, writeSeedArchive, type HostConfig } from "./pack-host-state.ts";
+import {
+  packHostState,
+  retireCarriedCodexLogins,
+  writeSeedArchive,
+  type HostConfig,
+} from "./pack-host-state.ts";
 
 const fixture = async (
   {
@@ -399,6 +404,50 @@ describe("packHostState", () => {
       assert.equal(carried("codex"), login("rt_host"));
       assert.equal(JSON.parse(carried("codex_uci")).tokens.refresh_token, "t3-copy-cannot-refresh");
       assert.equal(JSON.parse(carried("codex_uci")).tokens.access_token, "eyJ.access.sig");
+
+      const hostLogins = NodePath.join(home, "host-codex");
+      assert.deepEqual(
+        await retireCarriedCodexLogins({
+          directory: hostLogins,
+          codexLogins: packed.codexLogins,
+          label: "2026-09-27.1",
+        }),
+        [NodePath.join(hostLogins, "codex/auth.json.packed-2026-09-27.1")],
+      );
+      assert.deepEqual(await NodeFSP.readdir(NodePath.join(hostLogins, "codex")), [
+        "auth.json.packed-2026-09-27.1",
+      ]);
+      assert.equal(
+        await NodeFSP.readFile(
+          NodePath.join(hostLogins, "codex/auth.json.packed-2026-09-27.1"),
+          "utf8",
+        ),
+        login("rt_host"),
+      );
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to pack a Codex login it cannot parse rather than carry it raw", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pack-host-state-"));
+    try {
+      await NodeFSP.mkdir(NodePath.join(home, ".codex"));
+      await NodeFSP.writeFile(NodePath.join(home, ".codex/auth.json"), '{"tokens":{"access_tok');
+      const packing = packHostState({
+        config: { e2bApiKey: "e2b-key", provisioning: { templateId: "t3-common" } },
+        settings: { providerInstances: { codex: { driver: "codex" } } },
+        host: { homedir: home, platform: "linux", environment: {} },
+        baseDir: "/data/t3",
+        skillsDir: "/data/t3/skills",
+      });
+      assert.equal(
+        await packing.then(
+          () => "packed",
+          (error: Error) => error.message.replace(home, "<home>"),
+        ),
+        "<home>/.codex/auth.json is not a Codex login",
+      );
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });
     }

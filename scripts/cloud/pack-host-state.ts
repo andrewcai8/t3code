@@ -165,10 +165,10 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       : undefined;
     if (codexLogin) codexLogins[codexLogin.account] = hostLogin ? "host" : "copy";
     const data = hostLogin ?? (await NodeFSP.readFile(file.source));
-    files.push({
-      path: file.destination,
-      data: codexLogin && !hostLogin ? stripCodexRefreshToken(data.toString("utf8")) : data,
-    });
+    const copy = codexLogin && !hostLogin ? stripCodexRefreshToken(data.toString("utf8")) : data;
+    // Errors name the file and never its contents.
+    if (copy === undefined) throw new Error(`${file.source} is not a Codex login`);
+    files.push({ path: file.destination, data: copy });
   }
   if (input.namespaceSession) {
     // Errors name the file and never its contents, since a JSON.parse message quotes the input.
@@ -294,6 +294,27 @@ export async function packHostState(input: PackInput): Promise<HostState> {
 }
 
 /**
+ * Renames each host login a packed seed carries to `auth.json.packed-<label>`
+ * and returns the new paths. The host refreshes it from now on, so nothing on
+ * this machine may run Codex on it, and a repack must not carry its spent
+ * refresh token again. A repack without a fresh sign-in falls back to a copy.
+ */
+export async function retireCarriedCodexLogins(input: {
+  readonly directory: string;
+  readonly codexLogins: HostState["codexLogins"];
+  readonly label: string;
+}) {
+  const retired: Array<string> = [];
+  for (const [id, login] of Object.entries(input.codexLogins)) {
+    if (login !== "host") continue;
+    const carried = NodePath.join(input.directory, id, "auth.json");
+    await NodeFSP.rename(carried, `${carried}.packed-${input.label}`);
+    retired.push(`${carried}.packed-${input.label}`);
+  }
+  return retired;
+}
+
+/**
  * Writes `state` as a gzipped tarball whose root is `baseDir`. The config is
  * `environment-control.base.json`: the host adds `provisioning.runtimeArtifacts`
  * at boot, because it pins its own artifacts.
@@ -363,9 +384,10 @@ host adds its own.
 Each Codex account carries the host's own login from
 <codex-host-logins>/<instanceId>/auth.json (default ~/.t3/host-codex), made
 with \`CODEX_HOME=<that dir> codex login --device-auth\`. The host refreshes it,
-so nothing else may run Codex on that directory once it is packed. An account
-without one carries a copy of this machine's login that cannot refresh and
-stops working when its access token expires.`;
+so once the seed is written each carried file is renamed to
+auth.json.packed-<output name>, and the next pack needs a fresh sign-in for
+it. An account without one carries a copy of this machine's login that cannot
+refresh and stops working when its access token expires.`;
 
 if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({
@@ -438,4 +460,10 @@ if (import.meta.main) {
     },
   });
   console.log(`wrote ${NodePath.resolve(values.output)}`);
+  for (const retired of await retireCarriedCodexLogins({
+    directory: values["codex-host-logins"],
+    codexLogins: state.codexLogins,
+    label: NodePath.basename(values.output).replace(/\.(tgz|tar\.gz)$/, ""),
+  }))
+    console.log(`retired the host's Codex login to ${retired}`);
 }

@@ -298,12 +298,26 @@ function file(scope: "home" | "workspace", destination: string, data: Uint8Array
     contentsBase64: Buffer.from(data).toString("base64"),
   };
 }
-/** Every Codex login a home receives goes out unable to refresh (`stripCodexRefreshToken`). */
-function homeFileData(destination: string, data: Buffer) {
-  return credentialDestinations.codex.includes(relativePath(destination))
-    ? Buffer.from(stripCodexRefreshToken(data.toString("utf8")))
-    : data;
+/**
+ * Reads a file a home receives. Every Codex login goes out unable to refresh
+ * (`stripCodexRefreshToken`). Codex rewrites `auth.json` in place, so a read
+ * that catches it mid-write is retried, and a login that still cannot be
+ * parsed is refused rather than handed on raw.
+ */
+async function homeFileData(destination: string, read: () => Promise<Buffer>) {
+  if (!credentialDestinations.codex.includes(relativePath(destination))) return await read();
+  for (let attempt = 0; attempt < CODEX_LOGIN_READ_ATTEMPTS; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, CODEX_LOGIN_READ_RETRY_MS));
+    const stripped = stripCodexRefreshToken((await read()).toString("utf8"));
+    if (stripped !== undefined) return Buffer.from(stripped);
+  }
+  throw new ProvisionRefused({
+    reason: "credentials",
+    message: "A Codex login on this manager could not be read, so it was not copied. Try again.",
+  });
 }
+const CODEX_LOGIN_READ_ATTEMPTS = 3;
+const CODEX_LOGIN_READ_RETRY_MS = 100;
 function submittedFiles(input: EnvironmentProvisionInput) {
   let size = 0;
   return (input.workspaceFiles ?? []).map((item) => {
@@ -557,12 +571,12 @@ export function makeProvisionPreparationStore(stateDir: string) {
       for (const scope of ["home", "workspace"] as const) {
         for (const configured of provisioning[scope === "home" ? "homeFiles" : "workspaceFiles"] ??
           []) {
-          const data = await NodeFSP.readFile(configured.source);
+          const read = () => NodeFSP.readFile(configured.source);
           files.push(
             file(
               scope,
               configured.destination,
-              scope === "home" ? homeFileData(configured.destination, data) : data,
+              scope === "home" ? await homeFileData(configured.destination, read) : await read(),
             ),
           );
         }
@@ -597,13 +611,15 @@ export function makeProvisionPreparationStore(stateDir: string) {
           profile.credential.destination,
           input.provider,
         );
-        const credential = await NodeFSP.readFile(source).catch(() => {
-          throw new ProvisionRefused({
-            reason: "credentials",
-            message: "The selected provider account has no credentials on this manager.",
-          });
-        });
-        files.push(file("home", destination, homeFileData(destination, credential)));
+        const credential = await homeFileData(destination, () =>
+          NodeFSP.readFile(source).catch(() => {
+            throw new ProvisionRefused({
+              reason: "credentials",
+              message: "The selected provider account has no credentials on this manager.",
+            });
+          }),
+        );
+        files.push(file("home", destination, credential));
       }
       const settingsPath = ".t3/userdata/settings.json";
       const settingsIndex = files.findIndex(

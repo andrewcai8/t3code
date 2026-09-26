@@ -39,8 +39,8 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   CODEX_LOGIN_REFRESH_AHEAD_MS,
   codexLoginExpiredMessage,
-  codexLoginExpiring,
   codexLoginRefreshDue,
+  codexLoginSignedOut,
   parseCodexLogin,
 } from "../codexLoginCopy.ts";
 import { ProviderDriverError } from "../Errors.ts";
@@ -184,28 +184,37 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
         "auth.json",
       );
+      const { localAgentRuns } = yield* ServerConfig;
       const readLogin = fileSystem.readFileString(authPath).pipe(
         Effect.orElseSucceed(() => ""),
         Effect.map(parseCodexLogin),
       );
-      const refreshDue = Effect.zipWith(readLogin, Clock.currentTimeMillis, (login, now) =>
-        codexLoginRefreshDue(login, now, CODEX_LOGIN_REFRESH_AHEAD_MS),
+      const readLoginAt = Effect.zipWith(readLogin, Clock.currentTimeMillis, (login, now) => ({
+        login,
+        context: { now, localAgentRuns },
+      }));
+      const refreshDue = readLoginAt.pipe(
+        Effect.map(({ login, context }) =>
+          codexLoginRefreshDue(login, CODEX_LOGIN_REFRESH_AHEAD_MS, context),
+        ),
       );
       // Codex still reports a copied login (`stripCodexRefreshToken`) as signed
-      // in after its access token dies, and no refresh will ever revive it. A
-      // login this machine owns refreshes, so its status stays Codex's own.
-      const markExpiredLoginCopy = (draft: ServerProviderDraft) =>
+      // in after its access token dies, and no refresh will ever revive it. The
+      // same goes for a host's own login whose refresh failed.
+      const markSignedOutLogin = (draft: ServerProviderDraft) =>
         draft.auth.status !== "authenticated"
           ? Effect.succeed(draft)
-          : Effect.zipWith(readLogin, Clock.currentTimeMillis, (login, now): ServerProviderDraft =>
-              !login.refreshable && codexLoginExpiring(login, now)
-                ? {
-                    ...draft,
-                    status: "error",
-                    auth: { status: "unauthenticated" },
-                    message: codexLoginExpiredMessage(displayName ?? instanceId),
-                  }
-                : draft,
+          : readLoginAt.pipe(
+              Effect.map(({ login, context }): ServerProviderDraft =>
+                codexLoginSignedOut(login, context)
+                  ? {
+                      ...draft,
+                      status: "error",
+                      auth: { status: "unauthenticated" },
+                      message: codexLoginExpiredMessage(displayName ?? instanceId, login, context),
+                    }
+                  : draft,
+              ),
             );
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(
@@ -240,7 +249,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
                   refreshLogin,
                 ),
               ),
-              Effect.flatMap(markExpiredLoginCopy),
+              Effect.flatMap(markSignedOutLogin),
               Effect.annotateLogs({ providerInstanceId: instanceId }),
             ),
             modelManifest.current,
@@ -286,11 +295,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             }),
         ),
       );
-      // The status probe refreshes a login this machine owns once it is due
-      // (`codexLoginRefreshDue`), but probes run on an interval only while a
-      // client is watching, and a host mostly runs unwatched. Probes for one
+      // On a host, the status probe refreshes the host's own login once it is
+      // due (`codexLoginRefreshDue`), but probes run on an interval only while
+      // a client is watching, and a host mostly runs unwatched. Probes for one
       // instance never overlap, so this cannot race the usage probe.
-      if (enabled)
+      if (enabled && !localAgentRuns)
         yield* Effect.sleep("1 hour").pipe(
           Effect.andThen(refreshDue),
           Effect.flatMap((due) =>

@@ -3,8 +3,10 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   CODEX_LOGIN_COPY_MIN_LIFETIME_MS,
   CODEX_LOGIN_REFRESH_AHEAD_MS,
+  codexLoginExpiredMessage,
   codexLoginExpiring,
   codexLoginRefreshDue,
+  codexLoginSignedOut,
   parseCodexLogin,
   stripCodexRefreshToken,
 } from "./codexLoginCopy.ts";
@@ -36,11 +38,11 @@ describe("stripCodexRefreshToken", () => {
     });
   });
 
-  it("returns a login with no refresh token, or text Codex cannot load, unchanged", () => {
-    expect(stripCodexRefreshToken('{"OPENAI_API_KEY":"sk-proj-key"}')).toBe(
-      '{"OPENAI_API_KEY":"sk-proj-key"}',
-    );
-    expect(stripCodexRefreshToken("not json")).toBe("not json");
+  it("returns a login with no refresh token unchanged, and nothing for a torn file", () => {
+    expect([
+      stripCodexRefreshToken('{"OPENAI_API_KEY":"sk-proj-key"}'),
+      stripCodexRefreshToken('{"tokens":{"id_token":"eyJ.id.sig","refresh_tok'),
+    ]).toEqual(['{"OPENAI_API_KEY":"sk-proj-key"}', undefined]);
   });
 });
 
@@ -61,7 +63,7 @@ describe("parseCodexLogin", () => {
       refreshable: true,
     });
     expect(
-      parseCodexLogin(stripCodexRefreshToken(login('{"exp":1790600400,"sub":"user-1"}'))),
+      parseCodexLogin(stripCodexRefreshToken(login('{"exp":1790600400,"sub":"user-1"}'))!),
     ).toEqual({ accessTokenExpiresAt: 1790600400000, refreshable: false });
     expect(parseCodexLogin(login('{"sub":"user-1"}'))).toEqual({ refreshable: true });
     expect(parseCodexLogin("not json")).toEqual({ refreshable: true });
@@ -110,7 +112,7 @@ describe("codexLoginRefreshDue", () => {
     },
     {
       login: "is a copy expiring in 20 hours",
-      authJson: stripCodexRefreshToken(login('{"exp":1790676000}')),
+      authJson: stripCodexRefreshToken(login('{"exp":1790676000}'))!,
       ahead: false,
       copy: false,
     },
@@ -121,13 +123,76 @@ describe("codexLoginRefreshDue", () => {
       copy: false,
     },
   ])(
-    "a login that $login refreshes ahead: $ahead, before a copy: $copy",
+    "on a host, a login that $login refreshes ahead: $ahead, before a copy: $copy",
     ({ authJson, ahead, copy }) => {
       const parsed = parseCodexLogin(authJson);
+      const host = { now, localAgentRuns: false };
       expect([
-        codexLoginRefreshDue(parsed, now, CODEX_LOGIN_REFRESH_AHEAD_MS),
-        codexLoginRefreshDue(parsed, now, CODEX_LOGIN_COPY_MIN_LIFETIME_MS),
+        codexLoginRefreshDue(parsed, CODEX_LOGIN_REFRESH_AHEAD_MS, host),
+        codexLoginRefreshDue(parsed, CODEX_LOGIN_COPY_MIN_LIFETIME_MS, host),
       ]).toEqual([ahead, copy]);
     },
   );
+
+  it("never refreshes ahead on a server that runs agents, where Codex keeps its own schedule", () => {
+    const expired = parseCodexLogin(login('{"exp":1790600400}'));
+    expect([
+      codexLoginRefreshDue(expired, CODEX_LOGIN_REFRESH_AHEAD_MS, { now, localAgentRuns: true }),
+      codexLoginRefreshDue(expired, CODEX_LOGIN_REFRESH_AHEAD_MS, { now, localAgentRuns: false }),
+    ]).toEqual([false, true]);
+  });
+});
+
+describe("codexLoginSignedOut", () => {
+  const now = Date.parse("2026-09-28T14:00:00Z");
+  const copy = (payload: string) => stripCodexRefreshToken(login(payload))!;
+  it.each([
+    {
+      login: "a copy with 20 minutes left",
+      authJson: copy('{"exp":1790605200}'),
+      onHost: true,
+      elsewhere: true,
+    },
+    {
+      login: "a copy with 2 hours left",
+      authJson: copy('{"exp":1790611200}'),
+      onHost: false,
+      elsewhere: false,
+    },
+    {
+      login: "an own login past expiry",
+      authJson: login('{"exp":1790600400}'),
+      onHost: true,
+      elsewhere: false,
+    },
+    {
+      login: "an own login with 20 minutes left",
+      authJson: login('{"exp":1790605200}'),
+      onHost: false,
+      elsewhere: false,
+    },
+  ])(
+    "$login is signed out on a host: $onHost, elsewhere: $elsewhere",
+    ({ authJson, onHost, elsewhere }) => {
+      const parsed = parseCodexLogin(authJson);
+      expect([
+        codexLoginSignedOut(parsed, { now, localAgentRuns: false }),
+        codexLoginSignedOut(parsed, { now, localAgentRuns: true }),
+      ]).toEqual([onHost, elsewhere]);
+    },
+  );
+
+  it("tells a host to sign its own login in again, and a copy to be reseeded", () => {
+    const own = parseCodexLogin(login('{"exp":1790600400}'));
+    const copied = parseCodexLogin(copy('{"exp":1790600400}'));
+    expect([
+      codexLoginExpiredMessage("codex_uci", own, { localAgentRuns: false }),
+      codexLoginExpiredMessage("codex_uci", copied, { localAgentRuns: false }),
+      codexLoginExpiredMessage("codex_uci", own, { localAgentRuns: true }),
+    ]).toEqual([
+      "codex_uci's Codex login on this host expired; sign in again with ~/.t3/provisioning/codex-site-login.sh and reseed.",
+      "codex_uci's Codex login expired; sign in on your computer and reseed.",
+      "codex_uci's Codex login expired; sign in on your computer and reseed.",
+    ]);
+  });
 });

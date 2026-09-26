@@ -26,11 +26,16 @@ export const CODEX_LOGIN_REFRESH_AHEAD_MS = 48 * 60 * 60 * 1000;
 /** Provisioning refreshes a login it is about to copy when less than this is left. */
 export const CODEX_LOGIN_COPY_MIN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
-/** Text Codex could not load, or a login without a refresh token, is returned unchanged. */
-export function stripCodexRefreshToken(authJson: string): string {
+/**
+ * A login without a refresh token is returned unchanged. Undefined for text
+ * that is not a JSON object, such as a file read while Codex was rewriting it
+ * (Codex truncates `auth.json` and writes it in place), which must never be
+ * handed on raw.
+ */
+export function stripCodexRefreshToken(authJson: string): string | undefined {
   const auth = parseJson(authJson);
-  if (!isRecord(auth) || !isRecord(auth.tokens) || typeof auth.tokens.refresh_token !== "string")
-    return authJson;
+  if (!isRecord(auth)) return undefined;
+  if (!isRecord(auth.tokens) || typeof auth.tokens.refresh_token !== "string") return authJson;
   return JSON.stringify(
     { ...auth, tokens: { ...auth.tokens, refresh_token: UNREDEEMABLE_CODEX_REFRESH_TOKEN } },
     null,
@@ -59,21 +64,53 @@ export function parseCodexLogin(authJson: string): CodexLogin {
 }
 
 /**
- * Whether this machine should refresh its own login now. A copy never refreshes,
- * and a login with no readable expiry is left to Codex.
+ * Where a login is being judged. Only a server that runs no agents itself (a
+ * host) refreshes ahead of Codex. Elsewhere several T3 servers can share one
+ * Codex home, and two refreshing it at once spend the same refresh token and
+ * sign that login out, so Codex keeps its own schedule there.
  */
-export const codexLoginRefreshDue = (login: CodexLogin, now: number, within: number) =>
+export interface CodexLoginContext {
+  readonly now: number;
+  readonly localAgentRuns: boolean;
+}
+
+/**
+ * Whether this server should refresh its own login now. A copy never
+ * refreshes, and a login with no readable expiry is left to Codex.
+ */
+export const codexLoginRefreshDue = (
+  login: CodexLogin,
+  within: number,
+  { now, localAgentRuns }: CodexLoginContext,
+) =>
+  !localAgentRuns &&
   login.refreshable &&
   login.accessTokenExpiresAt !== undefined &&
   login.accessTokenExpiresAt - now < within;
+
+/**
+ * Whether the provider should report this login as signed out: a copy about
+ * to expire, which nothing can refresh, or a host's own login that is past
+ * expiry because its refresh failed.
+ */
+export const codexLoginSignedOut = (login: CodexLogin, context: CodexLoginContext) =>
+  login.refreshable
+    ? codexLoginRefreshDue(login, 0, context)
+    : codexLoginExpiring(login, context.now);
 
 /** An unknown expiry counts as usable: Codex decides then, not this guess. */
 export const codexLoginExpiring = (login: CodexLogin, now: number) =>
   login.accessTokenExpiresAt !== undefined &&
   login.accessTokenExpiresAt - now < CODEX_LOGIN_MIN_LIFETIME_MS;
 
-export const codexLoginExpiredMessage = (account: string) =>
-  `${account}'s Codex login expired; sign in on your computer and reseed.`;
+export const codexLoginExpiredMessage = (
+  account: string,
+  login: CodexLogin,
+  { localAgentRuns }: Pick<CodexLoginContext, "localAgentRuns">,
+) =>
+  login.refreshable && !localAgentRuns
+    ? `${account}'s Codex login on this host expired; sign in again with ~/.t3/provisioning/codex-site-login.sh and reseed.`
+    : `${account}'s Codex login expired; sign in on your computer and reseed.`;
 
 function parseJson(text: string): unknown {
   try {
