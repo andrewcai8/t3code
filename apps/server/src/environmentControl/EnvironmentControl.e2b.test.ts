@@ -39,7 +39,7 @@ vi.mock("./driver.ts", async (importOriginal) => {
   };
 });
 
-it.effect("reprepares a woken E2B box and reports it resumed only once that succeeds", () =>
+it.effect("reprepares a woken E2B box and keeps its lease active even when that fails", () =>
   Effect.gen(function* () {
     const directory = yield* Effect.acquireRelease(
       Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "e2b-resume-"))),
@@ -109,7 +109,7 @@ it.effect("reprepares a woken E2B box and reports it resumed only once that succ
       artifactSha256: artifact.sha256,
     };
     mocks.wake.mockResolvedValue({});
-    mocks.prepare.mockRejectedValueOnce(new Error("fetch failed")).mockResolvedValue(readiness);
+    mocks.prepare.mockRejectedValue(new Error("server did not start"));
     yield* Effect.gen(function* () {
       const { stateDir } = yield* ServerConfig.ServerConfig;
       const sql = yield* SqlClient.SqlClient;
@@ -148,12 +148,9 @@ it.effect("reprepares a woken E2B box and reports it resumed only once that succ
       const manager = yield* EnvironmentControl;
       const input = { environmentId: readiness.environmentId };
 
-      expect(yield* manager.resume(input)).toMatchObject({ kind: "refused" });
-      expect((yield* Effect.promise(() => registry.findById(requestId)))?.state).toBe("paused");
-
       expect(yield* manager.resume(input)).toEqual({ kind: "resumed" });
       expect((yield* Effect.promise(() => registry.findById(requestId)))?.state).toBe("active");
-      const [prepared, sandboxId, preparedManifest] = mocks.prepare.mock.calls[1]!;
+      const [prepared, sandboxId, preparedManifest] = mocks.prepare.mock.calls[0]!;
       expect([prepared.request.requestId, sandboxId, preparedManifest.input]).toEqual([
         requestId,
         "sandbox-1",

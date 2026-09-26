@@ -396,6 +396,13 @@ export function createEnvironmentControl(
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
           if (cause instanceof ProvisionedSandboxMissing)
             await leaseRegistry?.markMissing(input.leaseId);
+          else
+            await Effect.runPromise(
+              Effect.logError("cloud workspace could not be resumed", {
+                leaseId: input.leaseId,
+                cause,
+              }),
+            );
           return {
             kind: "refused",
             reason: cause instanceof ProvisionedSandboxMissing ? "missing" : "unknown",
@@ -660,7 +667,17 @@ export const layer = Layer.effect(
                 if (input.namespaceResource)
                   return resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
                 const resumed = await cloud.resume(input);
-                await reprepareProvisionedE2b(input.leaseId, config.e2bApiKey);
+                // The sandbox is awake whatever preparation does, so the lease
+                // must say so. A box that cannot reconverge still resumes the
+                // way it did before resume reprepared it.
+                await reprepareProvisionedE2b(input.leaseId, config.e2bApiKey).catch((cause) =>
+                  Effect.runPromise(
+                    Effect.logWarning("E2B box resumed without repreparing", {
+                      leaseId: input.leaseId,
+                      cause,
+                    }),
+                  ),
+                );
                 return resumed;
               },
             },
