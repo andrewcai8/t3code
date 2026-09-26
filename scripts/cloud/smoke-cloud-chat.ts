@@ -568,6 +568,8 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       ),
     );
 
+  /** Cleanup deletes the scratch branch only once this run has made it. */
+  let scratchCreated = false;
   const createScratch = Effect.fn("createScratch")(function* (branch: string) {
     const base = yield* remoteTip("refresh.branch", null);
     const made = yield* gh(
@@ -578,6 +580,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       "-f",
       `sha=${base.sha}`,
     ).pipe(Effect.catch((cause) => fail("refresh.branch", describe(cause))));
+    scratchCreated = true;
     yield* record("refresh.branch", made.object.sha === base.sha, branch, { from: base });
   });
 
@@ -1473,7 +1476,9 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         Effect.catchTag("SmokeFailure", () => Effect.void),
         Effect.catch((cause) => record("harness", false, null, describe(cause))),
         Effect.ensuring(cleanup),
-        Effect.ensuring(scratch ? deleteScratch(scratch) : Effect.void),
+        Effect.ensuring(
+          Effect.suspend(() => (scratch && scratchCreated ? deleteScratch(scratch) : Effect.void)),
+        ),
       );
     }).pipe(
       Effect.catch((cause) => record("manager.connect", false, null, { error: describe(cause) })),
@@ -1581,6 +1586,11 @@ const command = Command.make(
       if (steps.has("refresh") && !steps.has("resume"))
         return yield* new SmokeFailure({
           message: "--steps: refresh commits while the box is paused, so include resume",
+        });
+      if (steps.has("refresh") && steps.has("device"))
+        return yield* new SmokeFailure({
+          message:
+            "--steps: device builds in the workspace, so the box keeps its checkout and refresh cannot pass; run them separately",
         });
       if (steps.has("device") && flags.provider !== "namespace")
         return yield* new SmokeFailure({
