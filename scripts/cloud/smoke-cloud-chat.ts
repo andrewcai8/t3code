@@ -508,8 +508,8 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     readonly threads: Array<ChildThread>;
     /** The branch the box follows on GitHub: the default, or the scratch branch under `refresh`. */
     branch: string | null;
-    /** Tips of that branch seen around provision and resume; a fresh checkout sits on one. */
-    heads: ReadonlyArray<string>;
+    /** The box's HEAD: the tip it was prepared at, which resume never moves. */
+    head: string | null;
   } = {
     requestId: null,
     box: null,
@@ -518,7 +518,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     workspaceRoot: null,
     threads: [],
     branch: null,
-    heads: [],
+    head: null,
   };
 
   /** Under `refresh`, a branch made for this run, so the smoke can commit to what the box follows. */
@@ -814,9 +814,9 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     });
     yield* record(
       `${label}.checkout`,
-      markers.head !== null && created.heads.includes(markers.head),
+      markers.head !== null && markers.head === created.head,
       markers.head,
-      { acceptedHeads: created.heads, branch: markers.branch, origin: markers.origin },
+      { expected: created.head, branch: markers.branch, origin: markers.origin },
     );
     yield* record(`${label}.skill`, markers.skill === "present", markers.skill, {
       path: `$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md`,
@@ -989,10 +989,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     });
     const tipAfter = yield* remoteTip("provision.sourceRevision", scratch);
     created.branch = tipAfter.branch;
-    created.heads = [...new Set([tipBefore.sha, tipAfter.sha])];
+    created.head = box.sourceRevision;
     yield* record(
       "provision.sourceRevision",
-      box.sourceRevision !== null && created.heads.includes(box.sourceRevision),
+      box.sourceRevision !== null && [tipBefore.sha, tipAfter.sha].includes(box.sourceRevision),
       box.sourceRevision,
       { tipBefore, tipAfter },
     );
@@ -1334,12 +1334,8 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     if (resumed.kind !== "resumed") return yield* fail("resume.resumed", resumed.kind, resumed);
     yield* record("resume.resumed", true, seconds(resumeAt, yield* Clock.currentTimeMillis));
     const tipAfter = yield* remoteTip("resume.turn.origin", scratch);
-    const resumeTips = [tipBefore.sha, tipAfter.sha];
+    const resumeTips = new Set([tipBefore.sha, tipAfter.sha]);
     created.branch = tipAfter.branch;
-    // Resume moves an untouched box to the tip; a box the device step dirtied keeps its old HEAD.
-    created.heads = [
-      ...new Set(options.steps.has("device") ? [...created.heads, ...resumeTips] : resumeTips),
-    ];
     yield* withRpc(access.httpBaseUrl, access.bearer, (client) =>
       Effect.gen(function* () {
         const reconnected = yield* client["server.getConfig"]({}).pipe(
@@ -1352,13 +1348,14 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         const turn = yield* runTurn(client, thread.agent, "resume.turn", thread);
         yield* record(
           "resume.turn.origin",
-          turn.markers.origin !== null && resumeTips.includes(turn.markers.origin),
+          turn.markers.origin !== null && resumeTips.has(turn.markers.origin),
           turn.markers.origin,
           { tipBefore, tipAfter },
         );
         if (pushed) {
-          yield* record("refresh.head", turn.markers.head === pushed.sha, turn.markers.head, {
-            expected: pushed.sha,
+          yield* record("refresh.head", turn.markers.head === created.head, turn.markers.head, {
+            expected: created.head,
+            pushed: pushed.sha,
           });
           yield* record("refresh.origin", turn.markers.origin === pushed.sha, turn.markers.origin, {
             expected: pushed.sha,
@@ -1590,7 +1587,7 @@ const command = Command.make(
       if (steps.has("refresh") && steps.has("device"))
         return yield* new SmokeFailure({
           message:
-            "--steps: device builds in the workspace, so the box keeps its checkout and refresh cannot pass; run them separately",
+            "--steps: device and refresh each drive the box's workspace; run them in separate smokes",
         });
       if (steps.has("device") && flags.provider !== "namespace")
         return yield* new SmokeFailure({
