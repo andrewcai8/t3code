@@ -11,9 +11,15 @@ import { packHostState, writeSeedArchive, type HostConfig } from "./pack-host-st
 const fixture = async (
   {
     skills,
+    homeFiles,
+    workspaceFiles,
+    githubToken,
     ...extra
   }: Pick<HostConfig, "namespaceToken"> &
-    Pick<NonNullable<HostConfig["provisioning"]>, "skills"> = {},
+    Pick<
+      NonNullable<HostConfig["provisioning"]>,
+      "skills" | "homeFiles" | "workspaceFiles" | "githubToken"
+    > = {},
   namespaceSession?: string,
   namespaceFederated?: boolean,
 ) => {
@@ -27,6 +33,10 @@ const fixture = async (
   await write("plugins/review-skills/review/SKILL.md", "# Review\n");
   await write("cursor/pstack/skills/why/SKILL.md", "cursor why\n");
   await write("claude/pstack/skills/why/SKILL.md", "claude why\n");
+  await write("provisioning/prepare-megpt-ios.sh", "echo prepare\n");
+  await write("provisioning/api.env", "API_KEY=fixture\n");
+  await write(".claude/.credentials.json", '{"token":"claude"}');
+  await write("gitconfig", "[user]\n");
   if (namespaceSession !== undefined) await write("ns/token.json", namespaceSession);
   const packed = await packHostState({
     config: {
@@ -56,6 +66,23 @@ const fixture = async (
         ],
         claudeOAuthTokens: { claude_work: "sk-ant-oat01-work" },
         shellEnvironment: [{ name: "GH_TOKEN", source: NodePath.join(home, "secrets/github.bin") }],
+        ...(githubToken ? { githubToken } : {}),
+        ...(homeFiles
+          ? {
+              homeFiles: homeFiles.map((file) => ({
+                ...file,
+                source: NodePath.join(home, file.source),
+              })),
+            }
+          : {}),
+        ...(workspaceFiles
+          ? {
+              workspaceFiles: workspaceFiles.map((file) => ({
+                ...file,
+                source: NodePath.join(home, file.source),
+              })),
+            }
+          : {}),
         skills: skills?.map((skill) => ({
           ...skill,
           source: NodePath.join(home, skill.source),
@@ -265,6 +292,63 @@ describe("packHostState", () => {
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });
     }
+  });
+
+  it("carries configured home and workspace files, leaving account logins to the host", async () => {
+    const { home, packed } = await fixture({
+      homeFiles: [
+        { source: "provisioning/prepare-megpt-ios.sh", destination: ".t3/prepare-megpt-ios.sh" },
+        { source: ".claude/.credentials.json", destination: ".claude/.credentials.json" },
+      ],
+      workspaceFiles: [{ source: "provisioning/api.env", destination: "aura-hono-api/.env" }],
+    });
+    try {
+      assert.deepEqual(packed.config.provisioning.homeFiles, [
+        { source: "/data/t3/home-files/0", destination: ".t3/prepare-megpt-ios.sh" },
+      ]);
+      assert.deepEqual(packed.config.provisioning.workspaceFiles, [
+        { source: "/data/t3/workspace-files/0", destination: "aura-hono-api/.env" },
+      ]);
+      assert.deepEqual(
+        packed.skipped.filter(({ id }) => id.startsWith("homeFiles")),
+        [
+          {
+            id: "homeFiles .claude/.credentials.json",
+            reason: "the host installs each account's own login",
+          },
+        ],
+      );
+      const extracted = await extractSeed(home, packed);
+      assert.deepEqual(
+        await Promise.all(
+          ["home-files/0", "workspace-files/0"].map((path) =>
+            NodeFSP.readFile(NodePath.join(extracted, path), "utf8"),
+          ),
+        ),
+        ["echo prepare\n", "API_KEY=fixture\n"],
+      );
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a configured file it cannot read or that provisioning also writes", async () => {
+    const rejection = (options: Parameters<typeof fixture>[0]) =>
+      fixture(options).then(
+        () => "resolved",
+        (error: Error) => error.message.replace(/\S*t3-pack-host-state-[^/]+/, "<home>"),
+      );
+    assert.equal(
+      await rejection({ workspaceFiles: [{ source: "missing.env", destination: "api/.env" }] }),
+      "workspaceFiles source <home>/missing.env could not be read (ENOENT)",
+    );
+    assert.equal(
+      await rejection({
+        githubToken: "gh-token",
+        homeFiles: [{ source: "gitconfig", destination: ".gitconfig" }],
+      }),
+      "homeFiles .gitconfig clashes with the file provisioning writes for githubToken",
+    );
   });
 
   it("writes a seed tarball rooted at the base dir with private files", async () => {

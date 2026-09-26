@@ -21,8 +21,8 @@ import {
   type EnvironmentControlConfig,
 } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
+import { credentialDestinations } from "./credentialDestinations.ts";
 import {
-  credentialDestinations,
   credentialVariables,
   guestCredentialDestination,
   isForeignCredentialVariable,
