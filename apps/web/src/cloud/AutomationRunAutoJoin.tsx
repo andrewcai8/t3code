@@ -7,7 +7,7 @@ import {
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
 import { useProvisionedEnvironmentJoin } from "../connection/useProvisionedEnvironmentJoin";
@@ -33,32 +33,53 @@ const joinFailures = new Map<string, AutomationJoinFailure>();
 export function AutomationRunAutoJoin() {
   const hosts = useAutomationHosts();
   const openedThread = resolveThreadRouteRef(useParams({ strict: false }));
-  const openedEnvironmentId = openedThread?.environmentId;
-  const openedThreadId = openedThread?.threadId;
+  // Read when a join lands, which may be after the user already navigated to its chat.
+  const opened = useRef(openedThread);
+  opened.current = openedThread;
+  const touch = useAtomCommand(serverEnvironment.touchProvisionedEnvironment, {
+    reportFailure: false,
+  });
 
-  useEffect(() => {
-    if (!openedEnvironmentId || !openedThreadId) return;
+  const promoteOpenedChat = useCallback(() => {
+    const route = opened.current;
+    if (!route) return;
     const joined = automationJoins
       .joined()
       .find(
-        (join) => join.environmentId === openedEnvironmentId && join.threadId === openedThreadId,
+        (join) => join.environmentId === route.environmentId && join.threadId === route.threadId,
       );
     if (!joined) return;
     const ref = { environmentId: joined.environmentId, threadId: joined.threadId };
     if (provisionedSandboxFor(ref) !== null) return;
-    rememberProvisionedSandbox(ref, {
+    const lease = {
       leaseId: joined.leaseId,
       sandboxId: joined.sandboxId,
       managerEnvironmentId: joined.managerEnvironmentId,
-    });
-  }, [openedEnvironmentId, openedThreadId]);
+    };
+    rememberProvisionedSandbox(ref, lease);
+    // The heartbeat's next tick can be minutes away; renew now so the box does not idle out.
+    void touch({ environmentId: lease.managerEnvironmentId, input: { leaseId: lease.leaseId } });
+  }, [touch]);
+  const openedEnvironmentId = openedThread?.environmentId;
+  const openedThreadId = openedThread?.threadId;
+  useEffect(promoteOpenedChat, [openedEnvironmentId, openedThreadId, promoteOpenedChat]);
 
   return hosts.map((host) => (
-    <HostAutomationRunAutoJoin key={host.environmentId} managerId={host.environmentId} />
+    <HostAutomationRunAutoJoin
+      key={host.environmentId}
+      managerId={host.environmentId}
+      onJoined={promoteOpenedChat}
+    />
   ));
 }
 
-function HostAutomationRunAutoJoin({ managerId }: { managerId: EnvironmentId }) {
+function HostAutomationRunAutoJoin({
+  managerId,
+  onJoined,
+}: {
+  managerId: EnvironmentId;
+  onJoined: () => void;
+}) {
   const { environments } = useEnvironments();
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const query = useEnvironmentQuery(
@@ -106,6 +127,7 @@ function HostAutomationRunAutoJoin({ managerId }: { managerId: EnvironmentId }) 
             await join(environment, (_, ref, lease) => {
               if (ref === null) return;
               automationJoins.record({ requestId: environment.requestId, ...ref, ...lease });
+              onJoined();
             });
             joinFailures.delete(environment.requestId);
           } catch (error) {
