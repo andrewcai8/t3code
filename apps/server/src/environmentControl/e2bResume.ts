@@ -5,7 +5,7 @@ import { SandboxError } from "e2b";
  * One E2B connect request. Restoring a box paused for hours took 70 s before
  * E2B answered with a placement timeout, so the 15 s API timeout gave up first.
  */
-export const E2B_RESUME_REQUEST_TIMEOUT_MS = 120_000;
+export const E2B_RESUME_REQUEST_TIMEOUT_MS = 80_000;
 const E2B_RESUME_ATTEMPTS = 3;
 const E2B_RESUME_BACKOFF_MS = 2_000;
 
@@ -39,7 +39,8 @@ export function e2bResumeDecision(cause: unknown): E2bResumeDecision {
 
 /**
  * Connects to (and so resumes) an E2B sandbox, retrying placement timeouts.
- * Bounded by 3 attempts of 120 s plus backoff, about 6 minutes.
+ * Bounded by 3 attempts of 80 s plus 6 s of backoff, about 4 minutes, which
+ * stays inside the automation runner's 5 minute attaching step.
  */
 export async function connectResumingE2b<A>(
   sandboxId: string,

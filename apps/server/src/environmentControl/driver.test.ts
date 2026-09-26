@@ -351,7 +351,7 @@ describe("cloud SDK and controller boundary", () => {
       const [value] = await Promise.all([resumed, vi.runAllTimersAsync()]);
       expect(value).toEqual({});
       expect(sdk.connect.mock.calls.map(([, options]) => options.requestTimeoutMs)).toEqual([
-        120_000, 120_000,
+        80_000, 80_000,
       ]);
       expect(retries).toEqual([
         {

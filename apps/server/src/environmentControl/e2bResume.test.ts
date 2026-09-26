@@ -25,7 +25,7 @@ describe("e2bResumeDecision", () => {
     ).toEqual({
       kind: "retry",
       code: "request_timeout",
-      message: "E2B did not answer within 120 s",
+      message: "E2B did not answer within 80 s",
     });
   });
 
