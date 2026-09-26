@@ -3,6 +3,7 @@ import {
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type ChatFileAttachment,
+  defaultInstanceIdForDriver,
   type EnvironmentId,
   isProviderDriverKind,
   ProjectId,
@@ -25,6 +26,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import { createModelSelection } from "@t3tools/shared/model";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
   appendCodexArtifactTemplateUsePrompt,
@@ -554,6 +556,26 @@ export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "sessi
   return {
     threadId: thread.id,
     ...(runningTurnId !== null ? { turnId: runningTurnId } : {}),
+  };
+}
+
+/**
+ * The driver and model a cloud chat's draft carries onto the environment it provisions.
+ * The box keys its one account per driver by the driver's default instance id, not the
+ * manager's account id, so the selection moves to that key. The model is not checked
+ * against the manager's catalog: the box runs the chat and resolves it against its own.
+ */
+export function buildCloudHandoff(input: {
+  agentDriver: ProviderDriverKind;
+  selection: ModelSelection;
+}): { agentDriver: ProviderDriverKind; modelSelection: ModelSelection } {
+  return {
+    agentDriver: input.agentDriver,
+    modelSelection: createModelSelection(
+      defaultInstanceIdForDriver(input.agentDriver),
+      input.selection.model,
+      input.selection.options,
+    ),
   };
 }
 

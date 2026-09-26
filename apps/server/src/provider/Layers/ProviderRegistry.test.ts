@@ -941,6 +941,49 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         assert.deepStrictEqual(afterFailure.models, [authoritativeProvider.models[0]!]);
       });
 
+      it("drops Claude models the installed CLI is too old for once the probe lands", () => {
+        const model = (slug: string) => ({ slug, name: slug, isCustom: false, capabilities: null });
+        const pendingProvider = {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          status: "warning",
+          enabled: true,
+          installed: false,
+          auth: { status: "unknown" },
+          checkedAt: "2026-09-26T00:00:00.000Z",
+          version: null,
+          models: [model("claude-fable-5-1"), model("claude-opus-5"), model("claude-sonnet-5")],
+          slashCommands: [],
+          skills: [],
+        } satisfies ServerProvider;
+        const probedProvider = {
+          ...pendingProvider,
+          status: "ready",
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-09-26T00:01:00.000Z",
+          version: "2.1.200",
+          models: [model("claude-opus-5"), model("claude-sonnet-5")],
+        } satisfies ServerProvider;
+        const failedProvider = {
+          ...probedProvider,
+          status: "error",
+          auth: { status: "unknown" },
+          checkedAt: "2026-09-26T00:02:00.000Z",
+          models: [model("claude-sonnet-5")],
+        } satisfies ServerProvider;
+
+        const afterProbe = mergeProviderSnapshot(pendingProvider, probedProvider);
+        assert.deepStrictEqual(
+          afterProbe.models.map((entry) => entry.slug),
+          ["claude-opus-5", "claude-sonnet-5"],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(afterProbe, failedProvider).models.map((entry) => entry.slug),
+          ["claude-sonnet-5", "claude-opus-5"],
+        );
+      });
+
       describe("Codex model inventories", () => {
         const cachedProvider = {
           instanceId: ProviderInstanceId.make("codex-personal"),

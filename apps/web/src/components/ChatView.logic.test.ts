@@ -21,6 +21,13 @@ import type { Thread, ThreadShell, TurnDiffSummary } from "../types";
 import { deriveProviderInstanceEntries, NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import { createModelSelection } from "@t3tools/shared/model";
+import {
+  DraftId,
+  deriveEffectiveComposerModelState,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import {
   type RightPanelSurface,
   pullRequestSurface,
@@ -35,6 +42,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
   branchMismatchKey,
+  buildCloudHandoff,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
   buildRunningThreadTurnInterruptInput,
@@ -2603,5 +2611,104 @@ describe("needsLoadBalancedPick", () => {
     expect(
       needsLoadBalancedPick({ automatic: false, pickedEnvironmentId: host, candidates: [laptop] }),
     ).toBe(false);
+  });
+});
+
+describe("buildCloudHandoff", () => {
+  const claudeAgent = ProviderDriverKind.make("claudeAgent");
+  const models = (...slugs: ReadonlyArray<string>): ServerProvider["models"] =>
+    slugs.map((slug, index) => ({
+      slug,
+      name: slug,
+      isCustom: false,
+      isDefault: index === 0,
+      capabilities: null,
+    }));
+  const claudeSnapshot = (instanceId: string, slugs: ServerProvider["models"]): ServerProvider => ({
+    driver: claudeAgent,
+    instanceId: ProviderInstanceId.make(instanceId),
+    enabled: true,
+    installed: true,
+    status: "ready",
+    auth: { status: "authenticated" },
+    version: null,
+    checkedAt: now,
+    models: slugs,
+    slashCommands: [],
+    skills: [],
+  });
+  const picked = createModelSelection(ProviderInstanceId.make("claude_work"), "claude-opus-5-5", [
+    { id: "effort", value: "high" },
+    { id: "contextWindow", value: "1m" },
+  ]);
+
+  /** What the box composer sends after the draft is handed off to it. */
+  function sendOnBox() {
+    const draftId = DraftId.make("draft-cloud-handoff");
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(draftId, picked, { explicit: true });
+    const handoff = buildCloudHandoff({ agentDriver: claudeAgent, selection: picked });
+    store.setModelSelection(draftId, handoff.modelSelection);
+
+    const boxProviders = [
+      claudeSnapshot("claudeAgent", models("claude-fable-5-1", "claude-opus-5-5")),
+    ];
+    const draft = useComposerDraftStore.getState().getComposerDraft(draftId);
+    const { selectedProviderEntry } = resolveComposerProviderSelection({
+      entries: deriveProviderInstanceEntries(boxProviders),
+      candidateInstanceIds: [draft?.activeProvider],
+      lockedProvider: null,
+      lockedInstanceId: null,
+    });
+    const selectedInstanceId = selectedProviderEntry?.instanceId ?? null;
+    const state = deriveEffectiveComposerModelState({
+      draft,
+      providers: boxProviders,
+      selectedProvider: selectedProviderEntry?.driverKind ?? claudeAgent,
+      selectedInstanceId,
+      threadModelSelection: null,
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+    return {
+      instanceId: selectedInstanceId,
+      model: state.selectedModel,
+      options: selectedInstanceId ? state.modelOptions?.[selectedInstanceId] : undefined,
+    };
+  }
+
+  afterEach(() => {
+    useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  });
+
+  it.each([
+    ["codex", "codex_work", "codex"],
+    ["cursor", "cursor_work", "cursor"],
+    ["claudeAgent", "claude_work", "claudeAgent"],
+  ])("moves a %s selection from %s to the box's %s instance", (driver, hostId, boxId) => {
+    const selection = createModelSelection(ProviderInstanceId.make(hostId), "some-model", [
+      { id: "effort", value: "high" },
+    ]);
+    expect(
+      buildCloudHandoff({
+        agentDriver: ProviderDriverKind.make(driver),
+        selection,
+      }).modelSelection,
+    ).toEqual({
+      instanceId: boxId,
+      model: "some-model",
+      options: [{ id: "effort", value: "high" }],
+    });
+  });
+
+  it("keeps the model and options picked for a host account on the box's own instance", () => {
+    expect(sendOnBox()).toEqual({
+      instanceId: "claudeAgent",
+      model: "claude-opus-5-5",
+      options: [
+        { id: "effort", value: "high" },
+        { id: "contextWindow", value: "1m" },
+      ],
+    });
   });
 });
