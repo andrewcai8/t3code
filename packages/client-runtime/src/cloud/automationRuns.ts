@@ -72,6 +72,38 @@ export function automationEnvironmentsToJoin(
   );
 }
 
+/** How many joined-but-never-opened runs a device keeps connected at once. */
+const AUTOMATION_UNOPENED_JOIN_CAP = 10;
+
+/**
+ * The joined runs whose saved connection this device should drop before joining `incoming` more
+ * of `managerId`'s runs. Only connections still saved and never opened count: an opened chat is
+ * the user's. Of those, a run of this host that left its joinable list (paused, gone, or aged
+ * out) is dropped, and then the oldest until the new joins fit under the cap. `joins` is newest
+ * last, as `createAutomationJoins` keeps it.
+ */
+export function automationJoinsToDrop(
+  joins: ReadonlyArray<typeof AutomationJoin.Type>,
+  device: {
+    readonly managerId: EnvironmentId;
+    readonly joinable: ReadonlyArray<DiscoveredProvisionedEnvironment>;
+    readonly known: ReadonlySet<EnvironmentId>;
+    readonly opened: ReadonlySet<string>;
+    readonly incoming: number;
+  },
+): ReadonlyArray<typeof AutomationJoin.Type> {
+  const listed = new Set(device.joinable.map((environment) => environment.requestId));
+  const unopened = joins.filter(
+    (join) => device.known.has(join.environmentId) && !device.opened.has(join.requestId),
+  );
+  const left = unopened.filter(
+    (join) => join.managerEnvironmentId === device.managerId && !listed.has(join.requestId),
+  );
+  const kept = unopened.filter((join) => !left.includes(join));
+  const overflow = Math.max(0, kept.length + device.incoming - AUTOMATION_UNOPENED_JOIN_CAP);
+  return [...left, ...kept.slice(0, overflow)];
+}
+
 /** Joins this device made, newest last and bounded. Read on every call so tabs share them. */
 export function createAutomationJoins(storage: ProvisionStorage) {
   function joined(): ReadonlyArray<typeof AutomationJoin.Type> {

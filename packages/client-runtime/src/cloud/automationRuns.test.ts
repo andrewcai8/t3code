@@ -5,6 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   automationEnvironmentsToJoin,
+  automationJoinsToDrop,
   createAutomationJoins,
   recordAutomationJoinFailure,
   type AutomationJoinFailure,
@@ -74,14 +75,35 @@ function memoryStorage(): ProvisionStorage {
   };
 }
 
-const joinOf = (name: string) => ({
+const joinOf = (name: string, managerId = "host") => ({
   requestId: requestIdOf(name),
   environmentId: EnvironmentId.make(`env-${name}`),
   threadId: ThreadId.make(`thread-${name}`),
   leaseId: requestIdOf(name),
   sandboxId: `sandbox-${name}`,
-  managerEnvironmentId: EnvironmentId.make("host"),
+  managerEnvironmentId: EnvironmentId.make(managerId),
 });
+
+const toDrop = (
+  joins: ReadonlyArray<ReturnType<typeof joinOf>>,
+  device: {
+    readonly listed: ReadonlyArray<string>;
+    readonly opened?: ReadonlyArray<string>;
+    readonly removed?: ReadonlyArray<string>;
+    readonly incoming?: number;
+  },
+) =>
+  automationJoinsToDrop(joins, {
+    managerId: EnvironmentId.make("host"),
+    joinable: device.listed.map((name) => run(name)),
+    known: new Set(
+      joins
+        .map((join) => join.environmentId)
+        .filter((id) => !(device.removed ?? []).includes(id.slice("env-".length))),
+    ),
+    opened: new Set((device.opened ?? []).map(requestIdOf)),
+    incoming: device.incoming ?? 0,
+  }).map((join) => join.environmentId);
 
 describe("automationEnvironmentsToJoin", () => {
   it("joins recent, active runs whose chat exists and that this device does not know", () => {
@@ -151,6 +173,35 @@ describe("automationEnvironmentsToJoin", () => {
       ],
     ]);
     expect(toJoin([run("flaky")], { now: NOW + 60 * MINUTE, failures: thrice })).toEqual([]);
+  });
+});
+
+describe("automationJoinsToDrop", () => {
+  it("drops a never-opened run that left its host's list, and keeps every other", () => {
+    expect(
+      toDrop(
+        [
+          joinOf("left"),
+          joinOf("opened"),
+          joinOf("listed"),
+          joinOf("other-host", "other"),
+          joinOf("already-removed"),
+        ],
+        { listed: ["listed"], opened: ["opened"], removed: ["already-removed"] },
+      ),
+    ).toEqual(["env-left"]);
+  });
+
+  it("drops the oldest never-opened runs so the new joins fit under 10", () => {
+    const names = Array.from({ length: 12 }, (_, index) => `${index}`);
+    const joins = [...names.map((name) => joinOf(name)), joinOf("opened")];
+    expect([
+      toDrop(joins, { listed: [...names, "opened"], opened: ["opened"] }),
+      toDrop(joins, { listed: [...names, "opened"], opened: ["opened"], incoming: 1 }),
+    ]).toEqual([
+      ["env-0", "env-1"],
+      ["env-0", "env-1", "env-2"],
+    ]);
   });
 });
 
