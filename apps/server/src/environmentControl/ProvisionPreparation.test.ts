@@ -381,10 +381,9 @@ const hostLogin = (expiresAt: number, refreshToken: string) =>
     },
   });
 const codexTokens = (authJson: string | Uint8Array) => JSON.parse(String(authJson)).tokens;
-const accessTokenExpiry = (accessToken: string) =>
-  new Date(
-    JSON.parse(Buffer.from(accessToken.split(".")[1] ?? "", "base64url").toString()).exp * 1000,
-  ).toISOString();
+/** The access token's `exp`, in epoch seconds. */
+const accessTokenExpiry = (accessToken: string): number =>
+  JSON.parse(Buffer.from(accessToken.split(".")[1] ?? "", "base64url").toString()).exp;
 
 const hostOwnedCopy = (localAgentRuns: boolean) =>
   Effect.gen(function* () {
@@ -446,7 +445,8 @@ effectIt.effect(
     Effect.gen(function* () {
       expect(yield* hostOwnedCopy(false)).toEqual({
         refreshedAccounts: ["codex_host"],
-        boxCopyExpiresAt: "2026-10-08T14:00:00.000Z",
+        // 2026-10-08T14:00:00Z, the refreshed login.
+        boxCopyExpiresAt: 1791468000,
         boxCopyRefreshToken: "t3-copy-cannot-refresh",
         hostRefreshToken: "rt_rotated",
       });
@@ -459,7 +459,8 @@ effectIt.effect(
     Effect.gen(function* () {
       expect(yield* hostOwnedCopy(true)).toEqual({
         refreshedAccounts: [],
-        boxCopyExpiresAt: "2026-09-29T10:00:00.000Z",
+        // 2026-09-29T10:00:00Z, the login as it was.
+        boxCopyExpiresAt: 1790676000,
         boxCopyRefreshToken: "t3-copy-cannot-refresh",
         hostRefreshToken: "rt_host",
       });

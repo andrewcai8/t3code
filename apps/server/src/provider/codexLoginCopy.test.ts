@@ -25,7 +25,7 @@ describe("stripCodexRefreshToken", () => {
   "last_refresh": "2026-09-18T14:34:00.000000Z"
 }`;
 
-    expect(JSON.parse(stripCodexRefreshToken(login))).toEqual({
+    expect(JSON.parse(stripCodexRefreshToken(login) ?? "")).toEqual({
       auth_mode: "chatgpt",
       OPENAI_API_KEY: null,
       tokens: {

@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeTimersPromises from "node:timers/promises";
 import {
   DEFAULT_SERVER_SETTINGS,
   DurableProvisionRequest,
@@ -307,7 +308,7 @@ function file(scope: "home" | "workspace", destination: string, data: Uint8Array
 async function homeFileData(destination: string, read: () => Promise<Buffer>) {
   if (!credentialDestinations.codex.includes(relativePath(destination))) return await read();
   for (let attempt = 0; attempt < CODEX_LOGIN_READ_ATTEMPTS; attempt++) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, CODEX_LOGIN_READ_RETRY_MS));
+    if (attempt > 0) await NodeTimersPromises.setTimeout(CODEX_LOGIN_READ_RETRY_MS);
     const stripped = stripCodexRefreshToken((await read()).toString("utf8"));
     if (stripped !== undefined) return Buffer.from(stripped);
   }
