@@ -344,8 +344,12 @@ export function createCloudDriver(
         return namespaceRunner.destroyInstance(namespaceResource);
       }
       try {
-        // Pause by id: false means E2B already had it paused, which is success.
-        await Sandbox.pause(sandboxId, api);
+        // Pause by id so a paused box is not woken. E2B answers 409 both for a
+        // paused box and for one another connect is resuming, so check which.
+        if (await Sandbox.pause(sandboxId, api)) return;
+        const info = await Sandbox.getInfo(sandboxId, api);
+        if (info.state !== "paused")
+          throw new Error(`E2B did not pause sandbox ${sandboxId}; it is ${info.state}`);
       } catch (cause) {
         if (cause instanceof SandboxNotFoundError) return "missing";
         throw cause;

@@ -39,8 +39,8 @@ export function e2bResumeDecision(cause: unknown): E2bResumeDecision {
 
 /**
  * Connects to (and so resumes) an E2B sandbox, retrying placement timeouts.
- * Bounded by 3 attempts of 80 s plus 6 s of backoff, about 4 minutes, which
- * stays inside the automation runner's 5 minute attaching step.
+ * Bounded by 3 attempts of 80 s plus 6 s of backoff, about 4 minutes. The
+ * automation runner's attaching step allows for this.
  */
 export async function connectResumingE2b<A>(
   sandboxId: string,
