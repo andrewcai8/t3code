@@ -131,15 +131,10 @@ function ManagerAutomations({
   );
   const managerHttpBaseUrl = useEnvironmentHttpBaseUrl(managerId);
   const [editing, setEditing] = useState<Editing | null>(null);
-  const [revealed, setRevealed] = useState<{ name: string; url: string } | null>(null);
+  const [revealed, setRevealed] = useState<{ name: string; token: string } | null>(null);
   const reveal = (result: AutomationSaveResult) => {
     if (result.webhookToken === null) return;
-    setRevealed({
-      name: result.automation.name,
-      url: managerHttpBaseUrl
-        ? automationWebhookUrl(managerHttpBaseUrl, result.webhookToken)
-        : `${AUTOMATION_WEBHOOK_PATH_PREFIX}/${result.webhookToken}`,
-    });
+    setRevealed({ name: result.automation.name, token: result.webhookToken });
   };
   return (
     <SettingsSection
@@ -183,7 +178,13 @@ function ManagerAutomations({
           }}
         />
       ) : null}
-      {revealed ? <WebhookLinkDialog {...revealed} onClose={() => setRevealed(null)} /> : null}
+      {revealed ? (
+        <WebhookLinkDialog
+          {...revealed}
+          managerHttpBaseUrl={managerHttpBaseUrl}
+          onClose={() => setRevealed(null)}
+        />
+      ) : null}
     </SettingsSection>
   );
 }
@@ -503,7 +504,7 @@ function AutomationEditor({
                 placeholder="owner/name"
               />
             </Field>
-            <Field label="Branch">
+            <Field label="Branch" error={errorFor("branch")}>
               <Input
                 value={draft.branch}
                 disabled={saving}
@@ -548,7 +549,7 @@ function AutomationEditor({
                 </SelectPopup>
               </Select>
             </Field>
-            <Field label="Account">
+            <Field label="Account" error={errorFor("account")}>
               <Select
                 value={draft.account === "" ? MOST_USAGE_LEFT : draft.account}
                 disabled={saving}
@@ -698,22 +699,31 @@ function ToggleRow({
 
 function WebhookLinkDialog({
   name,
-  url,
+  token,
+  managerHttpBaseUrl,
   onClose,
 }: {
   name: string;
-  url: string;
+  token: string;
+  managerHttpBaseUrl: string | null;
   onClose: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
+  const [confirmingClose, setConfirmingClose] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard<void>({
+    onCopy: () => setCopied(true),
     onError: (error) =>
-      toastManager.add({ type: "error", title: "Could not copy link", description: error.message }),
+      toastManager.add({ type: "error", title: "Could not copy", description: error.message }),
   });
+  const url = managerHttpBaseUrl ? automationWebhookUrl(managerHttpBaseUrl, token) : null;
+  const path = `${AUTOMATION_WEBHOOK_PATH_PREFIX}/${encodeURIComponent(token)}`;
+  // The token is shown once, so leaving before copying it must be deliberate.
+  const requestClose = () => (copied ? onClose() : setConfirmingClose(true));
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (!open) requestClose();
       }}
     >
       <DialogPopup>
@@ -725,23 +735,48 @@ function WebhookLinkDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-2">
+          {url === null ? (
+            <p className="text-xs text-muted-foreground">
+              This client does not know the host&apos;s web address, so it cannot show the full
+              link. Put the host&apos;s address in front of this path.
+            </p>
+          ) : null}
           <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5">
+            {url === null ? <span className="text-xs text-muted-foreground">Path</span> : null}
             <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
-              {url}
+              {url ?? path}
             </code>
-            <Button size="xs" variant="ghost" onClick={() => copyToClipboard(url, undefined)}>
-              {isCopied ? "Copied" : "Copy link"}
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => copyToClipboard(url ?? path, undefined)}
+            >
+              {isCopied ? "Copied" : url === null ? "Copy path" : "Copy link"}
             </Button>
           </div>
-          {isOffDeviceReachablePairingUrl(url) ? null : (
+          {url !== null && !isOffDeviceReachablePairingUrl(url) ? (
             <p className="text-xs text-muted-foreground">
               This host is reached through a local address, so only this computer can call the link.
               Connect to the host by its network or tunnel address to get a shareable link.
             </p>
-          )}
+          ) : null}
         </DialogPanel>
         <DialogFooter>
-          <Button onClick={onClose}>Done</Button>
+          {confirmingClose ? (
+            <>
+              <p className="mr-auto self-center text-xs text-muted-foreground">
+                Close without copying? The link will not be shown again.
+              </p>
+              <Button variant="outline" onClick={() => setConfirmingClose(false)}>
+                Keep open
+              </Button>
+              <Button variant="destructive" onClick={onClose}>
+                Close
+              </Button>
+            </>
+          ) : (
+            <Button onClick={requestClose}>Done</Button>
+          )}
         </DialogFooter>
       </DialogPopup>
     </Dialog>

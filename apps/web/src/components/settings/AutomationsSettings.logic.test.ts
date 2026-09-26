@@ -72,10 +72,30 @@ describe("automationInputFromDraft", () => {
   });
 
   it("rejects an unknown time zone and ignores a bad cron while the schedule is off", () => {
-    expect(
-      automationInputFromDraft(draft({ scheduled: true, timeZone: "Mars/Olympus" })),
-    ).toMatchObject({ kind: "invalid", errors: { schedule: expect.any(String) } });
+    expect(automationInputFromDraft(draft({ scheduled: true, timeZone: "Mars/Olympus" }))).toEqual({
+      kind: "invalid",
+      errors: { schedule: "Use five cron fields, such as 0 9 * * 1-5, and an IANA time zone." },
+    });
     expect(automationInputFromDraft(draft({ scheduled: false, cron: "nope" })).kind).toBe("valid");
+  });
+
+  it("shows the minimum interval under the schedule, even before other fields are filled", () => {
+    expect(
+      automationInputFromDraft(draft({ name: "", scheduled: true, cron: "*/10 * * * *" })),
+    ).toEqual({
+      kind: "invalid",
+      errors: { name: "Name the automation.", schedule: "Runs must be at least 15 minutes apart." },
+    });
+    expect(
+      automationInputFromDraft(draft({ scheduled: true, cron: "0,15,30,45 * * * *" })).kind,
+    ).toBe("valid");
+  });
+
+  it("puts a wire-schema failure under the field that failed", () => {
+    expect(automationInputFromDraft(draft({ account: "work account" }))).toEqual({
+      kind: "invalid",
+      errors: { account: "Expected a string matching the RegExp ^[a-zA-Z][a-zA-Z0-9_-]*$" },
+    });
   });
 });
 

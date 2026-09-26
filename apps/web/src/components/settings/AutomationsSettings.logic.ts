@@ -6,7 +6,7 @@ import {
   type AutomationRunState,
   type ProvisionProvider,
 } from "@t3tools/contracts";
-import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 /** The editable form of an automation. Empty strings mean "not chosen yet". */
@@ -26,13 +26,8 @@ export interface AutomationDraft {
   readonly enabled: boolean;
 }
 
-export type AutomationDraftField =
-  | "name"
-  | "repository"
-  | "prompt"
-  | "agentDriver"
-  | "provider"
-  | "schedule";
+/** A field the form can show an error under. */
+export type AutomationDraftField = Exclude<keyof AutomationInput, "webhook" | "enabled">;
 
 export type AutomationDraftResult =
   | { readonly kind: "valid"; readonly input: AutomationInput }
@@ -42,7 +37,17 @@ export type AutomationDraftResult =
     };
 
 const REPOSITORY_PATTERN = /^[\w.-]+\/[\w.-]+$/;
-const decodeAutomationInput = Schema.decodeUnknownOption(AutomationInput);
+const decodeAutomationInput = Schema.decodeUnknownSync(AutomationInput);
+const DRAFT_FIELDS: ReadonlyArray<AutomationDraftField> = [
+  "name",
+  "repository",
+  "branch",
+  "prompt",
+  "agentDriver",
+  "account",
+  "provider",
+  "schedule",
+];
 
 export function newAutomationDraft(defaults: {
   readonly agentDriver: string;
@@ -82,7 +87,11 @@ export function automationDraftFrom(automation: Automation, timeZone: string): A
   };
 }
 
-/** Checks each field the form shows an error beside, then decodes the rest at the wire schema. */
+/**
+ * Checks each field with a message written for the form, then decodes every other field on its
+ * own at the wire schema, so a rule only the schema knows (such as the schedule's minimum
+ * interval) shows under the field it is about.
+ */
 export function automationInputFromDraft(draft: AutomationDraft): AutomationDraftResult {
   const errors: Partial<Record<AutomationDraftField, string>> = {};
   const name = draft.name.trim();
@@ -99,8 +108,7 @@ export function automationInputFromDraft(draft: AutomationDraft): AutomationDraf
   if (draft.provider === "") errors.provider = "Choose where it runs.";
   if (draft.scheduled && parseAutomationCron(cron, timeZone) === null)
     errors.schedule = "Use five cron fields, such as 0 9 * * 1-5, and an IANA time zone.";
-  if (Object.keys(errors).length > 0) return { kind: "invalid", errors };
-  const input = decodeAutomationInput({
+  const candidate = {
     name,
     repository,
     branch: draft.branch.trim() || null,
@@ -111,10 +119,15 @@ export function automationInputFromDraft(draft: AutomationDraft): AutomationDraf
     schedule: draft.scheduled ? { cron, timeZone } : null,
     webhook: draft.webhook,
     enabled: draft.enabled,
-  });
-  return Option.isSome(input)
-    ? { kind: "valid", input: input.value }
-    : { kind: "invalid", errors: { agentDriver: "Choose an agent this host offers." } };
+  };
+  for (const field of DRAFT_FIELDS) {
+    if (errors[field] !== undefined) continue;
+    const decoded = Schema.decodeUnknownResult(AutomationInput.fields[field])(candidate[field]);
+    if (Result.isFailure(decoded)) errors[field] = decoded.failure.message;
+  }
+  if (Object.keys(errors).length > 0) return { kind: "invalid", errors };
+  // Every field decoded on its own and the struct adds no rule of its own, so this cannot throw.
+  return { kind: "valid", input: decodeAutomationInput(candidate) };
 }
 
 /** The link a caller POSTs to. The token is the whole credential. */
