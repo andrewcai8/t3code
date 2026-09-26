@@ -2685,6 +2685,27 @@ describe("buildCloudHandoff", () => {
     useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   });
 
+  it.each([
+    ["codex", "codex_work", "codex"],
+    ["cursor", "cursor_work", "cursor"],
+    ["claudeAgent", "claude_work", "claudeAgent"],
+  ])("moves a %s selection from %s to the box's %s instance", (driver, hostId, boxId) => {
+    const selection = createModelSelection(ProviderInstanceId.make(hostId), "some-model", [
+      { id: "effort", value: "high" },
+    ]);
+    expect(
+      buildCloudHandoff({
+        agentDriver: ProviderDriverKind.make(driver),
+        selection,
+        cloudAccount: null,
+      }).modelSelection,
+    ).toEqual({
+      instanceId: boxId,
+      model: "some-model",
+      options: [{ id: "effort", value: "high" }],
+    });
+  });
+
   it("keeps the model and options picked for a host account on the box's own instance", () => {
     expect(
       sendOnBox(claudeSnapshot("claude_work", models("claude-fable-5-1", "claude-opus-5-5"))),

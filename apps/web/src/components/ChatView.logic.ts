@@ -3,6 +3,7 @@ import {
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type ChatFileAttachment,
+  defaultInstanceIdForDriver,
   type EnvironmentId,
   isProviderDriverKind,
   ProjectId,
@@ -558,7 +559,11 @@ export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "sessi
   };
 }
 
-/** The driver and model a cloud chat's draft carries onto the environment it provisions. */
+/**
+ * The driver and model a cloud chat's draft carries onto the environment it provisions.
+ * The box keys its one account per driver by the driver's default instance id, not the
+ * manager's account id, so the selection moves to that key.
+ */
 export function buildCloudHandoff(input: {
   agentDriver: ProviderDriverKind;
   selection: ModelSelection;
@@ -572,7 +577,7 @@ export function buildCloudHandoff(input: {
   return {
     agentDriver: input.agentDriver,
     modelSelection: createModelSelection(
-      cloudAccount?.instanceId ?? selection.instanceId,
+      defaultInstanceIdForDriver(input.agentDriver),
       cloudModel,
       selection.options,
     ),
