@@ -6,8 +6,12 @@
  *   node scripts/cloud/smoke-cloud-chat.ts --origin https://host --pairing-token-file ./token \
  *     --provider e2b --agents codex,claudeAgent,cursor --report ./run.json
  *
+ * `--steps automation` instead proves automations: it creates one with a webhook, calls the link,
+ * waits for the run's chat on its own box, reads the agent's reply, then deletes the automation
+ * and disposes the box.
+ *
  * The pairing token is exchanged once; the bearer is cached next to it (0600) until it expires.
- * Tokens and pairing URLs never reach stdout or the report.
+ * Tokens, pairing URLs and webhook links never reach stdout or the report.
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -18,6 +22,8 @@ import {
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
   AuthWebSocketTicketResult,
+  AUTOMATION_WEBHOOK_PATH_PREFIX,
+  type AutomationId,
   CommandId,
   MessageId,
   type OrchestrationThreadStreamItem,
@@ -78,7 +84,15 @@ const CHEAP_MODEL: Record<Agent, RegExp> = {
   claudeAgent: /haiku/i,
   cursor: /^(auto|composer|cheetah)/i,
 };
-const STEPS = ["provision", "turns", "device", "resume", "refresh", "delete"] as const;
+const STEPS = [
+  "provision",
+  "turns",
+  "device",
+  "resume",
+  "refresh",
+  "delete",
+  "automation",
+] as const;
 type Step = (typeof STEPS)[number];
 
 const PROVISION_TIMEOUT = "20 minutes";
@@ -91,6 +105,8 @@ const RECONNECT_TIMEOUT = "3 minutes";
 const PAUSED_TIMEOUT = "2 minutes";
 const CALL_TIMEOUT = "2 minutes";
 const DISPOSE_TIMEOUT = "3 minutes";
+/** Longer than the runner's own 30-minute start limit, so its failure is what the smoke reports. */
+const AUTOMATION_START_TIMEOUT = "40 minutes";
 
 const Check = Schema.Struct({
   name: Schema.String,
@@ -112,6 +128,7 @@ const encodeReport = Schema.encodeEffect(
       repo: Schema.String,
       steps: Schema.Array(Schema.String),
       box: Schema.Unknown,
+      automation: Schema.Unknown,
       managerPhases: Schema.Unknown,
       ok: Schema.Boolean,
       checks: Schema.Array(Check),
@@ -142,6 +159,9 @@ const decodeGitCommit = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ tree: GitObject })),
 );
 const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
+const decodeWebhookAccepted = Schema.decodeUnknownEffect(
+  Schema.Struct({ runId: Schema.String, state: Schema.String }),
+);
 const decodeBearerCache = Schema.decodeUnknownEffect(BearerCache);
 const encodeBearerCache = Schema.encodeEffect(BearerCache);
 
@@ -781,15 +801,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     return { reply, firstOutputAt: progress.firstOutputAt, thread: turnThread };
   });
 
-  /** Sends one marker turn and records its checks under `label`. */
-  const runTurn = Effect.fn("runTurn")(function* (
-    client: T3Client,
-    agent: Agent,
-    label: string,
-    thread: ChildThread | null,
-    onDispatched?: (threadId: ThreadId) => Effect.Effect<void>,
-  ) {
-    // The agent cannot print the nonce without running the snippet: only its sha256 prefix counts.
+  /**
+   * The shell line whose output proves an agent ran on the box: its checkout, skills and a nonce.
+   * The agent cannot print the nonce without running it: only the seed's sha256 prefix counts.
+   */
+  const markerSnippet = Effect.fn("markerSnippet")(function* (agent: Agent) {
     const seed = (yield* uuid).replaceAll("-", "");
     const expectedNonce = (yield* sha256(seed)).slice(0, 16);
     const snippet = [
@@ -805,6 +821,18 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
       `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_ORIGIN=$o SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
     ].join("; ");
+    return { snippet, expectedNonce };
+  });
+
+  /** Sends one marker turn and records its checks under `label`. */
+  const runTurn = Effect.fn("runTurn")(function* (
+    client: T3Client,
+    agent: Agent,
+    label: string,
+    thread: ChildThread | null,
+    onDispatched?: (threadId: ThreadId) => Effect.Effect<void>,
+  ) {
+    const { snippet, expectedNonce } = yield* markerSnippet(agent);
     const prompt = `Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim, and nothing else:\n\n${snippet}`;
     const turn = yield* sendTurn(client, agent, label, thread, prompt, {
       cheap: true,
@@ -926,6 +954,52 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     }
   });
 
+  /**
+   * Pairs this run with a box the manager provisioned, the way a client does: attach mints a
+   * one-time pairing URL, a loopback one goes through the manager's guest gateway, and the
+   * credential is exchanged for a bearer on the box.
+   */
+  const pairChild = Effect.fn("pairChild")(function* (
+    manager: T3Client,
+    check: string,
+    box: {
+      readonly requestId: ProvisionRequestId;
+      readonly leaseId: string;
+      readonly environmentId: string;
+    },
+  ) {
+    const attached = yield* bounded(
+      manager["environmentControl.attach"]({ requestId: box.requestId }),
+      "attach",
+    );
+    if (attached.kind !== "attached")
+      return yield* fail(check, `attach refused: ${attached.message}`);
+    if (attached.environmentId !== box.environmentId)
+      return yield* fail(check, "attach returned another environment");
+    // A loopback pairing URL is only reachable through the manager's guest gateway.
+    // Parse failures would carry the pairing URL, so they surface without it.
+    const minted = yield* Effect.try({
+      try: () => new URL(attached.pairingUrl),
+      catch: () => new SmokeFailure({ message: `${check}: attach returned an invalid URL` }),
+    });
+    const gateway = isLoopbackHost(minted.hostname);
+    const pairingUrl = gateway
+      ? Object.assign(new URL(options.origin), {
+          pathname: `${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/${encodeURIComponent(box.leaseId)}/pair`,
+          search: minted.search,
+          hash: minted.hash,
+        }).toString()
+      : attached.pairingUrl;
+    const target = yield* Effect.try({
+      try: () => resolveRemotePairingTarget({ pairingUrl }),
+      catch: () => new SmokeFailure({ message: `${check}: pairing URL has no usable target` }),
+    });
+    const childToken = yield* exchangePairingToken(target.httpBaseUrl, target.credential).pipe(
+      Effect.catch((cause) => fail(check, `child token exchange: ${describe(cause)}`)),
+    );
+    return { httpBaseUrl: target.httpBaseUrl, bearer: childToken.access_token, gateway };
+  });
+
   const provision = Effect.fn("provision")(function* (manager: T3Client) {
     const config = yield* manager["server.getConfig"]({}).pipe(
       Effect.timeoutOption("30 seconds"),
@@ -1010,34 +1084,13 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       { tipBefore, tipAfter },
     );
 
-    const attached = yield* bounded(manager["environmentControl.attach"]({ requestId }), "attach");
-    if (attached.kind !== "attached")
-      return yield* fail("child.paired", `attach refused: ${attached.message}`);
-    if (attached.environmentId !== box.environmentId)
-      return yield* fail("child.paired", "attach returned another environment");
-    // A loopback pairing URL is only reachable through the manager's guest gateway.
-    // Parse failures would carry the pairing URL, so they surface without it.
-    const minted = yield* Effect.try({
-      try: () => new URL(attached.pairingUrl),
-      catch: () => new SmokeFailure({ message: "child.paired: attach returned an invalid URL" }),
+    const child = yield* pairChild(manager, "child.paired", {
+      requestId,
+      leaseId: box.leaseId,
+      environmentId: box.environmentId,
     });
-    const gateway = isLoopbackHost(minted.hostname);
-    const pairingUrl = gateway
-      ? Object.assign(new URL(options.origin), {
-          pathname: `${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/${encodeURIComponent(box.leaseId)}/pair`,
-          search: minted.search,
-          hash: minted.hash,
-        }).toString()
-      : attached.pairingUrl;
-    const target = yield* Effect.try({
-      try: () => resolveRemotePairingTarget({ pairingUrl }),
-      catch: () => new SmokeFailure({ message: "child.paired: pairing URL has no usable target" }),
-    });
-    const childToken = yield* exchangePairingToken(target.httpBaseUrl, target.credential).pipe(
-      Effect.catch((cause) => fail("child.paired", `child token exchange: ${describe(cause)}`)),
-    );
-    created.child = { httpBaseUrl: target.httpBaseUrl, bearer: childToken.access_token };
-    return { readyAt, gateway, childHost: new URL(target.httpBaseUrl).host };
+    created.child = { httpBaseUrl: child.httpBaseUrl, bearer: child.bearer };
+    return { readyAt, gateway: child.gateway, childHost: new URL(child.httpBaseUrl).host };
   });
 
   const turns = Effect.fn("turns")(function* (
@@ -1372,6 +1425,292 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
   });
 
+  /** What the automation step created, so its cleanup finds it whichever check failed. */
+  const automationCreated: {
+    automationId: AutomationId | null;
+    runId: string | null;
+    requestId: ProvisionRequestId | null;
+    environmentId: string | null;
+    threadId: ThreadId | null;
+  } = { automationId: null, runId: null, requestId: null, environmentId: null, threadId: null };
+
+  /**
+   * Proves the automation path end to end: create an automation with a webhook, call the link
+   * (twice, as a redelivery), wait for the run's chat to start on its own box, join that box the
+   * way a client does, and read the agent's reply.
+   */
+  const automation = Effect.fn("automation")(function* (manager: T3Client) {
+    const agent = options.agents[0]!;
+    const { snippet, expectedNonce } = yield* markerSnippet(agent);
+    const bodyToken = (yield* uuid).replaceAll("-", "").slice(0, 16);
+    const prompt = [
+      "Run this exact shell command in the workspace with your shell tool, then reply with the single line it prints, verbatim.",
+      'On a second line, print SMOKE_BODY= followed by the value of "smoke" in the webhook request body below. Print nothing else.',
+      "",
+      snippet,
+    ].join("\n");
+    const created = yield* bounded(
+      manager["automations.create"]({
+        name: `smoke ${bodyToken.slice(0, 8)}`,
+        repository: options.repo,
+        branch: null,
+        prompt,
+        agentDriver: ProviderDriverKind.make(agent),
+        account: null,
+        provider: options.provider,
+        schedule: null,
+        webhook: true,
+        enabled: true,
+      }),
+      "automations.create",
+    ).pipe(Effect.catch((cause) => fail("automation.create", describe(cause))));
+    automationCreated.automationId = created.automation.id;
+    if (created.webhookToken === null)
+      return yield* fail("automation.create", "the host minted no webhook link");
+    // The link is the whole credential; it never reaches stdout or the report.
+    const webhookUrl = new URL(
+      `${AUTOMATION_WEBHOOK_PATH_PREFIX}/${created.webhookToken}`,
+      options.origin,
+    ).toString();
+    yield* record("automation.create", true, created.automation.id, {
+      agent,
+      provider: options.provider,
+      repository: options.repo,
+      webhookPath: AUTOMATION_WEBHOOK_PATH_PREFIX,
+    });
+
+    const deliveryId = yield* uuid;
+    const http = yield* HttpClient.HttpClient;
+    const deliver = bounded(
+      http
+        .execute(
+          HttpClientRequest.post(webhookUrl).pipe(
+            HttpClientRequest.setHeader("idempotency-key", deliveryId),
+            HttpClientRequest.bodyJsonUnsafe({ smoke: bodyToken }),
+          ),
+        )
+        .pipe(
+          Effect.flatMap((response) =>
+            response.json.pipe(
+              Effect.flatMap(decodeWebhookAccepted),
+              Effect.map((body) => ({ status: response.status, body })),
+              Effect.orElseSucceed(() => ({ status: response.status, body: null })),
+            ),
+          ),
+        ),
+      "webhook",
+    ).pipe(
+      Effect.catch((cause) => Effect.succeed({ status: 0, body: null, error: describe(cause) })),
+    );
+
+    const first = yield* deliver;
+    if (first.status !== 202 || first.body === null)
+      return yield* fail(
+        "automation.webhook",
+        `expected 202 with a run id, got ${first.status}`,
+        first,
+      );
+    automationCreated.runId = first.body.runId;
+    yield* record("automation.webhook", true, first.body.runId, {
+      status: first.status,
+      state: first.body.state,
+    });
+    // The run resolves the default branch's tip while it is being provisioned, somewhere between
+    // this reading and the one taken once it has started; a push in between moves it.
+    const tipBefore = yield* remoteTip("automation.webhook", null);
+    const again = yield* deliver;
+    yield* record(
+      "automation.redelivery",
+      again.status === 202 && again.body?.runId === first.body.runId,
+      again.body?.runId ?? again.status,
+      { status: again.status, expectedRunId: first.body.runId },
+    );
+
+    const runId = first.body.runId;
+    const triggeredAt = yield* Clock.currentTimeMillis;
+    const states: Array<{ readonly at: number; readonly state: string }> = [];
+    const settled = yield* Effect.gen(function* () {
+      const runs = yield* bounded(
+        manager["automations.listRuns"]({ id: created.automation.id, limit: 5 }),
+        "automations.listRuns",
+      );
+      const run = runs.find((candidate) => candidate.id === runId);
+      if (run && states.at(-1)?.state !== run.state)
+        states.push({ at: seconds(triggeredAt, yield* Clock.currentTimeMillis), state: run.state });
+      return run;
+    }).pipe(
+      Effect.repeat({
+        until: (run) =>
+          run !== undefined &&
+          (run.state === "started" || run.state === "failed" || run.state === "skipped"),
+        schedule: Schedule.spaced("5 seconds"),
+      }),
+      Effect.timeoutOption(AUTOMATION_START_TIMEOUT),
+      Effect.catch((cause) => fail("automation.started", describe(cause), { states })),
+    );
+    if (Option.isNone(settled) || settled.value === undefined)
+      return yield* fail("automation.started", `not started after ${AUTOMATION_START_TIMEOUT}`, {
+        states,
+      });
+    const run = settled.value;
+    automationCreated.requestId = run.requestId;
+    automationCreated.environmentId = run.environmentId;
+    automationCreated.threadId = run.threadId;
+    if (run.state !== "started" || run.environmentId === null || run.threadId === null)
+      return yield* fail("automation.started", `run ${run.state}`, {
+        states,
+        error: run.error,
+        disposedAt: run.disposedAt,
+      });
+    const tipAfter = yield* remoteTip("automation.started", null);
+    yield* record(
+      "automation.started",
+      true,
+      seconds(triggeredAt, yield* Clock.currentTimeMillis),
+      {
+        states,
+        requestId: run.requestId,
+        environmentId: run.environmentId,
+        threadId: run.threadId,
+      },
+    );
+
+    const joinable = yield* bounded(manager["automations.listJoinable"]({}), "listJoinable").pipe(
+      Effect.catch((cause) => fail("automation.joinable", describe(cause))),
+    );
+    const listed = joinable.find((entry) => entry.requestId === run.requestId);
+    if (!listed)
+      return yield* fail("automation.joinable", "listJoinable does not include the run", {
+        listed: joinable.map((entry) => entry.requestId),
+      });
+    yield* record("automation.joinable", true, listed.lifecycle, {
+      automationId: listed.automationId ?? null,
+      threadId: listed.threadId,
+    });
+
+    const child = yield* pairChild(manager, "automation.reply", {
+      requestId: run.requestId,
+      leaseId: listed.leaseId,
+      environmentId: run.environmentId,
+    });
+    const threadId = run.threadId;
+    // The runner sent the first user message; the thread's snapshot names it.
+    const sent: { message: { readonly id: string; readonly text: string } | null } = {
+      message: null,
+    };
+    let progress = initialProgress;
+    const watched = yield* withRpc(child.httpBaseUrl, child.bearer, (client) =>
+      client["orchestration.subscribeThread"]({ threadId }).pipe(
+        Stream.runForEachWhile((item) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.map((now) => {
+              if (sent.message === null && item.kind === "snapshot") {
+                const first = item.snapshot.thread.messages.find(
+                  (message) => message.role === "user",
+                );
+                if (first) sent.message = { id: first.id, text: first.text };
+              }
+              if (sent.message !== null)
+                progress = advanceTurn(progress, item, sent.message.id, now);
+              return progress.completedAt === null;
+            }),
+          ),
+        ),
+      ),
+    ).pipe(
+      Effect.timeoutOption(TURN_TIMEOUT),
+      Effect.map((finished) => (Option.isSome(finished) ? null : "turn did not finish in time")),
+      Effect.catch((cause) => Effect.succeed(describe(cause))),
+    );
+    const reply = [...progress.assistant.values()].join("\n");
+    const markers = readMarkers(reply);
+    const heads = [tipBefore.sha, tipAfter.sha];
+    const sentText = sent.message?.text ?? "";
+    const evidence = {
+      threadId,
+      gateway: child.gateway,
+      error: progress.error ?? watched,
+      expectedNonce,
+      expectedHeads: heads,
+      markers,
+      body: {
+        expected: bodyToken,
+        replied: readMarker(reply, "BODY"),
+        inPrompt: sentText.includes(bodyToken),
+      },
+      replyTail: reply.slice(-600),
+    };
+    const pass =
+      progress.error === null &&
+      markers.nonce === expectedNonce &&
+      markers.head !== null &&
+      heads.includes(markers.head) &&
+      evidence.body.inPrompt &&
+      evidence.body.replied === bodyToken;
+    yield* record("automation.reply", pass, markers.nonce, evidence);
+  });
+
+  /**
+   * Deletes the automation, then disposes the box of every run it started and checks each lease
+   * is gone. Deleting first stops a run still starting; disposing after catches one that already
+   * started, whose box outlives its automation. Never fails: it runs after whatever failed.
+   */
+  const automationCleanup = Effect.fn("automationCleanup")(function* (manager: T3Client) {
+    const automationId = automationCreated.automationId;
+    if (automationId === null) return;
+    const listed = yield* bounded(
+      manager["automations.listRuns"]({ id: automationId, limit: 50 }),
+      "automations.listRuns",
+    ).pipe(Effect.orElseSucceed(() => []));
+    const requestIds = new Set(
+      listed.filter((run) => run.state !== "skipped").map((run) => run.requestId),
+    );
+    if (automationCreated.requestId) requestIds.add(automationCreated.requestId);
+    const deleted = yield* bounded(
+      manager["automations.delete"]({ id: automationId }),
+      "automations.delete",
+    ).pipe(
+      Effect.as(null),
+      Effect.catch((cause) => Effect.succeed(describe(cause))),
+    );
+    const boxes = yield* Effect.forEach([...requestIds], (requestId) =>
+      Effect.gen(function* () {
+        const disposed = yield* bounded(
+          manager["environmentControl.dispose"]({ requestId }),
+          "dispose",
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.succeed({ kind: "error" as const, message: describe(cause) }),
+          ),
+          Effect.repeat({
+            while: (result) => result.kind !== "disposed",
+            schedule: Schedule.spaced("5 seconds"),
+          }),
+          Effect.timeoutOption(DISPOSE_TIMEOUT),
+        );
+        const entry = yield* bounded(
+          manager["environmentControl.listProvisioned"]({}),
+          "list",
+        ).pipe(
+          Effect.map((list) => list.find((candidate) => candidate.leaseId === requestId)),
+          Effect.catch((cause) => Effect.succeed({ lifecycle: `unknown: ${describe(cause)}` })),
+        );
+        return {
+          requestId,
+          disposed: Option.isSome(disposed) && disposed.value.kind === "disposed",
+          lease: entry?.lifecycle ?? "absent",
+        };
+      }),
+    );
+    const pass =
+      deleted === null &&
+      boxes.every((box) => box.disposed && (box.lease === "absent" || box.lease === "missing"));
+    yield* record("automation.cleanup", pass, pass ? boxes.length : "incomplete", {
+      deleteError: deleted,
+      boxes,
+    });
+  });
+
   /** Deletes the run's threads, disposes the box twice, and confirms the lease is gone. */
   const remove = Effect.fn("remove")(function* (manager: T3Client) {
     const box = created.box;
@@ -1458,11 +1797,19 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
   if (Option.isSome(bearer)) {
     yield* withRpc(options.origin, bearer.value, (manager) => {
       const steps = Effect.gen(function* () {
+        if (!options.steps.has("provision")) return;
         if (scratch) yield* createScratch(scratch);
         const paired = yield* provision(manager);
         yield* turns(manager, paired);
         if (options.steps.has("resume")) yield* resume(manager);
       });
+      const automationStep = options.steps.has("automation")
+        ? automation(manager).pipe(
+            Effect.catchTag("SmokeFailure", () => Effect.void),
+            Effect.catch((cause) => record("automation.harness", false, null, describe(cause))),
+            Effect.ensuring(automationCleanup(manager).pipe(Effect.ignore)),
+          )
+        : Effect.void;
       const cleanup = options.steps.has("delete")
         ? remove(manager)
         : Effect.suspend(() =>
@@ -1479,6 +1826,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         Effect.ensuring(
           Effect.suspend(() => (scratch && scratchCreated ? deleteScratch(scratch) : Effect.void)),
         ),
+        Effect.andThen(automationStep),
       );
     }).pipe(
       Effect.catch((cause) => record("manager.connect", false, null, { error: describe(cause) })),
@@ -1511,6 +1859,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           environmentId: created.box.environmentId,
         }
       : null,
+    automation: automationCreated.automationId ? { ...automationCreated } : null,
     managerPhases,
     ok,
     checks,
@@ -1553,7 +1902,14 @@ const command = Command.make(
     agents: Flag.String("agents").pipe(Flag.withDefault("codex,claudeAgent,cursor")),
     repo: Flag.String("repo").pipe(Flag.withDefault("andrewcai8/t3code")),
     steps: Flag.String("steps").pipe(
-      Flag.withDefault(STEPS.filter((step) => step !== "device" && step !== "refresh").join(",")),
+      Flag.withDescription(
+        `Any of ${STEPS.join(", ")}. automation is opt-in and provisions its own box, so it runs alone.`,
+      ),
+      Flag.withDefault(
+        STEPS.filter(
+          (step) => step !== "device" && step !== "refresh" && step !== "automation",
+        ).join(","),
+      ),
     ),
     deviceAgent: Flag.Literals("device-agent", AGENTS).pipe(Flag.withDefault("claudeAgent")),
     managerLog: Flag.String("manager-log").pipe(
@@ -1575,9 +1931,10 @@ const command = Command.make(
       const path = yield* Path.Path;
       const agents = yield* parseList(flags.agents, AGENTS, "agents");
       const steps = new Set(yield* parseList(flags.steps, STEPS, "steps"));
-      if (!steps.has("provision"))
+      if (!steps.has("provision") && [...steps].some((step) => step !== "automation"))
         return yield* new SmokeFailure({
-          message: "--steps: every step runs on a box this run provisions, so include provision",
+          message:
+            "--steps: every step but automation runs on a box this run provisions, so include provision",
         });
       if (steps.has("resume") && !steps.has("turns"))
         return yield* new SmokeFailure({

@@ -510,7 +510,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
       rawInput: EnvironmentProvisionInput,
       config: EnvironmentControlConfig,
       resolver: ProvisionPreparationResolver,
-      profiles: ProvisioningProviderProfiles,
+      /**
+       * The accounts a new request runs. A function is called only when the request is new: a
+       * retry of an accepted request keeps the accounts it froze, whatever routing says now.
+       */
+      profilesFor: ProvisioningProviderProfiles | (() => Promise<ProvisioningProviderProfiles>),
     ): Promise<ProvisionPreparationManifest> => {
       const input = decodeInput(rawInput);
       const submitted = submittedFiles(input);
@@ -524,6 +528,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
           throw new ProvisionRequestConflict({ requestId: input.requestId });
         return existing;
       }
+      const profiles = typeof profilesFor === "function" ? await profilesFor() : profilesFor;
       const provisioning = config.provisioning;
       const artifact = configuredRuntimeArtifact(config, input.provider);
       if (!provisioning || !artifact)

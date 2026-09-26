@@ -258,20 +258,26 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     usage: Record<string, ReadonlyArray<ServerProviderUsageWindow>> = {},
     agentDriver?: string,
     active: Record<string, number> = {},
+    pinAccount = false,
   ) =>
-    resolveProvisioningProfiles(settings, { providerInstanceId, agentDriver }, claudeOAuthTokens, {
-      providers: Object.entries(usage).map(([instanceId, windows]) => ({
-        instanceId: ProviderInstanceId.make(instanceId),
-        usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows },
-      })),
-      now: Date.parse("2026-09-03T12:00:00.000Z"),
-      load: new Map(
-        Object.entries(active).map(([instanceId, count]) => [
-          ProviderInstanceId.make(instanceId),
-          count,
-        ]),
-      ),
-    }).pipe(
+    resolveProvisioningProfiles(
+      settings,
+      { providerInstanceId, agentDriver, pinAccount },
+      claudeOAuthTokens,
+      {
+        providers: Object.entries(usage).map(([instanceId, windows]) => ({
+          instanceId: ProviderInstanceId.make(instanceId),
+          usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows },
+        })),
+        now: Date.parse("2026-09-03T12:00:00.000Z"),
+        load: new Map(
+          Object.entries(active).map(([instanceId, count]) => [
+            ProviderInstanceId.make(instanceId),
+            count,
+          ]),
+        ),
+      },
+    ).pipe(
       Effect.map((profiles) =>
         profiles.map(({ kind, instanceId, credential }) => [kind, instanceId, credential.kind]),
       ),
@@ -365,6 +371,50 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       ).toEqual([
         ["claudeAgent", "claudeSpare", "environment"],
         ["cursor", "cursorHome", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("keeps a pinned chat on its account while companions still route by usage", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* accounts(
+          routedSettings(),
+          "selected",
+          undefined,
+          {
+            selected: [session(20), weekly(97)],
+            claudeSpare: [session(80), weekly(10)],
+            cursorWork: [session(60)],
+            cursorHome: [session(10)],
+          },
+          "claudeAgent",
+          {},
+          true,
+        ),
+      ).toEqual([
+        ["claudeAgent", "selected", "environment"],
+        ["cursor", "cursorHome", "environment"],
+      ]);
+    }),
+  );
+
+  it.effect("refuses a pinned account that is over its limit instead of routing around it", () =>
+    Effect.gen(function* () {
+      const refused = yield* Effect.flip(
+        accounts(
+          routedSettings(),
+          "selected",
+          undefined,
+          { selected: [session(100), weekly(40)], claudeSpare: [session(10)] },
+          "claudeAgent",
+          {},
+          true,
+        ),
+      );
+      expect([refused.reason, refused.message]).toEqual([
+        "credentials",
+        "selected is over its usage limit.",
       ]);
     }),
   );

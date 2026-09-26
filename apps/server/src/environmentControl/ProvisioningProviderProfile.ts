@@ -4,12 +4,13 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ProviderInstanceEnvironment,
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
-import { rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
+import { isAccountSpent, rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -233,6 +234,8 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
  * the guest otherwise, so one unusable login never blocks the chat asked for.
  * `providerInstanceId` names the driver when `agentDriver` is absent and wins
  * ties, which keeps a manager with no usage data on the account the user saw.
+ * `pinAccount` skips the ranking for the requested driver and runs on
+ * `providerInstanceId` or refuses.
  */
 export type ProvisioningProviderProfiles = readonly [
   primary: ProvisioningProviderProfile,
@@ -241,7 +244,11 @@ export type ProvisioningProviderProfiles = readonly [
 
 export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfiles")(function* (
   settings: ServerSettings,
-  input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
+  input: {
+    readonly providerInstanceId: string;
+    readonly agentDriver?: string | undefined;
+    readonly pinAccount?: boolean | undefined;
+  },
   claudeOAuthTokens: Provisioning["claudeOAuthTokens"] | undefined,
   usage: {
     readonly providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "usageLimits">>;
@@ -289,10 +296,26 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
       : Option.none<ProvisioningProviderProfile>();
   });
   const driver = input.agentDriver ?? instances[hint]?.driver;
-  const routed = driver === undefined ? Option.none() : yield* firstPortable(driver);
+  // A pinned account is never swapped for another, so one known to be spent refuses here
+  // rather than starting a machine whose first turn fails.
+  if (
+    input.pinAccount &&
+    driver !== undefined &&
+    isAccountSpent(ProviderDriverKind.make(driver), limits.get(hint)?.usageLimits, usage.now)
+  )
+    return yield* new ProvisionRefused({
+      reason: "credentials",
+      message: `${instances[hint]?.displayName ?? hint} is over its usage limit.`,
+    });
+  const routed =
+    driver === undefined || input.pinAccount ? Option.none() : yield* firstPortable(driver);
   const primary = Option.isSome(routed)
     ? routed.value
-    : yield* resolveProvisioningProviderProfile(settings, input, claudeOAuthTokens);
+    : yield* resolveProvisioningProviderProfile(
+        settings,
+        { providerInstanceId: input.providerInstanceId, agentDriver: input.agentDriver },
+        claudeOAuthTokens,
+      );
   const companions: ProvisioningProviderProfile[] = [];
   for (const companionDriver of Object.keys(credentialVariables)) {
     if (companionDriver === primary.kind) continue;

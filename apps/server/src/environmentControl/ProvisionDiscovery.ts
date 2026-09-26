@@ -16,6 +16,7 @@ const decodeRows = Schema.decodeUnknownEffect(
       request: Schema.fromJsonString(DurableProvisionRequest),
       state: Schema.fromJsonString(ProvisionOperationState),
       lease: Schema.fromJsonString(StoredProvisionedLease),
+      automationId: Schema.NullOr(Schema.String),
     }),
   ),
 );
@@ -27,15 +28,16 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     const now = DateTime.formatIso(yield* DateTime.now);
     const rows = yield* sql`
     SELECT operations.request_json AS request, operations.state_json AS state,
-      leases.lease_json AS lease
+      leases.lease_json AS lease, runs.automation_id AS "automationId"
     FROM provision_operations AS operations
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
+    LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
     WHERE json_extract(operations.state_json, '$.kind') = 'ready'
       AND json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
     ORDER BY operations.created_at DESC, operations.request_id
   `;
     const result: Array<DiscoveredProvisionedEnvironment> = [];
-    for (const { request, state, lease } of yield* decodeRows(rows)) {
+    for (const { request, state, lease, automationId } of yield* decodeRows(rows)) {
       if (
         state.kind !== "ready" ||
         (request.retentionDeadline !== undefined && request.retentionDeadline <= now)
@@ -67,6 +69,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
           repository: request.repository ?? null,
           projectDir: state.readiness.projectDir,
           threadId: lease.owner?.threadId ?? null,
+          ...(automationId === null ? {} : { automationId }),
           createdAt: lease.createdAt,
           expiresAt:
             request.retentionDeadline !== undefined && request.retentionDeadline < lease.expiresAt
