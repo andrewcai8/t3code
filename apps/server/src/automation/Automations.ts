@@ -96,24 +96,20 @@ export const makeAutomations = Effect.fn("makeAutomations")(function* (
 ) {
   const store = yield* AutomationStore;
   const fibers = yield* FiberSet.make();
-  const inFlight = new Set<string>();
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
-  /** Runs a run in the background unless this process is already running it. */
+  /**
+   * Runs a run in the background. Only a trigger that created the run and startup's resume
+   * pass call this, so no run is launched twice in one process.
+   */
   const launch = (automation: Automation, run: StoredRun) =>
-    Effect.suspend(() => {
-      if (inFlight.has(run.id) || run.state === "started" || run.state === "failed")
-        return Effect.void;
-      inFlight.add(run.id);
-      return runAutomation(automation, run).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logError("automation run stopped", { runId: run.id, cause }),
-        ),
-        Effect.ensuring(Effect.sync(() => inFlight.delete(run.id))),
-        FiberSet.run(fibers),
-        Effect.asVoid,
-      );
-    });
+    runAutomation(automation, run).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError("automation run stopped", { runId: run.id, cause }),
+      ),
+      FiberSet.run(fibers),
+      Effect.asVoid,
+    );
 
   const trigger = Effect.fnUntraced(function* (
     automation: Automation,

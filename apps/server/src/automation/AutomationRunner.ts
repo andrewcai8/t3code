@@ -15,6 +15,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
 import * as Schedule from "effect/Schedule";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
@@ -70,9 +71,7 @@ const PROJECT_POLL = Duration.seconds(3);
 const transient = { schedule: Schedule.exponential(Duration.seconds(2)), times: 3 };
 
 const describe = (cause: unknown) =>
-  typeof cause === "object" && cause !== null && "message" in cause
-    ? String(cause.message)
-    : String(cause);
+  Predicate.hasProperty(cause, "message") ? String(cause.message) : String(cause);
 
 /**
  * Drives one run from wherever it stands to `started` or `failed`.
@@ -99,7 +98,7 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
         Effect.retry(transient),
         Effect.mapError((error) => new RunFailed(error.message)),
       );
-      if (result.kind === "ready") return result.environment.environmentId;
+      if (result.kind === "ready") return;
       if (result.kind === "refused") return yield* Effect.fail(new RunFailed(result.message));
       last = result.message;
       yield* Effect.sleep(PROVISION_RETRY);
