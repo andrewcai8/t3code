@@ -369,6 +369,17 @@ it("writes a Codex login whose refresh token the environment cannot redeem", asy
   }
 });
 
+const hostLogin = (expiresAt: number, refreshToken: string) =>
+  JSON.stringify({
+    tokens: {
+      id_token: "eyJ.id.sig",
+      access_token: `eyJ.${Buffer.from(JSON.stringify({ exp: expiresAt })).toString("base64url")}.sig`,
+      refresh_token: refreshToken,
+      account_id: "acct-1",
+    },
+  });
+const codexTokens = (authJson: string | Uint8Array) => JSON.parse(String(authJson)).tokens;
+
 effectIt.effect(
   "refreshes a host-owned Codex login due within a day before copying it, stripped",
   () =>
@@ -376,20 +387,13 @@ effectIt.effect(
       const f = yield* Effect.promise(fixture);
       const now = Date.parse("2026-09-28T14:00:00Z");
       yield* TestClock.setTime(now);
-      const login = (hoursLeft: number, refreshToken: string) =>
-        JSON.stringify({
-          tokens: {
-            id_token: "eyJ.id.sig",
-            access_token: `eyJ.${Buffer.from(JSON.stringify({ exp: Math.floor(now / 1000) + hoursLeft * 3600 })).toString("base64url")}.sig`,
-            refresh_token: refreshToken,
-            account_id: "acct-1",
-          },
-        });
       const authPath = NodePath.join(f.root, ".codex/auth.json");
-      const refreshed = login(240, "rt_rotated");
+      const refreshed = hostLogin(now / 1000 + 240 * 3600, "rt_rotated");
       const refreshedAccounts: Array<string> = [];
       yield* Effect.gen(function* () {
-        yield* Effect.promise(() => NodeFSP.writeFile(authPath, login(20, "rt_host")));
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(authPath, hostLogin(now / 1000 + 20 * 3600, "rt_host")),
+        );
         const settings = decodeServerSettings({
           providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
           providerInstances: {
@@ -417,18 +421,17 @@ effectIt.effect(
             profiles,
           ),
         );
+        const boxCopy = Buffer.from(
+          homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
+          "base64",
+        );
         expect(refreshedAccounts).toEqual(["codex_host"]);
+        expect(codexTokens(boxCopy)).toEqual({
+          ...codexTokens(refreshed),
+          refresh_token: "t3-copy-cannot-refresh",
+        });
         expect(
-          JSON.parse(
-            Buffer.from(
-              homeFile(manifest, ".codex/auth.json")?.contentsBase64 ?? "",
-              "base64",
-            ).toString(),
-          ).tokens,
-        ).toEqual({ ...JSON.parse(refreshed).tokens, refresh_token: "t3-copy-cannot-refresh" });
-        expect(
-          JSON.parse(yield* Effect.promise(() => NodeFSP.readFile(authPath, "utf8"))).tokens
-            .refresh_token,
+          codexTokens(yield* Effect.promise(() => NodeFSP.readFile(authPath))).refresh_token,
         ).toBe("rt_rotated");
       }).pipe(Effect.ensuring(Effect.promise(f.cleanup)));
     }).pipe(Effect.provide(NodeServices.layer)),
