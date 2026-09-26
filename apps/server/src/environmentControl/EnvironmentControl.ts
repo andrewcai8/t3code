@@ -600,7 +600,10 @@ export const layer = Layer.effect(
     const runLogged = Effect.runPromiseWith(yield* Effect.context<never>());
     const logRefresh = (leaseId: string, refreshError: string | null | undefined) =>
       refreshError
-        ? Effect.logWarning("cloud checkout refresh incomplete", { leaseId, cause: refreshError })
+        ? Effect.logWarning("cloud checkout could not fetch its branch", {
+            leaseId,
+            cause: refreshError,
+          })
         : Effect.void;
     const resolveAccounts = async <A>(
       resolveFrom: (
@@ -658,8 +661,9 @@ export const layer = Layer.effect(
             {
               ...cloud,
               // A box this manager provisioned resumes through the runtime that
-              // prepared it, which reconverges it and refreshes its checkout.
-              // Imported leases keep the legacy runner.
+              // prepared it, and fetches its followed branch so the thread sees
+              // what was pushed while it slept. Imported leases keep the legacy
+              // runner.
               resume: async (input) => {
                 try {
                   if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
@@ -667,18 +671,10 @@ export const layer = Layer.effect(
                   if (input.namespaceResource)
                     return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
                   const resumed = await cloud.resume(input);
-                  // The sandbox is awake whatever preparation does, so the lease
-                  // must say so. A box that cannot reconverge still resumes the
-                  // way it did before resume reprepared it.
-                  await reprepareProvisionedE2b(input.leaseId, config.e2bApiKey).then(
-                    (ready) => runLogged(logRefresh(input.leaseId, ready.refreshError)),
-                    (cause) =>
-                      runLogged(
-                        Effect.logWarning("E2B box resumed without repreparing", {
-                          leaseId: input.leaseId,
-                          cause,
-                        }),
-                      ),
+                  // Best effort: the sandbox is awake and resumed either way.
+                  await refreshProvisionedE2b(input.leaseId, config.e2bApiKey).then(
+                    ({ refreshError }) => runLogged(logRefresh(input.leaseId, refreshError)),
+                    (cause) => runLogged(logRefresh(input.leaseId, String(cause))),
                   );
                   return resumed;
                 } catch (cause) {
@@ -761,19 +757,17 @@ export const layer = Layer.effect(
       await runLogged(logRefresh(requestId, refreshError));
       return { namespaceProxy };
     };
-    const reprepareProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
+    const refreshProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
       const operation = await Effect.runPromise(store.get(requestId));
       if (
         operation.state.kind !== "ready" ||
         operation.state.allocation.resource.provider !== "e2b"
       )
         throw new Error("No ready E2B runtime");
-      return makeE2bProvisionRuntime({ apiKey }).prepare(
+      return makeE2bProvisionRuntime({ apiKey }).refresh(
         operation,
         operation.state.allocation.resource.sandboxId,
         await manifests.load(requestId),
-        undefined,
-        await manifests.readRuntime(requestId),
       );
     };
     const provider = (operation: ProvisionOperation) =>

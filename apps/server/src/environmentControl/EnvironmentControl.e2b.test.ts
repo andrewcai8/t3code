@@ -22,11 +22,11 @@ import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest);
-const mocks = vi.hoisted(() => ({ prepare: vi.fn(), wake: vi.fn() }));
+const mocks = vi.hoisted(() => ({ refresh: vi.fn(), wake: vi.fn() }));
 
 vi.mock("./E2bProvisionRuntime.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./E2bProvisionRuntime.ts")>()),
-  makeE2bProvisionRuntime: () => ({ prepare: mocks.prepare }),
+  makeE2bProvisionRuntime: () => ({ refresh: mocks.refresh }),
 }));
 vi.mock("./driver.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./driver.ts")>();
@@ -39,7 +39,7 @@ vi.mock("./driver.ts", async (importOriginal) => {
   };
 });
 
-it.effect("reprepares a woken E2B box and keeps its lease active even when that fails", () =>
+it.effect("fetches into a woken E2B box and keeps its lease active even when that fails", () =>
   Effect.gen(function* () {
     const directory = yield* Effect.acquireRelease(
       Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "e2b-resume-"))),
@@ -109,7 +109,7 @@ it.effect("reprepares a woken E2B box and keeps its lease active even when that 
       artifactSha256: artifact.sha256,
     };
     mocks.wake.mockResolvedValue({});
-    mocks.prepare.mockRejectedValue(new Error("server did not start"));
+    mocks.refresh.mockRejectedValue(new Error("fetch timed out"));
     yield* Effect.gen(function* () {
       const { stateDir } = yield* ServerConfig.ServerConfig;
       const sql = yield* SqlClient.SqlClient;
@@ -150,7 +150,7 @@ it.effect("reprepares a woken E2B box and keeps its lease active even when that 
 
       expect(yield* manager.resume(input)).toEqual({ kind: "resumed" });
       expect((yield* Effect.promise(() => registry.findById(requestId)))?.state).toBe("active");
-      const [prepared, sandboxId, preparedManifest] = mocks.prepare.mock.calls[0]!;
+      const [prepared, sandboxId, preparedManifest] = mocks.refresh.mock.calls[0]!;
       expect([prepared.request.requestId, sandboxId, preparedManifest.input]).toEqual([
         requestId,
         "sandbox-1",

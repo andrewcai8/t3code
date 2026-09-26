@@ -11,7 +11,11 @@ import {
 } from "e2b";
 import type { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
+import {
+  prepareRemoteHost,
+  refreshRemoteCheckout,
+  type RemotePreparationPort,
+} from "./remotePreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
@@ -85,6 +89,27 @@ export function makeProvisionResolution(config: {
 }
 
 const STDIN_CHUNK = 4 * 1024 * 1024;
+
+/** What a sandbox's guest verifies its preparation journal against. */
+function guestInput(
+  operation: ProvisionOperation,
+  sandboxId: string,
+  manifest: ProvisionPreparationManifest,
+  extra: { readonly runtime?: ProvisionPreparationManifest["preparation"]["artifact"] } = {},
+) {
+  const follow = followedBranch(manifest);
+  return withGuestProviderInstall(
+    {
+      ...manifest.preparation,
+      resourceIdentity: `e2b:${sandboxId}`,
+      requestHash: operation.requestHash,
+      preparationHash: operation.request.preparationHash,
+      ...extra,
+      ...(follow ? { follow } : {}),
+    },
+    operation.request.agentDriver,
+  );
+}
 
 function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
   return {
@@ -211,21 +236,10 @@ else:
         );
         stopUpload("artifact.upload", { bytes: archive.byteLength });
       }
-      const follow = followedBranch(manifest);
       const stopPrepare = startProvisionPhase(record);
       const result = await prepareRemoteHost(
         transport,
-        withGuestProviderInstall(
-          {
-            ...manifest.preparation,
-            resourceIdentity: `e2b:${sandboxId}`,
-            requestHash: operation.requestHash,
-            preparationHash: operation.request.preparationHash,
-            ...(runtime ? { runtime: guest } : {}),
-            ...(follow ? { follow } : {}),
-          },
-          operation.request.agentDriver,
-        ),
+        guestInput(operation, sandboxId, manifest, runtime ? { runtime: guest } : {}),
         record,
       );
       stopPrepare("remote.prepare");
@@ -241,6 +255,16 @@ else:
       });
       return result;
     },
+    /** Fetches the followed branch into a prepared, running box and nothing else. */
+    refresh: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+    ) =>
+      refreshRemoteCheckout(
+        e2bPythonPort(await connect(operation, sandboxId)),
+        guestInput(operation, sandboxId, manifest),
+      ),
     attach: async (
       operation: ProvisionOperation,
       sandboxId: string,

@@ -10,8 +10,8 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
-  checkoutDecisionScript,
   prepareRemoteHost,
+  refreshRemoteCheckout,
   remotePreparationScript,
   type RemotePreparationInput,
   type RemotePreparationPort,
@@ -864,254 +864,91 @@ describe("remote preparation artifacts", () => {
   });
 });
 
-/** Commits one new file on `branch` of the fixture's source repository and returns its SHA. */
-function advance(repository: string, name: string, branch?: string) {
-  if (branch) git(repository, "checkout", "-q", branch);
-  NodeChildProcess.execFileSync("git", ["commit", "-q", "--allow-empty", "-m", name], {
-    cwd: repository,
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: "Test",
-      GIT_AUTHOR_EMAIL: "test@example.invalid",
-      GIT_COMMITTER_NAME: "Test",
-      GIT_COMMITTER_EMAIL: "test@example.invalid",
-    },
-  });
+/** Commits once on the fixture's source repository and returns the new SHA. */
+function advance(repository: string, message: string) {
+  git(
+    repository,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    message,
+  );
   return git(repository, "rev-parse", "HEAD");
 }
 
-async function followed(follow = "HEAD") {
+async function following() {
   const input = await fixture();
   const source = input.repository!.url;
-  return {
-    input: { ...input, follow },
-    source,
-    branch: git(source, "symbolic-ref", "--short", "HEAD"),
-  };
+  const branch = git(source, "symbolic-ref", "--short", "HEAD");
+  return { input: { ...input, follow: "HEAD" }, source, tracking: `refs/remotes/origin/${branch}` };
 }
 
-describe("checkout refresh", () => {
-  it("decides from where preparation placed HEAD, not from the frozen revision", async () => {
-    const cases = [
-      ["a", "a", true, false, "a"],
-      ["a", "a", true, false, "b"],
-      ["a", "a", true, true, "b"],
-      ["a", "c", true, false, "b"],
-      ["a", "a", false, false, "b"],
-      ["a", "c", true, false, "a"],
-      ["a", "b", true, false, "b"],
-    ];
-    const result = await localPort.executePython({
-      script: `${checkoutDecisionScript}\nimport json, sys\nprint(json.dumps([checkout_action(*case) for case in json.load(sys.stdin)]))`,
-      stdin: JSON.stringify(cases),
-    });
-    expect(JSON.parse(result.stdout)).toEqual([
-      "up-to-date",
-      "fast-forward",
-      "behind",
-      "behind",
-      "behind",
-      "up-to-date",
-      "up-to-date",
+describe("remote branch refresh", () => {
+  it("shows every open what was pushed, without moving HEAD or rerunning setup", async () => {
+    const { input: followed, source, tracking } = await following();
+    const input = { ...followed, prepareCommands: ["echo ran >> ../setup-runs"] };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    expect(git(first.projectDir, "rev-parse", tracking)).toBe(first.headRevision);
+    const pushed = advance(source, "pushed while open");
+    const reopened = await prepareRemoteHost(localPort, input);
+    expect([reopened.headRevision, git(first.projectDir, "rev-parse", tracking)]).toEqual([
+      first.headRevision,
+      pushed,
     ]);
+    const later = advance(source, "pushed while paused");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect([
+      git(first.projectDir, "rev-parse", "HEAD"),
+      git(first.projectDir, "rev-parse", tracking),
+      await NodeFSP.readFile(NodePath.join(input.root, "setup-runs"), "utf8"),
+    ]).toEqual([first.headRevision, later, "ran\nran\n"]);
   });
 
-  it("opens a box at the tip even when its revision was frozen before a later push", async () => {
-    const { input, source, branch } = await followed();
-    const tip = advance(source, "pushed after submit");
-    const ready = await prepareRemoteHost(localPort, input);
-    pids.add(ready.serverPid);
-    expect(ready.sourceRevision).toBe(input.repository!.revision);
-    expect(ready.headRevision).toBe(tip);
-    expect(git(ready.projectDir, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(tip);
-  });
-
-  it("moves an untouched box to the new tip every time it reopens", async () => {
-    const { input, source } = await followed();
+  it("fetches past a shallow.lock a killed fetch left behind", async () => {
+    const { input, source, tracking } = await following();
     const first = await prepareRemoteHost(localPort, input);
     pids.add(first.serverPid);
-    const second = advance(source, "second");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(second);
-    const third = advance(source, "third");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(third);
+    await NodeFSP.writeFile(NodePath.join(first.projectDir, ".git/shallow.lock"), "");
+    const pushed = advance(source, "pushed");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
   });
 
-  it.each([
-    ["a commit", (dir: string) => advance(dir, "fix")],
-    ["an edit", (dir: string) => NodeFSP.writeFile(NodePath.join(dir, "README.md"), "edited\n")],
-    ["a new file", (dir: string) => NodeFSP.writeFile(NodePath.join(dir, "notes.txt"), "draft\n")],
-    ["a branch", (dir: string) => git(dir, "checkout", "-q", "-b", "thread")],
-  ])("leaves %s where the thread put it and shows the tip beside it", async (_, touch) => {
-    const { input, source, branch } = await followed();
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    await touch(first.projectDir);
-    const head = git(first.projectDir, "rev-parse", "HEAD");
-    const tip = advance(source, "upstream");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(head);
-    expect(git(first.projectDir, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(tip);
-  });
-
-  it("keeps a pinned revision where it was requested", async () => {
+  it("retries a partial clone whose killed fetch left shallow.lock behind", async () => {
     const input = await fixture();
     const first = await prepareRemoteHost(localPort, input);
     pids.add(first.serverPid);
-    advance(input.repository!.url, "upstream");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(
-      input.repository!.revision,
-    );
+    await fetch(`http://127.0.0.1:${input.port}/stop`);
+    await localPort.executePython({
+      script:
+        "import fcntl,sys\nwith open(sys.stdin.read(), 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+      stdin: NodePath.join(input.root, "server.lock"),
+    });
+    pids.delete(first.serverPid);
+    const stage = NodePath.join(input.root, "workspace.partial");
+    await NodeFSP.rename(first.projectDir, stage);
+    await NodeFSP.writeFile(NodePath.join(stage, ".git/shallow.lock"), "");
+    const retry = await prepareRemoteHost(localPort, input);
+    pids.add(retry.serverPid);
+    expect(retry.headRevision).toBe(input.repository!.revision);
   });
 
-  it("follows a named branch and still opens once that branch is deleted", async () => {
-    const { input, source, branch } = await followed("feature");
-    git(source, "checkout", "-q", "-b", "feature");
+  it("still opens and resumes when the remote cannot be reached", async () => {
+    const { input, source } = await following();
     const first = await prepareRemoteHost(localPort, input);
     pids.add(first.serverPid);
-    const tip = advance(source, "feature work");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
-    advance(source, "default moved on", branch);
-    git(source, "branch", "-D", "feature");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
-  });
-
-  it("still opens on the checkout it has when the remote cannot be reached", async () => {
-    const { input, source } = await followed();
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    advance(source, "unreachable");
-    await NodeFSP.rename(source, `${source}-moved`);
+    await NodeFSP.rename(source, `${source}-gone`);
     const reopened = await prepareRemoteHost(localPort, input);
     expect(reopened.headRevision).toBe(first.headRevision);
     expect(reopened.refreshError).toMatch(/Preparation command failed/);
-  });
-
-  it("keeps a box whose preparation files the tip now tracks, and still opens it", async () => {
-    const { input, source } = await followed();
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    await NodeFSP.mkdir(NodePath.join(source, ".evidence"));
-    await NodeFSP.writeFile(NodePath.join(source, ".evidence/report.json"), "upstream\n");
-    git(source, "add", ".");
-    advance(source, "tracks the evidence path");
-    const reopened = await prepareRemoteHost(localPort, input);
-    expect(reopened.headRevision).toBe(first.headRevision);
-    expect(reopened.refreshError).toMatch(/would be overwritten/);
-    expect(
-      await NodeFSP.readFile(NodePath.join(first.projectDir, ".evidence/report.json"), "utf8"),
-    ).toBe("private evidence");
-  });
-
-  it("reruns setup only when the checkout moved", async () => {
-    const { input, source } = await followed();
-    const withSetup = { ...input, prepareCommands: ["echo ran >> ../setup-runs"] };
-    const runs = async () =>
-      (await NodeFSP.readFile(NodePath.join(input.root, "setup-runs"), "utf8")).split("\n").length -
-      1;
-    const first = await prepareRemoteHost(localPort, withSetup);
-    pids.add(first.serverPid);
-    await prepareRemoteHost(localPort, withSetup);
-    expect(await runs()).toBe(1);
-    advance(source, "needs setup");
-    await prepareRemoteHost(localPort, withSetup);
-    expect(await runs()).toBe(2);
-  });
-
-  it("moves a box whose setup left files behind, since that tree is its baseline", async () => {
-    const { input, source } = await followed();
-    const withSetup = { ...input, prepareCommands: ["echo built > generated.txt"] };
-    const first = await prepareRemoteHost(localPort, withSetup);
-    pids.add(first.serverPid);
-    const tip = advance(source, "upstream");
-    expect((await prepareRemoteHost(localPort, withSetup)).headRevision).toBe(tip);
-  });
-
-  it("does not re-shallow a checkout a thread deepened", async () => {
-    const { input, source } = await followed();
-    advance(source, "history");
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    git(first.projectDir, "fetch", "-q", "--unshallow", "origin");
-    const tip = advance(source, "upstream");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
-    expect(git(first.projectDir, "rev-parse", "--is-shallow-repository")).toBe("false");
-  });
-
-  it("finishes a move that crashed between the checkout and its record", async () => {
-    const { input, source } = await followed();
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    const interrupted = advance(source, "interrupted");
-    git(first.projectDir, "fetch", "-q", "origin", interrupted);
-    git(first.projectDir, "checkout", "-q", "--detach", interrupted);
-    const journalPath = NodePath.join(input.root, "preparation.json");
-    const journal = JSON.parse(await NodeFSP.readFile(journalPath, "utf8"));
-    journal.checkout.target = interrupted;
-    await NodeFSP.writeFile(journalPath, JSON.stringify(journal));
-    const tip = advance(source, "after the crash");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
-  });
-
-  it("opens a moved box after the revision it was first cloned at is pruned", async () => {
-    const { input, source } = await followed();
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    const tip = advance(source, "upstream");
-    await prepareRemoteHost(localPort, input);
-    git(first.projectDir, "reflog", "expire", "--expire=now", "--all");
-    git(first.projectDir, "gc", "-q", "--prune=now");
-    expect(() =>
-      git(first.projectDir, "cat-file", "-e", `${input.repository!.revision}^{commit}`),
-    ).toThrow();
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(tip);
-  });
-
-  it("opens once a pushed commit breaks setup, and tries that setup only once", async () => {
-    const { input, source } = await followed();
-    const withSetup = {
-      ...input,
-      prepareCommands: ["echo tried >> ../setup-attempts", "test ! -f breaks-setup"],
-    };
-    const attempts = async () =>
-      (await NodeFSP.readFile(NodePath.join(input.root, "setup-attempts"), "utf8")).split("\n")
-        .length - 1;
-    const first = await prepareRemoteHost(localPort, withSetup);
-    pids.add(first.serverPid);
-    await NodeFSP.writeFile(NodePath.join(source, "breaks-setup"), "");
-    git(source, "add", ".");
-    const tip = advance(source, "breaks setup");
-    const reopened = await prepareRemoteHost(localPort, withSetup);
-    expect(reopened.headRevision).toBe(tip);
-    expect(reopened.refreshError).toMatch(/Setup after the refresh failed/);
-    expect((await prepareRemoteHost(localPort, withSetup)).headRevision).toBe(tip);
-    expect(await attempts()).toBe(2);
-  });
-
-  it("does not adopt a commit a thread detached onto after a failed move", async () => {
-    const { input, source, branch } = await followed();
-    const first = await prepareRemoteHost(localPort, input);
-    pids.add(first.serverPid);
-    const attempted = advance(source, "attempted");
-    const lock = NodePath.join(first.projectDir, ".git/index.lock");
-    await NodeFSP.writeFile(lock, "");
-    expect((await prepareRemoteHost(localPort, input)).refreshError).toMatch(/index\.lock/);
-    await NodeFSP.rm(lock);
-    git(first.projectDir, "checkout", "-q", "--detach", `origin/${branch}`);
-    advance(source, "later");
-    expect((await prepareRemoteHost(localPort, input)).headRevision).toBe(attempted);
-  });
-
-  it("never runs setup over a box prepared before setup was recorded", async () => {
-    const { input, source } = await followed();
-    const withSetup = { ...input, prepareCommands: ["echo ran >> ../setup-runs"] };
-    const first = await prepareRemoteHost(localPort, withSetup);
-    pids.add(first.serverPid);
-    const journalPath = NodePath.join(input.root, "preparation.json");
-    const { checkout: _, ...legacy } = JSON.parse(await NodeFSP.readFile(journalPath, "utf8"));
-    await NodeFSP.writeFile(journalPath, JSON.stringify(legacy));
-    advance(source, "upstream");
-    expect((await prepareRemoteHost(localPort, withSetup)).headRevision).toBe(first.headRevision);
-    advance(source, "again");
-    await prepareRemoteHost(localPort, withSetup);
-    expect(await NodeFSP.readFile(NodePath.join(input.root, "setup-runs"), "utf8")).toBe("ran\n");
+    expect((await refreshRemoteCheckout(localPort, input)).refreshError).toMatch(
+      /Preparation command failed/,
+    );
   });
 });
