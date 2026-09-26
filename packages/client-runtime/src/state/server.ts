@@ -981,9 +981,63 @@ export function createServerEnvironmentAtoms<R, E>(
     Effect.sync(() =>
       registry.refresh(managedEnvironments({ environmentId: target.environmentId, input: {} })),
     );
+  const automations = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:automations:list",
+    tag: WS_METHODS.automationsList,
+    staleTimeMs: 5_000,
+  });
+  const automationRuns = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:automations:runs",
+    tag: WS_METHODS.automationsListRuns,
+    staleTimeMs: 5_000,
+  });
+  const refreshAutomations = (
+    target: { readonly environmentId: EnvironmentId },
+    registry: AtomRegistry.AtomRegistry,
+  ) =>
+    Effect.sync(() =>
+      registry.refresh(automations({ environmentId: target.environmentId, input: {} })),
+    );
+  const automationKey = ({
+    environmentId,
+    input,
+  }: {
+    readonly environmentId: EnvironmentId;
+    readonly input: { readonly id: string };
+  }) => JSON.stringify([environmentId, input.id]);
   return {
     managedEnvironments,
     provisionedEnvironments,
+    automations,
+    automationRuns,
+    createAutomation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:automations:create",
+      tag: WS_METHODS.automationsCreate,
+      onSettled: refreshAutomations,
+    }),
+    updateAutomation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:automations:update",
+      tag: WS_METHODS.automationsUpdate,
+      concurrency: { mode: "singleFlight", key: automationKey },
+      onSettled: refreshAutomations,
+    }),
+    deleteAutomation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:automations:delete",
+      tag: WS_METHODS.automationsDelete,
+      concurrency: { mode: "singleFlight", key: automationKey },
+      onSettled: refreshAutomations,
+    }),
+    rotateAutomationWebhook: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:automations:rotate-webhook",
+      tag: WS_METHODS.automationsRotateWebhook,
+      concurrency: { mode: "singleFlight", key: automationKey },
+    }),
+    runAutomationNow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:automations:run-now",
+      tag: WS_METHODS.automationsRunNow,
+      concurrency: { mode: "singleFlight", key: automationKey },
+      onSettled: (target, registry) => Effect.sync(() => registry.refresh(automationRuns(target))),
+    }),
     startManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:start",
       tag: WS_METHODS.environmentControlStart,
