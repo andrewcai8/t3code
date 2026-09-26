@@ -5,11 +5,12 @@
     "types": ["node"],
     "lib": ["ESNext", "esnext.disposable"]
   },
-  // The cloud deploy scripts share the server's credential paths so the two
-  // cannot drift; these files have no dependencies.
+  // The cloud deploy scripts share the server's credential paths and copy
+  // transforms so the two cannot drift; these files have no dependencies.
   "include": [
     "**/*.ts",
     "../apps/server/src/provider/cursorCredentialPath.ts",
-    "../apps/server/src/environmentControl/credentialDestinations.ts"
+    "../apps/server/src/environmentControl/credentialDestinations.ts",
+    "../apps/server/src/environmentControl/stripCodexRefreshToken.ts"
   ]
 }
