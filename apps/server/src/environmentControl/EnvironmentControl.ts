@@ -89,6 +89,8 @@ const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const isProvisionRefused = Schema.is(ProvisionRefused);
 
 const LEASE_REAP_INTERVAL_MS = 5 * 60 * 1000;
+/** Boxes read at once per usage sweep, so a few stuck boxes cannot stall the rest. */
+const USAGE_SYNC_CONCURRENCY = 4;
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -514,18 +516,22 @@ export function createEnvironmentControl(
       const awakeIds = new Set(awake.map((lease) => lease.leaseId));
       for (const leaseId of settledActivity.keys())
         if (!awakeIds.has(leaseId)) settledActivity.delete(leaseId);
-      for (const lease of awake) {
-        const current = await activity(lease);
-        if (current === "busy") settledActivity.set(lease.leaseId, "busy");
-        else if (current === "idle" && settledActivity.get(lease.leaseId) !== "idle") {
-          try {
-            await pullUsage(lease);
-            settledActivity.set(lease.leaseId, "idle");
-          } catch {
-            // Left unsettled so the next sweep pulls again.
+      const queue = [...awake];
+      const sync = async () => {
+        for (let lease = queue.shift(); lease; lease = queue.shift()) {
+          const current = await activity(lease);
+          if (current === "busy") settledActivity.set(lease.leaseId, "busy");
+          else if (current === "idle" && settledActivity.get(lease.leaseId) !== "idle") {
+            try {
+              await pullUsage(lease);
+              settledActivity.set(lease.leaseId, "idle");
+            } catch {
+              // Left unsettled so the next sweep pulls again.
+            }
           }
         }
-      }
+      };
+      await Promise.all(Array.from({ length: USAGE_SYNC_CONCURRENCY }, sync));
     },
   };
 }
@@ -1107,12 +1113,18 @@ export const layer = Layer.effect(
     yield* Effect.gen(function* () {
       const service = yield* Effect.promise(resolve);
       if (!service) return;
-      yield* Effect.gen(function* () {
+      const every = Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS));
+      const reap = Effect.gen(function* () {
         // A lease is only registered once its provision reached ready, so an
         // expired heartbeat means a finished machine nobody is watching. Pause
         // it and leave it reconnectable. A provision that never reached ready
         // holds no lease and is disposed by its retention deadline instead.
         yield* Effect.promise(() => service.reapExpiredLeases()).pipe(Effect.ignore);
+        // A crash between issuing an allocation and recording it leaves a
+        // resource nobody else will look for.
+        yield* provisioning.reconcile.pipe(Effect.ignore);
+      }).pipe(Effect.repeat(every));
+      const collectUsage = Effect.gen(function* () {
         yield* Effect.tryPromise(() => service.syncLeaseUsage()).pipe(Effect.ignore);
         const now = yield* Clock.currentTimeMillis;
         yield* boxUsage
@@ -1122,10 +1134,9 @@ export const layer = Layer.effect(
             ),
           )
           .pipe(Effect.ignore);
-        // A crash between issuing an allocation and recording it leaves a
-        // resource nobody else will look for.
-        yield* provisioning.reconcile.pipe(Effect.ignore);
-      }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
+      }).pipe(Effect.repeat(every));
+      // Separate loops, so boxes slow to report usage never delay a pause.
+      yield* Effect.all([reap, collectUsage], { concurrency: 2, discard: true });
     }).pipe(Effect.forkScoped);
     return {
       namespaceProxyOrigin: (leaseId) =>

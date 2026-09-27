@@ -685,7 +685,7 @@ describe("a cloud box's usage", () => {
   async function withAwakeLease(
     test: (context: {
       registry: ReturnType<typeof createProvisionedLeaseRegistry>;
-      calls: string[];
+      events: string[];
       pulled: string[];
       activity: Array<"busy" | "idle" | "unknown">;
       failPulls: { remaining: number };
@@ -705,16 +705,16 @@ describe("a cloud box's usage", () => {
         remoteAccess: { origin: "http://box.invalid", brokerToken: "broker" },
         now: new Date("2026-01-01T00:00:00.000Z"),
       });
-      const calls: string[] = [];
+      const events: string[] = [];
       const pulled: string[] = [];
       const activity: Array<"busy" | "idle" | "unknown"> = [];
       const failPulls = { remaining: 0 };
       const driver = setup().driver;
-      driver.pause = async ({ sandboxId }) => {
-        calls.push(`pause:${sandboxId}`);
+      driver.pause = async () => {
+        events.push("pause");
       };
-      driver.dispose = async ({ sandboxId }) => {
-        calls.push(`dispose:${sandboxId}`);
+      driver.dispose = async () => {
+        events.push("dispose");
       };
       const manager = createEnvironmentControl(
         [],
@@ -723,46 +723,44 @@ describe("a cloud box's usage", () => {
         async () => activity.shift() ?? "idle",
         async (lease) => {
           pulled.push(lease.leaseId);
+          events.push("pull");
           if (failPulls.remaining > 0) {
             failPulls.remaining -= 1;
             throw new Error("usage history timed out");
           }
         },
       );
-      await test({ registry, calls, pulled, activity, failPulls, manager });
+      await test({ registry, events, pulled, activity, failPulls, manager });
     });
   }
 
   it("pauses a box even when its usage cannot be pulled", async () => {
-    await withAwakeLease(async ({ registry, calls, pulled, failPulls, manager }) => {
+    await withAwakeLease(async ({ registry, events, failPulls, manager }) => {
       failPulls.remaining = 1;
       expect(await manager.pause({ leaseId: "lease", sandboxId: "sandbox" })).toEqual({
         kind: "paused",
       });
-      expect(pulled).toEqual(["lease"]);
-      expect(calls).toEqual(["pause:sandbox"]);
+      expect(events).toEqual(["pull", "pause"]);
       expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
     });
   });
 
   it("pauses an expired box even when its usage cannot be pulled", async () => {
-    await withAwakeLease(async ({ registry, calls, pulled, failPulls, manager }) => {
+    await withAwakeLease(async ({ registry, events, failPulls, manager }) => {
       failPulls.remaining = 1;
       await manager.reapExpiredLeases();
-      expect(pulled).toEqual(["lease"]);
-      expect(calls).toEqual(["pause:sandbox"]);
+      expect(events).toEqual(["pull", "pause"]);
       expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
     });
   });
 
   it("disposes a box even when its usage cannot be pulled", async () => {
-    await withAwakeLease(async ({ registry, calls, pulled, failPulls, manager }) => {
+    await withAwakeLease(async ({ registry, events, failPulls, manager }) => {
       failPulls.remaining = 1;
       expect(await manager.dispose({ leaseId: "lease", sandboxId: "sandbox" })).toEqual({
         kind: "disposed",
       });
-      expect(pulled).toEqual(["lease"]);
-      expect(calls).toEqual(["dispose:sandbox"]);
+      expect(events).toEqual(["pull", "dispose"]);
       expect(await registry.findById("lease")).toMatchObject({ state: "disposed" });
     });
   });
