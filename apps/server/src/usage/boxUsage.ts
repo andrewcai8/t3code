@@ -88,7 +88,7 @@ export class BoxUsageStore extends Context.Service<
     /** Deletes rows whose newest usage is before `cutoffIso`. */
     readonly prune: (cutoffIso: string) => Effect.Effect<void, BoxUsageStoreError>;
   }
->()("t3/usage/BoxUsageStore") {
+>()("t3/usage/boxUsage/BoxUsageStore") {
   static readonly layer = Layer.effect(
     BoxUsageStore,
     Effect.gen(function* () {

@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDateInEffect:off - lease fixtures use fixed timestamps.
 import { assert, describe, it } from "@effect/vitest";
 import {
   USAGE_CONTRACT_VERSION,
@@ -59,7 +60,9 @@ function boxSource(hostId: string, distinctSessions = 1): UsageSource {
   };
 }
 
-const inStore = <A, E>(body: (store: BoxUsageStore["Service"]) => Effect.Effect<A, E>) =>
+const inStore = <A, E>(
+  body: (store: BoxUsageStore["Service"]) => Effect.Effect<A, E, SqlClient.SqlClient>,
+) =>
   Effect.gen(function* () {
     yield* runMigrations();
     return yield* body(yield* BoxUsageStore);

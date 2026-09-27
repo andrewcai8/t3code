@@ -81,6 +81,9 @@ const setup = Effect.gen(function* () {
   };
 });
 
+const token = (subject: string) =>
+  `h.${Buffer.from(JSON.stringify({ sub: subject })).toString("base64url")}.s`;
+
 const serviceLayers = (input: {
   readonly prefix: string;
   readonly home: string;
@@ -91,7 +94,7 @@ const serviceLayers = (input: {
   readonly environment?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
   /** Defaults to a store with no cloud box usage. */
-  readonly boxUsage?: Layer.Layer<BoxUsageStore | SqlClient.SqlClient>;
+  readonly boxUsage?: Layer.Layer<BoxUsageStore>;
 }) =>
   ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
@@ -242,8 +245,6 @@ describe("UsageService", () => {
   it.live("reads every Cursor instance's login and counts each account once", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
-      const token = (subject: string) =>
-        `h.${Buffer.from(JSON.stringify({ sub: subject })).toString("base64url")}.s`;
       const logins = [
         { id: "cursor", config: "config-a", subject: "auth0|user_a" },
         { id: "cursor-work", config: "config-b", subject: "auth0|user_b" },
@@ -1025,6 +1026,9 @@ describe("UsageService", () => {
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
       const boxHome = "/home/user/.claude/projects";
+      const storage = yield* Layer.build(
+        BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+      );
       yield* Effect.gen(function* () {
         const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
         yield* Effect.promise(() =>
@@ -1123,9 +1127,10 @@ describe("UsageService", () => {
             prefix: "usage-service-box-usage",
             home,
             settings,
-            boxUsage: BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+            boxUsage: Layer.succeedContext(storage),
           }),
         ),
+        Effect.provideContext(storage),
       );
     }).pipe(Effect.scoped),
   );
@@ -1140,7 +1145,7 @@ describe("UsageService", () => {
         await NodeFSP.writeFile(
           authPath,
           encodeUnknownJsonString({
-            accessToken: `h.${Buffer.from(JSON.stringify({ sub: "auth0|user_a" })).toString("base64url")}.s`,
+            accessToken: token("auth0|user_a"),
           }),
         );
       });
