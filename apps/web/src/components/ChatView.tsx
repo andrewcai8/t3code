@@ -2603,7 +2603,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const boxesOfOtherChats = useBoxesOfOtherChats(draftId, routeThreadRef);
+  const boxesOfOtherChats = useBoxesOfOtherChats(draftId, threadId);
   const runTargets = useMemo(
     () =>
       newChatRunTargets({

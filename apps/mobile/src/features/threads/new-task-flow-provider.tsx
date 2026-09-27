@@ -186,8 +186,6 @@ type NewTaskFlowContextValue = {
   readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
   /** How to leave another chat's box the flow was pointed at; null when it is on none. */
   readonly boxStart: NewThreadStart | null;
-  /** Marks the box this sheet just started as the task's own, so the flow may point at it. */
-  readonly adoptOwnBox: (environmentId: EnvironmentId) => void;
   readonly selectedProject: EnvironmentProject | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
   readonly selectedModel: ModelSelection | null;
@@ -271,13 +269,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const [selectedEnvironmentIdOverride, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
     null,
   );
-  // The box this sheet just started for its task, the one box it may point at.
-  const [ownBox, setOwnBox] = useState<EnvironmentId | null>(null);
-  const boxes = useMemo(
-    () =>
-      boxesOfOtherChats(provisionedBoxes, { threadId: null, leaseId: null, environmentId: ownBox }),
-    [provisionedBoxes, ownBox],
-  );
+  // A new task has no thread yet, so every claimed box is another chat's.
+  const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   // The new-task draft the composer is bound to. Null until a project is
   // chosen; each New Task entry mints its own, so a project can hold several.
@@ -305,7 +298,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
 
   const reset = useCallback(() => {
     setSelectedEnvironmentId(null);
-    setOwnBox(null);
     setSelectedProjectKey(null);
     setActiveDraftKey(null);
     setSubmitting(false);
@@ -1208,7 +1200,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       environments,
       boxes,
       boxStart,
-      adoptOwnBox: setOwnBox,
       selectedProject,
       modelOptions,
       selectedModel,

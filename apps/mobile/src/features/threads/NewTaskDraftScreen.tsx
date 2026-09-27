@@ -735,15 +735,17 @@ export function NewTaskDraftScreen(props: {
   // Shared content stays on the draft path, which owns its reservation.
   const boxCloudMachine =
     flow.boxStart?.kind === "cloud-machine" && !props.incomingShareId ? flow.boxStart : null;
+  const initialBranch = props.initialProjectRef?.branch ?? null;
   useEffect(() => {
     if (!boxCloudMachine) return;
     navigation.dispatch(
       StackActions.replace("NewTaskCloudMachine", {
         environmentId: String(boxCloudMachine.managerId),
         repository: boxCloudMachine.repository,
+        ...(initialBranch ? { branch: initialBranch } : {}),
       }),
     );
-  }, [boxCloudMachine, navigation]);
+  }, [boxCloudMachine, initialBranch, navigation]);
 
   useEffect(() => {
     if (!selectedProject) {

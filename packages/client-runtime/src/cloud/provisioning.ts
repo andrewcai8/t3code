@@ -6,7 +6,6 @@ import {
   type ProjectId,
   ProvisionProvider,
   type ScopedProjectRef,
-  type ScopedThreadRef,
   type ServerConfig,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -85,49 +84,22 @@ export function sameProvisionedBoxes(
   );
 }
 
-/** How a new chat recognises the box it started for itself. */
-export interface NewChatOwnBox {
-  /** The chat's thread, which the host records once the box is claimed for it. */
-  readonly threadId: ThreadId | null;
-  /** The lease the chat holds: under its draft, then under its thread once the first turn starts. */
-  readonly leaseId: string | null;
-  /** The environment the chat points at while that is the box it started for itself. */
-  readonly environmentId: EnvironmentId | null;
-}
-
 /**
- * What marks a draft's own box. The lease is looked up under the draft and under the thread the
- * draft becomes, because the first turn moves it there while the draft is still on screen.
- */
-export function draftOwnBox(
-  leases: Pick<ProvisionedSandboxLeaseStore, "leaseFor">,
-  draftId: string,
-  draftThreadRef: ScopedThreadRef,
-): NewChatOwnBox {
-  const lease = leases.leaseFor(draftId) ?? leases.leaseFor(draftThreadRef);
-  return {
-    threadId: draftThreadRef.threadId,
-    leaseId: lease?.leaseId ?? null,
-    environmentId: lease === null ? null : draftThreadRef.environmentId,
-  };
-}
-
-/**
- * The boxes a new chat must not start on, each mapped to the host that provisioned it: every
- * box the hosts report except the chat's own. The first turn moves the lease from the draft to
- * the thread while the draft is still on screen, so any one of the three marks it as its own.
+ * The boxes a new chat must not start on, each mapped to the host that provisioned it: those the
+ * host lists as claimed by a thread other than `threadId`, the chat's own. A box nobody has
+ * claimed yet belongs to no other chat, whether it was just created, is still pairing, or was
+ * left by a draft that never sent.
  */
 export function boxesOfOtherChats(
   boxes: ReadonlyArray<ProvisionedBox>,
-  own: NewChatOwnBox | null,
+  threadId: ThreadId | null,
 ): ReadonlyMap<EnvironmentId, EnvironmentId> {
-  const isOwn = (box: ProvisionedBox) =>
-    own !== null &&
-    ((own.threadId !== null && box.threadId === own.threadId) ||
-      (own.leaseId !== null && box.leaseId === own.leaseId) ||
-      box.environmentId === own.environmentId);
   return new Map(
-    boxes.flatMap((box) => (isOwn(box) ? [] : [[box.environmentId, box.managerId] as const])),
+    boxes.flatMap((box) =>
+      box.threadId === null || box.threadId === threadId
+        ? []
+        : [[box.environmentId, box.managerId] as const],
+    ),
   );
 }
 
@@ -166,9 +138,8 @@ export function newChatRunTargets<
     | null
     | undefined;
   /**
-   * Cloud boxes provisioned for other chats. Every new chat gets a fresh box,
-   * so none of these is a place to start one. Leave out the box this chat
-   * provisioned for itself.
+   * Cloud boxes other chats claimed. Every new chat gets a fresh box, so none
+   * of these is a place to start one.
    */
   readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
 }): NewChatRunTargets<Environment> {

@@ -1,4 +1,5 @@
-import { EnvironmentId, ProjectId, type ServerConfig } from "@t3tools/contracts";
+import { boxesOfOtherChats } from "@t3tools/client-runtime/cloud";
+import { EnvironmentId, ProjectId, type ServerConfig, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -73,12 +74,19 @@ describe("getProjectScopeSelectionTarget", () => {
 
   it("opens a member on no other chat's box when the representative is one", () => {
     const projects = [makeProject("t3code-box", "box"), makeProject("t3code-mac", "mac")];
+    const boxes = boxesOfOtherChats(
+      [
+        {
+          managerId: EnvironmentId.make("host"),
+          environmentId: EnvironmentId.make("box"),
+          leaseId: "lease",
+          threadId: ThreadId.make("chat-x"),
+        },
+      ],
+      null,
+    );
     expect(
-      getProjectScopeSelectionTarget(
-        makeScope(projects),
-        EnvironmentId.make("other"),
-        new Map([[EnvironmentId.make("box"), EnvironmentId.make("host")]]),
-      ),
+      getProjectScopeSelectionTarget(makeScope(projects), EnvironmentId.make("other"), boxes),
     ).toBe(projects[1]);
   });
 
@@ -286,10 +294,18 @@ describe("new task environments", () => {
     [host, cloudOnlyHost],
     [laptop, { localAgentRuns: true }],
   ]);
-  const boxes = new Map([
-    [box, host],
-    [namespaceBox, host],
-  ]);
+  const claimedBy = (environmentId: EnvironmentId, threadId: string | null) => ({
+    managerId: host,
+    environmentId,
+    leaseId: `${environmentId}-lease`,
+    threadId: threadId === null ? null : ThreadId.make(threadId),
+  });
+  const ownBox = EnvironmentId.make("own-box");
+  // What the host lists: two boxes other chats claimed, and one a draft started but never sent.
+  const boxes = boxesOfOtherChats(
+    [claimedBy(box, "chat-x"), claimedBy(namespaceBox, "automation-run"), claimedBy(ownBox, null)],
+    null,
+  );
 
   it("offers servers that run agents, never a running box or a host that runs none", () => {
     expect(
@@ -333,15 +349,22 @@ describe("new task environments", () => {
       });
     expect(picked(false)).toBe(host);
     expect(picked(true)).toBe(box);
+  });
+
+  it("keeps a resumed draft on the unclaimed box it started", () => {
+    const onOwnBox = onRepo("on-own-box", "own-box");
     expect(
       resolveNewTaskEnvironmentId({
-        picked: box,
+        picked: ownBox,
         pinned: false,
-        projects: hostOnly,
+        projects: [...hostOnly, onOwnBox],
         serverConfigs,
-        boxes: new Map([[namespaceBox, host]]),
+        boxes,
       }),
-    ).toBe(box);
+    ).toBe(ownBox);
+    expect(resolveNewThreadStart({ project: onOwnBox, serverConfigs, boxes })).toEqual({
+      kind: "draft",
+    });
   });
 
   describe("a draft on another chat's box", () => {

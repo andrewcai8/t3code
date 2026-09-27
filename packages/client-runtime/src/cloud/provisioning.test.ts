@@ -19,7 +19,6 @@ import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.t
 import {
   type CloudProvisionPorts,
   boxesOfOtherChats,
-  draftOwnBox,
   newChatRunTargets,
   offeredProvisionProviders,
   provisionCloudEnvironment,
@@ -483,66 +482,56 @@ describe("newChatRunTargets", () => {
 
 describe("boxesOfOtherChats", () => {
   const host = EnvironmentId.make("host");
-  const ownBox = EnvironmentId.make("own-box");
-  const otherBox = EnvironmentId.make("other-box");
-  const draftThreadId = ThreadId.make("draft-thread");
-  const boxes = (ownThreadId: ThreadId | null) => [
-    { managerId: host, environmentId: ownBox, leaseId: "own-lease", threadId: ownThreadId },
-    {
-      managerId: host,
-      environmentId: otherBox,
-      leaseId: "other-lease",
-      threadId: ThreadId.make("other-thread"),
-    },
-  ];
-  const others = new Map([[otherBox, host]]);
+  const laptop = { environmentId: EnvironmentId.make("laptop") };
+  const draftThread = ThreadId.make("draft-thread");
+  const box = (environmentId: string, threadId: string | null) => ({
+    managerId: host,
+    environmentId: EnvironmentId.make(environmentId),
+    leaseId: `${environmentId}-lease`,
+    threadId: threadId === null ? null : ThreadId.make(threadId),
+  });
+  const chatBox = box("chat-x-box", "chat-x");
+  const automationBox = box("automation-box", "automation-run");
+  const manager = {
+    environmentControl: true,
+    provisionProviders: ["e2b", "namespace"] as const,
+  };
 
-  it("keeps the draft's own box through the handoff to its first turn", () => {
-    const leases = createProvisionedSandboxLeaseStore(memoryStorage());
-    const onHost = { environmentId: host, threadId: draftThreadId };
-    const onBox = { environmentId: ownBox, threadId: draftThreadId };
-    leases.remember("draft", {
-      leaseId: "own-lease",
-      sandboxId: "sandbox",
-      managerEnvironmentId: host,
-    });
-    // Provisioned: the lease sits on the draft, which still points at the host.
-    expect(boxesOfOtherChats(boxes(null), draftOwnBox(leases, "draft", onHost))).toEqual(others);
-    // Paired: the draft points at its box.
-    expect(boxesOfOtherChats(boxes(null), draftOwnBox(leases, "draft", onBox))).toEqual(others);
-    // First turn started: the lease moved to the thread while the draft is still on screen, and
-    // the host has not recorded the claim yet.
-    leases.transfer("draft", onBox);
-    expect(leases.leaseFor("draft")).toBeNull();
-    expect(boxesOfOtherChats(boxes(null), draftOwnBox(leases, "draft", onBox))).toEqual(others);
-    // Claimed: the host lists the box under the draft's thread.
-    expect(boxesOfOtherChats(boxes(draftThreadId), draftOwnBox(leases, "draft", onBox))).toEqual(
-      others,
-    );
-    leases.forget(onBox);
-    expect(boxesOfOtherChats(boxes(draftThreadId), draftOwnBox(leases, "draft", onBox))).toEqual(
-      others,
+  it("counts boxes claimed by other chats or automation runs, never an unclaimed one", () => {
+    expect(
+      boxesOfOtherChats([chatBox, automationBox, box("fresh-box", null)], draftThread),
+    ).toEqual(
+      new Map([
+        [chatBox.environmentId, host],
+        [automationBox.environmentId, host],
+      ]),
     );
   });
 
-  it("marks every box as another chat's for a chat that started none", () => {
+  it("never counts the draft's own box through the handoff to its first turn", () => {
+    const own = (threadId: string | null) =>
+      boxesOfOtherChats([chatBox, box("own-box", threadId)], draftThread);
+    // Created, pairing, or paired with the first turn under way but not yet claimed.
+    expect(own(null)).toEqual(new Map([[chatBox.environmentId, host]]));
+    // Claimed by the draft's thread.
+    expect(own("draft-thread")).toEqual(new Map([[chatBox.environmentId, host]]));
+  });
+
+  it("sends a draft on another chat's box to a fresh box, even after its own box failed to pair", () => {
+    const hostEnvironment = { environmentId: host };
+    const failedPairing = box("failed-pairing-box", null);
     expect(
-      boxesOfOtherChats(boxes(ThreadId.make("earlier-chat")), {
-        threadId: draftThreadId,
-        leaseId: null,
-        environmentId: null,
+      newChatRunTargets({
+        environments: [hostEnvironment, chatBox, laptop],
+        environmentState: (id) => (id === host ? { serverConfig: { localAgentRuns: false } } : {}),
+        environmentId: chatBox.environmentId,
+        managerConfig: manager,
+        boxes: boxesOfOtherChats([chatBox, failedPairing], draftThread),
       }),
-    ).toEqual(
-      new Map([
-        [ownBox, host],
-        [otherBox, host],
-      ]),
-    );
-    expect(boxesOfOtherChats(boxes(null), null)).toEqual(
-      new Map([
-        [ownBox, host],
-        [otherBox, host],
-      ]),
-    );
+    ).toEqual({
+      environments: [laptop],
+      cloudProviders: ["e2b", "namespace"],
+      redirect: { kind: "cloud", provider: "e2b" },
+    });
   });
 });
