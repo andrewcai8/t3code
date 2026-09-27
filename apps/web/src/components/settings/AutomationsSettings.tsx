@@ -57,13 +57,14 @@ import { toastManager } from "../ui/toast";
 import {
   automationDraftFrom,
   automationInputFromDraft,
-  automationTriggerLabel,
+  automationTriggerSummary,
   automationWebhookUrl,
   isAutomationRunActive,
   newAutomationDraft,
+  presetCron,
   type AutomationDraft,
   type AutomationDraftField,
-} from "./AutomationsSettings.logic";
+} from "../automations/automations.logic";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
 /** The account menu's value for "run on the account with the most usage left". */
@@ -240,7 +241,7 @@ function AutomationRow({
           <p className="truncate text-xs text-muted-foreground">
             {automation.repository}
             {automation.branch ? `@${automation.branch}` : ""} ·{" "}
-            {PROVIDER_LABELS[automation.provider]} · {automationTriggerLabel(automation)}
+            {PROVIDER_LABELS[automation.provider]} · {automationTriggerSummary(automation)}
           </p>
         </div>
         <Button
@@ -609,10 +610,12 @@ function AutomationEditor({
                 <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3">
                   <Field label="Cron">
                     <Input
-                      value={draft.cron}
+                      value={presetCron(draft.schedule)}
                       disabled={saving}
                       aria-invalid={errors.schedule !== undefined || undefined}
-                      onChange={(event) => set({ cron: event.target.value })}
+                      onChange={(event) =>
+                        set({ schedule: { kind: "custom", cron: event.target.value } })
+                      }
                       placeholder="0 9 * * 1-5"
                     />
                   </Field>
