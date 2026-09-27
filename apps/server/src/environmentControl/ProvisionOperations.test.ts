@@ -19,6 +19,7 @@ import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import { TestClock } from "effect/testing";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderError, ProvisionProviderPorts } from "./Provisioning.ts";
@@ -669,3 +670,40 @@ it.effect(
       expect(disposed).toEqual([parent, child, parent]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+describe("an allocation whose outcome a crash lost", () => {
+  const issuedAt = "2026-09-26T08:00:00.000Z";
+  const minutesAfterIssue = (minutes: number) =>
+    TestClock.setTime(Date.parse(issuedAt) + minutes * 60_000);
+  const recording = () => {
+    const p = provider();
+    const disposed: ProvisionResource[] = [];
+    const ports: ProvisionProviderPorts["Service"] = {
+      ...p.ports,
+      dispose: (_operation, resource) =>
+        Effect.sync(() => {
+          disposed.push(resource);
+        }),
+    };
+    return { p, ports, disposed };
+  };
+  const seedForkIssued = (file: string, ports: ProvisionProviderPorts["Service"]) =>
+    Effect.gen(function* () {
+      const store = yield* ProvisionOperationStore;
+      yield* store.advance(yield* store.accept(request), { kind: "fork_issued", parent, issuedAt });
+    }).pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
+
+  it.effect("dispose settles a fork whose sandbox never appeared", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { ports, disposed } = recording();
+      yield* seedForkIssued(file, ports);
+      yield* minutesAfterIssue(60);
+      const result = yield* Effect.gen(function* () {
+        return yield* (yield* Provisioning).cancel(request.requestId);
+      }).pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
+      expect(result.state).toEqual({ kind: "disposed" });
+      expect(disposed).toEqual([parent]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
