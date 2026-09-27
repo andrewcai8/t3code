@@ -34,9 +34,11 @@ export interface RemotePreparationInput {
   /** Closed-set shell command from guestProviderInstallCommand. Runs in the isolated home. */
   readonly providerInstall?: string | undefined;
   /**
-   * Closed-set shell command from guestToolInstallCommand, run beside
-   * providerInstall. Excluded from the intent hash so a root prepared before
-   * it existed picks the tools up on its next prepare.
+   * Closed-set shell command from guestToolInstallCommand. Best effort, run
+   * after providerInstall and capped at 180 seconds; a failure records a
+   * `toolInstallFailed` phase instead of failing preparation. Excluded from
+   * the intent hash so a root prepared before it existed picks the tools up
+   * on its next prepare.
    */
   readonly toolInstall?: string | undefined;
   /**
@@ -209,6 +211,7 @@ INTERPRETER_START = time.monotonic()
 STARTUP = []
 # Children preparation started without waiting on; stopped if it fails first.
 BACKGROUND = []
+TOOL_INSTALL_SECONDS = 180
 os.umask(0o077)
 
 def atomic(path, value):
@@ -471,13 +474,12 @@ def prepare(spec):
         # Agent CLIs install into the isolated home, independent of the runtime
         # and the checkout, so they download while those do. Setup commands may
         # call the CLIs, so preparation waits for this before running them.
-        installing = []
-        for field in ('providerInstall', 'toolInstall'):
-            install = spec.get(field)
-            if install:
-                if not isinstance(install, str) or not install.strip() or '\0' in install:
-                    raise RuntimeError('Invalid ' + field + ' command')
-                installing.append((field, start(['sh', '-c', install], home, env)))
+        install = spec.get('providerInstall')
+        installing = None
+        if install:
+            if not isinstance(install, str) or not install.strip() or '\0' in install:
+                raise RuntimeError('Invalid provider install command')
+            installing = start(['sh', '-c', install], home, env)
         checkout = root / 'workspace.partial'
         fetching = None
         if repository is not None and not project.exists():
@@ -662,9 +664,19 @@ def prepare(spec):
                             raise RuntimeError('Refusing to overwrite an existing artifact')
                         continue
                     fetch_artifact(url, target, entry['sha256'])
-        for field, started in installing:
-            with step(field):
-                finish(started, 900)
+        if installing is not None:
+            with step('providerInstall'):
+                finish(installing, 900)
+        # Box CLIs start only once the agent CLIs are in, so two global npm
+        # installs never write the same prefix, and are joined last. They are
+        # best effort: a failure costs a warning, and the next prepare skips
+        # what finished and redoes the rest.
+        tools = spec.get('toolInstall')
+        tooling = None
+        if tools:
+            if not isinstance(tools, str) or not tools.strip() or '\0' in tools:
+                raise RuntimeError('Invalid tool install command')
+            tooling = (time.monotonic(), start(['sh', '-c', tools], home, env))
         prepare = spec.get('prepareCommands') or []
         if prepare:
             if not isinstance(prepare, list):
@@ -774,6 +786,21 @@ def prepare(spec):
         process = server_process()
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
+        if tooling is not None:
+            since, started = tooling
+            try:
+                finish(started, max(0, TOOL_INSTALL_SECONDS - (time.monotonic() - since)))
+                mark('toolInstall', since)
+                (root / 'tool-install.log').unlink(missing_ok=True)
+            except RuntimeError as error:
+                child = started[0]
+                with contextlib.suppress(OSError):
+                    os.killpg(child.pid, 9)
+                child.wait()
+                if child in BACKGROUND:
+                    BACKGROUND.remove(child)
+                atomic(root / 'tool-install.log', str(error) + '\n')
+                mark('toolInstallFailed', since)
         mark('prepareTotal', entered)
         return {'refreshError': refresh_error, 'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 

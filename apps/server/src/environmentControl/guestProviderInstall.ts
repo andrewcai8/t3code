@@ -43,14 +43,15 @@ const guestToolPins = {
  * Installs the AWS CLI and wrangler into the isolated home without sudo. Each
  * tool is skipped when its pinned version is already there, so a resumed Mac
  * pays only two file checks. The AWS CLI lands in a versioned directory by
- * rename, so a download cut short never passes for an install.
+ * rename, so a download cut short never passes for an install, and a new pin
+ * replaces every older version.
  */
 export function guestToolInstallCommand(pins = guestToolPins): string {
   return [
     "set -eu",
     `aws="$HOME/.local/lib/aws-cli-${pins.awsCli.version}"`,
     'if [ ! -x "$aws/aws" ]; then',
-    '  rm -rf "$aws" "$aws.partial"',
+    '  rm -rf "$HOME/.local/lib"/aws-cli-*',
     '  mkdir -p "$aws.partial"',
     `  curl -fsSL --retry 3 --connect-timeout 30 --max-time 900 https://awscli.amazonaws.com/AWSCLIV2-${pins.awsCli.version}.pkg -o "$aws.partial/aws.pkg"`,
     `  printf '%s  %s\\n' ${pins.awsCli.sha256} "$aws.partial/aws.pkg" | shasum -a 256 -c -s`,

@@ -113,8 +113,9 @@ describe("guestToolInstallCommand", () => {
     expect(await calls(home)).toBe("curl\npkgutil\nnpm\n");
   });
 
-  it("reinstalls over a download cut short and a different wrangler", async () => {
+  it("replaces a download cut short, an older AWS CLI, and a different wrangler", async () => {
     const home = await makeHome();
+    await NodeFSP.mkdir(NodePath.join(home, ".local/lib/aws-cli-9.9.8"), { recursive: true });
     await NodeFSP.mkdir(NodePath.join(home, ".local/lib/aws-cli-9.9.9.partial/expanded"), {
       recursive: true,
     });
@@ -128,6 +129,10 @@ describe("guestToolInstallCommand", () => {
     expect(install(home).status).toBe(0);
     expect(await calls(home)).toBe("curl\npkgutil\nnpm\n");
     expect(aws(home)).toBe("aws-cli/9.9.9\n");
+    expect((await NodeFSP.readdir(NodePath.join(home, ".local/lib"))).sort()).toEqual([
+      "aws-cli-9.9.9",
+      "node_modules",
+    ]);
   });
 
   it("refuses an AWS CLI package whose digest does not match", async () => {
