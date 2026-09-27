@@ -1,6 +1,7 @@
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
 import { deriveThreadTitleFromPrompt } from "../lib/projectThreadStartTurn";
+import { scopedThreadKey } from "../lib/scopedEntities";
 import type { QueuedThreadCreation, QueuedThreadMessage } from "./thread-outbox-model";
 import { isNewTaskDraftKey } from "./new-task-draft-key";
 import type { ComposerDraft } from "./use-composer-drafts";
@@ -61,10 +62,18 @@ function draftTitle(draft: ComposerDraft): string {
 export function buildPendingNewTasks(input: {
   readonly queuedMessages: ReadonlyArray<QueuedThreadMessage>;
   readonly drafts: Readonly<Record<string, ComposerDraft>>;
+  /** Scoped keys of every thread the client knows about. */
+  readonly knownThreadKeys: ReadonlySet<string>;
 }): ReadonlyArray<PendingNewTask> {
   const tasks: PendingNewTask[] = [];
   for (const message of input.queuedMessages) {
     if (!message.creation) {
+      continue;
+    }
+    // The outbox drops a delivered creation only after its disk write lands,
+    // which can trail the thread's arrival. Once the thread exists, its own
+    // row stands for the task.
+    if (input.knownThreadKeys.has(scopedThreadKey(message.environmentId, message.threadId))) {
       continue;
     }
     tasks.push({

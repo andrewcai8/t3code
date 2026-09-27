@@ -132,6 +132,7 @@ import {
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
+  useThreadRefs,
   useThreadShells,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
@@ -179,6 +180,9 @@ import {
   shouldNavigateAfterThreadPark,
   shouldRecedeSidebarThread,
   resolveWorkingStartedAt,
+  EMPTY_SIDEBAR_COMPOSER,
+  sidebarDraftRows,
+  sidebarDraftStatusLabel,
   sidebarListItemId,
   sidebarMarkerId,
   sortLogicalProjectsForSidebar,
@@ -187,6 +191,7 @@ import {
   useRetainedValue,
   useSidebarRowSubscriptionLease,
   useThreadJumpHintVisibility,
+  type SidebarDraftRowData,
   type SidebarListItem,
   type SidebarListMarker,
   type SidebarSection,
@@ -256,21 +261,6 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
-
-const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
-  prompt: "",
-  images: [],
-  files: [],
-  nonPersistedImageIds: [],
-  persistedAttachments: [],
-  terminalContexts: [],
-  previewAnnotations: [],
-  reviewComments: [],
-  modelSelectionByProvider: {},
-  activeProvider: null,
-  runtimeMode: null,
-  interactionMode: null,
-};
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -746,7 +736,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
         : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
   const accessibility = resolveSidebarRowAccessibility({
     title: preview,
-    statusLabel: "Unsent draft",
+    statusLabel: sidebarDraftStatusLabel(session, props.isActive),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -824,12 +814,6 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   );
 });
 
-interface SidebarDraftRowData {
-  draftId: DraftId;
-  session: DraftSessionState;
-  composer: ComposerThreadDraftState;
-}
-
 // Draft sessions with user content, surfaced above the pinned block so an
 // interrupted "new thread" stays one click away. Self-contained (own store
 // subscription + closing divider) so per-keystroke composer updates
@@ -844,6 +828,10 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
   const draftsByThreadKey = useComposerDraftStore((store) => store.draftsByThreadKey);
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
+  // Membership-only subscription: the refs array keeps its identity until a
+  // thread is added or removed, so thread activity never re-renders the block.
+  const threadRefs = useThreadRefs();
+  const knownThreadKeys = useMemo(() => new Set(threadRefs.map(scopedThreadKey)), [threadRefs]);
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
   // types. A draft that was never navigated away from has no snapshot to
@@ -870,55 +858,25 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     }
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
   }
-  const drafts = useMemo(() => {
-    const rows: SidebarDraftRowData[] = [];
-    // Every non-promoted session with content gets a row, mapped or not:
-    // new-thread surfaces mint fresh drafts and leave invested ones behind
-    // unmapped, so the mapping only knows about the latest per project.
-    for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (session.promotedTo != null) {
-        continue;
-      }
-      if (
-        props.scopedProjectKeys !== null &&
-        !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-      ) {
-        continue;
-      }
-      if (draftKey === props.routeDraftId) {
-        // Open draft: render the frozen entry snapshot, or a live row for a
-        // started first-send that has not been left yet. Gated on the LIVE
-        // session above so send/discard still removes the row immediately.
-        if (frozenActive.routeDraftId === draftKey && frozenActive.row !== null) {
-          rows.push(frozenActive.row);
-        } else if (session.pendingEnvironmentSend != null) {
-          rows.push({
-            draftId: DraftId.make(draftKey),
-            session,
-            composer: draftsByThreadKey[draftKey] ?? EMPTY_SIDEBAR_COMPOSER,
-          });
-        }
-        continue;
-      }
-      const composer = draftsByThreadKey[draftKey];
-      if (!draftSessionHasInvestedWork(session, composer)) {
-        continue;
-      }
-      rows.push({
-        draftId: DraftId.make(draftKey),
-        session,
-        composer: composer ?? EMPTY_SIDEBAR_COMPOSER,
-      });
-    }
-    rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
-    return rows;
-  }, [
-    draftThreadsByThreadKey,
-    draftsByThreadKey,
-    frozenActive,
-    props.routeDraftId,
-    props.scopedProjectKeys,
-  ]);
+  const drafts = useMemo(
+    () =>
+      sidebarDraftRows({
+        sessions: draftThreadsByThreadKey,
+        composers: draftsByThreadKey,
+        scopedProjectKeys: props.scopedProjectKeys,
+        routeDraftId: props.routeDraftId,
+        frozenRouteRow: frozenActive.routeDraftId === props.routeDraftId ? frozenActive.row : null,
+        knownThreadKeys,
+      }),
+    [
+      draftThreadsByThreadKey,
+      draftsByThreadKey,
+      frozenActive,
+      knownThreadKeys,
+      props.routeDraftId,
+      props.scopedProjectKeys,
+    ],
+  );
   const handleDiscard = useCallback(
     (draftId: DraftId) => {
       // The /draft/$draftId route redirects home on its own when the draft
