@@ -9,6 +9,7 @@ import {
   type AutomationSchedule,
   type EnvironmentId,
   type ProvisionProvider,
+  type VcsRef,
 } from "@t3tools/contracts";
 import * as Cron from "effect/Cron";
 import * as Result from "effect/Result";
@@ -35,6 +36,11 @@ export const SCHEDULE_PRESET_LABELS: Record<SchedulePresetKind, string> = {
   weekdays: "Weekdays",
   weekly: "Every week",
   custom: "Custom cron",
+};
+
+export const PROVISION_PROVIDER_LABELS: Record<ProvisionProvider, string> = {
+  e2b: "E2B",
+  namespace: "Mac",
 };
 
 /** The editable form of an automation. Empty strings mean "not chosen yet" or "the default". */
@@ -286,19 +292,54 @@ export function automationRepositoryOptions(
   );
 }
 
+/**
+ * The branches a cloud machine can check out, as named on the remote: local branches and remote
+ * ones without their remote prefix, once each. `keep` stays listed, as an edited automation's
+ * branch must be even when this checkout does not have it.
+ */
+export function automationBranchOptions(
+  refs: ReadonlyArray<VcsRef>,
+  keep: string,
+): { readonly defaultBranch: string | null; readonly branches: ReadonlyArray<string> } {
+  const names = new Set<string>();
+  let defaultBranch: string | null = null;
+  for (const ref of refs) {
+    const name =
+      ref.isRemote && ref.remoteName && ref.name.startsWith(`${ref.remoteName}/`)
+        ? ref.name.slice(ref.remoteName.length + 1)
+        : ref.name;
+    if (name === "HEAD") continue;
+    if (ref.isDefault) defaultBranch ??= name;
+    names.add(name);
+  }
+  if (keep !== "") names.add(keep);
+  return { defaultBranch, branches: [...names].sort((left, right) => left.localeCompare(right)) };
+}
+
+/** What an update sends to keep everything about `automation` but the fields in `patch`. */
+export function automationInputOf(
+  automation: Automation,
+  patch: Partial<AutomationInput> = {},
+): AutomationInput {
+  const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...input } = automation;
+  return { ...input, ...patch };
+}
+
 const REPOSITORY_PATTERN = /^[\w.-]+\/[\w.-]+$/;
 const decodeAutomationInput = Schema.decodeUnknownSync(AutomationInput);
-const DRAFT_FIELDS: ReadonlyArray<AutomationDraftField> = [
-  "name",
-  "repository",
-  "branch",
-  "prompt",
-  "agentDriver",
-  "account",
-  "model",
-  "provider",
-  "schedule",
-];
+/** Each form field's own wire decoder, so a rule only the schema knows lands under its field. */
+const DRAFT_FIELD_DECODERS = {
+  name: Schema.decodeUnknownResult(AutomationInput.fields.name),
+  repository: Schema.decodeUnknownResult(AutomationInput.fields.repository),
+  branch: Schema.decodeUnknownResult(AutomationInput.fields.branch),
+  prompt: Schema.decodeUnknownResult(AutomationInput.fields.prompt),
+  agentDriver: Schema.decodeUnknownResult(AutomationInput.fields.agentDriver),
+  account: Schema.decodeUnknownResult(AutomationInput.fields.account),
+  model: Schema.decodeUnknownResult(AutomationInput.fields.model),
+  provider: Schema.decodeUnknownResult(AutomationInput.fields.provider),
+  schedule: Schema.decodeUnknownResult(AutomationInput.fields.schedule),
+} satisfies Record<AutomationDraftField, unknown>;
+const DRAFT_FIELDS = Object.keys(DRAFT_FIELD_DECODERS) as ReadonlyArray<AutomationDraftField>;
 
 export function newAutomationDraft(defaults: {
   readonly agentDriver: string;
@@ -381,7 +422,7 @@ export function automationInputFromDraft(draft: AutomationDraft): AutomationDraf
   };
   for (const field of DRAFT_FIELDS) {
     if (errors[field] !== undefined) continue;
-    const decoded = Schema.decodeUnknownResult(AutomationInput.fields[field])(candidate[field]);
+    const decoded = DRAFT_FIELD_DECODERS[field](candidate[field]);
     if (Result.isFailure(decoded)) errors[field] = decoded.failure.message;
   }
   if (Object.keys(errors).length > 0) return { kind: "invalid", errors };

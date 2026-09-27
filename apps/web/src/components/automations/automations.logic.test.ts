@@ -1,7 +1,8 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, type VcsRef } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  automationBranchOptions,
   automationInputFromDraft,
   automationRepositoryOptions,
   automationTriggerSummary,
@@ -172,6 +173,30 @@ describe("automationRepositoryOptions", () => {
         source: { environmentId: "local", cwd: "/Users/andrew/t3code" },
       },
     ]);
+  });
+});
+
+describe("automationBranchOptions", () => {
+  it("names remote branches as the remote does and keeps an automation's own branch", () => {
+    const ref = (name: string, patch: Partial<VcsRef> = {}): VcsRef => ({
+      name,
+      current: false,
+      isDefault: false,
+      worktreePath: null,
+      ...patch,
+    });
+    expect(
+      automationBranchOptions(
+        [
+          ref("main", { current: true, isDefault: true }),
+          ref("origin/main", { isRemote: true, remoteName: "origin" }),
+          ref("origin/release", { isRemote: true, remoteName: "origin" }),
+          ref("origin/HEAD", { isRemote: true, remoteName: "origin" }),
+          ref("feature/cards"),
+        ],
+        "nightly",
+      ),
+    ).toEqual({ defaultBranch: "main", branches: ["feature/cards", "main", "nightly", "release"] });
   });
 });
 
