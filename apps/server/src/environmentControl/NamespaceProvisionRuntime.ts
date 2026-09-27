@@ -22,7 +22,7 @@ import {
 } from "./namespaceAllocation.ts";
 import type { NamespaceResource as ImportedNamespaceResource } from "./namespaceProvisioner.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
-import { withGuestProviderInstall } from "./guestProviderInstall.ts";
+import { guestToolInstallCommand, withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
@@ -292,8 +292,11 @@ export function makeNamespaceProvisionRuntime(config: {
   /** Supplies the proxy's upstream credential, so it can be renewed or stubbed. */
   readonly getIngressAuthorization?: () => Promise<string>;
   readonly proxies?: Pick<NamespaceProxyManager, "open" | "restore" | "close">;
+  /** Installs the box CLIs on every prepare. Tests replace the real downloads. */
+  readonly toolInstall?: string;
 }) {
   const proxies = config.proxies ?? new NamespaceProxyManager();
+  const toolInstall = config.toolInstall ?? guestToolInstallCommand();
   const ingressAuthorization =
     config.getIngressAuthorization ??
     (async () => `Bearer ${await config.session.issueToken(60_000)}`);
@@ -541,6 +544,7 @@ except FileExistsError:
           ...(artifactSources.length ? { artifactSources } : {}),
           ...(runtime ? { runtime: guest } : {}),
           ...(follow ? { follow } : {}),
+          toolInstall,
         },
         operation.request.agentDriver,
       ),

@@ -758,6 +758,79 @@ describe("remote preparation subprocess", () => {
     );
   });
 
+  it("installs box tools on a root prepared before they existed without changing its identity", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const second = await prepareRemoteHost(localPort, {
+      ...input,
+      toolInstall:
+        'printf "#!/bin/sh\\n" > "$HOME/.local/bin/aws" && chmod 700 "$HOME/.local/bin/aws"',
+    });
+    expect(second.environmentId).toBe(first.environmentId);
+    await expect(
+      NodeFSP.access(NodePath.join(input.root, "home/.local/bin/aws")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("installs box tools only after the agent CLIs are in", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, {
+      ...input,
+      providerInstall: 'sleep 1 && touch "$HOME/agent-clis"',
+      toolInstall: 'test -e "$HOME/agent-clis" && touch "$HOME/box-tools"',
+    });
+    pids.add(ready.serverPid);
+    await expect(
+      NodeFSP.access(NodePath.join(input.root, "home/box-tools")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("finishes preparing with a warning when the box tools fail to install", async () => {
+    const input = await fixture();
+    const phases: ProvisionPhase[] = [];
+    const ready = await prepareRemoteHost(
+      localPort,
+      { ...input, toolInstall: "printf 'aws download failed' >&2; exit 7" },
+      (phase) => phases.push(phase),
+    );
+    pids.add(ready.serverPid);
+    expect(phases.map(({ phase }) => phase)).toContain("remote.toolInstallFailed");
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "tool-install.log"), "utf8")).toBe(
+      "Preparation command failed: aws download failed\n",
+    );
+    const retry = await prepareRemoteHost(
+      localPort,
+      { ...input, toolInstall: 'touch "$HOME/box-tools"' },
+      (phase) => phases.push(phase),
+    );
+    expect(retry.environmentId).toBe(ready.environmentId);
+    expect(phases.map(({ phase }) => phase)).toContain("remote.toolInstall");
+    await expect(NodeFSP.access(NodePath.join(input.root, "tool-install.log"))).rejects.toThrow();
+  });
+
+  it("stops a stalled box tool install at its cap instead of holding preparation", async () => {
+    const input = await fixture();
+    const phases: ProvisionPhase[] = [];
+    const capped: RemotePreparationPort = {
+      executePython: ({ script, stdin }) =>
+        localPort.executePython({
+          script: script.replace("TOOL_INSTALL_SECONDS = 180", "TOOL_INSTALL_SECONDS = 1"),
+          stdin,
+        }),
+    };
+    const ready = await prepareRemoteHost(
+      capped,
+      { ...input, toolInstall: 'sleep 30; touch "$HOME/box-tools"' },
+      (phase) => phases.push(phase),
+    );
+    pids.add(ready.serverPid);
+    expect(phases.map(({ phase }) => phase)).toContain("remote.toolInstallFailed");
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "tool-install.log"), "utf8")).toBe(
+      'Preparation command timed out: sh -c sleep 30; touch "$HOME/box-tools"\n',
+    );
+  });
+
   it("does not start T3 when guest provider install fails", async () => {
     const input = await fixture();
     await expect(

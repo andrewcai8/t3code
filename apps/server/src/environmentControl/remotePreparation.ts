@@ -34,6 +34,14 @@ export interface RemotePreparationInput {
   /** Closed-set shell command from guestProviderInstallCommand. Runs in the isolated home. */
   readonly providerInstall?: string | undefined;
   /**
+   * Closed-set shell command from guestToolInstallCommand. Best effort, run
+   * after providerInstall and capped at 180 seconds; a failure records a
+   * `toolInstallFailed` phase instead of failing preparation. Excluded from
+   * the intent hash so a root prepared before it existed picks the tools up
+   * on its next prepare.
+   */
+  readonly toolInstall?: string | undefined;
+  /**
    * Operator-configured setup for this repository, run in the checkout once it
    * exists. A cloud box arrives with the repository but none of its toolchain
    * otherwise, so the first thing every agent does is install one.
@@ -203,6 +211,7 @@ INTERPRETER_START = time.monotonic()
 STARTUP = []
 # Children preparation started without waiting on; stopped if it fails first.
 BACKGROUND = []
+TOOL_INSTALL_SECONDS = 180
 os.umask(0o077)
 
 def atomic(path, value):
@@ -361,7 +370,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly', 'toolInstall')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
@@ -660,6 +669,16 @@ def prepare(spec):
         if installing is not None:
             with step('providerInstall'):
                 finish(installing, 900)
+        # Box CLIs start only once the agent CLIs are in, so two global npm
+        # installs never write the same prefix, and are joined last. They are
+        # best effort: a failure costs a warning, and the next prepare skips
+        # what finished and redoes the rest.
+        tools = spec.get('toolInstall')
+        tooling = None
+        if tools:
+            if not isinstance(tools, str) or not tools.strip() or '\0' in tools:
+                raise RuntimeError('Invalid tool install command')
+            tooling = (time.monotonic(), start(['sh', '-c', tools], home, env))
         prepare = spec.get('prepareCommands') or []
         if prepare:
             if not isinstance(prepare, list):
@@ -769,6 +788,21 @@ def prepare(spec):
         process = server_process()
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
+        if tooling is not None:
+            since, started = tooling
+            try:
+                finish(started, max(0, TOOL_INSTALL_SECONDS - (time.monotonic() - since)))
+                mark('toolInstall', since)
+                (root / 'tool-install.log').unlink(missing_ok=True)
+            except RuntimeError as error:
+                child = started[0]
+                with contextlib.suppress(OSError):
+                    os.killpg(child.pid, 9)
+                child.wait()
+                if child in BACKGROUND:
+                    BACKGROUND.remove(child)
+                atomic(root / 'tool-install.log', str(error) + '\n')
+                mark('toolInstallFailed', since)
         mark('prepareTotal', entered)
         return {'refreshError': refresh_error, 'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
 

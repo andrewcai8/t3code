@@ -52,7 +52,8 @@ case "${1:-}" in
   tools)
     test "$HOME" = /home/user
     npm install --global --no-fund --no-audit \
-      t3@0.0.40 vite-plus@0.3.0 pnpm@11.10.0 @openai/codex@0.157.1 @anthropic-ai/claude-code@2.1.283
+      t3@0.0.40 vite-plus@0.3.0 pnpm@11.10.0 @openai/codex@0.157.1 @anthropic-ai/claude-code@2.1.283 \
+      wrangler@4.141.0
     temporary=$(mktemp -d)
     trap 'rm -rf "$temporary"' EXIT
     download \
@@ -64,6 +65,12 @@ case "${1:-}" in
     tar -xzf "$temporary/cursor.tar.gz" --strip-components=1 -C "$destination"
     ln -sfn "$destination/cursor-agent" "$HOME/.local/bin/agent"
     ln -sfn agent "$HOME/.local/bin/cursor-agent"
+    download \
+      https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.4.zip \
+      "$temporary/awscli.zip" \
+      0c59444563f4df735eeb5481f6165f95dae546c33761760d8be9855d5cfe2d12
+    unzip -q "$temporary/awscli.zip" -d "$temporary"
+    "$temporary/aws/install" --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin"
     ;;
   swift)
     temporary=$(mktemp -d)
@@ -108,7 +115,7 @@ case "${1:-}" in
     ln -sfn "$destination/swiftlint-static" "$HOME/.local/bin/swiftlint"
     ;;
   verify)
-    for tool in node npm bun git gh rg python3 redis-server redis-cli go ruby t3 vp codex claude agent swift swiftlint; do
+    for tool in node npm bun git gh rg python3 redis-server redis-cli go ruby t3 vp codex claude agent aws wrangler swift swiftlint; do
       command -v "$tool"
     done
     test "$(node --version)" = v24.21.0
@@ -118,6 +125,8 @@ case "${1:-}" in
     agent --version
     t3 --version
     vp --version
+    aws --version | grep -q '^aws-cli/2\.37\.4 '
+    test "$(wrangler --version)" = 4.141.0
     # The repository pins pnpm as its package manager, and corepack on this
     # image is too old to install it on Node 24.
     test "$(pnpm --version)" = 11.10.0
@@ -130,7 +139,7 @@ case "${1:-}" in
     printf 'print("swift-ok")\n' > "$temporary/main.swift"
     swiftc "$temporary/main.swift" -o "$temporary/swift-proof"
     test "$("$temporary/swift-proof")" = swift-ok
-    for path in .t3 .t3-cloud .codex/auth.json .claude/.credentials.json .cursor/auth.json .config/cursor/auth.json .config/gh/hosts.yml .git-credentials .env; do
+    for path in .t3 .t3-cloud .codex/auth.json .claude/.credentials.json .cursor/auth.json .config/cursor/auth.json .config/gh/hosts.yml .git-credentials .env .aws/credentials .aws/config .wrangler/config .config/.wrangler/config; do
       test ! -e "$HOME/$path"
     done
     test -z "$(find "$HOME" -name state.sqlite -o -name .git -o -name .env)"
