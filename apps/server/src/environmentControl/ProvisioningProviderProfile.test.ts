@@ -49,6 +49,16 @@ const file = (relative: string, value = "synthetic-auth") =>
     return path;
   });
 
+/** A host's own login whose refresh failed: past expiry, with a refresh token Codex holds. */
+const revokedHostLogin = JSON.stringify({
+  tokens: {
+    id_token: "eyJ.id.sig",
+    access_token: `eyJhbGciOiJSUzI1NiJ9.${Buffer.from('{"exp":1788433200}').toString("base64url")}.sig`,
+    refresh_token: "rt_revoked",
+    account_id: "acct-1",
+  },
+});
+
 function resolve(settings: ServerSettings, providerInstanceId = "selected", agentDriver?: string) {
   return resolveProvisioningProviderProfile(settings, { providerInstanceId, agentDriver });
 }
@@ -527,6 +537,39 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       expect(
         (yield* Effect.flip(accounts(settings("codex-roomy"), "roomy", undefined, usage))).message,
       ).toBe(expired);
+    }),
+  );
+
+  it.effect("refuses a host's own Codex login that stays expired after a refresh", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-09-03T12:00:00.000Z"));
+      yield* file("codex-host/auth.json", revokedHostLogin);
+      const settings = decodeSettings({
+        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+        providerInstances: {
+          codex_uci: {
+            driver: "codex",
+            config: { homePath: NodePath.join(directory, "codex-host") },
+          },
+          cursor: { driver: "cursor", enabled: false },
+        },
+      });
+      const refreshed: Array<string> = [];
+      const failure = yield* Effect.flip(
+        resolveProvisioningProviderProfile(
+          settings,
+          { providerInstanceId: "codex_uci", agentDriver: "codex" },
+          undefined,
+          {
+            localAgentRuns: false,
+            refresh: (instanceId) => Effect.sync(() => void refreshed.push(instanceId)),
+          },
+        ),
+      );
+      expect([refreshed, failure.message]).toEqual([
+        ["codex_uci"],
+        "codex_uci's Codex login on this host expired; sign in again with ~/.t3/provisioning/codex-site-login.sh and reseed.",
+      ]);
     }),
   );
 

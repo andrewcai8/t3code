@@ -72,6 +72,8 @@ export interface PackInput {
    * with `XDG_CONFIG_HOME=<baseDir>`.
    */
   readonly namespaceSession?: string | undefined;
+  /** `PlanInput.codexHostLogins`: logins made for this host alone, carried whole. */
+  readonly codexHostLogins?: string | undefined;
   /**
    * The host keeps and refreshes its own federated Namespace token wherever
    * the server's Namespace SDK resolves it (`$XDG_CONFIG_HOME/ns/token.json`,
@@ -84,6 +86,11 @@ export interface PackInput {
 export interface HostState {
   readonly accounts: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
+  /**
+   * Whose login each Codex account carries: the host's own, which it
+   * refreshes, or a copy of this machine's that cannot refresh.
+   */
+  readonly codexLogins: Readonly<Record<string, "host" | "copy">>;
   /**
    * The host's config minus what only the transport knows: `broker`, which for
    * the E2B manager is the sandbox it creates after packing, and
@@ -132,6 +139,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     accounts: input.accounts,
     host: input.host,
     managerBaseDir: input.baseDir,
+    codexHostLogins: input.codexHostLogins,
   });
   if (plan.accounts.length === 0) throw new Error("No provider account can travel");
 
@@ -146,11 +154,25 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       }),
     },
   ];
+  const codexLogins: Record<string, "host" | "copy"> = {};
   for (const file of plan.files) {
-    const data = await NodeFSP.readFile(file.source);
+    const { codexLogin } = file;
+    const hostLogin = codexLogin?.hostLogin
+      ? await NodeFSP.readFile(codexLogin.hostLogin).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        })
+      : undefined;
+    if (codexLogin) codexLogins[codexLogin.account] = hostLogin ? "host" : "copy";
+    const data = hostLogin ?? (await NodeFSP.readFile(file.source));
+    const stripped = codexLogin ? stripCodexRefreshToken(data.toString("utf8")) : undefined;
+    // Either login must parse; a host login that does not would otherwise be
+    // packed and then retired. Errors name the file and never its contents.
+    if (codexLogin && stripped === undefined)
+      throw new Error(`${hostLogin ? codexLogin.hostLogin : file.source} is not a Codex login`);
     files.push({
       path: file.destination,
-      data: file.codexLogin ? stripCodexRefreshToken(data.toString("utf8")) : data,
+      data: stripped !== undefined && !hostLogin ? stripped : data,
     });
   }
   if (input.namespaceSession) {
@@ -245,6 +267,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   return {
     accounts: plan.accounts,
     skipped: [...plan.skipped, ...skippedFiles],
+    codexLogins,
     files,
     skills: bundles.map(({ directory, archive }) => ({ directory, archive })),
     config: {
@@ -273,6 +296,27 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       },
     },
   };
+}
+
+/**
+ * Renames each host login a packed seed carries to `auth.json.packed-<label>`
+ * and returns the new paths. The host refreshes it from now on, so nothing on
+ * this machine may run Codex on it, and a repack must not carry its spent
+ * refresh token again. A repack without a fresh sign-in falls back to a copy.
+ */
+export async function retireCarriedCodexLogins(input: {
+  readonly directory: string;
+  readonly codexLogins: HostState["codexLogins"];
+  readonly label: string;
+}) {
+  const retired: Array<string> = [];
+  for (const [id, login] of Object.entries(input.codexLogins)) {
+    if (login !== "host") continue;
+    const carried = NodePath.join(input.directory, id, "auth.json");
+    await NodeFSP.rename(carried, `${carried}.packed-${input.label}`);
+    retired.push(`${carried}.packed-${input.label}`);
+  }
+  return retired;
 }
 
 /**
@@ -326,7 +370,7 @@ export async function writeSeedArchive(input: {
 
 const USAGE = `Usage: node scripts/cloud/pack-host-state.ts --output FILE.tgz --base-dir DIR
        --broker-url https://HOST [--config FILE] [--settings FILE] [--accounts ID,ID,...]
-       [--namespace-session FILE | --namespace-federated]
+       [--namespace-session FILE | --namespace-federated] [--codex-host-logins DIR]
 
 Packs a provisioning host's state as a seed tarball rooted at --base-dir, for
 a container that runs the linux runtime artifact baked into its image. The
@@ -340,7 +384,17 @@ with no credential, for a host that keeps a federated workload token wherever
 the server's Namespace SDK resolves it ($XDG_CONFIG_HOME/ns/token.json, or
 ~/.config/ns/token.json on Linux) and refreshes it there. The workspace is whichever tenant the credential names;
 Namespace settings do not choose one. Runtime artifacts are never carried; the
-host adds its own.`;
+host adds its own.
+
+Each Codex account carries the host's own login from
+<codex-host-logins>/<instanceId>/auth.json (default ~/.t3/host-codex), made
+with \`CODEX_HOME=<that dir> codex login --device-auth\`. The host refreshes it,
+so once the seed is written each carried file is renamed to
+auth.json.packed-<output name>, and the next pack needs a fresh sign-in for
+it. An account without one carries a copy of this machine's login that cannot
+refresh and stops working when its access token expires. If the upload fails,
+upload the same tarball again; if the tarball is lost, rename each
+auth.json.packed-<output name> back to auth.json and pack again.`;
 
 if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({
@@ -359,6 +413,10 @@ if (import.meta.main) {
       accounts: { type: "string" },
       "namespace-session": { type: "string" },
       "namespace-federated": { type: "boolean", default: false },
+      "codex-host-logins": {
+        type: "string",
+        default: NodePath.join(NodeOS.homedir(), ".t3/host-codex"),
+      },
       help: { type: "boolean", default: false },
     },
   });
@@ -385,8 +443,14 @@ if (import.meta.main) {
     skillsDir: NodePath.posix.join(baseDir, "skills"),
     namespaceSession: values["namespace-session"],
     namespaceFederated: values["namespace-federated"],
+    codexHostLogins: values["codex-host-logins"],
   });
   for (const { id, reason } of state.skipped) console.log(`skipping ${id}: ${reason}`);
+  for (const [id, login] of Object.entries(state.codexLogins))
+    if (login === "copy")
+      console.log(
+        `${id}: no ${NodePath.join(values["codex-host-logins"], id, "auth.json")}; carrying this machine's login, unable to refresh`,
+      );
   console.log(`carrying accounts ${state.accounts.join(", ")}`);
   await writeSeedArchive({
     state,
@@ -403,4 +467,10 @@ if (import.meta.main) {
     },
   });
   console.log(`wrote ${NodePath.resolve(values.output)}`);
+  for (const retired of await retireCarriedCodexLogins({
+    directory: values["codex-host-logins"],
+    codexLogins: state.codexLogins,
+    label: NodePath.basename(values.output).replace(/\.(tgz|tar\.gz)$/, ""),
+  }))
+    console.log(`retired the host's Codex login to ${retired}`);
 }

@@ -37,8 +37,10 @@ import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
+  CODEX_LOGIN_REFRESH_AHEAD_MS,
   codexLoginExpiredMessage,
-  codexLoginExpiring,
+  codexLoginRefreshDue,
+  codexLoginSignedOut,
   parseCodexLogin,
 } from "../codexLoginCopy.ts";
 import { ProviderDriverError } from "../Errors.ts";
@@ -178,29 +180,41 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: expandHomePath(config.binaryPath),
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      // Codex still reports a copied login (`stripCodexRefreshToken`) as signed
-      // in after its access token dies, and no refresh will ever revive it.
       const authPath = pathService.join(
         homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
         "auth.json",
       );
-      const markExpiredLoginCopy = (draft: ServerProviderDraft) =>
+      const { localAgentRuns } = yield* ServerConfig;
+      const readLogin = fileSystem.readFileString(authPath).pipe(
+        Effect.orElseSucceed(() => ""),
+        Effect.map(parseCodexLogin),
+      );
+      const readLoginAt = Effect.zipWith(readLogin, Clock.currentTimeMillis, (login, now) => ({
+        login,
+        context: { now, localAgentRuns },
+      }));
+      const refreshDue = readLoginAt.pipe(
+        Effect.map(({ login, context }) =>
+          codexLoginRefreshDue(login, CODEX_LOGIN_REFRESH_AHEAD_MS, context),
+        ),
+      );
+      // Codex still reports a copied login (`stripCodexRefreshToken`) as signed
+      // in after its access token dies, and no refresh will ever revive it. The
+      // same goes for a host's own login whose refresh failed.
+      const markSignedOutLogin = (draft: ServerProviderDraft) =>
         draft.auth.status !== "authenticated"
           ? Effect.succeed(draft)
-          : Effect.zipWith(
-              fileSystem.readFileString(authPath).pipe(Effect.orElseSucceed(() => "")),
-              Clock.currentTimeMillis,
-              (authJson, now): ServerProviderDraft => {
-                const login = parseCodexLogin(authJson);
-                return !login.refreshable && codexLoginExpiring(login, now)
+          : readLoginAt.pipe(
+              Effect.map(({ login, context }): ServerProviderDraft =>
+                codexLoginSignedOut(login, context)
                   ? {
                       ...draft,
                       status: "error",
                       auth: { status: "unauthenticated" },
-                      message: codexLoginExpiredMessage(displayName ?? instanceId),
+                      message: codexLoginExpiredMessage(displayName ?? instanceId, login, context),
                     }
-                  : draft;
-              },
+                  : draft,
+              ),
             );
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(
@@ -226,8 +240,16 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const checkProvider = modelManifest.refreshInBackground.pipe(
         Effect.andThen(
           Effect.zipWith(
-            checkCodexProviderStatus(effectiveConfig, undefined, providerEnvironment).pipe(
-              Effect.flatMap(markExpiredLoginCopy),
+            refreshDue.pipe(
+              Effect.flatMap((refreshLogin) =>
+                checkCodexProviderStatus(
+                  effectiveConfig,
+                  undefined,
+                  providerEnvironment,
+                  refreshLogin,
+                ),
+              ),
+              Effect.flatMap(markSignedOutLogin),
               Effect.annotateLogs({ providerInstanceId: instanceId }),
             ),
             modelManifest.current,
@@ -273,6 +295,24 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             }),
         ),
       );
+      // On a host, the status probe refreshes the host's own login once it is
+      // due (`codexLoginRefreshDue`), but probes run on an interval only while
+      // a client is watching, and a host mostly runs unwatched. Probes for one
+      // instance never overlap, so this cannot race the usage probe.
+      if (enabled && !localAgentRuns)
+        yield* Effect.sleep("1 hour").pipe(
+          Effect.andThen(refreshDue),
+          Effect.flatMap((due) =>
+            due ? snapshot.refresh.pipe(Effect.andThen(refreshDue)) : Effect.succeed(false),
+          ),
+          Effect.flatMap((stillDue) =>
+            stillDue ? Effect.logWarning("Codex did not refresh this login.") : Effect.void,
+          ),
+          Effect.ignoreCause({ log: true }),
+          Effect.forever,
+          Effect.annotateLogs({ providerInstanceId: instanceId }),
+          Effect.forkScoped,
+        );
       const models = snapshot.getSnapshot.pipe(Effect.map((value) => value.models));
       // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
       // channels at construction time — their failure modes are all on the

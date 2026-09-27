@@ -53,23 +53,33 @@ export interface PlanInput {
   };
   /** The manager's `--base-dir`; its state directory is `userdata` below it. */
   readonly managerBaseDir: string;
+  /**
+   * A directory of Codex logins made for the manager alone, one
+   * `<instanceId>/auth.json` each. Absent, every Codex account travels as a
+   * copy of this machine's login.
+   */
+  readonly codexHostLogins?: string | undefined;
 }
 
 export interface ManagerPlan {
   readonly accounts: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
-  /**
-   * Host files to copy, by absolute source and absolute manager destination.
-   * A `codexLogin` travels without a usable refresh token (`stripCodexRefreshToken`).
-   */
-  readonly files: ReadonlyArray<{
-    readonly source: string;
-    readonly destination: string;
-    readonly codexLogin?: true;
-  }>;
+  /** Host files to copy, by absolute source and absolute manager destination. */
+  readonly files: ReadonlyArray<PlannedFile>;
   readonly settingsPath: string;
   readonly providerInstances: Record<string, ManagerInstance>;
   readonly shellEnvironment?: ReadonlyArray<{ readonly name: string; readonly source: string }>;
+}
+
+export interface PlannedFile {
+  readonly source: string;
+  readonly destination: string;
+  /**
+   * A Codex account's login. The manager's own `hostLogin`, when it exists,
+   * travels whole because the manager refreshes it. Otherwise `source`, this
+   * machine's login, travels unable to refresh (`stripCodexRefreshToken`).
+   */
+  readonly codexLogin?: { readonly account: string; readonly hostLogin?: string };
 }
 
 export interface ManagerInstance {
@@ -136,7 +146,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
 
   const accounts: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
-  const files: Array<{ source: string; destination: string; codexLogin?: true }> = [];
+  const files: Array<PlannedFile> = [];
   const providerInstances: Record<string, ManagerInstance> = {};
 
   for (const [id, instance] of Object.entries(instances)) {
@@ -164,7 +174,12 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
         files.push({
           source: codexAuthSource(instance.config, input.host.homedir),
           destination: posix.join(homePath, "auth.json"),
-          codexLogin: true,
+          codexLogin: {
+            account: id,
+            ...(input.codexHostLogins
+              ? { hostLogin: NodePath.join(input.codexHostLogins, id, "auth.json") }
+              : {}),
+          },
         });
         providerInstances[id] = { driver: "codex", ...named, enabled: true, config: { homePath } };
         break;

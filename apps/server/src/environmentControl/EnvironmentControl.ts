@@ -955,6 +955,13 @@ export const layer = Layer.effect(
                       },
                       manager.config.provisioning?.claudeOAuthTokens,
                       usage,
+                      {
+                        localAgentRuns,
+                        // The instance's status probe refreshes a host's own
+                        // login, serialized with its usage probes.
+                        refresh: (instanceId) =>
+                          providerRegistry.refreshInstance(instanceId).pipe(Effect.asVoid),
+                      },
                     ),
                   ),
                 ),
