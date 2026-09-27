@@ -41,6 +41,8 @@ export interface ProvisioningProviderProfile {
   readonly kind: "codex" | "cursor" | "claudeAgent";
   readonly instanceId: ProviderInstanceId;
   readonly displayName?: string;
+  /** A Claude account's configured email, which its setup token cannot report. */
+  readonly accountEmail?: string;
   readonly environment: ProviderInstanceEnvironment;
   readonly credential:
     | { readonly kind: "file"; readonly source: string; readonly destination: string }
@@ -109,7 +111,8 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
         message: "The selected provider account is unavailable on this machine.",
       });
     const environment = instance.environment ?? [];
-    const named = instance.displayName ? { displayName: instance.displayName } : {};
+    let named: Pick<ProvisioningProviderProfile, "displayName" | "accountEmail"> =
+      instance.displayName ? { displayName: instance.displayName } : {};
     const selectedEnvironment = mergeProviderInstanceEnvironment(environment, {});
     const effectiveEnvironment = mergeProviderInstanceEnvironment(environment);
     const invalidConfig = () =>
@@ -150,6 +153,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
           Effect.mapError(invalidConfig),
         );
         enabled = instance.enabled ?? config.enabled;
+        if (config.accountEmail) named = { ...named, accountEmail: config.accountEmail };
         const home = yield* resolveClaudeHomePath(config);
         const configDir = config.homePath.trim()
           ? home
@@ -273,7 +277,9 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
   },
   claudeOAuthTokens: Provisioning["claudeOAuthTokens"] | undefined,
   usage: {
-    readonly providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "usageLimits">>;
+    readonly providers: ReadonlyArray<
+      Pick<ServerProvider, "instanceId" | "usageLimits"> & Partial<Pick<ServerProvider, "auth">>
+    >;
     readonly now: number;
     readonly load?: AccountLoad;
   },
@@ -290,6 +296,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
               {
                 instanceId: ProviderInstanceId.make(id),
                 driver: instance.driver,
+                email: limits.get(ProviderInstanceId.make(id))?.auth?.email,
                 usageLimits: limits.get(ProviderInstanceId.make(id))?.usageLimits,
               },
             ]

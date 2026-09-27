@@ -11,6 +11,7 @@
  * is the one that differs: macOS reads `.cursor/auth.json`, Linux reads
  * `$XDG_CONFIG_HOME/cursor/auth.json`.
  */
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { cursorFileCredentialPath } from "../../apps/server/src/provider/cursorCredentialPath.ts";
@@ -87,7 +88,7 @@ export interface ManagerInstance {
   readonly displayName?: string;
   readonly enabled: true;
   readonly environment?: ReadonlyArray<Required<EnvironmentVariable>>;
-  readonly config?: { readonly homePath: string };
+  readonly config?: { readonly homePath: string } | { readonly accountEmail: string };
 }
 
 const expandHome = (value: string, homedir: string) =>
@@ -120,6 +121,30 @@ const codexAuthSource = (config: unknown, homedir: string) => {
       ? NodePath.resolve(expandHome(home, homedir))
       : NodePath.join(homedir, ".codex");
   return NodePath.join(effective, "auth.json");
+};
+
+/**
+ * The account a Claude instance is signed in to on this machine, which its
+ * setup token cannot report on the manager. Claude Code records it in
+ * `.claude.json`, inside the config dir when one is set and in the home
+ * directory otherwise; the instance's "Claude · email" name stands in when no
+ * login is on disk. Only the instance's own config dir counts: a
+ * `CLAUDE_CONFIG_DIR` in the packing shell, as an agent's shell often has,
+ * would file the default account under another one.
+ */
+const claudeAccountEmail = (instance: HostInstance, host: PlanInput["host"]) => {
+  const homePath = trimmed(instance.config, "homePath");
+  const configDir = homePath
+    ? NodePath.resolve(expandHome(homePath, host.homedir))
+    : instance.environment?.find(({ name }) => name === "CLAUDE_CONFIG_DIR")?.value;
+  try {
+    const profile = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(configDir || host.homedir, ".claude.json"), "utf8"),
+    );
+    const email = profile?.oauthAccount?.emailAddress;
+    if (typeof email === "string" && email.trim()) return email.trim();
+  } catch {}
+  return instance.displayName?.match(/([^\s·]+@[^\s·]+)\s*$/)?.[1];
 };
 
 /**
@@ -193,11 +218,13 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
           skip("no provisioning.claudeOAuthTokens entry; run `claude setup-token` for it");
           continue;
         }
+        const accountEmail = claudeAccountEmail(instance, input.host);
         providerInstances[id] = {
           driver: "claudeAgent",
           ...named,
           enabled: true,
           environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: token, sensitive: true }],
+          ...(accountEmail ? { config: { accountEmail } } : {}),
         };
         break;
       }

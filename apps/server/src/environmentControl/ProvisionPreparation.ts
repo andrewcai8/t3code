@@ -227,7 +227,7 @@ function enableChildProvider(
   } catch {}
   const providers = settings.providers ?? {};
   const providerInstances = settings.providerInstances ?? {};
-  const accounts = profiles.map(({ kind: agentDriver, displayName }) => {
+  const accounts = profiles.map(({ kind: agentDriver, displayName, accountEmail }) => {
     const instanceId = guestInstanceId(agentDriver);
     const existingInstance = providerInstances[instanceId] ?? {};
     const environment =
@@ -264,6 +264,9 @@ function enableChildProvider(
               },
             }
           : {}),
+        // The guest's setup token cannot name its account either, and Limits
+        // keys one account across machines by email.
+        ...(accountEmail ? { config: { ...existingInstance.config, accountEmail } } : {}),
         ...(environment ? { environment } : {}),
       },
     ] as const;
