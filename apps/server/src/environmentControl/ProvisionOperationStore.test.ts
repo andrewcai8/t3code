@@ -37,7 +37,7 @@ NodeRuntime.runMain(Effect.gen(function* () {
     process.stdin.once('data', () => { process.stdin.destroy(); resolve(); });
     process.stdout.write('loaded\\n');
   }));
-  const result = yield* store.advance(before, { kind: 'create_issued' });
+  const result = yield* store.advance(before, { kind: 'create_issued', issuedAt: '2026-09-26T08:00:00.000Z' });
   process.stdout.write(result.changed ? 'winner\\n' : 'observed\\n');
   const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
   yield* Effect.promise(async () => {
@@ -134,7 +134,10 @@ it.effect("two server processes cannot both claim the same allocation effect", (
       return yield* (yield* ProvisionOperationStore).get(request.requestId);
     }).pipe(Effect.provide(storeLayer), Effect.scoped);
     expect(persisted.revision).toBe(1);
-    expect(persisted.state).toEqual({ kind: "create_issued" });
+    expect(persisted.state).toEqual({
+      kind: "create_issued",
+      issuedAt: "2026-09-26T08:00:00.000Z",
+    });
     expect(persisted.request).toEqual(request);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

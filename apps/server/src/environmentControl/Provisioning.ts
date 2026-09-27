@@ -2,6 +2,7 @@ import {
   type DurableProvisionRequest,
   type E2bProvisionResource,
   type ProvisionAllocation,
+  type ProvisionAllocationAttempt,
   type ProvisionOperation,
   type ProvisionOperationState,
   type ProvisionReadiness,
@@ -12,6 +13,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import { retentionExpired } from "./retention.ts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -65,6 +67,60 @@ function allocatedState(
   return { kind: "allocated", allocation: { kind: "direct", resource } };
 }
 
+/** A create or fork call is abandoned after this, so no call outlives it. */
+const ISSUE_TIMEOUT = Duration.minutes(10);
+/**
+ * A resource still unobservable this long after its call went out was never
+ * made: the call has ended, and the provider has had time to list the result.
+ */
+const SETTLE_AFTER_MS = 20 * 60_000;
+
+type PendingAllocationState = Extract<
+  ProvisionOperationState,
+  { kind: "create_issued" | "fork_issued" | "allocation_unknown" }
+>;
+const isPendingAllocation = (state: ProvisionOperationState): state is PendingAllocationState =>
+  state.kind === "create_issued" ||
+  state.kind === "fork_issued" ||
+  state.kind === "allocation_unknown";
+function pendingAttempt(state: PendingAllocationState): ProvisionAllocationAttempt {
+  switch (state.kind) {
+    case "create_issued":
+      return { kind: "create", issuedAt: state.issuedAt };
+    case "fork_issued":
+      return { kind: "fork", parent: state.parent, issuedAt: state.issuedAt };
+    case "allocation_unknown":
+      return state.allocation;
+  }
+}
+const settled = (attempt: ProvisionAllocationAttempt, now: number) =>
+  now - Date.parse(attempt.issuedAt) >= SETTLE_AFTER_MS;
+/** A fork's recovery lists its parent too, which is never the child. */
+function attemptResources(
+  attempt: ProvisionAllocationAttempt,
+  found: ReadonlyArray<ProvisionResource>,
+): ReadonlyArray<ProvisionResource> {
+  return attempt.kind === "fork"
+    ? found.filter(
+        (resource) =>
+          resource.provider === "e2b" && resource.sandboxId !== attempt.parent.sandboxId,
+      )
+    : found;
+}
+const issue = <A>(call: Effect.Effect<A, ProvisionProviderError>) =>
+  call.pipe(
+    Effect.timeoutOrElse({
+      duration: ISSUE_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          new ProvisionProviderError({
+            message:
+              "The provider did not answer in time; recover the allocation before proceeding",
+          }),
+        ),
+    }),
+  );
+
 const phaseContext = (request: DurableProvisionRequest) => ({
   requestId: request.requestId,
   provider: request.provider,
@@ -79,6 +135,11 @@ export class Provisioning extends Context.Service<
     readonly cancel: (
       requestId: ProvisionRequestId,
     ) => Effect.Effect<ProvisionOperation, ProvisionStoreError>;
+    /**
+     * Settles every create or fork whose outcome was never recorded, so a crash
+     * between issuing one and recording it needs no caller to converge.
+     */
+    readonly reconcile: Effect.Effect<void, ProvisionStoreError>;
   }
 >()("t3/environmentControl/Provisioning") {
   static readonly make = Effect.gen(function* () {
@@ -92,7 +153,7 @@ export class Provisioning extends Context.Service<
     });
     const recover = Effect.fn("Provisioning.recover")(function* (
       operation: ProvisionOperation,
-      allocation: Extract<ProvisionOperationState, { kind: "allocation_unknown" }>["allocation"],
+      allocation: ProvisionAllocationAttempt,
     ) {
       const found = yield* (
         allocation.kind === "create"
@@ -108,13 +169,12 @@ export class Provisioning extends Context.Service<
           allocation,
           reason: found.failure.message,
         });
-      const candidates =
-        allocation.kind === "fork"
-          ? found.success.filter(
-              (resource) =>
-                resource.provider === "e2b" && resource.sandboxId !== allocation.parent.sandboxId,
-            )
-          : found.success;
+      const candidates = attemptResources(allocation, found.success);
+      if (
+        candidates.length === 0 &&
+        settled(allocation, DateTime.toEpochMillis(yield* DateTime.now))
+      )
+        return yield* cancel(operation.request.requestId);
       const resource = candidates.length === 1 ? candidates[0] : undefined;
       if (!resource)
         return yield* save(operation, {
@@ -143,21 +203,23 @@ export class Provisioning extends Context.Service<
         const state = operation.state;
         switch (state.kind) {
           case "intent": {
-            const issued = yield* store.advance(operation, { kind: "create_issued" });
+            const issuedAt = DateTime.formatIso(yield* DateTime.now);
+            const issued = yield* store.advance(operation, { kind: "create_issued", issuedAt });
             operation = issued.operation;
             if (!issued.changed) continue;
             // An E2B fork request reaches create for its parent and fork for the
             // child, so the two E2B allocation costs are already separate phases.
-            const created = yield* ports
-              .create(operation)
-              .pipe(timeProvisionPhase("allocate.create", context), Effect.result);
+            const created = yield* issue(ports.create(operation)).pipe(
+              timeProvisionPhase("allocate.create", context),
+              Effect.result,
+            );
             operation = yield* save(
               operation,
               created._tag === "Success"
                 ? allocatedState(operation.request, created.success)
                 : {
                     kind: "allocation_unknown",
-                    allocation: { kind: "create" },
+                    allocation: { kind: "create", issuedAt },
                     reason: created.failure.message,
                   },
             );
@@ -165,20 +227,19 @@ export class Provisioning extends Context.Service<
               return created.failure.retentionFailed ? yield* cancel(request.requestId) : operation;
             break;
           }
-          case "create_issued":
-            operation = yield* recover(operation, { kind: "create" });
-            if (operation.state.kind === "allocation_unknown") return operation;
-            break;
           case "parent_allocated": {
+            const issuedAt = DateTime.formatIso(yield* DateTime.now);
             const issued = yield* store.advance(operation, {
               kind: "fork_issued",
               parent: state.parent,
+              issuedAt,
             });
             operation = issued.operation;
             if (!issued.changed) continue;
-            const forked = yield* ports
-              .fork(operation, state.parent)
-              .pipe(timeProvisionPhase("allocate.fork", context), Effect.result);
+            const forked = yield* issue(ports.fork(operation, state.parent)).pipe(
+              timeProvisionPhase("allocate.fork", context),
+              Effect.result,
+            );
             operation = yield* save(
               operation,
               forked._tag === "Success"
@@ -188,7 +249,7 @@ export class Provisioning extends Context.Service<
                   }
                 : {
                     kind: "allocation_unknown",
-                    allocation: { kind: "fork", parent: state.parent },
+                    allocation: { kind: "fork", parent: state.parent, issuedAt },
                     reason: forked.failure.message,
                   },
             );
@@ -196,12 +257,10 @@ export class Provisioning extends Context.Service<
               return forked.failure.retentionFailed ? yield* cancel(request.requestId) : operation;
             break;
           }
+          case "create_issued":
           case "fork_issued":
-            operation = yield* recover(operation, { kind: "fork", parent: state.parent });
-            if (operation.state.kind === "allocation_unknown") return operation;
-            break;
           case "allocation_unknown":
-            operation = yield* recover(operation, state.allocation);
+            operation = yield* recover(operation, pendingAttempt(state));
             if (operation.state.kind === "allocation_unknown") return operation;
             break;
           case "allocated":
@@ -278,7 +337,7 @@ export class Provisioning extends Context.Service<
             case "create_issued":
               next = {
                 kind: "cancel_requested",
-                recovery: { kind: "create" },
+                recovery: pendingAttempt(state),
                 resources: [],
                 lastError: null,
               };
@@ -294,7 +353,7 @@ export class Provisioning extends Context.Service<
             case "fork_issued":
               next = {
                 kind: "cancel_requested",
-                recovery: { kind: "fork", parent: state.parent },
+                recovery: pendingAttempt(state),
                 resources: [state.parent],
                 lastError: null,
               };
@@ -340,15 +399,10 @@ export class Provisioning extends Context.Service<
           ).pipe(Effect.result);
           if (discovered._tag === "Failure")
             return yield* save(operation, { ...state, lastError: discovered.failure.message });
-          const recovery = state.recovery;
           const found = discovered.success;
           const resolved =
-            recovery.kind === "create"
-              ? found.length > 0
-              : found.some(
-                  (resource) =>
-                    resource.provider === "e2b" && resource.sandboxId !== recovery.parent.sandboxId,
-                );
+            attemptResources(state.recovery, found).length > 0 ||
+            settled(state.recovery, DateTime.toEpochMillis(yield* DateTime.now));
           const resources = new Map(
             [...state.resources, ...found].map((resource) => [
               resource.provider === "e2b"
@@ -360,7 +414,7 @@ export class Provisioning extends Context.Service<
           const updated = yield* store.advance(operation, {
             ...state,
             resources: [...resources.values()],
-            recovery: resolved ? null : recovery,
+            recovery: resolved ? null : state.recovery,
             lastError: resolved
               ? null
               : "Allocation outcome remains unknown; cleanup is not confirmed.",
@@ -382,7 +436,25 @@ export class Provisioning extends Context.Service<
         return yield* save(operation, { kind: "disposed" });
       }
     });
-    return { ensure, cancel };
+    const reconcile = Effect.gen(function* () {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      for (const operation of yield* store.listUnresolved) {
+        const state = operation.state;
+        const settle =
+          isPendingAllocation(state) && !retentionExpired(operation.request.retentionDeadline, now)
+            ? recover(operation, pendingAttempt(state))
+            : cancel(operation.request.requestId);
+        yield* settle.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("provision operation could not be reconciled", {
+              requestId: operation.request.requestId,
+              step: error.operation,
+            }),
+          ),
+        );
+      }
+    }).pipe(Effect.withSpan("Provisioning.reconcile"));
+    return { ensure, cancel, reconcile };
   });
   static readonly layer = Layer.effect(Provisioning, Provisioning.make);
 }

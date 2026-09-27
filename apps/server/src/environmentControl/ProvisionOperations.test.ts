@@ -19,6 +19,7 @@ import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
@@ -38,6 +39,8 @@ const request = Schema.decodeUnknownSync(DurableProvisionRequest)({
   strategy: "fork",
 });
 const parent = { provider: "e2b", sandboxId: "parent-1" } as const;
+/** Every allocation these tests issue goes out at the test clock's start. */
+const issuedAtClockStart = "1970-01-01T00:00:00.000Z";
 const child = { provider: "e2b", sandboxId: "child-1" } as const;
 const allocation: ProvisionAllocation = { kind: "fork", parent, resource: child };
 const readiness: ProvisionReadiness = {
@@ -141,9 +144,9 @@ describe("durable cloud provisioning", () => {
   );
 
   const boundaries: ProvisionOperationState[] = [
-    { kind: "create_issued" },
+    { kind: "create_issued", issuedAt: issuedAtClockStart },
     { kind: "parent_allocated", parent },
-    { kind: "fork_issued", parent },
+    { kind: "fork_issued", parent, issuedAt: issuedAtClockStart },
     { kind: "allocated", allocation },
     { kind: "preparing", allocation, lastError: null },
     { kind: "ready", allocation, readiness },
@@ -266,7 +269,7 @@ describe("durable cloud provisioning", () => {
         );
         expect(result.state).toEqual({
           kind: "allocation_unknown",
-          allocation: { kind: "create" },
+          allocation: { kind: "create", issuedAt: issuedAtClockStart },
           reason: "No matching resource is observable yet",
         });
       }
@@ -277,7 +280,7 @@ describe("durable cloud provisioning", () => {
       );
       expect(ambiguous.state).toEqual({
         kind: "allocation_unknown",
-        allocation: { kind: "create" },
+        allocation: { kind: "create", issuedAt: issuedAtClockStart },
         reason: "More than one matching resource exists",
       });
       expect(p.counts()).toEqual({ creates: 1, forks: 0 });
@@ -301,7 +304,7 @@ describe("durable cloud provisioning", () => {
       const missing = yield* ensure().pipe(Effect.provide(makeLayer(file, p.ports)), Effect.scoped);
       expect(missing.state).toEqual({
         kind: "allocation_unknown",
-        allocation: { kind: "fork", parent },
+        allocation: { kind: "fork", parent, issuedAt: issuedAtClockStart },
         reason: "No matching resource is observable yet",
       });
       p.resources.push(child, { provider: "e2b", sandboxId: "extra-child" });
@@ -494,7 +497,11 @@ it.effect("cancel keeps uncertain allocation unresolved until recovery can confi
     yield* Effect.gen(function* () {
       const store = yield* ProvisionOperationStore;
       const operation = yield* store.accept(request);
-      yield* store.advance(operation, { kind: "fork_issued", parent });
+      yield* store.advance(operation, {
+        kind: "fork_issued",
+        parent,
+        issuedAt: issuedAtClockStart,
+      });
       p.resources.push(parent);
       const result = yield* (yield* Provisioning).cancel(request.requestId);
       expect(result.state.kind).toBe("cancel_requested");
@@ -628,7 +635,10 @@ it.effect(
       const bounded = { ...request, retentionDeadline: "1960-01-01T00:00:00.000Z" };
       yield* Effect.gen(function* () {
         const store = yield* ProvisionOperationStore;
-        yield* store.advance(yield* store.accept(bounded), { kind: "create_issued" });
+        yield* store.advance(yield* store.accept(bounded), {
+          kind: "create_issued",
+          issuedAt: issuedAtClockStart,
+        });
       }).pipe(Effect.provide(makeLayer(file, p.ports)), Effect.scoped);
       expect(
         (yield* ensure(bounded).pipe(Effect.provide(makeLayer(file, p.ports)), Effect.scoped)).state
@@ -687,23 +697,141 @@ describe("an allocation whose outcome a crash lost", () => {
     };
     return { p, ports, disposed };
   };
+  const inService = <A, E>(
+    file: string,
+    ports: ProvisionProviderPorts["Service"],
+    effect: Effect.Effect<A, E, Provisioning | ProvisionOperationStore>,
+  ) => effect.pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
   const seedForkIssued = (file: string, ports: ProvisionProviderPorts["Service"]) =>
-    Effect.gen(function* () {
-      const store = yield* ProvisionOperationStore;
-      yield* store.advance(yield* store.accept(request), { kind: "fork_issued", parent, issuedAt });
-    }).pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
+    inService(
+      file,
+      ports,
+      Effect.gen(function* () {
+        const store = yield* ProvisionOperationStore;
+        yield* store.advance(yield* store.accept(request), {
+          kind: "fork_issued",
+          parent,
+          issuedAt,
+        });
+      }),
+    );
+  const reconcile = Effect.gen(function* () {
+    yield* (yield* Provisioning).reconcile;
+    return yield* (yield* ProvisionOperationStore).get(request.requestId);
+  });
+  const dispose = Effect.gen(function* () {
+    return yield* (yield* Provisioning).cancel(request.requestId);
+  });
 
-  it.effect("dispose settles a fork whose sandbox never appeared", () =>
+  it.effect("reconcile adopts the forked child and a retry finishes preparing it", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { p, ports } = recording();
+      yield* seedForkIssued(file, ports);
+      p.resources.push(parent, child);
+      yield* minutesAfterIssue(1);
+      expect((yield* inService(file, ports, reconcile)).state).toEqual({
+        kind: "allocated",
+        allocation,
+      });
+      expect((yield* inService(file, ports, ensure())).state).toEqual({
+        kind: "ready",
+        allocation,
+        readiness,
+      });
+      expect(p.counts()).toEqual({ creates: 0, forks: 0 });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("dispose kills the forked child the host never recorded", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { p, ports, disposed } = recording();
+      yield* seedForkIssued(file, ports);
+      p.resources.push(parent, child);
+      yield* minutesAfterIssue(1);
+      expect((yield* inService(file, ports, dispose)).state).toEqual({ kind: "disposed" });
+      expect(disposed).toEqual([parent, child]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["reconcile", "dispose"] as const)(
+    "%s settles a fork whose child never appeared once its outcome has settled",
+    (action) =>
+      Effect.gen(function* () {
+        const file = yield* temporaryDatabase;
+        const { ports, disposed } = recording();
+        yield* seedForkIssued(file, ports);
+        yield* minutesAfterIssue(21);
+        const result = yield* inService(file, ports, action === "reconcile" ? reconcile : dispose);
+        expect(result.state).toEqual({ kind: "disposed" });
+        expect(disposed).toEqual([parent]);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reconcile settles a row recorded before issue times were kept", () =>
     Effect.gen(function* () {
       const file = yield* temporaryDatabase;
       const { ports, disposed } = recording();
-      yield* seedForkIssued(file, ports);
-      yield* minutesAfterIssue(60);
-      const result = yield* Effect.gen(function* () {
-        return yield* (yield* Provisioning).cancel(request.requestId);
-      }).pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
-      expect(result.state).toEqual({ kind: "disposed" });
+      yield* inService(
+        file,
+        ports,
+        Effect.gen(function* () {
+          yield* (yield* ProvisionOperationStore).accept(request);
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE provision_operations
+          SET state_json = '{"kind":"fork_issued","parent":{"provider":"e2b","sandboxId":"parent-1"}}'`;
+      }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+      yield* minutesAfterIssue(0);
+      expect((yield* inService(file, ports, reconcile)).state).toEqual({ kind: "disposed" });
       expect(disposed).toEqual([parent]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a fork whose child may still appear keeps waiting", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { p, ports, disposed } = recording();
+      yield* seedForkIssued(file, ports);
+      p.resources.push(parent);
+      yield* minutesAfterIssue(19);
+      expect((yield* inService(file, ports, reconcile)).state).toEqual({
+        kind: "allocation_unknown",
+        allocation: { kind: "fork", parent, issuedAt },
+        reason: "No matching resource is observable yet",
+      });
+      expect((yield* inService(file, ports, dispose)).state).toEqual({
+        kind: "cancel_requested",
+        recovery: { kind: "fork", parent, issuedAt },
+        resources: [parent],
+        lastError: "Allocation outcome remains unknown; cleanup is not confirmed.",
+      });
+      expect(disposed).toEqual([parent]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a fork call that never answers is abandoned before its outcome settles", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { p } = recording();
+      const forking = yield* Deferred.make<void>();
+      const ports: ProvisionProviderPorts["Service"] = {
+        ...p.ports,
+        fork: () => Deferred.succeed(forking, undefined).pipe(Effect.andThen(Effect.never)),
+      };
+      yield* TestClock.setTime(Date.parse(issuedAt));
+      const pending = yield* inService(file, ports, ensure()).pipe(Effect.forkChild);
+      yield* Deferred.await(forking);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("10 minutes");
+      expect((yield* Fiber.join(pending)).state).toEqual({
+        kind: "allocation_unknown",
+        allocation: { kind: "fork", parent, issuedAt },
+        reason: "The provider did not answer in time; recover the allocation before proceeding",
+      });
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

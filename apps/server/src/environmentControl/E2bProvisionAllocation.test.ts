@@ -37,7 +37,7 @@ const operation: ProvisionOperation = {
   revision: 1,
   createdAt: "2026-09-13T00:00:00.000Z",
   updatedAt: "2026-09-13T00:00:00.000Z",
-  state: { kind: "create_issued" },
+  state: { kind: "create_issued", issuedAt: "2026-09-13T00:00:00.000Z" },
 };
 const readiness: ProvisionReadiness = {
   environmentId: EnvironmentId.make("environment-from-fixture"),

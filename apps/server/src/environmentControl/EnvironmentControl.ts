@@ -1056,6 +1056,9 @@ export const layer = Layer.effect(
         // it and leave it reconnectable. A provision that never reached ready
         // holds no lease and is disposed by its retention deadline instead.
         yield* Effect.promise(() => service.reapExpiredLeases()).pipe(Effect.ignore);
+        // A crash between issuing an allocation and recording it leaves a
+        // resource nobody else will look for.
+        yield* provisioning.reconcile.pipe(Effect.ignore);
       }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
     }).pipe(Effect.forkScoped);
     return {
