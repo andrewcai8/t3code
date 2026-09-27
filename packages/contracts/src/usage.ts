@@ -158,6 +158,14 @@ export const UsageSource = Schema.Struct({
    */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
+  /**
+   * The `sourcePath` its buckets carry when it differs from
+   * `fingerprint.resolvedHomePath`. A host keeps each cloud box's usage under
+   * the box's own fingerprint, so a connected box still deduplicates against
+   * it, but several boxes share one home path, so their buckets need per-box
+   * paths to stay apart.
+   */
+  sourcePath: Schema.optionalKey(TrimmedNonEmptyString),
   /** An action the client can offer to make this source available. */
   action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
 });
@@ -196,6 +204,12 @@ export const UsageSummaryInput = Schema.Struct({
   untilTime: Schema.optional(TrimmedNonEmptyString),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
+
+/** Asks an environment for its hourly UTC usage since an instant, for a host to keep. */
+export const UsageHistoryInput = Schema.Struct({
+  sinceTime: TrimmedNonEmptyString,
+});
+export type UsageHistoryInput = typeof UsageHistoryInput.Type;
 
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Number,

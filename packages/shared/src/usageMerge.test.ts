@@ -44,6 +44,7 @@ function summary(
     hostId: string;
     homePath: string;
     volumeId?: string;
+    sourcePath?: string;
     distinctSessions?: number;
   }[],
   contractVersion: number = USAGE_CONTRACT_VERSION,
@@ -68,6 +69,7 @@ function summary(
       malformedRecords: 0,
       distinctSessions: source.distinctSessions ?? 1,
       message: null,
+      ...(source.sourcePath === undefined ? {} : { sourcePath: source.sourcePath }),
     })),
     pricing: { status: "fresh", source: "litellm", fetchedAt: null, knownModels: 10 },
     scanDurationMs: 1,
@@ -603,6 +605,58 @@ describe("mergeUsage", () => {
     expect(merged.costUsd).toBe(10);
     expect(merged.duplicateSources).toHaveLength(1);
   });
+
+  it.each([
+    ["the host read last", "2026-08-07T01:00:00.000Z", "2026-08-07T00:00:00.000Z", 111],
+    ["the box read last", "2026-08-07T00:00:00.000Z", "2026-08-07T01:00:00.000Z", 131],
+  ])(
+    "counts a stored cloud box once when it is also connected, when %s",
+    (_name, hostReadAt, boxReadAt, expectedTokens) => {
+      const boxHome = "/home/user/.claude/projects";
+      const tokens = (uncachedInputTokens: number) => ({
+        uncachedInputTokens,
+        cachedInputTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+      });
+      const host = summary(
+        [
+          bucket({ sourcePath: "/root/.claude/projects", totals: tokens(1) }),
+          bucket({ sourcePath: `lease-a:${boxHome}`, totals: tokens(10) }),
+          bucket({ sourcePath: `lease-b:${boxHome}`, totals: tokens(100) }),
+        ],
+        [
+          { provider: "claude", hostId: "host", homePath: "/root/.claude/projects" },
+          {
+            provider: "claude",
+            hostId: "box-a",
+            homePath: boxHome,
+            sourcePath: `lease-a:${boxHome}`,
+          },
+          {
+            provider: "claude",
+            hostId: "box-b",
+            homePath: boxHome,
+            sourcePath: `lease-b:${boxHome}`,
+          },
+        ],
+      );
+      const liveBoxA = summary(
+        [bucket({ sourcePath: boxHome, totals: tokens(30) })],
+        [{ provider: "claude", hostId: "box-a", homePath: boxHome }],
+      );
+      const merged = mergeUsage(
+        [
+          environment("host", { ...host, readAt: hostReadAt }),
+          environment("box-a", { ...liveBoxA, readAt: boxReadAt }),
+        ],
+        USAGE_CONTRACT_VERSION,
+      );
+
+      expect(merged.totalTokens).toBe(expectedTokens);
+    },
+  );
 
   it("totals sessions from per-directory distinct counts, not per-bucket sums", () => {
     // One session that spans two days appears in two buckets. Summing bucket
