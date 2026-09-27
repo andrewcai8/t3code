@@ -1,6 +1,5 @@
 import {
   type AutomationIdInput,
-  type DiscoveredProvisionedEnvironment,
   EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
@@ -34,6 +33,7 @@ import {
   createRuntimeCommand,
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
+import { type ProvisionedBox, sameProvisionedBoxes } from "../cloud/provisioning.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -985,14 +985,24 @@ export function createServerEnvironmentAtoms<R, E>(
       ),
   });
   const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
-    Atom.make((get): ReadonlyArray<DiscoveredProvisionedEnvironment> =>
-      (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
-        const listed = get(
-          provisionedEnvironments({ environmentId: EnvironmentId.make(hostId), input: {} }),
+    Atom.make((get): ReadonlyArray<ProvisionedBox> => {
+      const boxes = (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
+        const managerId = EnvironmentId.make(hostId);
+        const listed = get(provisionedEnvironments({ environmentId: managerId, input: {} }));
+        return Option.getOrElse(AsyncResult.value(listed), () => []).map(
+          ({ environmentId, leaseId, threadId }) => ({
+            managerId,
+            environmentId,
+            leaseId,
+            threadId,
+          }),
         );
-        return Option.getOrElse(AsyncResult.value(listed), () => []);
-      }),
-    ).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
+      });
+      // Every refetch decodes a fresh list; keep the previous one while nothing in it changed so
+      // views reading it do not re-render on each poll.
+      const previous = Option.getOrNull(get.self<ReadonlyArray<ProvisionedBox>>());
+      return previous !== null && sameProvisionedBoxes(previous, boxes) ? previous : boxes;
+    }).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
   );
   /** Every cloud box the given hosts report, as far as each host has answered. */
   const provisionedBoxes = (hostIds: ReadonlyArray<EnvironmentId>) =>

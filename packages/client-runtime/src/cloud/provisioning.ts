@@ -6,7 +6,9 @@ import {
   type ProjectId,
   ProvisionProvider,
   type ScopedProjectRef,
+  type ScopedThreadRef,
   type ServerConfig,
+  type ThreadId,
 } from "@t3tools/contracts";
 
 import type { EnvironmentConnectionPresentation } from "../connection/presentation.ts";
@@ -56,6 +58,79 @@ function isEnvironmentGone(state: NewChatEnvironmentState | null | undefined): b
   return state?.connection?.blockedReason === "workspace-missing";
 }
 
+/** A cloud box a host reports, with the host that provisioned it. */
+export interface ProvisionedBox {
+  readonly managerId: EnvironmentId;
+  readonly environmentId: EnvironmentId;
+  readonly leaseId: string;
+  /** The chat the box was claimed for; null until one claims it. */
+  readonly threadId: ThreadId | null;
+}
+
+export function sameProvisionedBoxes(
+  left: ReadonlyArray<ProvisionedBox>,
+  right: ReadonlyArray<ProvisionedBox>,
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((box, index) => {
+      const other = right[index]!;
+      return (
+        box.managerId === other.managerId &&
+        box.environmentId === other.environmentId &&
+        box.leaseId === other.leaseId &&
+        box.threadId === other.threadId
+      );
+    })
+  );
+}
+
+/** How a new chat recognises the box it started for itself. */
+export interface NewChatOwnBox {
+  /** The chat's thread, which the host records once the box is claimed for it. */
+  readonly threadId: ThreadId | null;
+  /** The lease the chat holds: under its draft, then under its thread once the first turn starts. */
+  readonly leaseId: string | null;
+  /** The environment the chat points at while that is the box it started for itself. */
+  readonly environmentId: EnvironmentId | null;
+}
+
+/**
+ * What marks a draft's own box. The lease is looked up under the draft and under the thread the
+ * draft becomes, because the first turn moves it there while the draft is still on screen.
+ */
+export function draftOwnBox(
+  leases: Pick<ProvisionedSandboxLeaseStore, "leaseFor">,
+  draftId: string,
+  draftThreadRef: ScopedThreadRef,
+): NewChatOwnBox {
+  const lease = leases.leaseFor(draftId) ?? leases.leaseFor(draftThreadRef);
+  return {
+    threadId: draftThreadRef.threadId,
+    leaseId: lease?.leaseId ?? null,
+    environmentId: lease === null ? null : draftThreadRef.environmentId,
+  };
+}
+
+/**
+ * The boxes a new chat must not start on, each mapped to the host that provisioned it: every
+ * box the hosts report except the chat's own. The first turn moves the lease from the draft to
+ * the thread while the draft is still on screen, so any one of the three marks it as its own.
+ */
+export function boxesOfOtherChats(
+  boxes: ReadonlyArray<ProvisionedBox>,
+  own: NewChatOwnBox | null,
+): ReadonlyMap<EnvironmentId, EnvironmentId> {
+  const isOwn = (box: ProvisionedBox) =>
+    own !== null &&
+    ((own.threadId !== null && box.threadId === own.threadId) ||
+      (own.leaseId !== null && box.leaseId === own.leaseId) ||
+      box.environmentId === own.environmentId);
+  return new Map(
+    boxes.flatMap((box) => (isOwn(box) ? [] : [[box.environmentId, box.managerId] as const])),
+  );
+}
+
 export interface NewChatRunTargets<Environment> {
   /** The environments holding the project that a new chat may run on. */
   readonly environments: ReadonlyArray<Environment>;
@@ -95,7 +170,7 @@ export function newChatRunTargets<
    * so none of these is a place to start one. Leave out the box this chat
    * provisioned for itself.
    */
-  readonly boxes: ReadonlySet<EnvironmentId>;
+  readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
   const provider = cloudProviders[0];

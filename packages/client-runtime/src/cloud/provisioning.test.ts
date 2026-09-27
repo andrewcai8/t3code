@@ -18,6 +18,8 @@ import {
 import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
 import {
   type CloudProvisionPorts,
+  boxesOfOtherChats,
+  draftOwnBox,
   newChatRunTargets,
   offeredProvisionProviders,
   provisionCloudEnvironment,
@@ -476,5 +478,71 @@ describe("newChatRunTargets", () => {
         }).redirect,
       ).toEqual({ kind: "environment", environment: remote });
     });
+  });
+});
+
+describe("boxesOfOtherChats", () => {
+  const host = EnvironmentId.make("host");
+  const ownBox = EnvironmentId.make("own-box");
+  const otherBox = EnvironmentId.make("other-box");
+  const draftThreadId = ThreadId.make("draft-thread");
+  const boxes = (ownThreadId: ThreadId | null) => [
+    { managerId: host, environmentId: ownBox, leaseId: "own-lease", threadId: ownThreadId },
+    {
+      managerId: host,
+      environmentId: otherBox,
+      leaseId: "other-lease",
+      threadId: ThreadId.make("other-thread"),
+    },
+  ];
+  const others = new Map([[otherBox, host]]);
+
+  it("keeps the draft's own box through the handoff to its first turn", () => {
+    const leases = createProvisionedSandboxLeaseStore(memoryStorage());
+    const onHost = { environmentId: host, threadId: draftThreadId };
+    const onBox = { environmentId: ownBox, threadId: draftThreadId };
+    leases.remember("draft", {
+      leaseId: "own-lease",
+      sandboxId: "sandbox",
+      managerEnvironmentId: host,
+    });
+    // Provisioned: the lease sits on the draft, which still points at the host.
+    expect(boxesOfOtherChats(boxes(null), draftOwnBox(leases, "draft", onHost))).toEqual(others);
+    // Paired: the draft points at its box.
+    expect(boxesOfOtherChats(boxes(null), draftOwnBox(leases, "draft", onBox))).toEqual(others);
+    // First turn started: the lease moved to the thread while the draft is still on screen, and
+    // the host has not recorded the claim yet.
+    leases.transfer("draft", onBox);
+    expect(leases.leaseFor("draft")).toBeNull();
+    expect(boxesOfOtherChats(boxes(null), draftOwnBox(leases, "draft", onBox))).toEqual(others);
+    // Claimed: the host lists the box under the draft's thread.
+    expect(boxesOfOtherChats(boxes(draftThreadId), draftOwnBox(leases, "draft", onBox))).toEqual(
+      others,
+    );
+    leases.forget(onBox);
+    expect(boxesOfOtherChats(boxes(draftThreadId), draftOwnBox(leases, "draft", onBox))).toEqual(
+      others,
+    );
+  });
+
+  it("marks every box as another chat's for a chat that started none", () => {
+    expect(
+      boxesOfOtherChats(boxes(ThreadId.make("earlier-chat")), {
+        threadId: draftThreadId,
+        leaseId: null,
+        environmentId: null,
+      }),
+    ).toEqual(
+      new Map([
+        [ownBox, host],
+        [otherBox, host],
+      ]),
+    );
+    expect(boxesOfOtherChats(boxes(null), null)).toEqual(
+      new Map([
+        [ownBox, host],
+        [otherBox, host],
+      ]),
+    );
   });
 });
