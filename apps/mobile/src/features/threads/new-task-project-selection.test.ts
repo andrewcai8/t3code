@@ -14,6 +14,11 @@ import {
   resolveNewThreadStart,
 } from "./new-task-project-selection";
 
+type HostConfig = Pick<
+  ServerConfig,
+  "localAgentRuns" | "environmentControl" | "provisionProviders"
+>;
+
 function makeProject(
   id: string,
   environmentId = "environment",
@@ -192,7 +197,9 @@ describe("filterProjectScopes", () => {
   it("preserves the whole logical project and preferred environment when a workspace matches", () => {
     const matches = filterProjectScopes(scopes, "REMOTE-WORKSPACE");
     expect(matches[0]).toBe(code);
-    expect(getProjectScopeSelectionTarget(matches[0]!, EnvironmentId.make("mac"))).toBe(mac);
+    expect(getProjectScopeSelectionTarget(matches[0]!, EnvironmentId.make("mac"), new Map())).toBe(
+      mac,
+    );
     expect(code.projects).toEqual([mac, server]);
   });
 });
@@ -208,12 +215,7 @@ describe("resolveNewThreadStart", () => {
     environmentControl: true,
     provisionProviders: ["e2b", "namespace"] as const,
   };
-  const start = (
-    subject: EnvironmentProject,
-    hostConfig:
-      | Pick<ServerConfig, "localAgentRuns" | "environmentControl" | "provisionProviders">
-      | undefined,
-  ) =>
+  const start = (subject: EnvironmentProject, hostConfig: HostConfig | undefined) =>
     resolveNewThreadStart({
       project: subject,
       serverConfigs: new Map(hostConfig ? [[EnvironmentId.make("host"), hostConfig]] : []),
@@ -280,7 +282,7 @@ describe("new task environments", () => {
     environmentControl: true,
     provisionProviders: ["e2b", "namespace"] as const,
   };
-  const serverConfigs = new Map([
+  const serverConfigs = new Map<EnvironmentId, HostConfig>([
     [host, cloudOnlyHost],
     [laptop, { localAgentRuns: true }],
   ]);
@@ -344,12 +346,12 @@ describe("new task environments", () => {
 
   describe("a draft on another chat's box", () => {
     const leave = (input: {
-      readonly hostConfig: typeof cloudOnlyHost | { readonly localAgentRuns: false };
+      readonly hostConfig: HostConfig;
       readonly environments: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
     }) =>
       resolveNewThreadStart({
         project: onBox,
-        serverConfigs: new Map([
+        serverConfigs: new Map<EnvironmentId, HostConfig>([
           [host, input.hostConfig],
           [laptop, { localAgentRuns: true }],
         ]),
