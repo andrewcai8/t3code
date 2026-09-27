@@ -1,7 +1,7 @@
 // @effect-diagnostics globalFetch:off - Promise SDK adapters perform provider resolution and private remote HTTP.
 // @effect-diagnostics nodeBuiltinImport:off - SDK transfers read immutable local artifacts at the provider boundary.
 import * as NodeFS from "node:fs";
-import type * as NodeHttp from "node:http";
+import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeStreamPromises from "node:stream/promises";
 import {
@@ -100,22 +100,31 @@ const STDIN_CHUNK = 4 * 1024 * 1024;
  * streamed body far ahead of the network: one 150 MB upload held about that
  * much again in memory, and four at once exhausted a 2 GB host.
  */
-async function uploadFile(url: string, path: string, size: number) {
-  const request = NodeHttps.request(url, {
+export async function uploadFile(url: string, path: string, size: number) {
+  const target = new URL(url);
+  const request = (target.protocol === "http:" ? NodeHttp : NodeHttps).request(target, {
     method: "POST",
     headers: { "content-type": "application/octet-stream", "content-length": size },
     signal: AbortSignal.timeout(PREPARE_COMMAND_TIMEOUT_MS),
   });
-  const [response] = await Promise.all([
-    new Promise<NodeHttp.IncomingMessage>((resolve, reject) =>
-      request.once("response", resolve).on("error", reject),
-    ),
-    NodeStreamPromises.pipeline(NodeFS.createReadStream(path), request),
-  ]);
+  const sent = NodeStreamPromises.pipeline(NodeFS.createReadStream(path), request);
+  // envd can answer (a 401, say) before it reads the body, and then the
+  // reset that ends the send would hide the status that explains it.
+  const response = await new Promise<NodeHttp.IncomingMessage>((resolve, reject) => {
+    request.once("response", resolve);
+    sent.catch(reject);
+  });
   let body = "";
-  for await (const chunk of response) body += chunk;
-  if (!response.statusCode || response.statusCode >= 300)
+  try {
+    for await (const chunk of response) body += chunk;
+  } catch {
+    // A reset can cut the error body short; the status still names the failure.
+  }
+  if (!response.statusCode || response.statusCode >= 300) {
+    request.destroy();
     throw new Error(`The runtime artifact upload failed (${response.statusCode}): ${body}`);
+  }
+  await sent;
 }
 
 /** What a sandbox's guest verifies its preparation journal against. */
@@ -256,9 +265,9 @@ else:
     with path.open('rb') as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(chunk)
-    if digest.hexdigest() != spec['sha256']:
-        raise RuntimeError('The existing runtime archive failed its content hash check')
-    print('true')
+    # A reset mid-upload leaves a truncated archive. Upload it again; the guest
+    # preparation still refuses an archive whose digest does not match.
+    print('true' if digest.hexdigest() == spec['sha256'] else 'false')
 `,
         stdin: JSON.stringify({ path: guest.archivePath, sha256: desired.sha256 }),
       });
