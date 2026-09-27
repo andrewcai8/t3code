@@ -44,6 +44,7 @@ const fixture = async (
   await write("provisioning/prepare-megpt-ios.sh", "echo prepare\n");
   await write("provisioning/api.env", "API_KEY=fixture\n");
   await write(".claude/.credentials.json", '{"token":"claude"}');
+  await write(".claude.json", '{"oauthAccount":{"emailAddress":"work@example.com"}}');
   await write("gitconfig", "[user]\n");
   if (namespaceSession !== undefined) await write("ns/token.json", namespaceSession);
   const packed = await packHostState({
@@ -161,6 +162,8 @@ describe("packHostState", () => {
                       sensitive: true,
                     },
                   ],
+                  // Read from the local login, since the host's token cannot name it.
+                  config: { accountEmail: "work@example.com" },
                 },
               },
             }),

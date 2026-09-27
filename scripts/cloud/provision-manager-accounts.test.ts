@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off - login fixtures live in a temporary home.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, describe, it } from "@effect/vitest";
 
 import { cursorFileCredentialPath } from "../../apps/server/src/provider/cursorCredentialPath.ts";
@@ -203,6 +208,54 @@ describe("planManagerAccounts", () => {
         { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-work", sensitive: true },
       ],
     });
+  });
+
+  it("records a Claude account's email from its name when no local login names it", () => {
+    const plan = planManagerAccounts({
+      settings: {
+        providerInstances: {
+          claude_work: {
+            driver: "claudeAgent",
+            displayName: "Claude · work@example.com",
+            enabled: true,
+            config: { homePath: "/Users/op/.claude_missing" },
+          },
+        },
+      },
+      provisioning,
+      host,
+      managerBaseDir,
+    });
+    assert.deepEqual(plan.providerInstances.claude_work?.config, {
+      accountEmail: "work@example.com",
+    });
+  });
+
+  it("reads the default Claude account's email from home, whatever the packing shell's config dir", async () => {
+    const homedir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-plan-claude-"));
+    try {
+      const login = async (path: string, email: string) => {
+        await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
+        await NodeFSP.writeFile(path, JSON.stringify({ oauthAccount: { emailAddress: email } }));
+      };
+      await login(NodePath.join(homedir, ".claude.json"), "default@example.com");
+      await login(NodePath.join(homedir, ".claude_work/.claude.json"), "work@example.com");
+      const plan = planManagerAccounts({
+        settings: { providerInstances: { claudeAgent: { driver: "claudeAgent", enabled: true } } },
+        provisioning: { claudeOAuthTokens: { claudeAgent: "sk-ant-oat01-default" } },
+        host: {
+          homedir,
+          platform: "darwin",
+          environment: { CLAUDE_CONFIG_DIR: NodePath.join(homedir, ".claude_work") },
+        },
+        managerBaseDir,
+      });
+      assert.deepEqual(plan.providerInstances.claudeAgent?.config, {
+        accountEmail: "default@example.com",
+      });
+    } finally {
+      await NodeFSP.rm(homedir, { recursive: true, force: true });
+    }
   });
 
   it("treats a built-in driver with no instance entry as the legacy default instance", () => {

@@ -237,6 +237,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/usr/local/bin/claude",
         homePath: "",
         customModels: ["claude-custom"],
+        accountEmail: "",
         launchArgs: "",
         autoCompactWindow: "",
       });
@@ -946,6 +947,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/claude",
         homePath: "",
         customModels: [],
+        accountEmail: "",
         launchArgs: "",
         autoCompactWindow: "",
       });

@@ -837,6 +837,35 @@ it("gives a Claude account with a setup-token that token instead of a credential
   }
 });
 
+it("records the routed Claude account's email on the box's instance", async () => {
+  const f = await fixture();
+  try {
+    const manifest = await f.store.freeze(
+      inputFor("claudeAgent", "claude_personal"),
+      f.config,
+      f.resolver,
+      [
+        {
+          kind: "claudeAgent",
+          instanceId: ProviderInstanceId.make("claude_personal"),
+          accountEmail: "personal@example.com",
+          environment: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+          ],
+          credential: { kind: "environment" },
+        },
+      ],
+    );
+    const settings = homeFile(manifest, ".t3/userdata/settings.json");
+    expect(
+      JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()).providerInstances
+        .claudeAgent.config,
+    ).toEqual({ accountEmail: "personal@example.com" });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("drops a copied credential file that the cloud token replaces", async () => {
   const f = await fixture();
   try {

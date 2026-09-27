@@ -2911,6 +2911,27 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ),
       );
 
+      it.effect("reports the configured account email for a setup-token login", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            { ...defaultClaudeSettings, accountEmail: "work@example.com" },
+            claudeCapabilities({ tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" }),
+          );
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.email, "work@example.com");
+        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
+      );
+
+      it.effect("prefers the email a login reports over the configured one", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            { ...defaultClaudeSettings, accountEmail: "stale@example.com" },
+            claudeCapabilities({ email: "claude@example.com" }),
+          );
+          assert.strictEqual(status.auth.email, "claude@example.com");
+        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
+      );
+
       it.effect("runs Claude status probes with the configured CLAUDE_CONFIG_DIR", () => {
         const claudeConfigDir = "/tmp/t3code-claude-home";
         const recorded = recordingMockSpawnerLayer((args) => {

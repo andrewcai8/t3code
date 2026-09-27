@@ -19,6 +19,7 @@ import {
   displayLimitWindows,
   elapsedShare,
   formatResetsIn,
+  identicalProviderReadings,
   limitsNotice,
   paceOf,
   providersWithLimits,
@@ -1262,5 +1263,194 @@ describe("rankAccounts", () => {
       );
       expect(ids(ranked)).toEqual(["nearly", "spent"]);
     });
+  });
+});
+
+describe("one Claude account across machines", () => {
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const weekly = {
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    windowDurationMins: 7 * 24 * 60,
+    resetsAt: "2026-09-06T12:00:00.000Z",
+  } as const;
+  const reading = (instanceId: string, email: string, checkedAt: string, usedPercent: number) =>
+    provider({
+      driver: claude,
+      instanceId: ProviderInstanceId.make(instanceId),
+      displayName: `Claude · ${email}`,
+      auth: { status: "authenticated", email },
+      usageLimits: {
+        checkedAt,
+        windows: [
+          { ...window, usedPercent },
+          { ...weekly, usedPercent: 30 },
+        ],
+      },
+    });
+  const machines = new Map([
+    [
+      EnvironmentId.make("mac"),
+      {
+        entry: { target: { label: "Mac" } },
+        serverConfig: {
+          providers: [reading("claude_work", "work@example.com", "2026-09-03T11:00:00.000Z", 20)],
+        },
+      },
+    ],
+    [
+      EnvironmentId.make("host"),
+      {
+        entry: { target: { label: "Host" } },
+        serverConfig: {
+          providers: [reading("claude_work", "Work@Example.com", "2026-09-03T11:40:00.000Z", 45)],
+        },
+      },
+    ],
+    [
+      EnvironmentId.make("box"),
+      {
+        entry: { target: { label: "Box" } },
+        serverConfig: {
+          providers: [reading("claudeAgent", "work@example.com", "2026-09-03T11:20:00.000Z", 30)],
+        },
+      },
+    ],
+  ]);
+
+  it("collapses the Mac, host and box rows for one email into one, the freshest reading on show", () => {
+    const accounts = collectLimitAccounts(machines);
+    expect(accounts.map((account) => account.environments.map(({ label }) => label))).toEqual([
+      ["Mac", "Host", "Box"],
+    ]);
+    expect(accounts[0]?.limits.windows.map(({ usedPercent }) => usedPercent)).toEqual([45, 30]);
+  });
+
+  it("pools the account once, so its reading is not averaged in three times", () => {
+    const [pool] = collectLimitPools(collectLimitAccounts(machines), now);
+    expect(pool?.accounts).toHaveLength(1);
+    expect(
+      pool?.windows.map(({ id, members, remainingPercent }) => [
+        id,
+        members.length,
+        remainingPercent,
+      ]),
+    ).toEqual([
+      ["five_hour", 1, 55],
+      ["seven_day", 1, 70],
+    ]);
+  });
+});
+
+describe("identical readings", () => {
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const checkedAt = "2026-09-03T11:00:00.000Z";
+  const weekly = {
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    usedPercent: 62,
+    windowDurationMins: 7 * 24 * 60,
+    resetsAt: "2026-09-06T12:00:00.000Z",
+  } as const;
+  const instance = (email: string, sessionUsed: number) =>
+    provider({
+      driver: claude,
+      instanceId: ProviderInstanceId.make(`claude_${email.split("@")[0]}`),
+      displayName: `Claude · ${email}`,
+      auth: { status: "authenticated", email },
+      usageLimits: { checkedAt, windows: [{ ...window, usedPercent: sessionUsed }, weekly] },
+    });
+  const host = (providers: ServerProvider[]) =>
+    new Map([
+      [
+        EnvironmentId.make("host"),
+        { entry: { target: { label: "Host" } }, serverConfig: { providers } },
+      ],
+    ]);
+
+  it("flags four accounts reading the same numbers, and not two that differ", () => {
+    const providers = [
+      instance("a@example.com", 40),
+      instance("b@example.com", 40),
+      instance("c@example.com", 40),
+      instance("d@example.com", 40),
+      instance("e@example.com", 12),
+      instance("f@example.com", 77),
+    ];
+    expect(identicalProviderReadings(providers)).toEqual([
+      [
+        "Claude · a@example.com",
+        "Claude · b@example.com",
+        "Claude · c@example.com",
+        "Claude · d@example.com",
+      ],
+    ]);
+    expect(collectLimitNotices(host(providers))).toEqual([
+      "Claude · a@example.com, Claude · b@example.com, Claude · c@example.com, Claude · d@example.com report identical limits, so they may be one account.",
+    ]);
+  });
+
+  it("does not flag one account seen by name on the Mac and anonymously on the host", () => {
+    const mac = instance("a@example.com", 40);
+    const anonymous = { ...mac, auth: { status: "authenticated" as const } };
+    expect(
+      collectLimitNotices(
+        new Map([
+          [
+            EnvironmentId.make("mac"),
+            { entry: { target: { label: "Mac" } }, serverConfig: { providers: [mac] } },
+          ],
+          [
+            EnvironmentId.make("host"),
+            { entry: { target: { label: "Host" } }, serverConfig: { providers: [anonymous] } },
+          ],
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not flag one email reported by two instances, or untouched accounts", () => {
+    const same = instance("a@example.com", 40);
+    const fresh = (email: string) =>
+      provider({
+        ...instance(email, 0),
+        usageLimits: { checkedAt, windows: [{ ...window, usedPercent: 0, resetsAt: undefined }] },
+      });
+    expect(
+      identicalProviderReadings([
+        same,
+        { ...same, instanceId: ProviderInstanceId.make("claude_again") },
+        fresh("x@example.com"),
+        fresh("y@example.com"),
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("rankAccounts across instances of one account", () => {
+  const checkedAt = "2026-09-03T11:55:00.000Z";
+  const account = (id: string, email: string | undefined, usedPercent: number) => ({
+    instanceId: ProviderInstanceId.make(id),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    email,
+    usageLimits: { checkedAt, windows: [{ ...window, usedPercent }] },
+  });
+
+  it("counts sessions on either instance of one email against both", () => {
+    const load = new Map([[ProviderInstanceId.make("work"), 3]]);
+    const ranked = rankAccounts(
+      [
+        account("work", "work@example.com", 20),
+        account("work_again", "Work@example.com", 20),
+        account("home", "home@example.com", 50),
+      ],
+      now,
+      undefined,
+      load,
+    );
+    // 80% left over four sessions is 20 each, below home's 50 over one.
+    expect(ranked.map(({ instanceId }) => instanceId)).toEqual(["home", "work", "work_again"]);
   });
 });
