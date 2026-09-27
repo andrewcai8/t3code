@@ -117,4 +117,15 @@ describe("buildPendingNewTasks", () => {
 
     expect(tasks.map((task) => task.title)).toEqual(["queued new", "queued old"]);
   });
+
+  it("drops a queued creation once its thread exists", () => {
+    const queuedMessages = [queuedCreation("a", "2026-09-05T10:00:00.000Z")];
+    const listed = (knownThreadKeys: ReadonlySet<string>) =>
+      buildPendingNewTasks({ queuedMessages, drafts: {}, knownThreadKeys }).map(
+        (task) => task.title,
+      );
+
+    expect(listed(new Set())).toEqual(["queued a"]);
+    expect(listed(new Set([`${environmentId}:thread-a`]))).toEqual([]);
+  });
 });

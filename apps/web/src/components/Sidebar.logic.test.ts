@@ -44,6 +44,7 @@ import {
   sortScopedProjectsForSidebar,
   shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
+  sidebarDraftRows,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   type SidebarListItem,
   type SidebarListMarker,
@@ -60,6 +61,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 
+import type { DraftSessionState } from "../composerDraftStore";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -2572,4 +2574,49 @@ describe("navigation after parking a thread", () => {
       ).toBe(expected);
     },
   );
+});
+
+describe("sidebarDraftRows", () => {
+  const cloudEnvironmentId = EnvironmentId.make("environment-cloud");
+  const cloudSend: DraftSessionState = {
+    threadId: ThreadId.make("thread-cloud"),
+    environmentId: cloudEnvironmentId,
+    projectId: ProjectId.make("project-cloud"),
+    logicalProjectKey: "project-cloud",
+    createdAt: "2026-09-27T10:00:00.000Z",
+    runtimeMode: DEFAULT_RUNTIME_MODE,
+    interactionMode: DEFAULT_INTERACTION_MODE,
+    branch: null,
+    worktreePath: null,
+    envMode: "local",
+    startFromOrigin: false,
+    pendingEnvironmentSend: {
+      provider: "e2b",
+      preview: "fix the flaky test",
+      messageId: "message-cloud",
+      createdAt: "2026-09-27T10:00:00.000Z",
+      prompt: "fix the flaky test",
+      outgoingMessageText: "fix the flaky test",
+      phase: "ready",
+      startedAt: "2026-09-27T10:00:00.000Z",
+      readyEnvironmentId: "environment-cloud",
+    },
+  };
+  const rowsFor = (knownThreadKeys: ReadonlySet<string>, routeDraftId: string | null) =>
+    sidebarDraftRows({
+      sessions: { "draft-cloud": cloudSend },
+      composers: {},
+      scopedProjectKeys: null,
+      routeDraftId,
+      frozenRouteRow: null,
+      knownThreadKeys,
+    }).map((row) => row.draftId);
+
+  it("drops a pending cloud send once the box's thread exists", () => {
+    const threadKey = "environment-cloud:thread-cloud";
+    expect(rowsFor(new Set(), "draft-cloud")).toEqual(["draft-cloud"]);
+    expect(rowsFor(new Set(), null)).toEqual(["draft-cloud"]);
+    expect(rowsFor(new Set([threadKey]), "draft-cloud")).toEqual([]);
+    expect(rowsFor(new Set([threadKey]), null)).toEqual([]);
+  });
 });

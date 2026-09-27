@@ -24,6 +24,12 @@ import {
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
+import {
+  DraftId,
+  draftSessionHasInvestedWork,
+  type ComposerThreadDraftState,
+  type DraftSessionState,
+} from "../composerDraftStore";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -1252,4 +1258,79 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
+  prompt: "",
+  images: [],
+  files: [],
+  nonPersistedImageIds: [],
+  persistedAttachments: [],
+  terminalContexts: [],
+  previewAnnotations: [],
+  reviewComments: [],
+  modelSelectionByProvider: {},
+  activeProvider: null,
+  runtimeMode: null,
+  interactionMode: null,
+};
+
+export interface SidebarDraftRowData {
+  readonly draftId: DraftId;
+  readonly session: DraftSessionState;
+  readonly composer: ComposerThreadDraftState;
+}
+
+/**
+ * Draft sessions the sidebar lists above the pinned block, newest first.
+ * Every non-promoted session with content gets a row, mapped or not:
+ * new-thread surfaces mint fresh drafts and leave invested ones behind
+ * unmapped, so the mapping only knows about the latest per project.
+ */
+export function sidebarDraftRows(input: {
+  readonly sessions: Readonly<Record<string, DraftSessionState>>;
+  readonly composers: Readonly<Record<string, ComposerThreadDraftState>>;
+  readonly scopedProjectKeys: ReadonlySet<string> | null;
+  readonly routeDraftId: string | null;
+  /** The open draft's row as captured when it became the route, if it had one. */
+  readonly frozenRouteRow: SidebarDraftRowData | null;
+}): SidebarDraftRowData[] {
+  const rows: SidebarDraftRowData[] = [];
+  for (const [draftKey, session] of Object.entries(input.sessions)) {
+    if (session.promotedTo != null) {
+      continue;
+    }
+    if (
+      input.scopedProjectKeys !== null &&
+      !input.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+    ) {
+      continue;
+    }
+    if (draftKey === input.routeDraftId) {
+      // Open draft: the frozen entry snapshot, or a live row for a started
+      // first-send that has not been left yet. Gated on the live session
+      // above so send/discard still removes the row immediately.
+      if (input.frozenRouteRow !== null) {
+        rows.push(input.frozenRouteRow);
+      } else if (session.pendingEnvironmentSend != null) {
+        rows.push({
+          draftId: DraftId.make(draftKey),
+          session,
+          composer: input.composers[draftKey] ?? EMPTY_SIDEBAR_COMPOSER,
+        });
+      }
+      continue;
+    }
+    const composer = input.composers[draftKey];
+    if (!draftSessionHasInvestedWork(session, composer)) {
+      continue;
+    }
+    rows.push({
+      draftId: DraftId.make(draftKey),
+      session,
+      composer: composer ?? EMPTY_SIDEBAR_COMPOSER,
+    });
+  }
+  rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
+  return rows;
 }
