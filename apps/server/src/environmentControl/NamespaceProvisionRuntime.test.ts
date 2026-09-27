@@ -913,6 +913,7 @@ describe("Namespace runtime transport", () => {
           restore: (input) => proxies.restore(toUpstream(input)),
           close: (input) => proxies.close(input),
         },
+        toolInstall: 'echo installed >> "$HOME/tool-installs"',
       });
     };
     const environmentAt = async (origin: string) =>
@@ -932,6 +933,9 @@ describe("Namespace runtime transport", () => {
     );
     expect(await NodeFSP.readFile(NodePath.join(root, "developer-directory"), "utf8")).toBe(
       NodePath.join(f.applications, "Xcode_26.4.1.app/Contents/Developer"),
+    );
+    expect(await NodeFSP.readFile(NodePath.join(root, "home/tool-installs"), "utf8")).toBe(
+      "installed\n",
     );
     const operation = decodeOperation({
       ...f.operation,

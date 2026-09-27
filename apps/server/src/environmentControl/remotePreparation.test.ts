@@ -748,6 +748,21 @@ describe("remote preparation subprocess", () => {
     );
   });
 
+  it("installs box tools on a root prepared before they existed without changing its identity", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const second = await prepareRemoteHost(localPort, {
+      ...input,
+      toolInstall:
+        'printf "#!/bin/sh\\n" > "$HOME/.local/bin/aws" && chmod 700 "$HOME/.local/bin/aws"',
+    });
+    expect(second.environmentId).toBe(first.environmentId);
+    await expect(
+      NodeFSP.access(NodePath.join(input.root, "home/.local/bin/aws")),
+    ).resolves.toBeUndefined();
+  });
+
   it("does not start T3 when guest provider install fails", async () => {
     const input = await fixture();
     await expect(

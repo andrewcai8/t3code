@@ -34,6 +34,12 @@ export interface RemotePreparationInput {
   /** Closed-set shell command from guestProviderInstallCommand. Runs in the isolated home. */
   readonly providerInstall?: string | undefined;
   /**
+   * Closed-set shell command from guestToolInstallCommand, run beside
+   * providerInstall. Excluded from the intent hash so a root prepared before
+   * it existed picks the tools up on its next prepare.
+   */
+  readonly toolInstall?: string | undefined;
+  /**
    * Operator-configured setup for this repository, run in the checkout once it
    * exists. A cloud box arrives with the repository but none of its toolchain
    * otherwise, so the first thing every agent does is install one.
@@ -361,7 +367,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly', 'toolInstall')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
@@ -465,12 +471,13 @@ def prepare(spec):
         # Agent CLIs install into the isolated home, independent of the runtime
         # and the checkout, so they download while those do. Setup commands may
         # call the CLIs, so preparation waits for this before running them.
-        install = spec.get('providerInstall')
-        installing = None
-        if install:
-            if not isinstance(install, str) or not install.strip() or '\0' in install:
-                raise RuntimeError('Invalid provider install command')
-            installing = start(['sh', '-c', install], home, env)
+        installing = []
+        for field in ('providerInstall', 'toolInstall'):
+            install = spec.get(field)
+            if install:
+                if not isinstance(install, str) or not install.strip() or '\0' in install:
+                    raise RuntimeError('Invalid ' + field + ' command')
+                installing.append((field, start(['sh', '-c', install], home, env)))
         checkout = root / 'workspace.partial'
         fetching = None
         if repository is not None and not project.exists():
@@ -655,9 +662,9 @@ def prepare(spec):
                             raise RuntimeError('Refusing to overwrite an existing artifact')
                         continue
                     fetch_artifact(url, target, entry['sha256'])
-        if installing is not None:
-            with step('providerInstall'):
-                finish(installing, 900)
+        for field, started in installing:
+            with step(field):
+                finish(started, 900)
         prepare = spec.get('prepareCommands') or []
         if prepare:
             if not isinstance(prepare, list):
