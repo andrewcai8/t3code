@@ -18,8 +18,13 @@ import {
 import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
 import {
   type CloudProvisionPorts,
+  boxesOfOtherChats,
+  claimFirstTurnBox,
+  idleProvisionedBoxes,
   newChatRunTargets,
+  nextDraftEnvironment,
   offeredProvisionProviders,
+  type ProvisionedBoxClaim,
   provisionCloudEnvironment,
 } from "./provisioning.ts";
 import type { ProvisionStorage } from "./storage.ts";
@@ -309,6 +314,7 @@ describe("newChatRunTargets", () => {
             : { serverConfig: { localAgentRuns: input.localAgentRuns } },
       environmentId: input.environmentId ?? host.environmentId,
       managerConfig: input.managerConfig ?? manager,
+      boxes: new Set(),
     });
 
   it("hides a host without local runs and sends its chats to the first cloud kind", () => {
@@ -349,6 +355,7 @@ describe("newChatRunTargets", () => {
         environmentState: () => cloudOnlyHost,
         environmentId: host.environmentId,
         managerConfig: noCloud,
+        boxes: new Set(),
       }),
     ).toEqual({ environments: [], cloudProviders: [], redirect: null });
   });
@@ -369,6 +376,7 @@ describe("newChatRunTargets", () => {
               : {},
         environmentId: box.environmentId,
         managerConfig: input.managerConfig,
+        boxes: new Set(),
       });
 
     it("moves to a cloud-only host that can start a cloud kind instead", () => {
@@ -417,7 +425,273 @@ describe("newChatRunTargets", () => {
           id === box.environmentId ? { connection: { blockedReason: "authentication" } } : {},
         environmentId: box.environmentId,
         managerConfig: manager,
+        boxes: new Set(),
       }).redirect,
+    ).toBeNull();
+  });
+
+  describe("with cloud boxes other chats run on", () => {
+    const remote = { environmentId: EnvironmentId.make("remote") };
+    const namespaceBox = { environmentId: EnvironmentId.make("namespace-box") };
+    const withBoxes = (input: {
+      readonly environmentId: EnvironmentId;
+      readonly managerConfig?: ManagerConfig;
+    }) =>
+      newChatRunTargets({
+        environments: [host, box, laptop, namespaceBox, remote],
+        environmentState: (id) => (id === host.environmentId ? cloudOnlyHost : {}),
+        environmentId: input.environmentId,
+        managerConfig: input.managerConfig ?? manager,
+        boxes: new Set([box.environmentId, namespaceBox.environmentId]),
+      });
+
+    it("offers servers that run agents and fresh cloud kinds, never a running box", () => {
+      expect(withBoxes({ environmentId: laptop.environmentId })).toEqual({
+        environments: [laptop, remote],
+        cloudProviders: ["e2b", "namespace"],
+        redirect: null,
+      });
+    });
+
+    it("starts a chat that points at a running box on a fresh one", () => {
+      expect(withBoxes({ environmentId: box.environmentId }).redirect).toEqual({
+        kind: "cloud",
+        provider: "e2b",
+      });
+    });
+
+    it("moves a chat on a running box to a server when no cloud kind is offered", () => {
+      expect(
+        withBoxes({ environmentId: namespaceBox.environmentId, managerConfig: noCloud }),
+      ).toEqual({
+        environments: [laptop, remote],
+        cloudProviders: [],
+        redirect: { kind: "environment", environment: laptop },
+      });
+    });
+
+    it("moves a chat off an expired box to a server, skipping running boxes", () => {
+      expect(
+        newChatRunTargets({
+          environments: [box, namespaceBox, remote],
+          environmentState: (id) => (id === box.environmentId ? expired : {}),
+          environmentId: box.environmentId,
+          managerConfig: manager,
+          boxes: new Set([box.environmentId, namespaceBox.environmentId]),
+        }).redirect,
+      ).toEqual({ kind: "environment", environment: remote });
+    });
+  });
+});
+
+describe("boxesOfOtherChats", () => {
+  const host = EnvironmentId.make("host");
+  const laptop = { environmentId: EnvironmentId.make("laptop") };
+  const draftThread = ThreadId.make("draft-thread");
+  const box = (environmentId: string, threadId: string | null) => ({
+    managerId: host,
+    environmentId: EnvironmentId.make(environmentId),
+    leaseId: `${environmentId}-lease`,
+    threadId: threadId === null ? null : ThreadId.make(threadId),
+    lifecycle: "active" as const,
+  });
+  const chatBox = box("chat-x-box", "chat-x");
+  const automationBox = box("automation-box", "automation-run");
+  const manager = {
+    environmentControl: true,
+    provisionProviders: ["e2b", "namespace"] as const,
+  };
+
+  it("counts boxes claimed by other chats or automation runs, never an unclaimed one", () => {
+    expect(
+      boxesOfOtherChats([chatBox, automationBox, box("fresh-box", null)], draftThread),
+    ).toEqual(
+      new Map([
+        [chatBox.environmentId, host],
+        [automationBox.environmentId, host],
+      ]),
+    );
+  });
+
+  it("never counts the draft's own box through the handoff to its first turn", () => {
+    const own = (threadId: string | null) =>
+      boxesOfOtherChats([chatBox, box("own-box", threadId)], draftThread);
+    // Created, pairing, or paired with the first turn under way but not yet claimed.
+    expect(own(null)).toEqual(new Map([[chatBox.environmentId, host]]));
+    // Claimed by the draft's thread.
+    expect(own("draft-thread")).toEqual(new Map([[chatBox.environmentId, host]]));
+  });
+
+  it("sends a draft on another chat's box to a fresh box, even after its own box failed to pair", () => {
+    const hostEnvironment = { environmentId: host };
+    const failedPairing = box("failed-pairing-box", null);
+    expect(
+      newChatRunTargets({
+        environments: [hostEnvironment, chatBox, laptop],
+        environmentState: (id) => (id === host ? { serverConfig: { localAgentRuns: false } } : {}),
+        environmentId: chatBox.environmentId,
+        managerConfig: manager,
+        boxes: boxesOfOtherChats([chatBox, failedPairing], draftThread),
+      }),
+    ).toEqual({
+      environments: [laptop],
+      cloudProviders: ["e2b", "namespace"],
+      redirect: { kind: "cloud", provider: "e2b" },
+    });
+  });
+
+  it("never offers a paused or lost box, but lets a chat already on one stay", () => {
+    const paused = { ...box("paused-box", null), lifecycle: "paused" as const };
+    const lost = { ...box("lost-box", null), lifecycle: "missing" as const };
+    const targets = (environmentId: EnvironmentId) =>
+      newChatRunTargets({
+        environments: [paused, lost, laptop],
+        environmentState: () => ({}),
+        environmentId,
+        managerConfig: manager,
+        boxes: boxesOfOtherChats([paused, lost], draftThread),
+        idleBoxes: idleProvisionedBoxes([paused, lost, chatBox]),
+      });
+    expect(targets(laptop.environmentId)).toEqual({
+      environments: [laptop],
+      cloudProviders: ["e2b", "namespace"],
+      redirect: null,
+    });
+    expect(targets(paused.environmentId).redirect).toBeNull();
+  });
+});
+
+describe("claimFirstTurnBox", () => {
+  const host = EnvironmentId.make("host");
+  const box = EnvironmentId.make("box");
+  const firstThread = { environmentId: box, threadId: ThreadId.make("first-thread") };
+  const expectedClaim = {
+    environmentId: host,
+    input: { leaseId: "lease", environmentId: box, threadId: ThreadId.make("first-thread") },
+  };
+  const provisionedHere = () => {
+    const leases = createProvisionedSandboxLeaseStore(memoryStorage());
+    leases.rememberForEnvironment(box, {
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      managerEnvironmentId: host,
+    });
+    return leases;
+  };
+
+  it("claims the box for its first thread, retrying a failed claim once", async () => {
+    const leases = provisionedHere();
+    const claims: unknown[] = [];
+    const claim = async (request: unknown) => {
+      claims.push(request);
+      return claims.length > 1;
+    };
+    const warnings: number[] = [];
+    const ports = {
+      claim,
+      refresh: () => undefined,
+      warn: (attempt: number) => void warnings.push(attempt),
+    };
+    await expect(claimFirstTurnBox(leases, ports, firstThread)).resolves.toBe(true);
+    expect(claims).toEqual([expectedClaim, expectedClaim]);
+    expect(warnings).toEqual([1]);
+    expect(leases.leaseFor(firstThread)).toEqual({
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      managerEnvironmentId: host,
+    });
+    // A later chat on the same box finds nothing left to claim.
+    await expect(
+      claimFirstTurnBox(leases, ports, { environmentId: box, threadId: ThreadId.make("later") }),
+    ).resolves.toBe(false);
+    expect(claims).toHaveLength(2);
+  });
+
+  it("gives up after the retry without failing the send", async () => {
+    const claims: unknown[] = [];
+    const claim = async (request: unknown) => {
+      claims.push(request);
+      throw new Error("host unreachable");
+    };
+    const warnings: number[] = [];
+    const refreshed: EnvironmentId[] = [];
+    const ports = {
+      claim,
+      refresh: (managerId: EnvironmentId) => void refreshed.push(managerId),
+      warn: (attempt: number) => void warnings.push(attempt),
+    };
+    await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(false);
+    expect(claims).toEqual([expectedClaim, expectedClaim]);
+    expect(warnings).toEqual([1, 2]);
+    expect(refreshed).toEqual([]);
+  });
+
+  it("refetches the host's list after a claim, so the next draft sees the box taken", async () => {
+    // The host's record of who claimed the box, and this client's copy of its list.
+    let owner: ThreadId | null = null;
+    const hostList = () => [
+      {
+        managerId: host,
+        environmentId: box,
+        leaseId: "lease",
+        threadId: owner,
+        lifecycle: "active" as const,
+      },
+    ];
+    let clientList = hostList();
+    const ports = {
+      claim: async ({ input }: ProvisionedBoxClaim) => {
+        owner = ThreadId.make(input.threadId);
+        return true;
+      },
+      refresh: (managerId: EnvironmentId) => {
+        expect(managerId).toBe(host);
+        clientList = hostList();
+      },
+      warn: () => undefined,
+    };
+    const nextDraft = ThreadId.make("next-draft");
+    expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map());
+    await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(true);
+    expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map([[box, host]]));
+  });
+});
+
+describe("nextDraftEnvironment", () => {
+  const host = { environmentId: EnvironmentId.make("host"), projectId: "on-host" };
+  const box = { environmentId: EnvironmentId.make("box"), projectId: "on-box" };
+  const laptop = { environmentId: EnvironmentId.make("laptop"), projectId: "on-laptop" };
+
+  it("opens the next draft on the box's host, never the box the chat just took", () => {
+    expect(
+      nextDraftEnvironment({
+        environmentId: box.environmentId,
+        ownBoxManagerId: host.environmentId,
+        environments: [box, host, laptop],
+        runTargets: [box, laptop],
+      }),
+    ).toEqual(host);
+  });
+
+  it("falls back to another machine that runs chats when the host lacks the project", () => {
+    expect(
+      nextDraftEnvironment({
+        environmentId: box.environmentId,
+        ownBoxManagerId: host.environmentId,
+        environments: [box, laptop],
+        runTargets: [box, laptop],
+      }),
+    ).toEqual(laptop);
+  });
+
+  it("keeps the next draft where the chat started when it took no box", () => {
+    expect(
+      nextDraftEnvironment({
+        environmentId: laptop.environmentId,
+        ownBoxManagerId: null,
+        environments: [host, laptop],
+        runTargets: [laptop],
+      }),
     ).toBeNull();
   });
 });

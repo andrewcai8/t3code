@@ -6,7 +6,9 @@ import {
 } from "../cloud/provisionRequests";
 import {
   type CloudProvisioningProgressPhase,
+  claimProvisionedBox,
   newChatRunTargets,
+  nextDraftEnvironment,
   provisionCloudEnvironment,
 } from "@t3tools/client-runtime/cloud";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -533,6 +535,7 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
+import { refreshProvisionedEnvironments, useNewChatBoxes } from "../cloud/automationHosts";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -2602,6 +2605,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
+  const newChatBoxes = useNewChatBoxes(draftId, threadId);
   const runTargets = useMemo(
     () =>
       newChatRunTargets({
@@ -2609,16 +2613,19 @@ export default function ChatView(props: ChatViewProps) {
         environmentState: (environmentId) => environmentById.get(environmentId),
         environmentId: activeThreadEnvironmentId,
         managerConfig: primaryEnvironment?.serverConfig,
+        boxes: newChatBoxes.others,
+        idleBoxes: newChatBoxes.idle,
       }),
     [
       logicalProjectEnvironments,
       environmentById,
       activeThreadEnvironmentId,
       primaryEnvironment?.serverConfig,
+      newChatBoxes,
     ],
   );
-  // A draft offers only machines a new chat can run on; a started thread still
-  // names the machine it ran on.
+  // A draft offers only machines a new chat can run on, never another chat's
+  // box; a started thread still names the machine it ran on.
   const pickableEnvironments = draftId ? runTargets.environments : logicalProjectEnvironments;
   const hasMultipleEnvironments = pickableEnvironments.length > 1;
   const activeEnvironmentOption =
@@ -4071,8 +4078,8 @@ export default function ChatView(props: ChatViewProps) {
     pickableEnvironments,
     setDraftThreadContext,
   ]);
-  // A draft on an expired box, or on a host that runs no agents with no cloud
-  // kind to start instead, moves to a machine that can take it.
+  // A draft on an expired box, or on another chat's box or a host that runs no
+  // agents with no cloud kind to start instead, moves to a machine that can take it.
   const redirectEnvironment =
     draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
       ? runTargets.redirect.environment
@@ -7911,6 +7918,7 @@ export default function ChatView(props: ChatViewProps) {
       isReconnectPending() ||
       sendInFlightRef.current ||
       (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
+      newChatBoxes.refreshing ||
       (isInProgressCloudProvisioningPhase(cloudProvisioningPhase) &&
         !resumingCloudSendRef.current) ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
@@ -9167,6 +9175,10 @@ export default function ChatView(props: ChatViewProps) {
       if (backgroundThreadRef) {
         beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
       }
+      const cloudLease =
+        isLocalDraftThread && typeof composerDraftTarget === "string"
+          ? provisionedSandboxFor(composerDraftTarget)
+          : null;
       const startPromise = startThreadTurn({
         environmentId,
         input: {
@@ -9213,10 +9225,20 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (backgroundThreadRef) {
         markPromotedDraftThreadByRef(backgroundThreadRef);
+        // Never open the next draft on the box this chat just took: its claim may not have
+        // landed, so nothing else would stop the draft from starting on it.
+        const nextDraftTarget = nextDraftEnvironment({
+          environmentId: activeProject.environmentId,
+          ownBoxManagerId: cloudLease?.managerEnvironmentId ?? null,
+          environments: logicalProjectEnvironments,
+          runTargets: runTargets.environments,
+        });
         try {
           backgroundDraftOpened = Boolean(
             await handleNewThread(
-              scopeProjectRef(activeProject.environmentId, activeProject.id),
+              nextDraftTarget
+                ? scopeProjectRef(nextDraftTarget.environmentId, nextDraftTarget.projectId)
+                : scopeProjectRef(activeProject.environmentId, activeProject.id),
               resolveBackgroundDraftWorkspaceOptions({
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
@@ -9245,25 +9267,29 @@ export default function ChatView(props: ChatViewProps) {
             .getState()
             .setDraftPendingEnvironmentSend(composerDraftTarget, null);
         }
-        const cloudLease =
-          isLocalDraftThread && typeof composerDraftTarget === "string"
-            ? provisionedSandboxFor(composerDraftTarget)
-            : null;
         if (cloudLease && typeof composerDraftTarget === "string") {
-          const claimed = await claimCloudLease({
-            environmentId: cloudLease.managerEnvironmentId,
-            input: {
-              leaseId: cloudLease.leaseId,
-              environmentId,
-              threadId: threadIdForSend,
+          const claimed = await claimProvisionedBox(
+            {
+              claim: async (request) => {
+                const result = await claimCloudLease(request);
+                return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+              },
+              refresh: refreshProvisionedEnvironments,
+              warn: (attempt) =>
+                console.warn("[cloud] could not claim the box for its first turn", {
+                  leaseId: cloudLease.leaseId,
+                  attempt,
+                }),
             },
-          });
+            cloudLease,
+            scopeThreadRef(environmentId, threadIdForSend),
+          );
           transferProvisionedSandboxLease(
             composerDraftTarget,
             scopeThreadRef(environmentId, threadIdForSend),
           );
           forgetProvisionRequest(composerDraftTarget);
-          if (!AsyncResult.isSuccess(claimed) || claimed.value.kind !== "claimed") {
+          if (!claimed) {
             toastManager.add({
               type: "warning",
               title: "Cloud chat started, but its lease could not be claimed.",
@@ -10953,7 +10979,9 @@ export default function ChatView(props: ChatViewProps) {
                                     ? "Messages loading"
                                     : worktreeSetupBlocksSend
                                       ? "Preparing worktree"
-                                      : projectCloneSendBlockReason
+                                      : newChatBoxes.refreshing
+                                        ? "Checking cloud machines"
+                                        : projectCloneSendBlockReason
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}

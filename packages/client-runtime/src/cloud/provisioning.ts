@@ -1,19 +1,26 @@
 import {
   type EnvironmentId,
   type EnvironmentProvisionAttachResult,
+  type EnvironmentProvisionClaimInput,
+  type DiscoveredProvisionedEnvironment,
   type EnvironmentProvisionInput,
   type EnvironmentProvisionResult,
   type ProjectId,
   ProvisionProvider,
   type ScopedProjectRef,
+  type ScopedThreadRef,
   type ServerConfig,
+  type ThreadId,
 } from "@t3tools/contracts";
 
 import type { EnvironmentConnectionPresentation } from "../connection/presentation.ts";
 import { joinProvisionedEnvironment } from "../connection/provisioned.ts";
 import { scopeProjectRef } from "../environment/scoped.ts";
 import type { DraftProvisionRequest, ProvisionRequestStore } from "./provisionRequests.ts";
-import type { ProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
+import type {
+  ProvisionedSandboxLease,
+  ProvisionedSandboxLeaseStore,
+} from "./provisionedSandboxLeases.ts";
 
 export type CloudProvisioningPhase =
   | "creating"
@@ -56,6 +63,153 @@ function isEnvironmentGone(state: NewChatEnvironmentState | null | undefined): b
   return state?.connection?.blockedReason === "workspace-missing";
 }
 
+/** A cloud box a host reports, with the host that provisioned it. */
+export interface ProvisionedBox {
+  readonly managerId: EnvironmentId;
+  readonly environmentId: EnvironmentId;
+  readonly leaseId: string;
+  /** The chat the box was claimed for; null until one claims it. */
+  readonly threadId: ThreadId | null;
+  readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
+}
+
+/** The boxes the hosts listed last, and whether a newer list is on its way. */
+export interface ProvisionedBoxes {
+  readonly boxes: ReadonlyArray<ProvisionedBox>;
+  /**
+   * A host's list is being fetched. Another device may have claimed a box since the last one,
+   * so a draft must not send until it arrives.
+   */
+  readonly refreshing: boolean;
+}
+
+export function sameProvisionedBoxes(
+  left: ReadonlyArray<ProvisionedBox>,
+  right: ReadonlyArray<ProvisionedBox>,
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((box, index) => {
+      const other = right[index]!;
+      return (
+        box.managerId === other.managerId &&
+        box.environmentId === other.environmentId &&
+        box.leaseId === other.leaseId &&
+        box.threadId === other.threadId &&
+        box.lifecycle === other.lifecycle
+      );
+    })
+  );
+}
+
+/**
+ * The boxes a new chat must not start on, each mapped to the host that provisioned it: those the
+ * host lists as claimed by a thread other than `threadId`, the chat's own. A box nobody has
+ * claimed yet belongs to no other chat, whether it was just created, is still pairing, or was
+ * left by a draft that never sent.
+ */
+export function boxesOfOtherChats(
+  boxes: ReadonlyArray<ProvisionedBox>,
+  threadId: ThreadId | null,
+): ReadonlyMap<EnvironmentId, EnvironmentId> {
+  return new Map(
+    boxes.flatMap((box) =>
+      box.threadId === null || box.threadId === threadId
+        ? []
+        : [[box.environmentId, box.managerId] as const],
+    ),
+  );
+}
+
+/**
+ * Boxes the host has paused or lost. Nobody can start a chat on one until it is resumed, so a
+ * new chat is never offered one, though a chat already pointing at one keeps it.
+ */
+export function idleProvisionedBoxes(
+  boxes: ReadonlyArray<ProvisionedBox>,
+): ReadonlySet<EnvironmentId> {
+  return new Set(boxes.flatMap((box) => (box.lifecycle === "active" ? [] : [box.environmentId])));
+}
+
+export interface ProvisionedBoxClaim {
+  /** The host that provisioned the box. */
+  readonly environmentId: EnvironmentId;
+  readonly input: EnvironmentProvisionClaimInput;
+}
+
+export interface ProvisionedBoxClaimPorts {
+  /** One `environmentControl.claim` call; true when the host recorded the owner. */
+  readonly claim: (request: ProvisionedBoxClaim) => Promise<boolean>;
+  /** Refetches the host's box list, so drafts on every screen see the claim. */
+  readonly refresh: (managerId: EnvironmentId) => void;
+  /** Reports an attempt that failed; the caller owns where that is logged. */
+  readonly warn: (attempt: number) => void;
+}
+
+/**
+ * Records a thread on the host as the owner of the box its first turn started on, so every
+ * device stops offering the box to new chats. Tries twice; a claim that still fails leaves the
+ * chat running and is only reported, because the turn has already started.
+ */
+export async function claimProvisionedBox(
+  ports: ProvisionedBoxClaimPorts,
+  lease: Pick<ProvisionedSandboxLease, "leaseId" | "managerEnvironmentId">,
+  owner: ScopedThreadRef,
+): Promise<boolean> {
+  const request = {
+    environmentId: lease.managerEnvironmentId,
+    input: { leaseId: lease.leaseId, environmentId: owner.environmentId, threadId: owner.threadId },
+  };
+  for (const attempt of [1, 2]) {
+    if (await ports.claim(request).catch(() => false)) {
+      ports.refresh(lease.managerEnvironmentId);
+      return true;
+    }
+    ports.warn(attempt);
+  }
+  return false;
+}
+
+/**
+ * Claims the box a first turn started on when this device provisioned it and has not claimed it
+ * yet, which is when its lease is still recorded under the environment. False when there is
+ * nothing to claim or the claim failed.
+ */
+export function claimFirstTurnBox(
+  leases: Pick<ProvisionedSandboxLeaseStore, "transferFromEnvironment">,
+  ports: ProvisionedBoxClaimPorts,
+  owner: ScopedThreadRef,
+): Promise<boolean> {
+  const lease = leases.transferFromEnvironment(owner.environmentId, owner);
+  return lease === null ? Promise.resolve(false) : claimProvisionedBox(ports, lease, owner);
+}
+
+/**
+ * Where a background send opens the next draft, or null to open it where the chat just started.
+ * A chat that started on the box it provisioned has taken that box, whether or not its claim has
+ * landed yet, so the next draft goes to the box's host, which starts a fresh box when it runs no
+ * agents itself, else to the first other machine a new chat can run on.
+ */
+export function nextDraftEnvironment<
+  Environment extends { readonly environmentId: EnvironmentId },
+>(input: {
+  /** Where the chat just started. */
+  readonly environmentId: EnvironmentId;
+  /** The host of the box the chat started on, when the chat provisioned that box itself. */
+  readonly ownBoxManagerId: EnvironmentId | null;
+  /** The environments holding the chat's project. */
+  readonly environments: ReadonlyArray<Environment>;
+  /** Where a new chat may run, as `newChatRunTargets` offers it. */
+  readonly runTargets: ReadonlyArray<Environment>;
+}): Environment | null {
+  if (input.ownBoxManagerId === null) return null;
+  return (
+    input.environments.find(({ environmentId }) => environmentId === input.ownBoxManagerId) ??
+    input.runTargets.find(({ environmentId }) => environmentId !== input.environmentId) ??
+    null
+  );
+}
+
 export interface NewChatRunTargets<Environment> {
   /** The environments holding the project that a new chat may run on. */
   readonly environments: ReadonlyArray<Environment>;
@@ -63,11 +217,11 @@ export interface NewChatRunTargets<Environment> {
   readonly cloudProviders: ReadonlyArray<ProvisionProvider>;
   /**
    * Where a chat that cannot start where it points goes instead. A chat on a
-   * gone machine moves to the first live environment that runs agents or can
-   * hand the chat to a cloud kind. A chat on a live environment that runs no
-   * agents starts on the manager's first cloud kind, else moves to the first
-   * environment that runs them. Null when the chat may stay, or there is
-   * nowhere else to go.
+   * gone machine moves to the first live environment, not a box, that runs
+   * agents or can hand the chat to a cloud kind. A chat on another chat's box,
+   * or on a live environment that runs no agents, starts on the manager's
+   * first cloud kind, else moves to the first environment that runs them. Null
+   * when the chat may stay, or there is nowhere else to go.
    */
   readonly redirect:
     | { readonly kind: "cloud"; readonly provider: ProvisionProvider }
@@ -90,15 +244,24 @@ export function newChatRunTargets<
     | Pick<ServerConfig, "environmentControl" | "provisionProviders">
     | null
     | undefined;
+  /**
+   * Cloud boxes other chats claimed. Every new chat gets a fresh box, so none
+   * of these is a place to start one.
+   */
+  readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
+  /** Boxes the host has paused or lost; never offered, but a chat on one may stay. */
+  readonly idleBoxes?: Pick<ReadonlySet<EnvironmentId>, "has">;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
   const provider = cloudProviders[0];
   const gone = (environmentId: EnvironmentId) =>
     isEnvironmentGone(input.environmentState(environmentId));
   const runs = (environmentId: EnvironmentId) =>
+    !input.boxes.has(environmentId) &&
     runsLocalAgents(input.environmentState(environmentId)?.serverConfig);
+  const idle = (environmentId: EnvironmentId) => input.idleBoxes?.has(environmentId) === true;
   const environments = input.environments.filter(
-    ({ environmentId }) => runs(environmentId) && !gone(environmentId),
+    ({ environmentId }) => runs(environmentId) && !gone(environmentId) && !idle(environmentId),
   );
   const moveTo = (environment: Environment | undefined) =>
     environment ? ({ kind: "environment", environment } as const) : null;
@@ -109,7 +272,10 @@ export function newChatRunTargets<
         ? moveTo(
             input.environments.find(
               ({ environmentId }) =>
-                !gone(environmentId) && (runs(environmentId) || provider !== undefined),
+                !gone(environmentId) &&
+                !idle(environmentId) &&
+                !input.boxes.has(environmentId) &&
+                (runs(environmentId) || provider !== undefined),
             ),
           )
         : runs(input.environmentId)

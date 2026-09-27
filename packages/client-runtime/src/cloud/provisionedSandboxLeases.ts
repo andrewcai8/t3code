@@ -86,6 +86,22 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     persist();
   }
 
+  /**
+   * Moves the lease recorded under an environment to the thread whose first turn started there,
+   * and returns it. Null when the environment holds none, so only the first turn claims the box.
+   */
+  function transferFromEnvironment(
+    environmentId: EnvironmentId,
+    threadRef: ScopedThreadRef,
+  ): ProvisionedSandboxLease | null {
+    const lease = leases.get(environmentKey(environmentId));
+    if (!lease) return null;
+    leases.delete(environmentKey(environmentId));
+    leases.set(key(threadRef), lease);
+    persist();
+    return lease;
+  }
+
   function leaseFor(target: string | ScopedThreadRef): ProvisionedSandboxLease | null {
     return leases.get(key(target)) ?? null;
   }
@@ -116,6 +132,7 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     remember,
     rememberForEnvironment,
     transfer,
+    transferFromEnvironment,
     leaseFor,
     leaseForEnvironment,
     leaseOwnedByEnvironment,

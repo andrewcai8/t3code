@@ -1,6 +1,6 @@
 import {
   type AutomationIdInput,
-  type EnvironmentId,
+  EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -33,6 +33,7 @@ import {
   createRuntimeCommand,
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
+import { type ProvisionedBoxes, sameProvisionedBoxes } from "../cloud/provisioning.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -983,6 +984,48 @@ export function createServerEnvironmentAtoms<R, E>(
         Effect.timeout("20 seconds"),
       ),
   });
+  const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
+    Atom.make((get): ProvisionedBoxes => {
+      let refreshing = false;
+      const boxes = (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
+        const managerId = EnvironmentId.make(hostId);
+        const listed = get(provisionedEnvironments({ environmentId: managerId, input: {} }));
+        refreshing ||= listed.waiting;
+        return Option.getOrElse(AsyncResult.value(listed), () => []).map(
+          ({ environmentId, leaseId, threadId, lifecycle }) => ({
+            managerId,
+            environmentId,
+            leaseId,
+            threadId,
+            lifecycle,
+          }),
+        );
+      });
+      // Every refetch decodes a fresh list; keep the previous one while nothing in it changed so
+      // views reading it do not re-render on each poll.
+      const previous = Option.getOrNull(get.self<ProvisionedBoxes>());
+      return previous !== null &&
+        previous.refreshing === refreshing &&
+        sameProvisionedBoxes(previous.boxes, boxes)
+        ? previous
+        : { boxes, refreshing };
+    }).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
+  );
+  /**
+   * Every cloud box the given hosts report, as far as each host has answered, and whether any
+   * host's list is still being fetched.
+   */
+  const provisionedBoxes = (hostIds: ReadonlyArray<EnvironmentId>) =>
+    provisionedBoxesFamily(JSON.stringify([...hostIds].sort()));
+  /** Refetches the hosts' box lists; a list is otherwise kept until nothing reads it. */
+  const refreshProvisionedBoxes = (
+    registry: AtomRegistry.AtomRegistry,
+    hostIds: ReadonlyArray<EnvironmentId>,
+  ) => {
+    for (const environmentId of hostIds) {
+      registry.refresh(provisionedEnvironments({ environmentId, input: {} }));
+    }
+  };
   const refreshManagedEnvironments = (
     target: { readonly environmentId: EnvironmentId },
     registry: AtomRegistry.AtomRegistry,
@@ -1023,6 +1066,8 @@ export function createServerEnvironmentAtoms<R, E>(
   return {
     managedEnvironments,
     provisionedEnvironments,
+    provisionedBoxes,
+    refreshProvisionedBoxes,
     automations,
     recentAutomationRuns,
     joinableAutomationEnvironments,

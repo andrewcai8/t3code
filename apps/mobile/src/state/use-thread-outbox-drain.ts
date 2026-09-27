@@ -11,6 +11,7 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type MessageId,
 } from "@t3tools/contracts";
+import { claimFirstTurnBox } from "@t3tools/client-runtime/cloud";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -28,6 +29,7 @@ import {
   retainAcknowledgedThreadMessage,
   forgetAcknowledgedThreadMessage,
 } from "./acknowledged-thread-messages";
+import { provisionedSandboxLeases } from "./provision-stores";
 import { appAtomRegistry } from "./atom-registry";
 import { restoredNewTaskDraftKey } from "./new-task-draft-key";
 import { useProjects, useServerConfigs, useThreadShells } from "./entities";
@@ -631,6 +633,9 @@ async function preserveUploadedAttachmentsForEditor(
 
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const claimBox = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -1052,6 +1057,25 @@ export function useThreadOutboxDrain(): void {
       // Recorded before the queue entry goes so the thread screen never sees a
       // gap between the queued creation and the server's shell.
       recordPendingThreadCreationOutcome({ kind: "delivered", message: persistedMessage });
+      // The first turn on a cloud machine this phone started claims it on its host, so no
+      // device offers it to a new chat. The turn already started, so a failed claim only logs.
+      void claimFirstTurnBox(
+        provisionedSandboxLeases,
+        {
+          claim: async (request) => {
+            const result = await claimBox(request);
+            return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+          },
+          refresh: (managerId) =>
+            serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]),
+          warn: (attempt) =>
+            console.warn("[thread-outbox] could not claim the cloud machine for its first turn", {
+              threadId: queuedMessage.threadId,
+              attempt,
+            }),
+        },
+        { environmentId: queuedMessage.environmentId, threadId: queuedMessage.threadId },
+      );
       const outcome = await completeQueuedMessageDelivery(persistedMessage, deliveryRevision);
       if (outcome === "edited") {
         if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
@@ -1066,7 +1090,7 @@ export function useThreadOutboxDrain(): void {
       }
       return outcome === "removed";
     },
-    [makeDeliveryHelpers, restoreQueuedMessage, startTurn],
+    [claimBox, makeDeliveryHelpers, restoreQueuedMessage, startTurn],
   );
 
   // A creation outcome bridges setup until the server's shell has a turn.

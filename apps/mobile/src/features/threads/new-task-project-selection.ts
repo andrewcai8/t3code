@@ -1,4 +1,4 @@
-import { offeredProvisionProviders, runsLocalAgents } from "@t3tools/client-runtime/cloud";
+import { newChatRunTargets, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cloneRepository, type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 
@@ -10,12 +10,17 @@ type DraftProjectSelectionResolution =
   | { readonly kind: "select"; readonly project: EnvironmentProject }
   | { readonly kind: "pick" };
 
+/** The project a picked scope opens: the one on the preferred machine, else one on no other chat's box. */
 export function getProjectScopeSelectionTarget(
   scope: HomeProjectScope,
   preferredEnvironmentId: EnvironmentId | null,
+  boxes: ReadonlyMap<EnvironmentId, EnvironmentId>,
 ): EnvironmentProject {
   return (
     scope.projects.find((project) => project.environmentId === preferredEnvironmentId) ??
+    (boxes.has(scope.representative.environmentId)
+      ? scope.projects.find((project) => !boxes.has(project.environmentId))
+      : undefined) ??
     scope.representative
   );
 }
@@ -109,27 +114,188 @@ export function resolveDraftProjectSelection(
   return onlyProject ? { kind: "select", project: onlyProject } : { kind: "pick" };
 }
 
-export type NewThreadStart =
-  | { readonly kind: "draft" }
-  | { readonly kind: "cloud-machine"; readonly repository: string };
+/**
+ * The hosts whose box lists a new task reads: connected ones that can provision. A host still
+ * connecting would never answer, and waiting on it would hold every new task back.
+ */
+export function provisioningHostIds(
+  serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>,
+  environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly connectionState: string;
+  }>,
+): ReadonlyArray<EnvironmentId> {
+  return environments.flatMap(({ environmentId, connectionState }) =>
+    connectionState === "connected" &&
+    offeredProvisionProviders(serverConfigs.get(environmentId)).length > 0
+      ? [environmentId]
+      : [],
+  );
+}
+
+export interface NewTaskEnvironment {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+}
+
+type NewTaskServerConfig = Pick<
+  ServerConfig,
+  "localAgentRuns" | "environmentControl" | "provisionProviders"
+>;
+
+interface NewTaskEnvironmentsInput {
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
+  /**
+   * Boxes other chats run on, each mapped to the host that provisioned it. A new task always
+   * gets a fresh box, never one of these.
+   */
+  readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  /** Boxes the host has paused or lost, which a new task is never offered. */
+  readonly idleBoxes?: ReadonlySet<EnvironmentId>;
+}
+
+function newTaskRunTargets<Environment extends { readonly environmentId: EnvironmentId }>(
+  environments: ReadonlyArray<Environment>,
+  input: Pick<NewTaskEnvironmentsInput, "serverConfigs" | "boxes" | "idleBoxes">,
+): ReadonlyArray<Environment> {
+  return newChatRunTargets({
+    environments,
+    environmentState: (environmentId) => ({ serverConfig: input.serverConfigs.get(environmentId) }),
+    environmentId: null,
+    managerConfig: null,
+    boxes: input.boxes,
+    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
+  }).environments;
+}
 
 /**
- * How a new thread in `project` starts. A host that runs no agents but can provision refuses a
- * draft on itself, so the thread starts by cloning the project's repository onto a new cloud
- * machine. Everywhere else, and for a project with no repository to clone, it opens a draft on
- * the project as before.
+ * Where a new task starts before the user picks: the first machine a new task can run on, else
+ * the first that is no other chat's box, so a host that runs no agents starts a fresh box.
  */
-export function resolveNewThreadStart(
-  project: Pick<EnvironmentProject, "repositoryIdentity">,
-  hostConfig:
-    | Pick<ServerConfig, "localAgentRuns" | "environmentControl" | "provisionProviders">
-    | null
-    | undefined,
-): NewThreadStart {
-  const repository = cloneRepository(project.repositoryIdentity);
-  return repository !== undefined &&
-    !runsLocalAgents(hostConfig) &&
-    offeredProvisionProviders(hostConfig).length > 0
-    ? { kind: "cloud-machine", repository }
-    : { kind: "draft" };
+export function defaultNewTaskEnvironmentId(input: NewTaskEnvironmentsInput): EnvironmentId | null {
+  return (
+    (
+      newTaskRunTargets(input.projects, input)[0] ??
+      input.projects.find(
+        (project) =>
+          !input.boxes.has(project.environmentId) &&
+          input.idleBoxes?.has(project.environmentId) !== true,
+      )
+    )?.environmentId ?? null
+  );
+}
+
+/**
+ * The machine the new-task flow points at: the one picked, unless it is gone or another chat's
+ * box, and then the default. A queued task being edited stays on its own machine, box or not.
+ */
+export function resolveNewTaskEnvironmentId(
+  input: NewTaskEnvironmentsInput & {
+    readonly picked: EnvironmentId | null;
+    readonly pinned: boolean;
+  },
+): EnvironmentId | null {
+  const { picked } = input;
+  return picked !== null &&
+    input.projects.some((project) => project.environmentId === picked) &&
+    (input.pinned || !input.boxes.has(picked))
+    ? picked
+    : defaultNewTaskEnvironmentId(input);
+}
+
+/**
+ * The machines a new task can move to. Only machines that host the selected repository, so
+ * switching computers moves the same repo across machines instead of jumping to whatever
+ * unrelated project happens to be first on the other machine. Repository identity is the
+ * primary signal; projects that haven't reported one yet (still indexing) fall back to
+ * workspace basename / title so a valid host isn't hidden.
+ */
+export function newTaskEnvironments(
+  input: NewTaskEnvironmentsInput & {
+    readonly selectedProject: EnvironmentProject | null;
+    readonly savedConnectionsById: Readonly<
+      Record<EnvironmentId, { readonly environmentLabel: string } | undefined>
+    >;
+  },
+): ReadonlyArray<NewTaskEnvironment> {
+  const selectedRepositoryKey = input.selectedProject?.repositoryIdentity?.canonicalKey ?? null;
+  // `|| null` (not `??`): a pending-task placeholder project can have an empty
+  // workspaceRoot, and an "" basename would reject every real host below.
+  const selectedWorkspaceBasename = input.selectedProject?.workspaceRoot.split("/").at(-1) || null;
+  const selectedProjectTitle = input.selectedProject?.title ?? null;
+  const hostsSelectedRepository = (project: EnvironmentProject) => {
+    if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
+      return true;
+    }
+    const projectKey = project.repositoryIdentity?.canonicalKey ?? null;
+    if (selectedRepositoryKey !== null && projectKey !== null) {
+      return projectKey === selectedRepositoryKey;
+    }
+    return (
+      project.workspaceRoot.split("/").at(-1) === selectedWorkspaceBasename ||
+      (selectedProjectTitle !== null && project.title === selectedProjectTitle)
+    );
+  };
+  const seen = new Set<EnvironmentId>();
+  const candidates: NewTaskEnvironment[] = [];
+  for (const project of input.projects) {
+    const environment = input.savedConnectionsById[project.environmentId];
+    if (!environment || seen.has(project.environmentId) || !hostsSelectedRepository(project)) {
+      continue;
+    }
+    seen.add(project.environmentId);
+    candidates.push({
+      environmentId: project.environmentId,
+      environmentLabel: environment.environmentLabel,
+    });
+  }
+  return newTaskRunTargets(candidates, input);
+}
+
+export type NewThreadStart =
+  | { readonly kind: "draft" }
+  | {
+      readonly kind: "cloud-machine";
+      readonly managerId: EnvironmentId;
+      readonly repository: string;
+    }
+  | { readonly kind: "environment"; readonly environmentId: EnvironmentId };
+
+/**
+ * How a new thread in `project` starts, by the same rules as the web composer. A host that runs
+ * no agents but can provision refuses a draft on itself, and a new thread never joins another
+ * chat's box, so either starts a fresh cloud machine for the project's repository on that host.
+ * With no cloud machine to start, it moves to the first of `environments` that can take it, else
+ * opens a draft on the project as before.
+ */
+export function resolveNewThreadStart(input: {
+  readonly project: Pick<EnvironmentProject, "environmentId" | "repositoryIdentity">;
+  readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
+  readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  readonly idleBoxes?: ReadonlySet<EnvironmentId>;
+  /** Machines holding the same repository, in the order to prefer them. */
+  readonly environments?: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+}): NewThreadStart {
+  const { environmentId } = input.project;
+  const managerId = input.boxes.get(environmentId) ?? environmentId;
+  const targets = newChatRunTargets({
+    environments: input.environments ?? [],
+    environmentState: (id) => ({ serverConfig: input.serverConfigs.get(id) }),
+    environmentId,
+    managerConfig: input.serverConfigs.get(managerId),
+    boxes: input.boxes,
+    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
+  });
+  const repository = cloneRepository(input.project.repositoryIdentity);
+  if (targets.redirect?.kind === "cloud" && repository !== undefined) {
+    return { kind: "cloud-machine", managerId, repository };
+  }
+  const moveTo =
+    targets.redirect?.kind === "environment"
+      ? targets.redirect.environment
+      : targets.redirect?.kind === "cloud"
+        ? targets.environments[0]
+        : undefined;
+  return moveTo ? { kind: "environment", environmentId: moveTo.environmentId } : { kind: "draft" };
 }

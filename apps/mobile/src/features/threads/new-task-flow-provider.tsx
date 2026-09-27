@@ -84,7 +84,7 @@ import {
   setPendingConnectionError,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
-import { runsLocalAgents } from "@t3tools/client-runtime/cloud";
+import { boxesOfOtherChats, idleProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
 import {
@@ -103,7 +103,14 @@ import {
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskLocalWorkspaceSelection,
 } from "./new-task-context-presentation";
-import { resolveEnvironmentProjectMatch } from "./new-task-project-selection";
+import {
+  newTaskEnvironments,
+  resolveEnvironmentProjectMatch,
+  resolveNewTaskEnvironmentId,
+  resolveNewThreadStart,
+  type NewThreadStart,
+} from "./new-task-project-selection";
+import { useProvisionedBoxes } from "./use-provisioned-boxes";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 
 type WorkspaceMode = "local" | "worktree";
@@ -175,6 +182,12 @@ type NewTaskFlowContextValue = {
     readonly environmentId: EnvironmentId;
     readonly environmentLabel: string;
   }>;
+  /** Boxes other chats run on, each mapped to its host. A new task never starts on one. */
+  readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  /** A host's box list is being refetched; a task must not start until it arrives. */
+  readonly boxesRefreshing: boolean;
+  /** How to leave another chat's box the flow was pointed at; null when it is on none. */
+  readonly boxStart: NewThreadStart | null;
   readonly selectedProject: EnvironmentProject | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
   readonly selectedModel: ModelSelection | null;
@@ -236,6 +249,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const threads = useThreadShells();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const serverConfigs = useServerConfigs();
+  const { boxes: provisionedBoxes, refreshing: boxesRefreshing } =
+    useProvisionedBoxes(serverConfigs);
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
     useLegacyPlanModeState();
@@ -257,16 +272,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const [selectedEnvironmentIdOverride, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
     null,
   );
-  // A host that runs no agents still lists its projects, but a new task starts
-  // elsewhere when anywhere else holds one.
-  const selectedEnvironmentId =
-    selectedEnvironmentIdOverride !== null &&
-    projects.some((project) => project.environmentId === selectedEnvironmentIdOverride)
-      ? selectedEnvironmentIdOverride
-      : ((
-          projects.find((project) => runsLocalAgents(serverConfigs.get(project.environmentId))) ??
-          projects[0]
-        )?.environmentId ?? null);
+  // A new task has no thread yet, so every claimed box is another chat's.
+  const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
+  const idleBoxes = useMemo(() => idleProvisionedBoxes(provisionedBoxes), [provisionedBoxes]);
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   // The new-task draft the composer is bound to. Null until a project is
   // chosen; each New Task entry mints its own, so a project can hold several.
@@ -276,6 +284,16 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [editingPendingTask, setEditingPendingTask] = useState<QueuedThreadMessage | null>(null);
   const pendingLocalBranchSyncDraftKeysRef = useRef(new Set<string>());
+  // A host that runs no agents still lists its projects, but a new task starts
+  // elsewhere when anywhere else holds one; the same goes for another chat's box.
+  const selectedEnvironmentId = resolveNewTaskEnvironmentId({
+    picked: selectedEnvironmentIdOverride,
+    pinned: editingPendingTask !== null,
+    projects,
+    serverConfigs,
+    boxes,
+    idleBoxes,
+  });
   // Mirrors `editingPendingTask` synchronously so the unmount flush cannot act
   // on a task whose editing session already ended this render.
   const editingPendingTaskRef = useRef<QueuedThreadMessage | null>(null);
@@ -348,64 +366,18 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       ? editingPendingProject
       : (projectsForEnvironment[0] ?? null));
 
-  // Only offer machines that actually host the currently selected repository, so
-  // switching computers moves the same repo across machines instead of jumping to
-  // whatever unrelated project happens to be first on the other machine. Repository
-  // identity is the primary signal; projects that haven't reported one yet (still
-  // indexing) fall back to workspace basename / title so a valid host isn't hidden.
-  const selectedRepositoryKey = selectedProject?.repositoryIdentity?.canonicalKey ?? null;
-  // `|| null` (not `??`): a pending-task placeholder project can have an empty
-  // workspaceRoot, and an "" basename would reject every real host below.
-  const selectedWorkspaceBasename = selectedProject?.workspaceRoot.split("/").at(-1) || null;
-  const selectedProjectTitle = selectedProject?.title ?? null;
-  const environments = useMemo(() => {
-    const seen = new Set<EnvironmentId>();
-    const result: Array<{
-      readonly environmentId: EnvironmentId;
-      readonly environmentLabel: string;
-    }> = [];
-    const hostsSelectedRepository = (project: EnvironmentProject) => {
-      if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
-        return true;
-      }
-      const projectKey = project.repositoryIdentity?.canonicalKey ?? null;
-      if (selectedRepositoryKey !== null && projectKey !== null) {
-        return projectKey === selectedRepositoryKey;
-      }
-      return (
-        project.workspaceRoot.split("/").at(-1) === selectedWorkspaceBasename ||
-        (selectedProjectTitle !== null && project.title === selectedProjectTitle)
-      );
-    };
-    for (const project of projects) {
-      if (!hostsSelectedRepository(project)) {
-        continue;
-      }
-      if (
-        seen.has(project.environmentId) ||
-        !runsLocalAgents(serverConfigs.get(project.environmentId))
-      ) {
-        continue;
-      }
-      const environment = savedConnectionsById[project.environmentId];
-      if (!environment) {
-        continue;
-      }
-      seen.add(project.environmentId);
-      result.push({
-        environmentId: project.environmentId,
-        environmentLabel: environment.environmentLabel,
-      });
-    }
-    return result;
-  }, [
-    projects,
-    savedConnectionsById,
-    serverConfigs,
-    selectedRepositoryKey,
-    selectedWorkspaceBasename,
-    selectedProjectTitle,
-  ]);
+  const environments = useMemo(
+    () =>
+      newTaskEnvironments({
+        projects,
+        selectedProject,
+        savedConnectionsById,
+        serverConfigs,
+        boxes,
+        idleBoxes,
+      }),
+    [projects, selectedProject, savedConnectionsById, serverConfigs, boxes, idleBoxes],
+  );
 
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
@@ -719,6 +691,50 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     },
     [carryDraftContentTo],
   );
+
+  // A pick that lands on another chat's box (a route, a resumed draft, or a box list that arrived
+  // late) leaves it as the web composer does: for a fresh box on its host, else for the same
+  // repository on a machine that runs agents.
+  const blockedBoxProject = useMemo(() => {
+    const picked = selectedEnvironmentIdOverride;
+    if (picked === null || editingPendingTask !== null || !boxes.has(picked)) return null;
+    const onBox = projects.filter((project) => project.environmentId === picked);
+    return (
+      onBox.find(
+        (project) => scopedProjectKey(project.environmentId, project.id) === selectedProjectKey,
+      ) ??
+      onBox[0] ??
+      null
+    );
+  }, [boxes, editingPendingTask, projects, selectedEnvironmentIdOverride, selectedProjectKey]);
+  const boxStart = useMemo<NewThreadStart | null>(
+    () =>
+      blockedBoxProject === null
+        ? null
+        : resolveNewThreadStart({
+            project: blockedBoxProject,
+            serverConfigs,
+            boxes,
+            idleBoxes,
+            environments: newTaskEnvironments({
+              projects,
+              selectedProject: blockedBoxProject,
+              savedConnectionsById,
+              serverConfigs,
+              boxes,
+              idleBoxes,
+            }),
+          }),
+    [blockedBoxProject, boxes, idleBoxes, projects, savedConnectionsById, serverConfigs],
+  );
+  useEffect(() => {
+    if (boxStart?.kind !== "environment" || blockedBoxProject === null) return;
+    const match = resolveEnvironmentProjectMatch(
+      projects.filter((project) => project.environmentId === boxStart.environmentId),
+      blockedBoxProject,
+    );
+    if (match) setProject(match);
+  }, [blockedBoxProject, boxStart, projects, setProject]);
 
   const openDraft = useCallback(
     (draftKey: string): boolean => {
@@ -1190,6 +1206,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       planModeEnabled,
       expandedProvider,
       environments,
+      boxes,
+      boxesRefreshing,
+      boxStart,
       selectedProject,
       modelOptions,
       selectedModel,
@@ -1236,6 +1255,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       currentCheckoutBranchName,
       editingPendingTask,
       environments,
+      boxes,
+      boxesRefreshing,
+      boxStart,
       expandedProvider,
       filteredBranches,
       finishEditingPendingTask,

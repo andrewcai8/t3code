@@ -115,7 +115,10 @@ import {
 import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
-import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import {
+  useRemoteConnectionStatus,
+  useSavedRemoteConnection,
+} from "../../state/use-remote-environment-registry";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 import { resolveDraftProjectSelection } from "./new-task-project-selection";
@@ -658,6 +661,12 @@ export function NewTaskDraftScreen(props: {
         if (appliedInitialProjectKeyRef.current === directProjectKey) {
           return;
         }
+        if (flow.boxes.has(directProject.environmentId)) {
+          // Another chat's box: point the flow at it once and let the flow leave it.
+          appliedInitialProjectKeyRef.current = directProjectKey;
+          setProject(directProject);
+          return;
+        }
         if (props.initialProjectRef?.branch) {
           if (
             selectedProject?.environmentId !== directProject.environmentId ||
@@ -711,6 +720,7 @@ export function NewTaskDraftScreen(props: {
   }, [
     projectScopes,
     projects,
+    flow.boxes,
     flow.draftKey,
     props.initialProjectRef,
     props.incomingShareId,
@@ -721,6 +731,21 @@ export function NewTaskDraftScreen(props: {
     selectedProjectKey,
     setProject,
   ]);
+
+  // Shared content stays on the draft path, which owns its reservation.
+  const boxCloudMachine =
+    flow.boxStart?.kind === "cloud-machine" && !props.incomingShareId ? flow.boxStart : null;
+  const initialBranch = props.initialProjectRef?.branch ?? null;
+  useEffect(() => {
+    if (!boxCloudMachine) return;
+    navigation.dispatch(
+      StackActions.replace("NewTaskCloudMachine", {
+        environmentId: String(boxCloudMachine.managerId),
+        repository: boxCloudMachine.repository,
+        ...(initialBranch ? { branch: initialBranch } : {}),
+      }),
+    );
+  }, [boxCloudMachine, initialBranch, navigation]);
 
   useEffect(() => {
     if (!selectedProject) {
@@ -973,10 +998,10 @@ export function NewTaskDraftScreen(props: {
     shareImportAttempt,
   ]);
 
+  // Read from the connection, not the offered list: a draft on the cloud box it just started
+  // is on a machine the list never offers.
   const selectedEnvironmentLabel =
-    flow.environments.find(
-      (environment) => environment.environmentId === flow.selectedEnvironmentId,
-    )?.environmentLabel ?? "Environment";
+    useSavedRemoteConnection(flow.selectedEnvironmentId)?.environmentLabel ?? "Environment";
   const availableCurrentBranchName =
     flow.availableBranches.find((branch) => branch.current)?.name ??
     flow.availableBranches.find((branch) => branch.isDefault)?.name ??
@@ -1356,6 +1381,7 @@ export function NewTaskDraftScreen(props: {
     isIncomingShareReady &&
     !isImportingShare &&
     !flow.submitting &&
+    !flow.boxesRefreshing &&
     pendingPastedTextAttachmentCount === 0 &&
     !voiceInput.blocksSubmission &&
     !(flow.workspaceMode === "worktree" && !flow.selectedBranchName);

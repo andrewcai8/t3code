@@ -1,29 +1,39 @@
 import { useNavigation } from "@react-navigation/native";
+import { boxesOfOtherChats } from "@t3tools/client-runtime/cloud";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import { useCallback } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 
-import { readProject, readServerConfig } from "../../state/entities";
+import { readProject, useServerConfigs } from "../../state/entities";
 import { resolveNewThreadStart } from "./new-task-project-selection";
+import { useProvisionedBoxes } from "./use-provisioned-boxes";
 
 /**
  * "New thread in project" and "New thread on branch". On a host that runs no agents but can
- * provision, both start a cloud machine for the project instead of a draft the host would refuse.
- * The store is read when a callback runs, so the callbacks stay stable for the layouts using them.
+ * provision, or on another chat's box, both start a cloud machine on the host instead of a draft
+ * the host would refuse or the box already runs. The latest configs and boxes are read when a
+ * callback runs, so the callbacks stay stable for the layouts using them.
  */
 export function useNewThreadNavigation() {
   const navigation = useNavigation();
+  const serverConfigs = useServerConfigs();
+  const { boxes: provisionedBoxes } = useProvisionedBoxes(serverConfigs);
+  const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
+  const latest = useRef({ serverConfigs, boxes });
+  useLayoutEffect(() => {
+    latest.current = { serverConfigs, boxes };
+  }, [serverConfigs, boxes]);
 
   const newThreadInProject = useCallback(
     (project: EnvironmentProject) => {
-      const start = resolveNewThreadStart(project, readServerConfig(project.environmentId));
+      const start = resolveNewThreadStart({ project, ...latest.current });
       if (start.kind === "cloud-machine") {
         navigation.navigate("NewTaskSheet", {
           screen: "NewTaskCloudMachine",
           params: {
-            environmentId: String(project.environmentId),
+            environmentId: String(start.managerId),
             repository: start.repository,
           },
         });
@@ -47,14 +57,12 @@ export function useNewThreadNavigation() {
         environmentId: thread.environmentId,
         projectId: thread.projectId,
       });
-      const start = project
-        ? resolveNewThreadStart(project, readServerConfig(project.environmentId))
-        : null;
-      if (project && start?.kind === "cloud-machine") {
+      const start = project ? resolveNewThreadStart({ project, ...latest.current }) : null;
+      if (start?.kind === "cloud-machine") {
         navigation.navigate("NewTaskSheet", {
           screen: "NewTaskCloudMachine",
           params: {
-            environmentId: String(project.environmentId),
+            environmentId: String(start.managerId),
             repository: start.repository,
             branch: thread.branch,
           },

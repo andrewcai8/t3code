@@ -13,15 +13,15 @@ import { NewCloudMachineForm } from "../connection/NewCloudMachineSheet";
 import { useCreateCloudMachine } from "../connection/useCreateCloudMachine";
 
 type NewTaskCloudMachineRouteParams = {
-  /** The host that starts the machine; it holds the project the thread was asked for. */
+  /** The host that starts the machine: the project's own host, or the host of the box it is on. */
   readonly environmentId: string;
   readonly repository: string;
   readonly branch?: string | null;
 };
 
 /**
- * A new thread on a host that runs no agents: start a cloud machine cloned from the project's
- * repository, then open the draft on the machine's checkout.
+ * A new thread on a host that runs no agents, or on another chat's box: start a cloud machine
+ * cloned from the project's repository, then open the draft on the machine's checkout.
  */
 export function NewTaskCloudMachineRouteScreen({
   route,
