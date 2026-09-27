@@ -5,9 +5,10 @@ import {
   idleProvisionedBoxes,
   offeredProvisionProviders,
 } from "@t3tools/client-runtime/cloud";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { useMemo } from "react";
+import { EnvironmentId, type ThreadId } from "@t3tools/contracts";
+import { useEffect, useMemo } from "react";
 
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironments } from "../state/environments";
 import { serverEnvironment } from "../state/server";
 import { provisionedSandboxOwnedByEnvironment } from "./provisionedSandboxLeases";
@@ -33,10 +34,16 @@ export function useAutomationHosts() {
   }, [environments]);
 }
 
+/** Refetches a host's box list, as after a chat claims one of its boxes. */
+export function refreshProvisionedEnvironments(managerId: EnvironmentId): void {
+  serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]);
+}
+
 /**
  * The cloud boxes a draft must not start on, as the connected hosts list them however this device
- * came to know each: those another chat claimed, and those paused or lost. Only a draft asks the
- * hosts; anything else gets empty collections.
+ * came to know each: those another chat claimed, and those paused or lost. A draft refetches the
+ * lists when it opens, since another device may have claimed a box since, and must not send while
+ * `refreshing`. Only a draft asks the hosts; anything else gets empty collections.
  */
 export function useNewChatBoxes(
   draftId: string | null,
@@ -44,15 +51,29 @@ export function useNewChatBoxes(
 ): {
   readonly others: ReadonlyMap<EnvironmentId, EnvironmentId>;
   readonly idle: ReadonlySet<EnvironmentId>;
+  readonly refreshing: boolean;
 } {
   const hosts = useAutomationHosts();
   const hostIds = useMemo(
     () => (draftId === null ? [] : hosts.map((host) => host.environmentId)),
     [draftId, hosts],
   );
-  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const hostsKey = hostIds.join("\n");
+  useEffect(() => {
+    // Every draft that opens refetches, even when the hosts are unchanged.
+    if (draftId === null || hostsKey === "") return;
+    serverEnvironment.refreshProvisionedBoxes(
+      appAtomRegistry,
+      hostsKey.split("\n").map((hostId) => EnvironmentId.make(hostId)),
+    );
+  }, [draftId, hostsKey]);
+  const { boxes, refreshing } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
   return useMemo(
-    () => ({ others: boxesOfOtherChats(boxes, threadId), idle: idleProvisionedBoxes(boxes) }),
-    [boxes, threadId],
+    () => ({
+      others: boxesOfOtherChats(boxes, threadId),
+      idle: idleProvisionedBoxes(boxes),
+      refreshing,
+    }),
+    [boxes, refreshing, threadId],
   );
 }

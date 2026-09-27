@@ -19,7 +19,7 @@ import { useProvisionedBoxes } from "./use-provisioned-boxes";
 export function useNewThreadNavigation() {
   const navigation = useNavigation();
   const serverConfigs = useServerConfigs();
-  const provisionedBoxes = useProvisionedBoxes(serverConfigs);
+  const { boxes: provisionedBoxes } = useProvisionedBoxes(serverConfigs);
   const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
   const latest = useRef({ serverConfigs, boxes });
   useLayoutEffect(() => {

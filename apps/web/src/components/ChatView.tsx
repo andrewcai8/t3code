@@ -534,7 +534,7 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
-import { useNewChatBoxes } from "../cloud/automationHosts";
+import { refreshProvisionedEnvironments, useNewChatBoxes } from "../cloud/automationHosts";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -7917,6 +7917,7 @@ export default function ChatView(props: ChatViewProps) {
       isReconnectPending() ||
       sendInFlightRef.current ||
       (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
+      newChatBoxes.refreshing ||
       (isInProgressCloudProvisioningPhase(cloudProvisioningPhase) &&
         !resumingCloudSendRef.current) ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
@@ -9173,6 +9174,28 @@ export default function ChatView(props: ChatViewProps) {
       if (backgroundThreadRef) {
         beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
       }
+      const cloudLease =
+        isLocalDraftThread && typeof composerDraftTarget === "string"
+          ? provisionedSandboxFor(composerDraftTarget)
+          : null;
+      let cloudClaim: Promise<boolean> | null = null;
+      const claimCloudBox = (lease: NonNullable<typeof cloudLease>) =>
+        (cloudClaim ??= claimProvisionedBox(
+          {
+            claim: async (request) => {
+              const result = await claimCloudLease(request);
+              return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+            },
+            refresh: refreshProvisionedEnvironments,
+            warn: (attempt) =>
+              console.warn("[cloud] could not claim the box for its first turn", {
+                leaseId: lease.leaseId,
+                attempt,
+              }),
+          },
+          lease,
+          scopeThreadRef(environmentId, threadIdForSend),
+        ));
       const startPromise = startThreadTurn({
         environmentId,
         input: {
@@ -9219,6 +9242,9 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (backgroundThreadRef) {
         markPromotedDraftThreadByRef(backgroundThreadRef);
+        // The next draft opens on this project, possibly this very box. Claim it first, so the
+        // box list that draft refreshes on mount already shows the box taken.
+        if (cloudLease) await claimCloudBox(cloudLease);
         try {
           backgroundDraftOpened = Boolean(
             await handleNewThread(
@@ -9251,26 +9277,8 @@ export default function ChatView(props: ChatViewProps) {
             .getState()
             .setDraftPendingEnvironmentSend(composerDraftTarget, null);
         }
-        const cloudLease =
-          isLocalDraftThread && typeof composerDraftTarget === "string"
-            ? provisionedSandboxFor(composerDraftTarget)
-            : null;
         if (cloudLease && typeof composerDraftTarget === "string") {
-          const claimed = await claimProvisionedBox(
-            {
-              claim: async (request) => {
-                const result = await claimCloudLease(request);
-                return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
-              },
-              warn: (attempt) =>
-                console.warn("[cloud] could not claim the box for its first turn", {
-                  leaseId: cloudLease.leaseId,
-                  attempt,
-                }),
-            },
-            cloudLease,
-            scopeThreadRef(environmentId, threadIdForSend),
-          );
+          const claimed = await claimCloudBox(cloudLease);
           transferProvisionedSandboxLease(
             composerDraftTarget,
             scopeThreadRef(environmentId, threadIdForSend),
@@ -10966,7 +10974,9 @@ export default function ChatView(props: ChatViewProps) {
                                     ? "Messages loading"
                                     : worktreeSetupBlocksSend
                                       ? "Preparing worktree"
-                                      : projectCloneSendBlockReason
+                                      : newChatBoxes.refreshing
+                                        ? "Checking cloud machines"
+                                        : projectCloneSendBlockReason
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}

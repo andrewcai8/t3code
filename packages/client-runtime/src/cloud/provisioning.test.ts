@@ -585,7 +585,11 @@ describe("claimFirstTurnBox", () => {
       return claims.length > 1;
     };
     const warnings: number[] = [];
-    const ports = { claim, warn: (attempt: number) => void warnings.push(attempt) };
+    const ports = {
+      claim,
+      refresh: () => undefined,
+      warn: (attempt: number) => void warnings.push(attempt),
+    };
     await expect(claimFirstTurnBox(leases, ports, firstThread)).resolves.toBe(true);
     expect(claims).toEqual([expectedClaim, expectedClaim]);
     expect(warnings).toEqual([1]);
@@ -608,9 +612,45 @@ describe("claimFirstTurnBox", () => {
       throw new Error("host unreachable");
     };
     const warnings: number[] = [];
-    const ports = { claim, warn: (attempt: number) => void warnings.push(attempt) };
+    const refreshed: EnvironmentId[] = [];
+    const ports = {
+      claim,
+      refresh: (managerId: EnvironmentId) => void refreshed.push(managerId),
+      warn: (attempt: number) => void warnings.push(attempt),
+    };
     await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(false);
     expect(claims).toEqual([expectedClaim, expectedClaim]);
     expect(warnings).toEqual([1, 2]);
+    expect(refreshed).toEqual([]);
+  });
+
+  it("refetches the host's list after a claim, so the next draft sees the box taken", async () => {
+    // The host's record of who claimed the box, and this client's copy of its list.
+    let owner: ThreadId | null = null;
+    const hostList = () => [
+      {
+        managerId: host,
+        environmentId: box,
+        leaseId: "lease",
+        threadId: owner,
+        lifecycle: "active" as const,
+      },
+    ];
+    let clientList = hostList();
+    const ports = {
+      claim: async ({ input }: { readonly input: { readonly threadId: ThreadId } }) => {
+        owner = input.threadId;
+        return true;
+      },
+      refresh: (managerId: EnvironmentId) => {
+        expect(managerId).toBe(host);
+        clientList = hostList();
+      },
+      warn: () => undefined,
+    };
+    const nextDraft = ThreadId.make("next-draft");
+    expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map());
+    await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(true);
+    expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map([[box, host]]));
   });
 });

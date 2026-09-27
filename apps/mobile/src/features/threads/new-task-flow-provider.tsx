@@ -184,6 +184,8 @@ type NewTaskFlowContextValue = {
   }>;
   /** Boxes other chats run on, each mapped to its host. A new task never starts on one. */
   readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  /** A host's box list is being refetched; a task must not start until it arrives. */
+  readonly boxesRefreshing: boolean;
   /** How to leave another chat's box the flow was pointed at; null when it is on none. */
   readonly boxStart: NewThreadStart | null;
   readonly selectedProject: EnvironmentProject | null;
@@ -247,7 +249,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const threads = useThreadShells();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const serverConfigs = useServerConfigs();
-  const provisionedBoxes = useProvisionedBoxes(serverConfigs);
+  const { boxes: provisionedBoxes, refreshing: boxesRefreshing } =
+    useProvisionedBoxes(serverConfigs);
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
     useLegacyPlanModeState();
@@ -1204,6 +1207,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       expandedProvider,
       environments,
       boxes,
+      boxesRefreshing,
       boxStart,
       selectedProject,
       modelOptions,
@@ -1252,6 +1256,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       editingPendingTask,
       environments,
       boxes,
+      boxesRefreshing,
       boxStart,
       expandedProvider,
       filteredBranches,

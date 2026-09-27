@@ -1066,6 +1066,8 @@ export function useThreadOutboxDrain(): void {
             const result = await claimBox(request);
             return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
           },
+          refresh: (managerId) =>
+            serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]),
           warn: (attempt) =>
             console.warn("[thread-outbox] could not claim the cloud machine for its first turn", {
               threadId: queuedMessage.threadId,

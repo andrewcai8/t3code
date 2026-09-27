@@ -73,6 +73,16 @@ export interface ProvisionedBox {
   readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
 }
 
+/** The boxes the hosts listed last, and whether a newer list is on its way. */
+export interface ProvisionedBoxes {
+  readonly boxes: ReadonlyArray<ProvisionedBox>;
+  /**
+   * A host's list is being fetched. Another device may have claimed a box since the last one,
+   * so a draft must not send until it arrives.
+   */
+  readonly refreshing: boolean;
+}
+
 export function sameProvisionedBoxes(
   left: ReadonlyArray<ProvisionedBox>,
   right: ReadonlyArray<ProvisionedBox>,
@@ -130,6 +140,8 @@ export interface ProvisionedBoxClaim {
 export interface ProvisionedBoxClaimPorts {
   /** One `environmentControl.claim` call; true when the host recorded the owner. */
   readonly claim: (request: ProvisionedBoxClaim) => Promise<boolean>;
+  /** Refetches the host's box list, so drafts on every screen see the claim. */
+  readonly refresh: (managerId: EnvironmentId) => void;
   /** Reports an attempt that failed; the caller owns where that is logged. */
   readonly warn: (attempt: number) => void;
 }
@@ -149,7 +161,10 @@ export async function claimProvisionedBox(
     input: { leaseId: lease.leaseId, environmentId: owner.environmentId, threadId: owner.threadId },
   };
   for (const attempt of [1, 2]) {
-    if (await ports.claim(request).catch(() => false)) return true;
+    if (await ports.claim(request).catch(() => false)) {
+      ports.refresh(lease.managerEnvironmentId);
+      return true;
+    }
     ports.warn(attempt);
   }
   return false;
