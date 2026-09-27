@@ -1,9 +1,14 @@
 // @effect-diagnostics globalFetch:off - the manager reads a remote T3 server over private HTTP.
-import { OrchestrationSession, OrchestrationThreadShell, UsageSummary } from "@t3tools/contracts";
+import {
+  OrchestrationSession,
+  OrchestrationThreadShell,
+  UsageHistoryInput,
+  UsageSummary,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import type { BoxUsageStore } from "../usage/boxUsage.ts";
+import { leaseOwnedUsage, type BoxUsageStore } from "../usage/boxUsage.ts";
 import type { ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 export type LeaseActivity = "busy" | "idle" | "unknown";
@@ -60,6 +65,7 @@ export async function readLeaseActivity(lease: ProvisionedLease): Promise<LeaseA
 }
 
 const decodeUsageSummary = Schema.decodeUnknownSync(UsageSummary);
+const encodeHistoryInput = Schema.encodeSync(Schema.fromJsonString(UsageHistoryInput));
 
 /** Reads a remote T3 server's hourly usage since `sinceTime`, or throws. */
 export async function readLeaseUsage(
@@ -74,7 +80,7 @@ export async function readLeaseUsage(
       authorization: `Bearer ${lease.remoteAccess.brokerToken}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ sinceTime }),
+    body: encodeHistoryInput({ sinceTime }),
     redirect: "error",
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -99,7 +105,7 @@ export const pullLeaseUsage = Effect.fn("pullLeaseUsage")(function* (
   yield* store.replace({
     leaseId: lease.leaseId,
     accountIds: [lease.providerInstanceId, ...(lease.companionInstanceIds ?? [])],
-    usage,
+    usage: leaseOwnedUsage(lease.leaseId, usage),
     pulledAt: DateTime.formatIso(yield* DateTime.now),
   });
 });

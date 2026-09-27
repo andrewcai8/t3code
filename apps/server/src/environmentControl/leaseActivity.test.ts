@@ -2,9 +2,10 @@
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
 import { assert, it as effectIt } from "@effect/vitest";
-import { USAGE_CONTRACT_VERSION, type UsageSummary } from "@t3tools/contracts";
+import { USAGE_CONTRACT_VERSION, UsageSummary } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
@@ -144,6 +145,8 @@ const history: UsageSummary = {
   scanDurationMs: 4,
 };
 
+const encodeHistory = Schema.encodeSync(Schema.fromJsonString(UsageSummary));
+
 describe("pullLeaseUsage", () => {
   effectIt.effect("stores the box's history since the lease was created", () =>
     Effect.gen(function* () {
@@ -157,9 +160,9 @@ describe("pullLeaseUsage", () => {
                 request.method === "POST" &&
                 request.url === "/api/usage/history" &&
                 request.headers.authorization === "Bearer broker" &&
-                body === JSON.stringify({ sinceTime: "2026-09-01T02:30:00.000Z" });
+                body === '{"sinceTime":"2026-09-01T02:30:00.000Z"}';
               response.writeHead(expected ? 200 : 400, { "content-type": "application/json" });
-              response.end(expected ? JSON.stringify(history) : "{}");
+              response.end(expected ? encodeHistory(history) : "{}");
             });
           }),
         ),
@@ -178,13 +181,22 @@ describe("pullLeaseUsage", () => {
         updatedAt: "2026-09-01T02:30:00.000Z",
         expiresAt: "2026-09-01T02:45:00.000Z",
       });
-      const rows = yield* store.list("2026-09-01T00:00:00.000Z", "2026-08-31T00:00:00.000Z");
+      const rows = yield* store.list(
+        "2026-09-01T00:00:00.000Z",
+        "2026-09-02T00:00:00.000Z",
+        "2026-08-31T00:00:00.000Z",
+      );
       assert.deepStrictEqual(rows, [
         {
           leaseId: "lease-a",
           accountIds: ["codex", "claude"],
-          usage: { sources: history.sources, buckets: history.buckets },
-          latestHourStart: "2026-09-01T03:00:00.000Z",
+          sources: [
+            {
+              ...history.sources[0]!,
+              fingerprint: { ...history.sources[0]!.fingerprint, hostId: "lease-a" },
+            },
+          ],
+          buckets: history.buckets,
           pulledAt: "1970-01-01T00:00:00.000Z",
           retired: true,
         },

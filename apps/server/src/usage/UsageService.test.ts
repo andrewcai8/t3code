@@ -1022,6 +1022,30 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
+  it.live("names its sources by the host id a cloud box was given", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-usage-host-id",
+            home,
+            settings,
+            environment: { T3CODE_USAGE_HOST_ID: " lease-a " },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      assert.deepStrictEqual(
+        summary.sources
+          .filter((source) => source.fingerprint.provider === "claude")
+          .map((source) => source.fingerprint.hostId),
+        ["lease-a"],
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live("includes stored cloud box usage in the host summary", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

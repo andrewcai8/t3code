@@ -1,6 +1,7 @@
 // @effect-diagnostics globalDateInEffect:off - lease fixtures use fixed timestamps.
 import { assert, describe, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   USAGE_CONTRACT_VERSION,
   UsageDay,
   type UsageBucket,
@@ -8,13 +9,20 @@ import {
   type UsageSummary,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { mergeUsage } from "@t3tools/shared/usageMerge";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
-import { BoxUsageStore, foldBoxUsage, type StoredBoxUsage } from "./boxUsage.ts";
+import {
+  BoxUsageStore,
+  boxUsageListWindow,
+  foldBoxUsage,
+  leaseOwnedUsage,
+  type StoredBoxUsage,
+} from "./boxUsage.ts";
 
 const BOX_HOME = "/home/user/.claude/projects";
 
@@ -74,10 +82,37 @@ const inStore = <A, E>(
     ),
   );
 
-const totalTokens = (rows: ReadonlyArray<StoredBoxUsage>) =>
-  rows
-    .flatMap((row) => row.usage.buckets)
-    .reduce((sum, b) => sum + b.totals.uncachedInputTokens, 0);
+function summaryOf(
+  buckets: ReadonlyArray<UsageBucket>,
+  sources: ReadonlyArray<UsageSource>,
+  readAt: string,
+): UsageSummary {
+  return {
+    contractVersion: USAGE_CONTRACT_VERSION,
+    readAt,
+    timeZone: "UTC",
+    sinceDay: UsageDay.make("2026-09-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    buckets,
+    sources,
+    pricing: { status: "fresh", source: "litellm", fetchedAt: null, knownModels: 1 },
+    scanDurationMs: 0,
+  };
+}
+
+/** Every stored hour, with no box retired. */
+const ALL_HOURS = ["", "9999", ""] as const;
+
+const tokensIn = (rows: ReadonlyArray<StoredBoxUsage>) =>
+  rows.flatMap((row) => row.buckets).reduce((sum, b) => sum + b.totals.uncachedInputTokens, 0);
+
+const storedLeases = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly leaseId: string }>`
+    SELECT lease_id AS "leaseId" FROM box_usage ORDER BY lease_id
+  `;
+  return rows.map((row) => row.leaseId);
+});
 
 describe("BoxUsageStore", () => {
   it.effect("replaces a lease's history rather than adding to it", () =>
@@ -104,19 +139,12 @@ describe("BoxUsageStore", () => {
           },
           pulledAt: "2026-09-01T06:00:00.000Z",
         });
-        const rows = yield* store.list("2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z");
+        const rows = yield* store.list(...ALL_HOURS);
         assert.deepStrictEqual(
-          rows.map((row) => [row.leaseId, row.accountIds, row.latestHourStart, row.pulledAt]),
-          [
-            [
-              "lease-a",
-              ["claude", "codex"],
-              "2026-09-01T05:00:00.000Z",
-              "2026-09-01T06:00:00.000Z",
-            ],
-          ],
+          rows.map((row) => [row.leaseId, row.accountIds, row.pulledAt, row.buckets.length]),
+          [["lease-a", ["claude", "codex"], "2026-09-01T06:00:00.000Z", 2]],
         );
-        assert.strictEqual(totalTokens(rows), 100);
+        assert.strictEqual(tokensIn(rows), 100);
 
         yield* store.replace({
           leaseId: "lease-a",
@@ -124,62 +152,97 @@ describe("BoxUsageStore", () => {
           usage: { sources: [], buckets: [] },
           pulledAt: "2026-09-01T07:00:00.000Z",
         });
+        assert.deepStrictEqual(yield* store.list(...ALL_HOURS), []);
+        assert.deepStrictEqual(yield* storedLeases, []);
+      }),
+    ),
+  );
+
+  it.effect("reads only the hours inside the window", () =>
+    inStore((store) =>
+      Effect.gen(function* () {
+        yield* store.replace({
+          leaseId: "lease-a",
+          accountIds: ["claude"],
+          usage: {
+            sources: [boxSource("box-a")],
+            buckets: [
+              hourBucket("2026-09-01T02:00:00.000Z", 1),
+              hourBucket("2026-09-01T03:00:00.000Z", 10),
+              hourBucket("2026-09-01T04:00:00.000Z", 100),
+            ],
+          },
+          pulledAt: "2026-09-01T05:00:00.000Z",
+        });
+        const rows = yield* store.list("2026-09-01T03:00:00.000Z", "2026-09-01T04:00:00.000Z", "");
         assert.deepStrictEqual(
-          yield* store.list("2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z"),
-          [],
+          rows.map((row) => [row.leaseId, row.buckets.map((bucket) => bucket.hourStart)]),
+          [["lease-a", ["2026-09-01T03:00:00.000Z"]]],
         );
       }),
     ),
   );
 
-  it.effect("prunes rows whose newest usage is before the cutoff", () =>
+  it.effect("prunes hours before the cutoff and leases left without hours", () =>
     inStore((store) =>
       Effect.gen(function* () {
-        for (const [leaseId, hourStart] of [
-          ["lease-old", "2026-06-01T10:00:00.000Z"],
-          ["lease-new", "2026-09-01T10:00:00.000Z"],
+        for (const [leaseId, hourStarts] of [
+          ["lease-old", ["2026-06-01T10:00:00.000Z"]],
+          ["lease-mixed", ["2026-06-01T10:00:00.000Z", "2026-09-01T10:00:00.000Z"]],
+          ["lease-new", ["2026-09-01T10:00:00.000Z"]],
         ] as const) {
           yield* store.replace({
             leaseId,
             accountIds: ["claude"],
-            usage: { sources: [boxSource(leaseId)], buckets: [hourBucket(hourStart, 1)] },
-            pulledAt: hourStart,
+            usage: {
+              sources: [boxSource(leaseId)],
+              buckets: hourStarts.map((hourStart) => hourBucket(hourStart, 1)),
+            },
+            pulledAt: "2026-09-01T11:00:00.000Z",
           });
         }
         yield* store.prune("2026-06-29T00:00:00.000Z");
-        const rows = yield* store.list("", "");
+        const rows = yield* store.list(...ALL_HOURS);
         assert.deepStrictEqual(
-          rows.map((row) => row.leaseId),
-          ["lease-new"],
+          rows.map((row) => [row.leaseId, row.buckets.map((bucket) => bucket.hourStart)]),
+          [
+            ["lease-mixed", ["2026-09-01T10:00:00.000Z"]],
+            ["lease-new", ["2026-09-01T10:00:00.000Z"]],
+          ],
         );
+        assert.deepStrictEqual(yield* storedLeases, ["lease-mixed", "lease-new"]);
       }),
     ),
   );
 
-  it.effect("retires a box only once its lease has been gone for a day", () =>
+  it.effect("retires a box once its lease has not been active for a day", () =>
     inStore((store) =>
       Effect.gen(function* () {
         const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-        const created = new Date("2026-09-01T00:00:00.000Z");
-        for (const [leaseId, disposedAt] of [
-          ["lease-disposed-long-ago", "2026-09-02T00:00:00.000Z"],
-          ["lease-disposed-recently", "2026-09-03T23:00:00.000Z"],
-          ["lease-running", null],
-        ] as const) {
+        const leases = [
+          { leaseId: "lease-disposed-long-ago", settled: ["disposed", "2026-09-02T00:00:00.000Z"] },
+          { leaseId: "lease-disposed-recently", settled: ["disposed", "2026-09-03T23:00:00.000Z"] },
+          { leaseId: "lease-paused-long-ago", settled: ["paused", "2026-09-02T00:00:00.000Z"] },
+          { leaseId: "lease-active-quiet", settled: null },
+        ] as const;
+        for (const { leaseId, settled } of leases) {
           yield* Effect.promise(async () => {
             await registry.register({
               leaseId,
               sandboxId: `${leaseId}-sandbox`,
               providerInstanceId: "claude",
-              now: created,
+              now: new Date("2026-09-02T00:00:00.000Z"),
             });
-            if (disposedAt) await registry.markDisposed(leaseId, new Date(disposedAt));
+            if (settled?.[0] === "disposed")
+              await registry.markDisposed(leaseId, new Date(settled[1]));
+            if (settled?.[0] === "paused") await registry.markPaused(leaseId, new Date(settled[1]));
           });
         }
         for (const leaseId of [
+          "lease-active-quiet",
           "lease-disposed-long-ago",
           "lease-disposed-recently",
-          "lease-running",
+          "lease-paused-long-ago",
           "lease-unknown",
         ]) {
           yield* store.replace({
@@ -192,18 +255,80 @@ describe("BoxUsageStore", () => {
             pulledAt: "2026-09-01T11:00:00.000Z",
           });
         }
-        const rows = yield* store.list("2026-09-01T00:00:00.000Z", "2026-09-03T00:00:00.000Z");
+        const rows = yield* store.list(
+          "2026-09-01T00:00:00.000Z",
+          "2026-09-02T00:00:00.000Z",
+          "2026-09-03T00:00:00.000Z",
+        );
         assert.deepStrictEqual(
           rows.map((row) => [row.leaseId, row.retired]),
           [
+            ["lease-active-quiet", false],
             ["lease-disposed-long-ago", true],
             ["lease-disposed-recently", false],
-            ["lease-running", false],
+            ["lease-paused-long-ago", true],
             ["lease-unknown", true],
           ],
         );
       }),
     ),
+  );
+
+  it.effect(
+    "counts boxes cloned from one template apart, and a live box over its stored copy",
+    () =>
+      inStore((store) =>
+        Effect.gen(function* () {
+          const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
+          const template = boxSource("e2b.local");
+          for (const [leaseId, inputTokens] of [
+            ["lease-a", 10],
+            ["lease-b", 20],
+          ] as const) {
+            yield* Effect.promise(() =>
+              registry.register({
+                leaseId,
+                sandboxId: `${leaseId}-sandbox`,
+                providerInstanceId: "claude",
+              }),
+            );
+            yield* store.replace({
+              leaseId,
+              accountIds: ["claude"],
+              usage: leaseOwnedUsage(leaseId, {
+                sources: [template],
+                buckets: [hourBucket("2026-09-01T03:00:00.000Z", inputTokens)],
+              }),
+              pulledAt: "2026-09-01T04:00:00.000Z",
+            });
+          }
+          const input = {
+            timeZone: "UTC",
+            sinceDay: UsageDay.make("2026-09-01"),
+            untilDay: UsageDay.make("2026-09-01"),
+          };
+          const window = boxUsageListWindow(input);
+          const host = foldBoxUsage(
+            summaryOf([], [], "2026-09-01T04:00:00.000Z"),
+            input,
+            yield* store.list(window.sinceIso, window.untilIso, "2026-08-31T00:00:00.000Z"),
+            { hostId: "host", path: "/state/cloud-box-usage" },
+          );
+          const liveA = summaryOf(
+            [{ ...hourBucket("2026-09-01T03:00:00.000Z", 11), hourStart: undefined }],
+            [boxSource("lease-a")],
+            "2026-09-01T05:00:00.000Z",
+          );
+          const merged = mergeUsage(
+            [
+              { environmentId: EnvironmentId.make("host"), label: "host", summary: host },
+              { environmentId: EnvironmentId.make("box-a"), label: "box-a", summary: liveA },
+            ],
+            USAGE_CONTRACT_VERSION,
+          );
+          assert.strictEqual(merged.totalTokens, 31);
+        }),
+      ),
   );
 });
 
@@ -219,11 +344,16 @@ describe("foldBoxUsage", () => {
     pricing: { status: "fresh", source: "litellm", fetchedAt: null, knownModels: 1 },
     scanDurationMs: 0,
   };
-  const row = (leaseId: string, retired: boolean, buckets: UsageBucket[], sessions = 1) => ({
+  const row = (
+    leaseId: string,
+    retired: boolean,
+    buckets: UsageBucket[],
+    sessions = 1,
+  ): StoredBoxUsage => ({
     leaseId,
     accountIds: ["claude"],
-    usage: { sources: [boxSource(`host-${leaseId}`, sessions)], buckets },
-    latestHourStart: buckets.at(-1)?.hourStart ?? "",
+    sources: [boxSource(`host-${leaseId}`, sessions)],
+    buckets,
     pulledAt: "2026-09-02T00:00:00.000Z",
     retired,
   });
@@ -270,14 +400,15 @@ describe("foldBoxUsage", () => {
     assert.deepStrictEqual(
       folded.sources.map((source) => [
         source.fingerprint.hostId,
+        source.status,
         source.fingerprint.resolvedHomePath,
         source.sourcePath,
         source.scannedFiles,
         source.distinctSessions,
       ]),
       [
-        ["host-lease-live", BOX_HOME, `lease-live:${BOX_HOME}`, 2, 1],
-        ["host", "/state/cloud-box-usage", undefined, 4, 4],
+        ["host-lease-live", "partial", BOX_HOME, `lease-live:${BOX_HOME}`, 2, 1],
+        ["host", "ok", "/state/cloud-box-usage", undefined, 4, 4],
       ],
     );
   });

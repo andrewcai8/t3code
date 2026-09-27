@@ -57,7 +57,7 @@ import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { readAntigravityUsage } from "./antigravityUsageReader.ts";
 import { makeCursorAccountHistory, type CursorCredentialSource } from "./cursorAccountHistory.ts";
 import { addTranscript, UsageAggregator } from "./usageAggregation.ts";
-import { BoxUsageStore, boxUsageListSince, foldBoxUsage, historyForHost } from "./boxUsage.ts";
+import { BoxUsageStore, boxUsageListWindow, foldBoxUsage, historyForHost } from "./boxUsage.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -182,6 +182,9 @@ export const make = Effect.gen(function* () {
   const readCursorHistory = makeCursorAccountHistory();
   const platform = yield* HostProcessPlatform;
   const boxUsage = yield* BoxUsageStore;
+  // Cloud boxes are cloned from one template and share a hostname, so the
+  // provisioner names each one.
+  const usageHostId = hostEnvironment.T3CODE_USAGE_HOST_ID?.trim() || NodeOS.hostname();
 
   const fileCache: ScanCache = new Map();
   const sourceCache = new Map<string, typeof CachedSource.Type>();
@@ -738,7 +741,7 @@ export const make = Effect.gen(function* () {
     const startedAtMs = yield* Clock.currentTimeMillis;
     yield* ensureScanCacheLoaded;
 
-    const hostId = NodeOS.hostname();
+    const hostId = usageHostId;
     const windowStart = DateTime.make(`${input.sinceDay}T00:00:00Z`);
     if (Option.isNone(windowStart)) {
       return yield* new UsageReadError({
@@ -908,7 +911,8 @@ export const make = Effect.gen(function* () {
     const nowMs = yield* Clock.currentTimeMillis;
     // A box a client may still hold a summary for keeps its own identity so
     // the merge can deduplicate it. Clients cache summaries for up to an hour.
-    const rows = yield* boxUsage.list(boxUsageListSince(input), isoAt(nowMs - DAY_MS)).pipe(
+    const window = boxUsageListWindow(input);
+    const rows = yield* boxUsage.list(window.sinceIso, window.untilIso, isoAt(nowMs - DAY_MS)).pipe(
       Effect.mapError(
         (cause) =>
           new UsageReadError({
@@ -919,7 +923,7 @@ export const make = Effect.gen(function* () {
       ),
     );
     return foldBoxUsage(summary, input, rows, {
-      hostId: NodeOS.hostname(),
+      hostId: usageHostId,
       path: path.join(config.stateDir, "cloud-box-usage"),
     });
   });

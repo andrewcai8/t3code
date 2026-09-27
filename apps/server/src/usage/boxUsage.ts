@@ -3,9 +3,9 @@
  * Usage a host keeps for its cloud boxes.
  *
  * Cloud chats write transcripts on an ephemeral box, so the host pulls each
- * box's hourly UTC history, stores one row per lease, and folds the rows into
- * its own summary. Hour buckets re-bucket exactly into any client's day or
- * hour window.
+ * box's hourly UTC history, stores its sources per lease and its buckets per
+ * hour, and folds a window's hours into its own summary. Hour buckets
+ * re-bucket exactly into any client's day or hour window.
  *
  * @module boxUsage
  */
@@ -30,17 +30,14 @@ import { addTotals } from "./usageTranscripts.ts";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** A box's history exactly as the box reported it. */
-const BoxUsage = Schema.Struct({
-  sources: ForwardCompatibleArray(UsageSource),
-  buckets: ForwardCompatibleArray(UsageBucket),
-});
-export type BoxUsage = typeof BoxUsage.Type;
+export interface BoxUsage {
+  readonly sources: ReadonlyArray<UsageSource>;
+  readonly buckets: ReadonlyArray<UsageBucket>;
+}
 
-export interface StoredBoxUsage {
+export interface StoredBoxUsage extends BoxUsage {
   readonly leaseId: string;
   readonly accountIds: ReadonlyArray<string>;
-  readonly usage: BoxUsage;
-  readonly latestHourStart: string;
   readonly pulledAt: string;
   /**
    * No client can still hold a summary from this box, so it needs no identity
@@ -54,23 +51,46 @@ export class BoxUsageStoreError extends Schema.TaggedError<BoxUsageStoreError>()
   { operation: Schema.String, cause: Schema.Defect() },
 ) {}
 
-const encodeBoxUsage = Schema.encodeSync(Schema.fromJsonString(BoxUsage));
-const encodeAccountIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
-const decodeRow = Schema.decodeUnknownEffect(
+const SourcesJson = Schema.fromJsonString(ForwardCompatibleArray(UsageSource));
+const AccountIdsJson = Schema.fromJsonString(Schema.Array(Schema.String));
+const BucketJson = Schema.fromJsonString(UsageBucket);
+const encodeSources = Schema.encodeSync(SourcesJson);
+const encodeAccountIds = Schema.encodeSync(AccountIdsJson);
+const encodeBucket = Schema.encodeSync(BucketJson);
+const decodeLeaseRow = Schema.decodeUnknownEffect(
   Schema.Struct({
     leaseId: Schema.String,
-    accountIds: Schema.fromJsonString(Schema.Array(Schema.String)),
-    usage: Schema.fromJsonString(BoxUsage),
-    latestHourStart: Schema.String,
+    accountIds: AccountIdsJson,
+    sources: SourcesJson,
     pulledAt: Schema.String,
     retired: Schema.Number,
   }),
 );
+const decodeHourRow = Schema.decodeUnknownEffect(
+  Schema.Struct({ leaseId: Schema.String, bucket: BucketJson }),
+);
+
+/** Keeps each multi-row insert well under SQLite's bound-parameter limit. */
+const HOUR_INSERT_CHUNK = 200;
+
+/**
+ * Keys a pulled history's sources to its lease. Every box is cloned from one
+ * template, so a box's own fingerprint cannot tell boxes apart; the lease id can.
+ */
+export function leaseOwnedUsage(leaseId: string, usage: BoxUsage): BoxUsage {
+  return {
+    sources: usage.sources.map((source) => ({
+      ...source,
+      fingerprint: { ...source.fingerprint, hostId: leaseId },
+    })),
+    buckets: usage.buckets,
+  };
+}
 
 export class BoxUsageStore extends Context.Service<
   BoxUsageStore,
   {
-    /** Replaces the lease's stored history. History with no buckets deletes it. */
+    /** Replaces the lease's stored history. History with no hour buckets deletes it. */
     readonly replace: (input: {
       readonly leaseId: string;
       readonly accountIds: ReadonlyArray<string>;
@@ -78,14 +98,16 @@ export class BoxUsageStore extends Context.Service<
       readonly pulledAt: string;
     }) => Effect.Effect<void, BoxUsageStoreError>;
     /**
-     * Rows with usage at or after `sinceIso`. A row counts as retired when its
-     * lease is gone, or was disposed or went missing before `retiredBeforeIso`.
+     * Hours in `[sinceIso, untilIso)`, grouped by lease with the lease's sources.
+     * A lease counts as retired when its row is gone, or it has not been
+     * active since before `retiredBeforeIso`.
      */
     readonly list: (
       sinceIso: string,
+      untilIso: string,
       retiredBeforeIso: string,
     ) => Effect.Effect<ReadonlyArray<StoredBoxUsage>, BoxUsageStoreError>;
-    /** Deletes rows whose newest usage is before `cutoffIso`. */
+    /** Deletes hours before `cutoffIso`, then leases with no hours left. */
     readonly prune: (cutoffIso: string) => Effect.Effect<void, BoxUsageStoreError>;
   }
 >()("t3/usage/boxUsage/BoxUsageStore") {
@@ -100,77 +122,114 @@ export class BoxUsageStore extends Context.Service<
           readonly usage: BoxUsage;
           readonly pulledAt: string;
         }) {
-          let latestHourStart: string | null = null;
-          for (const bucket of input.usage.buckets) {
-            if (
-              bucket.hourStart !== undefined &&
-              (latestHourStart === null || bucket.hourStart > latestHourStart)
-            )
-              latestHourStart = bucket.hourStart;
-          }
-          if (latestHourStart === null) {
-            yield* sql`DELETE FROM box_usage WHERE lease_id = ${input.leaseId}`;
-            return;
-          }
-          const usage = encodeBoxUsage({
-            sources: input.usage.sources,
-            buckets: input.usage.buckets,
-          });
-          yield* sql`
-            INSERT INTO box_usage (lease_id, account_ids_json, usage_json, latest_hour_start, pulled_at)
-            VALUES (${input.leaseId}, ${encodeAccountIds(input.accountIds)}, ${usage}, ${latestHourStart}, ${input.pulledAt})
-            ON CONFLICT(lease_id) DO UPDATE SET
-              account_ids_json = excluded.account_ids_json,
-              usage_json = excluded.usage_json,
-              latest_hour_start = excluded.latest_hour_start,
-              pulled_at = excluded.pulled_at
-          `;
+          const hours = input.usage.buckets.flatMap((bucket) =>
+            bucket.hourStart === undefined
+              ? []
+              : [
+                  {
+                    lease_id: input.leaseId,
+                    hour_start: bucket.hourStart,
+                    bucket_json: encodeBucket(bucket),
+                  },
+                ],
+          );
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`DELETE FROM box_usage_hours WHERE lease_id = ${input.leaseId}`;
+              if (hours.length === 0) {
+                yield* sql`DELETE FROM box_usage WHERE lease_id = ${input.leaseId}`;
+                return;
+              }
+              for (let index = 0; index < hours.length; index += HOUR_INSERT_CHUNK) {
+                yield* sql`INSERT INTO box_usage_hours ${sql.insert(
+                  hours.slice(index, index + HOUR_INSERT_CHUNK),
+                )}`;
+              }
+              yield* sql`
+                INSERT INTO box_usage (lease_id, account_ids_json, sources_json, pulled_at)
+                VALUES (${input.leaseId}, ${encodeAccountIds(input.accountIds)}, ${encodeSources(input.usage.sources)}, ${input.pulledAt})
+                ON CONFLICT(lease_id) DO UPDATE SET
+                  account_ids_json = excluded.account_ids_json,
+                  sources_json = excluded.sources_json,
+                  pulled_at = excluded.pulled_at
+              `;
+            }),
+          );
         },
         Effect.mapError((cause) => new BoxUsageStoreError({ operation: "replace", cause })),
       );
       const list = Effect.fn("BoxUsageStore.list")(
-        function* (sinceIso: string, retiredBeforeIso: string) {
-          const rows = yield* sql`
-            SELECT
-              box_usage.lease_id AS "leaseId",
-              box_usage.account_ids_json AS "accountIds",
-              box_usage.usage_json AS usage,
-              box_usage.latest_hour_start AS "latestHourStart",
-              box_usage.pulled_at AS "pulledAt",
-              CASE
-                WHEN provisioned_leases.lease_id IS NULL THEN 1
-                WHEN json_extract(provisioned_leases.lease_json, '$.state') IN ('disposed', 'missing')
-                  AND json_extract(provisioned_leases.lease_json, '$.updatedAt') < ${retiredBeforeIso}
-                  THEN 1
-                ELSE 0
-              END AS retired
-            FROM box_usage
-            LEFT JOIN provisioned_leases ON provisioned_leases.lease_id = box_usage.lease_id
-            WHERE box_usage.latest_hour_start >= ${sinceIso}
-            ORDER BY box_usage.lease_id
-          `;
-          const stored = yield* Effect.forEach(rows, (row) =>
-            decodeRow(row).pipe(
-              Effect.map((decoded): StoredBoxUsage | null => ({
-                ...decoded,
-                retired: decoded.retired === 1,
-              })),
-              // One unreadable row must not hide every other box's usage.
-              Effect.catch((error) =>
-                Effect.logWarning("skipping unreadable cloud box usage", {
-                  leaseId: row.leaseId,
-                  error: error.message,
-                }).pipe(Effect.as(null)),
-              ),
-            ),
+        function* (sinceIso: string, untilIso: string, retiredBeforeIso: string) {
+          const [leaseRows, hourRows] = yield* sql.withTransaction(
+            Effect.all([
+              sql`
+                SELECT
+                  box_usage.lease_id AS "leaseId",
+                  box_usage.account_ids_json AS "accountIds",
+                  box_usage.sources_json AS sources,
+                  box_usage.pulled_at AS "pulledAt",
+                  CASE
+                    WHEN provisioned_leases.lease_id IS NULL THEN 1
+                    WHEN json_extract(provisioned_leases.lease_json, '$.state') <> 'active'
+                      AND json_extract(provisioned_leases.lease_json, '$.updatedAt') < ${retiredBeforeIso}
+                      THEN 1
+                    ELSE 0
+                  END AS retired
+                FROM box_usage
+                LEFT JOIN provisioned_leases ON provisioned_leases.lease_id = box_usage.lease_id
+                WHERE box_usage.lease_id IN (
+                  SELECT lease_id FROM box_usage_hours
+                  WHERE hour_start >= ${sinceIso} AND hour_start < ${untilIso}
+                )
+                ORDER BY box_usage.lease_id
+              `,
+              sql`
+                SELECT lease_id AS "leaseId", bucket_json AS bucket
+                FROM box_usage_hours
+                WHERE hour_start >= ${sinceIso} AND hour_start < ${untilIso}
+                ORDER BY hour_start
+              `,
+            ]),
           );
-          return stored.filter((row) => row !== null);
+          // One unreadable row must not hide every other box's usage.
+          const skip = (leaseId: unknown) => (error: Schema.SchemaError) =>
+            Effect.logWarning("skipping unreadable cloud box usage", {
+              leaseId,
+              error: error.message,
+            }).pipe(Effect.as(null));
+          const buckets = new Map<string, UsageBucket[]>();
+          for (const row of hourRows) {
+            const hour = yield* decodeHourRow(row).pipe(Effect.catch(skip(row.leaseId)));
+            if (hour === null) continue;
+            const leaseBuckets = buckets.get(hour.leaseId) ?? [];
+            leaseBuckets.push(hour.bucket);
+            buckets.set(hour.leaseId, leaseBuckets);
+          }
+          const stored: StoredBoxUsage[] = [];
+          for (const row of leaseRows) {
+            const lease = yield* decodeLeaseRow(row).pipe(Effect.catch(skip(row.leaseId)));
+            if (lease === null) continue;
+            stored.push({
+              ...lease,
+              buckets: buckets.get(lease.leaseId) ?? [],
+              retired: lease.retired === 1,
+            });
+          }
+          return stored;
         },
         Effect.mapError((cause) => new BoxUsageStoreError({ operation: "list", cause })),
       );
       const prune = Effect.fn("BoxUsageStore.prune")(
         function* (cutoffIso: string) {
-          yield* sql`DELETE FROM box_usage WHERE latest_hour_start < ${cutoffIso}`;
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`DELETE FROM box_usage_hours WHERE hour_start < ${cutoffIso}`;
+              yield* sql`
+                DELETE FROM box_usage
+                WHERE lease_id NOT IN (SELECT DISTINCT lease_id FROM box_usage_hours)
+              `;
+            }),
+          );
         },
         Effect.mapError((cause) => new BoxUsageStoreError({ operation: "prune", cause })),
       );
@@ -213,16 +272,23 @@ export function historyForHost(summary: UsageSummary): UsageSummary {
 }
 
 /**
- * The earliest `latest_hour_start` a stored row may have and still land in
- * the window. A day window starts a day early because days are in the
- * client's zone.
+ * The hours a stored row may need for `input`'s window, as `[since, until)`.
+ * A day window widens by the zone slack; the fold then filters exactly.
  */
-export function boxUsageListSince(input: UsageSummaryInput): string {
-  const sinceMs =
+export function boxUsageListWindow(input: UsageSummaryInput): {
+  readonly sinceIso: string;
+  readonly untilIso: string;
+} {
+  const [sinceMs, untilMs] =
     input.resolution === "hour"
-      ? Date.parse(input.sinceTime ?? "")
-      : Date.parse(`${input.sinceDay}T00:00:00Z`) - DAY_MS;
-  return Number.isNaN(sinceMs) ? "" : new Date(sinceMs).toISOString();
+      ? [Date.parse(input.sinceTime ?? ""), Date.parse(input.untilTime ?? "")]
+      : [
+          Date.parse(`${input.sinceDay}T00:00:00Z`) - DAY_MS,
+          Date.parse(`${input.untilDay}T00:00:00Z`) + 2 * DAY_MS,
+        ];
+  return Number.isNaN(sinceMs) || Number.isNaN(untilMs)
+    ? { sinceIso: "", untilIso: "" }
+    : { sinceIso: new Date(sinceMs).toISOString(), untilIso: new Date(untilMs).toISOString() };
 }
 
 function sumBuckets(a: UsageBucket, b: UsageBucket): UsageBucket {
@@ -266,12 +332,10 @@ export function foldBoxUsage(
 
   for (const row of rows) {
     const stored = new Set(
-      row.usage.sources.map((source) =>
-        sourceKey(source.fingerprint.provider, usageSourcePath(source)),
-      ),
+      row.sources.map((source) => sourceKey(source.fingerprint.provider, usageSourcePath(source))),
     );
     const sessionsBySource = new Map<string, number>();
-    for (const bucket of row.usage.buckets) {
+    for (const bucket of row.buckets) {
       if (bucket.hourStart === undefined || bucket.sourcePath === undefined) continue;
       const key = sourceKey(bucket.provider, bucket.sourcePath);
       if (!stored.has(key)) continue;
@@ -303,13 +367,20 @@ export function foldBoxUsage(
       sessionsBySource.set(key, (sessionsBySource.get(key) ?? 0) + bucket.sessions);
     }
 
-    for (const source of row.usage.sources) {
+    for (const source of row.sources) {
       const path = usageSourcePath(source);
       const bucketSessions = sessionsBySource.get(sourceKey(source.fingerprint.provider, path));
       if (bucketSessions === undefined) continue;
       const distinctSessions = Math.min(source.distinctSessions, bucketSessions);
       if (!row.retired) {
-        liveSources.push({ ...source, sourcePath: `${row.leaseId}:${path}`, distinctSessions });
+        // Partial, so a complete live scan of the same box claims its
+        // fingerprint and this copy only fills cells the live scan lacks.
+        liveSources.push({
+          ...source,
+          status: "partial",
+          sourcePath: `${row.leaseId}:${path}`,
+          distinctSessions,
+        });
         continue;
       }
       const provider = source.fingerprint.provider;
