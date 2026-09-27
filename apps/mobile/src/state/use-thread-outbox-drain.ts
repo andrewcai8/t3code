@@ -29,7 +29,7 @@ import {
   retainAcknowledgedThreadMessage,
   forgetAcknowledgedThreadMessage,
 } from "./acknowledged-thread-messages";
-import { provisionedSandboxLeases } from "../features/cloud/provisionStores";
+import { provisionedSandboxLeases } from "./provision-stores";
 import { appAtomRegistry } from "./atom-registry";
 import { restoredNewTaskDraftKey } from "./new-task-draft-key";
 import { useProjects, useServerConfigs, useThreadShells } from "./entities";
@@ -1061,9 +1061,16 @@ export function useThreadOutboxDrain(): void {
       // device offers it to a new chat. The turn already started, so a failed claim only logs.
       void claimFirstTurnBox(
         provisionedSandboxLeases,
-        async (request) => {
-          const result = await claimBox(request);
-          return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+        {
+          claim: async (request) => {
+            const result = await claimBox(request);
+            return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+          },
+          warn: (attempt) =>
+            console.warn("[thread-outbox] could not claim the cloud machine for its first turn", {
+              threadId: queuedMessage.threadId,
+              attempt,
+            }),
         },
         { environmentId: queuedMessage.environmentId, threadId: queuedMessage.threadId },
       );

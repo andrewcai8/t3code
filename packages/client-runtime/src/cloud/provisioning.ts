@@ -127,13 +127,20 @@ export interface ProvisionedBoxClaim {
   readonly input: EnvironmentProvisionClaimInput;
 }
 
+export interface ProvisionedBoxClaimPorts {
+  /** One `environmentControl.claim` call; true when the host recorded the owner. */
+  readonly claim: (request: ProvisionedBoxClaim) => Promise<boolean>;
+  /** Reports an attempt that failed; the caller owns where that is logged. */
+  readonly warn: (attempt: number) => void;
+}
+
 /**
  * Records a thread on the host as the owner of the box its first turn started on, so every
  * device stops offering the box to new chats. Tries twice; a claim that still fails leaves the
- * chat running and only logs, because the turn has already started.
+ * chat running and is only reported, because the turn has already started.
  */
 export async function claimProvisionedBox(
-  claim: (request: ProvisionedBoxClaim) => Promise<boolean>,
+  ports: ProvisionedBoxClaimPorts,
   lease: Pick<ProvisionedSandboxLease, "leaseId" | "managerEnvironmentId">,
   owner: ScopedThreadRef,
 ): Promise<boolean> {
@@ -142,11 +149,8 @@ export async function claimProvisionedBox(
     input: { leaseId: lease.leaseId, environmentId: owner.environmentId, threadId: owner.threadId },
   };
   for (const attempt of [1, 2]) {
-    if (await claim(request).catch(() => false)) return true;
-    console.warn("[cloud] could not claim the box for its first turn", {
-      leaseId: lease.leaseId,
-      attempt,
-    });
+    if (await ports.claim(request).catch(() => false)) return true;
+    ports.warn(attempt);
   }
   return false;
 }
@@ -158,11 +162,11 @@ export async function claimProvisionedBox(
  */
 export function claimFirstTurnBox(
   leases: Pick<ProvisionedSandboxLeaseStore, "transferFromEnvironment">,
-  claim: (request: ProvisionedBoxClaim) => Promise<boolean>,
+  ports: ProvisionedBoxClaimPorts,
   owner: ScopedThreadRef,
 ): Promise<boolean> {
   const lease = leases.transferFromEnvironment(owner.environmentId, owner);
-  return lease === null ? Promise.resolve(false) : claimProvisionedBox(claim, lease, owner);
+  return lease === null ? Promise.resolve(false) : claimProvisionedBox(ports, lease, owner);
 }
 
 export interface NewChatRunTargets<Environment> {

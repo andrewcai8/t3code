@@ -9257,9 +9257,16 @@ export default function ChatView(props: ChatViewProps) {
             : null;
         if (cloudLease && typeof composerDraftTarget === "string") {
           const claimed = await claimProvisionedBox(
-            async (request) => {
-              const result = await claimCloudLease(request);
-              return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+            {
+              claim: async (request) => {
+                const result = await claimCloudLease(request);
+                return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+              },
+              warn: (attempt) =>
+                console.warn("[cloud] could not claim the box for its first turn", {
+                  leaseId: cloudLease.leaseId,
+                  attempt,
+                }),
             },
             cloudLease,
             scopeThreadRef(environmentId, threadIdForSend),

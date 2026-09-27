@@ -1,6 +1,6 @@
 import type { ProvisionStorage } from "@t3tools/client-runtime/cloud";
 
-import { writeFileAtomically } from "../../lib/atomic-file";
+import { writeFileAtomically } from "../lib/atomic-file";
 
 /**
  * `ProvisionStorage` for the phone. The stores read and write synchronously, and this device has

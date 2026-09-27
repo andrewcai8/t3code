@@ -3,8 +3,8 @@ import {
   createProvisionedSandboxLeaseStore,
 } from "@t3tools/client-runtime/cloud";
 
-import { uuidv4 } from "../../lib/uuid";
-import { mobileProvisionStorage } from "./provisionStorage";
+import { uuidv4 } from "../lib/uuid";
+import { mobileProvisionStorage } from "./provision-storage";
 
 /**
  * This device's record of the cloud machines it started. Shared by every surface that can

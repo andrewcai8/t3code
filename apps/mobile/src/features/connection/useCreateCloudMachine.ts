@@ -16,8 +16,8 @@ import { waitForEnvironmentProject } from "../../state/entities";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { hydrateProvisionStorage } from "../cloud/provisionStorage";
-import { provisionRequests, provisionedSandboxLeases } from "../cloud/provisionStores";
+import { hydrateProvisionStorage } from "../../state/provision-storage";
+import { provisionRequests, provisionedSandboxLeases } from "../../state/provision-stores";
 import {
   CLOUD_MACHINE_PROVIDER_LABELS,
   type CloudMachineAccountOption,

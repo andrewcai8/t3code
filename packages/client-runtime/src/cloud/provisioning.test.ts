@@ -584,8 +584,11 @@ describe("claimFirstTurnBox", () => {
       claims.push(request);
       return claims.length > 1;
     };
-    await expect(claimFirstTurnBox(leases, claim, firstThread)).resolves.toBe(true);
+    const warnings: number[] = [];
+    const ports = { claim, warn: (attempt: number) => void warnings.push(attempt) };
+    await expect(claimFirstTurnBox(leases, ports, firstThread)).resolves.toBe(true);
     expect(claims).toEqual([expectedClaim, expectedClaim]);
+    expect(warnings).toEqual([1]);
     expect(leases.leaseFor(firstThread)).toEqual({
       leaseId: "lease",
       sandboxId: "sandbox",
@@ -593,7 +596,7 @@ describe("claimFirstTurnBox", () => {
     });
     // A later chat on the same box finds nothing left to claim.
     await expect(
-      claimFirstTurnBox(leases, claim, { environmentId: box, threadId: ThreadId.make("later") }),
+      claimFirstTurnBox(leases, ports, { environmentId: box, threadId: ThreadId.make("later") }),
     ).resolves.toBe(false);
     expect(claims).toHaveLength(2);
   });
@@ -604,7 +607,10 @@ describe("claimFirstTurnBox", () => {
       claims.push(request);
       throw new Error("host unreachable");
     };
-    await expect(claimFirstTurnBox(provisionedHere(), claim, firstThread)).resolves.toBe(false);
+    const warnings: number[] = [];
+    const ports = { claim, warn: (attempt: number) => void warnings.push(attempt) };
+    await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(false);
     expect(claims).toEqual([expectedClaim, expectedClaim]);
+    expect(warnings).toEqual([1, 2]);
   });
 });
