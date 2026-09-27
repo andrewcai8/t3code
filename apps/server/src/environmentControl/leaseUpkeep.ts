@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import type { BoxUsageStore } from "../usage/boxUsage.ts";
 import { CACHE_RETENTION_DAYS } from "../usage/UsageService.ts";
+import type { ProvisionStoreError } from "./ProvisionOperationStore.ts";
 
 export const LEASE_UPKEEP_INTERVAL = Duration.minutes(5);
 
@@ -17,7 +18,7 @@ export const LEASE_UPKEEP_INTERVAL = Duration.minutes(5);
 export const runLeaseUpkeep = (input: {
   readonly reapExpiredLeases: () => Promise<void>;
   readonly syncLeaseUsage: () => Promise<void>;
-  readonly reconcileProvisions: Effect.Effect<void, unknown>;
+  readonly reconcileProvisions: Effect.Effect<void, ProvisionStoreError>;
   readonly boxUsage: Pick<BoxUsageStore["Service"], "prune">;
 }) => {
   const repeat = (tick: Effect.Effect<void>) =>
