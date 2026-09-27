@@ -498,11 +498,12 @@ export const ProviderRegistryLive = Layer.effect(
           yield* PubSub.publish(changesPubSub, providers);
         }
         // Logged when the suspects change, not on every refresh.
-        const suspects = identicalProviderReadings(providers);
-        if (
-          suspects.length > 0 &&
-          JSON.stringify(suspects) !== JSON.stringify(identicalProviderReadings(previousProviders))
-        ) {
+        const suspectsOf = (snapshots: ReadonlyArray<ServerProvider>) =>
+          identicalProviderReadings(snapshots)
+            .map((names) => names.join(", "))
+            .join("; ");
+        const suspects = suspectsOf(providers);
+        if (suspects && suspects !== suspectsOf(previousProviders)) {
           yield* Effect.logWarning(
             "Provider accounts report identical usage limits and may be one account; remake their logins.",
             { suspects },
