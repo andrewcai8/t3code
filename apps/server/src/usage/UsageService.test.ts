@@ -34,7 +34,7 @@ import * as ServerConfig from "../config.ts";
 import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { BoxUsageStore } from "./boxUsage.ts";
+import { BoxUsageStore, BoxUsageStoreError } from "./boxUsage.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -1156,6 +1156,36 @@ describe("UsageService", () => {
         ),
         Effect.provideContext(storage),
       );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("still returns this host's usage when stored cloud box usage cannot be read", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-box-usage-unreadable",
+            home,
+            settings,
+            boxUsage: Layer.succeed(
+              BoxUsageStore,
+              BoxUsageStore.of({
+                replace: () => Effect.void,
+                list: () =>
+                  new BoxUsageStoreError({
+                    operation: "list",
+                    cause: new Error("no such table: box_usage_hours"),
+                  }),
+                prune: () => Effect.void,
+              }),
+            ),
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      assert.strictEqual(totalOutputTokens(summary), 5);
     }).pipe(Effect.scoped),
   );
 
