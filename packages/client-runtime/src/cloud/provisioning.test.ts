@@ -309,6 +309,7 @@ describe("newChatRunTargets", () => {
             : { serverConfig: { localAgentRuns: input.localAgentRuns } },
       environmentId: input.environmentId ?? host.environmentId,
       managerConfig: input.managerConfig ?? manager,
+      boxes: new Set(),
     });
 
   it("hides a host without local runs and sends its chats to the first cloud kind", () => {
@@ -349,6 +350,7 @@ describe("newChatRunTargets", () => {
         environmentState: () => cloudOnlyHost,
         environmentId: host.environmentId,
         managerConfig: noCloud,
+        boxes: new Set(),
       }),
     ).toEqual({ environments: [], cloudProviders: [], redirect: null });
   });
@@ -369,6 +371,7 @@ describe("newChatRunTargets", () => {
               : {},
         environmentId: box.environmentId,
         managerConfig: input.managerConfig,
+        boxes: new Set(),
       });
 
     it("moves to a cloud-only host that can start a cloud kind instead", () => {
@@ -417,7 +420,61 @@ describe("newChatRunTargets", () => {
           id === box.environmentId ? { connection: { blockedReason: "authentication" } } : {},
         environmentId: box.environmentId,
         managerConfig: manager,
+        boxes: new Set(),
       }).redirect,
     ).toBeNull();
+  });
+
+  describe("with cloud boxes other chats run on", () => {
+    const remote = { environmentId: EnvironmentId.make("remote") };
+    const namespaceBox = { environmentId: EnvironmentId.make("namespace-box") };
+    const withBoxes = (input: {
+      readonly environmentId: EnvironmentId;
+      readonly managerConfig?: ManagerConfig;
+    }) =>
+      newChatRunTargets({
+        environments: [host, box, laptop, namespaceBox, remote],
+        environmentState: (id) => (id === host.environmentId ? cloudOnlyHost : {}),
+        environmentId: input.environmentId,
+        managerConfig: input.managerConfig ?? manager,
+        boxes: new Set([box.environmentId, namespaceBox.environmentId]),
+      });
+
+    it("offers servers that run agents and fresh cloud kinds, never a running box", () => {
+      expect(withBoxes({ environmentId: laptop.environmentId })).toEqual({
+        environments: [laptop, remote],
+        cloudProviders: ["e2b", "namespace"],
+        redirect: null,
+      });
+    });
+
+    it("starts a chat that points at a running box on a fresh one", () => {
+      expect(withBoxes({ environmentId: box.environmentId }).redirect).toEqual({
+        kind: "cloud",
+        provider: "e2b",
+      });
+    });
+
+    it("moves a chat on a running box to a server when no cloud kind is offered", () => {
+      expect(
+        withBoxes({ environmentId: namespaceBox.environmentId, managerConfig: noCloud }),
+      ).toEqual({
+        environments: [laptop, remote],
+        cloudProviders: [],
+        redirect: { kind: "environment", environment: laptop },
+      });
+    });
+
+    it("moves a chat off an expired box to a server, skipping running boxes", () => {
+      expect(
+        newChatRunTargets({
+          environments: [box, namespaceBox, remote],
+          environmentState: (id) => (id === box.environmentId ? expired : {}),
+          environmentId: box.environmentId,
+          managerConfig: manager,
+          boxes: new Set([box.environmentId, namespaceBox.environmentId]),
+        }).redirect,
+      ).toEqual({ kind: "environment", environment: remote });
+    });
   });
 });
