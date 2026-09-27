@@ -30,7 +30,6 @@ import {
   draftSessionHasInvestedWork,
   type ComposerThreadDraftState,
   type DraftSessionState,
-  type PendingCloudEnvironmentSend,
 } from "../composerDraftStore";
 
 export function shouldNavigateAfterThreadPark(input: {
@@ -1284,19 +1283,20 @@ export interface SidebarDraftRowData {
 }
 
 // A first send stays a draft row until its thread exists, so while it is in
-// flight the row names that step. A failed send is back to unsent.
-const pendingCloudSendStatusLabel: Record<PendingCloudEnvironmentSend["phase"], string> = {
-  creating: "Starting cloud machine…",
-  pairing: "Starting cloud machine…",
-  "loading-project": "Starting cloud machine…",
-  ready: "Sending…",
-  failed: "Unsent draft",
-};
-
-export function sidebarDraftStatusLabel(session: DraftSessionState): string {
-  return session.pendingEnvironmentSend
-    ? pendingCloudSendStatusLabel[session.pendingEnvironmentSend.phase]
-    : "Unsent draft";
+// flight the row names that step. A ready send only goes out from its open
+// ChatView, and a failed turn start leaves the phase at ready, so a parked
+// ready send is still unsent.
+export function sidebarDraftStatusLabel(session: DraftSessionState, isOpen: boolean): string {
+  switch (session.pendingEnvironmentSend?.phase) {
+    case "creating":
+    case "pairing":
+    case "loading-project":
+      return "Starting cloud machine…";
+    case "ready":
+      return isOpen ? "Sending…" : "Unsent draft";
+    default:
+      return "Unsent draft";
+  }
 }
 
 /**

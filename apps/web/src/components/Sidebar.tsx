@@ -736,7 +736,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
         : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
   const accessibility = resolveSidebarRowAccessibility({
     title: preview,
-    statusLabel: sidebarDraftStatusLabel(session),
+    statusLabel: sidebarDraftStatusLabel(session, props.isActive),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });

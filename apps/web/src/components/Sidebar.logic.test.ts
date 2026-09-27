@@ -2627,28 +2627,34 @@ describe("sidebarDraftRows", () => {
     expect(rowsFor(new Set([threadKey]), null)).toEqual([]);
   });
 
-  it("labels an open draft by its live send, not the snapshot taken on entry", () => {
-    const labelsFor = (session: DraftSessionState) =>
+  it("labels a draft row by its live send and whether it is open", () => {
+    const labelFor = (session: DraftSessionState, routeDraftId: string | null) =>
       sidebarDraftRows({
         sessions: { "draft-cloud": session },
-        composers: {},
+        composers: { "draft-cloud": { ...EMPTY_SIDEBAR_COMPOSER, prompt: "fix the flaky test" } },
         scopedProjectKeys: null,
-        routeDraftId: "draft-cloud",
-        frozenRouteRow: {
-          draftId: DraftId.make("draft-cloud"),
-          session: unsent,
-          composer: EMPTY_SIDEBAR_COMPOSER,
-        },
+        routeDraftId,
+        frozenRouteRow:
+          routeDraftId === null
+            ? null
+            : {
+                draftId: DraftId.make("draft-cloud"),
+                session: unsent,
+                composer: EMPTY_SIDEBAR_COMPOSER,
+              },
         knownThreadKeys: new Set(),
-      }).map((row) => sidebarDraftStatusLabel(row.session));
+      }).map((row) => sidebarDraftStatusLabel(row.session, row.draftId === routeDraftId));
+    const inPhase = (phase: PendingCloudEnvironmentSend["phase"]): DraftSessionState => ({
+      ...unsent,
+      pendingEnvironmentSend: { ...readySend, phase },
+    });
 
-    expect(labelsFor(unsent)).toEqual(["Unsent draft"]);
-    expect(labelsFor(cloudSend)).toEqual(["Sending…"]);
-    expect(
-      labelsFor({
-        ...cloudSend,
-        pendingEnvironmentSend: { ...readySend, phase: "creating" },
-      }),
-    ).toEqual(["Starting cloud machine…"]);
+    expect(labelFor(unsent, "draft-cloud")).toEqual(["Unsent draft"]);
+    expect(labelFor(inPhase("creating"), "draft-cloud")).toEqual(["Starting cloud machine…"]);
+    expect(labelFor(inPhase("creating"), null)).toEqual(["Starting cloud machine…"]);
+    expect(labelFor(inPhase("ready"), "draft-cloud")).toEqual(["Sending…"]);
+    // Parked, or left after a failed turn start: the held send is not going out.
+    expect(labelFor(inPhase("ready"), null)).toEqual(["Unsent draft"]);
+    expect(labelFor(inPhase("failed"), "draft-cloud")).toEqual(["Unsent draft"]);
   });
 });
