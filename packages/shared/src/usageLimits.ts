@@ -308,29 +308,25 @@ function providerReading(provider: ServerProvider, fallbackKey: string): LimitRe
  * Accounts whose readings agree window for window, share used and reset
  * alike. Separate subscriptions do not land on the same numbers, so a match
  * means logins filed under different accounts are one subscription, usually a
- * setup token made while signed in to another account. Only readings with some
- * use and a reset on every window count, since untouched accounts all read 0%.
+ * setup token made while signed in to another account. Only windows with a
+ * reset are compared, as an idle window may have none, and a reading counts
+ * only when one of those shows use, since untouched accounts all read 0%.
  * Each group names its suspects once for a person to check; rows never merge.
  * A group that names one account is that account seen before its email was.
  */
 function findIdenticalReadings(readings: readonly LimitReading[]): string[][] {
   const bySignature = new Map<string, Map<string, LimitReading>>();
   for (const reading of readings) {
-    const windows = reading.limits?.windows ?? [];
-    const resets = windows.map(resetMillis);
-    if (
-      !reading.limits ||
-      reading.limits.unavailable ||
-      windows.every((window) => window.usedPercent === 0) ||
-      resets.includes(null)
-    )
-      continue;
+    if (!reading.limits || reading.limits.unavailable) continue;
+    const timed = reading.limits.windows.flatMap((window) => {
+      const at = resetMillis(window);
+      return at === null ? [] : [{ window, at }];
+    });
+    if (timed.every(({ window }) => window.usedPercent === 0)) continue;
     const signature = [
       reading.driver,
-      ...windows
-        .map(
-          (window, index) => `${window.kind}:${window.id}:${window.usedPercent}:${resets[index]}`,
-        )
+      ...timed
+        .map(({ window, at }) => `${window.kind}:${window.id}:${window.usedPercent}:${at}`)
         .sort(),
     ].join("|");
     const group = bySignature.get(signature) ?? new Map<string, LimitReading>();

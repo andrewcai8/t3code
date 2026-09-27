@@ -258,6 +258,52 @@ describe("planManagerAccounts", () => {
     }
   });
 
+  it("records no email and warns when a Claude login and its name disagree, but records one they agree on", async () => {
+    const homedir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-plan-claude-"));
+    try {
+      const login = async (directory: string, email: string) => {
+        await NodeFSP.mkdir(NodePath.join(homedir, directory), { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(homedir, directory, ".claude.json"),
+          JSON.stringify({ oauthAccount: { emailAddress: email } }),
+        );
+      };
+      await login(".claude_mixed", "other@example.com");
+      await login(".claude_home", "Home@example.com");
+      const account = (directory: string, email: string) => ({
+        driver: "claudeAgent",
+        displayName: `Claude · ${email}`,
+        enabled: true,
+        config: { homePath: NodePath.join(homedir, directory) },
+      });
+      const plan = planManagerAccounts({
+        settings: {
+          providerInstances: {
+            claude_mixed: account(".claude_mixed", "mixed@example.com"),
+            claude_home: account(".claude_home", "home@example.com"),
+          },
+        },
+        provisioning: {
+          claudeOAuthTokens: {
+            claude_mixed: "sk-ant-oat01-mixed",
+            claude_home: "sk-ant-oat01-home",
+          },
+        },
+        host: { homedir, platform: "darwin", environment: {} },
+        managerBaseDir,
+      });
+      assert.deepEqual(
+        [plan.providerInstances.claude_mixed?.config, plan.providerInstances.claude_home?.config],
+        [undefined, { accountEmail: "Home@example.com" }],
+      );
+      assert.deepEqual(plan.warnings, [
+        "claude_mixed: its login is other@example.com but its name says mixed@example.com; recording no account email. Rename the instance or sign it in to the right account.",
+      ]);
+    } finally {
+      await NodeFSP.rm(homedir, { recursive: true, force: true });
+    }
+  });
+
   it("treats a built-in driver with no instance entry as the legacy default instance", () => {
     const plan = planManagerAccounts({
       settings: { providers: { codex: { enabled: true }, cursor: {} } },

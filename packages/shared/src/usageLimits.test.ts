@@ -1392,6 +1392,35 @@ describe("identical readings", () => {
     ]);
   });
 
+  it("compares only windows with a reset, flagging a shared week and not fresh or idle accounts", () => {
+    const idleSession = (email: string, weekUsed: number, weekResets = weekly.resetsAt) =>
+      provider({
+        ...instance(email, 0),
+        usageLimits: {
+          checkedAt,
+          windows: [
+            { ...window, usedPercent: 0, resetsAt: undefined },
+            { ...weekly, usedPercent: weekUsed, resetsAt: weekResets },
+          ],
+        },
+      });
+    const fresh = (email: string) =>
+      provider({
+        ...instance(email, 0),
+        usageLimits: { checkedAt, windows: [{ ...window, usedPercent: 0, resetsAt: undefined }] },
+      });
+    expect(
+      identicalProviderReadings([
+        idleSession("a@example.com", 62),
+        idleSession("b@example.com", 62),
+        idleSession("c@example.com", 0),
+        idleSession("d@example.com", 0),
+        fresh("e@example.com"),
+        fresh("f@example.com"),
+      ]),
+    ).toEqual([["Claude · a@example.com", "Claude · b@example.com"]]);
+  });
+
   it("does not flag one account seen by name on the Mac and anonymously on the host", () => {
     const mac = instance("a@example.com", 40);
     const anonymous = { ...mac, auth: { status: "authenticated" as const } };

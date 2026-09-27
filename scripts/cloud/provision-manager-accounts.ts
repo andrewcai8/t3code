@@ -65,6 +65,8 @@ export interface PlanInput {
 export interface ManagerPlan {
   readonly accounts: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
+  /** Things the operator should fix that do not stop an account travelling. */
+  readonly warnings: ReadonlyArray<string>;
   /** Host files to copy, by absolute source and absolute manager destination. */
   readonly files: ReadonlyArray<PlannedFile>;
   readonly settingsPath: string;
@@ -130,21 +132,25 @@ const codexAuthSource = (config: unknown, homedir: string) => {
  * directory otherwise; the instance's "Claude · email" name stands in when no
  * login is on disk. Only the instance's own config dir counts: a
  * `CLAUDE_CONFIG_DIR` in the packing shell, as an agent's shell often has,
- * would file the default account under another one.
+ * would file the default account under another one. When the login and the
+ * name disagree there is no email, since a wrong one merges two accounts.
  */
 const claudeAccountEmail = (instance: HostInstance, host: PlanInput["host"]) => {
   const homePath = trimmed(instance.config, "homePath");
   const configDir = homePath
     ? NodePath.resolve(expandHome(homePath, host.homedir))
     : instance.environment?.find(({ name }) => name === "CLAUDE_CONFIG_DIR")?.value;
+  let login: string | undefined;
   try {
-    const profile = JSON.parse(
+    const email = JSON.parse(
       NodeFS.readFileSync(NodePath.join(configDir || host.homedir, ".claude.json"), "utf8"),
-    );
-    const email = profile?.oauthAccount?.emailAddress;
-    if (typeof email === "string" && email.trim()) return email.trim();
+    )?.oauthAccount?.emailAddress;
+    if (typeof email === "string" && email.trim()) login = email.trim();
   } catch {}
-  return instance.displayName?.match(/([^\s·]+@[^\s·]+)\s*$/)?.[1];
+  const named = instance.displayName?.match(/([^\s·]+@[^\s·]+)\s*$/)?.[1];
+  if (login && named && login.toLowerCase() !== named.toLowerCase())
+    return { conflict: { login, named } } as const;
+  return { email: login ?? named } as const;
 };
 
 /**
@@ -171,6 +177,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
 
   const accounts: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
+  const warnings: Array<string> = [];
   const files: Array<PlannedFile> = [];
   const providerInstances: Record<string, ManagerInstance> = {};
 
@@ -218,7 +225,12 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
           skip("no provisioning.claudeOAuthTokens entry; run `claude setup-token` for it");
           continue;
         }
-        const accountEmail = claudeAccountEmail(instance, input.host);
+        const identity = claudeAccountEmail(instance, input.host);
+        if (identity.conflict)
+          warnings.push(
+            `${id}: its login is ${identity.conflict.login} but its name says ${identity.conflict.named}; recording no account email. Rename the instance or sign it in to the right account.`,
+          );
+        const accountEmail = identity.email;
         providerInstances[id] = {
           driver: "claudeAgent",
           ...named,
@@ -277,6 +289,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
   return {
     accounts,
     skipped,
+    warnings,
     files,
     settingsPath: posix.join(base, "userdata", "settings.json"),
     providerInstances,
