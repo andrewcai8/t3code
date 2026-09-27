@@ -119,6 +119,16 @@ try {
     'env -i HOME=/home/user PATH=/usr/bin:/bin bash -lc \'test "$(bun --version)" = 1.4.0; swift --version; agent --version; test "$(npm config get prefix)" = /home/user/.local\'',
   );
   await record("selected-provider PATH and fresh login shell passed");
+  const cloudClis = await run(
+    "env -i HOME=/home/user PATH=/usr/bin:/bin AWS_ACCESS_KEY_ID=AKIAT3VERIFYEXAMPLE AWS_SECRET_ACCESS_KEY=verify AWS_DEFAULT_REGION=us-west-2 bash -lc 'aws --version && wrangler --version && aws configure list'",
+  );
+  NodeAssert.match(cloudClis, /^aws-cli\/2\.37\.4 /m);
+  NodeAssert.match(cloudClis, /^4\.141\.0$/m);
+  NodeAssert.match(cloudClis, /access_key +: \*+MPLE +: env/);
+  NodeAssert.match(cloudClis, /region +: us-west-2 +: env/);
+  await record("AWS CLI and wrangler on the login PATH read credentials from the environment", {
+    output: cloudClis,
+  });
   await run(
     "test -z \"$(ss -H -ltn 'sport = :3000 or sport = :3001')\"; test ! -d /home/user/work",
   );
