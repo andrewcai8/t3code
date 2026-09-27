@@ -428,6 +428,8 @@ interface Options {
   readonly pairingTokenFile: string;
   readonly provider: "e2b" | "namespace";
   readonly agents: ReadonlyArray<Agent>;
+  /** Pins the box to this account instead of the one with the most usage left. */
+  readonly account: string | null;
   readonly repo: string;
   readonly steps: ReadonlySet<Step>;
   readonly deviceAgent: Agent;
@@ -1012,9 +1014,18 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       );
     const primary = options.agents[0]!;
     const instance = config.value.providers.find(
-      (provider) => provider.driver === primary && provider.enabled,
+      (provider) =>
+        provider.driver === primary &&
+        provider.enabled &&
+        (options.account === null || provider.instanceId === options.account),
     );
-    if (!instance) return yield* fail("provision.ready", `the manager has no ${primary} account`);
+    if (!instance)
+      return yield* fail(
+        "provision.ready",
+        options.account === null
+          ? `the manager has no ${primary} account`
+          : `the manager has no enabled ${primary} account ${options.account}`,
+      );
     // A new-chat draft on the host lists these, so they must match what the box gets.
     for (const agent of options.agents) {
       const skills = config.value.provisionedSkills?.[agent];
@@ -1030,6 +1041,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       requestId,
       provider: options.provider,
       providerInstanceId: instance.instanceId,
+      ...(options.account === null ? {} : { pinAccount: true }),
       agentDriver: ProviderDriverKind.make(primary),
       repository: options.repo,
       ...(scratch ? { branch: scratch } : {}),
@@ -1900,6 +1912,12 @@ const command = Command.make(
     ),
     provider: Flag.Literals("provider", ["e2b", "namespace"]).pipe(Flag.withDefault("e2b")),
     agents: Flag.String("agents").pipe(Flag.withDefault("codex,claudeAgent,cursor")),
+    account: Flag.String("account").pipe(
+      Flag.withDescription(
+        "Pin the box to this account id (the first --agents driver) instead of the one with the most usage left.",
+      ),
+      Flag.optional,
+    ),
     repo: Flag.String("repo").pipe(Flag.withDefault("andrewcai8/t3code")),
     steps: Flag.String("steps").pipe(
       Flag.withDescription(
@@ -1958,6 +1976,7 @@ const command = Command.make(
         pairingTokenFile: path.resolve(flags.pairingTokenFile),
         provider: flags.provider,
         agents,
+        account: Option.getOrNull(flags.account),
         repo: flags.repo,
         steps,
         deviceAgent: flags.deviceAgent,
