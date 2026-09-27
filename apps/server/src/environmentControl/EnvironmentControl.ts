@@ -35,6 +35,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -80,12 +81,16 @@ import {
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
-import { readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
+import { pullLeaseUsage, readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
+import { BoxUsageStore } from "../usage/boxUsage.ts";
+import { CACHE_RETENTION_DAYS } from "../usage/UsageService.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const isProvisionRefused = Schema.is(ProvisionRefused);
 
 const LEASE_REAP_INTERVAL_MS = 5 * 60 * 1000;
+/** Boxes read at once per usage sweep, so a few stuck boxes cannot stall the rest. */
+const USAGE_SYNC_CONCURRENCY = 4;
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -106,6 +111,7 @@ export function createEnvironmentControl(
   driver: CloudDriver,
   leaseRegistry?: ProvisionedLeaseRegistry,
   activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = readLeaseActivity,
+  pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -117,6 +123,14 @@ export function createEnvironmentControl(
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
+  /** The last activity each awake lease settled on, so a finished turn pulls once. */
+  const settledActivity = new Map<string, "busy" | "idle">();
+  // A stopped box's transcripts are unreachable, so its usage is pulled first.
+  // A failed pull never blocks the stop.
+  const pullBeforeStop = async (lease: ProvisionedLease): Promise<void> => {
+    if (lease.state !== "active" || !lease.remoteAccess) return;
+    await pullUsage(lease).catch(() => undefined);
+  };
   const snapshot = async (target: ManagedTarget): Promise<ManagedEnvironment> => {
     let state: ComputeState;
     try {
@@ -208,6 +222,7 @@ export function createEnvironmentControl(
           current.expiresAt > new Date().toISOString()
         )
           continue;
+        await pullBeforeStop(lease);
         const result = await driver.pause({
           sandboxId: current.sandboxId,
           ...(current.namespaceResource ? { namespaceResource: current.namespaceResource } : {}),
@@ -237,8 +252,8 @@ export function createEnvironmentControl(
       leaseOperations.set(input.sandboxId, { action: "dispose" });
       try {
         if (leaseRegistry) {
-          const knownMissing =
-            (await leaseRegistry.findBySandbox(input.sandboxId))?.state === "missing";
+          const before = await leaseRegistry.findBySandbox(input.sandboxId);
+          const knownMissing = before?.state === "missing";
           const release = await leaseRegistry.beginRelease(input);
           if (release === "disposed") return { kind: "disposed" };
           if (release === "missing")
@@ -255,6 +270,7 @@ export function createEnvironmentControl(
             };
           if (release === "started") {
             const lease = await leaseRegistry.findBySandbox(input.sandboxId);
+            if (before) await pullBeforeStop(before);
             try {
               await driver.dispose({
                 sandboxId: input.sandboxId,
@@ -322,6 +338,7 @@ export function createEnvironmentControl(
             reason: "unknown",
             message: "Another chat on this machine is still working.",
           };
+        await pullBeforeStop(lease);
         const result = await driver.pause({
           sandboxId: input.sandboxId,
           ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
@@ -489,6 +506,33 @@ export function createEnvironmentControl(
       }
     },
     reapExpiredLeases,
+    /**
+     * Pulls each awake box's usage when its agent settles from busy to idle,
+     * or the first time it is seen idle. A failed pull retries next sweep.
+     */
+    syncLeaseUsage: async (): Promise<void> => {
+      if (!leaseRegistry) return;
+      const awake = await leaseRegistry.awake();
+      const awakeIds = new Set(awake.map((lease) => lease.leaseId));
+      for (const leaseId of settledActivity.keys())
+        if (!awakeIds.has(leaseId)) settledActivity.delete(leaseId);
+      const queue = [...awake];
+      const sync = async () => {
+        for (let lease = queue.shift(); lease; lease = queue.shift()) {
+          const current = await activity(lease);
+          if (current === "busy") settledActivity.set(lease.leaseId, "busy");
+          else if (current === "idle" && settledActivity.get(lease.leaseId) !== "idle") {
+            try {
+              await pullUsage(lease);
+              settledActivity.set(lease.leaseId, "idle");
+            } catch {
+              // Left unsettled so the next sweep pulls again.
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: USAGE_SYNC_CONCURRENCY }, sync));
+    },
   };
 }
 
@@ -554,6 +598,7 @@ export const layer = Layer.effect(
     const { stateDir, localAgentRuns } = yield* ServerConfig.ServerConfig;
     const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
+    const boxUsage = yield* BoxUsageStore;
     const manifests = makeProvisionPreparationStore(stateDir);
     const legacyLeases = yield* Effect.tryPromise({
       try: () =>
@@ -603,6 +648,17 @@ export const layer = Layer.effect(
     const logE2bResumeRetry = (retry: E2bResumeRetry) =>
       void runLogged(
         Effect.logWarning("E2B could not resume a cloud workspace yet; retrying", retry),
+      );
+    const pullUsage = (lease: ProvisionedLease) =>
+      runLogged(
+        pullLeaseUsage(boxUsage, lease).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("cloud box usage could not be pulled", {
+              leaseId: lease.leaseId,
+              cause,
+            }),
+          ),
+        ),
       );
     const logRefresh = (leaseId: string, refreshError: string | null | undefined) =>
       refreshError
@@ -689,6 +745,8 @@ export const layer = Layer.effect(
               },
             },
             leaseRegistry,
+            readLeaseActivity,
+            pullUsage,
           );
           return { ...control, config };
         })();
@@ -1023,6 +1081,11 @@ export const layer = Layer.effect(
     const cancelProvision = Effect.fn("EnvironmentControl.cancelProvision")(function* (
       requestId: ProvisionRequestId,
     ): Effect.fn.Return<EnvironmentProvisionDisposeResult, EnvironmentControlError> {
+      const lease = yield* Effect.promise(() =>
+        leaseRegistry.findById(requestId).catch(() => null),
+      );
+      if (lease?.state === "active" && lease.remoteAccess)
+        yield* Effect.promise(() => pullUsage(lease).catch(() => undefined));
       const operation = yield* provisioning.cancel(requestId).pipe(
         Effect.mapError(
           () =>
@@ -1050,7 +1113,8 @@ export const layer = Layer.effect(
     yield* Effect.gen(function* () {
       const service = yield* Effect.promise(resolve);
       if (!service) return;
-      yield* Effect.gen(function* () {
+      const every = Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS));
+      const reap = Effect.gen(function* () {
         // A lease is only registered once its provision reached ready, so an
         // expired heartbeat means a finished machine nobody is watching. Pause
         // it and leave it reconnectable. A provision that never reached ready
@@ -1059,7 +1123,20 @@ export const layer = Layer.effect(
         // A crash between issuing an allocation and recording it leaves a
         // resource nobody else will look for.
         yield* provisioning.reconcile.pipe(Effect.ignore);
-      }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS))));
+      }).pipe(Effect.repeat(every));
+      const collectUsage = Effect.gen(function* () {
+        yield* Effect.tryPromise(() => service.syncLeaseUsage()).pipe(Effect.ignore);
+        const now = yield* Clock.currentTimeMillis;
+        yield* boxUsage
+          .prune(
+            DateTime.formatIso(
+              DateTime.makeUnsafe(now - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000),
+            ),
+          )
+          .pipe(Effect.ignore);
+      }).pipe(Effect.repeat(every));
+      // Separate loops, so boxes slow to report usage never delay a pause.
+      yield* Effect.all([reap, collectUsage], { concurrency: 2, discard: true });
     }).pipe(Effect.forkScoped);
     return {
       namespaceProxyOrigin: (leaseId) =>
@@ -1195,5 +1272,6 @@ export const layer = Layer.effect(
   }),
 ).pipe(
   Layer.provide(ProvisionOperationStore.layer),
+  Layer.provide(BoxUsageStore.layer),
   Layer.provide(ProjectionThreadSessionRepositoryLive),
 );

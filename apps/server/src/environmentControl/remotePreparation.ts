@@ -385,6 +385,8 @@ def prepare(spec):
         env.update({
             'HOME': str(home),
             'T3CODE_HOME': str(t3home),
+            # Boxes cloned from one template share a hostname, so usage names each box by its request.
+            'T3CODE_USAGE_HOST_ID': spec['requestId'],
             'NPM_CONFIG_PREFIX': str(home / '.local'),
             'PATH': str(local_bin) + os.pathsep + base_path,
             'GIT_TERMINAL_PROMPT': '0',

@@ -120,6 +120,11 @@ function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
   ].join(" ");
 }
 
+/** The `sourcePath` a source's buckets carry. */
+export function usageSourcePath(source: UsageSource): string {
+  return source.sourcePath ?? source.fingerprint.resolvedHomePath;
+}
+
 function bucketsForSource(summary: UsageSummary, source: UsageSource): readonly UsageBucket[] {
   const providerSources = summary.sources.filter(
     (entry) => entry.fingerprint.provider === source.fingerprint.provider,
@@ -127,7 +132,7 @@ function bucketsForSource(summary: UsageSummary, source: UsageSource): readonly 
   return summary.buckets.filter(
     (bucket) =>
       bucket.provider === source.fingerprint.provider &&
-      (bucket.sourcePath === source.fingerprint.resolvedHomePath ||
+      (bucket.sourcePath === usageSourcePath(source) ||
         (bucket.sourcePath === undefined && providerSources.length === 1)),
   );
 }
@@ -251,7 +256,7 @@ function ownedContribution(
     if (ownerByFingerprint.get(key) === environment.environmentId) {
       const provider = source.fingerprint.provider;
       ownedProviders.add(provider);
-      ownedSources.add(`${provider}\u0000${source.fingerprint.resolvedHomePath}`);
+      ownedSources.add(`${provider}\u0000${usageSourcePath(source)}`);
       // Distinct within a directory. Summing per-bucket session counts instead
       // would count a session once per day and model it spans.
       sessionsByProvider.set(

@@ -24,7 +24,7 @@ import { cacheSavingsUsd, priceUsage, type RateTable } from "./usagePricing.ts";
  * `en-CA` yields ISO-ordered parts, which is why it is used here rather than
  * assembling the day from `Date` getters (those are host-local only).
  */
-function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
+export function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
   let format: Intl.DateTimeFormat;
   try {
     format = new Intl.DateTimeFormat("en-CA", {
@@ -219,14 +219,7 @@ export class UsageAggregator {
         sessions: bucket.sessions.size,
       });
     }
-    // Stable ordering keeps payloads diffable and snapshot tests meaningful.
-    buckets.sort(
-      (a, b) =>
-        a.day.localeCompare(b.day) ||
-        (a.hourStart ?? "").localeCompare(b.hourStart ?? "") ||
-        a.provider.localeCompare(b.provider) ||
-        a.model.localeCompare(b.model),
-    );
+    buckets.sort(compareUsageBuckets);
 
     return {
       buckets,
@@ -234,6 +227,16 @@ export class UsageAggregator {
       outOfWindow: this.#outOfWindow,
     };
   }
+}
+
+/** Stable ordering keeps payloads diffable and snapshot tests meaningful. */
+export function compareUsageBuckets(a: UsageBucket, b: UsageBucket): number {
+  return (
+    a.day.localeCompare(b.day) ||
+    (a.hourStart ?? "").localeCompare(b.hourStart ?? "") ||
+    a.provider.localeCompare(b.provider) ||
+    a.model.localeCompare(b.model)
+  );
 }
 
 const encodeCodexIdentity = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));

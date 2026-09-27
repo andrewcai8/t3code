@@ -65,6 +65,7 @@ if (args[0] === 'auth') {
   process.exit(0);
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
+  fs.writeFileSync(path.join(root, 'usage-host-id'), process.env.T3CODE_USAGE_HOST_ID ?? '');
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url === '/.well-known/t3/environment') {
@@ -481,6 +482,15 @@ describe("remote preparation subprocess", () => {
     pids.add(ready.serverPid);
     expect(ready.sourceRevision).toBe(input.repository?.revision);
     expect(await NodeFSP.readFile(NodePath.join(input.root, "started"), "utf8")).toBe("start\n");
+  });
+
+  it("names the guest's usage after its provision request", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, input);
+    pids.add(ready.serverPid);
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "usage-host-id"), "utf8")).toBe(
+      "repair-1",
+    );
   });
 
   it("rejects a responding server with a different environment identity", async () => {
