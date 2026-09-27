@@ -36,6 +36,7 @@ const input: AutomationInput = {
   prompt: "Triage new issues.",
   agentDriver: ProviderDriverKind.make("claudeAgent"),
   account: null,
+  model: null,
   provider: "namespace",
   schedule: { cron: "0 * * * *", timeZone: "UTC" },
   webhook: true,
@@ -268,6 +269,20 @@ it.effect("moves the schedule's floor only when the schedule changes, not on oth
         "2026-09-26T10:00:00.000Z",
         "2026-09-26T10:45:00.000Z",
       ]);
+    }),
+  ),
+);
+
+it.effect("keeps the chosen model across a reload and clears it back to the default", () =>
+  scoped(
+    Effect.gen(function* () {
+      yield* at("2026-09-26T08:00:00.000Z");
+      const { automations } = yield* service();
+      const { automation } = yield* automations.create({ ...input, model: "claude-opus-4-6" });
+      expect((yield* automations.list).map((listed) => listed.model)).toEqual(["claude-opus-4-6"]);
+
+      yield* automations.update(automation.id, { ...input, model: null });
+      expect((yield* automations.list).map((listed) => listed.model)).toEqual([null]);
     }),
   ),
 );

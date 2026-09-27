@@ -38,6 +38,7 @@ const automation: Automation = {
   prompt: "Bump dependencies and open a PR.",
   agentDriver: ProviderDriverKind.make("codex"),
   account: ProviderInstanceId.make("codex_work"),
+  model: null,
   provider: "e2b",
   schedule: null,
   webhook: false,
@@ -300,6 +301,35 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
     ),
   );
 
+  it.effect("starts the chat on the automation's chosen model", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* AutomationStore;
+        const chosen = { ...automation, model: "gpt-6-mini" };
+        yield* store.save({
+          automation: chosen,
+          webhookSecretHash: null,
+          scheduleSince: chosen.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const requests: Array<ChildRequest> = [];
+        const runner = yield* makeAutomationRunner(yield* fakeManager([], []));
+
+        yield* runner(chosen, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild(requests)),
+        );
+
+        expect(
+          requests.map(({ body }) => (body as { modelSelection?: unknown } | null)?.modelSelection),
+        ).toEqual([
+          undefined,
+          { instanceId: "codex", model: "gpt-6-mini" },
+          { instanceId: "codex", model: "gpt-6-mini" },
+        ]);
+      }),
+    ),
+  );
+
   it.effect("resumes a run a restart left in starting without provisioning again", () =>
     withStore(
       Effect.gen(function* () {
@@ -513,6 +543,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           branch: "dev",
           account: null,
           agentDriver: ProviderDriverKind.make("cursor"),
+          model: "composer-2",
         };
         yield* store.save({
           automation: edited,

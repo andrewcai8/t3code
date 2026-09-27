@@ -26,6 +26,7 @@ describe("automationInputFromDraft", () => {
         prompt: "Triage new issues.",
         agentDriver: "codex",
         account: null,
+        model: null,
         provider: "e2b",
         schedule: null,
         webhook: false,

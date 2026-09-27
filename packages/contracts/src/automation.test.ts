@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { AutomationSchedule } from "./automation.ts";
+import { AutomationInput, AutomationSchedule } from "./automation.ts";
 
 const decode = Schema.decodeUnknownExit(AutomationSchedule);
 
@@ -25,5 +25,23 @@ describe("AutomationSchedule", () => {
         "* 9 * * *",
       ].map(verdict),
     ).toEqual(["Success", "Failure", "Success", "Success", "Failure", "Failure"]);
+  });
+});
+
+describe("AutomationInput", () => {
+  it("reads an input from a client that predates the model pick as the default model", () => {
+    const decoded = Schema.decodeUnknownSync(AutomationInput)({
+      name: "Nightly",
+      repository: "andrewcai8/t3code",
+      branch: null,
+      prompt: "Bump dependencies.",
+      agentDriver: "codex",
+      account: null,
+      provider: "e2b",
+      schedule: null,
+      webhook: false,
+      enabled: true,
+    });
+    expect(decoded.model).toBe(null);
   });
 });

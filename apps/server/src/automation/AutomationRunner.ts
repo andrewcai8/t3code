@@ -167,7 +167,11 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
     const access = yield* ports.remoteAccess(run.requestId);
     if (!access)
       return yield* Effect.fail(new RunFailed("The host has no access to this environment."));
-    const model = DEFAULT_MODEL_BY_PROVIDER[agentDriver];
+    // An edit mid-run may have switched agents, and the chosen model belongs to the new one.
+    const model =
+      automation.agentDriver === agentDriver && automation.model !== null
+        ? automation.model
+        : DEFAULT_MODEL_BY_PROVIDER[agentDriver];
     if (!model) return yield* Effect.fail(new RunFailed(`${agentDriver} has no default model.`));
     const client = yield* child(access);
     let projectId: ProjectId | undefined;
