@@ -133,7 +133,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
   const [searchText, setSearchText] = useState("");
-  const { projectScopes, selectedEnvironmentId, setProject } = useNewTaskFlow();
+  const { projectScopes, selectedEnvironmentId, setProject, boxes } = useNewTaskFlow();
   const { state: catalogState } = useWorkspaceState();
   const navigation = useNavigation();
   const isFocused = useIsFocused();
@@ -184,13 +184,14 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
       return;
     }
 
-    // A host that runs no agents refuses a draft on itself; start a cloud machine for the
-    // project instead. Shared content stays on the draft path, which owns its reservation.
-    const start = resolveNewThreadStart(project, serverConfigs.get(project.environmentId));
+    // A host that runs no agents refuses a draft on itself, and a new task never joins another
+    // chat's box; start a cloud machine for the project instead. Shared content stays on the
+    // draft path, which owns its reservation.
+    const start = resolveNewThreadStart({ project, serverConfigs, boxes });
     if (start.kind === "cloud-machine" && !incomingShare) {
       navigation.dispatch(
         StackActions.push("NewTaskCloudMachine", {
-          environmentId: project.environmentId,
+          environmentId: start.managerId,
           repository: start.repository,
         }),
       );
@@ -334,6 +335,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 const selectionTarget = getProjectScopeSelectionTarget(
                   scope,
                   selectedEnvironmentId,
+                  boxes,
                 );
                 if (Platform.OS === "android") {
                   return (

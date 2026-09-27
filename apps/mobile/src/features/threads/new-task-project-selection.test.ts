@@ -1,4 +1,4 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type ServerConfig } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -10,6 +10,7 @@ import {
   newTaskEnvironments,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
+  resolveNewTaskEnvironmentId,
   resolveNewThreadStart,
 } from "./new-task-project-selection";
 
@@ -60,16 +61,27 @@ function makeScope(projects: ReadonlyArray<EnvironmentProject>): HomeProjectScop
 describe("getProjectScopeSelectionTarget", () => {
   it("keeps the current environment when it hosts the selected logical project", () => {
     const projects = [makeProject("t3code-mac", "mac"), makeProject("t3code-server", "server")];
-    expect(getProjectScopeSelectionTarget(makeScope(projects), EnvironmentId.make("server"))).toBe(
-      projects[1],
-    );
+    expect(
+      getProjectScopeSelectionTarget(makeScope(projects), EnvironmentId.make("server"), new Map()),
+    ).toBe(projects[1]);
+  });
+
+  it("opens a member on no other chat's box when the representative is one", () => {
+    const projects = [makeProject("t3code-box", "box"), makeProject("t3code-mac", "mac")];
+    expect(
+      getProjectScopeSelectionTarget(
+        makeScope(projects),
+        EnvironmentId.make("other"),
+        new Map([[EnvironmentId.make("box"), EnvironmentId.make("host")]]),
+      ),
+    ).toBe(projects[1]);
   });
 
   it("falls back to the representative when the current environment does not host the project", () => {
     const projects = [makeProject("t3code-mac", "mac"), makeProject("t3code-server", "server")];
-    expect(getProjectScopeSelectionTarget(makeScope(projects), EnvironmentId.make("other"))).toBe(
-      projects[0],
-    );
+    expect(
+      getProjectScopeSelectionTarget(makeScope(projects), EnvironmentId.make("other"), new Map()),
+    ).toBe(projects[0]);
   });
 });
 
@@ -196,27 +208,39 @@ describe("resolveNewThreadStart", () => {
     environmentControl: true,
     provisionProviders: ["e2b", "namespace"] as const,
   };
+  const start = (
+    subject: EnvironmentProject,
+    hostConfig:
+      | Pick<ServerConfig, "localAgentRuns" | "environmentControl" | "provisionProviders">
+      | undefined,
+  ) =>
+    resolveNewThreadStart({
+      project: subject,
+      serverConfigs: new Map(hostConfig ? [[EnvironmentId.make("host"), hostConfig]] : []),
+      boxes: new Map(),
+    });
 
   it("starts a cloud machine from a host that runs no agents but can provision", () => {
-    expect(resolveNewThreadStart(project, cloudOnlyHost)).toEqual({
+    expect(start(project, cloudOnlyHost)).toEqual({
       kind: "cloud-machine",
+      managerId: EnvironmentId.make("host"),
       repository: "andrewcai8/t3code",
     });
   });
 
   it("opens a draft on a host that runs agents, or predates the switch", () => {
-    expect(resolveNewThreadStart(project, { ...cloudOnlyHost, localAgentRuns: true })).toEqual({
+    expect(start(project, { ...cloudOnlyHost, localAgentRuns: true })).toEqual({
       kind: "draft",
     });
-    expect(resolveNewThreadStart(project, { environmentControl: true })).toEqual({ kind: "draft" });
-    expect(resolveNewThreadStart(project, null)).toEqual({ kind: "draft" });
+    expect(start(project, { environmentControl: true })).toEqual({ kind: "draft" });
+    expect(start(project, undefined)).toEqual({ kind: "draft" });
   });
 
   it("opens a draft when the host cannot provision or there is nothing to clone", () => {
-    expect(resolveNewThreadStart(project, { ...cloudOnlyHost, provisionProviders: [] })).toEqual({
+    expect(start(project, { ...cloudOnlyHost, provisionProviders: [] })).toEqual({
       kind: "draft",
     });
-    expect(resolveNewThreadStart(makeProject("scratch", "host"), cloudOnlyHost)).toEqual({
+    expect(start(makeProject("scratch", "host"), cloudOnlyHost)).toEqual({
       kind: "draft",
     });
   });
@@ -224,45 +248,134 @@ describe("resolveNewThreadStart", () => {
 
 describe("new task environments", () => {
   const repositoryKey = "github.com/andrewcai8/t3code";
+  const host = EnvironmentId.make("host");
+  const box = EnvironmentId.make("box");
+  const namespaceBox = EnvironmentId.make("namespace-box");
+  const laptop = EnvironmentId.make("laptop");
+  const server = EnvironmentId.make("server");
+  const onRepo = (id: string, environmentId: string) => {
+    const project = makeProject(id, environmentId, { repositoryKey });
+    return {
+      ...project,
+      repositoryIdentity: { ...project.repositoryIdentity!, owner: "andrewcai8", name: "t3code" },
+    };
+  };
   // Ordered as a sort by recent activity would put them: the boxes were touched last.
-  const projects = [
-    makeProject("on-box", "box", { repositoryKey }),
-    makeProject("on-host", "host", { repositoryKey }),
-    makeProject("on-namespace-box", "namespace-box", { repositoryKey }),
-    makeProject("on-laptop", "laptop", { repositoryKey }),
-    makeProject("on-server", "server", { repositoryKey }),
-  ];
+  const onBox = onRepo("on-box", "box");
+  const onHost = onRepo("on-host", "host");
+  const onNamespaceBox = onRepo("on-namespace-box", "namespace-box");
+  const onLaptop = onRepo("on-laptop", "laptop");
+  const onServer = onRepo("on-server", "server");
+  const everywhere = [onBox, onHost, onNamespaceBox, onLaptop, onServer];
+  const hostOnly = [onBox, onHost, onNamespaceBox];
   const savedConnectionsById = {
-    [EnvironmentId.make("box")]: { environmentLabel: "e2b-sandbox.local" },
-    [EnvironmentId.make("host")]: { environmentLabel: "andrew.megpt.app" },
-    [EnvironmentId.make("namespace-box")]: { environmentLabel: "nsc-mac" },
-    [EnvironmentId.make("laptop")]: { environmentLabel: "Laptop" },
-    [EnvironmentId.make("server")]: { environmentLabel: "Build server" },
+    [box]: { environmentLabel: "e2b-sandbox.local" },
+    [host]: { environmentLabel: "andrew.megpt.app" },
+    [namespaceBox]: { environmentLabel: "nsc-mac" },
+    [laptop]: { environmentLabel: "Laptop" },
+    [server]: { environmentLabel: "Build server" },
+  };
+  const cloudOnlyHost = {
+    localAgentRuns: false,
+    environmentControl: true,
+    provisionProviders: ["e2b", "namespace"] as const,
   };
   const serverConfigs = new Map([
-    [EnvironmentId.make("host"), { localAgentRuns: false }],
-    [EnvironmentId.make("laptop"), { localAgentRuns: true }],
+    [host, cloudOnlyHost],
+    [laptop, { localAgentRuns: true }],
   ]);
-  const boxes = new Set([EnvironmentId.make("box"), EnvironmentId.make("namespace-box")]);
+  const boxes = new Map([
+    [box, host],
+    [namespaceBox, host],
+  ]);
 
   it("offers servers that run agents, never a running box or a host that runs none", () => {
     expect(
       newTaskEnvironments({
-        projects,
-        selectedProject: projects[0]!,
+        projects: everywhere,
+        selectedProject: onBox,
         savedConnectionsById,
         serverConfigs,
         boxes,
       }),
     ).toEqual([
-      { environmentId: EnvironmentId.make("laptop"), environmentLabel: "Laptop" },
-      { environmentId: EnvironmentId.make("server"), environmentLabel: "Build server" },
+      { environmentId: laptop, environmentLabel: "Laptop" },
+      { environmentId: server, environmentLabel: "Build server" },
     ]);
   });
 
   it("starts on the first server that runs agents rather than a box", () => {
-    expect(defaultNewTaskEnvironmentId({ projects, serverConfigs, boxes })).toBe(
-      EnvironmentId.make("laptop"),
+    expect(defaultNewTaskEnvironmentId({ projects: everywhere, serverConfigs, boxes })).toBe(
+      laptop,
     );
+  });
+
+  it("starts on the host, not a box, when only the host and boxes hold the project", () => {
+    expect(defaultNewTaskEnvironmentId({ projects: hostOnly, serverConfigs, boxes })).toBe(host);
+    // From there the host starts a fresh box instead of a draft on itself.
+    expect(resolveNewThreadStart({ project: onHost, serverConfigs, boxes })).toEqual({
+      kind: "cloud-machine",
+      managerId: host,
+      repository: "andrewcai8/t3code",
+    });
+  });
+
+  it("ignores a pick of another chat's box unless a queued task being edited sits there", () => {
+    const picked = (pinned: boolean) =>
+      resolveNewTaskEnvironmentId({
+        picked: box,
+        pinned,
+        projects: hostOnly,
+        serverConfigs,
+        boxes,
+      });
+    expect(picked(false)).toBe(host);
+    expect(picked(true)).toBe(box);
+    expect(
+      resolveNewTaskEnvironmentId({
+        picked: box,
+        pinned: false,
+        projects: hostOnly,
+        serverConfigs,
+        boxes: new Map([[namespaceBox, host]]),
+      }),
+    ).toBe(box);
+  });
+
+  describe("a draft on another chat's box", () => {
+    const leave = (input: {
+      readonly hostConfig: typeof cloudOnlyHost | { readonly localAgentRuns: false };
+      readonly environments: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+    }) =>
+      resolveNewThreadStart({
+        project: onBox,
+        serverConfigs: new Map([
+          [host, input.hostConfig],
+          [laptop, { localAgentRuns: true }],
+        ]),
+        boxes,
+        environments: input.environments,
+      });
+
+    it("starts a fresh box on the box's host", () => {
+      expect(
+        leave({ hostConfig: cloudOnlyHost, environments: [{ environmentId: laptop }] }),
+      ).toEqual({ kind: "cloud-machine", managerId: host, repository: "andrewcai8/t3code" });
+    });
+
+    it("moves to a server that runs agents when the host starts no boxes", () => {
+      expect(
+        leave({
+          hostConfig: { localAgentRuns: false },
+          environments: [{ environmentId: laptop }],
+        }),
+      ).toEqual({ kind: "environment", environmentId: laptop });
+    });
+
+    it("stays when there is nowhere else to go", () => {
+      expect(leave({ hostConfig: { localAgentRuns: false }, environments: [] })).toEqual({
+        kind: "draft",
+      });
+    });
   });
 });

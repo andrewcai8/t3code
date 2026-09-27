@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import { offeredProvisionProviders, type ProvisionedBox } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
 import { useMemo } from "react";
 
@@ -12,7 +12,7 @@ import { serverEnvironment } from "../../state/server";
  */
 export function useProvisionedBoxes(
   serverConfigs: ReadonlyMap<EnvironmentId, ServerConfig>,
-): ReadonlySet<EnvironmentId> {
+): ReadonlyArray<ProvisionedBox> {
   const hostIds = useMemo(
     () =>
       [...serverConfigs].flatMap(([environmentId, config]) =>
@@ -20,6 +20,5 @@ export function useProvisionedBoxes(
       ),
     [serverConfigs],
   );
-  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
-  return useMemo(() => new Set(boxes.map((box) => box.environmentId)), [boxes]);
+  return useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
 }

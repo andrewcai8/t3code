@@ -661,6 +661,12 @@ export function NewTaskDraftScreen(props: {
         if (appliedInitialProjectKeyRef.current === directProjectKey) {
           return;
         }
+        if (flow.boxes.has(directProject.environmentId)) {
+          // Another chat's box: point the flow at it once and let the flow leave it.
+          appliedInitialProjectKeyRef.current = directProjectKey;
+          setProject(directProject);
+          return;
+        }
         if (props.initialProjectRef?.branch) {
           if (
             selectedProject?.environmentId !== directProject.environmentId ||
@@ -714,6 +720,7 @@ export function NewTaskDraftScreen(props: {
   }, [
     projectScopes,
     projects,
+    flow.boxes,
     flow.draftKey,
     props.initialProjectRef,
     props.incomingShareId,
@@ -724,6 +731,19 @@ export function NewTaskDraftScreen(props: {
     selectedProjectKey,
     setProject,
   ]);
+
+  // Shared content stays on the draft path, which owns its reservation.
+  const boxCloudMachine =
+    flow.boxStart?.kind === "cloud-machine" && !props.incomingShareId ? flow.boxStart : null;
+  useEffect(() => {
+    if (!boxCloudMachine) return;
+    navigation.dispatch(
+      StackActions.replace("NewTaskCloudMachine", {
+        environmentId: String(boxCloudMachine.managerId),
+        repository: boxCloudMachine.repository,
+      }),
+    );
+  }, [boxCloudMachine, navigation]);
 
   useEffect(() => {
     if (!selectedProject) {

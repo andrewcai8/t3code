@@ -11,17 +11,18 @@ import {
 } from "../../state/use-remote-environment-registry";
 import { NewCloudMachineForm } from "../connection/NewCloudMachineSheet";
 import { useCreateCloudMachine } from "../connection/useCreateCloudMachine";
+import { useNewTaskFlow } from "./new-task-flow-provider";
 
 type NewTaskCloudMachineRouteParams = {
-  /** The host that starts the machine; it holds the project the thread was asked for. */
+  /** The host that starts the machine: the project's own host, or the host of the box it is on. */
   readonly environmentId: string;
   readonly repository: string;
   readonly branch?: string | null;
 };
 
 /**
- * A new thread on a host that runs no agents: start a cloud machine cloned from the project's
- * repository, then open the draft on the machine's checkout.
+ * A new thread on a host that runs no agents, or on another chat's box: start a cloud machine
+ * cloned from the project's repository, then open the draft on the machine's checkout.
  */
 export function NewTaskCloudMachineRouteScreen({
   route,
@@ -50,6 +51,7 @@ function NewTaskCloudMachine({
   const insets = useSafeAreaInsets();
   const manager = useSavedRemoteConnection(managerId);
   const { connectedEnvironments } = useRemoteConnectionStatus();
+  const { adoptOwnBox } = useNewTaskFlow();
   // Leaving is allowed while the machine starts: it keeps starting and appears under
   // Connections, but nothing opens a draft for a screen the user left or moved past.
   const mounted = useRef(true);
@@ -64,6 +66,7 @@ function NewTaskCloudMachine({
       // A screen pushed over this one (such as another project's draft opened from the
       // sidebar) is where the user is now; resetting the sheet would throw it away.
       if (!mounted.current || !navigation.isFocused()) return;
+      adoptOwnBox(projectRef.environmentId);
       const title = readProject(projectRef)?.title;
       navigation.dispatch(
         CommonActions.reset({
@@ -85,7 +88,7 @@ function NewTaskCloudMachine({
         }),
       );
     },
-    [branch, navigation],
+    [adoptOwnBox, branch, navigation],
   );
   const creation = useCreateCloudMachine({ managerId, connectedEnvironments, onCreated });
 
