@@ -24,8 +24,10 @@ import {
   type UsageProviderKind,
   type UsageSource,
   type UsagePricing,
+  type UsageHistoryInput,
   type UsageSummary,
   type UsageSummaryInput,
+  UsageDay,
   UsageReadError,
 } from "@t3tools/contracts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -55,6 +57,7 @@ import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { readAntigravityUsage } from "./antigravityUsageReader.ts";
 import { makeCursorAccountHistory, type CursorCredentialSource } from "./cursorAccountHistory.ts";
 import { addTranscript, UsageAggregator } from "./usageAggregation.ts";
+import { BoxUsageStore, boxUsageListSince, foldBoxUsage, historyForHost } from "./boxUsage.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -84,10 +87,14 @@ const RATES_REFRESH_FLOOR_MS = 60 * 1000;
  * last write lands just before local midnight on the window's first day.
  */
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
-const MAX_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const MAX_HOURLY_WINDOW_MS = DAY_MS;
 
 /** Longest window the UI offers, plus slack. Older entries are pruned. */
-const CACHE_RETENTION_DAYS = 90;
+export const CACHE_RETENTION_DAYS = 90;
+
+const isoAt = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
 const decodeCodexSettings = Schema.decodeOption(CodexSettings);
 const decodeClaudeSettings = Schema.decodeOption(ClaudeSettings);
@@ -117,6 +124,11 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    /**
+     * This environment's hourly UTC usage since `sinceTime`, for a host that
+     * keeps a cloud box's usage. Excludes Cursor, which the host reads itself.
+     */
+    readonly readHistory: (input: UsageHistoryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     /** Refetches the rate table ahead of its TTL. See `ensureRates`. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
   }
@@ -129,22 +141,32 @@ const EMPTY_PRICING: UsagePricing = {
   knownModels: 0,
 };
 
+const emptySummary = (input: Pick<UsageSummaryInput, "timeZone" | "sinceDay" | "untilDay">) =>
+  ({
+    contractVersion: USAGE_CONTRACT_VERSION,
+    readAt: "1970-01-01T00:00:00.000Z",
+    timeZone: input.timeZone,
+    sinceDay: input.sinceDay,
+    untilDay: input.untilDay,
+    buckets: [],
+    sources: [],
+    pricing: EMPTY_PRICING,
+    scanDurationMs: 0,
+  }) satisfies UsageSummary;
+
 /** Empty summary, for suites that only need the RPC surface to resolve. */
 export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
-    readSummary: (input) =>
-      Effect.succeed({
-        contractVersion: USAGE_CONTRACT_VERSION,
-        readAt: "1970-01-01T00:00:00.000Z",
-        timeZone: input.timeZone,
-        sinceDay: input.sinceDay,
-        untilDay: input.untilDay,
-        buckets: [],
-        sources: [],
-        pricing: EMPTY_PRICING,
-        scanDurationMs: 0,
-      }),
+    readSummary: (input) => Effect.succeed(emptySummary(input)),
+    readHistory: () =>
+      Effect.succeed(
+        emptySummary({
+          timeZone: "UTC",
+          sinceDay: UsageDay.make("1970-01-01"),
+          untilDay: UsageDay.make("1970-01-01"),
+        }),
+      ),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
@@ -159,6 +181,7 @@ export const make = Effect.gen(function* () {
   const hostEnvironment = yield* HostProcessEnvironment;
   const readCursorHistory = makeCursorAccountHistory();
   const platform = yield* HostProcessPlatform;
+  const boxUsage = yield* BoxUsageStore;
 
   const fileCache: ScanCache = new Map();
   const sourceCache = new Map<string, typeof CachedSource.Type>();
@@ -679,6 +702,7 @@ export const make = Effect.gen(function* () {
   const scanSummary = Effect.fn("UsageService.scanSummary")(function* (
     input: UsageSummaryInput,
     settings: ServerSettingsValue,
+    maxHourlyWindowMs: number,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -702,7 +726,7 @@ export const make = Effect.gen(function* () {
       const sinceTimeMs = DateTime.toEpochMillis(sinceTime.value);
       const untilTimeMs = DateTime.toEpochMillis(untilTime.value);
       const durationMs = untilTimeMs - sinceTimeMs;
-      if (durationMs <= 0 || durationMs > MAX_HOURLY_WINDOW_MS) {
+      if (durationMs <= 0 || durationMs > maxHourlyWindowMs) {
         return yield* new UsageReadError({
           reason: "invalidWindow",
           detail: "Hourly usage window must be greater than zero and at most 24 hours",
@@ -725,7 +749,7 @@ export const make = Effect.gen(function* () {
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
 
-    const retentionCutoffMs = startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const retentionCutoffMs = startedAtMs - CACHE_RETENTION_DAYS * DAY_MS;
 
     // Pricing only matters once records are aggregated, so the rate table
     // loads while transcripts stream instead of gating them: a cold rates
@@ -828,8 +852,13 @@ export const make = Effect.gen(function* () {
    */
   const inflightScans = new Map<string, Deferred.Deferred<UsageSummary, UsageReadError>>();
 
-  const scanKey = (input: UsageSummaryInput, settings: ServerSettingsValue): string =>
+  const scanKey = (
+    input: UsageSummaryInput,
+    settings: ServerSettingsValue,
+    maxHourlyWindowMs: number,
+  ): string =>
     JSON.stringify([
+      maxHourlyWindowMs,
       input.timeZone,
       input.sinceDay,
       input.untilDay,
@@ -841,9 +870,12 @@ export const make = Effect.gen(function* () {
       settings.providerInstances,
     ]);
 
-  const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
+  const sharedScan = Effect.fnUntraced(function* (
+    input: UsageSummaryInput,
+    maxHourlyWindowMs: number,
+  ) {
     const settings = yield* readSettings;
-    const key = scanKey(input, settings);
+    const key = scanKey(input, settings, maxHourlyWindowMs);
     const deferred = yield* Effect.uninterruptible(
       Effect.gen(function* () {
         const existing = inflightScans.get(key);
@@ -855,7 +887,7 @@ export const make = Effect.gen(function* () {
         inflightScans.set(key, created);
         // Detached so one departing client cannot tear the scan out from under
         // the fibers awaiting it; a finished scan warms the cache either way.
-        yield* scanSummary(input, settings).pipe(
+        yield* scanSummary(input, settings, maxHourlyWindowMs).pipe(
           Effect.onExit((exit) =>
             Effect.sync(() => inflightScans.delete(key)).pipe(
               Effect.andThen(Deferred.done(created, exit)),
@@ -871,7 +903,60 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  return { readSummary, refreshRates } as const;
+  const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
+    const summary = yield* sharedScan(input, MAX_HOURLY_WINDOW_MS);
+    const nowMs = yield* Clock.currentTimeMillis;
+    // A box a client may still hold a summary for keeps its own identity so
+    // the merge can deduplicate it. Clients cache summaries for up to an hour.
+    const rows = yield* boxUsage.list(boxUsageListSince(input), isoAt(nowMs - DAY_MS)).pipe(
+      Effect.mapError(
+        (cause) =>
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "Stored cloud box usage could not be read.",
+            cause,
+          }),
+      ),
+    );
+    return foldBoxUsage(summary, input, rows, {
+      hostId: NodeOS.hostname(),
+      path: path.join(config.stateDir, "cloud-box-usage"),
+    });
+  });
+
+  const readHistory = Effect.fn("UsageService.readHistory")(function* (input: UsageHistoryInput) {
+    const since = DateTime.make(input.sinceTime);
+    if (Option.isNone(since)) {
+      return yield* new UsageReadError({
+        reason: "invalidWindow",
+        detail: `sinceTime '${input.sinceTime}' is not a valid instant`,
+      });
+    }
+    const nowMs = yield* Clock.currentTimeMillis;
+    const floorHour = (ms: number) => Math.floor(ms / HOUR_MS) * HOUR_MS;
+    const untilMs = floorHour(nowMs) + HOUR_MS;
+    const sinceMs = Math.min(
+      floorHour(
+        Math.max(DateTime.toEpochMillis(since.value), nowMs - CACHE_RETENTION_DAYS * DAY_MS),
+      ),
+      untilMs - HOUR_MS,
+    );
+    const summary = yield* sharedScan(
+      {
+        timeZone: "UTC",
+        sinceDay: UsageDay.make(isoAt(sinceMs).slice(0, 10)),
+        untilDay: UsageDay.make(isoAt(untilMs - 1).slice(0, 10)),
+        resolution: "hour",
+        sinceTime: isoAt(sinceMs),
+        untilTime: isoAt(untilMs),
+      },
+      // The window is built here and already bounded by retention.
+      Number.POSITIVE_INFINITY,
+    );
+    return historyForHost(summary);
+  });
+
+  return { readSummary, readHistory, refreshRates } as const;
 });
 
-export const layer = Layer.effect(UsageService, make);
+export const layer = Layer.effect(UsageService, make).pipe(Layer.provide(BoxUsageStore.layer));

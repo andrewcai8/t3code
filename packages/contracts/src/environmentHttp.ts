@@ -57,6 +57,7 @@ import {
   PullRequestOperationError,
   PullRequestUnavailableError,
 } from "./pullRequest.ts";
+import { UsageHistoryInput, UsageSummary } from "./usage.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,
@@ -617,6 +618,16 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
+/** A host pulls each cloud box's usage history with the box's broker token. */
+class EnvironmentUsageHttpApi extends HttpApiGroup.make("usage").add(
+  HttpApiEndpoint.post("history", "/api/usage/history", {
+    headers: OptionalBearerHeaders,
+    payload: UsageHistoryInput,
+    success: UsageSummary,
+    error: EnvironmentOrchestrationSnapshotErrors,
+  }).middleware(EnvironmentAuthenticatedAuth),
+) {}
+
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -684,4 +695,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentControlHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
+  .add(EnvironmentUsageHttpApi)
   .add(EnvironmentConnectHttpApi) {}
