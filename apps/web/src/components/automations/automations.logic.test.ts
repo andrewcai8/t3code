@@ -77,6 +77,24 @@ describe("nextRuns", () => {
     ]);
   });
 
+  it("runs a slot in the skipped spring hour just after the gap, and a repeated one once", () => {
+    const at = (cron: string, from: string, count: number) =>
+      iso(nextRuns({ cron, timeZone: "America/New_York" }, Date.parse(from), count));
+    // 2:30 does not exist on 2026-03-08; that day's run is at 3:30 EDT.
+    expect(at("30 2 * * *", "2026-03-06T12:00:00.000Z", 4)).toEqual([
+      "2026-03-07T07:30:00.000Z",
+      "2026-03-08T07:30:00.000Z",
+      "2026-03-09T06:30:00.000Z",
+      "2026-03-10T06:30:00.000Z",
+    ]);
+    // 1:30 happens twice on 2026-11-01; the run is the first, 1:30 EDT.
+    expect(at("30 1 * * 0", "2026-10-24T12:00:00.000Z", 3)).toEqual([
+      "2026-10-25T05:30:00.000Z",
+      "2026-11-01T05:30:00.000Z",
+      "2026-11-08T06:30:00.000Z",
+    ]);
+  });
+
   it("returns nothing for a cron it cannot read", () => {
     expect(nextRuns({ cron: "0 9 * *", timeZone: "UTC" }, 0, 3)).toEqual([]);
   });
