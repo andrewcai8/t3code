@@ -165,10 +165,15 @@ export async function packHostState(input: PackInput): Promise<HostState> {
       : undefined;
     if (codexLogin) codexLogins[codexLogin.account] = hostLogin ? "host" : "copy";
     const data = hostLogin ?? (await NodeFSP.readFile(file.source));
-    const copy = codexLogin && !hostLogin ? stripCodexRefreshToken(data.toString("utf8")) : data;
-    // Errors name the file and never its contents.
-    if (copy === undefined) throw new Error(`${file.source} is not a Codex login`);
-    files.push({ path: file.destination, data: copy });
+    const stripped = codexLogin ? stripCodexRefreshToken(data.toString("utf8")) : undefined;
+    // Either login must parse; a host login that does not would otherwise be
+    // packed and then retired. Errors name the file and never its contents.
+    if (codexLogin && stripped === undefined)
+      throw new Error(`${hostLogin ? codexLogin.hostLogin : file.source} is not a Codex login`);
+    files.push({
+      path: file.destination,
+      data: stripped !== undefined && !hostLogin ? stripped : data,
+    });
   }
   if (input.namespaceSession) {
     // Errors name the file and never its contents, since a JSON.parse message quotes the input.
@@ -387,7 +392,9 @@ with \`CODEX_HOME=<that dir> codex login --device-auth\`. The host refreshes it,
 so once the seed is written each carried file is renamed to
 auth.json.packed-<output name>, and the next pack needs a fresh sign-in for
 it. An account without one carries a copy of this machine's login that cannot
-refresh and stops working when its access token expires.`;
+refresh and stops working when its access token expires. If the upload fails,
+upload the same tarball again; if the tarball is lost, rename each
+auth.json.packed-<output name> back to auth.json and pack again.`;
 
 if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({

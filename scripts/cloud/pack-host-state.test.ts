@@ -453,6 +453,38 @@ describe("packHostState", () => {
     }
   });
 
+  it("refuses to pack a host login it cannot parse, leaving it in place", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pack-host-state-"));
+    const hostLogin = NodePath.join(home, "host-codex/codex/auth.json");
+    try {
+      await NodeFSP.mkdir(NodePath.join(home, ".codex"));
+      await NodeFSP.writeFile(
+        NodePath.join(home, ".codex/auth.json"),
+        '{"tokens":{"refresh_token":"rt_laptop"}}',
+      );
+      await NodeFSP.mkdir(NodePath.dirname(hostLogin), { recursive: true });
+      await NodeFSP.writeFile(hostLogin, '{"tokens":{"refresh_tok');
+      const packing = packHostState({
+        config: { e2bApiKey: "e2b-key", provisioning: { templateId: "t3-common" } },
+        settings: { providerInstances: { codex: { driver: "codex" } } },
+        host: { homedir: home, platform: "linux", environment: {} },
+        baseDir: "/data/t3",
+        skillsDir: "/data/t3/skills",
+        codexHostLogins: NodePath.join(home, "host-codex"),
+      });
+      assert.equal(
+        await packing.then(
+          () => "packed",
+          (error: Error) => error.message.replace(home, "<home>"),
+        ),
+        "<home>/host-codex/codex/auth.json is not a Codex login",
+      );
+      assert.deepEqual(await NodeFSP.readdir(NodePath.dirname(hostLogin)), ["auth.json"]);
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("writes a seed tarball rooted at the base dir with private files", async () => {
     const { home, packed } = await fixture();
     try {
