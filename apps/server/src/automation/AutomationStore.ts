@@ -36,7 +36,12 @@ export interface StoredAutomation {
 export type RunTransition =
   | { readonly state: "attaching" }
   | { readonly state: "starting"; readonly environmentId: EnvironmentId }
-  | { readonly state: "started"; readonly threadId: ThreadId }
+  | {
+      readonly state: "started";
+      readonly threadId: ThreadId;
+      /** Something the run did differently than configured, kept in the run's `error`. */
+      readonly note?: string | null;
+    }
   | { readonly state: "failed"; readonly error: string; readonly disposedAt: string | null };
 
 /** The states a run may leave, and the ones it may enter from each. */
@@ -333,7 +338,12 @@ export class AutomationStore extends Context.Service<
             return Effect.fail(storeError(`a run cannot move from ${from} to ${next.state}`));
           const environmentId = next.state === "starting" ? next.environmentId : null;
           const threadId = next.state === "started" ? next.threadId : null;
-          const error = next.state === "failed" ? next.error : null;
+          const error =
+            next.state === "failed"
+              ? next.error
+              : next.state === "started"
+                ? (next.note ?? null)
+                : null;
           const disposedAt = next.state === "failed" ? next.disposedAt : null;
           return readRuns(sql`
             UPDATE automation_runs SET state = ${next.state},

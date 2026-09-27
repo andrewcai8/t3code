@@ -484,7 +484,7 @@ function AutomationRuns({
                 </button>
               ) : null}
             </div>
-            {(run.state === "failed" || run.state === "skipped") && run.error ? (
+            {run.error ? (
               <p
                 className={run.state === "failed" ? "break-words text-destructive" : "break-words"}
               >

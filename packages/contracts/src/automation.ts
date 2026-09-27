@@ -118,6 +118,7 @@ export const AutomationRun = Schema.Struct({
   state: AutomationRunState,
   environmentId: Schema.NullOr(EnvironmentId),
   threadId: Schema.NullOr(ThreadId),
+  /** Why a run failed or was skipped, or a note on how a started run differed from its setup. */
   error: Schema.NullOr(Schema.String),
   /** When a failed run's machine was disposed. Null while it exists or never did. */
   disposedAt: Schema.NullOr(IsoDateTime),
