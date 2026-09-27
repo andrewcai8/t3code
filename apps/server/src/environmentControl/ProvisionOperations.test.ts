@@ -729,7 +729,7 @@ describe("an allocation whose outcome a crash lost", () => {
       const { p, ports } = recording();
       yield* seedForkIssued(file, ports);
       p.resources.push(parent, child);
-      yield* minutesAfterIssue(1);
+      yield* minutesAfterIssue(11);
       expect((yield* inService(file, ports, reconcile)).state).toEqual({
         kind: "allocated",
         allocation,
@@ -810,6 +810,80 @@ describe("an allocation whose outcome a crash lost", () => {
         lastError: "Allocation outcome remains unknown; cleanup is not confirmed.",
       });
       expect(disposed).toEqual([parent]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reconcile leaves a fork this process is still waiting on to its answer", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { p } = recording();
+      const forking = yield* Deferred.make<void>();
+      const answer = yield* Deferred.make<void>();
+      const ports: ProvisionProviderPorts["Service"] = {
+        ...p.ports,
+        fork: (operation, from) =>
+          Deferred.succeed(forking, undefined).pipe(
+            Effect.andThen(Deferred.await(answer)),
+            Effect.andThen(p.ports.fork(operation, from)),
+          ),
+      };
+      yield* TestClock.setTime(Date.parse(issuedAt));
+      yield* inService(
+        file,
+        ports,
+        Effect.gen(function* () {
+          const pending = yield* Effect.forkChild(ensure());
+          yield* Deferred.await(forking);
+          yield* TestClock.adjust("30 seconds");
+          const store = yield* ProvisionOperationStore;
+          const before = yield* store.get(request.requestId);
+          yield* (yield* Provisioning).reconcile;
+          const after = yield* store.get(request.requestId);
+          expect(after.state).toEqual({ kind: "fork_issued", parent, issuedAt });
+          expect(after.revision).toBe(before.revision);
+          yield* Deferred.succeed(answer, undefined);
+          expect((yield* Fiber.join(pending)).state).toEqual({
+            kind: "ready",
+            allocation,
+            readiness,
+          });
+        }),
+      );
+      expect(p.counts()).toEqual({ creates: 1, forks: 1 });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reconcile skips an unreadable row and settles one with an unreadable issue time", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const { ports, disposed } = recording();
+      const unreadable = { ...request, requestId: "0b7f5d0e-5c3a-4c1e-9d1a-2f4b8e6c7a91" };
+      yield* inService(
+        file,
+        ports,
+        Effect.gen(function* () {
+          const store = yield* ProvisionOperationStore;
+          yield* store.accept(request);
+          yield* store.accept(yield* decodeRequest(unreadable));
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE provision_operations
+          SET state_json = '{"kind":"fork_issued","parent":{"provider":"e2b","sandboxId":"parent-1"},"issuedAt":"not a time"}'
+          WHERE request_id = ${request.requestId}`;
+        yield* sql`UPDATE provision_operations SET state_json = '{"kind":"fork_issued"}'
+          WHERE request_id = ${unreadable.requestId}`;
+      }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+      yield* minutesAfterIssue(0);
+      expect((yield* inService(file, ports, reconcile)).state).toEqual({ kind: "disposed" });
+      expect(disposed).toEqual([parent]);
+      const untouched = yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql`SELECT state_json AS state FROM provision_operations
+          WHERE request_id = ${unreadable.requestId}`;
+      }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+      expect(untouched).toEqual([{ state: '{"kind":"fork_issued"}' }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

@@ -93,8 +93,13 @@ function pendingAttempt(state: PendingAllocationState): ProvisionAllocationAttem
       return state.allocation;
   }
 }
+/** An unreadable issue time counts as long ago, so its row settles instead of waiting forever. */
+function sinceIssue(attempt: ProvisionAllocationAttempt, now: number) {
+  const issuedAt = Date.parse(attempt.issuedAt);
+  return now - (Number.isNaN(issuedAt) ? 0 : issuedAt);
+}
 const settled = (attempt: ProvisionAllocationAttempt, now: number) =>
-  now - Date.parse(attempt.issuedAt) >= SETTLE_AFTER_MS;
+  sinceIssue(attempt, now) >= SETTLE_AFTER_MS;
 /** A fork's recovery lists its parent too, which is never the child. */
 function attemptResources(
   attempt: ProvisionAllocationAttempt,
@@ -440,6 +445,13 @@ export class Provisioning extends Context.Service<
       const now = DateTime.toEpochMillis(yield* DateTime.now);
       for (const operation of yield* store.listUnresolved) {
         const state = operation.state;
+        // This process may still be waiting on a younger call, and recording
+        // its answer must not lose to a recovery that could not yet see it.
+        if (
+          isPendingAllocation(state) &&
+          sinceIssue(pendingAttempt(state), now) < Duration.toMillis(ISSUE_TIMEOUT)
+        )
+          continue;
         const settle =
           isPendingAllocation(state) && !retentionExpired(operation.request.retentionDeadline, now)
             ? recover(operation, pendingAttempt(state))
