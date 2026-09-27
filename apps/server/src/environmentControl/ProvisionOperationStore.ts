@@ -37,6 +37,8 @@ export class ProvisionOperationStore extends Context.Service<
     readonly get: (
       requestId: ProvisionRequestId,
     ) => Effect.Effect<ProvisionOperation, ProvisionStoreError>;
+    /** Operations with a create or fork whose outcome is not yet recorded. */
+    readonly listUnresolved: Effect.Effect<ReadonlyArray<ProvisionOperation>, ProvisionStoreError>;
     readonly advance: (
       current: ProvisionOperation,
       state: ProvisionOperationState,
@@ -103,7 +105,32 @@ export class ProvisionOperationStore extends Context.Service<
         },
         Effect.mapError((cause) => new ProvisionStoreError({ operation: "advance", cause })),
       );
-      return { accept, get, advance };
+      const listUnresolved = Effect.gen(function* () {
+        const rows = yield* sql`
+        SELECT request_id AS "requestId", request_json AS request, request_hash AS "requestHash",
+          state_json AS state, revision, created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM provision_operations
+        WHERE json_extract(state_json, '$.kind') IN ('create_issued', 'fork_issued', 'allocation_unknown')
+          OR (json_extract(state_json, '$.kind') = 'cancel_requested'
+            AND json_extract(state_json, '$.recovery') IS NOT NULL)
+      `;
+        const operations = yield* Effect.forEach(rows, (row) =>
+          decodeRow(row).pipe(
+            Effect.map((operation): ProvisionOperation | null => operation),
+            Effect.catch((error) =>
+              Effect.logWarning("skipping an unreadable provision operation", {
+                requestId: row.requestId,
+                error: error.message,
+              }).pipe(Effect.as(null)),
+            ),
+          ),
+        );
+        return operations.filter((operation) => operation !== null);
+      }).pipe(
+        Effect.mapError((cause) => new ProvisionStoreError({ operation: "list", cause })),
+        Effect.withSpan("ProvisionOperationStore.listUnresolved"),
+      );
+      return { accept, get, listUnresolved, advance };
     }),
   );
 }

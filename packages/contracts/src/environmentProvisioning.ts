@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { EnvironmentProvisionInput, ProvisionRequestId } from "./environmentControl.ts";
@@ -88,28 +89,43 @@ export const ProvisionReadiness = Schema.Struct({
 });
 export type ProvisionReadiness = typeof ProvisionReadiness.Type;
 
+/**
+ * When a create or fork call went out. Rows written before this was recorded
+ * came from a process that has since exited, so no call of theirs can still be
+ * in flight and they read as issued long ago.
+ */
+const IssuedAt = Schema.String.pipe(
+  Schema.withDecodingDefault(Effect.succeed("1970-01-01T00:00:00.000Z")),
+);
+/** A create or fork whose outcome is not yet recorded. */
+export const ProvisionAllocationAttempt = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("create"), issuedAt: IssuedAt }),
+  Schema.Struct({
+    kind: Schema.Literal("fork"),
+    parent: E2bProvisionResource,
+    issuedAt: IssuedAt,
+  }),
+]);
+export type ProvisionAllocationAttempt = typeof ProvisionAllocationAttempt.Type;
+
 export const ProvisionOperationState = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("cancel_requested"),
-    recovery: Schema.NullOr(
-      Schema.Union([
-        Schema.Struct({ kind: Schema.Literal("create") }),
-        Schema.Struct({ kind: Schema.Literal("fork"), parent: E2bProvisionResource }),
-      ]),
-    ),
+    recovery: Schema.NullOr(ProvisionAllocationAttempt),
     resources: Schema.Array(ProvisionResource),
     lastError: Schema.NullOr(Schema.String),
   }),
   Schema.Struct({ kind: Schema.Literal("intent") }),
-  Schema.Struct({ kind: Schema.Literal("create_issued") }),
+  Schema.Struct({ kind: Schema.Literal("create_issued"), issuedAt: IssuedAt }),
   Schema.Struct({ kind: Schema.Literal("parent_allocated"), parent: E2bProvisionResource }),
-  Schema.Struct({ kind: Schema.Literal("fork_issued"), parent: E2bProvisionResource }),
+  Schema.Struct({
+    kind: Schema.Literal("fork_issued"),
+    parent: E2bProvisionResource,
+    issuedAt: IssuedAt,
+  }),
   Schema.Struct({
     kind: Schema.Literal("allocation_unknown"),
-    allocation: Schema.Union([
-      Schema.Struct({ kind: Schema.Literal("create") }),
-      Schema.Struct({ kind: Schema.Literal("fork"), parent: E2bProvisionResource }),
-    ]),
+    allocation: ProvisionAllocationAttempt,
     reason: Schema.String,
   }),
   Schema.Struct({ kind: Schema.Literal("allocated"), allocation: ProvisionAllocation }),
