@@ -447,6 +447,77 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     }),
   );
 
+  it.effect("hands the routed Claude account's email to the box", () =>
+    Effect.gen(function* () {
+      const tokenAccount = (token: string, accountEmail: string) => ({
+        driver: "claudeAgent",
+        enabled: true,
+        environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: token, sensitive: true }],
+        config: { accountEmail },
+      });
+      const profiles = yield* resolveProvisioningProfiles(
+        decodeSettings({
+          providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+          providerInstances: {
+            claude_work: tokenAccount("sk-ant-oat01-work", "work@example.com"),
+            claude_home: tokenAccount("sk-ant-oat01-home", "home@example.com"),
+          },
+        }),
+        { providerInstanceId: "claude_work", agentDriver: "claudeAgent" },
+        undefined,
+        {
+          providers: [
+            {
+              instanceId: ProviderInstanceId.make("claude_work"),
+              usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows: [session(90)] },
+            },
+            {
+              instanceId: ProviderInstanceId.make("claude_home"),
+              usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows: [session(10)] },
+            },
+          ],
+          now: Date.parse("2026-09-03T12:00:00.000Z"),
+        },
+      );
+      expect(profiles.map(({ instanceId, accountEmail }) => [instanceId, accountEmail])).toEqual([
+        ["claude_home", "home@example.com"],
+      ]);
+    }),
+  );
+
+  it.effect("counts a busy account's sessions on every instance that shares its email", () =>
+    Effect.gen(function* () {
+      const settings = decodeSettings({
+        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
+        providerInstances: {
+          work: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "work-key"),
+          workAgain: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "work-key-2"),
+          home: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "home-key"),
+        },
+      });
+      const reading = (instanceId: string, email: string, usedPercent: number) => ({
+        instanceId: ProviderInstanceId.make(instanceId),
+        auth: { status: "authenticated" as const, email },
+        usageLimits: { checkedAt: "2026-09-03T11:55:00.000Z", windows: [session(usedPercent)] },
+      });
+      const profiles = yield* resolveProvisioningProfiles(
+        settings,
+        { providerInstanceId: "work", agentDriver: "claudeAgent" },
+        undefined,
+        {
+          providers: [
+            reading("work", "work@example.com", 20),
+            reading("workAgain", "work@example.com", 20),
+            reading("home", "home@example.com", 50),
+          ],
+          now: Date.parse("2026-09-03T12:00:00.000Z"),
+          load: new Map([[ProviderInstanceId.make("work"), 3]]),
+        },
+      );
+      expect(profiles.map(({ instanceId }) => instanceId)).toEqual(["home"]);
+    }),
+  );
+
   it.effect("gives a Claude chat's Codex and Cursor companions their best accounts", () =>
     Effect.gen(function* () {
       yield* file("codex-default/auth.json", "default-login");

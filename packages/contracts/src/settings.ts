@@ -670,6 +670,15 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    /**
+     * The account a setup-token login belongs to. Such a token cannot read its
+     * own profile, so without this every machine running it reports an
+     * anonymous account and Limits shows it once per machine.
+     */
+    accountEmail: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
     autoCompactWindow: TrimmedString.check(
       Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN),
     ).pipe(

@@ -86,6 +86,7 @@ export interface PackInput {
 export interface HostState {
   readonly accounts: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
+  readonly warnings: ReadonlyArray<string>;
   /**
    * Whose login each Codex account carries: the host's own, which it
    * refreshes, or a copy of this machine's that cannot refresh.
@@ -267,6 +268,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   return {
     accounts: plan.accounts,
     skipped: [...plan.skipped, ...skippedFiles],
+    warnings: plan.warnings,
     codexLogins,
     files,
     skills: bundles.map(({ directory, archive }) => ({ directory, archive })),
@@ -446,6 +448,7 @@ if (import.meta.main) {
     codexHostLogins: values["codex-host-logins"],
   });
   for (const { id, reason } of state.skipped) console.log(`skipping ${id}: ${reason}`);
+  for (const warning of state.warnings) console.warn(`warning: ${warning}`);
   for (const [id, login] of Object.entries(state.codexLogins))
     if (login === "copy")
       console.log(

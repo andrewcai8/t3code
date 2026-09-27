@@ -11,6 +11,7 @@
  * is the one that differs: macOS reads `.cursor/auth.json`, Linux reads
  * `$XDG_CONFIG_HOME/cursor/auth.json`.
  */
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { cursorFileCredentialPath } from "../../apps/server/src/provider/cursorCredentialPath.ts";
@@ -64,6 +65,8 @@ export interface PlanInput {
 export interface ManagerPlan {
   readonly accounts: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
+  /** Things the operator should fix that do not stop an account travelling. */
+  readonly warnings: ReadonlyArray<string>;
   /** Host files to copy, by absolute source and absolute manager destination. */
   readonly files: ReadonlyArray<PlannedFile>;
   readonly settingsPath: string;
@@ -87,7 +90,7 @@ export interface ManagerInstance {
   readonly displayName?: string;
   readonly enabled: true;
   readonly environment?: ReadonlyArray<Required<EnvironmentVariable>>;
-  readonly config?: { readonly homePath: string };
+  readonly config?: { readonly homePath: string } | { readonly accountEmail: string };
 }
 
 const expandHome = (value: string, homedir: string) =>
@@ -123,6 +126,34 @@ const codexAuthSource = (config: unknown, homedir: string) => {
 };
 
 /**
+ * The account a Claude instance is signed in to on this machine, which its
+ * setup token cannot report on the manager. Claude Code records it in
+ * `.claude.json`, inside the config dir when one is set and in the home
+ * directory otherwise; the instance's "Claude · email" name stands in when no
+ * login is on disk. Only the instance's own config dir counts: a
+ * `CLAUDE_CONFIG_DIR` in the packing shell, as an agent's shell often has,
+ * would file the default account under another one. When the login and the
+ * name disagree there is no email, since a wrong one merges two accounts.
+ */
+const claudeAccountEmail = (instance: HostInstance, host: PlanInput["host"]) => {
+  const homePath = trimmed(instance.config, "homePath");
+  const configDir = homePath
+    ? NodePath.resolve(expandHome(homePath, host.homedir))
+    : instance.environment?.find(({ name }) => name === "CLAUDE_CONFIG_DIR")?.value;
+  let login: string | undefined;
+  try {
+    const email = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(configDir || host.homedir, ".claude.json"), "utf8"),
+    )?.oauthAccount?.emailAddress;
+    if (typeof email === "string" && email.trim()) login = email.trim();
+  } catch {}
+  const named = instance.displayName?.match(/([^\s·]+@[^\s·]+)\s*$/)?.[1];
+  if (login && named && login.toLowerCase() !== named.toLowerCase())
+    return { conflict: { login, named } } as const;
+  return { email: login ?? named } as const;
+};
+
+/**
  * Mirrors `deriveProviderInstanceConfigMap`: a built-in driver without an
  * explicit instance is still an instance, configured by the legacy map.
  */
@@ -146,6 +177,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
 
   const accounts: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
+  const warnings: Array<string> = [];
   const files: Array<PlannedFile> = [];
   const providerInstances: Record<string, ManagerInstance> = {};
 
@@ -193,11 +225,18 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
           skip("no provisioning.claudeOAuthTokens entry; run `claude setup-token` for it");
           continue;
         }
+        const identity = claudeAccountEmail(instance, input.host);
+        if (identity.conflict)
+          warnings.push(
+            `${id}: its login is ${identity.conflict.login} but its name says ${identity.conflict.named}; recording no account email. Rename the instance or sign it in to the right account.`,
+          );
+        const accountEmail = identity.email;
         providerInstances[id] = {
           driver: "claudeAgent",
           ...named,
           enabled: true,
           environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: token, sensitive: true }],
+          ...(accountEmail ? { config: { accountEmail } } : {}),
         };
         break;
       }
@@ -250,6 +289,7 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
   return {
     accounts,
     skipped,
+    warnings,
     files,
     settingsPath: posix.join(base, "userdata", "settings.json"),
     providerInstances,

@@ -269,7 +269,82 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
       }
     }
   }
+  const readings = [...presentations].flatMap(([environmentId, presentation]) => [
+    ...providersWithLimits(presentation.serverConfig?.providers ?? []).map((provider) =>
+      providerReading(provider, `${environmentId}:${provider.instanceId}`),
+    ),
+    ...(presentation.serverConfig?.usageLimitSources ?? []).flatMap((source) =>
+      source.accounts.map((account) => ({
+        key: accountKey(account.driver, account.email) ?? `${source.id}:${account.id}`,
+        driver: account.driver,
+        name: account.email ?? account.id,
+        limits: account.usageLimits,
+      })),
+    ),
+  ]);
+  for (const names of findIdenticalReadings(readings)) {
+    notices.push(`${names.join(", ")} report identical limits, so they may be one account.`);
+  }
   return notices;
+}
+
+interface LimitReading {
+  readonly key: string;
+  readonly driver: ServerProvider["driver"];
+  readonly name: string;
+  readonly limits: ServerProviderUsageLimits | undefined;
+}
+
+function providerReading(provider: ServerProvider, fallbackKey: string): LimitReading {
+  return {
+    key: accountKey(provider.driver, provider.auth.email) ?? fallbackKey,
+    driver: provider.driver,
+    name: provider.displayName?.trim() || provider.auth.email || String(provider.instanceId),
+    limits: provider.usageLimits,
+  };
+}
+
+/**
+ * Accounts whose readings agree window for window, share used and reset
+ * alike. Separate subscriptions do not land on the same numbers, so a match
+ * means logins filed under different accounts are one subscription, usually a
+ * setup token made while signed in to another account. Only windows with a
+ * reset are compared, as an idle window may have none, and a reading counts
+ * only when one of those shows use, since untouched accounts all read 0%.
+ * Each group names its suspects once for a person to check; rows never merge.
+ * A group that names one account is that account seen before its email was.
+ */
+function findIdenticalReadings(readings: readonly LimitReading[]): string[][] {
+  const bySignature = new Map<string, Map<string, LimitReading>>();
+  for (const reading of readings) {
+    if (!reading.limits || reading.limits.unavailable) continue;
+    const timed = reading.limits.windows.flatMap((window) => {
+      const at = resetMillis(window);
+      return at === null ? [] : [{ window, at }];
+    });
+    if (timed.every(({ window }) => window.usedPercent === 0)) continue;
+    const signature = [
+      reading.driver,
+      ...timed
+        .map(({ window, at }) => `${window.kind}:${window.id}:${window.usedPercent}:${at}`)
+        .sort(),
+    ].join("|");
+    const group = bySignature.get(signature) ?? new Map<string, LimitReading>();
+    if (!group.has(reading.key)) group.set(reading.key, reading);
+    bySignature.set(signature, group);
+  }
+  return [...bySignature.values()]
+    .map((group) => [...new Set([...group.values()].map(({ name }) => name))])
+    .filter((names) => names.length > 1);
+}
+
+/** Names of one machine's instances that read identical limits, a list per suspected shared account. */
+export function identicalProviderReadings(providers: readonly ServerProvider[]): string[][] {
+  return findIdenticalReadings(
+    providersWithLimits(providers).map((provider) =>
+      providerReading(provider, provider.instanceId),
+    ),
+  );
 }
 
 export interface LimitPoolMember {
@@ -772,7 +847,8 @@ export type AccountLoad = ReadonlyMap<ProviderInstanceId, number>;
 
 /**
  * Accounts of one driver, the one whose remaining usage leaves the new chat
- * the largest share first: `remainingPercent / (active + 1)`. Unknown
+ * the largest share first: `remainingPercent / (active + 1)`. Instances with
+ * one email are one subscription, so each counts the sessions of all. Unknown
  * headroom ranks below any account with room left, fewest active sessions
  * first, and above a spent one. Ties go to the account whose tightest window
  * refills first, then the preferred account, then the id, so the same
@@ -782,13 +858,21 @@ export function rankAccounts<
   A extends {
     readonly instanceId: ProviderInstanceId;
     readonly driver: ServerProvider["driver"];
+    readonly email?: string | undefined;
     readonly usageLimits?: ServerProviderUsageLimits | undefined;
   },
 >(accounts: readonly A[], now: number, preferred?: ProviderInstanceId, load?: AccountLoad): A[] {
+  const keyOf = (account: A) => accountKey(account.driver, account.email) ?? account.instanceId;
+  const sessions = new Map<string, number>();
+  for (const account of accounts)
+    sessions.set(
+      keyOf(account),
+      (sessions.get(keyOf(account)) ?? 0) + (load?.get(account.instanceId) ?? 0),
+    );
   const scored = accounts.map((account) => ({
     account,
     headroom: accountHeadroom(account.driver, account.usageLimits, now),
-    active: load?.get(account.instanceId) ?? 0,
+    active: sessions.get(keyOf(account)) ?? 0,
   }));
   return scored
     .sort((left, right) => {

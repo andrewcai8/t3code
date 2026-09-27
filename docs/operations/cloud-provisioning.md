@@ -37,6 +37,8 @@ Use the account's config directory, or drop `CLAUDE_CONFIG_DIR=` for the default
 
 Cloud environments for that account receive it as `CLAUDE_CODE_OAUTH_TOKEN`. A manager deployed by `deploy-provision-manager.mjs` or `pack-host-state.ts` runs that account on the token too, so the manager can chat on it and read its usage. Local runs keep using the keychain login. A credential set in the instance's own environment variables still wins, and an account with a `.credentials.json` file needs no token.
 
+A setup-token cannot report which account it belongs to, so the packer records each account's email from its local login (`.claude.json` in the account's config directory, else the `Claude · email` display name) as the instance's `accountEmail`, and the manager hands it to each environment. Limits uses it to show an account once however many machines run it. When several accounts report identical limits, Limits and the manager's log name them: a token was most likely minted from the wrong login. Mint it again from the right config directory and repack.
+
 ## Codex accounts
 
 Codex rotates a ChatGPT login's refresh token too, and rejects a reused one, so every copy of one `auth.json` that refreshes signs out all the others. Each login therefore has one owner that refreshes it, and every other copy carries a refresh token that cannot be redeemed ([`stripCodexRefreshToken`](../../apps/server/src/provider/codexLoginCopy.ts)). Such a copy stops working when its access token expires, about ten days after the owner's last refresh.
@@ -55,7 +57,7 @@ Provisioning refuses a Codex login it cannot parse, which can happen while Codex
 
 ## Which account a cloud environment uses
 
-The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left per chat, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh, split among the chats already running on it: awake cloud machines using that account for any of their agents and local threads with a turn in progress. An account with no known usage ranks below accounts with room left but above spent ones, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. A Codex account whose login is about to expire is skipped too. The choice is frozen with the request, so retrying or resuming keeps the same account.
+The chat picks a provider, not an account. The manager runs each provider on its enabled account with the most usage left per chat, judged by the account's tightest limit window (session, weekly, or monthly) in the manager's last usage refresh, split among the chats already running on it, on any instance signed in to the same email: awake cloud machines using that account for any of their agents and local threads with a turn in progress. An account with no known usage ranks below accounts with room left but above spent ones, and an account whose login cannot be copied is skipped, so a Claude account without a setup-token never gets picked. A Codex account whose login is about to expire is skipped too. The choice is frozen with the request, so retrying or resuming keeps the same account.
 
 ## Stand up a manager
 

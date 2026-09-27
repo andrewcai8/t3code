@@ -78,6 +78,7 @@ const state = await packHostState({
   skillsDir: "/home/user/skills",
 });
 for (const { id, reason } of state.skipped) console.log(`skipping ${id}: ${reason}`);
+for (const warning of state.warnings) console.warn(`warning: ${warning}`);
 console.log(`carrying accounts ${state.accounts.join(", ")}`);
 const { e2bApiKey: apiKey, provisioning } = state.config;
 const templateId = provisioning.templateId;

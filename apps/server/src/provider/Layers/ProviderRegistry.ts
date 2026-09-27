@@ -29,6 +29,7 @@ import {
   type ServerProvider,
   type ServerProviderUpdateState,
 } from "@t3tools/contracts";
+import { identicalProviderReadings } from "@t3tools/shared/usageLimits";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -495,6 +496,18 @@ export const ProviderRegistryLive = Layer.effect(
         }
         if (options?.publish !== false) {
           yield* PubSub.publish(changesPubSub, providers);
+        }
+        // Logged when the suspects change, not on every refresh.
+        const suspectsOf = (snapshots: ReadonlyArray<ServerProvider>) =>
+          identicalProviderReadings(snapshots)
+            .map((names) => names.join(", "))
+            .join("; ");
+        const suspects = suspectsOf(providers);
+        if (suspects && suspects !== suspectsOf(previousProviders)) {
+          yield* Effect.logWarning(
+            "Provider accounts report identical usage limits and may be one account; remake their logins.",
+            { suspects },
+          );
         }
       }
 

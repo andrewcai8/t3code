@@ -113,6 +113,7 @@ const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings =>
   binaryPath: "claude",
   homePath: "",
   customModels: [],
+  accountEmail: "",
   launchArgs: "",
   autoCompactWindow: "",
   ...overrides,

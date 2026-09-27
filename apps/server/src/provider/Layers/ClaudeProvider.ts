@@ -773,7 +773,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const email = capabilities?.email ?? cliAuth?.email;
+  const email = capabilities?.email ?? cliAuth?.email ?? (claudeSettings.accountEmail || undefined);
   const authMetadata =
     claudeAuthMetadata({
       subscriptionType: capabilities?.subscriptionType ?? cliAuth?.subscriptionType,
