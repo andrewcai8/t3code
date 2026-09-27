@@ -23,6 +23,7 @@ import {
   idleProvisionedBoxes,
   newChatRunTargets,
   offeredProvisionProviders,
+  type ProvisionedBoxClaim,
   provisionCloudEnvironment,
 } from "./provisioning.ts";
 import type { ProvisionStorage } from "./storage.ts";
@@ -638,8 +639,8 @@ describe("claimFirstTurnBox", () => {
     ];
     let clientList = hostList();
     const ports = {
-      claim: async ({ input }: { readonly input: { readonly threadId: ThreadId } }) => {
-        owner = input.threadId;
+      claim: async ({ input }: ProvisionedBoxClaim) => {
+        owner = ThreadId.make(input.threadId);
         return true;
       },
       refresh: (managerId: EnvironmentId) => {
