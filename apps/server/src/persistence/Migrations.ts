@@ -82,11 +82,11 @@ import Migration0059 from "./Migrations/059_AutomationsModel.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  *
- * Fork numbering: 052-056, 058 and 059 are this fork's own and deployed databases
- * have them applied, so their ids never change. 057 came from upstream. When
- * syncing upstream, an upstream migration takes the next free id above the
- * highest one here, and one whose contents match a fork migration is matched
- * by rename instead of added.
+ * Fork numbering: 052-056, 058 and 059 are this fork's own and deployed
+ * databases have them applied, so their ids never change. 057 came from
+ * upstream. When syncing upstream, an upstream migration takes the next free
+ * id above the highest one here, and one whose contents match a fork migration
+ * is matched by rename instead of added.
  */
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
