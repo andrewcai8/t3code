@@ -63,11 +63,11 @@ export interface NewChatRunTargets<Environment> {
   readonly cloudProviders: ReadonlyArray<ProvisionProvider>;
   /**
    * Where a chat that cannot start where it points goes instead. A chat on a
-   * gone machine moves to the first live environment that runs agents or can
-   * hand the chat to a cloud kind. A chat on a live environment that runs no
-   * agents starts on the manager's first cloud kind, else moves to the first
-   * environment that runs them. Null when the chat may stay, or there is
-   * nowhere else to go.
+   * gone machine moves to the first live environment, not a box, that runs
+   * agents or can hand the chat to a cloud kind. A chat on another chat's box,
+   * or on a live environment that runs no agents, starts on the manager's
+   * first cloud kind, else moves to the first environment that runs them. Null
+   * when the chat may stay, or there is nowhere else to go.
    */
   readonly redirect:
     | { readonly kind: "cloud"; readonly provider: ProvisionProvider }
@@ -90,12 +90,19 @@ export function newChatRunTargets<
     | Pick<ServerConfig, "environmentControl" | "provisionProviders">
     | null
     | undefined;
+  /**
+   * Cloud boxes provisioned for other chats. Every new chat gets a fresh box,
+   * so none of these is a place to start one. Leave out the box this chat
+   * provisioned for itself.
+   */
+  readonly boxes: ReadonlySet<EnvironmentId>;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
   const provider = cloudProviders[0];
   const gone = (environmentId: EnvironmentId) =>
     isEnvironmentGone(input.environmentState(environmentId));
   const runs = (environmentId: EnvironmentId) =>
+    !input.boxes.has(environmentId) &&
     runsLocalAgents(input.environmentState(environmentId)?.serverConfig);
   const environments = input.environments.filter(
     ({ environmentId }) => runs(environmentId) && !gone(environmentId),
@@ -109,7 +116,9 @@ export function newChatRunTargets<
         ? moveTo(
             input.environments.find(
               ({ environmentId }) =>
-                !gone(environmentId) && (runs(environmentId) || provider !== undefined),
+                !gone(environmentId) &&
+                !input.boxes.has(environmentId) &&
+                (runs(environmentId) || provider !== undefined),
             ),
           )
         : runs(input.environmentId)

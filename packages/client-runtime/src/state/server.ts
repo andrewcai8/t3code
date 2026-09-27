@@ -1,6 +1,7 @@
 import {
   type AutomationIdInput,
-  type EnvironmentId,
+  type DiscoveredProvisionedEnvironment,
+  EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -983,6 +984,19 @@ export function createServerEnvironmentAtoms<R, E>(
         Effect.timeout("20 seconds"),
       ),
   });
+  const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
+    Atom.make((get): ReadonlyArray<DiscoveredProvisionedEnvironment> =>
+      (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
+        const listed = get(
+          provisionedEnvironments({ environmentId: EnvironmentId.make(hostId), input: {} }),
+        );
+        return Option.getOrElse(AsyncResult.value(listed), () => []);
+      }),
+    ).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
+  );
+  /** Every cloud box the given hosts report, as far as each host has answered. */
+  const provisionedBoxes = (hostIds: ReadonlyArray<EnvironmentId>) =>
+    provisionedBoxesFamily(JSON.stringify([...hostIds].sort()));
   const refreshManagedEnvironments = (
     target: { readonly environmentId: EnvironmentId },
     registry: AtomRegistry.AtomRegistry,
@@ -1023,6 +1037,7 @@ export function createServerEnvironmentAtoms<R, E>(
   return {
     managedEnvironments,
     provisionedEnvironments,
+    provisionedBoxes,
     automations,
     recentAutomationRuns,
     joinableAutomationEnvironments,

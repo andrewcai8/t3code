@@ -533,6 +533,7 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
+import { useBoxesOfOtherChats } from "../cloud/automationHosts";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -2602,6 +2603,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
+  const boxesOfOtherChats = useBoxesOfOtherChats(draftId);
   const runTargets = useMemo(
     () =>
       newChatRunTargets({
@@ -2609,16 +2611,18 @@ export default function ChatView(props: ChatViewProps) {
         environmentState: (environmentId) => environmentById.get(environmentId),
         environmentId: activeThreadEnvironmentId,
         managerConfig: primaryEnvironment?.serverConfig,
+        boxes: boxesOfOtherChats,
       }),
     [
       logicalProjectEnvironments,
       environmentById,
       activeThreadEnvironmentId,
       primaryEnvironment?.serverConfig,
+      boxesOfOtherChats,
     ],
   );
-  // A draft offers only machines a new chat can run on; a started thread still
-  // names the machine it ran on.
+  // A draft offers only machines a new chat can run on, never another chat's
+  // box; a started thread still names the machine it ran on.
   const pickableEnvironments = draftId ? runTargets.environments : logicalProjectEnvironments;
   const hasMultipleEnvironments = pickableEnvironments.length > 1;
   const activeEnvironmentOption =
@@ -4071,8 +4075,8 @@ export default function ChatView(props: ChatViewProps) {
     pickableEnvironments,
     setDraftThreadContext,
   ]);
-  // A draft on an expired box, or on a host that runs no agents with no cloud
-  // kind to start instead, moves to a machine that can take it.
+  // A draft on an expired box, or on another chat's box or a host that runs no
+  // agents with no cloud kind to start instead, moves to a machine that can take it.
   const redirectEnvironment =
     draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
       ? runTargets.redirect.environment
