@@ -680,3 +680,111 @@ describe("a cloud machine whose agent is working", () => {
     });
   });
 });
+
+describe("a cloud box's usage", () => {
+  async function withAwakeLease(
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      pulled: string[];
+      activity: Array<"busy" | "idle" | "unknown">;
+      failPulls: { remaining: number };
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude",
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      await registry.markActive({
+        leaseId: "lease",
+        remoteAccess: { origin: "http://box.invalid", brokerToken: "broker" },
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const calls: string[] = [];
+      const pulled: string[] = [];
+      const activity: Array<"busy" | "idle" | "unknown"> = [];
+      const failPulls = { remaining: 0 };
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        calls.push(`pause:${sandboxId}`);
+      };
+      driver.dispose = async ({ sandboxId }) => {
+        calls.push(`dispose:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl(
+        [],
+        driver,
+        registry,
+        async () => activity.shift() ?? "idle",
+        async (lease) => {
+          pulled.push(lease.leaseId);
+          if (failPulls.remaining > 0) {
+            failPulls.remaining -= 1;
+            throw new Error("usage history timed out");
+          }
+        },
+      );
+      await test({ registry, calls, pulled, activity, failPulls, manager });
+    });
+  }
+
+  it("pauses a box even when its usage cannot be pulled", async () => {
+    await withAwakeLease(async ({ registry, calls, pulled, failPulls, manager }) => {
+      failPulls.remaining = 1;
+      expect(await manager.pause({ leaseId: "lease", sandboxId: "sandbox" })).toEqual({
+        kind: "paused",
+      });
+      expect(pulled).toEqual(["lease"]);
+      expect(calls).toEqual(["pause:sandbox"]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+    });
+  });
+
+  it("pauses an expired box even when its usage cannot be pulled", async () => {
+    await withAwakeLease(async ({ registry, calls, pulled, failPulls, manager }) => {
+      failPulls.remaining = 1;
+      await manager.reapExpiredLeases();
+      expect(pulled).toEqual(["lease"]);
+      expect(calls).toEqual(["pause:sandbox"]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+    });
+  });
+
+  it("disposes a box even when its usage cannot be pulled", async () => {
+    await withAwakeLease(async ({ registry, calls, pulled, failPulls, manager }) => {
+      failPulls.remaining = 1;
+      expect(await manager.dispose({ leaseId: "lease", sandboxId: "sandbox" })).toEqual({
+        kind: "disposed",
+      });
+      expect(pulled).toEqual(["lease"]);
+      expect(calls).toEqual(["dispose:sandbox"]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "disposed" });
+    });
+  });
+
+  it("pulls once when a busy box settles and retries a failed pull", async () => {
+    await withAwakeLease(async ({ pulled, activity, failPulls, manager }) => {
+      activity.push("busy", "idle", "idle");
+      for (let sweep = 0; sweep < 3; sweep += 1) await manager.syncLeaseUsage();
+      expect(pulled).toEqual(["lease"]);
+
+      failPulls.remaining = 1;
+      activity.push("busy", "idle", "idle", "idle");
+      for (let sweep = 0; sweep < 4; sweep += 1) await manager.syncLeaseUsage();
+      expect(pulled).toEqual(["lease", "lease", "lease"]);
+    });
+  });
+
+  it("pulls nothing while a box's activity cannot be read", async () => {
+    await withAwakeLease(async ({ pulled, activity, manager }) => {
+      activity.push("unknown", "unknown", "idle");
+      for (let sweep = 0; sweep < 3; sweep += 1) await manager.syncLeaseUsage();
+      expect(pulled).toEqual(["lease"]);
+    });
+  });
+});

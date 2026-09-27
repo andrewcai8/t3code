@@ -1,6 +1,9 @@
 // @effect-diagnostics globalFetch:off - the manager reads a remote T3 server over private HTTP.
-import { OrchestrationSession, OrchestrationThreadShell } from "@t3tools/contracts";
+import { OrchestrationSession, OrchestrationThreadShell, UsageSummary } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import type { BoxUsageStore } from "../usage/boxUsage.ts";
 import type { ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 export type LeaseActivity = "busy" | "idle" | "unknown";
@@ -55,3 +58,48 @@ export async function readLeaseActivity(lease: ProvisionedLease): Promise<LeaseA
     return "unknown";
   }
 }
+
+const decodeUsageSummary = Schema.decodeUnknownSync(UsageSummary);
+
+/** Reads a remote T3 server's hourly usage since `sinceTime`, or throws. */
+export async function readLeaseUsage(
+  lease: ProvisionedLease,
+  sinceTime: string,
+  timeoutMs: number,
+): Promise<UsageSummary> {
+  if (!lease.remoteAccess) throw new Error("The cloud box has no remote access.");
+  const response = await fetch(`${lease.remoteAccess.origin}/api/usage/history`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${lease.remoteAccess.brokerToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ sinceTime }),
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`The cloud box answered its usage history with status ${response.status}.`);
+  }
+  return decodeUsageSummary(await response.json());
+}
+
+/**
+ * Pulls a box's usage and replaces what the host keeps for it. History starts
+ * at the lease's creation because a forked box carries its parent's
+ * transcripts, and records from before the fork belong to the parent.
+ */
+export const pullLeaseUsage = Effect.fn("pullLeaseUsage")(function* (
+  store: BoxUsageStore["Service"],
+  lease: ProvisionedLease,
+  timeoutMs = 10_000,
+) {
+  const usage = yield* Effect.tryPromise(() => readLeaseUsage(lease, lease.createdAt, timeoutMs));
+  yield* store.replace({
+    leaseId: lease.leaseId,
+    accountIds: [lease.providerInstanceId, ...(lease.companionInstanceIds ?? [])],
+    usage,
+    pulledAt: DateTime.formatIso(yield* DateTime.now),
+  });
+});
