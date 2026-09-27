@@ -182,6 +182,7 @@ import {
   resolveWorkingStartedAt,
   EMPTY_SIDEBAR_COMPOSER,
   sidebarDraftRows,
+  sidebarDraftStatusLabel,
   sidebarListItemId,
   sidebarMarkerId,
   sortLogicalProjectsForSidebar,
@@ -735,7 +736,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
         : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
   const accessibility = resolveSidebarRowAccessibility({
     title: preview,
-    statusLabel: "Unsent draft",
+    statusLabel: sidebarDraftStatusLabel(session),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });

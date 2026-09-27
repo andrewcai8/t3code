@@ -30,6 +30,7 @@ import {
   draftSessionHasInvestedWork,
   type ComposerThreadDraftState,
   type DraftSessionState,
+  type PendingCloudEnvironmentSend,
 } from "../composerDraftStore";
 
 export function shouldNavigateAfterThreadPark(input: {
@@ -1282,6 +1283,22 @@ export interface SidebarDraftRowData {
   readonly composer: ComposerThreadDraftState;
 }
 
+// A first send stays a draft row until its thread exists, so while it is in
+// flight the row names that step. A failed send is back to unsent.
+const pendingCloudSendStatusLabel: Record<PendingCloudEnvironmentSend["phase"], string> = {
+  creating: "Starting cloud machine…",
+  pairing: "Starting cloud machine…",
+  "loading-project": "Starting cloud machine…",
+  ready: "Sending…",
+  failed: "Unsent draft",
+};
+
+export function sidebarDraftStatusLabel(session: DraftSessionState): string {
+  return session.pendingEnvironmentSend
+    ? pendingCloudSendStatusLabel[session.pendingEnvironmentSend.phase]
+    : "Unsent draft";
+}
+
 /**
  * Draft sessions the sidebar lists above the pinned block, newest first.
  * Every non-promoted session with content gets a row, mapped or not:
@@ -1323,9 +1340,10 @@ export function sidebarDraftRows(input: {
     if (draftKey === input.routeDraftId) {
       // Open draft: the frozen entry snapshot, or a live row for a started
       // first-send that has not been left yet. Gated on the live session
-      // above so send/discard still removes the row immediately.
+      // above so send/discard still removes the row immediately. Only the
+      // composer is frozen; the session stays live so a send shows its status.
       if (input.frozenRouteRow !== null) {
-        rows.push(input.frozenRouteRow);
+        rows.push({ ...input.frozenRouteRow, session });
       } else if (session.pendingEnvironmentSend != null) {
         rows.push({
           draftId: DraftId.make(draftKey),

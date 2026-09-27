@@ -44,7 +44,9 @@ import {
   sortScopedProjectsForSidebar,
   shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
+  EMPTY_SIDEBAR_COMPOSER,
   sidebarDraftRows,
+  sidebarDraftStatusLabel,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   type SidebarListItem,
   type SidebarListMarker,
@@ -61,7 +63,11 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 
-import type { DraftSessionState } from "../composerDraftStore";
+import {
+  DraftId,
+  type DraftSessionState,
+  type PendingCloudEnvironmentSend,
+} from "../composerDraftStore";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -2578,7 +2584,18 @@ describe("navigation after parking a thread", () => {
 
 describe("sidebarDraftRows", () => {
   const cloudEnvironmentId = EnvironmentId.make("environment-cloud");
-  const cloudSend: DraftSessionState = {
+  const readySend: PendingCloudEnvironmentSend = {
+    provider: "e2b",
+    preview: "fix the flaky test",
+    messageId: "message-cloud",
+    createdAt: "2026-09-27T10:00:00.000Z",
+    prompt: "fix the flaky test",
+    outgoingMessageText: "fix the flaky test",
+    phase: "ready",
+    startedAt: "2026-09-27T10:00:00.000Z",
+    readyEnvironmentId: "environment-cloud",
+  };
+  const unsent: DraftSessionState = {
     threadId: ThreadId.make("thread-cloud"),
     environmentId: cloudEnvironmentId,
     projectId: ProjectId.make("project-cloud"),
@@ -2590,18 +2607,8 @@ describe("sidebarDraftRows", () => {
     worktreePath: null,
     envMode: "local",
     startFromOrigin: false,
-    pendingEnvironmentSend: {
-      provider: "e2b",
-      preview: "fix the flaky test",
-      messageId: "message-cloud",
-      createdAt: "2026-09-27T10:00:00.000Z",
-      prompt: "fix the flaky test",
-      outgoingMessageText: "fix the flaky test",
-      phase: "ready",
-      startedAt: "2026-09-27T10:00:00.000Z",
-      readyEnvironmentId: "environment-cloud",
-    },
   };
+  const cloudSend: DraftSessionState = { ...unsent, pendingEnvironmentSend: readySend };
   const rowsFor = (knownThreadKeys: ReadonlySet<string>, routeDraftId: string | null) =>
     sidebarDraftRows({
       sessions: { "draft-cloud": cloudSend },
@@ -2618,5 +2625,30 @@ describe("sidebarDraftRows", () => {
     expect(rowsFor(new Set(), null)).toEqual(["draft-cloud"]);
     expect(rowsFor(new Set([threadKey]), "draft-cloud")).toEqual([]);
     expect(rowsFor(new Set([threadKey]), null)).toEqual([]);
+  });
+
+  it("labels an open draft by its live send, not the snapshot taken on entry", () => {
+    const labelsFor = (session: DraftSessionState) =>
+      sidebarDraftRows({
+        sessions: { "draft-cloud": session },
+        composers: {},
+        scopedProjectKeys: null,
+        routeDraftId: "draft-cloud",
+        frozenRouteRow: {
+          draftId: DraftId.make("draft-cloud"),
+          session: unsent,
+          composer: EMPTY_SIDEBAR_COMPOSER,
+        },
+        knownThreadKeys: new Set(),
+      }).map((row) => sidebarDraftStatusLabel(row.session));
+
+    expect(labelsFor(unsent)).toEqual(["Unsent draft"]);
+    expect(labelsFor(cloudSend)).toEqual(["Sending…"]);
+    expect(
+      labelsFor({
+        ...cloudSend,
+        pendingEnvironmentSend: { ...readySend, phase: "creating" },
+      }),
+    ).toEqual(["Starting cloud machine…"]);
   });
 });
