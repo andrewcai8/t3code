@@ -36,7 +36,12 @@ export interface StoredAutomation {
 export type RunTransition =
   | { readonly state: "attaching" }
   | { readonly state: "starting"; readonly environmentId: EnvironmentId }
-  | { readonly state: "started"; readonly threadId: ThreadId }
+  | {
+      readonly state: "started";
+      readonly threadId: ThreadId;
+      /** Something the run did differently than configured, kept in the run's `error`. */
+      readonly note?: string | null;
+    }
   | { readonly state: "failed"; readonly error: string; readonly disposedAt: string | null };
 
 /** The states a run may leave, and the ones it may enter from each. */
@@ -70,6 +75,7 @@ const AutomationRow = Schema.Struct({
   prompt: Schema.String,
   agentDriver: Schema.String,
   account: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
   provider: Schema.String,
   cron: Schema.NullOr(Schema.String),
   timeZone: Schema.NullOr(Schema.String),
@@ -94,6 +100,7 @@ const decodeAutomationRow = (input: unknown): Exit.Exit<StoredAutomation, unknow
       prompt: row.prompt,
       agentDriver: row.agentDriver,
       account: row.account,
+      model: row.model,
       provider: row.provider,
       schedule:
         row.cron === null || row.timeZone === null
@@ -203,7 +210,7 @@ export class AutomationStore extends Context.Service<
       const readAutomations = (where: Statement.Fragment) =>
         sql`
           SELECT id, name, repository, branch, prompt, agent_driver AS "agentDriver",
-            provider_instance_id AS account, provider, cron, timezone AS "timeZone",
+            provider_instance_id AS account, model, provider, cron, timezone AS "timeZone",
             schedule_since AS "scheduleSince", webhook_secret_hash AS "webhookSecretHash",
             enabled, created_at AS "createdAt", updated_at AS "updatedAt"
           FROM automations ${where}
@@ -238,18 +245,19 @@ export class AutomationStore extends Context.Service<
         save: ({ automation, webhookSecretHash, scheduleSince }) =>
           sql`
             INSERT INTO automations (id, name, repository, branch, prompt, agent_driver,
-              provider_instance_id, provider, cron, timezone, schedule_since, webhook_secret_hash,
-              enabled, created_at, updated_at)
+              provider_instance_id, model, provider, cron, timezone, schedule_since,
+              webhook_secret_hash, enabled, created_at, updated_at)
             VALUES (${automation.id}, ${automation.name}, ${automation.repository},
               ${automation.branch}, ${automation.prompt}, ${automation.agentDriver},
-              ${automation.account}, ${automation.provider}, ${automation.schedule?.cron ?? null},
+              ${automation.account}, ${automation.model}, ${automation.provider}, ${automation.schedule?.cron ?? null},
               ${automation.schedule?.timeZone ?? null}, ${scheduleSince},
               ${automation.webhook ? webhookSecretHash : null}, ${automation.enabled ? 1 : 0},
               ${automation.createdAt}, ${automation.updatedAt})
             ON CONFLICT(id) DO UPDATE SET name = excluded.name, repository = excluded.repository,
               branch = excluded.branch, prompt = excluded.prompt,
               agent_driver = excluded.agent_driver,
-              provider_instance_id = excluded.provider_instance_id, provider = excluded.provider,
+              provider_instance_id = excluded.provider_instance_id, model = excluded.model,
+              provider = excluded.provider,
               cron = excluded.cron, timezone = excluded.timezone,
               schedule_since = excluded.schedule_since,
               webhook_secret_hash = excluded.webhook_secret_hash, enabled = excluded.enabled,
@@ -330,7 +338,12 @@ export class AutomationStore extends Context.Service<
             return Effect.fail(storeError(`a run cannot move from ${from} to ${next.state}`));
           const environmentId = next.state === "starting" ? next.environmentId : null;
           const threadId = next.state === "started" ? next.threadId : null;
-          const error = next.state === "failed" ? next.error : null;
+          const error =
+            next.state === "failed"
+              ? next.error
+              : next.state === "started"
+                ? (next.note ?? null)
+                : null;
           const disposedAt = next.state === "failed" ? next.disposedAt : null;
           return readRuns(sql`
             UPDATE automation_runs SET state = ${next.state},

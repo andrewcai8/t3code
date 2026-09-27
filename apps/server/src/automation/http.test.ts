@@ -32,6 +32,7 @@ it.effect(
         prompt: "Smoke test the deploy.",
         agentDriver: ProviderDriverKind.make("codex"),
         account: null,
+        model: null,
         provider: "e2b" as const,
         schedule: null,
         webhook: true,

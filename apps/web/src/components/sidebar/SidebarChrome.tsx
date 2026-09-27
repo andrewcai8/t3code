@@ -1,8 +1,14 @@
-import { ArrowLeftIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  CalendarClockIcon,
+  ChartNoAxesColumnIcon,
+  SettingsIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
+import { useAutomationsAvailable } from "../../cloud/automationHosts";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
@@ -200,6 +206,29 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
       )}
       <SidebarUpdatePill />
     </SidebarMenu>
+  );
+});
+
+/** The Automations row under the thread header. Renders nothing when no host offers cloud machines. */
+export const SidebarAutomationsItem = memo(function SidebarAutomationsItem() {
+  const available = useAutomationsAvailable();
+  const navigate = useNavigate();
+  const { isMobile, setOpenMobile } = useSidebar();
+  const isActive = useLocation({ select: (location) => location.pathname === "/automations" });
+  if (!available) return null;
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        isActive={isActive}
+        onClick={() => {
+          if (isMobile) setOpenMobile(false);
+          void navigate({ to: "/automations" });
+        }}
+      >
+        <CalendarClockIcon />
+        <span>Automations</span>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
   );
 });
 

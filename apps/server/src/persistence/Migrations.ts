@@ -70,6 +70,7 @@ import Migration0055 from "./Migrations/055_PullRequestFilesViewed.ts";
 import Migration0056 from "./Migrations/056_Automations.ts";
 import Migration0057 from "./Migrations/057_ProjectionThreadsAutoSettleDisabledAt.ts";
 import Migration0058 from "./Migrations/058_BoxUsage.ts";
+import Migration0059 from "./Migrations/059_AutomationsModel.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -81,11 +82,11 @@ import Migration0058 from "./Migrations/058_BoxUsage.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  *
- * Fork numbering: 052-056 and 058 are this fork's own and deployed databases
- * have them applied, so their ids never change. 057 came from upstream. When
- * syncing upstream, an upstream migration takes the next free id above the
- * highest one here, and one whose contents match a fork migration is matched
- * by rename instead of added.
+ * Fork numbering: 052-056, 058 and 059 are this fork's own and deployed
+ * databases have them applied, so their ids never change. 057 came from
+ * upstream. When syncing upstream, an upstream migration takes the next free
+ * id above the highest one here, and one whose contents match a fork migration
+ * is matched by rename instead of added.
  */
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -146,6 +147,7 @@ const migrationEntries = [
   [56, "Automations", Migration0056],
   [57, "ProjectionThreadsAutoSettleDisabledAt", Migration0057],
   [58, "BoxUsage", Migration0058],
+  [59, "AutomationsModel", Migration0059],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

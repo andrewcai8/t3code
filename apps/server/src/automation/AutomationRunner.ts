@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
   DEFAULT_MODEL_BY_PROVIDER,
+  PROVIDER_DISPLAY_NAMES,
   type ClientOrchestrationCommand,
   EnvironmentHttpApi,
   MessageId,
@@ -12,6 +13,7 @@ import {
   type EnvironmentId,
   type EnvironmentProvisionInput,
   type ProjectId,
+  type ProviderDriverKind,
   type ProvisionRequestId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -43,6 +45,10 @@ export interface AutomationRunnerPorts {
   readonly dispose: (run: StoredRun) => Effect.Effect<boolean>;
   /** Where the host reaches a child it provisioned, and the admin token it holds for it. */
   readonly remoteAccess: (leaseId: string) => Effect.Effect<RemoteAccess | null>;
+  /** The model slugs the host offers for a driver; null when its catalog is unknown. */
+  readonly offeredModels: (
+    agentDriver: ProviderDriverKind,
+  ) => Effect.Effect<ReadonlyArray<string> | null>;
 }
 
 /** A step that ends the run with `message` shown in its history. */
@@ -167,8 +173,16 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
     const access = yield* ports.remoteAccess(run.requestId);
     if (!access)
       return yield* Effect.fail(new RunFailed("The host has no access to this environment."));
-    const model = DEFAULT_MODEL_BY_PROVIDER[agentDriver];
+    // An edit mid-run may have switched agents, and the chosen model belongs to the new one.
+    const chosen = automation.agentDriver === agentDriver ? automation.model : null;
+    // A model the provider no longer offers would have the turn rejected after the chat opens.
+    const offered = chosen === null ? null : yield* ports.offeredModels(agentDriver);
+    const retired = chosen !== null && offered !== null && !offered.includes(chosen);
+    const model = chosen !== null && !retired ? chosen : DEFAULT_MODEL_BY_PROVIDER[agentDriver];
     if (!model) return yield* Effect.fail(new RunFailed(`${agentDriver} has no default model.`));
+    const note = retired
+      ? `${chosen} is not offered for ${PROVIDER_DISPLAY_NAMES[agentDriver] ?? agentDriver}, so this run used ${model}.`
+      : null;
     const client = yield* child(access);
     let projectId: ProjectId | undefined;
     const polls = Duration.toMillis(PROJECT_WAIT) / Duration.toMillis(PROJECT_POLL);
@@ -242,7 +256,7 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
         runId: run.id,
         message: claimed.message,
       });
-    return threadId;
+    return { threadId, note };
   });
 
   const stepTimeout =
@@ -274,7 +288,7 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
           ? Effect.fail(new RunFailed("The run lost track of its environment."))
           : startChat(automation, run, run.environmentId).pipe(
               stepTimeout(STEP_TIMEOUT.starting, "Starting the chat"),
-              Effect.map((threadId) => ({ state: "started" as const, threadId })),
+              Effect.map(({ threadId, note }) => ({ state: "started" as const, threadId, note })),
             );
       case "started":
       case "failed":

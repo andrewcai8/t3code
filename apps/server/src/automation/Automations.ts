@@ -29,6 +29,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
 import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import { derivedRunId, makeAutomationRunner, runProvisionInput } from "./AutomationRunner.ts";
 import {
@@ -478,6 +479,7 @@ export class Automations extends Context.Service<
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const environmentControl = yield* EnvironmentControl;
+      const providers = yield* ProviderRegistry;
       const leases = createProvisionedLeaseRegistry(sql);
       const dispose = yield* makeDisposeMachine(environmentControl);
       const runner = yield* makeAutomationRunner({
@@ -487,6 +489,17 @@ export class Automations extends Context.Service<
           Effect.tryPromise(() => leases.findById(leaseId)).pipe(
             Effect.map((lease) => lease?.remoteAccess ?? null),
             Effect.orElseSucceed(() => null),
+          ),
+        // The host's own catalog, which the editor's model picker also reads; a box runs the
+        // same drivers and exposes no catalog of its own.
+        offeredModels: (agentDriver) =>
+          providers.getProviders.pipe(
+            Effect.map((snapshots) => {
+              const own = snapshots.filter((snapshot) => snapshot.driver === agentDriver);
+              return own.length === 0
+                ? null
+                : own.flatMap((snapshot) => snapshot.models.map((model) => model.slug));
+            }),
           ),
       });
       const context = yield* Effect.context<HttpClient.HttpClient>();

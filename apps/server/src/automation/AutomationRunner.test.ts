@@ -38,6 +38,7 @@ const automation: Automation = {
   prompt: "Bump dependencies and open a PR.",
   agentDriver: ProviderDriverKind.make("codex"),
   account: ProviderInstanceId.make("codex_work"),
+  model: null,
   provider: "e2b",
   schedule: null,
   webhook: false,
@@ -115,6 +116,8 @@ const fakeManager = (
     /** Answers to successive provision calls; the last one repeats. */
     readonly provision?: ReadonlyArray<EnvironmentProvisionResult | "error">;
     readonly attach?: EnvironmentProvisionAttachResult;
+    /** The host's model catalog for every driver; null when unknown. */
+    readonly offeredModels?: ReadonlyArray<string> | null;
   } = {},
 ) => {
   const stateNow = (label: string) =>
@@ -195,6 +198,7 @@ const fakeManager = (
             Effect.as({ origin: "https://child.test", brokerToken: "broker-token" }),
           ),
         ),
+      offeredModels: () => Effect.succeed(overrides.offeredModels ?? null),
     };
     return ports;
   });
@@ -298,6 +302,64 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
         );
       }),
     ),
+  );
+
+  const runWithModel = (model: string, offeredModels: ReadonlyArray<string> | null) =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* AutomationStore;
+        const chosen = { ...automation, model };
+        yield* store.save({
+          automation: chosen,
+          webhookSecretHash: null,
+          scheduleSince: chosen.createdAt,
+        });
+        yield* store.insertRun(run("provisioning"));
+        const requests: Array<ChildRequest> = [];
+        const runner = yield* makeAutomationRunner(yield* fakeManager([], [], { offeredModels }));
+        const finished = yield* runner(chosen, run("provisioning")).pipe(
+          Effect.provideService(HttpClient.HttpClient, fakeChild(requests)),
+        );
+        const [stored] = yield* store.listRuns(automation.id, 1);
+        return {
+          models: requests.map(
+            ({ body }) =>
+              (body as { modelSelection?: { model: string } } | null)?.modelSelection?.model,
+          ),
+          state: finished?.state,
+          error: stored?.error,
+        };
+      }),
+    );
+
+  it.effect("starts the chat on the automation's chosen model when the host offers it", () =>
+    Effect.gen(function* () {
+      expect(yield* runWithModel("gpt-6-mini", ["gpt-6-astra", "gpt-6-mini"])).toEqual({
+        models: [undefined, "gpt-6-mini", "gpt-6-mini"],
+        state: "started",
+        error: null,
+      });
+    }),
+  );
+
+  it.effect("keeps the chosen model when the host's catalog is unknown", () =>
+    Effect.gen(function* () {
+      expect(yield* runWithModel("gpt-6-mini", null)).toEqual({
+        models: [undefined, "gpt-6-mini", "gpt-6-mini"],
+        state: "started",
+        error: null,
+      });
+    }),
+  );
+
+  it.effect("falls back to the default model, with a note, when the chosen one is retired", () =>
+    Effect.gen(function* () {
+      expect(yield* runWithModel("gpt-retired", ["gpt-6-astra", "gpt-6-mini"])).toEqual({
+        models: [undefined, "gpt-6-astra", "gpt-6-astra"],
+        state: "started",
+        error: "gpt-retired is not offered for Codex, so this run used gpt-6-astra.",
+      });
+    }),
   );
 
   it.effect("resumes a run a restart left in starting without provisioning again", () =>
@@ -513,6 +575,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
           branch: "dev",
           account: null,
           agentDriver: ProviderDriverKind.make("cursor"),
+          model: "composer-2",
         };
         yield* store.save({
           automation: edited,

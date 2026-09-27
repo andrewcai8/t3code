@@ -1469,6 +1469,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         prompt,
         agentDriver: ProviderDriverKind.make(agent),
         account: null,
+        model: null,
         provider: options.provider,
         schedule: null,
         webhook: true,

@@ -29,15 +29,11 @@ import {
   settingsScopeEnvironmentLabel,
 } from "./settingsScopeAxis";
 
-/**
- * Pages with no scope to pick: rows saved on this client, and automations,
- * which belong to the host.
- */
+/** Pages with no scope to pick: rows saved on this client. */
 export const SETTINGS_DEVICE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/settings/appearance",
   "/settings/snap-shot",
   "/settings/connections",
-  "/settings/automations",
 ]);
 
 interface SettingsScopeMenuProps {

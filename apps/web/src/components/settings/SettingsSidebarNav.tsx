@@ -13,7 +13,6 @@ import {
   ArchiveIcon,
   BlocksIcon,
   BotIcon,
-  CalendarClockIcon,
   createLucideIcon,
   GitBranchIcon,
   HardDriveIcon,
@@ -87,7 +86,6 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
   "/settings/connections": Link2Icon,
-  "/settings/automations": CalendarClockIcon,
   "/settings/archived": ArchiveIcon,
 };
 

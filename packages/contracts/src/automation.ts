@@ -1,4 +1,5 @@
 import * as Cron from "effect/Cron";
+import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -69,6 +70,10 @@ export const AutomationInput = Schema.Struct({
   agentDriver: ProviderDriverKind,
   /** The account every run uses. Null runs each on the account with the most usage left. */
   account: Schema.NullOr(ProviderInstanceId),
+  /** The model slug every run uses. Null uses the agent's default model. */
+  model: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   provider: ProvisionProvider,
   /** Null runs only from the webhook or Run now. */
   schedule: Schema.NullOr(AutomationSchedule),
@@ -113,6 +118,7 @@ export const AutomationRun = Schema.Struct({
   state: AutomationRunState,
   environmentId: Schema.NullOr(EnvironmentId),
   threadId: Schema.NullOr(ThreadId),
+  /** Why a run failed or was skipped, or a note on how a started run differed from its setup. */
   error: Schema.NullOr(Schema.String),
   /** When a failed run's machine was disposed. Null while it exists or never did. */
   disposedAt: Schema.NullOr(IsoDateTime),

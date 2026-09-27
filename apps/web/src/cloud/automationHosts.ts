@@ -34,6 +34,17 @@ export function useAutomationHosts() {
   }, [environments]);
 }
 
+/**
+ * Whether any known environment offers cloud machines. Connection phase is ignored, so a
+ * reconnect does not add and remove the entry points.
+ */
+export function useAutomationsAvailable(): boolean {
+  const { environments } = useEnvironments();
+  return environments.some(
+    (environment) => offeredProvisionProviders(environment.serverConfig).length > 0,
+  );
+}
+
 /** Refetches a host's box list, as after a chat claims one of its boxes. */
 export function refreshProvisionedEnvironments(managerId: EnvironmentId): void {
   serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]);

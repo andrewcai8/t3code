@@ -1,7 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
-
-import { AutomationsSettings } from "../components/settings/AutomationsSettings";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/settings/automations")({
-  component: AutomationsSettings,
+  beforeLoad: () => {
+    throw redirect({ to: "/automations", replace: true });
+  },
 });
