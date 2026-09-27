@@ -7,6 +7,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
@@ -1294,10 +1295,23 @@ export function sidebarDraftRows(input: {
   readonly routeDraftId: string | null;
   /** The open draft's row as captured when it became the route, if it had one. */
   readonly frozenRouteRow: SidebarDraftRowData | null;
+  /** Scoped keys of every thread the client knows about. */
+  readonly knownThreadKeys: ReadonlySet<string>;
 }): SidebarDraftRowData[] {
   const rows: SidebarDraftRowData[] = [];
   for (const [draftKey, session] of Object.entries(input.sessions)) {
     if (session.promotedTo != null) {
+      continue;
+    }
+    // A cloud first-send keeps its draft until the local send settles, which
+    // can trail the box's thread by a minute. Once that thread exists, its
+    // own row stands for the chat.
+    if (
+      session.pendingEnvironmentSend != null &&
+      input.knownThreadKeys.has(
+        scopedThreadKey(scopeThreadRef(session.environmentId, session.threadId)),
+      )
+    ) {
       continue;
     }
     if (

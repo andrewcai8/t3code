@@ -132,6 +132,7 @@ import {
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
+  useThreadRefs,
   useThreadShells,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
@@ -826,6 +827,10 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
   const draftsByThreadKey = useComposerDraftStore((store) => store.draftsByThreadKey);
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
+  // Membership-only subscription: the refs array keeps its identity until a
+  // thread is added or removed, so thread activity never re-renders the block.
+  const threadRefs = useThreadRefs();
+  const knownThreadKeys = useMemo(() => new Set(threadRefs.map(scopedThreadKey)), [threadRefs]);
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
   // types. A draft that was never navigated away from has no snapshot to
@@ -860,11 +865,13 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
         scopedProjectKeys: props.scopedProjectKeys,
         routeDraftId: props.routeDraftId,
         frozenRouteRow: frozenActive.routeDraftId === props.routeDraftId ? frozenActive.row : null,
+        knownThreadKeys,
       }),
     [
       draftThreadsByThreadKey,
       draftsByThreadKey,
       frozenActive,
+      knownThreadKeys,
       props.routeDraftId,
       props.scopedProjectKeys,
     ],
