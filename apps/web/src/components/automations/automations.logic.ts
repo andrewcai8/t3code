@@ -328,7 +328,10 @@ export function automationInputOf(
 const REPOSITORY_PATTERN = /^[\w.-]+\/[\w.-]+$/;
 const decodeAutomationInput = Schema.decodeUnknownSync(AutomationInput);
 /** Each form field's own wire decoder, so a rule only the schema knows lands under its field. */
-const DRAFT_FIELD_DECODERS = {
+const DRAFT_FIELD_DECODERS: Record<
+  AutomationDraftField,
+  (input: unknown) => Result.Result<unknown, Schema.SchemaError>
+> = {
   name: Schema.decodeUnknownResult(AutomationInput.fields.name),
   repository: Schema.decodeUnknownResult(AutomationInput.fields.repository),
   branch: Schema.decodeUnknownResult(AutomationInput.fields.branch),
@@ -338,7 +341,7 @@ const DRAFT_FIELD_DECODERS = {
   model: Schema.decodeUnknownResult(AutomationInput.fields.model),
   provider: Schema.decodeUnknownResult(AutomationInput.fields.provider),
   schedule: Schema.decodeUnknownResult(AutomationInput.fields.schedule),
-} satisfies Record<AutomationDraftField, unknown>;
+};
 const DRAFT_FIELDS = Object.keys(DRAFT_FIELD_DECODERS) as ReadonlyArray<AutomationDraftField>;
 
 export function newAutomationDraft(defaults: {
