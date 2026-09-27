@@ -35,12 +35,9 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as DateTime from "effect/DateTime";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as Schedule from "effect/Schedule";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ALL_TRAFFIC } from "e2b";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
@@ -82,13 +79,12 @@ import {
 } from "./ProvisionedLeaseRegistry.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { pullLeaseUsage, readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
+import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
-import { CACHE_RETENTION_DAYS } from "../usage/UsageService.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const isProvisionRefused = Schema.is(ProvisionRefused);
 
-const LEASE_REAP_INTERVAL_MS = 5 * 60 * 1000;
 /** Boxes read at once per usage sweep, so a few stuck boxes cannot stall the rest. */
 const USAGE_SYNC_CONCURRENCY = 4;
 
@@ -1113,30 +1109,12 @@ export const layer = Layer.effect(
     yield* Effect.gen(function* () {
       const service = yield* Effect.promise(resolve);
       if (!service) return;
-      const every = Schedule.spaced(Duration.millis(LEASE_REAP_INTERVAL_MS));
-      const reap = Effect.gen(function* () {
-        // A lease is only registered once its provision reached ready, so an
-        // expired heartbeat means a finished machine nobody is watching. Pause
-        // it and leave it reconnectable. A provision that never reached ready
-        // holds no lease and is disposed by its retention deadline instead.
-        yield* Effect.promise(() => service.reapExpiredLeases()).pipe(Effect.ignore);
-        // A crash between issuing an allocation and recording it leaves a
-        // resource nobody else will look for.
-        yield* provisioning.reconcile.pipe(Effect.ignore);
-      }).pipe(Effect.repeat(every));
-      const collectUsage = Effect.gen(function* () {
-        yield* Effect.tryPromise(() => service.syncLeaseUsage()).pipe(Effect.ignore);
-        const now = yield* Clock.currentTimeMillis;
-        yield* boxUsage
-          .prune(
-            DateTime.formatIso(
-              DateTime.makeUnsafe(now - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000),
-            ),
-          )
-          .pipe(Effect.ignore);
-      }).pipe(Effect.repeat(every));
-      // Separate loops, so boxes slow to report usage never delay a pause.
-      yield* Effect.all([reap, collectUsage], { concurrency: 2, discard: true });
+      yield* runLeaseUpkeep({
+        reapExpiredLeases: () => service.reapExpiredLeases(),
+        syncLeaseUsage: () => service.syncLeaseUsage(),
+        reconcileProvisions: provisioning.reconcile,
+        boxUsage,
+      });
     }).pipe(Effect.forkScoped);
     return {
       namespaceProxyOrigin: (leaseId) =>
