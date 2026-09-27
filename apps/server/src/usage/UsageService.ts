@@ -912,16 +912,17 @@ export const make = Effect.gen(function* () {
     // A box a client may still hold a summary for keeps its own identity so
     // the merge can deduplicate it. Clients cache summaries for up to an hour.
     const window = boxUsageListWindow(input);
-    const rows = yield* boxUsage.list(window.sinceIso, window.untilIso, isoAt(nowMs - DAY_MS)).pipe(
-      Effect.mapError(
-        (cause) =>
-          new UsageReadError({
-            reason: "scanFailed",
-            detail: "Stored cloud box usage could not be read.",
-            cause,
-          }),
-      ),
-    );
+    // Box usage is an addition to this host's own usage, so an unreadable
+    // store drops the boxes rather than the whole summary.
+    const rows = yield* boxUsage
+      .list(window.sinceIso, window.untilIso, isoAt(nowMs - DAY_MS))
+      .pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("stored cloud box usage could not be read", { cause }).pipe(
+            Effect.as([]),
+          ),
+        ),
+      );
     return foldBoxUsage(summary, input, rows, {
       hostId: usageHostId,
       path: path.join(config.stateDir, "cloud-box-usage"),
