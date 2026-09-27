@@ -292,6 +292,43 @@ export function automationRepositoryOptions(
   );
 }
 
+const REPOSITORY_PATTERN = /^[\w.-]+\/[\w.-]+$/;
+
+/** A row in the repository picker: a project's repository, or an `owner/name` typed in. */
+export type RepositoryChoice =
+  | { readonly kind: "typed"; readonly repository: string }
+  | { readonly kind: "option"; readonly repository: string; readonly label: string | null };
+
+/**
+ * The repository picker's rows for `query`: the projects' repositories that match it, plus
+ * `current` when no project clones it, led by the query itself when it is an `owner/name` not
+ * listed yet.
+ */
+export function repositoryChoices(
+  options: ReadonlyArray<AutomationRepositoryOption>,
+  query: string,
+  current: string,
+): ReadonlyArray<RepositoryChoice> {
+  const listed: Array<RepositoryChoice> = options.map((option) => ({
+    kind: "option",
+    repository: option.repository,
+    label: option.label,
+  }));
+  if (current !== "" && !options.some((option) => option.repository === current))
+    listed.unshift({ kind: "option", repository: current, label: null });
+  const typed = query.trim();
+  const needle = typed.toLowerCase();
+  const matching = listed.filter(
+    (choice) =>
+      choice.repository.toLowerCase().includes(needle) ||
+      (choice.kind === "option" && choice.label?.toLowerCase().includes(needle)),
+  );
+  const isNew =
+    REPOSITORY_PATTERN.test(typed) &&
+    !listed.some((choice) => choice.repository.toLowerCase() === needle);
+  return isNew ? [{ kind: "typed", repository: typed }, ...matching] : matching;
+}
+
 /**
  * The branches a cloud machine can check out, as named on the remote: local branches and remote
  * ones without their remote prefix, once each. `keep` stays listed, as an edited automation's
@@ -325,7 +362,6 @@ export function automationInputOf(
   return { ...input, ...patch };
 }
 
-const REPOSITORY_PATTERN = /^[\w.-]+\/[\w.-]+$/;
 const decodeAutomationInput = Schema.decodeUnknownSync(AutomationInput);
 /** Each form field's own wire decoder, so a rule only the schema knows lands under its field. */
 const DRAFT_FIELD_DECODERS: Record<

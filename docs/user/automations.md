@@ -12,8 +12,8 @@ Choose **Automations** at the top of the sidebar, or **Open automations** in the
 then **New automation**. Automations need a connected host with cloud environments configured.
 Other hosts do not offer them.
 
-- **Repository** lists the repositories of the projects you have added to T3 Code. **Branch**
-  defaults to the repository's default branch.
+- **Repository** lists the repositories of the projects you have added to T3 Code. To use another
+  repository, type its `owner/name`. **Branch** defaults to the repository's default branch.
 - **Prompt** is the first message of every run's chat. The template buttons fill in a starter
   prompt.
 - **Agent** is Codex, Claude, or Cursor, whichever the host has set up. **Account** defaults to

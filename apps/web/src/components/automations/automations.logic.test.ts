@@ -12,6 +12,7 @@ import {
   nextRuns,
   presetCron,
   presetFromCron,
+  repositoryChoices,
   withPresetKind,
   type AutomationDraft,
 } from "./automations.logic";
@@ -172,6 +173,41 @@ describe("automationRepositoryOptions", () => {
         label: "t3code",
         source: { environmentId: "local", cwd: "/Users/andrew/t3code" },
       },
+    ]);
+  });
+});
+
+describe("repositoryChoices", () => {
+  const options = [
+    {
+      repository: "andrewcai8/t3code",
+      label: "t3code",
+      source: { environmentId: EnvironmentId.make("local"), cwd: "/Users/andrew/t3code" },
+    },
+  ];
+  it("offers a typed owner/name that is not a project, and nothing for other text", () => {
+    expect(repositoryChoices(options, " acme/docs ", "")).toEqual([
+      { kind: "typed", repository: "acme/docs" },
+    ]);
+    expect(repositoryChoices(options, "t3", "")).toEqual([
+      { kind: "option", repository: "andrewcai8/t3code", label: "t3code" },
+    ]);
+    expect(repositoryChoices(options, "not a repo", "")).toEqual([]);
+  });
+
+  it("does not repeat a repository that is already listed", () => {
+    expect(repositoryChoices(options, "andrewcai8/t3code", "")).toEqual([
+      { kind: "option", repository: "andrewcai8/t3code", label: "t3code" },
+    ]);
+    expect(repositoryChoices(options, "acme/docs", "acme/docs")).toEqual([
+      { kind: "option", repository: "acme/docs", label: null },
+    ]);
+  });
+
+  it("still offers a typed repository with no projects at all", () => {
+    expect(repositoryChoices([], "", "")).toEqual([]);
+    expect(repositoryChoices([], "acme/docs", "")).toEqual([
+      { kind: "typed", repository: "acme/docs" },
     ]);
   });
 });

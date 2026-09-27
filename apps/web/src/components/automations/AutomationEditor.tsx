@@ -62,6 +62,7 @@ import {
   formatRunTime,
   newAutomationDraft,
   nextRuns,
+  repositoryChoices,
   withPresetKind,
   type AutomationDraft,
   type AutomationDraftField,
@@ -402,51 +403,43 @@ function RepositoryField({
   onChange: (repository: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  const items = useMemo(() => {
-    const repositories = options.map((option) => option.repository);
-    // An edited automation keeps its repository even when no project here clones it.
-    return value === "" || repositories.includes(value) ? repositories : [value, ...repositories];
-  }, [options, value]);
-  const labels = new Map(options.map((option) => [option.repository, option.label]));
-  const needle = query.trim().toLowerCase();
-  const filtered =
-    needle === ""
-      ? items
-      : items.filter(
-          (item) =>
-            item.toLowerCase().includes(needle) || labels.get(item)?.toLowerCase().includes(needle),
-        );
+  const choices = repositoryChoices(options, query, value);
+  const byRepository = new Map(choices.map((choice) => [choice.repository, choice]));
+  const items = choices.map((choice) => choice.repository);
   return (
     <Field label="Repository" error={error}>
-      {items.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          Add the project in T3 Code to pick its repository.
-        </p>
-      ) : (
-        <PickerCombobox
-          ariaLabel="Repository"
-          items={items}
-          filteredItems={filtered}
-          value={value}
-          disabled={disabled}
-          placeholder="Search repositories…"
-          emptyText="No matching repositories."
-          query={query}
-          onQueryChange={setQuery}
-          onSelect={onChange}
-          renderTrigger={() => value || "Choose a repository"}
-          renderItem={(item) => (
+      <PickerCombobox
+        ariaLabel="Repository"
+        items={items}
+        filteredItems={items}
+        value={value}
+        disabled={disabled}
+        placeholder="Search or type owner/name…"
+        emptyText={
+          options.length === 0
+            ? "Type owner/name to use a repository that is not a project here."
+            : "No matching repositories. Type owner/name to use another."
+        }
+        query={query}
+        onQueryChange={setQuery}
+        onSelect={onChange}
+        renderTrigger={() => value || "Choose a repository"}
+        renderItem={(item) => {
+          const choice = byRepository.get(item);
+          if (choice?.kind === "typed")
+            return <span className="min-w-0 flex-1 truncate">Use {item}</span>;
+          return (
             <>
               <span className="min-w-0 flex-1 truncate">{item}</span>
-              {labels.has(item) ? (
+              {choice?.label ? (
                 <span className="shrink-0 truncate text-xs text-muted-foreground">
-                  {labels.get(item)}
+                  {choice.label}
                 </span>
               ) : null}
             </>
-          )}
-        />
-      )}
+          );
+        }}
+      />
     </Field>
   );
 }
