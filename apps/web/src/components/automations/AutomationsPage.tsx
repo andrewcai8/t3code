@@ -15,6 +15,7 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { useAutomationHosts } from "../../cloud/automationHosts";
+import { isElectron } from "../../env";
 import { useProvisionedEnvironmentJoin } from "../../connection/useProvisionedEnvironmentJoin";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useVisibleInterval } from "../../hooks/useVisibleInterval";
@@ -64,8 +65,13 @@ import {
   presetCron,
   type AutomationDraft,
   type AutomationDraftField,
-} from "../automations/automations.logic";
-import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
+} from "./automations.logic";
+import { ScrollArea } from "../ui/scroll-area";
+import { SidebarInset } from "../ui/sidebar";
+import { SettingsSection } from "../settings/settingsLayout";
+import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadcrumb";
+import { WorkspacePageContainer } from "../WorkspacePageContainer";
+import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
 /** The account menu's value for "run on the account with the most usage left". */
 const MOST_USAGE_LEFT = "most-usage-left";
@@ -87,30 +93,43 @@ const RUN_POLL_MS = 5_000;
 
 const browserTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-export function AutomationsSettings() {
+export function AutomationsPage() {
   const managers = useAutomationHosts().flatMap(({ environmentId, label, serverConfig }) =>
     serverConfig ? [{ environmentId, label, serverConfig }] : [],
   );
   return (
-    <SettingsPageContainer>
-      {managers.length === 0 ? (
-        <SettingsSection id="automations" title="Automations">
-          <p className="px-4 py-3 text-sm text-muted-foreground">
-            Automations need a connected host with cloud environments configured.
-          </p>
-        </SettingsSection>
-      ) : (
-        managers.map((manager, index) => (
-          <ManagerAutomations
-            key={manager.environmentId}
-            sectionId={index === 0 ? "automations" : undefined}
-            managerId={manager.environmentId}
-            title={managers.length > 1 ? `Automations · ${manager.label}` : "Automations"}
-            config={manager.serverConfig}
-          />
-        ))
-      )}
-    </SettingsPageContainer>
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
+        <WorkspacePageHeader electron={isElectron}>
+          <WorkspaceBreadcrumb ariaLabel="Automations">
+            <WorkspaceBreadcrumbItem current>
+              <h1>Automations</h1>
+            </WorkspaceBreadcrumbItem>
+          </WorkspaceBreadcrumb>
+        </WorkspacePageHeader>
+        <ScrollArea className="min-h-0 flex-1">
+          <WorkspacePageContainer>
+            {managers.length === 0 ? (
+              <SettingsSection id="automations" title="Automations">
+                <p className="px-4 py-3 text-sm text-muted-foreground">
+                  Automations need a connected host with cloud environments configured.
+                </p>
+              </SettingsSection>
+            ) : (
+              managers.map((manager, index) => (
+                <ManagerAutomations
+                  key={manager.environmentId}
+                  sectionId={index === 0 ? "automations" : undefined}
+                  managerId={manager.environmentId}
+                  title={managers.length > 1 ? `Automations · ${manager.label}` : "Automations"}
+                  config={manager.serverConfig}
+                />
+              ))
+            )}
+          </WorkspacePageContainer>
+        </ScrollArea>
+      </div>
+    </SidebarInset>
   );
 }
 
