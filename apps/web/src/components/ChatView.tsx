@@ -8,6 +8,7 @@ import {
   type CloudProvisioningProgressPhase,
   claimProvisionedBox,
   newChatRunTargets,
+  nextDraftEnvironment,
   provisionCloudEnvironment,
 } from "@t3tools/client-runtime/cloud";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -9178,24 +9179,6 @@ export default function ChatView(props: ChatViewProps) {
         isLocalDraftThread && typeof composerDraftTarget === "string"
           ? provisionedSandboxFor(composerDraftTarget)
           : null;
-      let cloudClaim: Promise<boolean> | null = null;
-      const claimCloudBox = (lease: NonNullable<typeof cloudLease>) =>
-        (cloudClaim ??= claimProvisionedBox(
-          {
-            claim: async (request) => {
-              const result = await claimCloudLease(request);
-              return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
-            },
-            refresh: refreshProvisionedEnvironments,
-            warn: (attempt) =>
-              console.warn("[cloud] could not claim the box for its first turn", {
-                leaseId: lease.leaseId,
-                attempt,
-              }),
-          },
-          lease,
-          scopeThreadRef(environmentId, threadIdForSend),
-        ));
       const startPromise = startThreadTurn({
         environmentId,
         input: {
@@ -9242,13 +9225,20 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (backgroundThreadRef) {
         markPromotedDraftThreadByRef(backgroundThreadRef);
-        // The next draft opens on this project, possibly this very box. Claim it first, so the
-        // box list that draft refreshes on mount already shows the box taken.
-        if (cloudLease) await claimCloudBox(cloudLease);
+        // Never open the next draft on the box this chat just took: its claim may not have
+        // landed, so nothing else would stop the draft from starting on it.
+        const nextDraftTarget = nextDraftEnvironment({
+          environmentId: activeProject.environmentId,
+          ownBoxManagerId: cloudLease?.managerEnvironmentId ?? null,
+          environments: logicalProjectEnvironments,
+          runTargets: runTargets.environments,
+        });
         try {
           backgroundDraftOpened = Boolean(
             await handleNewThread(
-              scopeProjectRef(activeProject.environmentId, activeProject.id),
+              nextDraftTarget
+                ? scopeProjectRef(nextDraftTarget.environmentId, nextDraftTarget.projectId)
+                : scopeProjectRef(activeProject.environmentId, activeProject.id),
               resolveBackgroundDraftWorkspaceOptions({
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
@@ -9278,7 +9268,22 @@ export default function ChatView(props: ChatViewProps) {
             .setDraftPendingEnvironmentSend(composerDraftTarget, null);
         }
         if (cloudLease && typeof composerDraftTarget === "string") {
-          const claimed = await claimCloudBox(cloudLease);
+          const claimed = await claimProvisionedBox(
+            {
+              claim: async (request) => {
+                const result = await claimCloudLease(request);
+                return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
+              },
+              refresh: refreshProvisionedEnvironments,
+              warn: (attempt) =>
+                console.warn("[cloud] could not claim the box for its first turn", {
+                  leaseId: cloudLease.leaseId,
+                  attempt,
+                }),
+            },
+            cloudLease,
+            scopeThreadRef(environmentId, threadIdForSend),
+          );
           transferProvisionedSandboxLease(
             composerDraftTarget,
             scopeThreadRef(environmentId, threadIdForSend),

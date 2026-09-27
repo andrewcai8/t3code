@@ -22,6 +22,7 @@ import {
   claimFirstTurnBox,
   idleProvisionedBoxes,
   newChatRunTargets,
+  nextDraftEnvironment,
   offeredProvisionProviders,
   type ProvisionedBoxClaim,
   provisionCloudEnvironment,
@@ -653,5 +654,44 @@ describe("claimFirstTurnBox", () => {
     expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map());
     await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(true);
     expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map([[box, host]]));
+  });
+});
+
+describe("nextDraftEnvironment", () => {
+  const host = { environmentId: EnvironmentId.make("host"), projectId: "on-host" };
+  const box = { environmentId: EnvironmentId.make("box"), projectId: "on-box" };
+  const laptop = { environmentId: EnvironmentId.make("laptop"), projectId: "on-laptop" };
+
+  it("opens the next draft on the box's host, never the box the chat just took", () => {
+    expect(
+      nextDraftEnvironment({
+        environmentId: box.environmentId,
+        ownBoxManagerId: host.environmentId,
+        environments: [box, host, laptop],
+        runTargets: [box, laptop],
+      }),
+    ).toEqual(host);
+  });
+
+  it("falls back to another machine that runs chats when the host lacks the project", () => {
+    expect(
+      nextDraftEnvironment({
+        environmentId: box.environmentId,
+        ownBoxManagerId: host.environmentId,
+        environments: [box, laptop],
+        runTargets: [box, laptop],
+      }),
+    ).toEqual(laptop);
+  });
+
+  it("keeps the next draft where the chat started when it took no box", () => {
+    expect(
+      nextDraftEnvironment({
+        environmentId: laptop.environmentId,
+        ownBoxManagerId: null,
+        environments: [host, laptop],
+        runTargets: [laptop],
+      }),
+    ).toBeNull();
   });
 });

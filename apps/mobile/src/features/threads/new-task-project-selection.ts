@@ -1,4 +1,4 @@
-import { newChatRunTargets } from "@t3tools/client-runtime/cloud";
+import { newChatRunTargets, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cloneRepository, type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 
@@ -112,6 +112,25 @@ export function resolveDraftProjectSelection(
 
   const onlyProject = getOnlySelectableProject(projectScopes);
   return onlyProject ? { kind: "select", project: onlyProject } : { kind: "pick" };
+}
+
+/**
+ * The hosts whose box lists a new task reads: connected ones that can provision. A host still
+ * connecting would never answer, and waiting on it would hold every new task back.
+ */
+export function provisioningHostIds(
+  serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>,
+  environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly connectionState: string;
+  }>,
+): ReadonlyArray<EnvironmentId> {
+  return environments.flatMap(({ environmentId, connectionState }) =>
+    connectionState === "connected" &&
+    offeredProvisionProviders(serverConfigs.get(environmentId)).length > 0
+      ? [environmentId]
+      : [],
+  );
 }
 
 export interface NewTaskEnvironment {

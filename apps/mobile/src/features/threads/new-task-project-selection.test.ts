@@ -9,6 +9,7 @@ import {
   filterProjectScopes,
   getProjectScopeSelectionTarget,
   newTaskEnvironments,
+  provisioningHostIds,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
   resolveNewTaskEnvironmentId,
@@ -428,5 +429,23 @@ describe("new task environments", () => {
         kind: "draft",
       });
     });
+  });
+});
+
+describe("provisioningHostIds", () => {
+  it("reads only connected hosts that can provision, so a sleeping host holds nothing back", () => {
+    const provisions = { environmentControl: true, provisionProviders: ["e2b"] as const };
+    const serverConfigs = new Map<EnvironmentId, HostConfig>([
+      [EnvironmentId.make("host"), provisions],
+      [EnvironmentId.make("sleeping-host"), provisions],
+      [EnvironmentId.make("laptop"), { localAgentRuns: true }],
+    ]);
+    expect(
+      provisioningHostIds(serverConfigs, [
+        { environmentId: EnvironmentId.make("host"), connectionState: "connected" },
+        { environmentId: EnvironmentId.make("sleeping-host"), connectionState: "reconnecting" },
+        { environmentId: EnvironmentId.make("laptop"), connectionState: "connected" },
+      ]),
+    ).toEqual([EnvironmentId.make("host")]);
   });
 });

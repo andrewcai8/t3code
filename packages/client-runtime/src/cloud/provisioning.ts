@@ -184,6 +184,32 @@ export function claimFirstTurnBox(
   return lease === null ? Promise.resolve(false) : claimProvisionedBox(ports, lease, owner);
 }
 
+/**
+ * Where a background send opens the next draft, or null to open it where the chat just started.
+ * A chat that started on the box it provisioned has taken that box, whether or not its claim has
+ * landed yet, so the next draft goes to the box's host, which starts a fresh box when it runs no
+ * agents itself, else to the first other machine a new chat can run on.
+ */
+export function nextDraftEnvironment<
+  Environment extends { readonly environmentId: EnvironmentId },
+>(input: {
+  /** Where the chat just started. */
+  readonly environmentId: EnvironmentId;
+  /** The host of the box the chat started on, when the chat provisioned that box itself. */
+  readonly ownBoxManagerId: EnvironmentId | null;
+  /** The environments holding the chat's project. */
+  readonly environments: ReadonlyArray<Environment>;
+  /** Where a new chat may run, as `newChatRunTargets` offers it. */
+  readonly runTargets: ReadonlyArray<Environment>;
+}): Environment | null {
+  if (input.ownBoxManagerId === null) return null;
+  return (
+    input.environments.find(({ environmentId }) => environmentId === input.ownBoxManagerId) ??
+    input.runTargets.find(({ environmentId }) => environmentId !== input.environmentId) ??
+    null
+  );
+}
+
 export interface NewChatRunTargets<Environment> {
   /** The environments holding the project that a new chat may run on. */
   readonly environments: ReadonlyArray<Environment>;
