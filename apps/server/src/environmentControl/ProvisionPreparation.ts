@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - immutable private inputs are captured at the filesystem and provider boundary.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
@@ -163,6 +164,16 @@ const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
 const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
 export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
+/**
+ * Hashes a file a chunk at a time. A runtime archive is about 150 MB, and
+ * reading it whole held that much per concurrent provision and hashed it in
+ * one synchronous call.
+ */
+export async function fileDigest(path: string) {
+  const hash = NodeCrypto.createHash("sha256");
+  for await (const chunk of NodeFS.createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
 const provisionInputLimit = 64 * 1024 * 1024;
 
 /**
@@ -424,16 +435,17 @@ async function privateRead(path: string) {
     throw new Error("Provisioning state file must be private.");
   return await NodeFSP.readFile(path, "utf8");
 }
-async function writeOnce(path: string, data: string | Uint8Array) {
+/** `fill` creates the temporary file; the first complete, fsynced one wins `path`. */
+async function writeOnce(path: string, fill: (temporary: string) => Promise<void>) {
   const temporary = `${path}.${NodeCrypto.randomUUID()}.tmp`;
-  const handle = await NodeFSP.open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(data);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
+    await fill(temporary);
+    const handle = await NodeFSP.open(temporary, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await NodeFSP.link(temporary, path).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "EEXIST") throw error;
     });
@@ -444,7 +456,7 @@ async function writeOnce(path: string, data: string | Uint8Array) {
       await directory.close();
     }
   } finally {
-    await NodeFSP.unlink(temporary);
+    await NodeFSP.rm(temporary, { force: true });
   }
 }
 
@@ -480,16 +492,22 @@ export function makeProvisionPreparationStore(stateDir: string) {
   /** Copies a configured artifact into the store so a later config edit cannot change what a guest receives. */
   const storeArtifact = async (artifact: ProvisionRuntimeArtifact) => {
     relativePath(artifact.entrypoint);
-    const artifactBytes = await NodeFSP.readFile(artifact.path);
-    if (provisionDigest(artifactBytes) !== artifact.sha256)
-      throw new ProvisionRefused({
-        reason: "unconfigured",
-        message: "The configured runtime artifact failed its content hash check.",
-      });
     const artifactPath = NodePath.join(directory, `${artifact.sha256}.tar`);
-    await writeOnce(artifactPath, artifactBytes);
-    if (provisionDigest(await NodeFSP.readFile(artifactPath)) !== artifact.sha256)
-      throw new Error("Stored runtime artifact changed.");
+    const stored = await fileDigest(artifactPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (stored === null)
+      await writeOnce(artifactPath, async (temporary) => {
+        await NodeFSP.copyFile(artifact.path, temporary, NodeFSP.constants.COPYFILE_EXCL);
+        await NodeFSP.chmod(temporary, 0o600);
+        if ((await fileDigest(temporary)) !== artifact.sha256)
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "The configured runtime artifact failed its content hash check.",
+          });
+      });
+    else if (stored !== artifact.sha256) throw new Error("Stored runtime artifact changed.");
     return { ...artifact, path: artifactPath };
   };
   const load = async (id: ProvisionRequestId): Promise<ProvisionPreparationManifest> => {
@@ -852,7 +870,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         localArtifact,
         egressAllow: provisioning.egressAllow ?? [],
       };
-      await writeOnce(manifestPath(input.requestId), stableStringify(manifest));
+      await writeOnce(manifestPath(input.requestId), (temporary) =>
+        NodeFSP.writeFile(temporary, stableStringify(manifest), { flag: "wx", mode: 0o600 }),
+      );
       const saved = await load(input.requestId);
       if (stableStringify(saved.input) !== stableStringify(input))
         throw new ProvisionRequestConflict({ requestId: input.requestId });
