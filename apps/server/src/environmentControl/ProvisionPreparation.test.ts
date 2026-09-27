@@ -116,6 +116,38 @@ it("routes accounts for a new request only, so a retry cannot be refused by rout
   }
 });
 
+it("stores the pinned runtime artifact only when its content matches the pin", async () => {
+  const f = await fixture();
+  try {
+    const directory = NodePath.join(f.root, "provisioning");
+    const stored = NodePath.join(directory, `${provisionDigest("artifact")}.tar`);
+    await NodeFSP.writeFile(NodePath.join(f.root, "runtime.tar"), "tampered");
+    await expect(f.store.freeze(input, f.config, f.resolver, [f.profile])).rejects.toThrow(
+      "The configured runtime artifact failed its content hash check.",
+    );
+    expect(await NodeFSP.readdir(directory)).toEqual([]);
+
+    await NodeFSP.writeFile(NodePath.join(f.root, "runtime.tar"), "artifact");
+    const manifest = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
+    expect([manifest.localArtifact.path, await NodeFSP.readFile(stored, "utf8")]).toEqual([
+      stored,
+      "artifact",
+    ]);
+
+    await NodeFSP.writeFile(stored, "tampered");
+    await expect(
+      f.store.freeze(
+        decodeProvisionInput({ ...input, requestId: "0d9b3c1e-6f3a-4c55-9d7e-2b8f4a1c5e60" }),
+        f.config,
+        f.resolver,
+        [f.profile],
+      ),
+    ).rejects.toThrow("Stored runtime artifact changed.");
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("freezes source, template, artifact and credentials across manager restart and rejects changed intent", async () => {
   const f = await fixture();
   try {

@@ -28,8 +28,8 @@ import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTimin
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
   desiredRuntime,
+  fileDigest,
   followedBranch,
-  provisionDigest,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
 
@@ -411,10 +411,10 @@ export function makeNamespaceProvisionRuntime(config: {
     record?: RecordProvisionPhase,
   ) => {
     const stopDigest = startProvisionPhase(record);
-    const archive = await NodeFSP.readFile(desired.path);
-    if (provisionDigest(archive) !== desired.sha256)
+    const { size } = await NodeFSP.stat(desired.path);
+    if ((await fileDigest(desired.path)) !== desired.sha256)
       throw new Error("The stored runtime artifact changed");
-    stopDigest("artifact.digest", { bytes: archive.byteLength });
+    stopDigest("artifact.digest", { bytes: size });
     const id = resource.devboxId;
     // The archive lives on the retained volume, so a resume or a retried
     // preparation skips the upload once its digest checks out.
@@ -452,7 +452,7 @@ else: print('present')
     try {
       const stopUpload = startProvisionPhase(record);
       await successful(config.session, ["upload", id, desired.path, `${staged}/runtime.tar`]);
-      stopUpload("artifact.upload", { bytes: archive.byteLength });
+      stopUpload("artifact.upload", { bytes: size });
       const stopLink = startProvisionPhase(record);
       await successful(config.session, [
         "exec",

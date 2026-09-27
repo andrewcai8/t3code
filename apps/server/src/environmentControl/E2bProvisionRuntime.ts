@@ -1,6 +1,9 @@
 // @effect-diagnostics globalFetch:off - Promise SDK adapters perform provider resolution and private remote HTTP.
 // @effect-diagnostics nodeBuiltinImport:off - SDK transfers read immutable local artifacts at the provider boundary.
-import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
+import * as NodeHttps from "node:https";
+import * as NodeStreamPromises from "node:stream/promises";
 import {
   CommandExitError,
   E2B,
@@ -21,8 +24,8 @@ import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
   desiredRuntime,
+  fileDigest,
   followedBranch,
-  provisionDigest,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
 
@@ -90,6 +93,39 @@ export function makeProvisionResolution(config: {
 }
 
 const STDIN_CHUNK = 4 * 1024 * 1024;
+
+/**
+ * Streams a file to a sandbox upload URL at the pace the socket drains.
+ * `files.write` goes through Node's fetch in the bundled server, which reads a
+ * streamed body far ahead of the network: one 150 MB upload held about that
+ * much again in memory, and four at once exhausted a 2 GB host.
+ */
+export async function uploadFile(url: string, path: string, size: number) {
+  const target = new URL(url);
+  const request = (target.protocol === "http:" ? NodeHttp : NodeHttps).request(target, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream", "content-length": size },
+    signal: AbortSignal.timeout(PREPARE_COMMAND_TIMEOUT_MS),
+  });
+  const sent = NodeStreamPromises.pipeline(NodeFS.createReadStream(path), request);
+  // envd can answer (a 401, say) before it reads the body, and then the
+  // reset that ends the send would hide the status that explains it.
+  const response = await new Promise<NodeHttp.IncomingMessage>((resolve, reject) => {
+    request.once("response", resolve);
+    sent.catch(reject);
+  });
+  let body = "";
+  try {
+    for await (const chunk of response) body += chunk;
+  } catch {
+    // A reset can cut the error body short; the status still names the failure.
+  }
+  if (!response.statusCode || response.statusCode >= 300) {
+    request.destroy();
+    throw new Error(`The runtime artifact upload failed (${response.statusCode}): ${body}`);
+  }
+  await sent;
+}
 
 /** What a sandbox's guest verifies its preparation journal against. */
 function guestInput(
@@ -207,10 +243,10 @@ export function makeE2bProvisionRuntime(
       const sandbox = await connect(operation, sandboxId);
       const { local: desired, guest } = desiredRuntime(manifest, runtime);
       const stopDigest = startProvisionPhase(record);
-      const archive = await NodeFSP.readFile(desired.path);
-      if (provisionDigest(archive) !== desired.sha256)
+      const { size } = await NodeFS.promises.stat(desired.path);
+      if ((await fileDigest(desired.path)) !== desired.sha256)
         throw new Error("The stored runtime artifact changed.");
-      stopDigest("artifact.digest", { bytes: archive.byteLength });
+      stopDigest("artifact.digest", { bytes: size });
       const transport = e2bPythonPort(sandbox);
       const stopPresence = startProvisionPhase(record);
       const existingArchive = await transport.executePython({
@@ -229,22 +265,18 @@ else:
     with path.open('rb') as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(chunk)
-    if digest.hexdigest() != spec['sha256']:
-        raise RuntimeError('The existing runtime archive failed its content hash check')
-    print('true')
+    # A reset mid-upload leaves a truncated archive. Upload it again; the guest
+    # preparation still refuses an archive whose digest does not match.
+    print('true' if digest.hexdigest() == spec['sha256'] else 'false')
 `,
         stdin: JSON.stringify({ path: guest.archivePath, sha256: desired.sha256 }),
       });
       stopPresence("artifact.presence");
       if (!archivePresence(existingArchive.stdout)) {
         const stopUpload = startProvisionPhase(record);
-        await sandbox.files.write(
-          guest.archivePath,
-          new Uint8Array(archive).buffer,
-          // E2B files.write uses AbortSignal.timeout(60_000) unless overridden.
-          { requestTimeoutMs: PREPARE_COMMAND_TIMEOUT_MS },
-        );
-        stopUpload("artifact.upload", { bytes: archive.byteLength });
+        // A guest that receives a different file fails its preparation hash check.
+        await uploadFile(await sandbox.uploadUrl(guest.archivePath), desired.path, size);
+        stopUpload("artifact.upload", { bytes: size });
       }
       const stopPrepare = startProvisionPhase(record);
       const result = await prepareRemoteHost(
