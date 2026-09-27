@@ -115,7 +115,10 @@ import {
 import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
-import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import {
+  useRemoteConnectionStatus,
+  useSavedRemoteConnection,
+} from "../../state/use-remote-environment-registry";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 import { resolveDraftProjectSelection } from "./new-task-project-selection";
@@ -973,10 +976,10 @@ export function NewTaskDraftScreen(props: {
     shareImportAttempt,
   ]);
 
+  // Read from the connection, not the offered list: a draft on the cloud box it just started
+  // is on a machine the list never offers.
   const selectedEnvironmentLabel =
-    flow.environments.find(
-      (environment) => environment.environmentId === flow.selectedEnvironmentId,
-    )?.environmentLabel ?? "Environment";
+    useSavedRemoteConnection(flow.selectedEnvironmentId)?.environmentLabel ?? "Environment";
   const availableCurrentBranchName =
     flow.availableBranches.find((branch) => branch.current)?.name ??
     flow.availableBranches.find((branch) => branch.isDefault)?.name ??

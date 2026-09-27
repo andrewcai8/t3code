@@ -4,8 +4,10 @@ import { describe, expect, it } from "vite-plus/test";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { HomeProjectScope } from "../home/homeThreadList";
 import {
+  defaultNewTaskEnvironmentId,
   filterProjectScopes,
   getProjectScopeSelectionTarget,
+  newTaskEnvironments,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
   resolveNewThreadStart,
@@ -217,5 +219,50 @@ describe("resolveNewThreadStart", () => {
     expect(resolveNewThreadStart(makeProject("scratch", "host"), cloudOnlyHost)).toEqual({
       kind: "draft",
     });
+  });
+});
+
+describe("new task environments", () => {
+  const repositoryKey = "github.com/andrewcai8/t3code";
+  // Ordered as a sort by recent activity would put them: the boxes were touched last.
+  const projects = [
+    makeProject("on-box", "box", { repositoryKey }),
+    makeProject("on-host", "host", { repositoryKey }),
+    makeProject("on-namespace-box", "namespace-box", { repositoryKey }),
+    makeProject("on-laptop", "laptop", { repositoryKey }),
+    makeProject("on-server", "server", { repositoryKey }),
+  ];
+  const savedConnectionsById = {
+    [EnvironmentId.make("box")]: { environmentLabel: "e2b-sandbox.local" },
+    [EnvironmentId.make("host")]: { environmentLabel: "andrew.megpt.app" },
+    [EnvironmentId.make("namespace-box")]: { environmentLabel: "nsc-mac" },
+    [EnvironmentId.make("laptop")]: { environmentLabel: "Laptop" },
+    [EnvironmentId.make("server")]: { environmentLabel: "Build server" },
+  };
+  const serverConfigs = new Map([
+    [EnvironmentId.make("host"), { localAgentRuns: false }],
+    [EnvironmentId.make("laptop"), { localAgentRuns: true }],
+  ]);
+  const boxes = new Set([EnvironmentId.make("box"), EnvironmentId.make("namespace-box")]);
+
+  it("offers servers that run agents, never a running box or a host that runs none", () => {
+    expect(
+      newTaskEnvironments({
+        projects,
+        selectedProject: projects[0]!,
+        savedConnectionsById,
+        serverConfigs,
+        boxes,
+      }),
+    ).toEqual([
+      { environmentId: EnvironmentId.make("laptop"), environmentLabel: "Laptop" },
+      { environmentId: EnvironmentId.make("server"), environmentLabel: "Build server" },
+    ]);
+  });
+
+  it("starts on the first server that runs agents rather than a box", () => {
+    expect(defaultNewTaskEnvironmentId({ projects, serverConfigs, boxes })).toBe(
+      EnvironmentId.make("laptop"),
+    );
   });
 });

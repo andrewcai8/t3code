@@ -1,4 +1,8 @@
-import { offeredProvisionProviders, runsLocalAgents } from "@t3tools/client-runtime/cloud";
+import {
+  newChatRunTargets,
+  offeredProvisionProviders,
+  runsLocalAgents,
+} from "@t3tools/client-runtime/cloud";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cloneRepository, type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 
@@ -107,6 +111,85 @@ export function resolveDraftProjectSelection(
 
   const onlyProject = getOnlySelectableProject(projectScopes);
   return onlyProject ? { kind: "select", project: onlyProject } : { kind: "pick" };
+}
+
+export interface NewTaskEnvironment {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+}
+
+interface NewTaskEnvironmentsInput {
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly serverConfigs: ReadonlyMap<EnvironmentId, Pick<ServerConfig, "localAgentRuns">>;
+  /** Cloud boxes the hosts report. A new task always gets a fresh box, never one of these. */
+  readonly boxes: ReadonlySet<EnvironmentId>;
+}
+
+function newTaskRunTargets<Environment extends { readonly environmentId: EnvironmentId }>(
+  environments: ReadonlyArray<Environment>,
+  input: NewTaskEnvironmentsInput,
+): ReadonlyArray<Environment> {
+  return newChatRunTargets({
+    environments,
+    environmentState: (environmentId) => ({ serverConfig: input.serverConfigs.get(environmentId) }),
+    environmentId: null,
+    managerConfig: null,
+    boxes: input.boxes,
+  }).environments;
+}
+
+/** Where a new task starts before the user picks: the first machine a new task can run on. */
+export function defaultNewTaskEnvironmentId(input: NewTaskEnvironmentsInput): EnvironmentId | null {
+  return (newTaskRunTargets(input.projects, input)[0] ?? input.projects[0])?.environmentId ?? null;
+}
+
+/**
+ * The machines a new task can move to. Only machines that host the selected repository, so
+ * switching computers moves the same repo across machines instead of jumping to whatever
+ * unrelated project happens to be first on the other machine. Repository identity is the
+ * primary signal; projects that haven't reported one yet (still indexing) fall back to
+ * workspace basename / title so a valid host isn't hidden.
+ */
+export function newTaskEnvironments(
+  input: NewTaskEnvironmentsInput & {
+    readonly selectedProject: EnvironmentProject | null;
+    readonly savedConnectionsById: Readonly<
+      Record<EnvironmentId, { readonly environmentLabel: string } | undefined>
+    >;
+  },
+): ReadonlyArray<NewTaskEnvironment> {
+  const selectedRepositoryKey = input.selectedProject?.repositoryIdentity?.canonicalKey ?? null;
+  // `|| null` (not `??`): a pending-task placeholder project can have an empty
+  // workspaceRoot, and an "" basename would reject every real host below.
+  const selectedWorkspaceBasename = input.selectedProject?.workspaceRoot.split("/").at(-1) || null;
+  const selectedProjectTitle = input.selectedProject?.title ?? null;
+  const hostsSelectedRepository = (project: EnvironmentProject) => {
+    if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
+      return true;
+    }
+    const projectKey = project.repositoryIdentity?.canonicalKey ?? null;
+    if (selectedRepositoryKey !== null && projectKey !== null) {
+      return projectKey === selectedRepositoryKey;
+    }
+    return (
+      project.workspaceRoot.split("/").at(-1) === selectedWorkspaceBasename ||
+      (selectedProjectTitle !== null && project.title === selectedProjectTitle)
+    );
+  };
+  const seen = new Set<EnvironmentId>();
+  const candidates: NewTaskEnvironment[] = [];
+  for (const project of input.projects) {
+    const environment = input.savedConnectionsById[project.environmentId];
+    if (!environment || seen.has(project.environmentId) || !hostsSelectedRepository(project)) {
+      continue;
+    }
+    seen.add(project.environmentId);
+    candidates.push({
+      environmentId: project.environmentId,
+      environmentLabel: environment.environmentLabel,
+    });
+  }
+  return newTaskRunTargets(candidates, input);
 }
 
 export type NewThreadStart =
