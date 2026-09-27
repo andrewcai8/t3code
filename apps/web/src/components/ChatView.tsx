@@ -6,6 +6,7 @@ import {
 } from "../cloud/provisionRequests";
 import {
   type CloudProvisioningProgressPhase,
+  claimProvisionedBox,
   newChatRunTargets,
   provisionCloudEnvironment,
 } from "@t3tools/client-runtime/cloud";
@@ -533,7 +534,7 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
-import { useBoxesOfOtherChats } from "../cloud/automationHosts";
+import { useNewChatBoxes } from "../cloud/automationHosts";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -2603,7 +2604,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const boxesOfOtherChats = useBoxesOfOtherChats(draftId, threadId);
+  const newChatBoxes = useNewChatBoxes(draftId, threadId);
   const runTargets = useMemo(
     () =>
       newChatRunTargets({
@@ -2611,14 +2612,15 @@ export default function ChatView(props: ChatViewProps) {
         environmentState: (environmentId) => environmentById.get(environmentId),
         environmentId: activeThreadEnvironmentId,
         managerConfig: primaryEnvironment?.serverConfig,
-        boxes: boxesOfOtherChats,
+        boxes: newChatBoxes.others,
+        idleBoxes: newChatBoxes.idle,
       }),
     [
       logicalProjectEnvironments,
       environmentById,
       activeThreadEnvironmentId,
       primaryEnvironment?.serverConfig,
-      boxesOfOtherChats,
+      newChatBoxes,
     ],
   );
   // A draft offers only machines a new chat can run on, never another chat's
@@ -9254,20 +9256,20 @@ export default function ChatView(props: ChatViewProps) {
             ? provisionedSandboxFor(composerDraftTarget)
             : null;
         if (cloudLease && typeof composerDraftTarget === "string") {
-          const claimed = await claimCloudLease({
-            environmentId: cloudLease.managerEnvironmentId,
-            input: {
-              leaseId: cloudLease.leaseId,
-              environmentId,
-              threadId: threadIdForSend,
+          const claimed = await claimProvisionedBox(
+            async (request) => {
+              const result = await claimCloudLease(request);
+              return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
             },
-          });
+            cloudLease,
+            scopeThreadRef(environmentId, threadIdForSend),
+          );
           transferProvisionedSandboxLease(
             composerDraftTarget,
             scopeThreadRef(environmentId, threadIdForSend),
           );
           forgetProvisionRequest(composerDraftTarget);
-          if (!AsyncResult.isSuccess(claimed) || claimed.value.kind !== "claimed") {
+          if (!claimed) {
             toastManager.add({
               type: "warning",
               title: "Cloud chat started, but its lease could not be claimed.",

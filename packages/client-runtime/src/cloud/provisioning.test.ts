@@ -19,6 +19,8 @@ import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.t
 import {
   type CloudProvisionPorts,
   boxesOfOtherChats,
+  claimFirstTurnBox,
+  idleProvisionedBoxes,
   newChatRunTargets,
   offeredProvisionProviders,
   provisionCloudEnvironment,
@@ -489,6 +491,7 @@ describe("boxesOfOtherChats", () => {
     environmentId: EnvironmentId.make(environmentId),
     leaseId: `${environmentId}-lease`,
     threadId: threadId === null ? null : ThreadId.make(threadId),
+    lifecycle: "active" as const,
   });
   const chatBox = box("chat-x-box", "chat-x");
   const automationBox = box("automation-box", "automation-run");
@@ -533,5 +536,75 @@ describe("boxesOfOtherChats", () => {
       cloudProviders: ["e2b", "namespace"],
       redirect: { kind: "cloud", provider: "e2b" },
     });
+  });
+
+  it("never offers a paused or lost box, but lets a chat already on one stay", () => {
+    const paused = { ...box("paused-box", null), lifecycle: "paused" as const };
+    const lost = { ...box("lost-box", null), lifecycle: "missing" as const };
+    const targets = (environmentId: EnvironmentId) =>
+      newChatRunTargets({
+        environments: [paused, lost, laptop],
+        environmentState: () => ({}),
+        environmentId,
+        managerConfig: manager,
+        boxes: boxesOfOtherChats([paused, lost], draftThread),
+        idleBoxes: idleProvisionedBoxes([paused, lost, chatBox]),
+      });
+    expect(targets(laptop.environmentId)).toEqual({
+      environments: [laptop],
+      cloudProviders: ["e2b", "namespace"],
+      redirect: null,
+    });
+    expect(targets(paused.environmentId).redirect).toBeNull();
+  });
+});
+
+describe("claimFirstTurnBox", () => {
+  const host = EnvironmentId.make("host");
+  const box = EnvironmentId.make("box");
+  const firstThread = { environmentId: box, threadId: ThreadId.make("first-thread") };
+  const expectedClaim = {
+    environmentId: host,
+    input: { leaseId: "lease", environmentId: box, threadId: ThreadId.make("first-thread") },
+  };
+  const provisionedHere = () => {
+    const leases = createProvisionedSandboxLeaseStore(memoryStorage());
+    leases.rememberForEnvironment(box, {
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      managerEnvironmentId: host,
+    });
+    return leases;
+  };
+
+  it("claims the box for its first thread, retrying a failed claim once", async () => {
+    const leases = provisionedHere();
+    const claims: unknown[] = [];
+    const claim = async (request: unknown) => {
+      claims.push(request);
+      return claims.length > 1;
+    };
+    await expect(claimFirstTurnBox(leases, claim, firstThread)).resolves.toBe(true);
+    expect(claims).toEqual([expectedClaim, expectedClaim]);
+    expect(leases.leaseFor(firstThread)).toEqual({
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      managerEnvironmentId: host,
+    });
+    // A later chat on the same box finds nothing left to claim.
+    await expect(
+      claimFirstTurnBox(leases, claim, { environmentId: box, threadId: ThreadId.make("later") }),
+    ).resolves.toBe(false);
+    expect(claims).toHaveLength(2);
+  });
+
+  it("gives up after the retry without failing the send", async () => {
+    const claims: unknown[] = [];
+    const claim = async (request: unknown) => {
+      claims.push(request);
+      throw new Error("host unreachable");
+    };
+    await expect(claimFirstTurnBox(provisionedHere(), claim, firstThread)).resolves.toBe(false);
+    expect(claims).toEqual([expectedClaim, expectedClaim]);
   });
 });

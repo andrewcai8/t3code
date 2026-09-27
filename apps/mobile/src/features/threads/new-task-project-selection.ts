@@ -132,11 +132,13 @@ interface NewTaskEnvironmentsInput {
    * gets a fresh box, never one of these.
    */
   readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  /** Boxes the host has paused or lost, which a new task is never offered. */
+  readonly idleBoxes?: ReadonlySet<EnvironmentId>;
 }
 
 function newTaskRunTargets<Environment extends { readonly environmentId: EnvironmentId }>(
   environments: ReadonlyArray<Environment>,
-  input: Pick<NewTaskEnvironmentsInput, "serverConfigs" | "boxes">,
+  input: Pick<NewTaskEnvironmentsInput, "serverConfigs" | "boxes" | "idleBoxes">,
 ): ReadonlyArray<Environment> {
   return newChatRunTargets({
     environments,
@@ -144,6 +146,7 @@ function newTaskRunTargets<Environment extends { readonly environmentId: Environ
     environmentId: null,
     managerConfig: null,
     boxes: input.boxes,
+    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
   }).environments;
 }
 
@@ -155,7 +158,11 @@ export function defaultNewTaskEnvironmentId(input: NewTaskEnvironmentsInput): En
   return (
     (
       newTaskRunTargets(input.projects, input)[0] ??
-      input.projects.find((project) => !input.boxes.has(project.environmentId))
+      input.projects.find(
+        (project) =>
+          !input.boxes.has(project.environmentId) &&
+          input.idleBoxes?.has(project.environmentId) !== true,
+      )
     )?.environmentId ?? null
   );
 }
@@ -247,6 +254,7 @@ export function resolveNewThreadStart(input: {
   readonly project: Pick<EnvironmentProject, "environmentId" | "repositoryIdentity">;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
   readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  readonly idleBoxes?: ReadonlySet<EnvironmentId>;
   /** Machines holding the same repository, in the order to prefer them. */
   readonly environments?: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
 }): NewThreadStart {
@@ -258,6 +266,7 @@ export function resolveNewThreadStart(input: {
     environmentId,
     managerConfig: input.serverConfigs.get(managerId),
     boxes: input.boxes,
+    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
   });
   const repository = cloneRepository(input.project.repositoryIdentity);
   if (targets.redirect?.kind === "cloud" && repository !== undefined) {

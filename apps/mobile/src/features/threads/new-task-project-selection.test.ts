@@ -1,4 +1,4 @@
-import { boxesOfOtherChats } from "@t3tools/client-runtime/cloud";
+import { boxesOfOtherChats, idleProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { EnvironmentId, ProjectId, type ServerConfig, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -81,6 +81,7 @@ describe("getProjectScopeSelectionTarget", () => {
           environmentId: EnvironmentId.make("box"),
           leaseId: "lease",
           threadId: ThreadId.make("chat-x"),
+          lifecycle: "active",
         },
       ],
       null,
@@ -299,6 +300,7 @@ describe("new task environments", () => {
     environmentId,
     leaseId: `${environmentId}-lease`,
     threadId: threadId === null ? null : ThreadId.make(threadId),
+    lifecycle: "active" as const,
   });
   const ownBox = EnvironmentId.make("own-box");
   // What the host lists: two boxes other chats claimed, and one a draft started but never sent.
@@ -365,6 +367,30 @@ describe("new task environments", () => {
     expect(resolveNewThreadStart({ project: onOwnBox, serverConfigs, boxes })).toEqual({
       kind: "draft",
     });
+  });
+
+  it("never offers or starts on an unclaimed box the host paused", () => {
+    const pausedBox = EnvironmentId.make("paused-box");
+    const onPausedBox = onRepo("on-paused-box", "paused-box");
+    const listed = [{ ...claimedBy(pausedBox, null), lifecycle: "paused" as const }];
+    const input = {
+      projects: [onPausedBox, onHost, onLaptop],
+      serverConfigs,
+      boxes: boxesOfOtherChats(listed, null),
+      idleBoxes: idleProvisionedBoxes(listed),
+    };
+    expect(
+      newTaskEnvironments({
+        ...input,
+        selectedProject: onPausedBox,
+        savedConnectionsById: {
+          ...savedConnectionsById,
+          [pausedBox]: { environmentLabel: "Paused" },
+        },
+      }),
+    ).toEqual([{ environmentId: laptop, environmentLabel: "Laptop" }]);
+    expect(defaultNewTaskEnvironmentId(input)).toBe(laptop);
+    expect(defaultNewTaskEnvironmentId({ ...input, projects: [onPausedBox, onHost] })).toBe(host);
   });
 
   describe("a draft on another chat's box", () => {

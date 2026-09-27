@@ -1,11 +1,14 @@
 import {
   type EnvironmentId,
   type EnvironmentProvisionAttachResult,
+  type EnvironmentProvisionClaimInput,
+  type DiscoveredProvisionedEnvironment,
   type EnvironmentProvisionInput,
   type EnvironmentProvisionResult,
   type ProjectId,
   ProvisionProvider,
   type ScopedProjectRef,
+  type ScopedThreadRef,
   type ServerConfig,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -14,7 +17,10 @@ import type { EnvironmentConnectionPresentation } from "../connection/presentati
 import { joinProvisionedEnvironment } from "../connection/provisioned.ts";
 import { scopeProjectRef } from "../environment/scoped.ts";
 import type { DraftProvisionRequest, ProvisionRequestStore } from "./provisionRequests.ts";
-import type { ProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
+import type {
+  ProvisionedSandboxLease,
+  ProvisionedSandboxLeaseStore,
+} from "./provisionedSandboxLeases.ts";
 
 export type CloudProvisioningPhase =
   | "creating"
@@ -64,6 +70,7 @@ export interface ProvisionedBox {
   readonly leaseId: string;
   /** The chat the box was claimed for; null until one claims it. */
   readonly threadId: ThreadId | null;
+  readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
 }
 
 export function sameProvisionedBoxes(
@@ -78,7 +85,8 @@ export function sameProvisionedBoxes(
         box.managerId === other.managerId &&
         box.environmentId === other.environmentId &&
         box.leaseId === other.leaseId &&
-        box.threadId === other.threadId
+        box.threadId === other.threadId &&
+        box.lifecycle === other.lifecycle
       );
     })
   );
@@ -101,6 +109,60 @@ export function boxesOfOtherChats(
         : [[box.environmentId, box.managerId] as const],
     ),
   );
+}
+
+/**
+ * Boxes the host has paused or lost. Nobody can start a chat on one until it is resumed, so a
+ * new chat is never offered one, though a chat already pointing at one keeps it.
+ */
+export function idleProvisionedBoxes(
+  boxes: ReadonlyArray<ProvisionedBox>,
+): ReadonlySet<EnvironmentId> {
+  return new Set(boxes.flatMap((box) => (box.lifecycle === "active" ? [] : [box.environmentId])));
+}
+
+export interface ProvisionedBoxClaim {
+  /** The host that provisioned the box. */
+  readonly environmentId: EnvironmentId;
+  readonly input: EnvironmentProvisionClaimInput;
+}
+
+/**
+ * Records a thread on the host as the owner of the box its first turn started on, so every
+ * device stops offering the box to new chats. Tries twice; a claim that still fails leaves the
+ * chat running and only logs, because the turn has already started.
+ */
+export async function claimProvisionedBox(
+  claim: (request: ProvisionedBoxClaim) => Promise<boolean>,
+  lease: Pick<ProvisionedSandboxLease, "leaseId" | "managerEnvironmentId">,
+  owner: ScopedThreadRef,
+): Promise<boolean> {
+  const request = {
+    environmentId: lease.managerEnvironmentId,
+    input: { leaseId: lease.leaseId, environmentId: owner.environmentId, threadId: owner.threadId },
+  };
+  for (const attempt of [1, 2]) {
+    if (await claim(request).catch(() => false)) return true;
+    console.warn("[cloud] could not claim the box for its first turn", {
+      leaseId: lease.leaseId,
+      attempt,
+    });
+  }
+  return false;
+}
+
+/**
+ * Claims the box a first turn started on when this device provisioned it and has not claimed it
+ * yet, which is when its lease is still recorded under the environment. False when there is
+ * nothing to claim or the claim failed.
+ */
+export function claimFirstTurnBox(
+  leases: Pick<ProvisionedSandboxLeaseStore, "transferFromEnvironment">,
+  claim: (request: ProvisionedBoxClaim) => Promise<boolean>,
+  owner: ScopedThreadRef,
+): Promise<boolean> {
+  const lease = leases.transferFromEnvironment(owner.environmentId, owner);
+  return lease === null ? Promise.resolve(false) : claimProvisionedBox(claim, lease, owner);
 }
 
 export interface NewChatRunTargets<Environment> {
@@ -142,6 +204,8 @@ export function newChatRunTargets<
    * of these is a place to start one.
    */
   readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
+  /** Boxes the host has paused or lost; never offered, but a chat on one may stay. */
+  readonly idleBoxes?: Pick<ReadonlySet<EnvironmentId>, "has">;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
   const provider = cloudProviders[0];
@@ -150,8 +214,9 @@ export function newChatRunTargets<
   const runs = (environmentId: EnvironmentId) =>
     !input.boxes.has(environmentId) &&
     runsLocalAgents(input.environmentState(environmentId)?.serverConfig);
+  const idle = (environmentId: EnvironmentId) => input.idleBoxes?.has(environmentId) === true;
   const environments = input.environments.filter(
-    ({ environmentId }) => runs(environmentId) && !gone(environmentId),
+    ({ environmentId }) => runs(environmentId) && !gone(environmentId) && !idle(environmentId),
   );
   const moveTo = (environment: Environment | undefined) =>
     environment ? ({ kind: "environment", environment } as const) : null;
@@ -163,6 +228,7 @@ export function newChatRunTargets<
             input.environments.find(
               ({ environmentId }) =>
                 !gone(environmentId) &&
+                !idle(environmentId) &&
                 !input.boxes.has(environmentId) &&
                 (runs(environmentId) || provider !== undefined),
             ),

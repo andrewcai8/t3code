@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   boxesOfOtherChats,
   createAutomationJoins,
+  idleProvisionedBoxes,
   offeredProvisionProviders,
 } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
@@ -33,19 +34,25 @@ export function useAutomationHosts() {
 }
 
 /**
- * The cloud boxes a draft must not start on: every box the connected hosts list as claimed by
- * another chat, however this device came to know it. Only a draft asks the hosts; anything else
- * gets an empty map.
+ * The cloud boxes a draft must not start on, as the connected hosts list them however this device
+ * came to know each: those another chat claimed, and those paused or lost. Only a draft asks the
+ * hosts; anything else gets empty collections.
  */
-export function useBoxesOfOtherChats(
+export function useNewChatBoxes(
   draftId: string | null,
   threadId: ThreadId,
-): ReadonlyMap<EnvironmentId, EnvironmentId> {
+): {
+  readonly others: ReadonlyMap<EnvironmentId, EnvironmentId>;
+  readonly idle: ReadonlySet<EnvironmentId>;
+} {
   const hosts = useAutomationHosts();
   const hostIds = useMemo(
     () => (draftId === null ? [] : hosts.map((host) => host.environmentId)),
     [draftId, hosts],
   );
   const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
-  return useMemo(() => boxesOfOtherChats(boxes, threadId), [boxes, threadId]);
+  return useMemo(
+    () => ({ others: boxesOfOtherChats(boxes, threadId), idle: idleProvisionedBoxes(boxes) }),
+    [boxes, threadId],
+  );
 }

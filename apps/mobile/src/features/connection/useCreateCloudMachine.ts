@@ -84,10 +84,11 @@ export function useCreateCloudMachine(input: {
       // The request record has to be readable before one is reserved, or a machine started
       // just before an app kill would have no record to dispose it by.
       await hydrateProvisionStorage();
+      const draftId = `mobile-cloud-machine:${uuidv4()}`;
       try {
         const outcome = await provisionCloudEnvironment(
           {
-            draftId: `mobile-cloud-machine:${uuidv4()}`,
+            draftId,
             managerEnvironmentId: managerId,
             input: {
               provider: selection.provider,
@@ -140,7 +141,19 @@ export function useCreateCloudMachine(input: {
           return;
         }
         setState(IDLE);
-        if (outcome.kind === "ready") onCreated(outcome.projectRef);
+        if (outcome.kind === "ready") {
+          // The first turn on the machine claims it on the host (see the outbox drain); until
+          // then its lease waits under the machine's environment.
+          const lease = provisionedSandboxLeases.leaseFor(draftId);
+          if (lease) {
+            provisionedSandboxLeases.rememberForEnvironment(
+              outcome.projectRef.environmentId,
+              lease,
+            );
+            provisionedSandboxLeases.forget(draftId);
+          }
+          onCreated(outcome.projectRef);
+        }
       } finally {
         inFlight.current = false;
       }

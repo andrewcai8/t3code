@@ -990,11 +990,12 @@ export function createServerEnvironmentAtoms<R, E>(
         const managerId = EnvironmentId.make(hostId);
         const listed = get(provisionedEnvironments({ environmentId: managerId, input: {} }));
         return Option.getOrElse(AsyncResult.value(listed), () => []).map(
-          ({ environmentId, leaseId, threadId }) => ({
+          ({ environmentId, leaseId, threadId, lifecycle }) => ({
             managerId,
             environmentId,
             leaseId,
             threadId,
+            lifecycle,
           }),
         );
       });

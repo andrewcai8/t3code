@@ -84,7 +84,7 @@ import {
   setPendingConnectionError,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
-import { boxesOfOtherChats } from "@t3tools/client-runtime/cloud";
+import { boxesOfOtherChats, idleProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
 import {
@@ -271,6 +271,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   );
   // A new task has no thread yet, so every claimed box is another chat's.
   const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
+  const idleBoxes = useMemo(() => idleProvisionedBoxes(provisionedBoxes), [provisionedBoxes]);
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   // The new-task draft the composer is bound to. Null until a project is
   // chosen; each New Task entry mints its own, so a project can hold several.
@@ -288,6 +289,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     projects,
     serverConfigs,
     boxes,
+    idleBoxes,
   });
   // Mirrors `editingPendingTask` synchronously so the unmount flush cannot act
   // on a task whose editing session already ended this render.
@@ -369,8 +371,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         savedConnectionsById,
         serverConfigs,
         boxes,
+        idleBoxes,
       }),
-    [projects, selectedProject, savedConnectionsById, serverConfigs, boxes],
+    [projects, selectedProject, savedConnectionsById, serverConfigs, boxes, idleBoxes],
   );
 
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
@@ -709,15 +712,17 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
             project: blockedBoxProject,
             serverConfigs,
             boxes,
+            idleBoxes,
             environments: newTaskEnvironments({
               projects,
               selectedProject: blockedBoxProject,
               savedConnectionsById,
               serverConfigs,
               boxes,
+              idleBoxes,
             }),
           }),
-    [blockedBoxProject, boxes, projects, savedConnectionsById, serverConfigs],
+    [blockedBoxProject, boxes, idleBoxes, projects, savedConnectionsById, serverConfigs],
   );
   useEffect(() => {
     if (boxStart?.kind !== "environment" || blockedBoxProject === null) return;
