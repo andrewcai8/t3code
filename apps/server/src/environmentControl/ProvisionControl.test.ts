@@ -420,7 +420,10 @@ it.effect.each(["attach", "touch"] as const)(
           : yield* control.touch({ leaseId: input.requestId });
       expect(result.kind).toBe("refused");
       expect(calls).toEqual(["dispose"]);
-      expect((yield* store.get(input.requestId)).state).toEqual({ kind: "disposed" });
+      expect((yield* store.get(input.requestId)).state).toEqual({
+        kind: "disposed",
+        environmentId: "expired",
+      });
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(

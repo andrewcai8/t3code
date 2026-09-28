@@ -108,12 +108,20 @@ export const ProvisionAllocationAttempt = Schema.Union([
 ]);
 export type ProvisionAllocationAttempt = typeof ProvisionAllocationAttempt.Type;
 
+/**
+ * The environment a disposed box ran, carried from `ready` through cleanup so a client that
+ * saved the box can still learn it is gone. Absent when the box never became ready, and on
+ * rows disposed before it was recorded.
+ */
+const DisposedEnvironmentId = Schema.optional(EnvironmentId);
+
 export const ProvisionOperationState = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("cancel_requested"),
     recovery: Schema.NullOr(ProvisionAllocationAttempt),
     resources: Schema.Array(ProvisionResource),
     lastError: Schema.NullOr(Schema.String),
+    environmentId: DisposedEnvironmentId,
   }),
   Schema.Struct({ kind: Schema.Literal("intent") }),
   Schema.Struct({ kind: Schema.Literal("create_issued"), issuedAt: IssuedAt }),
@@ -144,7 +152,7 @@ export const ProvisionOperationState = Schema.Union([
     reason: Schema.String,
     resource: ProvisionResource,
   }),
-  Schema.Struct({ kind: Schema.Literal("disposed") }),
+  Schema.Struct({ kind: Schema.Literal("disposed"), environmentId: DisposedEnvironmentId }),
 ]);
 export type ProvisionOperationState = typeof ProvisionOperationState.Type;
 export const ProvisionOperation = Schema.Struct({
