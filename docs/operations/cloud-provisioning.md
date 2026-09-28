@@ -100,3 +100,15 @@ ls <preparationRoot>/home/.codex/skills
 ```
 
 `.codex/skills/.system` is Codex's own built-in skills, shipped in the template. `ls` hides it because it starts with a dot, so compare counts with `find` and expect that baseline on top of your bundle.
+
+## Count a machine's usage on the manager
+
+The manager's Usage page counts its own transcripts and its cloud boxes. A machine no client connects to, such as a laptop you worked on before moving to the manager, can push its history with `scripts/usage/import-machine-usage.ts`, run from a checkout on that machine:
+
+```
+node scripts/usage/import-machine-usage.ts --dry-run
+node scripts/usage/import-machine-usage.ts --origin https://manager \
+  --pairing-token-file <file holding a pairing token>
+```
+
+The script scans the provider homes in the machine's `~/.t3/userdata/settings.json` with the server's own scanner, reading that directory only, and replaces what the manager keeps for the machine's environment id. The manager keeps the same 90 days it keeps for boxes, so run the script hourly to keep the page current. Cursor is left out because the manager reads the Cursor account itself. `--remove` deletes the machine's history from the manager.
