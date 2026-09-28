@@ -16,6 +16,10 @@ function claudeLine(overrides: {
   model?: string;
   outputTokens?: number;
   speed?: string;
+  cacheCreation?: {
+    readonly ephemeral_5m_input_tokens: number;
+    readonly ephemeral_1h_input_tokens: number;
+  };
 }): string {
   return JSON.stringify({
     type: "assistant",
@@ -33,6 +37,9 @@ function claudeLine(overrides: {
         cache_read_input_tokens: 1000,
         output_tokens: overrides.outputTokens ?? 286,
         ...(overrides.speed === undefined ? {} : { speed: overrides.speed }),
+        ...(overrides.cacheCreation === undefined
+          ? {}
+          : { cache_creation: overrides.cacheCreation }),
       },
     },
   });
@@ -54,6 +61,23 @@ describe("parseClaudeLine", () => {
     });
     expect(record?.dedupeKey).toBe("msg_1:");
     expect(record?.fast).toBe(false);
+  });
+
+  it("keeps the share of cache writes that live for an hour", () => {
+    const record = parseClaudeLine(
+      claudeLine({
+        messageId: "msg_1",
+        contentType: "text",
+        cacheCreation: { ephemeral_5m_input_tokens: 16818, ephemeral_1h_input_tokens: 50000 },
+      }),
+    );
+
+    expect(record?.totals.cacheCreationTokens).toBe(66818);
+    expect(record?.oneHourCacheWriteTokens).toBe(50000);
+    expect(
+      parseClaudeLine(claudeLine({ messageId: "msg_1", contentType: "text" }))
+        ?.oneHourCacheWriteTokens,
+    ).toBe(0);
   });
 
   it("marks fast-mode requests", () => {

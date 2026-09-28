@@ -492,6 +492,51 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("counts archived Codex rollouts once, including one archived after a scan", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const codexHome = NodePath.join(home, "codex");
+      const rollout = (sessionId: string, outputTokens: number) =>
+        [
+          { type: "session_meta", payload: { id: sessionId } },
+          { type: "turn_context", payload: { model: "gpt-6-astra" } },
+          {
+            type: "event_msg",
+            timestamp: "2026-08-01T10:00:00Z",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: { input_tokens: 10, output_tokens: outputTokens },
+                last_token_usage: { input_tokens: 10, output_tokens: outputTokens },
+              },
+            },
+          },
+        ]
+          .map((line) => encodeUnknownJsonString(line))
+          .join("\n") + "\n";
+      const live = NodePath.join(codexHome, "sessions", "2026", "08", "01", "rollout-live.jsonl");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.dirname(live), { recursive: true });
+        await NodeFSP.mkdir(NodePath.join(codexHome, "archived_sessions"), { recursive: true });
+        await NodeFSP.writeFile(live, rollout("live-session", 7));
+        await NodeFSP.writeFile(
+          NodePath.join(codexHome, "archived_sessions", "rollout-old.jsonl"),
+          rollout("archived-session", 40),
+        );
+      });
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-codex-archived", home, settings })),
+      );
+
+      assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 47);
+      // Codex moves a rollout it archives; the scan cache still holds its old path.
+      yield* Effect.promise(() =>
+        NodeFSP.rename(live, NodePath.join(codexHome, "archived_sessions", "rollout-live.jsonl")),
+      );
+      assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 47);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("reads configured and disabled accounts once across shared and aliased homes", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
