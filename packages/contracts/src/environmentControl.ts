@@ -47,7 +47,8 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
   leaseId: TrimmedNonEmptyString,
   sandboxId: TrimmedNonEmptyString,
-  lifecycle: Schema.Literals(["active", "paused", "missing"]),
+  /** `disposed` is only returned for environments a client asked about by id. */
+  lifecycle: Schema.Literals(["active", "paused", "missing", "disposed"]),
   environmentId: EnvironmentId,
   provider: Schema.Literals(["e2b", "namespace"]),
   label: TrimmedNonEmptyString,

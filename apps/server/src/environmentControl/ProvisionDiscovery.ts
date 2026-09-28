@@ -2,6 +2,7 @@ import {
   DiscoveredProvisionedEnvironment,
   DurableProvisionRequest,
   EnvironmentControlError,
+  type EnvironmentId,
   ProvisionOperationState,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -22,9 +23,12 @@ const decodeRows = Schema.decodeUnknownEffect(
 );
 const decodeDiscovery = Schema.decodeUnknownEffect(DiscoveredProvisionedEnvironment);
 
-/** Discovery reads retained identities without renewing leases or issuing credentials. */
+/**
+ * Discovery reads retained identities without renewing leases or issuing credentials. Of the
+ * `known` environments, those that were this host's boxes and are gone come back as `disposed`.
+ */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
-  function* (sql: SqlClient.SqlClient) {
+  function* (sql: SqlClient.SqlClient, known: ReadonlyArray<EnvironmentId> = []) {
     const now = DateTime.formatIso(yield* DateTime.now);
     const rows = yield* sql`
     SELECT operations.request_json AS request, operations.state_json AS state,
@@ -33,18 +37,29 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
     LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
     WHERE json_extract(operations.state_json, '$.kind') = 'ready'
-      AND json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
+      AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
+        OR ${
+          known.length === 0
+            ? sql`1 = 0`
+            : sql`json_extract(operations.state_json, '$.readiness.environmentId') IN ${sql.in(known)}`
+        })
     ORDER BY operations.created_at DESC, operations.request_id
   `;
+    const saved = new Set<string>(known);
     const result: Array<DiscoveredProvisionedEnvironment> = [];
+    const gone = new Map<string, DiscoveredProvisionedEnvironment>();
     for (const { request, state, lease, automationId } of yield* decodeRows(rows)) {
-      if (
-        state.kind !== "ready" ||
-        (request.retentionDeadline !== undefined && request.retentionDeadline <= now)
-      )
-        continue;
-      if (lease.state !== "active" && lease.state !== "paused" && lease.state !== "missing")
-        continue;
+      if (state.kind !== "ready") continue;
+      const expired = request.retentionDeadline !== undefined && request.retentionDeadline <= now;
+      const lifecycle =
+        !expired &&
+        (lease.state === "active" || lease.state === "paused" || lease.state === "missing")
+          ? lease.state
+          : saved.has(state.readiness.environmentId) &&
+              (lease.state === "disposed" || (expired && lease.state !== "releasing"))
+            ? "disposed"
+            : null;
+      if (lifecycle === null) continue;
       const resource = state.allocation.resource;
       const sandboxId = resource.provider === "e2b" ? resource.sandboxId : resource.devboxId;
       if (
@@ -55,30 +70,35 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         (lease.owner !== null && lease.owner.environmentId !== state.readiness.environmentId)
       )
         continue;
-      result.push(
-        yield* decodeDiscovery({
-          requestId: request.requestId,
-          leaseId: lease.leaseId,
-          sandboxId: lease.sandboxId,
-          lifecycle: lease.state,
-          environmentId: state.readiness.environmentId,
-          provider: resource.provider,
-          label:
-            request.repository ??
-            `${resource.provider === "e2b" ? "E2B" : "Namespace"} · ${request.requestId.slice(0, 8)}`,
-          repository: request.repository ?? null,
-          projectDir: state.readiness.projectDir,
-          threadId: lease.owner?.threadId ?? null,
-          ...(automationId === null ? {} : { automationId }),
-          createdAt: lease.createdAt,
-          expiresAt:
-            request.retentionDeadline !== undefined && request.retentionDeadline < lease.expiresAt
-              ? request.retentionDeadline
-              : lease.expiresAt,
-        }),
-      );
+      const environment = yield* decodeDiscovery({
+        requestId: request.requestId,
+        leaseId: lease.leaseId,
+        sandboxId: lease.sandboxId,
+        lifecycle,
+        environmentId: state.readiness.environmentId,
+        provider: resource.provider,
+        label:
+          request.repository ??
+          `${resource.provider === "e2b" ? "E2B" : "Namespace"} · ${request.requestId.slice(0, 8)}`,
+        repository: request.repository ?? null,
+        projectDir: state.readiness.projectDir,
+        threadId: lease.owner?.threadId ?? null,
+        ...(automationId === null ? {} : { automationId }),
+        createdAt: lease.createdAt,
+        expiresAt:
+          request.retentionDeadline !== undefined && request.retentionDeadline < lease.expiresAt
+            ? request.retentionDeadline
+            : lease.expiresAt,
+      });
+      if (lifecycle !== "disposed") result.push(environment);
+      else if (!gone.has(environment.environmentId))
+        gone.set(environment.environmentId, environment);
     }
-    return result;
+    const live = new Set(result.map((environment) => environment.environmentId));
+    return [
+      ...result,
+      ...[...gone.values()].filter(({ environmentId }) => !live.has(environmentId)),
+    ];
   },
   Effect.mapError(
     () => new EnvironmentControlError({ message: "Provisioned environments could not be listed." }),

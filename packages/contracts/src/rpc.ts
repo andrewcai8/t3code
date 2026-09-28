@@ -34,7 +34,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ProviderAuthCancelInput,
   ProviderAuthCompleteInput,
@@ -700,7 +700,13 @@ const EnvironmentControlListRpc = Rpc.make(WS_METHODS.environmentControlList, {
 const EnvironmentControlListProvisionedRpc = Rpc.make(
   WS_METHODS.environmentControlListProvisioned,
   {
-    payload: Schema.Struct({}),
+    payload: Schema.Struct({
+      /**
+       * The environments the client has saved. The host also returns those of them that were
+       * its boxes and are gone, with lifecycle `disposed`.
+       */
+      environmentIds: Schema.optional(Schema.Array(EnvironmentId)),
+    }),
     success: ProvisionedEnvironmentList,
     error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
   },

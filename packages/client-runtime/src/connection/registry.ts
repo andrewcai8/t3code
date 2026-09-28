@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { type DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -960,5 +960,34 @@ export const make = Effect.gen(function* () {
     followStream,
   });
 });
+
+/**
+ * Marks the saved workspaces their cloud host reports lost or disposed as missing, so they stop
+ * reconnecting and their saved history stays readable. Anything not saved is skipped.
+ */
+export const markGoneWorkspacesMissing = Effect.fn("EnvironmentRegistry.markGoneWorkspacesMissing")(
+  function* (
+    boxes: ReadonlyArray<Pick<DiscoveredProvisionedEnvironment, "environmentId" | "lifecycle">>,
+  ) {
+    const registry = yield* EnvironmentRegistry;
+    const entries = yield* SubscriptionRef.get(registry.entries);
+    for (const { environmentId, lifecycle } of boxes) {
+      const target = entries.get(environmentId)?.target;
+      if (
+        (lifecycle !== "missing" && lifecycle !== "disposed") ||
+        target?._tag !== "BearerConnectionTarget" ||
+        target.workspaceStatus === "missing"
+      )
+        continue;
+      yield* registry
+        .markWorkspaceMissing(environmentId)
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Could not mark a gone workspace missing.", { environmentId, error }),
+          ),
+        );
+    }
+  },
+);
 
 export const layer = Layer.effect(EnvironmentRegistry, make);

@@ -984,12 +984,29 @@ export function createServerEnvironmentAtoms<R, E>(
         Effect.timeout("20 seconds"),
       ),
   });
+  // Asks about every saved environment, so a host also lists the saved ones that were its boxes and
+  // are gone. The key stays `{}` so every reader shares one fetch per host; the ids are read when
+  // it runs. Settings and Automations use `provisionedEnvironments`, which never lists gone boxes.
+  const provisionedBoxLists = createEnvironmentQueryAtomFamily(runtime, {
+    label: "environment-data:cloud:provisioned-box-lists",
+    staleTimeMs: 5_000,
+    execute: (_input: Record<string, never>) =>
+      EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => SubscriptionRef.get(registry.entries)),
+        Effect.flatMap((entries) =>
+          request(WS_METHODS.environmentControlListProvisioned, {
+            environmentIds: [...entries.keys()],
+          }),
+        ),
+        Effect.timeout("20 seconds"),
+      ),
+  });
   const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
     Atom.make((get): ProvisionedBoxes => {
       let refreshing = false;
       const boxes = (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
         const managerId = EnvironmentId.make(hostId);
-        const listed = get(provisionedEnvironments({ environmentId: managerId, input: {} }));
+        const listed = get(provisionedBoxLists({ environmentId: managerId, input: {} }));
         refreshing ||= listed.waiting;
         return Option.getOrElse(AsyncResult.value(listed), () => []).map(
           ({ environmentId, leaseId, threadId, lifecycle }) => ({
@@ -1023,7 +1040,7 @@ export function createServerEnvironmentAtoms<R, E>(
     hostIds: ReadonlyArray<EnvironmentId>,
   ) => {
     for (const environmentId of hostIds) {
-      registry.refresh(provisionedEnvironments({ environmentId, input: {} }));
+      registry.refresh(provisionedBoxLists({ environmentId, input: {} }));
     }
   };
   const refreshManagedEnvironments = (

@@ -2681,10 +2681,10 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
-        [WS_METHODS.environmentControlListProvisioned]: () =>
+        [WS_METHODS.environmentControlListProvisioned]: (input) =>
           observeRpcEffect(
             WS_METHODS.environmentControlListProvisioned,
-            environmentControl.listProvisioned,
+            environmentControl.listProvisioned(input.environmentIds),
           ),
         [WS_METHODS.environmentControlList]: () =>
           observeRpcEffect(WS_METHODS.environmentControlList, environmentControl.list),
