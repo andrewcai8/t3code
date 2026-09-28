@@ -14,6 +14,7 @@ const rates: RateTable = new Map([
       outputCostPerToken: 5e-5,
       cacheReadCostPerToken: 1e-6,
       cacheCreationCostPerToken: 1.25e-5,
+      oneHourCacheWriteCostPerToken: 2e-5,
       fastMultiplier: 1,
     },
   ],

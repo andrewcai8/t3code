@@ -91,6 +91,13 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const MAX_HOURLY_WINDOW_MS = DAY_MS;
 
+/** Where each CLI keeps transcripts under its home. Codex moves a rollout it archives. */
+const TRANSCRIPT_DIRECTORIES = {
+  claude: ["projects"],
+  codex: ["sessions", "archived_sessions"],
+  grok: ["sessions"],
+} as const;
+
 /** Longest window the UI offers, plus slack. Older entries are pruned. */
 export const CACHE_RETENTION_DAYS = 90;
 
@@ -283,7 +290,7 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  /** Resolves the transcript directory for each provider. */
+  /** Resolves the transcript directories for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
     settings: ServerSettingsValue,
     retentionCutoffMs: number,
@@ -330,42 +337,44 @@ export const make = Effect.gen(function* () {
             environment.GROK_HOME?.trim() || path.join(NodeOS.homedir(), ".grok"),
           );
         }
-        const directory = path.resolve(home, provider === "claude" ? "projects" : "sessions");
-        const sourceKey = provider + "\0" + directory;
-        const previous = sourceCache.get(sourceKey);
-        // Keep canonical paths and source fingerprints stable after root cleanup,
-        // including aliases and clients merging pre-cleanup environment summaries.
-        const dir = yield* fileSystem
-          .realPath(directory)
-          .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
-        const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
-        const hasRetainedHistory = fileCache
-          .entries()
-          .some(
-            ([filePath, entry]) =>
-              entry.provider === provider &&
-              entry.mtimeMs >= retentionCutoffMs &&
-              entry.records.length + entry.tailRecords.length > 0 &&
-              isWithinDirectory(filePath, dir),
-          );
-        // A recreated directory still reports the retained history under its old identity.
-        const volumeId =
-          previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
-            ? previous.volumeId || currentVolumeId
-            : currentVolumeId;
-        if (previous?.dir !== dir || previous.volumeId !== volumeId) {
-          sourceCache.set(sourceKey, { dir, volumeId });
-          cacheDirty = true;
+        for (const subdirectory of TRANSCRIPT_DIRECTORIES[provider]) {
+          const directory = path.resolve(home, subdirectory);
+          const sourceKey = provider + "\0" + directory;
+          const previous = sourceCache.get(sourceKey);
+          // Keep canonical paths and source fingerprints stable after root cleanup,
+          // including aliases and clients merging pre-cleanup environment summaries.
+          const dir = yield* fileSystem
+            .realPath(directory)
+            .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
+          const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+          const hasRetainedHistory = fileCache
+            .entries()
+            .some(
+              ([filePath, entry]) =>
+                entry.provider === provider &&
+                entry.mtimeMs >= retentionCutoffMs &&
+                entry.records.length + entry.tailRecords.length > 0 &&
+                isWithinDirectory(filePath, dir),
+            );
+          // A recreated directory still reports the retained history under its old identity.
+          const volumeId =
+            previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
+              ? previous.volumeId || currentVolumeId
+              : currentVolumeId;
+          if (previous?.dir !== dir || previous.volumeId !== volumeId) {
+            sourceCache.set(sourceKey, { dir, volumeId });
+            cacheDirty = true;
+          }
+          const key = `${provider}\0${dir}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          dirs.push({
+            provider,
+            dir,
+            volumeId,
+            ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}),
+          });
         }
-        const key = `${provider}\0${dir}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        dirs.push({
-          provider,
-          dir,
-          volumeId,
-          ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}),
-        });
       }
     }
     return dirs;
