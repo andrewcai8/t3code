@@ -1,5 +1,6 @@
 import type { DraftId } from "~/composerDraftStore";
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { useClaimedBoxes } from "~/cloud/automationHosts";
 import { resolveEnvironmentMachineKind, type ScopedProjectRef } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { FolderPlusIcon } from "lucide-react";
@@ -106,13 +107,15 @@ export function DraftHeroHeadline({
       ),
     [environments],
   );
+  const claimedBoxes = useClaimedBoxes();
   const projectPickerEntries = useMemo(
     () =>
       buildSidebarProjectPickerEntries({
         groups: projectGroups,
         preferredProjectRef: activeProjectRef,
+        boxes: claimedBoxes,
       }),
-    [activeProjectRef, projectGroups],
+    [activeProjectRef, claimedBoxes, projectGroups],
   );
   const projectEntryByKey = useMemo(
     () => new Map(projectPickerEntries.map((entry) => [entry.group.projectKey, entry] as const)),
