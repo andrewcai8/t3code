@@ -1110,6 +1110,7 @@ describe("UsageService", () => {
         const store = yield* BoxUsageStore;
         yield* store.replace({
           leaseId: "lease-a",
+          origin: "box",
           accountIds: ["claude"],
           usage: {
             sources: [

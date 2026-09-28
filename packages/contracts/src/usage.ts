@@ -225,6 +225,25 @@ export const UsageSummary = Schema.Struct({
 });
 export type UsageSummary = typeof UsageSummary.Type;
 
+/**
+ * A machine's own hourly UTC history, as a host would pull it from a cloud box,
+ * pushed to a host that no client of the machine connects to. Each import
+ * replaces what the host keeps for `machineId`.
+ */
+export const UsageImportInput = Schema.Struct({
+  /** Stable across hostname changes, unlike the sources' `hostId`. */
+  machineId: TrimmedNonEmptyString,
+  history: UsageSummary,
+});
+export type UsageImportInput = typeof UsageImportInput.Type;
+
+/** What the host now keeps for the machine. */
+export const UsageImportResult = Schema.Struct({
+  sources: NonNegativeInt,
+  buckets: NonNegativeInt,
+});
+export type UsageImportResult = typeof UsageImportResult.Type;
+
 export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageReadError", {
   reason: Schema.Literals(["scanFailed", "invalidWindow"]),
   /** Stable, bounded description. The underlying failure travels in `cause`. */

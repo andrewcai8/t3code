@@ -20,6 +20,7 @@ import {
   BoxUsageStore,
   boxUsageListWindow,
   foldBoxUsage,
+  importMachineUsage,
   leaseOwnedUsage,
   type StoredBoxUsage,
 } from "./boxUsage.ts";
@@ -120,6 +121,7 @@ describe("BoxUsageStore", () => {
       Effect.gen(function* () {
         yield* store.replace({
           leaseId: "lease-a",
+          origin: "box",
           accountIds: ["claude"],
           usage: {
             sources: [boxSource("box-a")],
@@ -129,6 +131,7 @@ describe("BoxUsageStore", () => {
         });
         yield* store.replace({
           leaseId: "lease-a",
+          origin: "box",
           accountIds: ["claude", "codex"],
           usage: {
             sources: [boxSource("box-a")],
@@ -148,6 +151,7 @@ describe("BoxUsageStore", () => {
 
         yield* store.replace({
           leaseId: "lease-a",
+          origin: "box",
           accountIds: ["claude"],
           usage: { sources: [], buckets: [] },
           pulledAt: "2026-09-01T07:00:00.000Z",
@@ -163,6 +167,7 @@ describe("BoxUsageStore", () => {
       Effect.gen(function* () {
         yield* store.replace({
           leaseId: "lease-a",
+          origin: "box",
           accountIds: ["claude"],
           usage: {
             sources: [boxSource("box-a")],
@@ -193,6 +198,7 @@ describe("BoxUsageStore", () => {
         ] as const) {
           yield* store.replace({
             leaseId,
+            origin: "box",
             accountIds: ["claude"],
             usage: {
               sources: [boxSource(leaseId)],
@@ -247,6 +253,7 @@ describe("BoxUsageStore", () => {
         ]) {
           yield* store.replace({
             leaseId,
+            origin: "box",
             accountIds: ["claude"],
             usage: {
               sources: [boxSource(leaseId)],
@@ -294,6 +301,7 @@ describe("BoxUsageStore", () => {
             );
             yield* store.replace({
               leaseId,
+              origin: "box",
               accountIds: ["claude"],
               usage: leaseOwnedUsage(leaseId, {
                 sources: [template],
@@ -447,4 +455,204 @@ describe("foldBoxUsage", () => {
       ],
     );
   });
+});
+
+describe("importMachineUsage", () => {
+  const MAC_HOME = "/Users/me/.claude/projects";
+  const MAC_CODEX = "/Users/me/.codex/sessions";
+  const DAY = {
+    timeZone: "UTC",
+    sinceDay: UsageDay.make("2026-09-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+  };
+  const macSource = (
+    provider: UsageSource["fingerprint"]["provider"],
+    resolvedHomePath: string,
+  ): UsageSource => ({
+    fingerprint: {
+      hostId: "Andrews-Mac.local",
+      provider,
+      resolvedHomePath,
+      volumeId: "16777234:9",
+    },
+    status: "ok",
+    scannedFiles: 3,
+    skippedFiles: 0,
+    malformedRecords: 0,
+    distinctSessions: 2,
+    message: null,
+  });
+  const macHistory = (claudeHours: ReadonlyArray<readonly [string, number]>) =>
+    summaryOf(
+      [
+        ...claudeHours.map(([hourStart, input]) =>
+          hourBucket(hourStart, input, { sourcePath: MAC_HOME }),
+        ),
+        hourBucket("2026-09-01T06:00:00.000Z", 7, { provider: "codex", sourcePath: MAC_CODEX }),
+        hourBucket("2026-09-01T06:00:00.000Z", 1000, {
+          provider: "cursor",
+          sourcePath: "cursor-account:acct",
+        }),
+      ],
+      [
+        macSource("claude", MAC_HOME),
+        macSource("codex", MAC_CODEX),
+        {
+          ...macSource("cursor", "cursor-account:acct"),
+          fingerprint: {
+            hostId: "cursor.com",
+            provider: "cursor",
+            resolvedHomePath: "cursor-account:acct",
+            volumeId: "acct",
+          },
+        },
+      ],
+      "2026-09-01T07:00:00.000Z",
+    );
+  /** The host's summary for the day once it folds what it keeps. */
+  const hostSummary = (store: BoxUsageStore["Service"], readAt: string) =>
+    Effect.gen(function* () {
+      const list = boxUsageListWindow(DAY);
+      return foldBoxUsage(
+        summaryOf([], [], readAt),
+        DAY,
+        yield* store.list(list.sinceIso, list.untilIso, "2026-08-31T00:00:00.000Z"),
+        { hostId: "host", path: "/state/cloud-box-usage" },
+      );
+    });
+  const merge = (...summaries: ReadonlyArray<readonly [string, UsageSummary]>) =>
+    mergeUsage(
+      summaries.map(([id, summary]) => ({
+        environmentId: EnvironmentId.make(id),
+        label: id,
+        summary,
+      })),
+      USAGE_CONTRACT_VERSION,
+    );
+
+  it.effect("serves an import in the host's summary and replaces it on re-import", () =>
+    inStore((store) =>
+      Effect.gen(function* () {
+        const first = yield* importMachineUsage(store, {
+          machineId: "mac-environment",
+          history: macHistory([["2026-09-01T03:00:00.000Z", 40]]),
+        });
+        assert.deepStrictEqual(first, { sources: 2, buckets: 2 });
+        const afterFirst = merge(["host", yield* hostSummary(store, "2026-09-01T08:00:00.000Z")]);
+        assert.deepStrictEqual(
+          afterFirst.providers.map((provider) => [provider.provider, provider.totalTokens]),
+          [
+            ["claude", 40],
+            ["codex", 7],
+          ],
+        );
+
+        const history = macHistory([
+          ["2026-09-01T03:00:00.000Z", 45],
+          ["2026-09-01T05:00:00.000Z", 60],
+        ]);
+        yield* importMachineUsage(store, { machineId: "mac-environment", history });
+        yield* importMachineUsage(store, { machineId: "mac-environment", history });
+        const host = yield* hostSummary(store, "2026-09-01T08:00:00.000Z");
+        assert.strictEqual(merge(["host", host]).totalTokens, 112);
+        assert.deepStrictEqual(
+          host.sources.map((source) => [
+            source.fingerprint.hostId,
+            source.fingerprint.resolvedHomePath,
+            source.status,
+            source.sourcePath,
+          ]),
+          [
+            ["Andrews-Mac.local", MAC_HOME, "partial", `mac-environment:${MAC_HOME}`],
+            ["Andrews-Mac.local", MAC_CODEX, "partial", `mac-environment:${MAC_CODEX}`],
+          ],
+        );
+      }),
+    ),
+  );
+
+  it.effect("counts the machine once when a client also connects to it", () =>
+    inStore((store) =>
+      Effect.gen(function* () {
+        yield* importMachineUsage(store, {
+          machineId: "mac-environment",
+          history: macHistory([["2026-09-01T03:00:00.000Z", 40]]),
+        });
+        // A daily scan by the machine itself, which has seen 10 tokens since the import.
+        const live = summaryOf(
+          [
+            hourBucket("2026-09-01T03:00:00.000Z", 50, {
+              hourStart: undefined,
+              sourcePath: MAC_HOME,
+            }),
+            hourBucket("2026-09-01T06:00:00.000Z", 7, {
+              hourStart: undefined,
+              provider: "codex",
+              sourcePath: MAC_CODEX,
+            }),
+          ],
+          [macSource("claude", MAC_HOME), macSource("codex", MAC_CODEX)],
+          "2026-09-01T08:00:00.000Z",
+        );
+        for (const hostReadAt of ["2026-09-01T07:30:00.000Z", "2026-09-01T09:00:00.000Z"]) {
+          const merged = merge(["host", yield* hostSummary(store, hostReadAt)], ["mac", live]);
+          assert.deepStrictEqual(
+            [merged.totalTokens, merged.contributingEnvironments],
+            [57, [EnvironmentId.make("mac")]],
+          );
+        }
+      }),
+    ),
+  );
+
+  it.effect("keeps a machine apart from the host's cloud boxes", () =>
+    inStore((store) =>
+      Effect.gen(function* () {
+        const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
+        yield* Effect.promise(() =>
+          registry.register({
+            leaseId: "lease-live",
+            sandboxId: "sandbox-live",
+            providerInstanceId: "claude",
+          }),
+        );
+        for (const leaseId of ["lease-live", "lease-gone"]) {
+          yield* store.replace({
+            leaseId,
+            origin: "box",
+            accountIds: ["claude"],
+            usage: leaseOwnedUsage(leaseId, {
+              sources: [boxSource("e2b.local")],
+              buckets: [hourBucket("2026-09-01T03:00:00.000Z", 100)],
+            }),
+            pulledAt: "2026-09-01T04:00:00.000Z",
+          });
+        }
+        yield* importMachineUsage(store, {
+          machineId: "mac-environment",
+          history: macHistory([["2026-09-01T03:00:00.000Z", 40]]),
+        });
+        const host = yield* hostSummary(store, "2026-09-01T08:00:00.000Z");
+        assert.deepStrictEqual(
+          host.sources.map((source) => [source.fingerprint.hostId, source.status]),
+          [
+            ["lease-live", "partial"],
+            ["Andrews-Mac.local", "partial"],
+            ["Andrews-Mac.local", "partial"],
+            ["host", "ok"],
+          ],
+        );
+        assert.deepStrictEqual(
+          merge(["host", host]).providers.map((provider) => [
+            provider.provider,
+            provider.totalTokens,
+          ]),
+          [
+            ["claude", 240],
+            ["codex", 7],
+          ],
+        );
+      }),
+    ),
+  );
 });

@@ -177,7 +177,7 @@ import {
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
-import { usageHttpApiLayer } from "./usage/http.ts";
+import { usageHttpApiLayer, usageImportBodyLimitLayer } from "./usage/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
@@ -634,6 +634,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(DesktopAppUpdateLayerLive))),
   Layer.provide(commandReadinessLayer),
   Layer.provide(environmentControlBodyLimitLayer),
+  Layer.provide(usageImportBodyLimitLayer),
   Layer.provide(browserApiCorsLayer),
   Layer.provide(httpCompressionLayer),
 );

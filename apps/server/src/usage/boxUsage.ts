@@ -1,9 +1,10 @@
 // @effect-diagnostics globalDate:off - stored hour buckets are re-bucketed by ISO instant.
 /**
- * Usage a host keeps for its cloud boxes.
+ * Usage a host keeps for machines it does not scan itself.
  *
  * Cloud chats write transcripts on an ephemeral box, so the host pulls each
- * box's hourly UTC history, stores its sources per lease and its buckets per
+ * box's hourly UTC history. A machine no client connects to pushes the same
+ * history instead. The host stores its sources per row and its buckets per
  * hour, and folds a window's hours into its own summary. Hour buckets
  * re-bucket exactly into any client's day or hour window.
  *
@@ -13,12 +14,15 @@ import {
   ForwardCompatibleArray,
   UsageBucket,
   UsageSource,
+  type UsageImportInput,
+  type UsageImportResult,
   type UsageProviderKind,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { usageSourcePath } from "@t3tools/shared/usageMerge";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -35,7 +39,14 @@ export interface BoxUsage {
   readonly buckets: ReadonlyArray<UsageBucket>;
 }
 
+/**
+ * Who a stored row belongs to: a cloud box the host pulls by lease, or a
+ * machine that imports its own history. Only a box can retire.
+ */
+type StoredUsageOrigin = "box" | "machine";
+
 export interface StoredBoxUsage extends BoxUsage {
+  /** The box's lease id, or the importing machine's id. */
   readonly leaseId: string;
   readonly accountIds: ReadonlyArray<string>;
   readonly pulledAt: string;
@@ -90,17 +101,18 @@ export function leaseOwnedUsage(leaseId: string, usage: BoxUsage): BoxUsage {
 export class BoxUsageStore extends Context.Service<
   BoxUsageStore,
   {
-    /** Replaces the lease's stored history. History with no hour buckets deletes it. */
+    /** Replaces the row's stored history. History with no hour buckets deletes it. */
     readonly replace: (input: {
       readonly leaseId: string;
+      readonly origin: StoredUsageOrigin;
       readonly accountIds: ReadonlyArray<string>;
       readonly usage: BoxUsage;
       readonly pulledAt: string;
     }) => Effect.Effect<void, BoxUsageStoreError>;
     /**
-     * Hours in `[sinceIso, untilIso)`, grouped by lease with the lease's sources.
-     * A lease counts as retired when its row is gone, or it has not been
-     * active since before `retiredBeforeIso`.
+     * Hours in `[sinceIso, untilIso)`, grouped by row with the row's sources.
+     * A box counts as retired when its lease is gone, or it has not been
+     * active since before `retiredBeforeIso`. A machine never retires.
      */
     readonly list: (
       sinceIso: string,
@@ -118,6 +130,7 @@ export class BoxUsageStore extends Context.Service<
       const replace = Effect.fn("BoxUsageStore.replace")(
         function* (input: {
           readonly leaseId: string;
+          readonly origin: StoredUsageOrigin;
           readonly accountIds: ReadonlyArray<string>;
           readonly usage: BoxUsage;
           readonly pulledAt: string;
@@ -146,9 +159,10 @@ export class BoxUsageStore extends Context.Service<
                 )}`;
               }
               yield* sql`
-                INSERT INTO box_usage (lease_id, account_ids_json, sources_json, pulled_at)
-                VALUES (${input.leaseId}, ${encodeAccountIds(input.accountIds)}, ${encodeSources(input.usage.sources)}, ${input.pulledAt})
+                INSERT INTO box_usage (lease_id, origin, account_ids_json, sources_json, pulled_at)
+                VALUES (${input.leaseId}, ${input.origin}, ${encodeAccountIds(input.accountIds)}, ${encodeSources(input.usage.sources)}, ${input.pulledAt})
                 ON CONFLICT(lease_id) DO UPDATE SET
+                  origin = excluded.origin,
                   account_ids_json = excluded.account_ids_json,
                   sources_json = excluded.sources_json,
                   pulled_at = excluded.pulled_at
@@ -169,6 +183,7 @@ export class BoxUsageStore extends Context.Service<
                   box_usage.sources_json AS sources,
                   box_usage.pulled_at AS "pulledAt",
                   CASE
+                    WHEN box_usage.origin = 'machine' THEN 0
                     WHEN provisioned_leases.lease_id IS NULL THEN 1
                     WHEN json_extract(provisioned_leases.lease_json, '$.state') <> 'active'
                       AND json_extract(provisioned_leases.lease_json, '$.updatedAt') < ${retiredBeforeIso}
@@ -241,6 +256,29 @@ export class BoxUsageStore extends Context.Service<
 const sourceKey = (provider: UsageProviderKind, path: string) => `${provider}\u0000${path}`;
 
 /**
+ * Replaces what the host keeps for a machine with the history it pushed. The
+ * machine's sources keep their own fingerprints, so a client that also
+ * connects to the machine counts each transcript directory once.
+ */
+export const importMachineUsage = Effect.fn("importMachineUsage")(function* (
+  store: BoxUsageStore["Service"],
+  input: UsageImportInput,
+) {
+  const usage = historyForHost(input.history);
+  yield* store.replace({
+    leaseId: input.machineId,
+    origin: "machine",
+    accountIds: [],
+    usage,
+    pulledAt: DateTime.formatIso(yield* DateTime.now),
+  });
+  return {
+    sources: usage.sources.length,
+    buckets: usage.buckets.filter((bucket) => bucket.hourStart !== undefined).length,
+  } satisfies UsageImportResult;
+});
+
+/**
  * What a box's history keeps for a host: Cursor is dropped because the host
  * reads the Cursor account itself, and missing or empty sources and buckets
  * without a kept source are dropped because the host has nothing to show for them.
@@ -310,10 +348,11 @@ function sumBuckets(a: UsageBucket, b: UsageBucket): UsageBucket {
 /**
  * Folds stored box history into a host summary for `input`'s window.
  *
- * A live box keeps its own fingerprint so a client that also reaches the box
- * counts it once, with a per-box `sourcePath` so boxes sharing a home path stay
- * apart. Retired boxes collapse into one source per provider at `retiredHome`,
- * so the summary does not grow with every box the host ever ran.
+ * A live box or an imported machine keeps its own fingerprint so a client
+ * that also reaches it counts it once, with a per-row `sourcePath` so rows
+ * sharing a home path stay apart. Retired boxes collapse into one source per
+ * provider at `retiredHome`, so the summary does not grow with every box the
+ * host ever ran.
  */
 export function foldBoxUsage(
   summary: UsageSummary,
@@ -373,8 +412,8 @@ export function foldBoxUsage(
       if (bucketSessions === undefined) continue;
       const distinctSessions = Math.min(source.distinctSessions, bucketSessions);
       if (!row.retired) {
-        // Partial, so a complete live scan of the same box claims its
-        // fingerprint and this copy only fills cells the live scan lacks.
+        // Partial, so a complete live scan of the same box or machine claims
+        // its fingerprint and this copy only fills cells the live scan lacks.
         liveSources.push({
           ...source,
           status: "partial",

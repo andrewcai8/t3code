@@ -71,6 +71,7 @@ import Migration0056 from "./Migrations/056_Automations.ts";
 import Migration0057 from "./Migrations/057_ProjectionThreadsAutoSettleDisabledAt.ts";
 import Migration0058 from "./Migrations/058_BoxUsage.ts";
 import Migration0059 from "./Migrations/059_AutomationsModel.ts";
+import Migration0060 from "./Migrations/060_BoxUsageOrigin.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -148,6 +149,7 @@ const migrationEntries = [
   [57, "ProjectionThreadsAutoSettleDisabledAt", Migration0057],
   [58, "BoxUsage", Migration0058],
   [59, "AutomationsModel", Migration0059],
+  [60, "BoxUsageOrigin", Migration0060],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
