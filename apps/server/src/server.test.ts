@@ -1090,7 +1090,7 @@ const buildAppUnderTest = (options?: {
           list: Effect.succeed([]),
           provisionProviders: Effect.succeed([]),
           provisionedSkills: Effect.succeed(undefined),
-          listProvisioned: Effect.succeed([]),
+          listProvisioned: () => Effect.succeed([]),
           provision: () =>
             Effect.succeed({
               kind: "refused",

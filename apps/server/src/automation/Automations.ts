@@ -506,7 +506,7 @@ export class Automations extends Context.Service<
       const automations = yield* makeAutomations({
         run: (automation, run) => runner(automation, run).pipe(Effect.provide(context)),
         dispose,
-        listProvisioned: environmentControl.listProvisioned,
+        listProvisioned: environmentControl.listProvisioned(),
       });
       yield* forkParked(automations.start);
       return automations;

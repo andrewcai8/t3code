@@ -50,6 +50,11 @@ import {
   type SupervisorConnectionState,
 } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
+import { newChatRunTargets } from "../cloud/provisioning.ts";
+import {
+  type EnvironmentConnectionPresentation,
+  presentEnvironmentConnection,
+} from "./presentation.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import {
@@ -610,6 +615,105 @@ describe("EnvironmentRegistry", () => {
           BEARER_TARGET,
         );
         expect(yield* Ref.get(harness.releasedSessions)).toBe(0);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("stops dialing and offering the saved boxes a host reports gone", () =>
+    Effect.gen(function* () {
+      const pausedBox = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("environment-paused-box"),
+        label: "Paused box",
+        connectionId: "paused-box-connection",
+      });
+      const harness = yield* makeHarness(
+        [BEARER_TARGET, pausedBox],
+        [
+          BEARER_PROFILE,
+          new BearerConnectionProfile({
+            connectionId: pausedBox.connectionId,
+            environmentId: pausedBox.environmentId,
+            label: pausedBox.label,
+            httpBaseUrl: "https://paused-box.example.test",
+            wsBaseUrl: "wss://paused-box.example.test",
+          }),
+        ],
+        [
+          [BEARER_TARGET.connectionId, BEARER_CREDENTIAL],
+          [pausedBox.connectionId, BEARER_CREDENTIAL],
+        ],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        for (const target of [BEARER_TARGET, pausedBox]) {
+          yield* awaitConnectionState(
+            registry,
+            target.environmentId,
+            (state) => state.phase === "connected",
+          );
+        }
+        const runTargets = Effect.gen(function* () {
+          const entries = yield* SubscriptionRef.get(registry.entries);
+          const connections = new Map<EnvironmentId, EnvironmentConnectionPresentation>();
+          for (const [environmentId, entry] of entries) {
+            connections.set(
+              environmentId,
+              presentEnvironmentConnection(yield* registry.state(environmentId), entry.target),
+            );
+          }
+          const { environments, redirect } = newChatRunTargets({
+            environments: [BEARER_TARGET, pausedBox].map(({ environmentId }) => ({
+              environmentId,
+            })),
+            environmentState: (environmentId) => ({
+              connection: connections.get(environmentId),
+            }),
+            environmentId: BEARER_TARGET.environmentId,
+            managerConfig: null,
+            boxes: new Set(),
+          });
+          return { offered: environments.map(({ environmentId }) => environmentId), redirect };
+        });
+        expect(yield* runTargets).toEqual({
+          offered: ["environment-bearer", "environment-paused-box"],
+          redirect: null,
+        });
+
+        yield* EnvironmentRegistry.markGoneWorkspacesMissing([
+          { environmentId: BEARER_TARGET.environmentId, lifecycle: "disposed" },
+          { environmentId: pausedBox.environmentId, lifecycle: "paused" },
+          { environmentId: EnvironmentId.make("environment-not-saved"), lifecycle: "disposed" },
+        ]);
+
+        const disposed = yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "blocked",
+        );
+        expect(disposed.retryAt).toBeNull();
+        const entries = yield* SubscriptionRef.get(registry.entries);
+        expect(entries.get(BEARER_TARGET.environmentId)?.target).toEqual(
+          new BearerConnectionTarget({ ...BEARER_TARGET, workspaceStatus: "missing" }),
+        );
+        expect(
+          presentEnvironmentConnection(disposed, entries.get(BEARER_TARGET.environmentId)!.target),
+        ).toEqual({
+          phase: "error",
+          error: "This workspace no longer exists. Its saved conversation is still available.",
+          traceId: null,
+          blockedReason: "workspace-missing",
+        });
+        expect(entries.get(pausedBox.environmentId)?.target).toEqual(pausedBox);
+        expect((yield* registry.state(pausedBox.environmentId)).phase).toBe("connected");
+        expect(yield* runTargets).toEqual({
+          offered: ["environment-paused-box"],
+          redirect: {
+            kind: "environment",
+            environment: { environmentId: "environment-paused-box" },
+          },
+        });
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );

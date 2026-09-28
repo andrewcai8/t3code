@@ -122,8 +122,8 @@ export function boxesOfOtherChats(
 }
 
 /**
- * Boxes the host has paused or lost. Nobody can start a chat on one until it is resumed, so a
- * new chat is never offered one, though a chat already pointing at one keeps it.
+ * Boxes the host has paused, lost, or disposed. Nobody can start a chat on one, so a new chat is
+ * never offered one, though a chat already pointing at one keeps it.
  */
 export function idleProvisionedBoxes(
   boxes: ReadonlyArray<ProvisionedBox>,

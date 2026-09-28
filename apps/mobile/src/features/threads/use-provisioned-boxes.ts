@@ -3,10 +3,21 @@ import type { ProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 import { useEffect, useMemo } from "react";
 
+import { environmentCatalog } from "../../connection/catalog";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { useServerConfigs } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { provisioningHostIds } from "./new-task-project-selection";
+
+function useProvisioningHostIds(serverConfigs: ReadonlyMap<EnvironmentId, ServerConfig>) {
+  const { connectedEnvironments } = useRemoteConnectionStatus();
+  return useMemo(
+    () => provisioningHostIds(serverConfigs, connectedEnvironments),
+    [serverConfigs, connectedEnvironments],
+  );
+}
 
 /**
  * Every cloud box the connected hosts among `serverConfigs` report. A phone that joined a box through a
@@ -17,11 +28,7 @@ import { provisioningHostIds } from "./new-task-project-selection";
 export function useProvisionedBoxes(
   serverConfigs: ReadonlyMap<EnvironmentId, ServerConfig>,
 ): ProvisionedBoxes {
-  const { connectedEnvironments } = useRemoteConnectionStatus();
-  const hostIds = useMemo(
-    () => provisioningHostIds(serverConfigs, connectedEnvironments),
-    [serverConfigs, connectedEnvironments],
-  );
+  const hostIds = useProvisioningHostIds(serverConfigs);
   const hostsKey = hostIds.join("\n");
   useEffect(() => {
     if (hostsKey === "") return;
@@ -31,4 +38,18 @@ export function useProvisionedBoxes(
     );
   }, [hostsKey]);
   return useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+}
+
+/**
+ * Marks the saved cloud boxes their hosts report lost or disposed as missing, so none keeps
+ * reconnecting or is offered for a new task. Mount once, app-wide. It reads the lists without
+ * refetching them; the readers of `useProvisionedBoxes` do that.
+ */
+export function useMarkGoneProvisionedBoxes(): void {
+  const hostIds = useProvisioningHostIds(useServerConfigs());
+  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const markGone = useAtomCommand(environmentCatalog.markGoneWorkspacesMissing);
+  useEffect(() => {
+    void markGone(boxes);
+  }, [boxes, markGone]);
 }

@@ -62,7 +62,7 @@ it.effect(
           list: Effect.succeed([]),
           provisionProviders: Effect.succeed([]),
           provisionedSkills: Effect.succeed(undefined),
-          listProvisioned: Effect.succeed([]),
+          listProvisioned: () => Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),
           stop: () => Effect.die("Unused in provision HTTP proof"),
           pause: () => Effect.die("Unused in provision HTTP proof"),

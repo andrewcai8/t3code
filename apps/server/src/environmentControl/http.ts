@@ -50,9 +50,9 @@ export const environmentControlHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.control.listProvisioned")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* control.listProvisioned.pipe(
-            Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)),
-          );
+          return yield* control
+            .listProvisioned()
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
         }),
       )
       .handle(
