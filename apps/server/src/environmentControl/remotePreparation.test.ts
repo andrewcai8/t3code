@@ -973,6 +973,46 @@ async function following() {
 }
 
 describe("remote branch refresh", () => {
+  it("starts on the default branch by name and keeps agent commits through a refresh", async () => {
+    const { input, source } = await following();
+    git(source, "branch", "-M", "main");
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    advance(first.projectDir, "agent work");
+    const agentHead = git(first.projectDir, "rev-parse", "HEAD");
+    const pushed = advance(source, "pushed while open");
+    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect([
+      git(first.projectDir, "symbolic-ref", "--short", "HEAD"),
+      git(first.projectDir, "rev-parse", "--abbrev-ref", "@{upstream}"),
+      git(first.projectDir, "rev-parse", "HEAD"),
+      git(first.projectDir, "rev-parse", "origin/main"),
+      git(first.projectDir, "rev-list", "--left-right", "--count", "HEAD...@{upstream}"),
+    ]).toEqual(["main", "origin/main", agentHead, pushed, "1\t1"]);
+  });
+
+  it("starts on a requested branch by name, and a pinned revision stays detached", async () => {
+    const { input: followed, source } = await following();
+    git(source, "checkout", "-q", "-b", "feature");
+    const featureTip = advance(source, "feature work");
+    const input = {
+      ...followed,
+      follow: "feature",
+      repository: { ...followed.repository!, revision: featureTip },
+    };
+    const onFeature = await prepareRemoteHost(localPort, input);
+    pids.add(onFeature.serverPid);
+    expect([
+      git(onFeature.projectDir, "symbolic-ref", "--short", "HEAD"),
+      git(onFeature.projectDir, "rev-parse", "--abbrev-ref", "@{upstream}"),
+      onFeature.headRevision,
+    ]).toEqual(["feature", "origin/feature", featureTip]);
+
+    const pinned = await prepareRemoteHost(localPort, await fixture());
+    pids.add(pinned.serverPid);
+    expect(git(pinned.projectDir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+  });
+
   it("shows every open what was pushed, without moving HEAD or rerunning setup", async () => {
     const { input: followed, source, tracking } = await following();
     const input = { ...followed, prepareCommands: ["echo ran >> ../setup-runs"] };

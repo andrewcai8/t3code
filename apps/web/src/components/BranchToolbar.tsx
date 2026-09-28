@@ -38,6 +38,7 @@ import {
 import {
   BranchToolbarBranchSelector,
   type BranchToolbarBranchSelectorHandle,
+  type CloudBaseBranch,
 } from "./BranchToolbarBranchSelector";
 import {
   BranchToolbarEnvironmentSelector,
@@ -98,6 +99,8 @@ interface BranchToolbarProps {
   onCreateNamespaceEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
   creatingCloudEnvironment?: boolean;
   pendingCloudProvider?: CloudEnvironmentProvider | null;
+  /** Set while a cloud environment is pending; see `BranchToolbarBranchSelector`. */
+  cloudBase?: CloudBaseBranch | undefined;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
 }
@@ -595,6 +598,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   onCreateNamespaceEnvironment,
   creatingCloudEnvironment,
   pendingCloudProvider,
+  cloudBase,
   composerControlsHostRef,
   contextStripVisible = true,
 }: BranchToolbarProps) {
@@ -804,6 +808,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           onStartFromOriginChange={onStartFromOriginChange}
           {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
           {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
+          {...(cloudBase ? { cloudBase } : {})}
         />
       ) : null}
     </ComposerSurface.ContextStrip>

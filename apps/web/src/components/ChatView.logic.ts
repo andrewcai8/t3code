@@ -3,6 +3,7 @@ import {
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type ChatFileAttachment,
+  cloneRepository,
   defaultInstanceIdForDriver,
   type EnvironmentId,
   isProviderDriverKind,
@@ -11,6 +12,7 @@ import {
   type ModelSelection,
   type PreviewAnnotationPayload,
   type ProviderInteractionMode,
+  type RepositoryIdentity,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -561,6 +563,20 @@ export function buildCloudHandoff(input: {
       input.selection.options,
     ),
   };
+}
+
+/**
+ * What a cloud chat clones: the project's repository, on the branch the user
+ * picked. Without a pick the branch is left out and the box asks GitHub for the
+ * default, which a stale local origin/HEAD cannot get wrong.
+ */
+export function cloudCloneSource(
+  identity: RepositoryIdentity | null | undefined,
+  branch: string | null,
+): { readonly repository?: string; readonly branch?: string } {
+  const repository = cloneRepository(identity);
+  if (!repository) return {};
+  return branch ? { repository, branch } : { repository };
 }
 
 /** Use the same enabled instance for the composer, provider status, and chat actions. */

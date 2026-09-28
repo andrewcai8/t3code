@@ -1492,6 +1492,8 @@ describe("composerDraftStore project draft thread mapping", () => {
       outgoingMessageText: "start the sandbox",
       phase: "creating",
       startedAt: "2026-09-14T00:00:01.000Z",
+      repository: "me/repo",
+      branch: "feature",
     };
     store.setDraftPendingEnvironmentSend(draftId, pending);
     store.clearComposerContent(draftId);

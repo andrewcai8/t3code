@@ -440,23 +440,30 @@ def prepare(spec):
                 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
                 'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode(),
             })
-        def fetch_followed():
-            # Best effort: the thread sees new pushes through the remote ref
-            # and pulls them itself. HEAD is never moved under its work.
+        def followed_branch(cwd):
+            # The followed branch by name, asking the remote for its default
+            # when the request left it at HEAD.
             follow = spec.get('follow')
             if repository is None or not follow:
                 return None
+            if follow == 'HEAD':
+                default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], cwd, git_env, timeout=30), re.M)
+                if default is None:
+                    raise RuntimeError('The repository does not advertise a default branch')
+                follow = default.group(1)
+            run(['git', 'check-ref-format', 'refs/remotes/origin/' + follow], cwd, env)
+            return follow
+        def fetch_followed():
+            # Best effort: the thread sees new pushes through the remote ref
+            # and pulls them itself. HEAD is never moved under its work.
             try:
-                if follow == 'HEAD':
-                    default = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', run(['git', 'ls-remote', '--symref', 'origin', 'HEAD'], project, git_env, timeout=30), re.M)
-                    if default is None:
-                        raise RuntimeError('The repository does not advertise a default branch')
-                    follow = default.group(1)
+                follow = followed_branch(project)
+                if follow is None:
+                    return None
                 tracking = 'refs/remotes/origin/' + follow
-                run(['git', 'check-ref-format', tracking], project, env)
                 # Offer HEAD and the last fetched tips, or the server resends
-                # everything since the checkout: the clone made no refs, and
-                # HEAD never moves. An unborn HEAD is left out rather than
+                # everything since the checkout: an older box's clone made no
+                # refs, and HEAD never moves. An unborn HEAD is left out rather than
                 # failing the fetch. No --depth, which would take shallow.lock.
                 tips = ['--negotiation-tip=refs/remotes/origin/*']
                 with contextlib.suppress(RuntimeError):
@@ -621,7 +628,19 @@ def prepare(spec):
                     run(['git', '-c', 'user.name=T3', '-c', 'user.email=agent@t3.local', 'commit', '--allow-empty', '-qm', 'Initialize workspace'], checkout, git_env)
                 else:
                     finish(fetching, 600)
-                    run(['git', 'checkout', '--detach', repository['revision']], checkout, git_env, timeout=600)
+                    # The first checkout lands on the followed branch by name,
+                    # tracking origin, so the thread starts on main rather
+                    # than a detached HEAD. -B makes a retry of this
+                    # never-opened checkout converge. A pinned revision, or a
+                    # branch the remote cannot name, stays detached.
+                    branch = None
+                    with contextlib.suppress(RuntimeError):
+                        branch = followed_branch(checkout)
+                    if branch is None:
+                        run(['git', 'checkout', '--detach', repository['revision']], checkout, git_env, timeout=600)
+                    else:
+                        run(['git', 'update-ref', 'refs/remotes/origin/' + branch, repository['revision']], checkout, env)
+                        run(['git', 'checkout', '-q', '-B', branch, '--track', 'origin/' + branch], checkout, git_env, timeout=600)
                 os.rename(checkout, project)
         if repository is not None:
             with step('repositoryVerify'):
