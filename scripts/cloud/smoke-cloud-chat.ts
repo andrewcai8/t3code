@@ -282,6 +282,8 @@ interface Markers {
   readonly skill: string | null;
   readonly flavor: string | null;
   readonly models: string | null;
+  readonly aws: string | null;
+  readonly cloudflare: string | null;
   readonly nonce: string | null;
 }
 /** The last `SMOKE_<key>=<value>` the agent printed: a reply may quote the prompt's example first. */
@@ -294,6 +296,8 @@ const readMarkers = (reply: string): Markers => ({
   skill: readMarker(reply, "SKILL"),
   flavor: readMarker(reply, "FLAVOR"),
   models: readMarker(reply, "MODELS"),
+  aws: readMarker(reply, "AWS"),
+  cloudflare: readMarker(reply, "CF"),
   nonce: readMarker(reply, "NONCE"),
 });
 
@@ -820,8 +824,11 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         ? [`test -f "$HOME/.claude/agents/poteto-agent.md" || f=$f-no-agent`]
         : []),
       `m=missing; test -f "${MODEL_SHEET[agent]}" && m=present; git check-ignore -q "${MODEL_SHEET[agent]}" 2>/dev/null && m=$m-ignored`,
+      // The account AWS answers for, and whether Cloudflare accepts the box's token.
+      `a=no-cli; command -v aws >/dev/null && a=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo no-auth)`,
+      `c=no-cli; command -v wrangler >/dev/null && c=no-auth && curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify | grep -q '"active"' && c=active`,
       `n=$(printf %s ${seed} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)`,
-      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_ORIGIN=$o SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_NONCE=$n"`,
+      `echo "SMOKE_HEAD=$h SMOKE_BRANCH=$b SMOKE_ORIGIN=$o SMOKE_SKILL=$s SMOKE_FLAVOR=$f SMOKE_MODELS=$m SMOKE_AWS=$a SMOKE_CF=$c SMOKE_NONCE=$n"`,
     ].join("; ");
     return { snippet, expectedNonce };
   });
@@ -861,6 +868,8 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     yield* record(`${label}.models`, markers.models !== null, markers.models, {
       path: MODEL_SHEET[agent],
     });
+    yield* record(`${label}.aws`, markers.aws !== null, markers.aws, {});
+    yield* record(`${label}.cloudflare`, markers.cloudflare !== null, markers.cloudflare, {});
     return { ...turn, markers };
   });
 
