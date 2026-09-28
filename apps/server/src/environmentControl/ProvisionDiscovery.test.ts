@@ -157,6 +157,49 @@ it.effect(
           threadId: "thread-11",
         });
         expect(yield* listProvisionedEnvironments(sql)).toEqual(listed);
+        const withSaved = yield* listProvisionedEnvironments(sql, [
+          EnvironmentId.make("environment-7"),
+          EnvironmentId.make("environment-8"),
+          EnvironmentId.make("environment-never-provisioned"),
+        ]);
+        expect(withSaved.filter((row) => row.lifecycle !== "disposed")).toEqual(listed);
+        expect(
+          withSaved
+            .filter((row) => row.lifecycle === "disposed")
+            .toSorted((left, right) => left.requestId.localeCompare(right.requestId)),
+        ).toEqual([
+          {
+            requestId: id(7),
+            leaseId: id(7),
+            sandboxId: "sandbox-7",
+            lifecycle: "disposed",
+            environmentId: "environment-7",
+            provider: "e2b",
+            label: "proof/repository",
+            repository: "proof/repository",
+            projectDir: "/private/project",
+            threadId: "thread-7",
+            createdAt: expect.any(String),
+            expiresAt: expect.any(String),
+          },
+          {
+            requestId: id(8),
+            leaseId: id(8),
+            sandboxId: "sandbox-8",
+            lifecycle: "disposed",
+            environmentId: "environment-8",
+            provider: "e2b",
+            label: "proof/repository",
+            repository: "proof/repository",
+            projectDir: "/private/project",
+            threadId: "thread-8",
+            createdAt: expect.any(String),
+            expiresAt: "1960-01-01T00:00:00.000Z",
+          },
+        ]);
+        expect(
+          yield* listProvisionedEnvironments(sql, [EnvironmentId.make("environment-10")]),
+        ).toEqual(listed);
         expect(
           (yield* Effect.promise(() =>
             createProvisionedLeaseRegistry(sql).findBySandbox("sandbox-1"),
