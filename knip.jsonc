@@ -14,14 +14,15 @@
     },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification and
-      // worktree setup (from t3.json) run directly. Cloud CLIs are invoked from
-      // docs (`node scripts/cloud/...`), not imports.
+      // worktree setup (from t3.json) run directly. Cloud and usage CLIs are invoked
+      // from docs (`node scripts/cloud/...`), not imports.
       "entry": [
         "knip-schemas.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",
         "cloud/*.mjs",
         "cloud/smoke-cloud-chat.ts",
+        "usage/import-machine-usage.ts",
       ],
     },
     "apps/server": {
