@@ -35,6 +35,9 @@ const entryFor: Record<
     name: directory,
     enabled: true,
     scope: "user",
+    ...(frontmatter.displayName && frontmatter.displayName !== directory
+      ? { displayName: frontmatter.displayName }
+      : {}),
     ...invocation(frontmatter),
   }),
   codex: (_directory, frontmatter) =>

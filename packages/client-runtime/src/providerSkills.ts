@@ -66,11 +66,20 @@ export function getProviderSkillsForSlashMenu(
     : [];
 }
 
+/**
+ * Provider commands not already shown as a skill. Claude Code lists a skill's
+ * command under its frontmatter `name`, which is the skill's `displayName`
+ * when it differs from the folder name that actually runs it.
+ */
 export function getProviderSlashCommandsForSlashMenu(
   slashCommands: ReadonlyArray<ServerProviderSlashCommand>,
   visibleSkills: ReadonlyArray<ServerProviderSkill>,
 ): ServerProviderSlashCommand[] {
-  const skillNames = new Set(visibleSkills.map((skill) => skill.name.trim().toLowerCase()));
+  const skillNames = new Set(
+    visibleSkills.flatMap((skill) =>
+      [skill.name, skill.displayName ?? skill.name].map((name) => name.trim().toLowerCase()),
+    ),
+  );
   return slashCommands.filter((command) => !skillNames.has(command.name.trim().toLowerCase()));
 }
 
