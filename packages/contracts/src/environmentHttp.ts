@@ -57,7 +57,7 @@ import {
   PullRequestOperationError,
   PullRequestUnavailableError,
 } from "./pullRequest.ts";
-import { UsageHistoryInput, UsageSummary } from "./usage.ts";
+import { UsageHistoryInput, UsageImportInput, UsageImportResult, UsageSummary } from "./usage.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,
@@ -618,15 +618,27 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
-/** A host pulls each cloud box's usage history with the box's broker token. */
-class EnvironmentUsageHttpApi extends HttpApiGroup.make("usage").add(
-  HttpApiEndpoint.post("history", "/api/usage/history", {
-    headers: OptionalBearerHeaders,
-    payload: UsageHistoryInput,
-    success: UsageSummary,
-    error: EnvironmentOrchestrationSnapshotErrors,
-  }).middleware(EnvironmentAuthenticatedAuth),
-) {}
+/**
+ * A host pulls each cloud box's usage history with the box's broker token, and
+ * a machine no client connects to pushes its own.
+ */
+export class EnvironmentUsageHttpApi extends HttpApiGroup.make("usage")
+  .add(
+    HttpApiEndpoint.post("history", "/api/usage/history", {
+      headers: OptionalBearerHeaders,
+      payload: UsageHistoryInput,
+      success: UsageSummary,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("import", "/api/usage/import", {
+      headers: OptionalBearerHeaders,
+      payload: UsageImportInput,
+      success: UsageImportResult,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
 
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(

@@ -104,6 +104,7 @@ export const pullLeaseUsage = Effect.fn("pullLeaseUsage")(function* (
   const usage = yield* Effect.tryPromise(() => readLeaseUsage(lease, lease.createdAt, timeoutMs));
   yield* store.replace({
     leaseId: lease.leaseId,
+    origin: "box",
     accountIds: [lease.providerInstanceId, ...(lease.companionInstanceIds ?? [])],
     usage: leaseOwnedUsage(lease.leaseId, usage),
     pulledAt: DateTime.formatIso(yield* DateTime.now),
