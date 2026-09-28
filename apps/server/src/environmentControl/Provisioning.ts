@@ -382,6 +382,7 @@ export class Provisioning extends Context.Service<
                     ? [state.allocation.resource, state.allocation.parent]
                     : [state.allocation.resource],
                 lastError: null,
+                ...(state.kind === "ready" ? { environmentId: state.readiness.environmentId } : {}),
               };
               break;
             case "failed":
@@ -438,7 +439,10 @@ export class Provisioning extends Context.Service<
         if (failure?._tag === "Failure")
           return yield* save(operation, { ...cleanup, lastError: failure.failure.message });
         if (cleanup.recovery) return operation;
-        return yield* save(operation, { kind: "disposed" });
+        return yield* save(operation, {
+          kind: "disposed",
+          ...(cleanup.environmentId === undefined ? {} : { environmentId: cleanup.environmentId }),
+        });
       }
     });
     const reconcile = Effect.gen(function* () {

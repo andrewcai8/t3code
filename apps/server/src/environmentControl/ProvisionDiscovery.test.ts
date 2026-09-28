@@ -1,7 +1,12 @@
 // @effect-diagnostics globalDate:off - fixed historical timestamps exercise expiry.
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { DurableProvisionRequest, EnvironmentId, ProvisionRequestId } from "@t3tools/contracts";
+import {
+  DurableProvisionRequest,
+  EnvironmentId,
+  type ProvisionOperation,
+  ProvisionRequestId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -12,6 +17,7 @@ import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 
 const expiredAt = new Date("1960-01-01T00:00:00.000Z");
 const decodeRequest = Schema.decodeUnknownSync(DurableProvisionRequest);
@@ -207,4 +213,124 @@ it.effect(
         ).toBe(retainedExpiry);
       }).pipe(Effect.provide(makeSqlitePersistenceLive(database)), Effect.scoped);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+const boxEnvironment = (operation: ProvisionOperation) =>
+  EnvironmentId.make(`box-${operation.request.requestId.slice(-1)}`);
+const sandboxOf = (operation: ProvisionOperation) =>
+  `sandbox-${operation.request.requestId.slice(-1)}`;
+const boxPorts: ProvisionProviderPorts["Service"] = {
+  create: (operation) => Effect.succeed({ provider: "e2b", sandboxId: sandboxOf(operation) }),
+  recoverCreate: () => Effect.succeed([]),
+  fork: () => Effect.die("unused"),
+  recoverFork: () => Effect.succeed([]),
+  prepare: (operation) =>
+    Effect.succeed({
+      environmentId: boxEnvironment(operation),
+      projectDir: "/home/user/work/app",
+      sourceRevision: null,
+      t3Revision: "b".repeat(40),
+      artifactSha256: "c".repeat(64),
+      preparationHash: "a".repeat(64),
+    }),
+  dispose: () => Effect.void,
+};
+
+it.effect("a box disposed through the host is reported disposed to a client that saved it", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const database = path.join(yield* fs.makeTempDirectoryScoped(), "manager.sqlite");
+    yield* Effect.gen(function* () {
+      const provisioning = yield* Provisioning;
+      const store = yield* ProvisionOperationStore;
+      const sql = yield* SqlClient.SqlClient;
+      const registry = createProvisionedLeaseRegistry(sql);
+      const provision = Effect.fn(function* (index: number, owned: boolean) {
+        const operation = yield* provisioning.ensure(
+          decodeRequest({
+            requestId: id(index),
+            provider: "e2b",
+            providerInstanceId: "account",
+            sourceRevision: null,
+            repository: "proof/repository",
+            preparationHash: "a".repeat(64),
+            strategy: "direct",
+            templateId: "fixture",
+          }),
+        );
+        expect(operation.state.kind).toBe("ready");
+        yield* Effect.promise(() =>
+          registry.register({
+            leaseId: id(index),
+            sandboxId: sandboxOf(operation),
+            provider: "e2b",
+            providerInstanceId: "account",
+          }),
+        );
+        if (owned)
+          yield* Effect.promise(() =>
+            registry.claim({
+              leaseId: id(index),
+              owner: { environmentId: boxEnvironment(operation), threadId: `thread-${index}` },
+            }),
+          );
+        return operation;
+      });
+      const dispose = Effect.fn(function* (index: number) {
+        expect((yield* provisioning.cancel(id(index))).state.kind).toBe("disposed");
+        yield* Effect.promise(() => registry.markDisposed(id(index)));
+      });
+
+      yield* provision(1, true);
+      yield* dispose(1);
+      yield* provision(2, false);
+      yield* dispose(2);
+      // Before disposal kept the box's identity, it left a bare `disposed` state.
+      const legacy = yield* provision(3, true);
+      yield* store.advance(legacy, { kind: "disposed" });
+      yield* Effect.promise(() => registry.markDisposed(id(3)));
+      yield* provision(4, true);
+      yield* provision(5, true);
+      yield* dispose(5);
+
+      const listed = yield* listProvisionedEnvironments(sql, [
+        EnvironmentId.make("box-1"),
+        EnvironmentId.make("box-2"),
+        EnvironmentId.make("box-3"),
+        EnvironmentId.make("box-4"),
+      ]);
+      expect(listed.map((row) => [row.environmentId, row.lifecycle, row.threadId])).toEqual([
+        ["box-4", "active", "thread-4"],
+        ["box-1", "disposed", "thread-1"],
+        ["box-2", "disposed", null],
+        ["box-3", "disposed", "thread-3"],
+      ]);
+      expect(listed[3]).toEqual({
+        requestId: id(3),
+        leaseId: id(3),
+        sandboxId: "sandbox-3",
+        lifecycle: "disposed",
+        environmentId: "box-3",
+        provider: "e2b",
+        label: "proof/repository",
+        repository: "proof/repository",
+        threadId: "thread-3",
+        createdAt: expect.any(String),
+        expiresAt: expect.any(String),
+      });
+      expect((yield* listProvisionedEnvironments(sql)).map((row) => row.environmentId)).toEqual([
+        "box-4",
+      ]);
+    }).pipe(
+      Effect.provide(
+        Provisioning.layer.pipe(
+          Layer.provideMerge(ProvisionOperationStore.layer),
+          Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
+          Layer.provideMerge(makeSqlitePersistenceLive(database)),
+        ),
+      ),
+      Effect.scoped,
+    );
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

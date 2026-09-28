@@ -614,7 +614,11 @@ it.effect.each([
         Effect.provide(makeLayer(file, ports)),
         Effect.scoped,
       );
-      expect(result.state).toEqual({ kind: "disposed" });
+      expect(result.state).toEqual(
+        state.kind === "ready"
+          ? { kind: "disposed", environmentId: "stable-environment" }
+          : { kind: "disposed" },
+      );
       expect(p.counts()).toEqual({ creates: 0, forks: 0 });
       expect(disposed).toEqual(
         state.kind === "intent"

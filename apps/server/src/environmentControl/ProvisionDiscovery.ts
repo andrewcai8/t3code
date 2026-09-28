@@ -26,6 +26,8 @@ const decodeDiscovery = Schema.decodeUnknownEffect(DiscoveredProvisionedEnvironm
 /**
  * Discovery reads retained identities without renewing leases or issuing credentials. Of the
  * `known` environments, those that were this host's boxes and are gone come back as `disposed`.
+ * A disposed operation names its box's environment, or on rows disposed before it did, the
+ * lease's owner does, since a box is claimed for a thread on its own environment.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
   function* (sql: SqlClient.SqlClient, known: ReadonlyArray<EnvironmentId> = []) {
@@ -36,52 +38,78 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     FROM provision_operations AS operations
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
     LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
-    WHERE json_extract(operations.state_json, '$.kind') = 'ready'
-      AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
-        OR ${
-          known.length === 0
-            ? sql`1 = 0`
-            : sql`json_extract(operations.state_json, '$.readiness.environmentId') IN ${sql.in(known)}`
-        })
+    WHERE (json_extract(operations.state_json, '$.kind') = 'ready'
+        AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
+          OR ${
+            known.length === 0
+              ? sql`1 = 0`
+              : sql`json_extract(operations.state_json, '$.readiness.environmentId') IN ${sql.in(known)}`
+          }))
+      OR ${
+        known.length === 0
+          ? sql`1 = 0`
+          : sql`(json_extract(operations.state_json, '$.kind') = 'disposed'
+        AND (json_extract(operations.state_json, '$.environmentId') IN ${sql.in(known)}
+          OR json_extract(leases.lease_json, '$.owner.environmentId') IN ${sql.in(known)}))`
+      }
     ORDER BY operations.created_at DESC, operations.request_id
   `;
     const saved = new Set<string>(known);
     const result: Array<DiscoveredProvisionedEnvironment> = [];
     const gone = new Map<string, DiscoveredProvisionedEnvironment>();
     for (const { request, state, lease, automationId } of yield* decodeRows(rows)) {
-      if (state.kind !== "ready") continue;
-      const expired = request.retentionDeadline !== undefined && request.retentionDeadline <= now;
-      const lifecycle =
-        !expired &&
-        (lease.state === "active" || lease.state === "paused" || lease.state === "missing")
-          ? lease.state
-          : saved.has(state.readiness.environmentId) &&
-              (lease.state === "disposed" || (expired && lease.state !== "releasing"))
-            ? "disposed"
+      let box: {
+        readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
+        readonly environmentId: string;
+        readonly projectDir?: string;
+      } | null = null;
+      if (state.kind === "ready") {
+        const resource = state.allocation.resource;
+        const expired = request.retentionDeadline !== undefined && request.retentionDeadline <= now;
+        const lifecycle =
+          !expired &&
+          (lease.state === "active" || lease.state === "paused" || lease.state === "missing")
+            ? lease.state
+            : saved.has(state.readiness.environmentId) &&
+                (lease.state === "disposed" || (expired && lease.state !== "releasing"))
+              ? "disposed"
+              : null;
+        box =
+          lifecycle === null ||
+          lease.sandboxId !== (resource.provider === "e2b" ? resource.sandboxId : resource.devboxId)
+            ? null
+            : {
+                lifecycle,
+                environmentId: state.readiness.environmentId,
+                projectDir: state.readiness.projectDir,
+              };
+      } else if (state.kind === "disposed") {
+        const environmentId = state.environmentId ?? lease.owner?.environmentId;
+        box =
+          environmentId !== undefined && saved.has(environmentId)
+            ? { lifecycle: "disposed", environmentId }
             : null;
-      if (lifecycle === null) continue;
-      const resource = state.allocation.resource;
-      const sandboxId = resource.provider === "e2b" ? resource.sandboxId : resource.devboxId;
+      }
       if (
+        box === null ||
         lease.leaseId !== request.requestId ||
-        lease.sandboxId !== sandboxId ||
-        lease.provider !== resource.provider ||
+        lease.provider !== request.provider ||
         lease.providerInstanceId !== request.providerInstanceId ||
-        (lease.owner !== null && lease.owner.environmentId !== state.readiness.environmentId)
+        (lease.owner !== null && lease.owner.environmentId !== box.environmentId)
       )
         continue;
       const environment = yield* decodeDiscovery({
         requestId: request.requestId,
         leaseId: lease.leaseId,
         sandboxId: lease.sandboxId,
-        lifecycle,
-        environmentId: state.readiness.environmentId,
-        provider: resource.provider,
+        lifecycle: box.lifecycle,
+        environmentId: box.environmentId,
+        provider: request.provider,
         label:
           request.repository ??
-          `${resource.provider === "e2b" ? "E2B" : "Namespace"} · ${request.requestId.slice(0, 8)}`,
+          `${request.provider === "e2b" ? "E2B" : "Namespace"} · ${request.requestId.slice(0, 8)}`,
         repository: request.repository ?? null,
-        projectDir: state.readiness.projectDir,
+        ...(box.projectDir === undefined ? {} : { projectDir: box.projectDir }),
         threadId: lease.owner?.threadId ?? null,
         ...(automationId === null ? {} : { automationId }),
         createdAt: lease.createdAt,
@@ -90,7 +118,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
             ? request.retentionDeadline
             : lease.expiresAt,
       });
-      if (lifecycle !== "disposed") result.push(environment);
+      if (box.lifecycle !== "disposed") result.push(environment);
       else if (!gone.has(environment.environmentId))
         gone.set(environment.environmentId, environment);
     }

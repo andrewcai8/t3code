@@ -53,7 +53,8 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   provider: Schema.Literals(["e2b", "namespace"]),
   label: TrimmedNonEmptyString,
   repository: Schema.NullOr(TrimmedNonEmptyString),
-  projectDir: TrimmedNonEmptyString,
+  /** Absent on a `disposed` environment whose workspace the host no longer records. */
+  projectDir: Schema.optional(TrimmedNonEmptyString),
   threadId: Schema.NullOr(ThreadId),
   /** Set when the host started this environment for an automation run rather than a client. */
   automationId: Schema.optional(TrimmedNonEmptyString),
