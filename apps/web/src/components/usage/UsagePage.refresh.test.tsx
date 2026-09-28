@@ -20,6 +20,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("../../state/presentation", () => ({
   environmentPresentations: { presentationsAtom: null },
+  limitPresentationsAtom: null,
 }));
 vi.mock("../../state/server", () => ({
   serverEnvironment: { refreshProviders: null },

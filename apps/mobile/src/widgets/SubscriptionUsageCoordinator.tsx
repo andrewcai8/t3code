@@ -4,7 +4,7 @@ import * as Linking from "expo-linking";
 import { useEffect } from "react";
 import { Platform } from "react-native";
 import { environmentCatalog } from "../connection/catalog";
-import { environmentPresentations } from "../state/presentation";
+import { limitPresentationsAtom } from "../state/presentation";
 import { publishSubscriptionUsage } from "./publishSubscriptionUsage";
 import { useSubscriptionUsage } from "./useSubscriptionUsage";
 import { buildSubscriptionUsageSnapshot } from "./subscriptionUsageSnapshot";
@@ -12,7 +12,7 @@ import { buildSubscriptionUsageSnapshot } from "./subscriptionUsageSnapshot";
 // Isolate quota changes from the much busier thread/config presentation stream.
 const snapshotAtom = Atom.make((get) =>
   buildSubscriptionUsageSnapshot(
-    get(environmentPresentations.presentationsAtom),
+    get(limitPresentationsAtom),
     Linking.createURL("settings/usage", { queryParams: { tab: "limits" } }),
     // Android scrolls the full list; iOS stores a bounded widget timeline.
     Platform.OS === "android" ? Infinity : 6,
