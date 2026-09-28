@@ -133,9 +133,15 @@ export function buildSidebarProjectSnapshots(input: {
   });
 }
 
+/**
+ * One entry per project group, each targeting the member a new chat in it starts from: the
+ * preferred project, else the group's own. A member on another chat's cloud box (`boxes`) is
+ * passed over for any other member, since every new chat gets a fresh box.
+ */
 export function buildSidebarProjectPickerEntries(input: {
   groups: ReadonlyArray<SidebarProjectSnapshot>;
   preferredProjectRef: ScopedProjectRef | null;
+  boxes: Pick<ReadonlyMap<EnvironmentId, unknown>, "has">;
 }) {
   const preferredProjectRef = input.preferredProjectRef;
   const entries = input.groups.flatMap((group): SidebarProjectPickerEntry[] => {
@@ -156,12 +162,15 @@ export function buildSidebarProjectPickerEntries(input: {
           (project) => project.environmentId === preferredProjectRef.environmentId,
         ))
       : null;
-    const targetProject =
-      preferredProject ??
-      group.memberProjects.find(
+    const candidates = [
+      ...(preferredProject ? [preferredProject] : []),
+      ...group.memberProjects.filter(
         (project) => project.environmentId === group.environmentId && project.id === group.id,
-      ) ??
-      group.memberProjects[0];
+      ),
+      ...group.memberProjects,
+    ];
+    const targetProject =
+      candidates.find((project) => !input.boxes.has(project.environmentId)) ?? candidates[0];
     if (!targetProject) return [];
 
     return [{ group, targetProject, isPreferred }];

@@ -51,6 +51,17 @@ export function refreshProvisionedEnvironments(managerId: EnvironmentId): void {
 }
 
 /**
+ * The cloud boxes the connected hosts list as claimed by a chat, each mapped to its host. Every new
+ * chat gets a fresh box, so a surface that starts one never points it at these.
+ */
+export function useClaimedBoxes(): ReadonlyMap<EnvironmentId, EnvironmentId> {
+  const hosts = useAutomationHosts();
+  const hostIds = useMemo(() => hosts.map((host) => host.environmentId), [hosts]);
+  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  return useMemo(() => boxesOfOtherChats(boxes, null), [boxes]);
+}
+
+/**
  * The cloud boxes a draft must not start on, as the connected hosts list them however this device
  * came to know each: those another chat claimed, and those paused or lost. A draft refetches the
  * lists when it opens, since another device may have claimed a box since, and must not send while

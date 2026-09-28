@@ -72,7 +72,7 @@ import {
 } from "react";
 import { useAtomValue } from "@effect/atom-react";
 
-import { useAutomationsAvailable } from "../cloud/automationHosts";
+import { useAutomationsAvailable, useClaimedBoxes } from "../cloud/automationHosts";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -945,13 +945,15 @@ function OpenCommandPaletteDialog(props: {
       }),
     [activeDraftThread, activeThread, defaultProjectRef, handleNewThread],
   );
+  const claimedBoxes = useClaimedBoxes();
   const projectPickerEntries = useMemo(
     () =>
       buildSidebarProjectPickerEntries({
         groups: projectGroups,
         preferredProjectRef: contextualProjectRef,
+        boxes: claimedBoxes,
       }),
-    [contextualProjectRef, projectGroups],
+    [claimedBoxes, contextualProjectRef, projectGroups],
   );
   const pickerProjects = useMemo(
     () =>

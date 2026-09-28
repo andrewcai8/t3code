@@ -26,6 +26,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { readProjects, readThreadShell, useProjects, useThread } from "../state/entities";
 import {
   hasExplicitComposerModelSelection,
+  resolveNewChatProjectRef,
   resolveNewDraftStartFromOrigin,
   resolveNewThreadModelSelectionOverride,
 } from "../lib/chatThreadActions";
@@ -33,6 +34,7 @@ import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import { useClaimedBoxes } from "../cloud/automationHosts";
 import { useClientSettings } from "./useSettings";
 
 interface NewThreadWorkspaceOptions {
@@ -57,6 +59,7 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const claimedBoxes = useClaimedBoxes();
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -65,7 +68,7 @@ export function useNewThreadHandler() {
 
   return useCallback(
     (
-      projectRef: ScopedProjectRef,
+      requestedProjectRef: ScopedProjectRef,
       options?: {
         branch?: string | null;
         worktreePath?: string | null;
@@ -78,6 +81,13 @@ export function useNewThreadHandler() {
       // up again and finding whichever draft it happens to hold.
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
+      const projectRef = resolveNewChatProjectRef({
+        projectRef: requestedProjectRef,
+        projects,
+        boxes: claimedBoxes,
+        logicalProjectKey: (project) =>
+          deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
+      });
       const targetServerSettings =
         environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
       const {
@@ -437,7 +447,13 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [environmentServerConfigs, getCurrentRouteTarget, projectGroupingSettings, router],
+    [
+      claimedBoxes,
+      environmentServerConfigs,
+      getCurrentRouteTarget,
+      projectGroupingSettings,
+      router,
+    ],
   );
 }
 

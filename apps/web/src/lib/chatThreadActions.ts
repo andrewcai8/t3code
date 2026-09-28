@@ -68,6 +68,33 @@ export function hasExplicitComposerModelSelection(
   );
 }
 
+/**
+ * The project a new chat asked for in `projectRef` opens on. One on another chat's cloud box
+ * (`boxes`) moves to the same logical project on a machine that is not one, since every new chat
+ * gets a fresh box. A project that only boxes hold stays, and the composer starts a fresh box.
+ */
+export function resolveNewChatProjectRef<
+  Project extends { readonly environmentId: EnvironmentId; readonly id: ProjectId },
+>(input: {
+  readonly projectRef: ScopedProjectRef;
+  readonly projects: ReadonlyArray<Project>;
+  readonly boxes: Pick<ReadonlyMap<EnvironmentId, unknown>, "has">;
+  readonly logicalProjectKey: (project: Project) => string;
+}): ScopedProjectRef {
+  const { projectRef, boxes } = input;
+  if (!boxes.has(projectRef.environmentId)) return projectRef;
+  const requested = input.projects.find(
+    (project) =>
+      project.environmentId === projectRef.environmentId && project.id === projectRef.projectId,
+  );
+  if (!requested) return projectRef;
+  const key = input.logicalProjectKey(requested);
+  const sibling = input.projects.find(
+    (project) => !boxes.has(project.environmentId) && input.logicalProjectKey(project) === key,
+  );
+  return sibling ? scopeProjectRef(sibling.environmentId, sibling.id) : projectRef;
+}
+
 export function resolveThreadActionProjectRef(
   context: ChatThreadActionContext,
 ): ScopedProjectRef | null {
