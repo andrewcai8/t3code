@@ -3,6 +3,7 @@ import type {
   EnvironmentMachineKind,
   VcsRef,
   ProjectId,
+  RepositoryIdentity,
   WorktreeSubmodules,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -251,6 +252,24 @@ export function resolveBranchTriggerLabel(input: {
     return `From ${baseRef}`;
   }
   return resolvedActiveBranch;
+}
+
+/**
+ * The branches a cloud environment can start from: those on the remote it
+ * clones (see `cloneRepository`), named as that remote names them. A
+ * local-only branch is left out, since the cloud clones from GitHub.
+ */
+export function cloudBaseRefs(
+  refs: ReadonlyArray<VcsRef>,
+  identity: RepositoryIdentity | null | undefined,
+): VcsRef[] {
+  const remote = identity?.origin ? "origin" : identity?.locator.remoteName;
+  const prefix = `${remote}/`;
+  return refs.flatMap((ref) =>
+    ref.isRemote && ref.remoteName === remote && ref.name.startsWith(prefix)
+      ? [{ ...ref, name: ref.name.slice(prefix.length) }]
+      : [],
+  );
 }
 
 export function resolveBranchToolbarPrBranch(input: {

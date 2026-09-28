@@ -493,6 +493,7 @@ import {
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
   buildCloudHandoff,
+  cloudCloneSource,
   getAntigravitySendBlockReason,
   resolveDraftHeroState,
   findRecordedWorktreeSetup,
@@ -1860,6 +1861,8 @@ export default function ChatView(props: ChatViewProps) {
   const [cloudProvisioningChoice, setCloudProvisioningChoice] = useState<
     "e2b" | "namespace" | null
   >(null);
+  // The branch a cloud environment starts from; null is the repository's default.
+  const [cloudBaseBranch, setCloudBaseBranch] = useState<string | null>(null);
   const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
   const [cloudProvisioningPhase, setCloudProvisioningPhase] = useState<
     "creating" | "pairing" | "loading-project" | "ready" | "failed" | null
@@ -4958,6 +4961,18 @@ export default function ChatView(props: ChatViewProps) {
     (canCreateCloudEnvironment && !automaticEnvironment && runTargets.redirect?.kind === "cloud"
       ? runTargets.redirect.provider
       : null);
+  // While a cloud environment is pending, the branch picker chooses the branch
+  // it clones. The choice is fixed once a send has reserved the request.
+  const cloudBase = useMemo(
+    () =>
+      cloudProvisioningRequested !== null && cloneRepository(activeProject?.repositoryIdentity)
+        ? {
+            branch: cloudBaseBranch,
+            onChange: cloudProvisioningPhase === null ? setCloudBaseBranch : null,
+          }
+        : undefined,
+    [activeProject, cloudBaseBranch, cloudProvisioningPhase, cloudProvisioningRequested],
+  );
   const handleSelectCloudEnvironment = useCallback(
     (provider: "e2b" | "namespace") => {
       if (!canCreateCloudEnvironment || !cloudAccount) return;
@@ -4989,7 +5004,7 @@ export default function ChatView(props: ChatViewProps) {
         return false;
       }
       const viewingStartedDraft = () => currentDraftIdRef.current === startedDraftId;
-      const repository = cloneRepository(activeProject?.repositoryIdentity);
+      const source = cloudCloneSource(activeProject?.repositoryIdentity, cloudBaseBranch);
       const showPhase = (phase: CloudProvisioningProgressPhase) => {
         patchDraftPendingEnvironmentSend(startedDraftId, { phase });
         if (viewingStartedDraft()) {
@@ -5022,7 +5037,7 @@ export default function ChatView(props: ChatViewProps) {
               provider: cloudProvisioningRequested,
               providerInstanceId: cloudAccount.instanceId,
               agentDriver: handoff.agentDriver,
-              ...(repository ? { repository } : {}),
+              ...source,
             },
           },
           {
@@ -5111,6 +5126,7 @@ export default function ChatView(props: ChatViewProps) {
       activeProject,
       attachCloudEnvironment,
       canCreateCloudEnvironment,
+      cloudBaseBranch,
       cloudProvisioningRequested,
       cloudAccount,
       connectCloudPairing,
@@ -6331,6 +6347,7 @@ export default function ChatView(props: ChatViewProps) {
       cloudProvisioningStartedAtRef.current = null;
       cloudProvisioningEndedAtRef.current = null;
       setCloudProvisioningChoice(null);
+      setCloudBaseBranch(null);
       setCloudProvisioningPhase(null);
       setCloudProvisioningError(null);
       setCreatingCloudEnvironment(false);
@@ -6339,6 +6356,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     cloudSetupProviderRef.current = pending.provider;
+    setCloudBaseBranch(pending.branch ?? null);
     cloudProvisioningStartedAtRef.current = pending.startedAt;
     cloudProvisioningEndedAtRef.current = pending.endedAt ?? null;
     setCloudProvisioningError(pending.error ?? null);
@@ -8313,6 +8331,7 @@ export default function ChatView(props: ChatViewProps) {
             phase: "creating",
             startedAt: cloudProvisioningStartedAtRef.current ?? new Date().toISOString(),
             ...(currentPending.repository ? { repository: currentPending.repository } : {}),
+            ...(currentPending.branch ? { branch: currentPending.branch } : {}),
             ...(currentPending.readyEnvironmentId
               ? { readyEnvironmentId: currentPending.readyEnvironmentId }
               : {}),
@@ -8450,7 +8469,7 @@ export default function ChatView(props: ChatViewProps) {
           streaming: false,
         },
       ]);
-      const repository = cloneRepository(activeProject.repositoryIdentity);
+      const source = cloudCloneSource(activeProject.repositoryIdentity, cloudBaseBranch);
       const startedAt = new Date().toISOString();
       useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, {
         provider: cloudProvisioningRequested,
@@ -8461,7 +8480,7 @@ export default function ChatView(props: ChatViewProps) {
         outgoingMessageText,
         phase: "creating",
         startedAt,
-        ...(repository ? { repository } : {}),
+        ...source,
       });
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -11135,6 +11154,7 @@ export default function ChatView(props: ChatViewProps) {
                                   : {})}
                                 creatingCloudEnvironment={creatingCloudEnvironment}
                                 pendingCloudProvider={cloudProvisioningRequested}
+                                cloudBase={cloudBase}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />

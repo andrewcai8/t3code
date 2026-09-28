@@ -322,6 +322,8 @@ const PendingCloudEnvironmentSend = Schema.Struct({
   endedAt: Schema.optionalKey(Schema.String),
   error: Schema.optionalKey(Schema.String),
   repository: Schema.optionalKey(Schema.String),
+  /** The branch the environment starts from; absent is the repository's default. */
+  branch: Schema.optionalKey(Schema.String),
   readyEnvironmentId: Schema.optionalKey(Schema.String),
 });
 export type PendingCloudEnvironmentSend = typeof PendingCloudEnvironmentSend.Type;
@@ -1664,6 +1666,7 @@ function pendingEnvironmentSendsEqual(
     left.endedAt === right.endedAt &&
     left.error === right.error &&
     left.repository === right.repository &&
+    left.branch === right.branch &&
     left.readyEnvironmentId === right.readyEnvironmentId
   );
 }
@@ -1750,6 +1753,7 @@ function parsePendingEnvironmentSend(value: unknown): PendingCloudEnvironmentSen
     ...(typeof pending.endedAt === "string" ? { endedAt: pending.endedAt } : {}),
     ...(typeof pending.error === "string" ? { error: pending.error } : {}),
     ...(typeof pending.repository === "string" ? { repository: pending.repository } : {}),
+    ...(typeof pending.branch === "string" ? { branch: pending.branch } : {}),
     ...(typeof pending.readyEnvironmentId === "string" && pending.readyEnvironmentId.length > 0
       ? { readyEnvironmentId: pending.readyEnvironmentId }
       : {}),

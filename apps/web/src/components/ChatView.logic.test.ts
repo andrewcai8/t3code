@@ -44,6 +44,7 @@ import {
   branchMismatchKey,
   buildCloudHandoff,
   buildExpiredTerminalContextToastCopy,
+  cloudCloneSource,
   buildLoadingThreadFromShell,
   buildRunningThreadTurnInterruptInput,
   buildThreadTurnInterruptInput,
@@ -2482,6 +2483,27 @@ describe("needsLoadBalancedPick", () => {
     expect(
       needsLoadBalancedPick({ automatic: false, pickedEnvironmentId: host, candidates: [laptop] }),
     ).toBe(false);
+  });
+});
+
+describe("cloudCloneSource", () => {
+  const identity = {
+    canonicalKey: "github.com/me/repo",
+    locator: {
+      source: "git-remote" as const,
+      remoteName: "origin",
+      remoteUrl: "git@github.com:me/repo.git",
+    },
+    owner: "me",
+    name: "repo",
+  };
+
+  it("sends a branch only when the user picked one, and only with a repository", () => {
+    expect([
+      cloudCloneSource(identity, null),
+      cloudCloneSource(identity, "feature"),
+      cloudCloneSource(null, "feature"),
+    ]).toEqual([{ repository: "me/repo" }, { repository: "me/repo", branch: "feature" }, {}]);
   });
 });
 
