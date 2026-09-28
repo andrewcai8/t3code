@@ -13,6 +13,7 @@ import {
   collectProviderUsageLimits,
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
+  withoutCloudBoxes,
   collectLimitAccounts,
   collectLimitNotices,
   collectLimitPools,
@@ -1339,6 +1340,118 @@ describe("one Claude account across machines", () => {
     ).toEqual([
       ["five_hour", 1, 55],
       ["seven_day", 1, 70],
+    ]);
+  });
+});
+
+describe("cloud boxes in Limits", () => {
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const reading = (
+    instanceId: string,
+    email: string,
+    reported: { readonly email: boolean; readonly checkedAt: string; readonly weeklyUsed: number },
+  ) =>
+    provider({
+      driver: claude,
+      instanceId: ProviderInstanceId.make(instanceId),
+      displayName: `Claude · ${email}`,
+      auth: reported.email ? { status: "authenticated", email } : { status: "authenticated" },
+      usageLimits: {
+        checkedAt: reported.checkedAt,
+        windows: [
+          {
+            id: "seven_day",
+            kind: "weekly",
+            label: "Weekly",
+            usedPercent: reported.weeklyUsed,
+            windowDurationMins: 7 * 24 * 60,
+            resetsAt: "2026-10-01T11:00:00.000Z",
+          },
+        ],
+      },
+    });
+  const environment = (label: string, providers: ServerProvider[]) => ({
+    entry: { target: { label } },
+    serverConfig: { providers },
+  });
+  // A box made before its host recorded account emails runs the routed account
+  // as `claudeAgent` under the same name, and its setup token cannot name it.
+  // A paused box still shows the reading its client cached.
+  const presentations = new Map([
+    [
+      EnvironmentId.make("mac"),
+      environment("Mac", [
+        reading("claude_shanghai11167", "shanghai11167@gmail.com", {
+          email: true,
+          checkedAt: "2026-09-28T06:55:47.000Z",
+          weeklyUsed: 22,
+        }),
+        reading("claude_dustowl321", "dustowl321@gmail.com", {
+          email: true,
+          checkedAt: "2026-09-28T06:55:42.000Z",
+          weeklyUsed: 0,
+        }),
+      ]),
+    ],
+    [
+      EnvironmentId.make("host"),
+      environment("andrew.megpt.app", [
+        reading("claude_shanghai11167", "shanghai11167@gmail.com", {
+          email: true,
+          checkedAt: "2026-09-28T06:52:59.000Z",
+          weeklyUsed: 22,
+        }),
+        reading("claude_dustowl321", "dustowl321@gmail.com", {
+          email: true,
+          checkedAt: "2026-09-28T06:52:59.000Z",
+          weeklyUsed: 0,
+        }),
+      ]),
+    ],
+    [
+      EnvironmentId.make("live-box"),
+      environment("authentic-intelligence/megpt-mono", [
+        reading("claudeAgent", "shanghai11167@gmail.com", {
+          email: false,
+          checkedAt: "2026-09-28T06:54:02.000Z",
+          weeklyUsed: 22,
+        }),
+      ]),
+    ],
+    [
+      EnvironmentId.make("paused-box"),
+      environment("authentic-intelligence/megpt-mono", [
+        reading("claudeAgent", "dustowl321@gmail.com", {
+          email: false,
+          checkedAt: "2026-09-27T07:30:00.000Z",
+          weeklyUsed: 0,
+        }),
+      ]),
+    ],
+  ]);
+  const boxes = new Set([EnvironmentId.make("live-box"), EnvironmentId.make("paused-box")]);
+
+  it("counts each account once, from the machines that own it", () => {
+    const accounts = collectLimitAccounts(withoutCloudBoxes(presentations, boxes));
+    expect(
+      accounts.map((account) => [account.email, account.environments.map(({ label }) => label)]),
+    ).toEqual([
+      ["shanghai11167@gmail.com", ["Mac", "andrew.megpt.app"]],
+      ["dustowl321@gmail.com", ["Mac", "andrew.megpt.app"]],
+    ]);
+  });
+
+  it("shows a box's anonymous copy as another account when no host lists the box", () => {
+    expect(
+      collectLimitAccounts(withoutCloudBoxes(presentations, new Set())).map((account) => [
+        account.displayName,
+        account.environments.map(({ label }) => label),
+      ]),
+    ).toEqual([
+      ["Claude · shanghai11167@gmail.com", ["Mac", "andrew.megpt.app"]],
+      ["Claude · dustowl321@gmail.com", ["Mac", "andrew.megpt.app"]],
+      ["Claude · shanghai11167@gmail.com", ["authentic-intelligence/megpt-mono"]],
+      ["Claude · dustowl321@gmail.com", ["authentic-intelligence/megpt-mono"]],
     ]);
   });
 });

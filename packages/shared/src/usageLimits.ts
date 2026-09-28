@@ -79,6 +79,22 @@ export type LimitPresentations = ReadonlyMap<
   }
 >;
 
+/**
+ * The environments Limits reads accounts from: every one but the cloud boxes
+ * their hosts list. A box only runs copies of its host's accounts, which the
+ * host reports itself, and a box made before its host recorded Claude account
+ * emails cannot name its account, so no key would merge its row.
+ */
+export function withoutCloudBoxes<P>(
+  presentations: ReadonlyMap<EnvironmentId, P>,
+  boxes: ReadonlySet<EnvironmentId>,
+): ReadonlyMap<EnvironmentId, P> {
+  if (![...presentations.keys()].some((environmentId) => boxes.has(environmentId))) {
+    return presentations;
+  }
+  return new Map([...presentations].filter(([environmentId]) => !boxes.has(environmentId)));
+}
+
 function accountKey(driver: ServerProvider["driver"], email: string | undefined): string | null {
   const normalizedEmail = email?.trim().toLowerCase();
   return normalizedEmail ? `${driver}:${normalizedEmail}` : null;
