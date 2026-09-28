@@ -10,10 +10,14 @@ import {
   CircleAlertIcon,
   ChevronDownIcon,
   CircleDashedIcon,
+  InfoIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { refreshUsageLimits } from "@t3tools/client-runtime/state/usage";
+import {
+  cursorKeychainAccessEnvironments,
+  refreshUsageLimits,
+} from "@t3tools/client-runtime/state/usage";
 
 import {
   isCompatibleUsageContractVersion,
@@ -61,6 +65,7 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -129,9 +134,7 @@ export function UsagePage() {
     selectedEnvironmentIds,
   );
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const cursorAccessEnvironments = selectedEnvironments.filter(
-    (environment) => environment.needsCursorKeychainAccess,
-  );
+  const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
   const sourceMessages = [
     ...new Set(
       selectedEnvironments.flatMap(
@@ -485,13 +488,31 @@ export function UsagePage() {
                           : formatTokens(merged.totalTokens)}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {metric !== "cost"
-                          ? `${formatCount(merged.sessions)} sessions`
-                          : merged.costQuality.unpricedShare > 0
-                            ? `${formatCount(merged.sessions)} sessions · API estimate excludes ${formatPercent(
-                                merged.costQuality.unpricedShare,
-                              )} unpriced records`
-                            : `${formatCount(merged.sessions)} sessions · API estimate`}
+                        {formatCount(merged.sessions)} sessions
+                        {metric === "cost" && (
+                          <>
+                            {" · API estimate"}
+                            {merged.costQuality.unpricedShare > 0 && (
+                              <>
+                                {" "}
+                                <Popover>
+                                  <PopoverTrigger
+                                    openOnHover
+                                    render={<InlineButton tone="muted" />}
+                                    aria-label="Unpriced usage details"
+                                  >
+                                    <InfoIcon className="size-3" aria-hidden />
+                                  </PopoverTrigger>
+                                  <PopoverPopup side="top" tooltipStyle>
+                                    API estimate excludes{" "}
+                                    {formatPercent(merged.costQuality.unpricedShare)} unpriced
+                                    records.
+                                  </PopoverPopup>
+                                </Popover>
+                              </>
+                            )}
+                          </>
+                        )}
                       </span>
                     </div>
 
