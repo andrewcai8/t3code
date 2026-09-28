@@ -7,61 +7,60 @@ on:
 
 permissions:
   contents: write
-  issues: write
+  pull-requests: write
 
+# main is protected, so upstream arrives as a pull request merged with a merge
+# commit, never a squash: later syncs then share history with pingdotgg/t3code.
 jobs:
   sync:
-    name: Merge pingdotgg/t3code into this fork
+    name: Open a pull request merging pingdotgg/t3code
     runs-on: ubuntu-24.04
+    env:
+      # Pull requests opened with the default token start no CI, so required
+      # checks never run and auto-merge never fires. FORK_SYNC_TOKEN (contents,
+      # pull requests, and workflows write on this fork) lets the sync land alone.
+      GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      BASE: ${{ github.event.repository.default_branch }}
+      HEAD_BRANCH: sync/upstream
     steps:
-      - name: Merge upstream into the default branch
-        id: merge
-        env:
-          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          BRANCH: ${{ github.event.repository.default_branch }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream and open a pull request
         run: |
           set -eu
-          if gh api --method POST "repos/${GH_REPO}/merge-upstream" -f branch="$BRANCH"; then
-            echo "Merged pingdotgg/t3code into ${BRANCH}."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags upstream main
+          behind=$(git rev-list --count "HEAD..upstream/main")
+          if [ "$behind" -eq 0 ]; then
+            echo "${BASE} already contains upstream/main."
             exit 0
           fi
-          hint=$(cat <<EOF
-          GitHub could not merge upstream into ${BRANCH}.
-          This fork's ${BRANCH} has unique commits that conflict with pingdotgg/t3code.
-          Do not force-reset ${BRANCH}. That would drop this fork's work.
-          Resolve locally:
-            git fetch upstream
-            git checkout -b sync/upstream origin/${BRANCH}
-            git merge upstream/${BRANCH}
-          If upstream changed GitHub Actions files, FORK_SYNC_TOKEN needs the workflow scope.
-          EOF
-          )
-          echo "$hint" >&2
-          echo "failed=true" >> "$GITHUB_OUTPUT"
-          echo "hint<<HINT" >> "$GITHUB_OUTPUT"
-          echo "$hint" >> "$GITHUB_OUTPUT"
-          echo "HINT" >> "$GITHUB_OUTPUT"
-          exit 1
-
-      # A failed sync is otherwise silent. One open issue collects every failed
-      # day, so the fork cannot drift unnoticed and the issue never duplicates.
-      - name: Report a failed sync
-        if: failure() && steps.merge.outputs.failed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          HINT: ${{ steps.merge.outputs.hint }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -eu
-          title="Upstream sync needs a manual merge"
-          body=$(printf '%s: the daily upstream sync failed ([run](%s)).\n\n```\n%s\n```\n' \
-            "$(date -u +%Y-%m-%d)" "$RUN_URL" "$HINT")
-          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
-            --jq "map(select(.title == \"$title\")) | first | .number // empty")
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --body "$body"
-          else
-            gh issue create --title "$title" --body "$body"
+          upstream=$(git rev-parse --short upstream/main)
+          git switch -C "$HEAD_BRANCH"
+          if ! git merge --no-ff --no-edit -m "Merge upstream/main through ${upstream}" upstream/main; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            {
+              echo "Upstream conflicts with ${BASE} in:"
+              echo "$conflicts"
+              echo "Merge by hand: git fetch upstream && git switch -c sync/upstream origin/${BASE} && git merge upstream/main"
+            } >&2
+            exit 1
           fi
+          git push --force origin "$HEAD_BRANCH"
+          title="chore: merge upstream pingdotgg/t3code"
+          body="Merges ${behind} upstream commits through pingdotgg/t3code@${upstream}. Merge with **Create a merge commit**, never squash."
+          number=$(gh pr list --head "$HEAD_BRANCH" --base "$BASE" --state open --json number --jq 'first | .number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --body "$body"
+          else
+            number=$(gh pr create --head "$HEAD_BRANCH" --base "$BASE" --title "$title" --body "$body" | sed 's|.*/||')
+          fi
+          gh pr merge "$number" --merge --auto
