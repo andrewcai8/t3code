@@ -10,6 +10,22 @@ const testState = vi.hoisted(() => {
     defaultModelSelection: null,
     defaultRuntimeMode: "full-access" as RuntimeMode,
   };
+  const defaultProjects = [
+    {
+      id: "project-remote",
+      environmentId: "environment-ssh",
+      workspaceRoot: "/remote/project",
+      defaultThreadEnvMode: null,
+      defaultModelSelection: null,
+    },
+  ];
+  let projects: ReadonlyArray<Record<string, unknown>> = defaultProjects;
+  // The boxes the hosts list, each with whether a chat claimed it.
+  let hostBoxes: ReadonlyArray<{ readonly environmentId: string; readonly claimed: boolean }> = [];
+  let environments: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly connection: { readonly phase: string; readonly blockedReason?: string };
+  }> = [];
   let storedDraft: {
     readonly draftId: string;
     readonly environmentId: string;
@@ -45,6 +61,26 @@ const testState = vi.hoisted(() => {
     get targetSettings() {
       return targetSettings;
     },
+    get projects() {
+      return projects;
+    },
+    get hostBoxes() {
+      return hostBoxes;
+    },
+    get environments() {
+      return environments;
+    },
+    // What the client knows when a new chat starts: its projects, the boxes the hosts list, and
+    // each environment's connection.
+    setWorld(world: {
+      readonly projects: typeof projects;
+      readonly hostBoxes: typeof hostBoxes;
+      readonly environments: typeof environments;
+    }) {
+      projects = world.projects;
+      hostBoxes = world.hostBoxes;
+      environments = world.environments;
+    },
     reset(
       nextStoredDraft: typeof storedDraft,
       workspaceDefaults = {
@@ -53,6 +89,9 @@ const testState = vi.hoisted(() => {
       },
     ) {
       storedDraft = nextStoredDraft;
+      projects = defaultProjects;
+      hostBoxes = [];
+      environments = [];
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
@@ -127,7 +166,15 @@ vi.mock("react", () => ({
   useCallback: <T>(callback: T) => callback,
   useMemo: <T>(factory: () => T) => factory(),
 }));
-vi.mock("../cloud/automationHosts", () => ({ useClaimedBoxes: () => new Map() }));
+vi.mock("../cloud/automationHosts", () => ({
+  useClaimedBoxes: () =>
+    new Map(
+      testState.hostBoxes
+        .filter((box) => box.claimed)
+        .map((box) => [box.environmentId, "environment-host"]),
+    ),
+  useHostBoxes: () => new Set(testState.hostBoxes.map((box) => box.environmentId)),
+}));
 vi.mock("../components/Sidebar.logic", () => ({ orderItemsByPreferredIds: () => [] }));
 vi.mock("../composerDraftStore", () => {
   const useComposerDraftStore = Object.assign(() => null, {
@@ -153,23 +200,19 @@ vi.mock("../lib/utils", () => ({
   newThreadId: () => "thread-delayed",
 }));
 vi.mock("../logicalProject", () => ({
-  deriveLogicalProjectKeyFromSettings: () => "remote-project",
+  deriveLogicalProjectKeyFromSettings: (project: { readonly repository?: string }) =>
+    project.repository ?? "remote-project",
   getProjectOrderKey: () => "remote-project",
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => ({
-  readProjects: () => [
-    {
-      id: "project-remote",
-      environmentId: "environment-ssh",
-      workspaceRoot: "/remote/project",
-      defaultThreadEnvMode: null,
-      defaultModelSelection: null,
-    },
-  ],
+  readProjects: () => testState.projects,
   readThreadShell: () => null,
   useProjects: () => [],
   useThread: () => null,
+}));
+vi.mock("../state/environments", () => ({
+  useEnvironments: () => ({ environments: testState.environments }),
 }));
 vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
@@ -182,6 +225,7 @@ vi.mock("../uiStateStore", () => ({
 }));
 vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
 
+import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useNewThreadHandler } from "./useHandleNewThread";
 
 describe.each([
@@ -288,4 +332,83 @@ describe.each([
       );
     },
   );
+});
+
+describe("a new chat started from a page with no chat in view", () => {
+  // The host runs no agents itself; every chat runs on a fresh cloud box it provisions, and each
+  // box holds its own copy of the repository, grouped with the host's.
+  const host = "environment-host";
+  const megptOn = (environmentId: string) => ({
+    id: `megpt-mono-${environmentId}`,
+    environmentId,
+    workspaceRoot: "/data/repos/megpt-mono",
+    repository: "megpt-mono",
+    defaultThreadEnvMode: null,
+    defaultModelSelection: null,
+  });
+  const hostProjectRef = { environmentId: host, projectId: `megpt-mono-${host}` };
+
+  // Without a chat in view, the new chat is placed from the first project in sidebar order,
+  // which here is a box's copy of megpt-mono.
+  const startFromAutomations = (hintEnvironmentId: string) => {
+    testState.router.state.location.href = "/automations";
+    return startNewThreadFromContext({
+      activeDraftThread: null,
+      activeThread: undefined,
+      defaultProjectRef: {
+        environmentId: hintEnvironmentId,
+        projectId: `megpt-mono-${hintEnvironmentId}`,
+      } as never,
+      handleNewThread: useNewThreadHandler(),
+    });
+  };
+
+  it.each([
+    {
+      name: "a paused box the host lists as claimed",
+      connection: { phase: "reconnecting" },
+      listed: [{ environmentId: "environment-box", claimed: true }],
+    },
+    {
+      name: "a paused box, before the host's box list arrives",
+      connection: { phase: "reconnecting" },
+      listed: [],
+    },
+    {
+      name: "a box the host lists but no chat claimed",
+      connection: { phase: "connected" },
+      listed: [{ environmentId: "environment-box", claimed: false }],
+    },
+    {
+      name: "a gone box",
+      connection: { phase: "error", blockedReason: "workspace-missing" },
+      listed: [],
+    },
+  ])("opens a draft on the host's project, not $name", async ({ connection, listed }) => {
+    testState.reset(null);
+    testState.completeProjectFileRead(null);
+    const boxId = "environment-box";
+    testState.setWorld({
+      projects: [megptOn(boxId), megptOn(host)],
+      hostBoxes: listed,
+      environments: [
+        { environmentId: host, connection: { phase: "connected" } },
+        { environmentId: boxId, connection },
+      ],
+    });
+
+    await startFromAutomations(boxId);
+
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "megpt-mono",
+      hostProjectRef,
+      "draft-delayed",
+      expect.anything(),
+    );
+    expect(testState.router.navigate).toHaveBeenCalledWith({
+      to: "/draft/$draftId",
+      params: { draftId: "draft-delayed" },
+      replace: false,
+    });
+  });
 });
