@@ -176,6 +176,22 @@ describe("getProviderSlashCommandsForSlashMenu", () => {
     ).toEqual(["compact"]);
   });
 
+  it("drops the command Claude Code publishes under a skill's frontmatter name", () => {
+    const potetoMode = {
+      name: "poteto-mode",
+      displayName: "Poteto Mode",
+      path: "/Users/matt/.claude/skills/poteto-mode/SKILL.md",
+      enabled: true,
+    };
+
+    expect(
+      getProviderSlashCommandsForSlashMenu(
+        [{ name: "Poteto Mode", description: "poteto's agent style." }, ...commands],
+        [potetoMode],
+      ).map((command) => command.name),
+    ).toEqual(["ask-matt", "compact"]);
+  });
+
   it("keeps the provider command when the matching skill alias is hidden", () => {
     const visibleSkills = getProviderSkillsForSlashMenu(skills, false);
 

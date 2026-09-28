@@ -123,6 +123,13 @@ it.effect("lists each driver's provisioned skills on a host that runs no agents"
       scope: "user",
       description: "Explain history.",
     });
+    assert.deepEqual(skills?.claudeAgent?.[0], {
+      name: "deploy",
+      enabled: true,
+      scope: "user",
+      displayName: "deploy-skill",
+      description: "Ship.",
+    });
 
     assert.strictEqual(yield* control.provisionedSkills, skills, "unchanged bundles are cached");
     yield* Effect.promise(() =>
