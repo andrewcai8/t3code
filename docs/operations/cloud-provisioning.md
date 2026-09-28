@@ -103,11 +103,11 @@ ls <preparationRoot>/home/.codex/skills
 
 ## Count a machine's usage on the manager
 
-The manager's Usage page counts its own transcripts and its cloud boxes. A machine no client connects to, such as a laptop you worked on before moving to the manager, can push its history with `scripts/usage/import-machine-usage.ts`, run from a checkout on that machine:
+The manager's Usage page counts its own transcripts and its cloud boxes. A machine no client connects to, such as a laptop you worked on before moving to the manager, can push its history with `apps/server/scripts/import-machine-usage.ts`, run from a checkout on that machine:
 
 ```
-node scripts/usage/import-machine-usage.ts --dry-run
-node scripts/usage/import-machine-usage.ts --origin https://manager \
+node apps/server/scripts/import-machine-usage.ts --dry-run
+node apps/server/scripts/import-machine-usage.ts --origin https://manager \
   --pairing-token-file <file holding a pairing token>
 ```
 

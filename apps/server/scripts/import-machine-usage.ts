@@ -3,8 +3,8 @@
  * no client connects to. It runs the server's own usage scanner over the provider homes in this
  * machine's T3 settings, then replaces what the host keeps for this machine.
  *
- *   node scripts/usage/import-machine-usage.ts --dry-run
- *   node scripts/usage/import-machine-usage.ts --origin https://host \
+ *   node apps/server/scripts/import-machine-usage.ts --dry-run
+ *   node apps/server/scripts/import-machine-usage.ts --origin https://host \
  *     --pairing-token-file ~/.t3/audit/secrets/host-pairing-token
  *
  * The machine's T3 home is only read. The scanner keeps its rate table and parse cache under
@@ -28,7 +28,7 @@ import {
   type UsageSummary,
 } from "@t3tools/contracts";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
-import { fromLenientJson } from "@t3tools/shared/schemaJson";
+import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
@@ -41,10 +41,10 @@ import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
-import * as ServerConfig from "../../apps/server/src/config.ts";
-import * as ServerSettingsService from "../../apps/server/src/serverSettings.ts";
-import { BoxUsageStore } from "../../apps/server/src/usage/boxUsage.ts";
-import * as UsageService from "../../apps/server/src/usage/UsageService.ts";
+import * as ServerConfig from "../src/config.ts";
+import * as ServerSettingsService from "../src/serverSettings.ts";
+import { BoxUsageStore } from "../src/usage/boxUsage.ts";
+import * as UsageService from "../src/usage/UsageService.ts";
 
 class ImportFailure extends Schema.TaggedError<ImportFailure>()("ImportFailure", {
   message: Schema.String,
@@ -54,6 +54,7 @@ const decodeSettings = Schema.decodeUnknownEffect(fromLenientJson(ServerSettings
 const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
 const decodeImportResult = Schema.decodeUnknownEffect(UsageImportResult);
 const encodeImport = Schema.encodeEffect(Schema.fromJsonString(UsageImportInput));
+const encodeReport = Schema.encodeEffect(fromJsonStringPretty(Schema.Unknown));
 const BearerCache = Schema.fromJsonString(
   Schema.Struct({ origin: Schema.String, accessToken: Schema.String, expiresAt: Schema.Finite }),
 );
@@ -297,18 +298,14 @@ const command = Command.make(
       const history = flags.remove ? { ...scanned, sources: [], buckets: [] } : scanned;
       const body = yield* encodeImport({ machineId, history });
       yield* Console.log(
-        JSON.stringify(
-          {
-            machineId,
-            hostId: history.sources[0]?.fingerprint.hostId ?? null,
-            scannedAt: DateTime.formatIso(now),
-            scanDurationMs: history.scanDurationMs,
-            payloadBytes: Buffer.byteLength(body),
-            providers: describeHistory(history),
-          },
-          null,
-          2,
-        ),
+        yield* encodeReport({
+          machineId,
+          hostId: history.sources[0]?.fingerprint.hostId ?? null,
+          scannedAt: DateTime.formatIso(now),
+          scanDurationMs: history.scanDurationMs,
+          payloadBytes: Buffer.byteLength(body),
+          providers: describeHistory(history),
+        }),
       );
       if (flags.dryRun || Option.isNone(target)) return;
 
@@ -330,7 +327,7 @@ const command = Command.make(
             (cause) => new ImportFailure({ message: `import failed: ${describe(cause)}` }),
           ),
         );
-      yield* Console.log(JSON.stringify({ imported }));
+      yield* Console.log(yield* encodeReport({ imported }));
     }),
 ).pipe(Command.withDescription("Upload this machine's usage history to a T3 host."));
 
