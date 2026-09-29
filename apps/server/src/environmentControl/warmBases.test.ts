@@ -241,6 +241,23 @@ describe("warm base upkeep", () => {
     ]);
   });
 
+  it("stops handing out a base that broke a chat, and retires it on the next tick", async () => {
+    const h = harness([record({ ready: ready(KEY, NOW - HOUR) })]);
+    const before = selectWarmTemplate(h.current()!, KEY, NOW, policy, h.upkeep.failedTemplates());
+    h.upkeep.failed("Example/Repo", "base", "bun install failed");
+    const after = selectWarmTemplate(h.current()!, KEY, NOW, policy, h.upkeep.failedTemplates());
+    await h.upkeep.tick(policy);
+    expect([before, after, h.current(), h.frozen]).toEqual([
+      "base",
+      null,
+      record({
+        lastFailure: { key: KEY, reason: "bun install failed", at: iso(NOW) },
+        retired: [{ kind: "snapshot", snapshotId: "base:default", retiredAt: iso(NOW) }],
+      }),
+      [],
+    ]);
+  });
+
   it("keeps a sealed build whose snapshot E2B refused for now, and snapshots it next tick", async () => {
     const h = harness([record()]);
     await h.upkeep.tick(policy);

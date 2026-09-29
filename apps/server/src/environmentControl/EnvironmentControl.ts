@@ -913,6 +913,7 @@ export const layer = Layer.effect(
                 }),
             });
           const sandboxId = resource.sandboxId;
+          const request = operation.request;
           return yield* Effect.tryPromise({
             try: () => runtime.prepare(operation, sandboxId, manifest, record, build),
             catch: (error) =>
@@ -923,7 +924,24 @@ export const layer = Layer.effect(
                   "Remote preparation did not finish. Retry the same request to resume.",
                 ),
               }),
-          });
+          }).pipe(
+            // A chat that could not prepare on a warm base's tree sends later
+            // chats cold until a new base exists. An upgrade or an expired
+            // retention is not the base's fault.
+            Effect.tapError((error) =>
+              Effect.sync(() => {
+                if (
+                  request.provider === "e2b" &&
+                  request.strategy === "direct" &&
+                  manifest.warmKey &&
+                  manifest.input.repository &&
+                  build === null &&
+                  !error.retentionFailed
+                )
+                  warmBases.failed(manifest.input.repository, request.templateId, error.message);
+              }),
+            ),
+          );
         }).pipe(
           Effect.tap((ready) => logRefresh(operation.request.requestId, ready.refreshError)),
           Effect.ensuring(
@@ -1091,6 +1109,7 @@ export const layer = Layer.effect(
               key,
               Date.now(),
               policy,
+              warmBases.failedTemplates(),
             ),
           );
           // A chat that had to start cold asks for a base, on the account it routed to.

@@ -93,15 +93,22 @@ export function warmBasePolicy(refreshHours = 12): WarmBasePolicy {
 const age = (iso: string, now: number) => now - Date.parse(iso);
 const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis));
 
-/** The bare template a chat keyed `key` starts from, or null to start cold. */
+/**
+ * The bare template a chat keyed `key` starts from, or null to start cold.
+ * `failedTemplates` are bases a chat already failed to prepare from.
+ */
 export function selectWarmTemplate(
   record: WarmBaseRecord | null,
   key: string,
   now: number,
   policy: WarmBasePolicy,
+  failedTemplates: ReadonlySet<string> = new Set(),
 ): string | null {
   const ready = record?.ready;
-  return ready && ready.key === key && age(ready.builtAt, now) <= policy.maxAgeMs
+  return ready &&
+    ready.key === key &&
+    age(ready.builtAt, now) <= policy.maxAgeMs &&
+    !failedTemplates.has(ready.templateId)
     ? ready.templateId
     : null;
 }
@@ -147,6 +154,16 @@ const retireAll = (record: WarmBaseRecord, now: number): WarmBaseRecord => ({
   build: null,
   retired: [...record.retired, ...retiredReady(record, now), ...retiredBuild(record, now)],
 });
+/** A chat failed to prepare from the base, so no chat starts from it again. */
+const invalidateReady = (record: WarmBaseRecord, reason: string, now: number): WarmBaseRecord =>
+  record.ready
+    ? {
+        ...record,
+        ready: null,
+        lastFailure: { key: record.ready.key, reason, at: iso(now) },
+        retired: [...record.retired, ...retiredReady(record, now)],
+      }
+    : record;
 const abandonBuild = (record: WarmBaseRecord, reason: string, now: number): WarmBaseRecord => ({
   ...record,
   build: null,
@@ -231,6 +248,8 @@ export interface WarmBasePorts {
  */
 export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
   const wanted = new Map<string, WarmBaseSeed>();
+  /** Bases a chat failed to prepare from, by template, until a tick retires them. */
+  const failures = new Map<string, { readonly repository: string; readonly reason: string }>();
 
   const drive = async (
     record: WarmBaseRecord,
@@ -297,12 +316,20 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     policy: WarmBasePolicy,
   ) => {
     const want = wanted.get(repository);
+    const reported = [...failures].filter(([, failure]) => failure.repository === repository);
+    const settle = () => {
+      if (wanted.get(repository) === want) wanted.delete(repository);
+      for (const [templateId, failure] of reported)
+        if (failures.get(templateId) === failure) failures.delete(templateId);
+    };
     const seed = want ?? stored?.seed;
     const key = await ports.key(repository);
     const now = ports.now();
-    const step = nextWarmStep(stored, key, want !== undefined, now, policy);
-    if (!seed || (stored === null && step === "idle")) {
-      wanted.delete(repository);
+    const broken = stored?.ready && failures.get(stored.ready.templateId);
+    const current = stored && broken ? invalidateReady(stored, broken.reason, now) : stored;
+    const step = nextWarmStep(current, key, want !== undefined, now, policy);
+    if (!seed || (current === null && step === "idle")) {
+      settle();
       return;
     }
     let saved = stored;
@@ -316,7 +343,7 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
       build: null,
       lastFailure: null,
       retired: [],
-      ...stored,
+      ...current,
       seed,
     };
     if (key === null) record = retireAll(record, now);
@@ -350,10 +377,15 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     if (record.build && key !== null) record = await drive(record, record.build, key, now, policy);
     record = await dispose(record, now, policy);
     if (stableStringify(record) !== stableStringify(saved)) await save(record);
-    if (wanted.get(repository) === want) wanted.delete(repository);
+    settle();
   };
 
   return {
+    /** A chat created from `templateId` failed to prepare. */
+    failed: (repository: string, templateId: string, reason: string) => {
+      failures.set(templateId, { repository: canonicalRepository(repository), reason });
+    },
+    failedTemplates: (): ReadonlySet<string> => new Set(failures.keys()),
     want: (repository: string, seed: WarmBaseSeed) => {
       wanted.set(canonicalRepository(repository), seed);
     },
@@ -361,7 +393,8 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
       const records = new Map(
         (await ports.store.list()).map((record) => [record.repository, record]),
       );
-      for (const repository of new Set([...records.keys(), ...wanted.keys()]))
+      const reported = [...failures.values()].map(({ repository }) => repository);
+      for (const repository of new Set([...records.keys(), ...wanted.keys(), ...reported]))
         await upkeep(repository, records.get(repository) ?? null, policy).catch((cause) =>
           ports.warn("warm base upkeep failed", { repository, cause }),
         );
