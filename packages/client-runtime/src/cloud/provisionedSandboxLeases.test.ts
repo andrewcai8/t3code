@@ -94,17 +94,22 @@ describe("provisioned sandbox leases", () => {
 });
 
 describe("boxes", () => {
-  it("names each box this device holds a lease on, with its host", () => {
+  it("names only boxes their host reported, never an environment a thread key names", () => {
     const { storage } = memoryStorage();
     const store = createProvisionedSandboxLeaseStore(storage);
     store.remember("draft-still-provisioning", lease);
-    store.remember(threadRef, lease);
+    // A lease a device moved to a thread on a real server by mistake names no box.
+    store.remember(
+      { environmentId: EnvironmentId.make("andrew-megpt-host"), threadId: ThreadId.make("t") },
+      lease,
+    );
+    store.remember(threadRef, { ...lease, environmentId: EnvironmentId.make("reported-box") });
     store.rememberForEnvironment(EnvironmentId.make("joined"), {
       ...lease,
       managerEnvironmentId: EnvironmentId.make("other-host"),
     });
     expect(store.boxes()).toEqual([
-      { environmentId: "child", managerId: "manager" },
+      { environmentId: "reported-box", managerId: "manager" },
       { environmentId: "joined", managerId: "other-host" },
     ]);
   });

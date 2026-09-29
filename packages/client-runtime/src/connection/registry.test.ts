@@ -749,6 +749,63 @@ describe("EnvironmentRegistry", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("never marks a host as a box, and a wrong mark can be undone", () =>
+    Effect.gen(function* () {
+      const server = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("andrew-megpt-host"),
+        label: "andrew.megpt.app",
+        connectionId: "bearer:andrew-megpt-host",
+      });
+      const serverProfile = new BearerConnectionProfile({
+        connectionId: server.connectionId,
+        environmentId: server.environmentId,
+        label: server.label,
+        httpBaseUrl: "https://andrew.megpt.app",
+        wsBaseUrl: "wss://andrew.megpt.app",
+      });
+      const harness = yield* makeHarness(
+        [server, HOST_BOX],
+        [serverProfile, HOST_BOX_PROFILE],
+        [
+          [server.connectionId, BEARER_CREDENTIAL],
+          [HOST_BOX.connectionId, BEARER_CREDENTIAL],
+        ],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, server.environmentId, (s) => s.phase === "connected");
+        // The server provisions boxes, so it is a manager, whatever a lease or list says.
+        yield* registry.markBoxes([
+          { environmentId: server.environmentId, managerId: EnvironmentId.make("other-host") },
+          { environmentId: EnvironmentId.make("new-box"), managerId: server.environmentId },
+        ]);
+        yield* registry.markBoxes([
+          { environmentId: server.environmentId, managerId: server.environmentId },
+        ]);
+        expect((yield* Ref.get(harness.storedTargets)).get(server.environmentId)).toEqual(server);
+        expect((yield* registry.state(server.environmentId)).phase).toBe("connected");
+
+        // A box marked by mistake goes back to being an ordinary environment.
+        yield* registry.unmarkBox(HOST_BOX.environmentId);
+        const unmarked = new BearerConnectionTarget({
+          environmentId: HOST_BOX.environmentId,
+          label: HOST_BOX.label,
+          connectionId: HOST_BOX.connectionId,
+        });
+        expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)).toEqual(
+          unmarked,
+        );
+        yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("pairing a box again keeps it a box", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness(

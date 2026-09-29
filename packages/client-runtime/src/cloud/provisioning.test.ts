@@ -20,6 +20,7 @@ import {
   type CloudProvisionPorts,
   boxesOfOtherChats,
   claimFirstTurnBox,
+  claimProvisionedBox,
   idleProvisionedBoxes,
   type NewChatEnvironmentState,
   newChatProject,
@@ -216,10 +217,13 @@ describe("provisionCloudEnvironment", () => {
 
     await provisionCloudEnvironment(draft, ports);
 
+    // The box's environment is recorded as the host reported it, so only a send on that box
+    // can claim the lease.
     expect(leases.leaseFor("draft")).toEqual({
       leaseId: "lease",
       sandboxId: "sandbox",
       managerEnvironmentId: "manager",
+      environmentId: preparedEnvironmentId,
     });
     leases.transfer("draft", threadRef);
     expect(leases.leaseFor("draft")).toBeNull();
@@ -227,6 +231,7 @@ describe("provisionCloudEnvironment", () => {
       leaseId: "lease",
       sandboxId: "sandbox",
       managerEnvironmentId: "manager",
+      environmentId: preparedEnvironmentId,
     });
   });
 
@@ -686,6 +691,8 @@ describe("claimFirstTurnBox", () => {
     environmentId: host,
     input: { leaseId: "lease", environmentId: box, threadId: ThreadId.make("first-thread") },
   };
+  // This device's catalog marks `box` as a box `host` provisioned; anything else is not a box.
+  const boxManager = (environmentId: EnvironmentId) => (environmentId === box ? host : null);
   const provisionedHere = () => {
     const leases = createProvisionedSandboxLeaseStore(memoryStorage());
     leases.rememberForEnvironment(box, {
@@ -708,6 +715,7 @@ describe("claimFirstTurnBox", () => {
       claim,
       refresh: () => undefined,
       warn: (attempt: number) => void warnings.push(attempt),
+      boxManager,
     };
     await expect(claimFirstTurnBox(leases, ports, firstThread)).resolves.toBe(true);
     expect(claims).toEqual([expectedClaim, expectedClaim]);
@@ -736,6 +744,7 @@ describe("claimFirstTurnBox", () => {
       claim,
       refresh: (managerId: EnvironmentId) => void refreshed.push(managerId),
       warn: (attempt: number) => void warnings.push(attempt),
+      boxManager,
     };
     await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(false);
     expect(claims).toEqual([expectedClaim, expectedClaim]);
@@ -766,11 +775,58 @@ describe("claimFirstTurnBox", () => {
         clientList = hostList();
       },
       warn: () => undefined,
+      boxManager,
     };
     const nextDraft = ThreadId.make("next-draft");
     expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map());
     await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(true);
     expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map([[box, host]]));
+  });
+});
+
+describe("claimProvisionedBox", () => {
+  const host = EnvironmentId.make("host");
+  const box = EnvironmentId.make("box");
+  const server = EnvironmentId.make("andrew-megpt-host");
+  const boxManager = (environmentId: EnvironmentId) => (environmentId === box ? host : null);
+  const attempt = async (
+    lease: Parameters<typeof claimProvisionedBox>[1],
+    owner: EnvironmentId,
+  ) => {
+    const claims: ProvisionedBoxClaim[] = [];
+    const claimed = await claimProvisionedBox(
+      {
+        claim: async (request) => {
+          claims.push(request);
+          return true;
+        },
+        refresh: () => undefined,
+        warn: () => undefined,
+        boxManager,
+      },
+      lease,
+      { environmentId: owner, threadId: ThreadId.make("thread") },
+    );
+    return { claimed, claims: claims.map(({ input }) => input.environmentId) };
+  };
+  const lease = { leaseId: "lease", sandboxId: "sandbox", managerEnvironmentId: host };
+
+  it("never claims a draft's box for a chat that started on a real server", async () => {
+    // A draft kept its lease after provisioning failed, and the user ran it on a server instead.
+    await expect(attempt({ ...lease, environmentId: box }, server)).resolves.toEqual({
+      claimed: false,
+      claims: [],
+    });
+    await expect(attempt(lease, server)).resolves.toEqual({ claimed: false, claims: [] });
+  });
+
+  it("claims the box for a chat that started on it", async () => {
+    await expect(attempt({ ...lease, environmentId: box }, box)).resolves.toEqual({
+      claimed: true,
+      claims: [box],
+    });
+    // A lease recorded before it named its box claims only a box this device marked for its host.
+    await expect(attempt(lease, box)).resolves.toEqual({ claimed: true, claims: [box] });
   });
 });
 

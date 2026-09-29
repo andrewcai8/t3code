@@ -121,6 +121,14 @@ describe("running box demand", () => {
     expect([...held]).toEqual([BOX.environmentId]);
   });
 
+  it("holds a box that joined after its host's list was read once the list is fetched again", () => {
+    const { registry, lifecycle, held } = harness({ session: running, lifecycle: "missing" });
+    // Stands in for the list read before the automation run's box existed.
+    expect([...held]).toEqual([]);
+    registry.set(lifecycle, "active");
+    expect([...held]).toEqual([BOX.environmentId]);
+  });
+
   it("does not hold a box with no running turn", () => {
     expect([...harness({ session: null, lifecycle: "active" }).held]).toEqual([]);
   });
