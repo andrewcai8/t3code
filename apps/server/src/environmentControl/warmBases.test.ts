@@ -167,6 +167,7 @@ function harness(initial: WarmBaseRecord[], buildState: { kind: string } = { kin
   const sealed: string[] = [];
   const deleteAttempts: string[] = [];
   const deleteAnswers = new Map<string, Array<"deleted" | "missing" | "in_use">>();
+  const snapshotErrors: Error[] = [];
   const upkeep = makeWarmBaseUpkeep({
     store: {
       list: async () => [...records.values()],
@@ -186,10 +187,14 @@ function harness(initial: WarmBaseRecord[], buildState: { kind: string } = { kin
     seal: async (built) => {
       sealed.push(built.request.requestId);
     },
-    snapshot: async (built) => ({
-      snapshotId: `built-${built.request.requestId}:default`,
-      templateId: `built-${built.request.requestId}`,
-    }),
+    snapshot: async (built) => {
+      const error = snapshotErrors.shift();
+      if (error) throw error;
+      return {
+        snapshotId: `built-${built.request.requestId}:default`,
+        templateId: `built-${built.request.requestId}`,
+      };
+    },
     deleteSnapshot: async (snapshotId) => {
       deleteAttempts.push(snapshotId);
       return deleteAnswers.get(snapshotId)?.shift() ?? "deleted";
@@ -204,6 +209,7 @@ function harness(initial: WarmBaseRecord[], buildState: { kind: string } = { kin
     sealed,
     deleteAttempts,
     deleteAnswers,
+    snapshotErrors,
     current: () => records.get("example/repo"),
   };
 }
@@ -236,6 +242,24 @@ describe("warm base upkeep", () => {
         retired: [{ kind: "snapshot", snapshotId: "old:default", retiredAt: iso(h.clock.now) }],
       }),
     ]);
+  });
+
+  it("keeps a sealed build whose snapshot E2B refused for now, and snapshots it next tick", async () => {
+    const h = harness([record()]);
+    await h.upkeep.tick(policy);
+    const [requestId] = h.frozen;
+    h.states.set(requestId!, readyState);
+    h.snapshotErrors.push(
+      new Error("Sandbox cannot be snapshotted right now because its node is busy, please retry"),
+    );
+    await h.upkeep.tick(policy);
+    const refused = h.current();
+    await h.upkeep.tick(policy);
+    expect([
+      refused?.build?.requestId,
+      refused?.lastFailure,
+      h.current()?.ready?.templateId,
+    ]).toEqual([requestId, null, `built-${requestId}`]);
   });
 
   it("deletes a replaced snapshot only after its grace period, and not while a chat uses it", async () => {
