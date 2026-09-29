@@ -288,7 +288,8 @@ describe("environment grouping", () => {
         environmentId: primaryEnvironmentId,
         projectId: staleWithoutRepositoryIdentity.id,
       },
-      boxes: new Map(),
+      boxes: new Set(),
+      environmentState: () => null,
     });
     expect(pickerEntry?.isPreferred).toBe(true);
     expect(pickerEntry?.targetProject.id).toBe(canonical.id);
@@ -347,7 +348,8 @@ describe("environment grouping", () => {
         environmentId: remoteEnvironmentId,
         projectId: remote.id,
       },
-      boxes: new Map(),
+      boxes: new Set(),
+      environmentState: () => null,
     });
 
     expect(entries).toHaveLength(2);
@@ -412,7 +414,8 @@ describe("environment grouping", () => {
         environmentId: remoteEnvironmentId,
         projectId: currentRemote.id,
       },
-      boxes: new Map(),
+      boxes: new Set(),
+      environmentState: () => null,
     });
     const destination = entries.find(
       (entry) => entry.group.projectKey === destinationRepositoryIdentity.canonicalKey,
@@ -429,7 +432,7 @@ describe("environment grouping", () => {
     });
   });
 
-  it("targets the host's copy of a repository, not another chat's cloud box", () => {
+  it("targets the host's copy of a repository and offers none that only cloud boxes hold", () => {
     const boxEnvironmentId = EnvironmentId.make("env-box");
     const host = makeProject({
       id: ProjectId.make("host-megpt"),
@@ -459,17 +462,15 @@ describe("environment grouping", () => {
 
     const entries = buildSidebarProjectPickerEntries({
       groups,
-      // Viewing the box's own chat.
+      // Viewing the box's own chat, or no chat with the box's copy first in sidebar order.
       preferredProjectRef: { environmentId: boxEnvironmentId, projectId: box.id },
-      boxes: new Map([[boxEnvironmentId, primaryEnvironmentId]]),
+      boxes: new Set([boxEnvironmentId]),
+      environmentState: () => null,
     });
 
     expect(
       entries.map((entry) => [entry.group.displayName, entry.targetProject.workspaceRoot]),
-    ).toEqual([
-      ["megpt-mono", "/data/repos/megpt-mono"],
-      ["box-only", "/tmp/t3-provision/lease/other"],
-    ]);
+    ).toEqual([["megpt-mono", "/data/repos/megpt-mono"]]);
   });
 
   it("keeps manual project order when building grouped sidebar entries", () => {

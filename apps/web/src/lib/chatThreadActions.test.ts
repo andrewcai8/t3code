@@ -7,7 +7,6 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
-  resolveNewChatProjectRef,
   resolveThreadActionProjectRef,
   hasExplicitComposerModelSelection,
   resolveNewDraftStartFromOrigin,
@@ -101,31 +100,6 @@ describe("chatThreadActions", () => {
         newWorktreesStartFromOrigin: true,
       }),
     ).toBe(false);
-  });
-
-  it("opens a new chat asked for on another chat's box on the same repository elsewhere", () => {
-    const host = EnvironmentId.make("host");
-    const box = EnvironmentId.make("box");
-    const projects = [
-      { environmentId: box, id: ProjectId.make("box-megpt"), repo: "megpt-mono" },
-      { environmentId: box, id: ProjectId.make("box-only"), repo: "box-only" },
-      { environmentId: host, id: ProjectId.make("host-t3code"), repo: "t3code" },
-      { environmentId: host, id: ProjectId.make("host-megpt"), repo: "megpt-mono" },
-    ];
-    const resolve = (projectId: string) =>
-      resolveNewChatProjectRef({
-        projectRef: scopeProjectRef(
-          projects.find((project) => project.id === projectId)!.environmentId,
-          ProjectId.make(projectId),
-        ),
-        projects,
-        boxes: new Map([[box, host]]),
-        logicalProjectKey: (project) => project.repo,
-      });
-
-    expect(resolve("box-megpt")).toEqual(scopeProjectRef(host, ProjectId.make("host-megpt")));
-    expect(resolve("box-only")).toEqual(scopeProjectRef(box, ProjectId.make("box-only")));
-    expect(resolve("host-t3code")).toEqual(scopeProjectRef(host, ProjectId.make("host-t3code")));
   });
 
   it("prefers the active thread project when resolving thread actions", () => {

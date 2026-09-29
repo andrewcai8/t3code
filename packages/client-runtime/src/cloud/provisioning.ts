@@ -55,7 +55,10 @@ export function runsLocalAgents(
 /** What the client knows about one environment when placing a new chat. */
 export interface NewChatEnvironmentState {
   readonly serverConfig?: Pick<ServerConfig, "localAgentRuns"> | null | undefined;
-  readonly connection?: Pick<EnvironmentConnectionPresentation, "blockedReason"> | null | undefined;
+  readonly connection?:
+    | Partial<Pick<EnvironmentConnectionPresentation, "phase" | "blockedReason">>
+    | null
+    | undefined;
 }
 
 /** Whether an environment's machine is gone for good, such as a cloud box whose lease expired. */
@@ -206,6 +209,51 @@ export function nextDraftEnvironment<
   return (
     input.environments.find(({ environmentId }) => environmentId === input.ownBoxManagerId) ??
     input.runTargets.find(({ environmentId }) => environmentId !== input.environmentId) ??
+    null
+  );
+}
+
+/**
+ * The project a new chat opens on: `requested`, else the first copy of the same logical project
+ * in `projects`, else with nothing requested the first project at all. Never a copy on a cloud
+ * box, whatever its state, or on a gone machine, since every new chat gets a fresh box. A
+ * connected copy wins over one that is not, whose files a new chat could not read. The route or
+ * chat in view only ever shapes `requested`. Null when only boxes hold the project, or
+ * `requested` is not among `projects`.
+ */
+export function newChatProject<
+  Project extends { readonly environmentId: EnvironmentId; readonly id: ProjectId },
+>(input: {
+  readonly requested: ScopedProjectRef | null;
+  /** Every project the client knows, in the order to prefer them. */
+  readonly projects: ReadonlyArray<Project>;
+  readonly logicalProjectKey: (project: Project) => string;
+  /** Every cloud box the hosts list, claimed or not. */
+  readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
+  readonly environmentState: (
+    environmentId: EnvironmentId,
+  ) => NewChatEnvironmentState | null | undefined;
+}): Project | null {
+  const { requested } = input;
+  const asked = requested
+    ? input.projects.find(
+        (project) =>
+          project.environmentId === requested.environmentId && project.id === requested.projectId,
+      )
+    : undefined;
+  if (requested && !asked) return null;
+  const key = asked ? input.logicalProjectKey(asked) : null;
+  const candidates = [...(asked ? [asked] : []), ...input.projects].filter(
+    (project) =>
+      (key === null || input.logicalProjectKey(project) === key) &&
+      !input.boxes.has(project.environmentId) &&
+      !isEnvironmentGone(input.environmentState(project.environmentId)),
+  );
+  return (
+    candidates.find(
+      (project) => input.environmentState(project.environmentId)?.connection?.phase === "connected",
+    ) ??
+    candidates[0] ??
     null
   );
 }

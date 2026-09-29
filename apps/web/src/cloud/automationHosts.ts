@@ -51,14 +51,23 @@ export function refreshProvisionedEnvironments(managerId: EnvironmentId): void {
 }
 
 /**
- * The cloud boxes the connected hosts list as claimed by a chat, each mapped to its host. Every new
- * chat gets a fresh box, so a surface that starts one never points it at these.
+ * What placing a new chat with `newChatProject` reads: every cloud box the connected hosts list,
+ * claimed or not, and each environment's connection.
  */
-export function useClaimedBoxes(): ReadonlyMap<EnvironmentId, EnvironmentId> {
+export function useNewChatPlacement() {
+  const { environments } = useEnvironments();
   const hosts = useAutomationHosts();
   const hostIds = useMemo(() => hosts.map((host) => host.environmentId), [hosts]);
   const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
-  return useMemo(() => boxesOfOtherChats(boxes, null), [boxes]);
+  return useMemo(() => {
+    const environmentById = new Map(
+      environments.map((environment) => [environment.environmentId, environment] as const),
+    );
+    return {
+      boxes: new Set(boxes.map((box) => box.environmentId)),
+      environmentState: (environmentId: EnvironmentId) => environmentById.get(environmentId),
+    };
+  }, [boxes, environments]);
 }
 
 /**

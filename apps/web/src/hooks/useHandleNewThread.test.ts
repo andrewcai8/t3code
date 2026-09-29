@@ -132,7 +132,8 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
   scopeProjectRef: (environmentId: string, projectId: string) => ({ environmentId, projectId }),
   scopeThreadRef: (environmentId: string, threadId: string) => ({ environmentId, threadId }),
 }));
-vi.mock("@t3tools/contracts", () => ({
+vi.mock("@t3tools/contracts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/contracts")>()),
   DEFAULT_RUNTIME_MODE: "default",
   DEFAULT_SERVER_SETTINGS: {},
 }));
@@ -167,13 +168,11 @@ vi.mock("react", () => ({
   useMemo: <T>(factory: () => T) => factory(),
 }));
 vi.mock("../cloud/automationHosts", () => ({
-  useClaimedBoxes: () =>
-    new Map(
-      testState.hostBoxes
-        .filter((box) => box.claimed)
-        .map((box) => [box.environmentId, "environment-host"]),
-    ),
-  useHostBoxes: () => new Set(testState.hostBoxes.map((box) => box.environmentId)),
+  useNewChatPlacement: () => ({
+    boxes: new Set(testState.hostBoxes.map((box) => box.environmentId)),
+    environmentState: (environmentId: string) =>
+      testState.environments.find((environment) => environment.environmentId === environmentId),
+  }),
 }));
 vi.mock("../components/Sidebar.logic", () => ({ orderItemsByPreferredIds: () => [] }));
 vi.mock("../composerDraftStore", () => {
@@ -210,9 +209,6 @@ vi.mock("../state/entities", () => ({
   readThreadShell: () => null,
   useProjects: () => [],
   useThread: () => null,
-}));
-vi.mock("../state/environments", () => ({
-  useEnvironments: () => ({ environments: testState.environments }),
 }));
 vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
