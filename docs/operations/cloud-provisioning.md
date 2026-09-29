@@ -9,7 +9,7 @@ A provisioning manager is a T3 server that owns that lifecycle. It allocates the
 Provisioning reads `~/.t3/environment-control.json`. Four things matter:
 
 - `e2bApiKey`, required for anything E2B.
-- `provisioning.templateId`, the E2B template new environments fork from.
+- `provisioning.templateId`, the E2B template new environments fork from, unless their repository has a warm base (below).
 - `provisioning.runtimeArtifacts.linux`, the pinned build a new environment runs. Without it provisioning refuses with `unconfigured` rather than failing, because an install that only manages named targets is an ordinary configuration state.
 - `provisioning.githubToken`, required only for cloning a private repository.
 
@@ -18,6 +18,8 @@ Clients offer only what a manager can provision. E2B appears when `provisioning.
 `provisioning.skills` is optional and names skill bundles copied into every new environment. Each entry has a `source` directory on the manager. Give it a `name` when the source is one skill; omit `name` when the source is a directory of skills, because every supported CLI resolves a skill as `<root>/<directory>/SKILL.md` and looks no deeper.
 
 Skills land in the home directory and follow the selected driver. Codex reads `.codex/skills`, Cursor reads `.cursor/skills`, Claude reads `.claude/skills`. They never land in the checkout, which is what the agent opens a pull request from. An entry's optional `agents` list (`codex`, `cursor`, `claudeAgent`) limits it to those drivers, so a Cursor bundle and a Claude/Codex port of it can share skill names. A manager that runs no agents itself (`T3CODE_LOCAL_AGENT_RUNS=false`) lists these bundles as each driver's skills, so the composer offers what a new environment will have.
+
+A repository with E2B `prepareCommands` gets a warm base after its first cloud chat. The manager builds one cold box on the default branch. It then removes that box's T3 identity, installed files and credential files, snapshots it, and kills it. Later chats for the repository start from the snapshot. They fetch their own revision into the prepared checkout and rerun the prepare commands. Those commands must therefore be safe to rerun on a tree they already prepared. The base is rebuilt every `provisioning.warmBaseRefreshHours` (default 12, `0` turns warm bases off). It is also rebuilt when the template, the linux runtime artifact, the repository's prepare commands, `egressAllow` or `provisioning.workspaceFiles` change. Until the rebuild lands, chats start cold. Anything a prepare command derives from a workspace file, such as a copied `.env`, stays in the snapshot. Records live under `<state>/provisioning/warm-bases`.
 
 A host packed by `pack-host-state.ts` or `deploy-provision-manager.mjs` carries copies of `provisioning.homeFiles` and `provisioning.workspaceFiles`, except agent login files, which the host installs per account. `provisioning.workspaceFiles` land in every checkout; a repository entry's own `workspaceFiles` do not travel. With `githubToken` set, provisioning writes `.gitconfig`, `.git-credentials`, and `.config/gh/hosts.yml` itself, so the packer refuses a home file at any of those paths.
 
