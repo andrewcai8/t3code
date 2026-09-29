@@ -288,8 +288,7 @@ describe("environment grouping", () => {
         environmentId: primaryEnvironmentId,
         projectId: staleWithoutRepositoryIdentity.id,
       },
-      boxes: new Set(),
-      environmentState: () => null,
+      environmentState: () => ({}),
     });
     expect(pickerEntry?.isPreferred).toBe(true);
     expect(pickerEntry?.targetProject.id).toBe(canonical.id);
@@ -348,8 +347,7 @@ describe("environment grouping", () => {
         environmentId: remoteEnvironmentId,
         projectId: remote.id,
       },
-      boxes: new Set(),
-      environmentState: () => null,
+      environmentState: () => ({}),
     });
 
     expect(entries).toHaveLength(2);
@@ -414,8 +412,7 @@ describe("environment grouping", () => {
         environmentId: remoteEnvironmentId,
         projectId: currentRemote.id,
       },
-      boxes: new Set(),
-      environmentState: () => null,
+      environmentState: () => ({}),
     });
     const destination = entries.find(
       (entry) => entry.group.projectKey === destinationRepositoryIdentity.canonicalKey,
@@ -464,8 +461,8 @@ describe("environment grouping", () => {
       groups,
       // Viewing the box's own chat, or no chat with the box's copy first in sidebar order.
       preferredProjectRef: { environmentId: boxEnvironmentId, projectId: box.id },
-      boxes: new Set([boxEnvironmentId]),
-      environmentState: () => null,
+      // A cloud box is not a user environment, so it has no state.
+      environmentState: (environmentId) => (environmentId === boxEnvironmentId ? null : {}),
     });
 
     expect(

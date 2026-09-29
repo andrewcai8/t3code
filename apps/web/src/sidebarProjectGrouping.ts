@@ -142,7 +142,6 @@ export function buildSidebarProjectSnapshots(input: {
 export function buildSidebarProjectPickerEntries(input: {
   groups: ReadonlyArray<SidebarProjectSnapshot>;
   preferredProjectRef: ScopedProjectRef | null;
-  boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
   environmentState: (environmentId: EnvironmentId) => NewChatEnvironmentState | null | undefined;
 }) {
   const preferredProjectRef = input.preferredProjectRef;
@@ -169,7 +168,6 @@ export function buildSidebarProjectPickerEntries(input: {
       requested: scopeProjectRef(requested.environmentId, requested.id),
       projects: group.memberProjects,
       logicalProjectKey: () => group.projectKey,
-      boxes: input.boxes,
       environmentState: input.environmentState,
     });
     if (!targetProject) return [];

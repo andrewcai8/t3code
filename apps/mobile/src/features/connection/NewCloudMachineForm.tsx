@@ -1,14 +1,12 @@
 import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { type ReactNode, useMemo, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { cn } from "../../lib/cn";
 import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
-import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import {
   CLOUD_MACHINE_PROVIDER_LABELS,
   cloudMachineAccountDetail,
@@ -21,55 +19,6 @@ import {
   type CloudMachineProvider,
 } from "./cloudMachineOptions";
 import { createCloudMachineProgressText, useCreateCloudMachine } from "./useCreateCloudMachine";
-
-/**
- * Starts a cloud machine from Settings. The manager does the work, so this closes once the
- * machine is joined and its checkout has landed — at which point a new task can be started on
- * it normally.
- */
-export function NewCloudMachineSheet(props: {
-  readonly managerId: EnvironmentId;
-  readonly managerLabel: string;
-  readonly connectedEnvironments: ReadonlyArray<ConnectedEnvironmentSummary>;
-  readonly onClose: () => void;
-}) {
-  const insets = useSafeAreaInsets();
-  const creation = useCreateCloudMachine({
-    managerId: props.managerId,
-    connectedEnvironments: props.connectedEnvironments,
-    onCreated: props.onClose,
-  });
-  const working = creation.state.kind === "working";
-
-  return (
-    <Modal
-      visible
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={props.onClose}
-    >
-      <View className="flex-1 bg-screen" style={{ paddingBottom: insets.bottom }}>
-        <View className="flex-row items-center justify-between gap-3 px-5 py-3">
-          <Text className="flex-1 text-xl font-t3-semibold">New cloud machine</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-            disabled={working}
-            onPress={props.onClose}
-            className="min-h-11 justify-center px-3 disabled:opacity-50"
-          >
-            <Text className="text-base text-primary">Cancel</Text>
-          </Pressable>
-        </View>
-        <NewCloudMachineForm
-          managerId={props.managerId}
-          managerLabel={props.managerLabel}
-          creation={creation}
-        />
-      </View>
-    </Modal>
-  );
-}
 
 /**
  * Picks what a cloud machine needs — a repository to clone, where to run it, and which account

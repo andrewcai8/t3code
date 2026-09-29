@@ -76,16 +76,6 @@ export interface ProvisionedBox {
   readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
 }
 
-/** The boxes the hosts listed last, and whether a newer list is on its way. */
-export interface ProvisionedBoxes {
-  readonly boxes: ReadonlyArray<ProvisionedBox>;
-  /**
-   * A host's list is being fetched. Another device may have claimed a box since the last one,
-   * so a draft must not send until it arrives.
-   */
-  readonly refreshing: boolean;
-}
-
 export function sameProvisionedBoxes(
   left: ReadonlyArray<ProvisionedBox>,
   right: ReadonlyArray<ProvisionedBox>,
@@ -103,35 +93,6 @@ export function sameProvisionedBoxes(
       );
     })
   );
-}
-
-/**
- * The boxes a new chat must not start on, each mapped to the host that provisioned it: those the
- * host lists as claimed by a thread other than `threadId`, the chat's own. A box nobody has
- * claimed yet belongs to no other chat, whether it was just created, is still pairing, or was
- * left by a draft that never sent.
- */
-export function boxesOfOtherChats(
-  boxes: ReadonlyArray<ProvisionedBox>,
-  threadId: ThreadId | null,
-): ReadonlyMap<EnvironmentId, EnvironmentId> {
-  return new Map(
-    boxes.flatMap((box) =>
-      box.threadId === null || box.threadId === threadId
-        ? []
-        : [[box.environmentId, box.managerId] as const],
-    ),
-  );
-}
-
-/**
- * Boxes the host has paused, lost, or disposed. Nobody can start a chat on one, so a new chat is
- * never offered one, though a chat already pointing at one keeps it.
- */
-export function idleProvisionedBoxes(
-  boxes: ReadonlyArray<ProvisionedBox>,
-): ReadonlySet<EnvironmentId> {
-  return new Set(boxes.flatMap((box) => (box.lifecycle === "active" ? [] : [box.environmentId])));
 }
 
 export interface ProvisionedBoxClaim {
@@ -233,11 +194,11 @@ export function nextDraftEnvironment<
 
 /**
  * The project a new chat opens on: `requested`, else the first copy of the same logical project
- * in `projects`, else with nothing requested the first project at all. Never a copy on a cloud
- * box, whatever its state, or on a gone machine, since every new chat gets a fresh box. A
- * connected copy wins over one that is not, whose files a new chat could not read. The route or
- * chat in view only ever shapes `requested`. Null when only boxes hold the project, or
- * `requested` is not among `projects`.
+ * in `projects`, else with nothing requested the first project at all. Only a copy on a user
+ * environment, one `environmentState` knows, and never on a gone machine; a cloud box is not a
+ * user environment, and every new chat gets a fresh box. A connected copy wins over one that is
+ * not, whose files a new chat could not read. The route or chat in view only ever shapes
+ * `requested`. Null when only boxes hold the project, or `requested` is not among `projects`.
  */
 export function newChatProject<
   Project extends { readonly environmentId: EnvironmentId; readonly id: ProjectId },
@@ -246,8 +207,7 @@ export function newChatProject<
   /** Every project the client knows, in the order to prefer them. */
   readonly projects: ReadonlyArray<Project>;
   readonly logicalProjectKey: (project: Project) => string;
-  /** Every cloud box the hosts list, claimed or not. */
-  readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
+  /** The user environments' state; null for anything else. */
   readonly environmentState: (
     environmentId: EnvironmentId,
   ) => NewChatEnvironmentState | null | undefined;
@@ -261,12 +221,14 @@ export function newChatProject<
     : undefined;
   if (requested && !asked) return null;
   const key = asked ? input.logicalProjectKey(asked) : null;
-  const candidates = [...(asked ? [asked] : []), ...input.projects].filter(
-    (project) =>
+  const candidates = [...(asked ? [asked] : []), ...input.projects].filter((project) => {
+    const state = input.environmentState(project.environmentId);
+    return (
       (key === null || input.logicalProjectKey(project) === key) &&
-      !input.boxes.has(project.environmentId) &&
-      !isEnvironmentGone(input.environmentState(project.environmentId)),
-  );
+      state != null &&
+      !isEnvironmentGone(state)
+    );
+  });
   return (
     candidates.find(
       (project) => input.environmentState(project.environmentId)?.connection?.phase === "connected",
@@ -311,23 +273,20 @@ export function newChatRunTargets<
     | null
     | undefined;
   /**
-   * Cloud boxes other chats claimed. Every new chat gets a fresh box, so none
-   * of these is a place to start one.
+   * Cloud boxes that are not the chat's own. Every new chat gets a fresh box, so none of these
+   * is a place to start one.
    */
-  readonly boxes: Pick<ReadonlySet<EnvironmentId>, "has">;
-  /** Boxes the host has paused or lost; never offered, but a chat on one may stay. */
-  readonly idleBoxes?: Pick<ReadonlySet<EnvironmentId>, "has">;
+  readonly boxes?: Pick<ReadonlySet<EnvironmentId>, "has">;
 }): NewChatRunTargets<Environment> {
   const cloudProviders = offeredProvisionProviders(input.managerConfig);
   const provider = cloudProviders[0];
   const gone = (environmentId: EnvironmentId) =>
     isEnvironmentGone(input.environmentState(environmentId));
+  const box = (environmentId: EnvironmentId) => input.boxes?.has(environmentId) === true;
   const runs = (environmentId: EnvironmentId) =>
-    !input.boxes.has(environmentId) &&
-    runsLocalAgents(input.environmentState(environmentId)?.serverConfig);
-  const idle = (environmentId: EnvironmentId) => input.idleBoxes?.has(environmentId) === true;
+    !box(environmentId) && runsLocalAgents(input.environmentState(environmentId)?.serverConfig);
   const environments = input.environments.filter(
-    ({ environmentId }) => runs(environmentId) && !gone(environmentId) && !idle(environmentId),
+    ({ environmentId }) => runs(environmentId) && !gone(environmentId),
   );
   const moveTo = (environment: Environment | undefined) =>
     environment ? ({ kind: "environment", environment } as const) : null;
@@ -339,8 +298,7 @@ export function newChatRunTargets<
             input.environments.find(
               ({ environmentId }) =>
                 !gone(environmentId) &&
-                !idle(environmentId) &&
-                !input.boxes.has(environmentId) &&
+                !box(environmentId) &&
                 (runs(environmentId) || provider !== undefined),
             ),
           )

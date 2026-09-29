@@ -78,8 +78,6 @@ export function ConnectionsRouteScreen() {
               <ProvisionedEnvironmentRows
                 managerId={environment.environmentId}
                 managerLabel={environment.environmentLabel}
-                connectedEnvironments={connectedEnvironments}
-                onLeave={onRemoveEnvironmentPress}
               />
               <CloudComputeControls
                 managerId={environment.environmentId}

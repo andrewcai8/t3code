@@ -4,10 +4,7 @@ import type {
   EnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
 import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
-import {
-  createEnvironmentPresentationAtoms,
-  createLimitPresentationsAtom,
-} from "@t3tools/client-runtime/state/presentation";
+import { createEnvironmentPresentationAtoms } from "@t3tools/client-runtime/state/presentation";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
@@ -18,11 +15,6 @@ export const environmentPresentations = createEnvironmentPresentationAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   stateAtom: environmentCatalog.stateAtom,
   serverConfigValueAtom: serverEnvironment.configValueAtom,
-});
-
-export const limitPresentationsAtom = createLimitPresentationsAtom({
-  presentationsAtom: environmentPresentations.presentationsAtom,
-  provisionedBoxes: serverEnvironment.provisionedBoxes,
 });
 
 let previousConnectionPhases: ReadonlyMap<EnvironmentId, EnvironmentConnectionPhase> = new Map();

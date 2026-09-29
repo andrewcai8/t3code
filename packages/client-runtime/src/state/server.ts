@@ -33,7 +33,7 @@ import {
   createRuntimeCommand,
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
-import { type ProvisionedBoxes, sameProvisionedBoxes } from "../cloud/provisioning.ts";
+import { type ProvisionedBox, sameProvisionedBoxes } from "../cloud/provisioning.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -1002,12 +1002,10 @@ export function createServerEnvironmentAtoms<R, E>(
       ),
   });
   const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
-    Atom.make((get): ProvisionedBoxes => {
-      let refreshing = false;
+    Atom.make((get): ReadonlyArray<ProvisionedBox> => {
       const boxes = (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
         const managerId = EnvironmentId.make(hostId);
         const listed = get(provisionedBoxLists({ environmentId: managerId, input: {} }));
-        refreshing ||= listed.waiting;
         return Option.getOrElse(AsyncResult.value(listed), () => []).map(
           ({ environmentId, leaseId, threadId, lifecycle }) => ({
             managerId,
@@ -1020,18 +1018,11 @@ export function createServerEnvironmentAtoms<R, E>(
       });
       // Every refetch decodes a fresh list; keep the previous one while nothing in it changed so
       // views reading it do not re-render on each poll.
-      const previous = Option.getOrNull(get.self<ProvisionedBoxes>());
-      return previous !== null &&
-        previous.refreshing === refreshing &&
-        sameProvisionedBoxes(previous.boxes, boxes)
-        ? previous
-        : { boxes, refreshing };
+      const previous = Option.getOrNull(get.self<ReadonlyArray<ProvisionedBox>>());
+      return previous !== null && sameProvisionedBoxes(previous, boxes) ? previous : boxes;
     }).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
   );
-  /**
-   * Every cloud box the given hosts report, as far as each host has answered, and whether any
-   * host's list is still being fetched.
-   */
+  /** Every cloud box the given hosts report, as far as each host has answered. */
   const provisionedBoxes = (hostIds: ReadonlyArray<EnvironmentId>) =>
     provisionedBoxesFamily(JSON.stringify([...hostIds].sort()));
   /** Refetches the hosts' box lists; a list is otherwise kept until nothing reads it. */

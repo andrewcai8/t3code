@@ -1,9 +1,4 @@
-import {
-  boxesOfOtherChats,
-  idleProvisionedBoxes,
-  type ProvisionedBox,
-} from "@t3tools/client-runtime/cloud";
-import { EnvironmentId, ProjectId, type ServerConfig, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type ServerConfig } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -70,33 +65,20 @@ function makeScope(projects: ReadonlyArray<EnvironmentProject>): HomeProjectScop
   };
 }
 
-function listedBox(
-  environmentId: string,
-  options: { readonly threadId?: string; readonly lifecycle?: ProvisionedBox["lifecycle"] } = {},
-): ProvisionedBox {
-  return {
-    managerId: EnvironmentId.make("host"),
-    environmentId: EnvironmentId.make(environmentId),
-    leaseId: `${environmentId}-lease`,
-    threadId: options.threadId ? ThreadId.make(options.threadId) : null,
-    lifecycle: options.lifecycle ?? "active",
-  };
+/** The user environments' states, one of them a gone machine. A cloud box is never one. */
+function userEnvironments(...environmentIds: ReadonlyArray<string>) {
+  return new Map([
+    ...environmentIds.map((environmentId) => [EnvironmentId.make(environmentId), {}] as const),
+    [EnvironmentId.make("gone"), { connection: { blockedReason: "workspace-missing" as const } }],
+  ]);
 }
 
-const goneMachine = new Map([
-  [EnvironmentId.make("gone"), { connection: { blockedReason: "workspace-missing" as const } }],
-]);
-
 describe("getProjectScopeSelectionTarget", () => {
-  const target = (
-    projects: ReadonlyArray<EnvironmentProject>,
-    preferred: string,
-    listed: ReadonlyArray<ProvisionedBox> = [],
-  ) =>
+  const target = (projects: ReadonlyArray<EnvironmentProject>, preferred: string) =>
     getProjectScopeSelectionTarget(
       makeScope(projects),
       EnvironmentId.make(preferred),
-      newChatPlacement(listed, goneMachine),
+      newChatPlacement(userEnvironments("mac", "server", "host")),
     )?.id;
 
   it("keeps the current environment when it hosts the selected logical project", () => {
@@ -109,16 +91,10 @@ describe("getProjectScopeSelectionTarget", () => {
     expect(target(projects, "other")).toBe("t3code-mac");
   });
 
-  it("opens the host copy when the representative is a box, claimed, unclaimed, or paused", () => {
+  it("opens the host copy when the representative or the preferred machine is a box", () => {
     const projects = [makeProject("t3code-box", "box"), makeProject("t3code-host", "host")];
-    expect(target(projects, "other", [listedBox("box", { threadId: "chat-x" })])).toBe(
-      "t3code-host",
-    );
-    expect(target(projects, "other", [listedBox("box")])).toBe("t3code-host");
-    expect(target(projects, "other", [listedBox("box", { lifecycle: "paused" })])).toBe(
-      "t3code-host",
-    );
-    expect(target(projects, "box", [listedBox("box")])).toBe("t3code-host");
+    expect(target(projects, "other")).toBe("t3code-host");
+    expect(target(projects, "box")).toBe("t3code-host");
   });
 
   it("opens the host copy when the representative's machine is gone", () => {
@@ -128,7 +104,7 @@ describe("getProjectScopeSelectionTarget", () => {
 
   it("offers nothing when only boxes hold the project", () => {
     const projects = [makeProject("t3code-box", "box"), makeProject("t3code-gone", "gone")];
-    expect(target(projects, "box", [listedBox("box")])).toBe(undefined);
+    expect(target(projects, "box")).toBe(undefined);
   });
 });
 
@@ -243,7 +219,7 @@ describe("filterProjectScopes", () => {
       getProjectScopeSelectionTarget(
         matches[0]!,
         EnvironmentId.make("mac"),
-        newChatPlacement([], new Map()),
+        newChatPlacement(userEnvironments("mac", "server")),
       ),
     ).toBe(mac);
     expect(code.projects).toEqual([mac, server]);
@@ -317,9 +293,7 @@ describe("new task environments", () => {
   const everywhere = [onBox, onHost, onNamespaceBox, onLaptop, onServer];
   const hostOnly = [onBox, onHost, onNamespaceBox];
   const savedConnectionsById = {
-    [box]: { environmentLabel: "e2b-sandbox.local" },
     [host]: { environmentLabel: "andrew.megpt.app" },
-    [namespaceBox]: { environmentLabel: "nsc-mac" },
     [laptop]: { environmentLabel: "Laptop" },
     [server]: { environmentLabel: "Build server" },
   };
@@ -332,22 +306,13 @@ describe("new task environments", () => {
     [host, cloudOnlyHost],
     [laptop, { localAgentRuns: true }],
   ]);
-  const claimedBy = (environmentId: EnvironmentId, threadId: string | null) => ({
-    managerId: host,
-    environmentId,
-    leaseId: `${environmentId}-lease`,
-    threadId: threadId === null ? null : ThreadId.make(threadId),
-    lifecycle: "active" as const,
-  });
+  // Two boxes other chats run on, and one this phone just started for the task at hand.
   const ownBox = EnvironmentId.make("own-box");
-  // What the host lists: two boxes other chats claimed, and one a draft started but never sent.
-  const listed = [
-    claimedBy(box, "chat-x"),
-    claimedBy(namespaceBox, "automation-run"),
-    claimedBy(ownBox, null),
-  ];
-  const boxes = boxesOfOtherChats(listed, null);
-  const placement = newChatPlacement(listed, goneMachine);
+  const boxes = new Map([
+    [box, host],
+    [namespaceBox, host],
+  ]);
+  const placement = newChatPlacement(userEnvironments(host, laptop, server));
 
   it("offers servers that run agents, never a running box or a host that runs none", () => {
     expect(
@@ -356,7 +321,6 @@ describe("new task environments", () => {
         selectedProject: onBox,
         savedConnectionsById,
         serverConfigs,
-        boxes,
       }),
     ).toEqual([
       { environmentId: laptop, environmentLabel: "Laptop" },
@@ -370,7 +334,7 @@ describe("new task environments", () => {
     );
   });
 
-  it("never starts on an unclaimed box or a gone machine", () => {
+  it("never starts on a box, even its own, or a gone machine", () => {
     const projects = [onRepo("on-own-box", "own-box"), onRepo("on-gone", "gone"), onHost, onLaptop];
     expect(defaultNewTaskEnvironmentId({ projects, serverConfigs, placement })).toBe(laptop);
     expect(
@@ -404,7 +368,7 @@ describe("new task environments", () => {
     expect(picked(true)).toBe(box);
   });
 
-  it("keeps a resumed draft on the unclaimed box it started", () => {
+  it("keeps a draft on the box it just started", () => {
     const onOwnBox = onRepo("on-own-box", "own-box");
     expect(
       resolveNewTaskEnvironmentId({
@@ -419,31 +383,6 @@ describe("new task environments", () => {
     expect(resolveNewThreadStart({ project: onOwnBox, serverConfigs, boxes })).toEqual({
       kind: "draft",
     });
-  });
-
-  it("never offers or starts on an unclaimed box the host paused", () => {
-    const pausedBox = EnvironmentId.make("paused-box");
-    const onPausedBox = onRepo("on-paused-box", "paused-box");
-    const listedPaused = [{ ...claimedBy(pausedBox, null), lifecycle: "paused" as const }];
-    const input = {
-      projects: [onPausedBox, onHost, onLaptop],
-      serverConfigs,
-      boxes: boxesOfOtherChats(listedPaused, null),
-      idleBoxes: idleProvisionedBoxes(listedPaused),
-      placement: newChatPlacement(listedPaused, new Map()),
-    };
-    expect(
-      newTaskEnvironments({
-        ...input,
-        selectedProject: onPausedBox,
-        savedConnectionsById: {
-          ...savedConnectionsById,
-          [pausedBox]: { environmentLabel: "Paused" },
-        },
-      }),
-    ).toEqual([{ environmentId: laptop, environmentLabel: "Laptop" }]);
-    expect(defaultNewTaskEnvironmentId(input)).toBe(laptop);
-    expect(defaultNewTaskEnvironmentId({ ...input, projects: [onPausedBox, onHost] })).toBe(host);
   });
 
   describe("a draft on another chat's box", () => {

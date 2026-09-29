@@ -1,7 +1,7 @@
 import type { EnvironmentId, OrchestrationThreadShell } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
-import type { ProvisionedBoxes } from "../cloud/provisioning.ts";
+import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { connectionBox } from "../connection/model.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import { isThreadSessionRunning } from "./threads.ts";
@@ -17,7 +17,9 @@ export function createRunningBoxDemandAtom(input: {
   readonly threadsAtom: (
     environmentId: EnvironmentId,
   ) => Atom.Atom<ReadonlyArray<Pick<OrchestrationThreadShell, "session">>>;
-  readonly provisionedBoxes: (hostIds: ReadonlyArray<EnvironmentId>) => Atom.Atom<ProvisionedBoxes>;
+  readonly provisionedBoxes: (
+    hostIds: ReadonlyArray<EnvironmentId>,
+  ) => Atom.Atom<ReadonlyArray<ProvisionedBox>>;
   readonly demandAtom: (environmentId: EnvironmentId) => Atom.Atom<unknown>;
 }) {
   return Atom.make((get): ReadonlyArray<EnvironmentId> => {
@@ -31,7 +33,7 @@ export function createRunningBoxDemandAtom(input: {
         running.set(environmentId, box.managerId);
     }
     if (running.size === 0) return [];
-    const { boxes } = get(input.provisionedBoxes([...new Set(running.values())]));
+    const boxes = get(input.provisionedBoxes([...new Set(running.values())]));
     const held = boxes.flatMap(({ environmentId, lifecycle }) =>
       lifecycle === "active" && running.has(environmentId) ? [environmentId] : [],
     );

@@ -9,32 +9,34 @@ import {
   useRemoteConnectionStatus,
   useSavedRemoteConnection,
 } from "../../state/use-remote-environment-registry";
-import { NewCloudMachineForm } from "../connection/NewCloudMachineSheet";
+import { NewCloudMachineForm } from "../connection/NewCloudMachineForm";
 import { useCreateCloudMachine } from "../connection/useCreateCloudMachine";
 
 type NewTaskCloudMachineRouteParams = {
   /** The host that starts the machine: the project's own host, or the host of the box it is on. */
   readonly environmentId: string;
-  readonly repository: string;
+  /** Absent when started from Connections, which lets the form pick the repository. */
+  readonly repository?: string;
   readonly branch?: string | null;
 };
 
 /**
- * A new thread on a host that runs no agents, or on another chat's box: start a cloud machine
- * cloned from the project's repository, then open the draft on the machine's checkout.
+ * A new cloud chat: start a cloud machine cloned from a repository, then open the draft on the
+ * machine's checkout, so the machine is always the chat's. New threads on a host that runs no
+ * agents, or on another chat's box, arrive with the project's repository.
  */
 export function NewTaskCloudMachineRouteScreen({
   route,
 }: StaticScreenProps<Partial<NewTaskCloudMachineRouteParams> | undefined>) {
   const params = route.params;
-  // Only the new-thread entry points build these params; a bare deep link has nothing to start.
-  if (!params?.environmentId || !params.repository) return null;
+  // A bare deep link names no host to start the machine on.
+  if (!params?.environmentId) return null;
   return (
     <NewTaskCloudMachine
       // A new request while this screen is open starts from its own params, not the last form.
-      key={`${params.environmentId}\n${params.repository}\n${params.branch ?? ""}`}
+      key={`${params.environmentId}\n${params.repository ?? ""}\n${params.branch ?? ""}`}
       environmentId={params.environmentId}
-      repository={params.repository}
+      {...(params.repository ? { repository: params.repository } : {})}
       {...(params.branch ? { branch: params.branch } : {})}
     />
   );
@@ -94,7 +96,7 @@ function NewTaskCloudMachine({
       <NewCloudMachineForm
         managerId={managerId}
         managerLabel={manager?.environmentLabel ?? "The host"}
-        initialRepository={repository}
+        {...(repository ? { initialRepository: repository } : {})}
         creation={creation}
       />
     </View>

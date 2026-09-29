@@ -1,51 +1,35 @@
 import { useAtomValue } from "@effect/atom-react";
-import {
-  isOffDeviceReachablePairingUrl,
-  joinProvisionedEnvironment,
-  provisionedGatewayPairingUrl,
-} from "@t3tools/client-runtime/connection";
+import { useNavigation } from "@react-navigation/native";
 import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
-import { AsyncResult } from "effect/unstable/reactivity";
-import { useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, View } from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Alert, Pressable, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
-import { connectPairing } from "../../connection/onboarding";
-import { holdBoxDemand } from "../../state/box-demand";
 import { cn } from "../../lib/cn";
 import { useThreadShell } from "../../state/entities";
+import { provisionedSandboxLeases } from "../../state/provision-stores";
 import { useEnvironmentQuery } from "../../state/query";
-import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { ConnectionStatusDot } from "./ConnectionStatusDot";
-import { NewCloudMachineSheet } from "./NewCloudMachineSheet";
 import {
   presentProvisionedEnvironment,
-  provisionedEnvironmentRows,
-  isProvisionedEnvironmentConnected,
-  type ProvisionedEnvironmentRow,
-  type ProvisionedJoinState,
+  type ProvisionedRowAction,
 } from "./provisionedEnvironmentRowModel";
 
-const IDLE: ProvisionedJoinState = { kind: "idle" };
+const IDLE: ProvisionedRowAction = { kind: "idle" };
 
 /**
- * "Cloud machines" section: every machine a connected manager has provisioned, with a Join
- * that pairs this device to the machine's own server and a Leave that forgets it again.
- * Renders nothing for an environment that is not a manager.
+ * "Cloud machines" section: every machine a connected manager runs for a chat. A machine belongs
+ * to its chat, so it is opened through that chat; here it can be woken or deleted, and the "+"
+ * starts a new cloud chat. Renders nothing for an environment that is not a manager.
  */
 export function ProvisionedEnvironmentRows(props: {
   readonly managerId: EnvironmentId;
   readonly managerLabel: string;
-  readonly connectedEnvironments: ReadonlyArray<ConnectedEnvironmentSummary>;
-  /** Forget a joined machine on this device. The callback owns the confirm. */
-  readonly onLeave: (environmentId: EnvironmentId) => void;
 }) {
   const config = useAtomValue(serverEnvironment.configValueAtom(props.managerId));
   const supported = config?.environmentControl === true;
@@ -55,96 +39,64 @@ export function ProvisionedEnvironmentRows(props: {
       ? serverEnvironment.provisionedEnvironments({ environmentId: props.managerId, input: {} })
       : null,
   );
-  const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
-    reportFailure: false,
-  });
   const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
     reportFailure: false,
   });
-  const pair = useAtomCommand(connectPairing, { reportFailure: false });
-  const [joinStates, setJoinStates] = useState<Readonly<Record<string, ProvisionedJoinState>>>({});
-  const [creating, setCreating] = useState(false);
-  const rows = useMemo(
-    () => provisionedEnvironmentRows(query.data ?? [], props.connectedEnvironments),
-    [query.data, props.connectedEnvironments],
-  );
-  const { connectedEnvironments, managerId } = props;
-  const manager = connectedEnvironments.find((entry) => entry.environmentId === managerId);
-  const join = useCallback(
-    async (environment: DiscoveredProvisionedEnvironment) => {
-      const setJoinState = (state: ProvisionedJoinState) =>
-        setJoinStates((current) => ({ ...current, [environment.requestId]: state }));
-      setJoinState({ kind: "joining" });
-      // A box connects only while something holds it; joining holds it until the pairing lands.
-      const release = holdBoxDemand(environment.environmentId);
-      try {
-        const outcome = await joinProvisionedEnvironment(environment, {
-          isConnected: (id) => isProvisionedEnvironmentConnected(id, connectedEnvironments),
-          attach: async () => {
-            if (environment.lifecycle === "paused") {
-              const resumed = await resume({
+  const dispose = useAtomCommand(serverEnvironment.disposeProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const navigation = useNavigation();
+  const [actions, setActions] = useState<Readonly<Record<string, ProvisionedRowAction>>>({});
+  const rows = query.data ?? [];
+  const { managerId } = props;
+
+  async function act(
+    environment: DiscoveredProvisionedEnvironment,
+    label: string,
+    run: () => Promise<string | null>,
+  ) {
+    const setAction = (action: ProvisionedRowAction) =>
+      setActions((current) => ({ ...current, [environment.requestId]: action }));
+    setAction({ kind: "working", label });
+    const failure = await run();
+    setAction(failure === null ? IDLE : { kind: "failed", message: failure });
+    query.refresh();
+  }
+  const resumeEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
+    act(environment, "Resuming…", async () => {
+      const result = await resume({
+        environmentId: managerId,
+        input: { environmentId: environment.environmentId },
+      });
+      if (result._tag === "Failure") return "The host could not resume this machine. Try again.";
+      return result.value.kind === "resumed" ? null : result.value.message;
+    });
+  const deleteEnvironment = (environment: DiscoveredProvisionedEnvironment, title: string) =>
+    Alert.alert(
+      "Delete this cloud machine?",
+      `This permanently stops the machine for "${title}" and ends any running work. The chat's history stays.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () =>
+            void act(environment, "Deleting…", async () => {
+              const result = await dispose({
                 environmentId: managerId,
-                input: { environmentId: environment.environmentId },
+                input: { requestId: environment.requestId },
               });
-              if (AsyncResult.isFailure(resumed) || resumed.value.kind !== "resumed") {
-                return {
-                  kind: "refused" as const,
-                  message: AsyncResult.isFailure(resumed)
-                    ? "The manager could not resume this environment. Try again."
-                    : resumed.value.kind === "refused"
-                      ? resumed.value.message
-                      : "The manager could not resume this environment. Try again.",
-                };
-              }
-            }
-            const result = await attach({
-              environmentId: managerId,
-              input: { requestId: environment.requestId },
-            });
-            if (AsyncResult.isFailure(result))
-              throw new Error("The manager could not issue a connection. Try again.");
-            return result.value;
-          },
-          pair: async (pairingUrl) => {
-            const result = await pair({
-              pairingUrl,
-              expectedEnvironmentId: environment.environmentId,
-              box: { managerId },
-            });
-            if (AsyncResult.isFailure(result)) {
-              const error = Cause.squash(result.cause);
-              throw error instanceof Error
-                ? error
-                : new Error("The machine could not be connected. Try again.");
-            }
-            return result.value;
-          },
-          ...(manager?.displayUrl
-            ? {
-                rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
-                  provisionedGatewayPairingUrl(manager.displayUrl, lease.leaseId, pairingUrl),
-              }
-            : {}),
-          canReach: isOffDeviceReachablePairingUrl,
-        });
-        setJoinState(
-          outcome.kind === "joined"
-            ? IDLE
-            : outcome.kind === "unreachable"
-              ? { kind: "unreachable" }
-              : { kind: "failed", message: outcome.message },
-        );
-      } catch (error) {
-        setJoinState({
-          kind: "failed",
-          message: error instanceof Error ? error.message : "The machine could not be joined.",
-        });
-      } finally {
-        release();
-      }
-    },
-    [attach, connectedEnvironments, manager, managerId, pair, resume],
-  );
+              if (result._tag === "Failure" || result.value.kind !== "disposed")
+                return "The host could not delete this machine. Try again.";
+              if (environment.threadId !== null)
+                provisionedSandboxLeases.forget(
+                  scopeThreadRef(environment.environmentId, environment.threadId),
+                );
+              return null;
+            }),
+        },
+      ],
+    );
 
   if (!supported) return null;
   return (
@@ -160,8 +112,13 @@ export function ProvisionedEnvironmentRows(props: {
           {canCreate ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="New cloud machine"
-              onPress={() => setCreating(true)}
+              accessibilityLabel="New cloud chat"
+              onPress={() =>
+                navigation.navigate("NewTaskSheet", {
+                  screen: "NewTaskCloudMachine",
+                  params: { environmentId: String(props.managerId) },
+                })
+              }
               className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70"
             >
               <SymbolView
@@ -201,78 +158,72 @@ export function ProvisionedEnvironmentRows(props: {
       ) : rows.length === 0 ? (
         <View collapsable={false} className="rounded-[24px] bg-card p-5">
           <Text className="text-sm text-foreground-muted">
-            No cloud machines yet. Start one and it keeps running after you close the app.
+            No cloud machines yet. Start a cloud chat and its machine keeps running after you close
+            the app.
           </Text>
         </View>
       ) : (
         <View collapsable={false} className="overflow-hidden rounded-[24px] bg-card">
-          {rows.map((row, index) => (
+          {rows.map((environment, index) => (
             <ProvisionedEnvironmentRowView
-              key={row.environment.requestId}
-              row={row}
-              join={joinStates[row.environment.requestId] ?? IDLE}
-              managerLabel={props.managerLabel}
+              key={environment.requestId}
+              environment={environment}
+              action={actions[environment.requestId] ?? IDLE}
               borderTop={index !== 0}
-              onJoin={() => void join(row.environment)}
-              onLeave={() => {
-                if (row.joined !== null) props.onLeave(row.joined.environmentId);
-              }}
+              onResume={() => void resumeEnvironment(environment)}
+              onDelete={(title) => deleteEnvironment(environment, title)}
             />
           ))}
         </View>
       )}
-      {creating ? (
-        <NewCloudMachineSheet
-          managerId={props.managerId}
-          managerLabel={props.managerLabel}
-          connectedEnvironments={props.connectedEnvironments}
-          onClose={() => {
-            setCreating(false);
-            query.refresh();
-          }}
-        />
-      ) : null}
     </View>
   );
 }
 
 function ProvisionedEnvironmentRowView(props: {
-  readonly row: ProvisionedEnvironmentRow;
-  readonly join: ProvisionedJoinState;
-  readonly managerLabel: string;
+  readonly environment: DiscoveredProvisionedEnvironment;
+  readonly action: ProvisionedRowAction;
   readonly borderTop: boolean;
-  readonly onJoin: () => void;
-  readonly onLeave: () => void;
+  readonly onResume: () => void;
+  readonly onDelete: (title: string) => void;
 }) {
-  const { environment, joined } = props.row;
-  // The machine's thread is only readable once this device has joined it.
-  const thread = useThreadShell(
-    joined !== null && environment.threadId !== null
-      ? scopeThreadRef(environment.environmentId, environment.threadId)
-      : null,
-  );
+  const { environment } = props;
+  const threadRef =
+    environment.threadId === null
+      ? null
+      : scopeThreadRef(environment.environmentId, environment.threadId);
+  // Only a chat this device has is readable here, and only that one can be opened.
+  const thread = useThreadShell(threadRef);
+  const navigation = useNavigation();
   const presentation = presentProvisionedEnvironment({
-    row: props.row,
-    join: props.join,
-    managerLabel: props.managerLabel,
+    environment,
     threadTitle: thread?.title ?? null,
+    action: props.action,
   });
-  const connectionState = joined?.isEnabled ? joined.connectionState : "available";
+  const working = props.action.kind === "working";
+  const buttons = [
+    ...(environment.lifecycle === "paused" ? [{ label: "Resume", onPress: props.onResume }] : []),
+    ...(thread !== null && threadRef !== null
+      ? [
+          {
+            label: "Open chat",
+            onPress: () =>
+              navigation.navigate("Thread", {
+                environmentId: String(threadRef.environmentId),
+                threadId: String(threadRef.threadId),
+              }),
+          },
+        ]
+      : []),
+    { label: "Delete", onPress: () => props.onDelete(presentation.title) },
+  ];
   return (
     <View
       collapsable={false}
-      className={cn(
-        "flex-row items-center gap-3 bg-card px-4 py-3.5",
-        props.borderTop && "border-t border-border",
-      )}
+      className={cn("gap-2 bg-card px-4 py-3.5", props.borderTop && "border-t border-border")}
     >
-      <View className="min-w-0 flex-1 gap-0.5">
+      <View className="min-w-0 gap-0.5">
         <View className="min-w-0 flex-row items-center gap-2">
-          <ConnectionStatusDot
-            state={connectionState}
-            pulse={connectionState === "connecting" || connectionState === "reconnecting"}
-            size={7}
-          />
           <EnvironmentMachineSymbol
             kind="cloud"
             size={14}
@@ -297,18 +248,21 @@ function ProvisionedEnvironmentRowView(props: {
           {presentation.status}
         </Text>
       </View>
-      {presentation.action === null ? (
+      {working ? (
         <ActivityIndicator colorClassName={"accent-icon"} size="small" />
       ) : (
-        <Pressable
-          accessibilityRole="button"
-          onPress={presentation.action === "join" ? props.onJoin : props.onLeave}
-          className="rounded-full bg-subtle px-3.5 py-2 active:opacity-70"
-        >
-          <Text className="text-xs font-t3-bold text-foreground">
-            {presentation.action === "join" ? "Join" : "Leave"}
-          </Text>
-        </Pressable>
+        <View className="flex-row gap-2">
+          {buttons.map((button) => (
+            <Pressable
+              key={button.label}
+              accessibilityRole="button"
+              onPress={button.onPress}
+              className="rounded-full bg-subtle px-3.5 py-2 active:opacity-70"
+            >
+              <Text className="text-xs font-t3-bold text-foreground">{button.label}</Text>
+            </Pressable>
+          ))}
+        </View>
       )}
     </View>
   );

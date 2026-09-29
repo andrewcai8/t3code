@@ -13,7 +13,6 @@ import {
   collectProviderUsageLimits,
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
-  withoutCloudBoxes,
   collectLimitAccounts,
   collectLimitNotices,
   collectLimitPools,
@@ -1429,10 +1428,13 @@ describe("cloud boxes in Limits", () => {
       ]),
     ],
   ]);
-  const boxes = new Set([EnvironmentId.make("live-box"), EnvironmentId.make("paused-box")]);
+  // Clients list user environments only, so a box never reaches Limits.
+  const userEnvironments = new Map(
+    [...presentations].filter(([environmentId]) => !environmentId.endsWith("-box")),
+  );
 
   it("counts each account once, from the machines that own it", () => {
-    const accounts = collectLimitAccounts(withoutCloudBoxes(presentations, boxes));
+    const accounts = collectLimitAccounts(userEnvironments);
     expect(
       accounts.map((account) => [account.email, account.environments.map(({ label }) => label)]),
     ).toEqual([
@@ -1441,9 +1443,9 @@ describe("cloud boxes in Limits", () => {
     ]);
   });
 
-  it("shows a box's anonymous copy as another account when no host lists the box", () => {
+  it("would show a box's anonymous copy as another account", () => {
     expect(
-      collectLimitAccounts(withoutCloudBoxes(presentations, new Set())).map((account) => [
+      collectLimitAccounts(presentations).map((account) => [
         account.displayName,
         account.environments.map(({ label }) => label),
       ]),

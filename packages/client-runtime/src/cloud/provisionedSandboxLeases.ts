@@ -145,6 +145,11 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     readPersisted();
   }
 
+  /** Whether this device started the box and no chat has taken it yet. */
+  function awaitsFirstChat(environmentId: EnvironmentId): boolean {
+    return leases.has(environmentKey(environmentId));
+  }
+
   /**
    * Each box this device holds a lease on, with the host that provisioned it. Only ids the box's
    * host reported count: those recorded on the lease, and a joined box's environment key. A
@@ -176,6 +181,7 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     leaseOwnedByEnvironment,
     forget,
     reload,
+    awaitsFirstChat,
     boxes,
   };
 }

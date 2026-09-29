@@ -35,7 +35,7 @@ export function useBoxLifecycle(environmentId: EnvironmentId | null) {
     // Opening a box's chat asks its host again, since the box may have paused since.
     if (managerId !== null) serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]);
   }, [environmentId, managerId]);
-  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
   return boxes.find((box) => box.environmentId === environmentId)?.lifecycle ?? null;
 }
 
@@ -68,7 +68,7 @@ export function CloudBoxes() {
 
   const hosts = useAutomationHosts();
   const hostIds = useMemo(() => hosts.map((host) => host.environmentId), [hosts]);
-  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
   useEffect(() => {
     void markBoxes(boxes.map(({ environmentId, managerId }) => ({ environmentId, managerId })));
     void markGone(boxes);
