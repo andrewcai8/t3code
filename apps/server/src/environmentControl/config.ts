@@ -218,7 +218,7 @@ const Provisioning = Schema.Struct({
    * and has prepare commands, and a chat was created for it. Default 12; `0`
    * disables warm bases.
    */
-  warmBaseRefreshHours: Schema.optional(Schema.Number),
+  warmBaseRefreshHours: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
   namespace: Schema.optional(
     Schema.Struct({
