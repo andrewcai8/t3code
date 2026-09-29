@@ -15,6 +15,7 @@ import {
   type WarmBaseRecord,
   type WarmBaseSeed,
 } from "./warmBases.ts";
+import { provisionDigest } from "./ProvisionPreparation.ts";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-09-29T12:00:00.000Z");
@@ -86,7 +87,7 @@ describe("choosing a warm base", () => {
     ],
     [
       "a recent failure on the same inputs waits",
-      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 0.5 * HOUR) } }),
+      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 0.5 * HOUR), attempts: 1 } }),
       KEY,
       true,
       null,
@@ -94,7 +95,7 @@ describe("choosing a warm base", () => {
     ],
     [
       "a failure on the same inputs is retried after the backoff",
-      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 2 * HOUR) } }),
+      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 2 * HOUR), attempts: 1 } }),
       KEY,
       false,
       null,
@@ -102,7 +103,33 @@ describe("choosing a warm base", () => {
     ],
     [
       "a failure on older inputs does not hold back new ones",
-      record({ lastFailure: { key: OLD_KEY, reason: "x", at: iso(NOW - 0.5 * HOUR) } }),
+      record({
+        lastFailure: { key: OLD_KEY, reason: "x", at: iso(NOW - 0.5 * HOUR), attempts: 1 },
+      }),
+      KEY,
+      false,
+      null,
+      "start",
+    ],
+    [
+      "a third failure in a row waits four times as long",
+      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 3 * HOUR), attempts: 3 } }),
+      KEY,
+      false,
+      null,
+      "idle",
+    ],
+    [
+      "a third failure in a row is retried after four backoffs",
+      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 5 * HOUR), attempts: 3 } }),
+      KEY,
+      false,
+      null,
+      "start",
+    ],
+    [
+      "repeated failures wait at most a day",
+      record({ lastFailure: { key: KEY, reason: "x", at: iso(NOW - 25 * HOUR), attempts: 10 } }),
       KEY,
       false,
       null,
@@ -251,7 +278,7 @@ describe("warm base upkeep", () => {
       "base",
       null,
       record({
-        lastFailure: { key: KEY, reason: "bun install failed", at: iso(NOW) },
+        lastFailure: { key: KEY, reason: "bun install failed", at: iso(NOW), attempts: 1 },
         retired: [{ kind: "snapshot", snapshotId: "base:default", retiredAt: iso(NOW) }],
       }),
       [],
@@ -315,11 +342,39 @@ describe("warm base upkeep", () => {
     h.clock.now += 31 * 60_000;
     await h.upkeep.tick(policy);
     builds.push(h.frozen.length);
-    expect([failed, builds]).toEqual([
-      record({ lastFailure: { key: KEY, reason: "npm ci exited 1", at: iso(NOW) } }),
-      [1, 1, 2],
+    const again = h.current()?.lastFailure;
+    h.clock.now += 61 * 60_000;
+    await h.upkeep.tick(policy);
+    builds.push(h.frozen.length);
+    h.clock.now += 60 * 60_000;
+    await h.upkeep.tick(policy);
+    builds.push(h.frozen.length);
+    expect([failed, again, builds]).toEqual([
+      record({ lastFailure: { key: KEY, reason: "npm ci exited 1", at: iso(NOW), attempts: 1 } }),
+      { key: KEY, reason: "npm ci exited 1", at: iso(NOW + 61 * 60_000), attempts: 2 },
+      [1, 1, 2, 2, 3],
     ]);
   });
+});
+
+it("reads a failure recorded before attempts were counted as the first", async () => {
+  const stateDir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "warm-bases-"));
+  try {
+    const directory = NodePath.join(stateDir, "provisioning", "warm-bases");
+    await NodeFSP.mkdir(directory, { recursive: true });
+    await NodeFSP.writeFile(
+      NodePath.join(directory, `${provisionDigest("example/repo")}.json`),
+      JSON.stringify({ ...record(), lastFailure: { key: KEY, reason: "old", at: iso(NOW) } }),
+    );
+    expect((await makeWarmBaseStore(stateDir).read("example/repo"))?.lastFailure).toEqual({
+      key: KEY,
+      reason: "old",
+      at: iso(NOW),
+      attempts: 1,
+    });
+  } finally {
+    await NodeFSP.rm(stateDir, { recursive: true, force: true });
+  }
 });
 
 it("stores one private record per repository", async () => {
@@ -328,12 +383,19 @@ it("stores one private record per repository", async () => {
     const store = makeWarmBaseStore(stateDir);
     const saved = record({ ready: ready(KEY, NOW) });
     await store.write(saved);
-    await store.write({ ...saved, lastFailure: { key: KEY, reason: "later", at: iso(NOW) } });
+    await store.write({
+      ...saved,
+      lastFailure: { key: KEY, reason: "later", at: iso(NOW), attempts: 2 },
+    });
     expect([
       await store.read("Example/Repo"),
       await store.read("example/other"),
       (await store.list()).length,
-    ]).toEqual([{ ...saved, lastFailure: { key: KEY, reason: "later", at: iso(NOW) } }, null, 1]);
+    ]).toEqual([
+      { ...saved, lastFailure: { key: KEY, reason: "later", at: iso(NOW), attempts: 2 } },
+      null,
+      1,
+    ]);
   } finally {
     await NodeFSP.rm(stateDir, { recursive: true, force: true });
   }

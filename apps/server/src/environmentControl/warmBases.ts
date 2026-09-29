@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { canonicalRepository } from "./config.ts";
 import { GitRevision, provisionDigest, Sha256, writeReplace } from "./ProvisionPreparation.ts";
@@ -43,7 +44,13 @@ export const WarmBaseRecord = Schema.Struct({
     Schema.Struct({ key: Sha256, requestId: ProvisionRequestId, startedAt: IsoDateTime }),
   ),
   lastFailure: Schema.NullOr(
-    Schema.Struct({ key: Sha256, reason: Schema.String, at: IsoDateTime }),
+    Schema.Struct({
+      key: Sha256,
+      reason: Schema.String,
+      at: IsoDateTime,
+      /** Consecutive failures for `key`. Records from before it was counted read as one. */
+      attempts: Schema.Int.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+    }),
   ),
   /** Things to dispose once the provider lets us: replaced snapshots and finished build boxes. */
   retired: Schema.Array(
@@ -68,6 +75,7 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 /** A build box outlives its deadline by long enough to be sealed and snapshotted. */
 const BUILD_RETENTION_MS = 2 * HOUR;
+const MAX_FAILURE_BACKOFF_MS = 24 * HOUR;
 
 export interface WarmBasePolicy {
   /** A base this old is rebuilt. */
@@ -133,8 +141,11 @@ export function nextWarmStep(
       ? wanted || record !== null
       : ready.key !== currentKey || age(ready.builtAt, now) >= policy.refreshMs;
   if (!needed) return "idle";
-  const failure = record?.lastFailure;
-  return failure && failure.key === currentKey && age(failure.at, now) < policy.failureBackoffMs
+  const last = record?.lastFailure;
+  return last &&
+    last.key === currentKey &&
+    age(last.at, now) <
+      Math.min(policy.failureBackoffMs * 2 ** (last.attempts - 1), MAX_FAILURE_BACKOFF_MS)
     ? "idle"
     : "start";
 }
@@ -154,20 +165,27 @@ const retireAll = (record: WarmBaseRecord, now: number): WarmBaseRecord => ({
   build: null,
   retired: [...record.retired, ...retiredReady(record, now), ...retiredBuild(record, now)],
 });
+/** Another failure for `key`: consecutive ones for the same key back off longer. */
+const failure = (record: WarmBaseRecord, key: string, reason: string, now: number) => ({
+  key,
+  reason,
+  at: iso(now),
+  attempts: record.lastFailure?.key === key ? record.lastFailure.attempts + 1 : 1,
+});
 /** A chat failed to prepare from the base, so no chat starts from it again. */
 const invalidateReady = (record: WarmBaseRecord, reason: string, now: number): WarmBaseRecord =>
   record.ready
     ? {
         ...record,
         ready: null,
-        lastFailure: { key: record.ready.key, reason, at: iso(now) },
+        lastFailure: failure(record, record.ready.key, reason, now),
         retired: [...record.retired, ...retiredReady(record, now)],
       }
     : record;
 const abandonBuild = (record: WarmBaseRecord, reason: string, now: number): WarmBaseRecord => ({
   ...record,
   build: null,
-  lastFailure: record.build ? { key: record.build.key, reason, at: iso(now) } : record.lastFailure,
+  lastFailure: record.build ? failure(record, record.build.key, reason, now) : record.lastFailure,
   retired: [...record.retired, ...retiredBuild(record, now)],
 });
 const promoteBuild = (
@@ -366,7 +384,7 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
           }),
         );
       if ("reason" in frozen)
-        record = { ...record, lastFailure: { key, reason: frozen.reason, at: iso(now) } };
+        record = { ...record, lastFailure: failure(record, key, frozen.reason, now) };
       else {
         // Recorded before the build is driven, so a crash mid-build still
         // finds and disposes it.
