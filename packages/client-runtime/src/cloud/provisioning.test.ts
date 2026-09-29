@@ -20,6 +20,8 @@ import {
   type CloudProvisionPorts,
   claimFirstTurnBox,
   claimProvisionedBox,
+  draftBoxLease,
+  leaseReachesBox,
   type NewChatEnvironmentState,
   newChatProject,
   newChatRunTargets,
@@ -718,6 +720,18 @@ describe("claimProvisionedBox", () => {
       claims: [],
     });
     await expect(attempt(lease, server)).resolves.toEqual({ claimed: false, claims: [] });
+  });
+
+  it("claims a draft's own box from before leases named it, before the box is marked", async () => {
+    // Provisioned before the upgrade: the lease names no box, and no host list has marked it yet.
+    // The draft's held send still records the box it made ready.
+    const legacy = draftBoxLease(lease, box);
+    expect(leaseReachesBox(legacy, box, () => null)).toBe(true);
+    expect(leaseReachesBox(legacy, server, () => null)).toBe(false);
+    await expect(attempt(legacy, box)).resolves.toEqual({ claimed: true, claims: [box] });
+    // With nothing ready, the lease stays as recorded.
+    expect(draftBoxLease(lease, null)).toBe(lease);
+    expect(draftBoxLease({ ...lease, environmentId: box }, server).environmentId).toBe(box);
   });
 
   it("claims the box for a chat that started on it", async () => {
