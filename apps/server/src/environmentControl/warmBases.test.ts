@@ -2,11 +2,8 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import {
-  ProvisionOperation,
-  ProvisionRequestId,
-  type ProvisionOperationState,
-} from "@t3tools/contracts";
+import { ProvisionOperation, ProvisionRequestId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import {
@@ -21,7 +18,7 @@ import {
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-09-29T12:00:00.000Z");
-const iso = (millis: number) => new Date(millis).toISOString();
+const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis));
 const KEY = "1".repeat(64);
 const OLD_KEY = "0".repeat(64);
 const REVISION = "a".repeat(40);
@@ -128,7 +125,7 @@ describe("choosing a warm base", () => {
 });
 
 const decodeOperation = Schema.decodeUnknownSync(ProvisionOperation);
-const operation = (requestId: string, state: ProvisionOperationState | { kind: string }) =>
+const operation = (requestId: string, state: unknown) =>
   decodeOperation({
     request: {
       requestId,
@@ -159,10 +156,10 @@ const readyState = {
   },
 };
 
-function harness(initial: WarmBaseRecord[], buildState: { kind: string } = { kind: "intent" }) {
+function harness(initial: WarmBaseRecord[], buildState: unknown = { kind: "intent" }) {
   const clock = { now: NOW };
   const records = new Map(initial.map((entry) => [entry.repository, entry]));
-  const states = new Map<string, { kind: string }>();
+  const states = new Map<string, unknown>();
   const frozen: string[] = [];
   const sealed: string[] = [];
   const deleteAttempts: string[] = [];
@@ -182,7 +179,7 @@ function harness(initial: WarmBaseRecord[], buildState: { kind: string } = { kin
       states.set(requestId, buildState);
       return KEY;
     },
-    ensure: async (requestId) => operation(requestId, states.get(requestId)!),
+    ensure: async (requestId) => operation(requestId, states.get(requestId)),
     cancel: async (requestId) => operation(requestId, { kind: "disposed" }),
     seal: async (built) => {
       sealed.push(built.request.requestId);

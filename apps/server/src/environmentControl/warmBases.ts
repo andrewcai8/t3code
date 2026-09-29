@@ -9,6 +9,7 @@ import {
   type ProvisionOperation,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { canonicalRepository } from "./config.ts";
 import { GitRevision, provisionDigest, Sha256, writeReplace } from "./ProvisionPreparation.ts";
@@ -90,7 +91,7 @@ export function warmBasePolicy(refreshHours = 12): WarmBasePolicy {
 }
 
 const age = (iso: string, now: number) => now - Date.parse(iso);
-const iso = (millis: number) => new Date(millis).toISOString();
+const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis));
 
 /** The bare template a chat keyed `key` starts from, or null to start cold. */
 export function selectWarmTemplate(
