@@ -1,5 +1,5 @@
 import {
-  type EnvironmentId,
+  EnvironmentId,
   type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionClaimInput,
   type DiscoveredProvisionedEnvironment,
@@ -125,6 +125,20 @@ export function leaseReachesBox(
   return lease.environmentId !== undefined
     ? lease.environmentId === environmentId
     : boxManager(environmentId) === lease.managerEnvironmentId;
+}
+
+/**
+ * A draft's lease, naming its box from the draft's ready send when the lease predates leases
+ * naming their box. Such a box may not be marked yet on its first send, and the ready send is
+ * the one record of it. A lease that names its box keeps it.
+ */
+export function draftBoxLease<Lease extends Pick<ProvisionedSandboxLease, "environmentId">>(
+  lease: Lease,
+  readyEnvironmentId: string | null,
+): Lease {
+  return lease.environmentId !== undefined || readyEnvironmentId === null
+    ? lease
+    : { ...lease, environmentId: EnvironmentId.make(readyEnvironmentId) };
 }
 
 /**

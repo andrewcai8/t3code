@@ -7,6 +7,7 @@ import {
 import {
   type CloudProvisioningProgressPhase,
   claimProvisionedBox,
+  draftBoxLease,
   leaseReachesBox,
   newChatProject,
   newChatRunTargets,
@@ -1553,6 +1554,14 @@ function releaseChatTimelineAnchor<T extends { readonly messageId: MessageId | n
   current: T,
 ): T {
   return current.messageId === null ? current : { ...current, messageId: null };
+}
+
+/** The box a draft's held cloud send made ready, if any. */
+function readyDraftBoxEnvironmentId(draftId: DraftId): string | null {
+  return (
+    useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend
+      ?.readyEnvironmentId ?? null
+  );
 }
 
 /** The host a saved box connection names, read when a send or pick needs it. */
@@ -4199,7 +4208,14 @@ export default function ChatView(props: ChatViewProps) {
       setPendingCloudSendEnvironmentId(null);
       // Moving off the box this draft provisioned lets the box go, so no later send claims it.
       const lease = provisionedSandboxFor(draftId);
-      if (lease && !leaseReachesBox(lease, nextEnvironmentId, catalogBoxManager)) {
+      if (
+        lease &&
+        !leaseReachesBox(
+          draftBoxLease(lease, readyDraftBoxEnvironmentId(draftId)),
+          nextEnvironmentId,
+          catalogBoxManager,
+        )
+      ) {
         cancelProvisionRequest(draftId);
         useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
       }
@@ -9258,9 +9274,13 @@ export default function ChatView(props: ChatViewProps) {
       if (backgroundThreadRef) {
         beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
       }
-      const draftLease =
+      const storedDraftLease =
         isLocalDraftThread && typeof composerDraftTarget === "string"
           ? provisionedSandboxFor(composerDraftTarget)
+          : null;
+      const draftLease =
+        storedDraftLease && typeof composerDraftTarget === "string"
+          ? draftBoxLease(storedDraftLease, readyDraftBoxEnvironmentId(composerDraftTarget))
           : null;
       // A draft keeps its lease when provisioning fails, and may then run on a real server. Only
       // a send on its own box claims the box; any other leaves the box for the draft to dispose.
