@@ -42,6 +42,7 @@ import {
 } from "../../lib/modelOptions";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { useEnvironments } from "../../state/environments";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import {
@@ -104,10 +105,12 @@ import {
   resolveNewTaskLocalWorkspaceSelection,
 } from "./new-task-context-presentation";
 import {
+  newChatPlacement,
   newTaskEnvironments,
   resolveEnvironmentProjectMatch,
   resolveNewTaskEnvironmentId,
   resolveNewThreadStart,
+  type NewChatPlacement,
   type NewThreadStart,
 } from "./new-task-project-selection";
 import { useProvisionedBoxes } from "./use-provisioned-boxes";
@@ -186,6 +189,7 @@ type NewTaskFlowContextValue = {
   readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
   /** A host's box list is being refetched; a task must not start until it arrives. */
   readonly boxesRefreshing: boolean;
+  readonly placement: NewChatPlacement;
   /** How to leave another chat's box the flow was pointed at; null when it is on none. */
   readonly boxStart: NewThreadStart | null;
   readonly selectedProject: EnvironmentProject | null;
@@ -251,6 +255,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const serverConfigs = useServerConfigs();
   const { boxes: provisionedBoxes, refreshing: boxesRefreshing } =
     useProvisionedBoxes(serverConfigs);
+  const { presentationById } = useEnvironments();
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
     useLegacyPlanModeState();
@@ -275,6 +280,10 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // A new task has no thread yet, so every claimed box is another chat's.
   const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
   const idleBoxes = useMemo(() => idleProvisionedBoxes(provisionedBoxes), [provisionedBoxes]);
+  const placement = useMemo(
+    () => newChatPlacement(provisionedBoxes, presentationById),
+    [provisionedBoxes, presentationById],
+  );
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   // The new-task draft the composer is bound to. Null until a project is
   // chosen; each New Task entry mints its own, so a project can hold several.
@@ -285,14 +294,15 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const [editingPendingTask, setEditingPendingTask] = useState<QueuedThreadMessage | null>(null);
   const pendingLocalBranchSyncDraftKeysRef = useRef(new Set<string>());
   // A host that runs no agents still lists its projects, but a new task starts
-  // elsewhere when anywhere else holds one; the same goes for another chat's box.
+  // elsewhere when anywhere else holds one. It starts on a box only when picked there, as a
+  // fresh cloud machine's draft is.
   const selectedEnvironmentId = resolveNewTaskEnvironmentId({
     picked: selectedEnvironmentIdOverride,
     pinned: editingPendingTask !== null,
     projects,
     serverConfigs,
     boxes,
-    idleBoxes,
+    placement,
   });
   // Mirrors `editingPendingTask` synchronously so the unmount flush cannot act
   // on a task whose editing session already ended this render.
@@ -1208,6 +1218,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       environments,
       boxes,
       boxesRefreshing,
+      placement,
       boxStart,
       selectedProject,
       modelOptions,
@@ -1257,6 +1268,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       environments,
       boxes,
       boxesRefreshing,
+      placement,
       boxStart,
       expandedProvider,
       filteredBranches,

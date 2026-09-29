@@ -133,7 +133,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
   const [searchText, setSearchText] = useState("");
-  const { projectScopes, selectedEnvironmentId, setProject, boxes } = useNewTaskFlow();
+  const { projectScopes, selectedEnvironmentId, setProject, boxes, placement } = useNewTaskFlow();
   const { state: catalogState } = useWorkspaceState();
   const navigation = useNavigation();
   const isFocused = useIsFocused();
@@ -152,7 +152,10 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
     : null;
   const screenTitle = incomingShare ? "Start a task" : "Choose project";
   const projectEmptyState = deriveProjectEmptyState(catalogState);
-  const visibleScopes = filterProjectScopes(projectScopes, searchText);
+  const visibleScopes = filterProjectScopes(projectScopes, searchText).flatMap((scope) => {
+    const selectionTarget = getProjectScopeSelectionTarget(scope, selectedEnvironmentId, placement);
+    return selectionTarget ? [{ scope, selectionTarget }] : [];
+  });
   const resumedDestinationKeyRef = useRef<string | null>(null);
   const reservedDestinationProject = incomingShare?.destination
     ? (projects.find(
@@ -330,13 +333,8 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                   : "overflow-hidden rounded-[24px] bg-card"
               }
             >
-              {visibleScopes.map((scope, scopeIndex) => {
+              {visibleScopes.map(({ scope, selectionTarget }, scopeIndex) => {
                 const hasMultipleProjects = scope.projects.length > 1;
-                const selectionTarget = getProjectScopeSelectionTarget(
-                  scope,
-                  selectedEnvironmentId,
-                  boxes,
-                );
                 if (Platform.OS === "android") {
                   return (
                     <MaterialListRow
