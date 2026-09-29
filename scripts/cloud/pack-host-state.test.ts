@@ -191,6 +191,7 @@ describe("packHostState", () => {
           egressAllow: ["registry.npmjs.org"],
           shellEnvironment: [{ name: "GH_TOKEN", source: "/data/t3/shell-environment/GH_TOKEN" }],
           skills: [{ source: "/data/t3/skills/0/review-skills", name: "review" }],
+          repositories: [{ repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } }],
         },
       });
     } finally {
@@ -213,6 +214,7 @@ describe("packHostState", () => {
           namespace: { size: "m" },
           repositories: [
             { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
+            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
           ],
         },
       });
@@ -242,6 +244,7 @@ describe("packHostState", () => {
           namespace: { size: "m" },
           repositories: [
             { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
+            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
           ],
         },
       });
@@ -262,6 +265,7 @@ describe("packHostState", () => {
       assert.deepEqual(packed.config.provisioning.namespace, { size: "m" });
       assert.deepEqual(packed.config.provisioning.repositories, [
         { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
+        { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
       ]);
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });

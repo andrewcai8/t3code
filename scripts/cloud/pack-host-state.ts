@@ -258,13 +258,16 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     namespaceToken || input.namespaceSession || input.namespaceFederated,
   );
   // A repository entry's `workspaceFiles` name paths on this machine, so only
-  // its Namespace settings travel. Their artifact paths live in Namespace's
-  // storage, not on disk.
-  const namespaceRepositories = namespaceAuthorized
-    ? (provisioning?.repositories ?? []).flatMap(({ repository, namespace }) =>
-        namespace ? [{ repository, namespace }] : [],
-      )
-    : [];
+  // its E2B and Namespace settings travel. Namespace artifact paths live in
+  // Namespace's storage, not on disk.
+  const repositories = (provisioning?.repositories ?? []).flatMap(
+    ({ repository, e2b, namespace }) => {
+      const carried = namespaceAuthorized ? namespace : undefined;
+      return e2b || carried
+        ? [{ repository, ...(e2b ? { e2b } : {}), ...(carried ? { namespace: carried } : {}) }]
+        : [];
+    },
+  );
   return {
     accounts: plan.accounts,
     skipped: [...plan.skipped, ...skippedFiles],
@@ -294,7 +297,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
         ...(namespaceAuthorized && provisioning?.namespace
           ? { namespace: provisioning.namespace }
           : {}),
-        ...(namespaceRepositories.length ? { repositories: namespaceRepositories } : {}),
+        ...(repositories.length ? { repositories } : {}),
       },
     },
   };
