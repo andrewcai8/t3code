@@ -23,6 +23,17 @@ case "${1:-}" in
     printf 'user ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/t3-user
     chmod 440 /etc/sudoers.d/t3-user
     install -d -o user -g user /home/user/.local /home/user/.local/bin /home/user/.bun /home/user/.bun/bin
+    # Chrome for headless browser tests. The .deb, not Ubuntu's chromium, which is a snap stub.
+    temporary=$(mktemp -d)
+    download \
+      https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_154.0.8037.57-1_amd64.deb \
+      "$temporary/chrome.deb" \
+      66c0645f6a19871bab2844b8537c11a0db2e7d3bea8ef85a1c7cb52a54e65a3e
+    apt-get install -y --no-install-recommends "$temporary/chrome.deb" fonts-liberation fonts-noto-color-emoji
+    rm -rf "$temporary"
+    # MeGPT's browser checks default to this path, and box processes do not inherit template env.
+    printf '#!/bin/sh\nexec /opt/google/chrome/google-chrome --disable-dev-shm-usage "$@"\n' > /usr/local/bin/chromium-headless
+    chmod 755 /usr/local/bin/chromium-headless
     ;;
   runtimes)
     temporary=$(mktemp -d)
@@ -66,9 +77,9 @@ case "${1:-}" in
     ln -sfn "$destination/cursor-agent" "$HOME/.local/bin/agent"
     ln -sfn agent "$HOME/.local/bin/cursor-agent"
     download \
-      https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.4.zip \
+      https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.36.45.zip \
       "$temporary/awscli.zip" \
-      0c59444563f4df735eeb5481f6165f95dae546c33761760d8be9855d5cfe2d12
+      0f02381483b0a5ca127a4cb379e656a73007b346561a5e41d3249d3bc1861226
     unzip -q "$temporary/awscli.zip" -d "$temporary"
     "$temporary/aws/install" --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin"
     ;;
@@ -115,7 +126,7 @@ case "${1:-}" in
     ln -sfn "$destination/swiftlint-static" "$HOME/.local/bin/swiftlint"
     ;;
   verify)
-    for tool in node npm bun git gh rg python3 redis-server redis-cli go ruby t3 vp codex claude agent aws wrangler swift swiftlint; do
+    for tool in node npm bun git gh rg python3 redis-server redis-cli go ruby t3 vp codex claude agent aws wrangler swift swiftlint google-chrome chromium-headless; do
       command -v "$tool"
     done
     test "$(node --version)" = v24.21.0
@@ -125,7 +136,9 @@ case "${1:-}" in
     agent --version
     t3 --version
     vp --version
-    aws --version | grep -q '^aws-cli/2\.37\.4 '
+    # MeGPT pins this version, so its setup keeps the one on PATH.
+    aws --version | grep -q '^aws-cli/2\.36\.45 '
+    chromium-headless --version
     test "$(wrangler --version)" = 4.141.0
     # The repository pins pnpm as its package manager, and corepack on this
     # image is too old to install it on Node 24.
@@ -136,6 +149,8 @@ case "${1:-}" in
     trap 'rm -rf "$temporary"' EXIT
     python3 -m venv "$temporary/venv"
     "$temporary/venv/bin/python" -c 'import ssl; print(ssl.OPENSSL_VERSION)'
+    timeout 60 chromium-headless --headless=new --no-sandbox --disable-gpu --user-data-dir="$temporary/chrome" \
+      --dump-dom 'data:text/html,<title>t3-browser-ready</title>' | grep -q '<title>t3-browser-ready</title>'
     printf 'print("swift-ok")\n' > "$temporary/main.swift"
     swiftc "$temporary/main.swift" -o "$temporary/swift-proof"
     test "$("$temporary/swift-proof")" = swift-ok
