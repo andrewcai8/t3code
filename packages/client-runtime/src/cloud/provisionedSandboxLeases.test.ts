@@ -92,3 +92,20 @@ describe("provisioned sandbox leases", () => {
     expect(records.has(PROVISIONED_SANDBOX_LEASES_STORAGE_KEY)).toBe(false);
   });
 });
+
+describe("boxes", () => {
+  it("names each box this device holds a lease on, with its host", () => {
+    const { storage } = memoryStorage();
+    const store = createProvisionedSandboxLeaseStore(storage);
+    store.remember("draft-still-provisioning", lease);
+    store.remember(threadRef, lease);
+    store.rememberForEnvironment(EnvironmentId.make("joined"), {
+      ...lease,
+      managerEnvironmentId: EnvironmentId.make("other-host"),
+    });
+    expect(store.boxes()).toEqual([
+      { environmentId: "child", managerId: "manager" },
+      { environmentId: "joined", managerId: "other-host" },
+    ]);
+  });
+});
