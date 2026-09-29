@@ -27,6 +27,23 @@ and cached data. Explicit removal closes the scope and clears credentials,
 projections, and platform-owned state such as drafts. Cloud-account changes apply
 to relay registrations; they must not discard directly paired environments.
 
+## Cloud boxes belong to their chats
+
+A cloud box is saved like any paired server, so its credential and cached chat
+survive a restart, but its target carries the host that provisioned it
+(`BearerConnectionTarget.box`). That mark decides two things once, instead of
+each surface filtering boxes out. Environment lists, from
+[`presentationsAtom`](../../packages/client-runtime/src/state/presentation.ts) and
+`userEnvironmentIds`, leave boxes out, so no picker, grouping, or settings list
+can offer one. The registry connects a box only while something
+[demands](../../packages/client-runtime/src/connection/registry.ts) it: its open
+chat, the draft that is provisioning it, or a turn running on it that its host
+still lists active. Read a box's own state through the point atoms.
+
+Boxes saved before the mark existed are marked from this device's lease records
+and from the lists hosts report. A box paired from a bare link stays an ordinary
+environment until its host lists it.
+
 ## HTTP authorization
 
 RPC sessions authenticate at socket upgrade, while HTTP requests need current

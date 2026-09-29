@@ -6,13 +6,14 @@ import {
 } from "@t3tools/client-runtime/cloud";
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
+import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useEffectEvent, useRef } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
 import { useProvisionedEnvironmentJoin } from "../connection/useProvisionedEnvironmentJoin";
 import { useVisibleInterval } from "../hooks/useVisibleInterval";
-import { useEnvironments } from "../state/environments";
+
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -80,7 +81,7 @@ function HostAutomationRunAutoJoin({
   managerId: EnvironmentId;
   onJoined: () => void;
 }) {
-  const { environments } = useEnvironments();
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const query = useEnvironmentQuery(
     serverEnvironment.joinableAutomationEnvironments({ environmentId: managerId, input: {} }),
@@ -95,7 +96,7 @@ function HostAutomationRunAutoJoin({
       joining.current = true;
       try {
         const joins = automationJoins.joined();
-        const known = new Set(environments.map((environment) => environment.environmentId));
+        const known = new Set(catalog.entries.keys());
         const selected = automationEnvironmentsToJoin(joinable, {
           now: Date.now(),
           known,

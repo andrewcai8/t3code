@@ -7,6 +7,7 @@ import {
 import {
   type CloudProvisioningProgressPhase,
   claimProvisionedBox,
+  newChatProject,
   newChatRunTargets,
   nextDraftEnvironment,
   provisionCloudEnvironment,
@@ -53,13 +54,13 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderInteractionMode,
   ProviderDriverKind,
-  resolveEnvironmentMachineKind,
   RuntimeMode,
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
   cloneRepository,
 } from "@t3tools/contracts";
 import {
+  connectionBox,
   provisionedGatewayPairingUrl,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -384,6 +385,7 @@ import { sourceControlEnvironment } from "../state/sourceControl";
 import { useProjectClone } from "../state/projectClones";
 import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
 import {
+  useEnvironment,
   useEnvironments,
   useEnvironmentHttpBaseUrl,
   usePrimaryEnvironment,
@@ -414,7 +416,6 @@ import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImag
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import {
-  type EnvironmentOption,
   resolveEffectiveEnvMode,
   resolveLocalCheckoutBranchMismatch,
   shouldShowComposerContextStrip,
@@ -517,6 +518,8 @@ import {
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
   needsLoadBalancedPick,
+  isDraftOnAnotherChatsBox,
+  projectEnvironmentOptions,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -537,6 +540,7 @@ import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { refreshProvisionedEnvironments, useNewChatBoxes } from "../cloud/automationHosts";
+import { holdBoxDemand, useBoxDemand, useBoxLifecycle } from "../cloud/CloudBoxes";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -1639,10 +1643,6 @@ export default function ChatView(props: ChatViewProps) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
-  const environmentById = useMemo(
-    () => new Map(environments.map((environment) => [environment.environmentId, environment])),
-    [environments],
-  );
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
   const draftThread = useComposerDraftStore((store) =>
@@ -2072,6 +2072,27 @@ export default function ChatView(props: ChatViewProps) {
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
+  // A cloud box is not a user environment, so `environments` leaves it out. The chat it runs,
+  // or the draft that just started it, still reads it.
+  const activeThreadEnvironment = useEnvironment(activeThreadEnvironmentId);
+  const cloudBoxIds = useAtomValue(environmentCatalog.boxIdsAtom);
+  const ownBoxEnvironmentId = draftThread?.pendingEnvironmentSend?.readyEnvironmentId ?? null;
+  const onAnotherChatsBox = isDraftOnAnotherChatsBox({
+    draftId,
+    environmentId: activeThreadEnvironmentId,
+    ownBoxEnvironmentId,
+    boxIds: cloudBoxIds,
+  });
+  const environmentById = useMemo(() => {
+    const byId = new Map(
+      environments.map((environment) => [environment.environmentId, environment]),
+    );
+    if (activeThreadEnvironment !== null && !onAnotherChatsBox) {
+      byId.set(activeThreadEnvironment.environmentId, activeThreadEnvironment);
+    }
+    return byId;
+  }, [activeThreadEnvironment, environments, onAnotherChatsBox]);
+  useBoxDemand(onAnotherChatsBox ? null : activeThreadEnvironmentId);
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
@@ -2484,6 +2505,8 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const activeEnvironment =
     activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
+  // Opening a paused box's chat wakes it through its host.
+  const activeBoxLifecycle = useBoxLifecycle(onAnotherChatsBox ? null : activeThreadEnvironmentId);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
@@ -2549,6 +2572,10 @@ export default function ChatView(props: ChatViewProps) {
     },
     [recoverEnvironment, retryEnvironment],
   );
+  useEffect(() => {
+    if (activeBoxLifecycle !== "paused" || activeThreadEnvironmentId === null) return;
+    void handleReconnectActiveEnvironment(activeThreadEnvironmentId);
+  }, [activeBoxLifecycle, activeThreadEnvironmentId, handleReconnectActiveEnvironment]);
   const disconnectDelayElapsed = useEnvironmentDisconnectDelay(
     activeEnvironmentUnavailable ? activeEnvironment.environmentId : null,
   );
@@ -2556,6 +2583,7 @@ export default function ChatView(props: ChatViewProps) {
     disconnectDelayElapsed &&
     activeEnvironment !== null &&
     activeEnvironment.entry.target._tag !== "PrimaryConnectionTarget" &&
+    connectionBox(activeEnvironment.entry.target) === null &&
     !isDesktopLocalConnectionTarget(activeEnvironment.entry.target);
   const [disconnectingEnvironment, setDisconnectingEnvironment] = useState(false);
   const handleDisconnectActiveEnvironment = useCallback(
@@ -2583,30 +2611,13 @@ export default function ChatView(props: ChatViewProps) {
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
-    const memberProjects = allProjects.filter(
-      (p) => deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey,
-    );
-    const seen = new Set<string>();
-    const envs: EnvironmentOption[] = [];
-    for (const p of memberProjects) {
-      if (seen.has(p.environmentId)) continue;
-      seen.add(p.environmentId);
-      const isPrimary = p.environmentId === primaryEnvironmentId;
-      const environment = environmentById.get(p.environmentId) ?? null;
-      envs.push({
-        environmentId: p.environmentId,
-        projectId: p.id,
-        label: environment?.label ?? p.environmentId,
-        isPrimary,
-        machine: resolveEnvironmentMachineKind(environment?.serverConfig ?? null),
-      });
-    }
-    // Sort: primary first, then alphabetical
-    envs.sort((a, b) => {
-      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-      return a.label.localeCompare(b.label);
+    return projectEnvironmentOptions({
+      projects: allProjects.filter(
+        (p) => deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey,
+      ),
+      environmentById,
+      primaryEnvironmentId,
     });
-    return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
   const newChatBoxes = useNewChatBoxes(draftId, threadId);
   const runTargets = useMemo(
@@ -4087,6 +4098,37 @@ export default function ChatView(props: ChatViewProps) {
     draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
       ? runTargets.redirect.environment
       : null;
+  const projectOffAnotherChatsBox = useMemo(
+    () =>
+      onAnotherChatsBox && activeProject
+        ? newChatProject({
+            requested: scopeProjectRef(activeProject.environmentId, activeProject.id),
+            projects: allProjects,
+            logicalProjectKey: (project) =>
+              deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
+            boxes: cloudBoxIds,
+            environmentState: (environmentId) => environmentById.get(environmentId),
+          })
+        : null,
+    [
+      activeProject,
+      allProjects,
+      cloudBoxIds,
+      environmentById,
+      onAnotherChatsBox,
+      projectGroupingSettings,
+    ],
+  );
+  useEffect(() => {
+    if (!draftId || !projectOffAnotherChatsBox || sendInFlightRef.current) return;
+    setDraftThreadContext(draftId, {
+      projectRef: scopeProjectRef(
+        projectOffAnotherChatsBox.environmentId,
+        projectOffAnotherChatsBox.id,
+      ),
+      loadBalancedEnvironmentId: null,
+    });
+  }, [draftId, projectOffAnotherChatsBox, setDraftThreadContext]);
   useEffect(() => {
     if (!draftId || !redirectEnvironment || sendInFlightRef.current) return;
     setDraftThreadContext(draftId, {
@@ -5028,6 +5070,7 @@ export default function ChatView(props: ChatViewProps) {
       if (viewingStartedDraft()) {
         setCreatingCloudEnvironment(true);
       }
+      const releaseBoxHolds: Array<() => void> = [];
       try {
         const outcome = await provisionCloudEnvironment(
           {
@@ -5060,8 +5103,14 @@ export default function ChatView(props: ChatViewProps) {
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
             pair: async (pairingUrl) => {
-              const result = await connectCloudPairing({ pairingUrl });
-              return AsyncResult.isSuccess(result) ? result.value : null;
+              const result = await connectCloudPairing({
+                pairingUrl,
+                box: { managerId: primaryEnvironmentId },
+              });
+              if (!AsyncResult.isSuccess(result)) return null;
+              // The box publishes its project over its connection; the draft holds it once ready.
+              releaseBoxHolds.push(holdBoxDemand(result.value));
+              return result.value;
             },
             ...(primaryEnvironmentHttpBaseUrl === null
               ? {}
@@ -5074,7 +5123,7 @@ export default function ChatView(props: ChatViewProps) {
                     ),
                 }),
             isConnected: (environmentId) =>
-              appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId)
+              appAtomRegistry.get(environmentPresentations.presentationAtom(environmentId))
                 ?.connection.phase === "connected",
             // The browser may be running on the manager itself, where even a loopback link works.
             canReach: () => true,
@@ -5117,6 +5166,7 @@ export default function ChatView(props: ChatViewProps) {
         }
         return true;
       } finally {
+        for (const release of releaseBoxHolds) release();
         if (viewingStartedDraft()) {
           setCreatingCloudEnvironment(false);
         }

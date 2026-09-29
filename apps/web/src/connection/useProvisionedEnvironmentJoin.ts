@@ -11,7 +11,10 @@ import {
   rememberProvisionedSandbox,
   rememberProvisionedSandboxForEnvironment,
 } from "../cloud/provisionedSandboxLeases";
-import { useEnvironmentHttpBaseUrl, useEnvironments } from "../state/environments";
+import { holdBoxDemand } from "../cloud/CloudBoxes";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { useEnvironmentHttpBaseUrl } from "../state/environments";
+import { environmentPresentations } from "../state/presentation";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import { waitForThreadShell } from "../state/waitForThreadShell";
@@ -44,7 +47,6 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
     reportFailure: false,
   });
   const pair = useAtomCommand(connectPairing, { reportFailure: false });
-  const { environments } = useEnvironments();
   const managerHttpBaseUrl = useEnvironmentHttpBaseUrl(managerId);
   const rewritePairingUrl = (pairingUrl: string, leaseId: string) =>
     managerHttpBaseUrl
@@ -80,30 +82,41 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
       return rewritePairingUrl(result.pairingUrl, environment.leaseId);
     },
     /** Pairs this client with the environment; resolves with its thread once that has loaded. */
-    join: (environment: DiscoveredProvisionedEnvironment, remember = keepLeaseAwake) =>
-      openProvisionedEnvironment(environment, {
-        isConnected: (id) =>
-          environments.some(
-            (entry) => entry.environmentId === id && entry.connection.phase === "connected",
-          ),
-        attach: () => attachForClient(environment),
-        pair: async (pairingUrl) => {
-          const result = await pair({
-            pairingUrl,
-            expectedEnvironmentId: environment.environmentId,
-          });
-          if (AsyncResult.isFailure(result))
-            throw new Error("The environment could not be connected. Try again.");
-          return result.value;
-        },
-        rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
-        waitForThread: waitForThreadShell,
-        rememberLease: (ref) =>
-          remember(environment, ref, {
-            leaseId: environment.leaseId,
-            sandboxId: environment.sandboxId,
-            managerEnvironmentId: managerId,
-          }),
-      }),
+    join: async (environment: DiscoveredProvisionedEnvironment, remember = keepLeaseAwake) => {
+      // Joining waits for the box's thread, which needs it connected; its chat holds it after.
+      const release = holdBoxDemand(environment.environmentId);
+      try {
+        return await joinEnvironment(environment, remember);
+      } finally {
+        release();
+      }
+    },
   };
+
+  function joinEnvironment(environment: DiscoveredProvisionedEnvironment, remember: RememberLease) {
+    return openProvisionedEnvironment(environment, {
+      isConnected: (id) =>
+        appAtomRegistry.get(environmentPresentations.presentationAtom(id))?.connection.phase ===
+        "connected",
+      attach: () => attachForClient(environment),
+      pair: async (pairingUrl) => {
+        const result = await pair({
+          pairingUrl,
+          expectedEnvironmentId: environment.environmentId,
+          box: { managerId },
+        });
+        if (AsyncResult.isFailure(result))
+          throw new Error("The environment could not be connected. Try again.");
+        return result.value;
+      },
+      rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
+      waitForThread: waitForThreadShell,
+      rememberLease: (ref) =>
+        remember(environment, ref, {
+          leaseId: environment.leaseId,
+          sandboxId: environment.sandboxId,
+          managerEnvironmentId: managerId,
+        }),
+    });
+  }
 }

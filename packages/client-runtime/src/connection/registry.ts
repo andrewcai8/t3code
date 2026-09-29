@@ -28,10 +28,12 @@ import * as ConnectionProfileStore from "./profileStore.ts";
 import * as Connectivity from "./connectivity.ts";
 import {
   BearerConnectionTarget,
+  type BoxAttachment,
   type ConnectionAttemptError,
   type ConnectionTarget,
   type NetworkStatus,
   type SupervisorConnectionState,
+  connectionBox,
 } from "./model.ts";
 import { ConnectionBlockedError } from "./model.ts";
 import { credentialMissingError, profileMissingError } from "./errors.ts";
@@ -99,6 +101,21 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * Holds a box connected for as long as the calling scope is open. A box connects only while
+     * something demands it; every other environment connects whenever it is enabled, so
+     * demanding one changes nothing.
+     */
+    readonly demand: (environmentId: EnvironmentId) => Effect.Effect<void, never, Scope.Scope>;
+    /** The environments something demands right now. */
+    readonly demanded: SubscriptionRef.SubscriptionRef<ReadonlySet<EnvironmentId>>;
+    /**
+     * Marks saved connections as the boxes they reach, so they stop being user environments.
+     * Anything not saved, not a bearer connection, or already marked is skipped.
+     */
+    readonly markBoxes: (
+      boxes: ReadonlyArray<{ readonly environmentId: EnvironmentId } & BoxAttachment>,
+    ) => Effect.Effect<void>;
     readonly markWorkspaceMissing: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<
@@ -212,6 +229,8 @@ export const make = Effect.gen(function* () {
   }
 
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
+  const demandCounts = yield* Ref.make<ReadonlyMap<EnvironmentId, number>>(new Map());
+  const demanded = yield* SubscriptionRef.make<ReadonlySet<EnvironmentId>>(new Set());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
 
@@ -273,6 +292,17 @@ export const make = Effect.gen(function* () {
     return entry;
   });
 
+  // A box connects only while demanded; everything else whenever it is enabled.
+  const wantsConnection = Effect.fn("EnvironmentRegistry.wantsConnection")(function* (
+    entry: ConnectionCatalogEntry,
+  ) {
+    return (
+      entry.enabled &&
+      (connectionBox(entry.target) === null ||
+        (yield* SubscriptionRef.get(demanded)).has(entry.target.environmentId))
+    );
+  });
+
   const closeServiceScope = Effect.fn("EnvironmentRegistry.closeServiceScope")(function* (
     environmentId: EnvironmentId,
   ) {
@@ -302,7 +332,7 @@ export const make = Effect.gen(function* () {
             Scope.provide(scope),
             Effect.onError(() => Scope.close(scope, Exit.void)),
           );
-          if (entry.enabled) {
+          if (yield* wantsConnection(entry)) {
             yield* supervisor.connect;
           }
           yield* SubscriptionRef.update(serviceScopes, (current) => {
@@ -460,18 +490,29 @@ export const make = Effect.gen(function* () {
   });
 
   const register = Effect.fn("EnvironmentRegistry.register")(function* (
-    registration: ConnectionRegistration,
+    requested: ConnectionRegistration,
   ) {
-    const registered = connectionRegistrationCatalogEntry(registration);
-    const environmentId = registered.target.environmentId;
+    const environmentId = requested.target.environmentId;
     yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
         if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
           return;
         }
-        // Editing a saved environment must preserve its disabled state.
+        // Editing a saved environment must preserve its disabled state, and a box stays a box
+        // however it is paired again.
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        const previousBox = previous === undefined ? null : connectionBox(previous.target);
+        const registration =
+          previousBox !== null &&
+          requested._tag === "BearerConnectionRegistration" &&
+          requested.target.box === undefined
+            ? new BearerConnectionRegistration({
+                ...requested,
+                target: new BearerConnectionTarget({ ...requested.target, box: previousBox }),
+              })
+            : requested;
+        const registered = connectionRegistrationCatalogEntry(registration);
         const entry: ConnectionCatalogEntry =
           previous === undefined
             ? registered
@@ -508,8 +549,14 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const markWorkspaceMissing = Effect.fn("EnvironmentRegistry.markWorkspaceMissing")(function* (
+  /**
+   * Persists a saved bearer connection's target as `update` rewrites it, and replaces its
+   * runtime. Platform and non-bearer environments, and targets `update` leaves alone (null),
+   * are skipped.
+   */
+  const rewriteBearerTarget = Effect.fn("EnvironmentRegistry.rewriteBearerTarget")(function* (
     environmentId: EnvironmentId,
+    update: (target: BearerConnectionTarget) => BearerConnectionTarget | null,
   ) {
     yield* withLeaseLock(
       environmentId,
@@ -518,10 +565,11 @@ export const make = Effect.gen(function* () {
           return;
         }
         const entry = yield* getEntry(environmentId);
-        if (
-          entry.target._tag !== "BearerConnectionTarget" ||
-          entry.target.workspaceStatus === "missing"
-        ) {
+        if (entry.target._tag !== "BearerConnectionTarget") {
+          return;
+        }
+        const target = update(entry.target);
+        if (target === null) {
           return;
         }
         if (
@@ -534,10 +582,6 @@ export const make = Effect.gen(function* () {
         if (Option.isNone(credential)) {
           return yield* credentialMissingError(entry.target.connectionId);
         }
-        const target = new BearerConnectionTarget({
-          ...entry.target,
-          workspaceStatus: "missing",
-        });
         yield* registrations.register(
           new BearerConnectionRegistration({
             target,
@@ -552,6 +596,73 @@ export const make = Effect.gen(function* () {
       }),
     );
   });
+
+  const markWorkspaceMissing = (environmentId: EnvironmentId) =>
+    rewriteBearerTarget(environmentId, (target) =>
+      target.workspaceStatus === "missing"
+        ? null
+        : new BearerConnectionTarget({ ...target, workspaceStatus: "missing" }),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.markWorkspaceMissing"));
+
+  const markBoxes: EnvironmentRegistry["Service"]["markBoxes"] = (boxes) =>
+    Effect.forEach(
+      boxes,
+      ({ environmentId, managerId }) =>
+        rewriteBearerTarget(environmentId, (target) =>
+          target.box?.managerId === managerId
+            ? null
+            : new BearerConnectionTarget({ ...target, box: { managerId } }),
+        ).pipe(
+          Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.void),
+          Effect.catch((error) =>
+            Effect.logWarning("Could not mark a saved connection as a box.", {
+              environmentId,
+              error,
+            }),
+          ),
+        ),
+      { discard: true },
+    ).pipe(Effect.withSpan("EnvironmentRegistry.markBoxes"));
+
+  const setDemand = Effect.fn("EnvironmentRegistry.setDemand")(function* (
+    environmentId: EnvironmentId,
+    change: 1 | -1,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const counts = yield* Ref.get(demandCounts);
+        const count = Math.max(0, (counts.get(environmentId) ?? 0) + change);
+        const nextCounts = new Map(counts);
+        if (count === 0) nextCounts.delete(environmentId);
+        else nextCounts.set(environmentId, count);
+        yield* Ref.set(demandCounts, nextCounts);
+        const wasDemanded = (yield* SubscriptionRef.get(demanded)).has(environmentId);
+        if (wasDemanded === count > 0) return;
+        yield* SubscriptionRef.update(demanded, (current) => {
+          const next = new Set(current);
+          if (count > 0) next.add(environmentId);
+          else next.delete(environmentId);
+          return next;
+        });
+        const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (entry === undefined || connectionBox(entry.target) === null) return;
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+        if (lease === undefined) {
+          if (count > 0) yield* createServiceScope(entry);
+          return;
+        }
+        yield* (yield* wantsConnection(entry))
+          ? lease.supervisor.connect
+          : lease.supervisor.disconnect;
+      }),
+    );
+  });
+
+  const demand: EnvironmentRegistry["Service"]["demand"] = (environmentId) =>
+    Effect.acquireRelease(setDemand(environmentId, 1), () => setDemand(environmentId, -1)).pipe(
+      Effect.withSpan("EnvironmentRegistry.demand"),
+    );
 
   const installPlatformRegistration = Effect.fn("EnvironmentRegistry.installPlatformRegistration")(
     function* (registration: PlatformConnectionRegistration) {
@@ -851,7 +962,9 @@ export const make = Effect.gen(function* () {
           return nextEntries;
         });
         if (lease !== undefined) {
-          yield* enabled ? lease.supervisor.connect : lease.supervisor.disconnect;
+          yield* (yield* wantsConnection(next))
+            ? lease.supervisor.connect
+            : lease.supervisor.disconnect;
         } else if (enabled) {
           yield* createServiceScope(next);
         }
@@ -950,6 +1063,9 @@ export const make = Effect.gen(function* () {
     remove,
     removeRelayEnvironments,
     retryNow,
+    demand,
+    demanded,
+    markBoxes,
     markWorkspaceMissing,
     setEnabled,
     setCompatibility,

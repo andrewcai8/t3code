@@ -128,6 +128,28 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     if (leases.delete(key(target))) persist();
   }
 
+  /** Each box this device holds a lease on by environment, with the host that provisioned it. */
+  function boxes(): ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly managerId: EnvironmentId;
+  }> {
+    return [...leases].flatMap(([entryKey, lease]) => {
+      const environmentId = entryKey.startsWith("environment:")
+        ? entryKey.slice("environment:".length)
+        : entryKey.startsWith("thread:")
+          ? entryKey.slice("thread:".length, entryKey.lastIndexOf(":"))
+          : null;
+      return environmentId === null
+        ? []
+        : [
+            {
+              environmentId: EnvironmentId.make(environmentId),
+              managerId: lease.managerEnvironmentId,
+            },
+          ];
+    });
+  }
+
   return {
     remember,
     rememberForEnvironment,
@@ -137,6 +159,7 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     leaseForEnvironment,
     leaseOwnedByEnvironment,
     forget,
+    boxes,
   };
 }
 

@@ -30,6 +30,7 @@ import {
   type ThreadRouteTarget,
 } from "../threadRoutes";
 import { resolveThreadSyncPhase } from "../threadSync";
+import { useBoxDemand } from "../cloud/CloudBoxes";
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -75,6 +76,8 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
         })
       : null;
 
+  // An open chat on a cloud box is what keeps the box connected.
+  useBoxDemand(target.kind === "server" ? target.threadRef.environmentId : null);
   const shell = useEnvironmentQuery(
     serverThreadRef === null ? null : environmentShell.stateAtom(serverThreadRef.environmentId),
   );

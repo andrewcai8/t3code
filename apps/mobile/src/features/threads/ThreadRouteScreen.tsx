@@ -5,6 +5,7 @@ import {
   clearComposerDraftContent,
 } from "../../state/use-composer-drafts";
 import { useWorktreeSetup } from "./use-worktree-setup";
+import { useBoxDemand, useResumePausedBox } from "./use-provisioned-boxes";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";
@@ -258,6 +259,9 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeEnvironmentShellState = useEnvironmentShellState(environmentId);
+  // An open chat on a cloud box keeps the box connected, and wakes it when it is paused.
+  useBoxDemand(environmentId);
+  useResumePausedBox(environmentId);
   const { onReconnectEnvironment } = useRemoteConnections();
   const navigation = useNavigation();
   const routeConnectionState =

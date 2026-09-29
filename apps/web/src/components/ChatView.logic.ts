@@ -13,6 +13,8 @@ import {
   type PreviewAnnotationPayload,
   type ProviderInteractionMode,
   type RepositoryIdentity,
+  resolveEnvironmentMachineKind,
+  type ServerConfig,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -23,6 +25,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { EnvironmentOption } from "./BranchToolbar.logic";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   squashAtomCommandFailure,
@@ -1439,4 +1442,60 @@ export function needsLoadBalancedPick(input: {
   if (!input.automatic) return false;
   const picked = input.pickedEnvironmentId;
   return !picked || !input.candidates.some((candidate) => candidate.environmentId === picked);
+}
+
+/**
+ * Whether a draft points at a cloud box it did not start, as one opened from another chat's box
+ * before boxes were marked. Such a box is not the draft's: it neither connects for it nor shows,
+ * and the draft moves to its project's copy on a user environment.
+ */
+export function isDraftOnAnotherChatsBox(input: {
+  readonly draftId: string | null;
+  readonly environmentId: EnvironmentId | null;
+  /** The box the draft's own cloud send started, once it is ready. */
+  readonly ownBoxEnvironmentId: string | null;
+  readonly boxIds: ReadonlySet<EnvironmentId>;
+}): boolean {
+  return (
+    input.draftId !== null &&
+    input.environmentId !== null &&
+    input.environmentId !== input.ownBoxEnvironmentId &&
+    input.boxIds.has(input.environmentId)
+  );
+}
+
+/**
+ * The machines "Run on" offers for a chat's project: one per environment holding a copy that
+ * `environmentById` knows, the primary first, then by name. `environmentById` holds the user
+ * environments and the chat's own box, so another chat's box never shows.
+ */
+export function projectEnvironmentOptions(input: {
+  readonly projects: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly id: EnvironmentOption["projectId"];
+  }>;
+  readonly environmentById: ReadonlyMap<
+    EnvironmentId,
+    { readonly label: string; readonly serverConfig: ServerConfig | null }
+  >;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+}): EnvironmentOption[] {
+  const seen = new Set<EnvironmentId>();
+  const options: EnvironmentOption[] = [];
+  for (const project of input.projects) {
+    if (seen.has(project.environmentId)) continue;
+    seen.add(project.environmentId);
+    const environment = input.environmentById.get(project.environmentId);
+    if (environment === undefined) continue;
+    options.push({
+      environmentId: project.environmentId,
+      projectId: project.id,
+      label: environment.label,
+      isPrimary: project.environmentId === input.primaryEnvironmentId,
+      machine: resolveEnvironmentMachineKind(environment.serverConfig),
+    });
+  }
+  return options.sort((a, b) =>
+    a.isPrimary !== b.isPrimary ? (a.isPrimary ? -1 : 1) : a.label.localeCompare(b.label),
+  );
 }

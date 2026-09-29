@@ -14,6 +14,9 @@ const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 export function ProvisionedSandboxLeaseHeartbeat() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  // Only a box something holds open is kept awake; the host pauses the rest once they idle, and
+  // never a box whose turn is still running.
+  const demanded = useAtomValue(environmentCatalog.demandedValueAtom);
   const touch = useAtomCommand(serverEnvironment.touchProvisionedEnvironment, {
     reportFailure: false,
   });
@@ -60,11 +63,9 @@ export function ProvisionedSandboxLeaseHeartbeat() {
   useEffect(() => {
     let cancelled = false;
     const touchAll = () => {
-      for (const [environmentId, entry] of catalog.entries) {
-        if (
-          entry.target._tag === "BearerConnectionTarget" &&
-          entry.target.workspaceStatus === "missing"
-        )
+      for (const environmentId of demanded) {
+        const target = catalog.entries.get(environmentId)?.target;
+        if (target?._tag !== "BearerConnectionTarget" || target.workspaceStatus === "missing")
           continue;
         const owned = provisionedSandboxForEnvironment(environmentId);
         if (!owned) continue;
@@ -89,7 +90,7 @@ export function ProvisionedSandboxLeaseHeartbeat() {
       cancelled = true;
       globalThis.clearInterval(interval);
     };
-  }, [catalog.entries, markMissing, touch]);
+  }, [catalog.entries, demanded, markMissing, touch]);
 
   return null;
 }
