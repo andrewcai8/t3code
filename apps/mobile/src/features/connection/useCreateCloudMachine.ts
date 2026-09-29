@@ -14,7 +14,7 @@ import { connectPairing } from "../../connection/onboarding";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentPresentations } from "../../state/presentation";
-import { holdBoxDemand } from "../threads/use-provisioned-boxes";
+import { holdBoxDemand } from "../../state/box-demand";
 import { waitForEnvironmentProject } from "../../state/entities";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
@@ -88,7 +88,6 @@ export function useCreateCloudMachine(input: {
       // just before an app kill would have no record to dispose it by.
       await hydrateProvisionStorage();
       const draftId = `mobile-cloud-machine:${uuidv4()}`;
-      const releaseBoxHolds: Array<() => void> = [];
       try {
         const outcome = await provisionCloudEnvironment(
           {
@@ -120,10 +119,7 @@ export function useCreateCloudMachine(input: {
             },
             pair: async (pairingUrl) => {
               const result = await pair({ pairingUrl, box: { managerId } });
-              if (!AsyncResult.isSuccess(result)) return null;
-              // The box publishes its checkout over its connection; its draft holds it after.
-              releaseBoxHolds.push(holdBoxDemand(result.value));
-              return result.value;
+              return AsyncResult.isSuccess(result) ? result.value : null;
             },
             ...(manager?.displayUrl
               ? {
@@ -137,10 +133,13 @@ export function useCreateCloudMachine(input: {
             // A phone is never the machine that started the box, so a loopback pairing URL is
             // one it cannot reach however healthy the box is.
             canReach: isOffDeviceReachablePairingUrl,
-            waitForProject: (environmentId, timeoutMs) =>
-              waitForEnvironmentProject(environmentId, timeoutMs).then(
-                (project) => project?.id ?? null,
-              ),
+            waitForProject: (environmentId, timeoutMs) => {
+              // The box publishes its checkout over its connection; its draft holds it after.
+              const release = holdBoxDemand(environmentId);
+              return waitForEnvironmentProject(environmentId, timeoutMs)
+                .then((project) => project?.id ?? null)
+                .finally(release);
+            },
             onPhase: (phase) => setState({ kind: "working", phase }),
           },
         );
@@ -163,7 +162,6 @@ export function useCreateCloudMachine(input: {
           onCreated(outcome.projectRef);
         }
       } finally {
-        for (const release of releaseBoxHolds) release();
         inFlight.current = false;
       }
     },

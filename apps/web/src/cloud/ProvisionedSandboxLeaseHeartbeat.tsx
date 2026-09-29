@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useEffectEvent } from "react";
 
 import {
@@ -17,6 +18,17 @@ export function ProvisionedSandboxLeaseHeartbeat() {
   // Only a box something holds open is kept awake; the host pauses the rest once they idle, and
   // never a box whose turn is still running.
   const demanded = useAtomValue(environmentCatalog.demandedValueAtom);
+  const demandedBoxesKey = [...demanded]
+    .filter((environmentId) => {
+      const target = catalog.entries.get(environmentId)?.target;
+      return (
+        target?._tag === "BearerConnectionTarget" &&
+        target.box !== undefined &&
+        target.workspaceStatus !== "missing"
+      );
+    })
+    .sort()
+    .join("\n");
   const touch = useAtomCommand(serverEnvironment.touchProvisionedEnvironment, {
     reportFailure: false,
   });
@@ -62,11 +74,12 @@ export function ProvisionedSandboxLeaseHeartbeat() {
 
   useEffect(() => {
     let cancelled = false;
+    const boxIds =
+      demandedBoxesKey === ""
+        ? []
+        : demandedBoxesKey.split("\n").map((id) => EnvironmentId.make(id));
     const touchAll = () => {
-      for (const environmentId of demanded) {
-        const target = catalog.entries.get(environmentId)?.target;
-        if (target?._tag !== "BearerConnectionTarget" || target.workspaceStatus === "missing")
-          continue;
+      for (const environmentId of boxIds) {
         const owned = provisionedSandboxForEnvironment(environmentId);
         if (!owned) continue;
         void touch({
@@ -90,7 +103,7 @@ export function ProvisionedSandboxLeaseHeartbeat() {
       cancelled = true;
       globalThis.clearInterval(interval);
     };
-  }, [catalog.entries, demanded, markMissing, touch]);
+  }, [demandedBoxesKey, markMissing, touch]);
 
   return null;
 }

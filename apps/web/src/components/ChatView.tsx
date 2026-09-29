@@ -2076,9 +2076,21 @@ export default function ChatView(props: ChatViewProps) {
   // or the draft that just started it, still reads it.
   const activeThreadEnvironment = useEnvironment(activeThreadEnvironmentId);
   const cloudBoxIds = useAtomValue(environmentCatalog.boxIdsAtom);
-  const ownBoxEnvironmentId = draftThread?.pendingEnvironmentSend?.readyEnvironmentId ?? null;
+  // The box a draft's own cloud send started stays its own after the send clears, until the
+  // draft becomes the thread on it.
+  const readyBoxEnvironmentId = draftThread?.pendingEnvironmentSend?.readyEnvironmentId ?? null;
+  const [ownBox, setOwnBox] = useState<{ draftId: string; environmentId: string } | null>(null);
+  if (
+    draftId !== null &&
+    readyBoxEnvironmentId !== null &&
+    (ownBox?.draftId !== draftId || ownBox.environmentId !== readyBoxEnvironmentId)
+  ) {
+    setOwnBox({ draftId, environmentId: readyBoxEnvironmentId });
+  }
+  const ownBoxEnvironmentId =
+    readyBoxEnvironmentId ?? (ownBox?.draftId === draftId ? ownBox.environmentId : null);
   const onAnotherChatsBox = isDraftOnAnotherChatsBox({
-    draftId,
+    draftId: isServerThread ? null : draftId,
     environmentId: activeThreadEnvironmentId,
     ownBoxEnvironmentId,
     boxIds: cloudBoxIds,
@@ -5070,7 +5082,6 @@ export default function ChatView(props: ChatViewProps) {
       if (viewingStartedDraft()) {
         setCreatingCloudEnvironment(true);
       }
-      const releaseBoxHolds: Array<() => void> = [];
       try {
         const outcome = await provisionCloudEnvironment(
           {
@@ -5107,10 +5118,7 @@ export default function ChatView(props: ChatViewProps) {
                 pairingUrl,
                 box: { managerId: primaryEnvironmentId },
               });
-              if (!AsyncResult.isSuccess(result)) return null;
-              // The box publishes its project over its connection; the draft holds it once ready.
-              releaseBoxHolds.push(holdBoxDemand(result.value));
-              return result.value;
+              return AsyncResult.isSuccess(result) ? result.value : null;
             },
             ...(primaryEnvironmentHttpBaseUrl === null
               ? {}
@@ -5127,14 +5135,19 @@ export default function ChatView(props: ChatViewProps) {
                 ?.connection.phase === "connected",
             // The browser may be running on the manager itself, where even a loopback link works.
             canReach: () => true,
-            waitForProject: (environmentId, timeoutMs) =>
-              waitForProjectMatch(
+            waitForProject: (environmentId, timeoutMs) => {
+              // The box publishes its project over its connection; the draft holds it once ready.
+              const release = holdBoxDemand(environmentId);
+              return waitForProjectMatch(
                 (project) => project.environmentId === environmentId,
                 timeoutMs,
-              ).then(
-                (project) => project.id,
-                () => null,
-              ),
+              )
+                .then(
+                  (project) => project.id,
+                  () => null,
+                )
+                .finally(release);
+            },
             onPhase: showPhase,
           },
         );
@@ -5166,7 +5179,6 @@ export default function ChatView(props: ChatViewProps) {
         }
         return true;
       } finally {
-        for (const release of releaseBoxHolds) release();
         if (viewingStartedDraft()) {
           setCreatingCloudEnvironment(false);
         }

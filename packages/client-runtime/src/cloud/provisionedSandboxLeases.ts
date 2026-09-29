@@ -128,6 +128,15 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     if (leases.delete(key(target))) persist();
   }
 
+  /**
+   * Reads the persisted leases again, for storage that fills after the store was made, as the
+   * phone's does once its file is read.
+   */
+  function reload(): void {
+    leases.clear();
+    readPersisted();
+  }
+
   /** Each box this device holds a lease on by environment, with the host that provisioned it. */
   function boxes(): ReadonlyArray<{
     readonly environmentId: EnvironmentId;
@@ -159,6 +168,7 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     leaseForEnvironment,
     leaseOwnedByEnvironment,
     forget,
+    reload,
     boxes,
   };
 }

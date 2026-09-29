@@ -81,10 +81,9 @@ import {
   useThreadOutboxMessages,
   useThreadOutboxShellStatuses,
 } from "./use-thread-outbox";
-import {
-  setPendingConnectionError,
-  useRemoteConnectionStatus,
-} from "./use-remote-environment-registry";
+import { setPendingConnectionError } from "./use-remote-environment-registry";
+import { connectionPhasesAtom } from "./presentation";
+import { useBoxesDemand } from "./box-demand";
 
 // Ordinary offline behavior (a socket dropping mid-request, a retryable
 // attachment upload failure) must not spam `console.warn` on every backoff
@@ -653,7 +652,13 @@ export function useThreadOutboxDrain(): void {
   const creationOutcomes = useAtomValue(pendingThreadCreationOutcomesAtom);
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
-  const { connectedEnvironments } = useRemoteConnectionStatus();
+  const connectionPhases = useAtomValue(connectionPhasesAtom);
+  // A message queued for a cloud box brings the box online until it is delivered.
+  useBoxesDemand(
+    Object.values(queuedMessagesByThreadKey).flatMap((messages) =>
+      messages.map((message) => message.environmentId),
+    ),
+  );
   const [retryTick, setRetryTick] = useState(0);
   const retryAttemptRef = useRef(new Map<MessageId, number>());
   const retryNotBeforeRef = useRef(new Map<MessageId, number>());
@@ -1189,16 +1194,15 @@ export function useThreadOutboxDrain(): void {
       }
 
       const creation = nextQueuedMessage.creation;
-      const environment = connectedEnvironments.find(
-        (candidate) => candidate.environmentId === nextQueuedMessage.environmentId,
-      );
+      const environmentConnected =
+        connectionPhases.get(nextQueuedMessage.environmentId) === "connected";
       const shellStatus = shellStatuses.get(nextQueuedMessage.environmentId) ?? "empty";
       const deliveryAction = resolveThreadOutboxDeliveryAction({
         isCreation: creation !== undefined,
         threadExists: thread !== undefined,
         threadHandoff: thread?.handoff != null,
         shellStatus,
-        environmentConnected: environment?.connectionState === "connected",
+        environmentConnected,
         threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",
       });
       // The delivery action resolves first; capability checks apply only to
@@ -1311,7 +1315,7 @@ export function useThreadOutboxDrain(): void {
             isCreation: creation !== undefined,
             threadExists: liveThread !== undefined,
             shellStatus,
-            environmentConnected: environment?.connectionState === "connected",
+            environmentConnected,
             threadBusy: liveThreadBusy,
           });
           if (liveDeliveryAction !== "send") {
@@ -1356,7 +1360,7 @@ export function useThreadOutboxDrain(): void {
       return;
     }
   }, [
-    connectedEnvironments,
+    connectionPhases,
     dispatchingQueuedMessageId,
     editingQueuedMessageIds,
     projects,

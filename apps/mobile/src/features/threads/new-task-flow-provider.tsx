@@ -113,7 +113,8 @@ import {
   type NewChatPlacement,
   type NewThreadStart,
 } from "./new-task-project-selection";
-import { useBoxDemand, useProvisionedBoxes } from "./use-provisioned-boxes";
+import { useBoxDemand } from "../../state/box-demand";
+import { useProvisionedBoxes } from "./use-provisioned-boxes";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 
 type WorkspaceMode = "local" | "worktree";

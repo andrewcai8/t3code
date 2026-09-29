@@ -108,7 +108,15 @@ vi.mock("./use-thread-outbox", async () => {
 
 vi.mock("./use-remote-environment-registry", () => ({
   setPendingConnectionError: harness.setPendingConnectionError,
-  useRemoteConnectionStatus: () => ({ connectedEnvironments: [] }),
+}));
+
+vi.mock("./presentation", async () => {
+  const { Atom } = await import("effect/unstable/reactivity");
+  return { connectionPhasesAtom: Atom.make(new Map()).pipe(Atom.keepAlive) };
+});
+
+vi.mock("./box-demand", () => ({
+  useBoxesDemand: () => undefined,
 }));
 
 vi.mock("./thread-outbox", async () => {

@@ -16,7 +16,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { connectPairing } from "../../connection/onboarding";
-import { holdBoxDemand } from "../threads/use-provisioned-boxes";
+import { holdBoxDemand } from "../../state/box-demand";
 import { cn } from "../../lib/cn";
 import { useThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";

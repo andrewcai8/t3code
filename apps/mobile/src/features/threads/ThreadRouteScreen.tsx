@@ -5,7 +5,8 @@ import {
   clearComposerDraftContent,
 } from "../../state/use-composer-drafts";
 import { useWorktreeSetup } from "./use-worktree-setup";
-import { useBoxDemand, useResumePausedBox } from "./use-provisioned-boxes";
+import { useBoxDemand } from "../../state/box-demand";
+import { useResumePausedBox } from "./use-provisioned-boxes";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";

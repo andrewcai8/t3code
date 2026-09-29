@@ -115,10 +115,8 @@ import {
 import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
-import {
-  useRemoteConnectionStatus,
-  useSavedRemoteConnection,
-} from "../../state/use-remote-environment-registry";
+import { connectionPhasesAtom } from "../../state/presentation";
+import { useSavedRemoteConnection } from "../../state/use-remote-environment-registry";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 import { resolveDraftProjectSelection } from "./new-task-project-selection";
@@ -208,15 +206,12 @@ export function NewTaskDraftScreen(props: {
   const controlsBottomPadding = Math.max(insets.bottom, 10);
   const keyboardOpenedOffset = Math.max(0, controlsBottomPadding - 8);
   const { projectScopes, selectedProject, selectedProjectKey, setProject } = flow;
-  const { connectedEnvironments } = useRemoteConnectionStatus();
+  const connectionPhases = useAtomValue(connectionPhasesAtom);
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
   );
   const environmentConnected =
-    selectedProject !== null &&
-    connectedEnvironments.find(
-      (environment) => environment.environmentId === selectedProject.environmentId,
-    )?.connectionState === "connected";
+    selectedProject !== null && connectionPhases.get(selectedProject.environmentId) === "connected";
   const modelUnavailable = environmentConnected && flow.selectedModelOption?.isUnavailable === true;
   // A project added by cloning exists before its files do: the prompt can be
   // written meanwhile, but Start waits for the clone.

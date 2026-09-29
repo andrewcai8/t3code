@@ -3,7 +3,7 @@ import type { ProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { connectionBox } from "@t3tools/client-runtime/connection";
 import { createRunningBoxDemandAtom } from "@t3tools/client-runtime/state/boxDemand";
 import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { useEffect, useMemo } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
@@ -11,6 +11,8 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { useServerConfigs } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
 import { environmentThreadShells } from "../../state/threads";
+import { hydrateProvisionStorage } from "../../state/provision-storage";
+import { provisionedSandboxLeases } from "../../state/provision-stores";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { provisioningHostIds } from "./new-task-project-selection";
@@ -54,31 +56,29 @@ const runningBoxDemandAtom = createRunningBoxDemandAtom({
 /**
  * Keeps the saved catalog's boxes marked as boxes, marks those their hosts report lost or
  * disposed as missing, and keeps a box connected while a turn runs on it. A box saved before boxes
- * were marked is found in the lists its host reports. Mount once, app-wide. It reads the lists
+ * were marked is found in this phone's leases, then in the lists its host reports. Mount once,
+ * app-wide. It reads the lists
  * without refetching them; the readers of `useProvisionedBoxes` do that.
  */
 export function useCloudBoxes(): void {
   const hostIds = useProvisioningHostIds(useServerConfigs());
   const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const catalogReady = useAtomValue(environmentCatalog.catalogValueAtom).isReady;
   const markBoxes = useAtomCommand(environmentCatalog.markBoxes);
   const markGone = useAtomCommand(environmentCatalog.markGoneWorkspacesMissing);
+  useEffect(() => {
+    if (!catalogReady) return;
+    // The lease store was made before the phone's provisioning file was read.
+    void hydrateProvisionStorage().then(() => {
+      provisionedSandboxLeases.reload();
+      void markBoxes(provisionedSandboxLeases.boxes());
+    });
+  }, [catalogReady, markBoxes]);
   useEffect(() => {
     void markBoxes(boxes.map(({ environmentId, managerId }) => ({ environmentId, managerId })));
     void markGone(boxes);
   }, [boxes, markBoxes, markGone]);
   useAtomMount(runningBoxDemandAtom);
-}
-
-const NO_DEMAND = Atom.make(null).pipe(Atom.withLabel("mobile-environment-demand:none"));
-
-/** Keeps a cloud box connected while mounted. Any other environment is unaffected. */
-export function useBoxDemand(environmentId: EnvironmentId | null): void {
-  useAtomMount(environmentId === null ? NO_DEMAND : environmentCatalog.demandAtom(environmentId));
-}
-
-/** Holds a box connected until the returned release runs, as while pairing or joining it. */
-export function holdBoxDemand(environmentId: EnvironmentId): () => void {
-  return appAtomRegistry.mount(environmentCatalog.demandAtom(environmentId));
 }
 
 /**

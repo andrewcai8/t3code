@@ -109,3 +109,17 @@ describe("boxes", () => {
     ]);
   });
 });
+
+describe("reload", () => {
+  it("reads leases persisted after the store was made, as once a phone's file is read", () => {
+    const { records, storage } = memoryStorage();
+    const store = createProvisionedSandboxLeaseStore(storage);
+    records.set(
+      PROVISIONED_SANDBOX_LEASES_STORAGE_KEY,
+      JSON.stringify({ [`thread:${threadRef.environmentId}:${threadRef.threadId}`]: lease }),
+    );
+    expect(store.leaseFor(threadRef)).toBeNull();
+    store.reload();
+    expect(store.leaseFor(threadRef)).toEqual(lease);
+  });
+});
