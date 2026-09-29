@@ -76,18 +76,15 @@ describe("running box demand", () => {
       threadsAtom: (environmentId) =>
         environmentId === BOX.environmentId ? threads : Atom.make([]),
       provisionedBoxes: () =>
-        Atom.make((get) => ({
-          boxes: [
-            {
-              managerId: HOST.environmentId,
-              environmentId: BOX.environmentId,
-              leaseId: "lease",
-              threadId: null,
-              lifecycle: get(lifecycle),
-            },
-          ],
-          refreshing: false,
-        })),
+        Atom.make((get) => [
+          {
+            managerId: HOST.environmentId,
+            environmentId: BOX.environmentId,
+            leaseId: "lease",
+            threadId: null,
+            lifecycle: get(lifecycle),
+          },
+        ]),
       demandAtom,
     });
     registry.mount(atom);

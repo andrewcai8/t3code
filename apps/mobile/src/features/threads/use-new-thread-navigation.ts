@@ -1,9 +1,5 @@
 import { useNavigation } from "@react-navigation/native";
-import {
-  boxesOfOtherChats,
-  newChatProject,
-  type ProvisionedBox,
-} from "@t3tools/client-runtime/cloud";
+import { newChatProject } from "@t3tools/client-runtime/cloud";
 import {
   deriveLogicalProjectKeyFromSettings,
   type ProjectGroupingSettings,
@@ -14,33 +10,27 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
-import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 
 import { appAtomRegistry } from "../../state/atom-registry";
 import { readProjects, useServerConfigs } from "../../state/entities";
 import { environmentPresentations } from "../../state/presentation";
 import { useMobileProjectGroupingSettings } from "../../state/project-grouping";
 import { newChatPlacement, resolveNewThreadStart } from "./new-task-project-selection";
-import { useProvisionedBoxes } from "./use-provisioned-boxes";
+import { useOtherChatBoxes } from "./use-provisioned-boxes";
 
 /** The copy of `environmentId`/`projectId`'s project a new thread opens on, never one on a box. */
 function newThreadProject(
   environmentId: EnvironmentId,
   projectId: ProjectId,
-  latest: {
-    readonly groupingSettings: ProjectGroupingSettings;
-    readonly provisionedBoxes: ReadonlyArray<ProvisionedBox>;
-  },
+  latest: { readonly groupingSettings: ProjectGroupingSettings },
 ): EnvironmentProject | null {
   return newChatProject({
     requested: scopeProjectRef(environmentId, projectId),
     projects: readProjects(),
     logicalProjectKey: (project) =>
       deriveLogicalProjectKeyFromSettings(project, latest.groupingSettings),
-    ...newChatPlacement(
-      latest.provisionedBoxes,
-      appAtomRegistry.get(environmentPresentations.presentationsAtom),
-    ),
+    ...newChatPlacement(appAtomRegistry.get(environmentPresentations.presentationsAtom)),
   });
 }
 
@@ -54,12 +44,11 @@ export function useNewThreadNavigation() {
   const navigation = useNavigation();
   const serverConfigs = useServerConfigs();
   const groupingSettings = useMobileProjectGroupingSettings();
-  const { boxes: provisionedBoxes } = useProvisionedBoxes(serverConfigs);
-  const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
-  const latest = useRef({ serverConfigs, boxes, groupingSettings, provisionedBoxes });
+  const boxes = useOtherChatBoxes();
+  const latest = useRef({ serverConfigs, boxes, groupingSettings });
   useLayoutEffect(() => {
-    latest.current = { serverConfigs, boxes, groupingSettings, provisionedBoxes };
-  }, [serverConfigs, boxes, groupingSettings, provisionedBoxes]);
+    latest.current = { serverConfigs, boxes, groupingSettings };
+  }, [serverConfigs, boxes, groupingSettings]);
 
   const newThreadInProject = useCallback(
     (requested: EnvironmentProject) => {

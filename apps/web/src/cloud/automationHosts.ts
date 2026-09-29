@@ -1,37 +1,26 @@
-import { useAtomValue } from "@effect/atom-react";
-import {
-  boxesOfOtherChats,
-  createAutomationJoins,
-  idleProvisionedBoxes,
-  offeredProvisionProviders,
-} from "@t3tools/client-runtime/cloud";
-import { EnvironmentId, type ThreadId } from "@t3tools/contracts";
-import { useEffect, useMemo } from "react";
+import { createAutomationJoins, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import type { EnvironmentId } from "@t3tools/contracts";
+import { useMemo } from "react";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironments } from "../state/environments";
 import { serverEnvironment } from "../state/server";
-import { provisionedSandboxOwnedByEnvironment } from "./provisionedSandboxLeases";
 import { localProvisionStorage } from "./provisionStorage";
 
 export const automationJoins = createAutomationJoins(localProvisionStorage);
 
-/**
- * Connected hosts that can run automations: they offer cloud environments, and are not a cloud
- * box this device reached through a host (by lease, or by joining an automation run).
- */
+/** Connected hosts that can run automations: they offer cloud environments. */
 export function useAutomationHosts() {
   const { environments } = useEnvironments();
-  return useMemo(() => {
-    const joinedBoxes = new Set(automationJoins.joined().map((join) => join.environmentId));
-    return environments.filter(
-      (environment) =>
-        environment.connection.phase === "connected" &&
-        offeredProvisionProviders(environment.serverConfig).length > 0 &&
-        provisionedSandboxOwnedByEnvironment(environment.environmentId) === null &&
-        !joinedBoxes.has(environment.environmentId),
-    );
-  }, [environments]);
+  return useMemo(
+    () =>
+      environments.filter(
+        (environment) =>
+          environment.connection.phase === "connected" &&
+          offeredProvisionProviders(environment.serverConfig).length > 0,
+      ),
+    [environments],
+  );
 }
 
 /**
@@ -50,61 +39,15 @@ export function refreshProvisionedEnvironments(managerId: EnvironmentId): void {
   serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]);
 }
 
-/**
- * What placing a new chat with `newChatProject` reads: every cloud box the connected hosts list,
- * claimed or not, and each environment's connection.
- */
+/** What placing a new chat with `newChatProject` reads: each user environment's state. */
 export function useNewChatPlacement() {
   const { environments } = useEnvironments();
-  const hosts = useAutomationHosts();
-  const hostIds = useMemo(() => hosts.map((host) => host.environmentId), [hosts]);
-  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
   return useMemo(() => {
     const environmentById = new Map(
       environments.map((environment) => [environment.environmentId, environment] as const),
     );
     return {
-      boxes: new Set(boxes.map((box) => box.environmentId)),
       environmentState: (environmentId: EnvironmentId) => environmentById.get(environmentId),
     };
-  }, [boxes, environments]);
-}
-
-/**
- * The cloud boxes a draft must not start on, as the connected hosts list them however this device
- * came to know each: those another chat claimed, and those paused or lost. A draft refetches the
- * lists when it opens, since another device may have claimed a box since, and must not send while
- * `refreshing`. Only a draft asks the hosts; anything else gets empty collections.
- */
-export function useNewChatBoxes(
-  draftId: string | null,
-  threadId: ThreadId,
-): {
-  readonly others: ReadonlyMap<EnvironmentId, EnvironmentId>;
-  readonly idle: ReadonlySet<EnvironmentId>;
-  readonly refreshing: boolean;
-} {
-  const hosts = useAutomationHosts();
-  const hostIds = useMemo(
-    () => (draftId === null ? [] : hosts.map((host) => host.environmentId)),
-    [draftId, hosts],
-  );
-  const hostsKey = hostIds.join("\n");
-  useEffect(() => {
-    // Every draft that opens refetches, even when the hosts are unchanged.
-    if (draftId === null || hostsKey === "") return;
-    serverEnvironment.refreshProvisionedBoxes(
-      appAtomRegistry,
-      hostsKey.split("\n").map((hostId) => EnvironmentId.make(hostId)),
-    );
-  }, [draftId, hostsKey]);
-  const { boxes, refreshing } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
-  return useMemo(
-    () => ({
-      others: boxesOfOtherChats(boxes, threadId),
-      idle: idleProvisionedBoxes(boxes),
-      refreshing,
-    }),
-    [boxes, refreshing, threadId],
-  );
+  }, [environments]);
 }

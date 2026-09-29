@@ -1376,7 +1376,6 @@ export function NewTaskDraftScreen(props: {
     isIncomingShareReady &&
     !isImportingShare &&
     !flow.submitting &&
-    !flow.boxesRefreshing &&
     pendingPastedTextAttachmentCount === 0 &&
     !voiceInput.blocksSubmission &&
     !(flow.workspaceMode === "worktree" && !flow.selectedBranchName);

@@ -1,5 +1,4 @@
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
-import type { ProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { connectionBox } from "@t3tools/client-runtime/connection";
 import { createRunningBoxDemandAtom } from "@t3tools/client-runtime/state/boxDemand";
 import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
@@ -26,24 +25,25 @@ function useProvisioningHostIds(serverConfigs: ReadonlyMap<EnvironmentId, Server
 }
 
 /**
- * Every cloud box the connected hosts among `serverConfigs` report. A phone that joined a box through a
- * pairing link keeps no record that it is a box, so the host that provisioned it is the only
- * place to ask. The lists are refetched when a reader mounts, since another device may have
- * claimed a box since they were last read.
+ * The cloud boxes a new task never starts on, each mapped to the host that provisioned it: every
+ * saved box but one this phone just started and no chat has taken yet.
  */
-export function useProvisionedBoxes(
-  serverConfigs: ReadonlyMap<EnvironmentId, ServerConfig>,
-): ProvisionedBoxes {
-  const hostIds = useProvisioningHostIds(serverConfigs);
-  const hostsKey = hostIds.join("\n");
-  useEffect(() => {
-    if (hostsKey === "") return;
-    serverEnvironment.refreshProvisionedBoxes(
-      appAtomRegistry,
-      hostsKey.split("\n").map((hostId) => EnvironmentId.make(hostId)),
-    );
-  }, [hostsKey]);
-  return useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+export function useOtherChatBoxes(): ReadonlyMap<EnvironmentId, EnvironmentId> {
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  // The lease store is not reactive, and a box leaves it once its first chat starts, so the
+  // boxes are read on every render and the map is rebuilt only when they change.
+  const key = JSON.stringify(
+    [...catalog.entries].flatMap(([environmentId, entry]) => {
+      const box = connectionBox(entry.target);
+      return box === null || provisionedSandboxLeases.awaitsFirstChat(environmentId)
+        ? []
+        : [[environmentId, box.managerId]];
+    }),
+  );
+  return useMemo(
+    () => new Map(JSON.parse(key) as ReadonlyArray<[EnvironmentId, EnvironmentId]>),
+    [key],
+  );
 }
 
 const runningBoxDemandAtom = createRunningBoxDemandAtom({
@@ -57,12 +57,12 @@ const runningBoxDemandAtom = createRunningBoxDemandAtom({
  * Keeps the saved catalog's boxes marked as boxes, marks those their hosts report lost or
  * disposed as missing, and keeps a box connected while a turn runs on it. A box saved before boxes
  * were marked is found in this phone's leases, then in the lists its host reports. Mount once,
- * app-wide. It reads the lists
- * without refetching them; the readers of `useProvisionedBoxes` do that.
+ * app-wide. It reads the lists without refetching them; a box's open chat refetches its host's
+ * list.
  */
 export function useCloudBoxes(): void {
   const hostIds = useProvisioningHostIds(useServerConfigs());
-  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
   const catalogReady = useAtomValue(environmentCatalog.catalogValueAtom).isReady;
   const markBoxes = useAtomCommand(environmentCatalog.markBoxes);
   const markGone = useAtomCommand(environmentCatalog.markGoneWorkspacesMissing);
@@ -93,7 +93,7 @@ export function useResumePausedBox(environmentId: EnvironmentId | null): void {
   useEffect(() => {
     if (managerId !== null) serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]);
   }, [environmentId, managerId]);
-  const { boxes } = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
   const lifecycle = boxes.find((box) => box.environmentId === environmentId)?.lifecycle ?? null;
   const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
     reportFailure: false,

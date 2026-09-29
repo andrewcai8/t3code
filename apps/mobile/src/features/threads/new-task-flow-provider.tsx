@@ -85,7 +85,6 @@ import {
   setPendingConnectionError,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
-import { boxesOfOtherChats, idleProvisionedBoxes } from "@t3tools/client-runtime/cloud";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
 import {
@@ -114,7 +113,7 @@ import {
   type NewThreadStart,
 } from "./new-task-project-selection";
 import { useBoxDemand } from "../../state/box-demand";
-import { useProvisionedBoxes } from "./use-provisioned-boxes";
+import { useOtherChatBoxes } from "./use-provisioned-boxes";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 
 type WorkspaceMode = "local" | "worktree";
@@ -188,8 +187,6 @@ type NewTaskFlowContextValue = {
   }>;
   /** Boxes other chats run on, each mapped to its host. A new task never starts on one. */
   readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
-  /** A host's box list is being refetched; a task must not start until it arrives. */
-  readonly boxesRefreshing: boolean;
   readonly placement: NewChatPlacement;
   /** How to leave another chat's box the flow was pointed at; null when it is on none. */
   readonly boxStart: NewThreadStart | null;
@@ -254,8 +251,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const threads = useThreadShells();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const serverConfigs = useServerConfigs();
-  const { boxes: provisionedBoxes, refreshing: boxesRefreshing } =
-    useProvisionedBoxes(serverConfigs);
+  const boxes = useOtherChatBoxes();
   const { presentationById } = useEnvironments();
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
@@ -278,13 +274,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const [selectedEnvironmentIdOverride, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
     null,
   );
-  // A new task has no thread yet, so every claimed box is another chat's.
-  const boxes = useMemo(() => boxesOfOtherChats(provisionedBoxes, null), [provisionedBoxes]);
-  const idleBoxes = useMemo(() => idleProvisionedBoxes(provisionedBoxes), [provisionedBoxes]);
-  const placement = useMemo(
-    () => newChatPlacement(provisionedBoxes, presentationById),
-    [provisionedBoxes, presentationById],
-  );
+  const placement = useMemo(() => newChatPlacement(presentationById), [presentationById]);
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   // The new-task draft the composer is bound to. Null until a project is
   // chosen; each New Task entry mints its own, so a project can hold several.
@@ -386,10 +376,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         selectedProject,
         savedConnectionsById,
         serverConfigs,
-        boxes,
-        idleBoxes,
       }),
-    [projects, selectedProject, savedConnectionsById, serverConfigs, boxes, idleBoxes],
+    [projects, selectedProject, savedConnectionsById, serverConfigs],
   );
 
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
@@ -728,17 +716,14 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
             project: blockedBoxProject,
             serverConfigs,
             boxes,
-            idleBoxes,
             environments: newTaskEnvironments({
               projects,
               selectedProject: blockedBoxProject,
               savedConnectionsById,
               serverConfigs,
-              boxes,
-              idleBoxes,
             }),
           }),
-    [blockedBoxProject, boxes, idleBoxes, projects, savedConnectionsById, serverConfigs],
+    [blockedBoxProject, boxes, projects, savedConnectionsById, serverConfigs],
   );
   useEffect(() => {
     if (boxStart?.kind !== "environment" || blockedBoxProject === null) return;
@@ -1220,7 +1205,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       expandedProvider,
       environments,
       boxes,
-      boxesRefreshing,
       placement,
       boxStart,
       selectedProject,
@@ -1270,7 +1254,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       editingPendingTask,
       environments,
       boxes,
-      boxesRefreshing,
       placement,
       boxStart,
       expandedProvider,

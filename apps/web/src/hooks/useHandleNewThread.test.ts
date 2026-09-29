@@ -20,12 +20,16 @@ const testState = vi.hoisted(() => {
     },
   ];
   let projects: ReadonlyArray<Record<string, unknown>> = defaultProjects;
-  // The boxes the hosts list, each with whether a chat claimed it.
-  let hostBoxes: ReadonlyArray<{ readonly environmentId: string; readonly claimed: boolean }> = [];
-  let environments: ReadonlyArray<{
+  // The user environments. A cloud box is never one.
+  type Environments = ReadonlyArray<{
     readonly environmentId: string;
     readonly connection: { readonly phase: string; readonly blockedReason?: string };
-  }> = [];
+  }>;
+  const defaultEnvironments: Environments = defaultProjects.map(({ environmentId }) => ({
+    environmentId,
+    connection: { phase: "connected" },
+  }));
+  let environments = defaultEnvironments;
   let storedDraft: {
     readonly draftId: string;
     readonly environmentId: string;
@@ -64,21 +68,12 @@ const testState = vi.hoisted(() => {
     get projects() {
       return projects;
     },
-    get hostBoxes() {
-      return hostBoxes;
-    },
     get environments() {
       return environments;
     },
-    // What the client knows when a new chat starts: its projects, the boxes the hosts list, and
-    // each environment's connection.
-    setWorld(world: {
-      readonly projects: typeof projects;
-      readonly hostBoxes: typeof hostBoxes;
-      readonly environments: typeof environments;
-    }) {
+    // What the client knows when a new chat starts: its projects and the user environments.
+    setWorld(world: { readonly projects: typeof projects; readonly environments: Environments }) {
       projects = world.projects;
-      hostBoxes = world.hostBoxes;
       environments = world.environments;
     },
     reset(
@@ -90,8 +85,7 @@ const testState = vi.hoisted(() => {
     ) {
       storedDraft = nextStoredDraft;
       projects = defaultProjects;
-      hostBoxes = [];
-      environments = [];
+      environments = defaultEnvironments;
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
@@ -169,7 +163,6 @@ vi.mock("react", () => ({
 }));
 vi.mock("../cloud/automationHosts", () => ({
   useNewChatPlacement: () => ({
-    boxes: new Set(testState.hostBoxes.map((box) => box.environmentId)),
     environmentState: (environmentId: string) =>
       testState.environments.find((environment) => environment.environmentId === environmentId),
   }),
@@ -359,38 +352,13 @@ describe("a new chat started from a page with no chat in view", () => {
     });
   };
 
-  it.each([
-    {
-      name: "a paused box the host lists as claimed",
-      connection: { phase: "reconnecting" },
-      listed: [{ environmentId: "environment-box", claimed: true }],
-    },
-    {
-      name: "a paused box, before the host's box list arrives",
-      connection: { phase: "reconnecting" },
-      listed: [],
-    },
-    {
-      name: "a box the host lists but no chat claimed",
-      connection: { phase: "connected" },
-      listed: [{ environmentId: "environment-box", claimed: false }],
-    },
-    {
-      name: "a gone box",
-      connection: { phase: "error", blockedReason: "workspace-missing" },
-      listed: [],
-    },
-  ])("opens a draft on the host's project, not $name", async ({ connection, listed }) => {
+  it("opens a draft on the host's project, never a box's copy", async () => {
     testState.reset(null);
     testState.completeProjectFileRead(null);
     const boxId = "environment-box";
     testState.setWorld({
       projects: [megptOn(boxId), megptOn(host)],
-      hostBoxes: listed,
-      environments: [
-        { environmentId: host, connection: { phase: "connected" } },
-        { environmentId: boxId, connection },
-      ],
+      environments: [{ environmentId: host, connection: { phase: "connected" } }],
     });
 
     await startFromAutomations(boxId);

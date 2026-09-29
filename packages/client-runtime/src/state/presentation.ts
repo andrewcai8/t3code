@@ -1,9 +1,7 @@
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
-import { withoutCloudBoxes } from "@t3tools/shared/usageLimits";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
-import { offeredProvisionProviders, type ProvisionedBoxes } from "../cloud/provisioning.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
   connectionBox,
@@ -81,24 +79,4 @@ export function createEnvironmentPresentationAtoms<E>(input: {
     presentationAtom,
     presentationsAtom,
   };
-}
-
-/**
- * The presentations Limits reads accounts from: all but the cloud boxes that
- * the hosts among them list. Asking the hosts is the only way to know, since a
- * device that joined a box through a pairing link keeps no record that it is one.
- */
-export function createLimitPresentationsAtom(input: {
-  readonly presentationsAtom: Atom.Atom<ReadonlyMap<EnvironmentId, EnvironmentPresentation>>;
-  readonly provisionedBoxes: (hostIds: ReadonlyArray<EnvironmentId>) => Atom.Atom<ProvisionedBoxes>;
-}) {
-  return Atom.make((get) => {
-    const presentations = get(input.presentationsAtom);
-    const hostIds = [...presentations].flatMap(([environmentId, presentation]) =>
-      offeredProvisionProviders(presentation.serverConfig).length > 0 ? [environmentId] : [],
-    );
-    if (hostIds.length === 0) return presentations;
-    const { boxes } = get(input.provisionedBoxes(hostIds));
-    return withoutCloudBoxes(presentations, new Set(boxes.map((box) => box.environmentId)));
-  }).pipe(Atom.withLabel("environment-presentations:limits"));
 }

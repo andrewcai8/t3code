@@ -181,8 +181,6 @@ export function SettingsEnvironmentsRouteScreen() {
               key={environment.environmentId}
               managerId={environment.environmentId}
               managerLabel={environment.environmentLabel}
-              connectedEnvironments={connectedEnvironments}
-              onLeave={onRemoveEnvironmentPress}
             />
           ))}
 

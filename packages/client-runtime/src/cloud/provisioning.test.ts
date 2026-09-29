@@ -18,10 +18,8 @@ import {
 import { createProvisionedSandboxLeaseStore } from "./provisionedSandboxLeases.ts";
 import {
   type CloudProvisionPorts,
-  boxesOfOtherChats,
   claimFirstTurnBox,
   claimProvisionedBox,
-  idleProvisionedBoxes,
   type NewChatEnvironmentState,
   newChatProject,
   newChatRunTargets,
@@ -310,78 +308,47 @@ describe("newChatProject", () => {
   });
   const connected: NewChatEnvironmentState = { connection: { phase: "connected" } };
   const paused: NewChatEnvironmentState = { connection: { phase: "reconnecting" } };
-  const gone: NewChatEnvironmentState = {
-    connection: { phase: "error", blockedReason: "workspace-missing" },
-  };
+  // A cloud box is not a user environment, so it has no state to place a chat by.
   const place = (input: {
     readonly requested: Copy | null;
     readonly projects: ReadonlyArray<Copy>;
-    readonly boxes?: ReadonlyArray<EnvironmentId>;
     readonly states?: Readonly<Record<string, NewChatEnvironmentState>>;
   }) =>
     newChatProject({
       requested: input.requested ? refOf(input.requested) : null,
       projects: input.projects,
       logicalProjectKey: (project) => project.repository,
-      boxes: new Set(input.boxes ?? []),
-      environmentState: (environmentId) => input.states?.[environmentId] ?? connected,
+      environmentState: (environmentId) =>
+        environmentId === box ? null : (input.states?.[environmentId] ?? connected),
     })?.id ?? null;
 
-  // What the host lists for the box holding a copy of megpt-mono, how the client sees it, and
-  // where a new chat goes when the host holds no copy of its own. A box the host has not listed
-  // yet reads as any offline machine, so with nothing better it is kept.
-  const boxStates = {
-    none: null,
-    "claimed and paused": { listed: true, state: paused, withoutHost: null },
-    "claimed and running": { listed: true, state: connected, withoutHost: null },
-    unclaimed: { listed: true, state: connected, withoutHost: null },
-    "paused, before the host's list arrives": {
-      listed: false,
-      state: paused,
-      withoutHost: "megpt-mono@box",
-    },
-    gone: { listed: false, state: gone, withoutHost: null },
-    missing: { listed: true, state: gone, withoutHost: null },
-  } as const;
   // The chat in view is on its box, so a chat route asks for the box's copy. Every other page has
   // no chat in view and asks for the first project in sidebar order, which here is also the box's.
   const routes = ["chat", "/automations", "/usage", "/settings", "/"] as const;
   const cases = routes.flatMap((route) =>
-    Object.entries(boxStates).flatMap(([boxState, boxInfo]) =>
-      [true, false].flatMap((onHost) => {
-        if (!boxInfo && !onHost) return [];
-        const projects = [
-          ...(boxInfo ? [copy(box)] : []),
-          ...(onHost ? [copy(host)] : []),
-          copy(host, "t3code"),
-        ];
-        return [
-          {
-            route,
-            boxState,
-            onHost,
-            projects,
-            requested: projects[0]!,
-            boxes: boxInfo?.listed ? [box] : [],
-            states: { [box]: boxInfo?.state ?? connected, [host]: connected },
-            expected: onHost ? "megpt-mono@host" : (boxInfo?.withoutHost ?? null),
-          },
-        ];
-      }),
-    ),
+    [true, false].map((onHost) => {
+      const projects = [copy(box), ...(onHost ? [copy(host)] : []), copy(host, "t3code")];
+      return {
+        route,
+        onHost,
+        projects,
+        requested: projects[0]!,
+        expected: onHost ? "megpt-mono@host" : null,
+      };
+    }),
   );
 
   it.each(cases)(
-    "from $route with a box that is $boxState, host holds the project: $onHost",
-    ({ requested, projects, boxes, states, expected }) => {
-      expect(place({ requested, projects, boxes, states })).toBe(expected);
+    "from $route never opens on a box; host holds the project: $onHost",
+    ({ requested, projects, expected }) => {
+      expect(place({ requested, projects })).toBe(expected);
     },
   );
 
   it("keeps a requested copy on a machine that is not a box", () => {
-    expect(
-      place({ requested: copy(laptop), projects: [copy(host), copy(laptop)], boxes: [box] }),
-    ).toBe("megpt-mono@laptop");
+    expect(place({ requested: copy(laptop), projects: [copy(host), copy(laptop)] })).toBe(
+      "megpt-mono@laptop",
+    );
   });
 
   it("moves off a disconnected copy when a connected one exists, else keeps it", () => {
@@ -393,12 +360,22 @@ describe("newChatProject", () => {
     );
   });
 
+  it("moves off a gone machine", () => {
+    const gone = { connection: { phase: "error", blockedReason: "workspace-missing" } } as const;
+    expect(
+      place({
+        requested: copy(laptop),
+        projects: [copy(laptop), copy(host)],
+        states: { [laptop]: gone },
+      }),
+    ).toBe("megpt-mono@host");
+  });
+
   it("starts from the first connected project off every box when nothing is requested", () => {
     expect(
       place({
         requested: null,
         projects: [copy(box), copy(laptop, "t3code"), copy(host)],
-        boxes: [box],
         states: { [laptop]: paused },
       }),
     ).toBe("megpt-mono@host");
@@ -606,83 +583,6 @@ describe("newChatRunTargets", () => {
   });
 });
 
-describe("boxesOfOtherChats", () => {
-  const host = EnvironmentId.make("host");
-  const laptop = { environmentId: EnvironmentId.make("laptop") };
-  const draftThread = ThreadId.make("draft-thread");
-  const box = (environmentId: string, threadId: string | null) => ({
-    managerId: host,
-    environmentId: EnvironmentId.make(environmentId),
-    leaseId: `${environmentId}-lease`,
-    threadId: threadId === null ? null : ThreadId.make(threadId),
-    lifecycle: "active" as const,
-  });
-  const chatBox = box("chat-x-box", "chat-x");
-  const automationBox = box("automation-box", "automation-run");
-  const manager = {
-    environmentControl: true,
-    provisionProviders: ["e2b", "namespace"] as const,
-  };
-
-  it("counts boxes claimed by other chats or automation runs, never an unclaimed one", () => {
-    expect(
-      boxesOfOtherChats([chatBox, automationBox, box("fresh-box", null)], draftThread),
-    ).toEqual(
-      new Map([
-        [chatBox.environmentId, host],
-        [automationBox.environmentId, host],
-      ]),
-    );
-  });
-
-  it("never counts the draft's own box through the handoff to its first turn", () => {
-    const own = (threadId: string | null) =>
-      boxesOfOtherChats([chatBox, box("own-box", threadId)], draftThread);
-    // Created, pairing, or paired with the first turn under way but not yet claimed.
-    expect(own(null)).toEqual(new Map([[chatBox.environmentId, host]]));
-    // Claimed by the draft's thread.
-    expect(own("draft-thread")).toEqual(new Map([[chatBox.environmentId, host]]));
-  });
-
-  it("sends a draft on another chat's box to a fresh box, even after its own box failed to pair", () => {
-    const hostEnvironment = { environmentId: host };
-    const failedPairing = box("failed-pairing-box", null);
-    expect(
-      newChatRunTargets({
-        environments: [hostEnvironment, chatBox, laptop],
-        environmentState: (id) => (id === host ? { serverConfig: { localAgentRuns: false } } : {}),
-        environmentId: chatBox.environmentId,
-        managerConfig: manager,
-        boxes: boxesOfOtherChats([chatBox, failedPairing], draftThread),
-      }),
-    ).toEqual({
-      environments: [laptop],
-      cloudProviders: ["e2b", "namespace"],
-      redirect: { kind: "cloud", provider: "e2b" },
-    });
-  });
-
-  it("never offers a paused or lost box, but lets a chat already on one stay", () => {
-    const paused = { ...box("paused-box", null), lifecycle: "paused" as const };
-    const lost = { ...box("lost-box", null), lifecycle: "missing" as const };
-    const targets = (environmentId: EnvironmentId) =>
-      newChatRunTargets({
-        environments: [paused, lost, laptop],
-        environmentState: () => ({}),
-        environmentId,
-        managerConfig: manager,
-        boxes: boxesOfOtherChats([paused, lost], draftThread),
-        idleBoxes: idleProvisionedBoxes([paused, lost, chatBox]),
-      });
-    expect(targets(laptop.environmentId)).toEqual({
-      environments: [laptop],
-      cloudProviders: ["e2b", "namespace"],
-      redirect: null,
-    });
-    expect(targets(paused.environmentId).redirect).toBeNull();
-  });
-});
-
 describe("claimFirstTurnBox", () => {
   const host = EnvironmentId.make("host");
   const box = EnvironmentId.make("box");
@@ -753,7 +653,7 @@ describe("claimFirstTurnBox", () => {
     expect(refreshed).toEqual([]);
   });
 
-  it("refetches the host's list after a claim, so the next draft sees the box taken", async () => {
+  it("refetches the host's list after a claim, so every device sees the box taken", async () => {
     // The host's record of who claimed the box, and this client's copy of its list.
     let owner: ThreadId | null = null;
     const hostList = () => [
@@ -778,10 +678,9 @@ describe("claimFirstTurnBox", () => {
       warn: () => undefined,
       boxManager,
     };
-    const nextDraft = ThreadId.make("next-draft");
-    expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map());
+    expect(clientList.map(({ threadId }) => threadId)).toEqual([null]);
     await expect(claimFirstTurnBox(provisionedHere(), ports, firstThread)).resolves.toBe(true);
-    expect(boxesOfOtherChats(clientList, nextDraft)).toEqual(new Map([[box, host]]));
+    expect(clientList.map(({ threadId }) => threadId)).toEqual([firstThread.threadId]);
   });
 });
 

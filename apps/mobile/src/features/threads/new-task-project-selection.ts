@@ -4,7 +4,6 @@ import {
   offeredProvisionProviders,
   runsLocalAgents,
   type NewChatEnvironmentState,
-  type ProvisionedBox,
 } from "@t3tools/client-runtime/cloud";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -18,13 +17,11 @@ type DraftProjectSelectionResolution =
   | { readonly kind: "select"; readonly project: EnvironmentProject }
   | { readonly kind: "pick" };
 
-/** What `newChatProject` reads: every box the hosts list, claimed or not, and each environment's state. */
+/** What `newChatProject` reads: each user environment's state. A cloud box has none. */
 export function newChatPlacement(
-  provisionedBoxes: ReadonlyArray<ProvisionedBox>,
   environmentStates: ReadonlyMap<EnvironmentId, NewChatEnvironmentState>,
 ) {
   return {
-    boxes: new Set(provisionedBoxes.map((box) => box.environmentId)),
     environmentState: (environmentId: EnvironmentId) => environmentStates.get(environmentId),
   };
 }
@@ -141,8 +138,8 @@ export function resolveDraftProjectSelection(
 }
 
 /**
- * The hosts whose box lists a new task reads: connected ones that can provision. A host still
- * connecting would never answer, and waiting on it would hold every new task back.
+ * The hosts whose box lists the client reads: connected ones that can provision. A host still
+ * connecting would never answer.
  */
 export function provisioningHostIds(
   serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>,
@@ -169,17 +166,11 @@ type NewTaskServerConfig = Pick<
   "localAgentRuns" | "environmentControl" | "provisionProviders"
 >;
 
-interface NewTaskEnvironmentsInput {
-  readonly projects: ReadonlyArray<EnvironmentProject>;
-  readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
-  /**
-   * Boxes other chats run on, each mapped to the host that provisioned it. A new task always
-   * gets a fresh box, never one of these.
-   */
-  readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
-  /** Boxes the host has paused or lost, which a new task is never offered. */
-  readonly idleBoxes?: ReadonlySet<EnvironmentId>;
-}
+/**
+ * Boxes other chats run on, each mapped to the host that provisioned it. A new task always gets a
+ * fresh box, never one of these.
+ */
+type OtherChatBoxes = ReadonlyMap<EnvironmentId, EnvironmentId>;
 
 /**
  * Where a new task starts before the user picks: a machine that runs agents, else any, so a host
@@ -203,11 +194,11 @@ export function defaultNewTaskEnvironmentId(input: {
  * box, and then the default. A queued task being edited stays on its own machine, box or not.
  */
 export function resolveNewTaskEnvironmentId(
-  input: Parameters<typeof defaultNewTaskEnvironmentId>[0] &
-    Pick<NewTaskEnvironmentsInput, "boxes"> & {
-      readonly picked: EnvironmentId | null;
-      readonly pinned: boolean;
-    },
+  input: Parameters<typeof defaultNewTaskEnvironmentId>[0] & {
+    readonly boxes: OtherChatBoxes;
+    readonly picked: EnvironmentId | null;
+    readonly pinned: boolean;
+  },
 ): EnvironmentId | null {
   const { picked } = input;
   return picked !== null &&
@@ -224,14 +215,15 @@ export function resolveNewTaskEnvironmentId(
  * primary signal; projects that haven't reported one yet (still indexing) fall back to
  * workspace basename / title so a valid host isn't hidden.
  */
-export function newTaskEnvironments(
-  input: NewTaskEnvironmentsInput & {
-    readonly selectedProject: EnvironmentProject | null;
-    readonly savedConnectionsById: Readonly<
-      Record<EnvironmentId, { readonly environmentLabel: string } | undefined>
-    >;
-  },
-): ReadonlyArray<NewTaskEnvironment> {
+export function newTaskEnvironments(input: {
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
+  readonly selectedProject: EnvironmentProject | null;
+  /** The user environments; a cloud box is not one, so it is never offered. */
+  readonly savedConnectionsById: Readonly<
+    Record<EnvironmentId, { readonly environmentLabel: string } | undefined>
+  >;
+}): ReadonlyArray<NewTaskEnvironment> {
   const selectedRepositoryKey = input.selectedProject?.repositoryIdentity?.canonicalKey ?? null;
   // `|| null` (not `??`): a pending-task placeholder project can have an empty
   // workspaceRoot, and an "" basename would reject every real host below.
@@ -268,8 +260,6 @@ export function newTaskEnvironments(
     environmentState: (environmentId) => ({ serverConfig: input.serverConfigs.get(environmentId) }),
     environmentId: null,
     managerConfig: null,
-    boxes: input.boxes,
-    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
   }).environments;
 }
 
@@ -292,8 +282,7 @@ export type NewThreadStart =
 export function resolveNewThreadStart(input: {
   readonly project: Pick<EnvironmentProject, "environmentId" | "repositoryIdentity">;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
-  readonly boxes: ReadonlyMap<EnvironmentId, EnvironmentId>;
-  readonly idleBoxes?: ReadonlySet<EnvironmentId>;
+  readonly boxes: OtherChatBoxes;
   /** Machines holding the same repository, in the order to prefer them. */
   readonly environments?: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
 }): NewThreadStart {
@@ -305,7 +294,6 @@ export function resolveNewThreadStart(input: {
     environmentId,
     managerConfig: input.serverConfigs.get(managerId),
     boxes: input.boxes,
-    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
   });
   const repository = cloneRepository(input.project.repositoryIdentity);
   if (targets.redirect?.kind === "cloud" && repository !== undefined) {

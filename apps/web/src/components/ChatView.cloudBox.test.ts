@@ -34,7 +34,6 @@ describe("a draft on the megpt-mono copy of a legacy e2b.local box", () => {
       requested: { environmentId: BOX, projectId: boxProject.id },
       projects,
       logicalProjectKey: (project) => project.key,
-      boxes: draft.boxIds,
       environmentState: (environmentId) => (environmentId === HOST ? { serverConfig: null } : null),
     });
     expect(moveTo).toEqual(hostProject);

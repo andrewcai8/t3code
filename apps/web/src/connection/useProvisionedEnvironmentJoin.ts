@@ -35,9 +35,9 @@ const keepLeaseAwake: RememberLease = (environment, ref, lease) => {
 };
 
 /**
- * Connects this client to environments `managerId` provisioned. Settings, run history, and the
- * automation auto-join share it so all resume, route pairing through the manager's gateway, and
- * record the lease.
+ * Connects this client to boxes `managerId` provisioned for automation runs. Run history and the
+ * auto-join share it so both resume, route pairing through the manager's gateway, and record the
+ * lease.
  */
 export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
   const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
@@ -76,11 +76,6 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
   }
 
   return {
-    /** A fresh pairing URL another device can use to reach the environment. */
-    mintPairingUrl: async (environment: DiscoveredProvisionedEnvironment) => {
-      const result = await attachForClient(environment);
-      return rewritePairingUrl(result.pairingUrl, environment.leaseId);
-    },
     /** Pairs this client with the environment; resolves with its thread once that has loaded. */
     join: async (environment: DiscoveredProvisionedEnvironment, remember = keepLeaseAwake) => {
       // Joining waits for the box's thread, which needs it connected; its chat holds it after.

@@ -1,153 +1,80 @@
-import { isOffDeviceReachablePairingUrl } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
-import { type DiscoveredProvisionedEnvironment, type EnvironmentId } from "@t3tools/contracts";
-import { useEffect, useId, useState } from "react";
-import { useProvisionedEnvironmentJoin } from "../../connection/useProvisionedEnvironmentJoin";
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import { useEffect, useState } from "react";
+
+import { forgetProvisionedSandbox } from "../../cloud/provisionedSandboxLeases";
+import { ensureLocalApi } from "../../localApi";
 import { useThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
-import { QRCodeSvg } from "../ui/qr-code";
-import { toastManager } from "../ui/toast";
 
-type DevicePairing =
-  | { readonly kind: "minting" }
-  | { readonly kind: "shareable"; readonly url: string }
-  | { readonly kind: "local-only" }
-  | { readonly kind: "failed"; readonly message: string };
+const LIFECYCLE_LABELS: Record<DiscoveredProvisionedEnvironment["lifecycle"], string> = {
+  active: "Running",
+  paused: "Paused",
+  missing: "Lost",
+  disposed: "Deleted",
+};
 
+/**
+ * One cloud machine the host runs for a chat. Its chat opens it, when that chat is on this
+ * device; here it can only be woken or deleted.
+ */
 function ProvisionedEnvironmentRow({
   environment,
-  pending,
-  disabled,
-  onOpen,
-  onMintPairingUrl,
+  busy,
+  onResume,
+  onDelete,
 }: {
   environment: DiscoveredProvisionedEnvironment;
-  pending: boolean;
-  disabled: boolean;
-  onOpen: () => void;
-  onMintPairingUrl: () => Promise<string>;
+  busy: boolean;
+  onResume: () => void;
+  onDelete: (title: string) => void;
 }) {
-  const thread = useThreadShell(
+  const threadRef =
     environment.threadId === null
       ? null
-      : scopeThreadRef(environment.environmentId, environment.threadId),
-  );
-  const [pairing, setPairing] = useState<DevicePairing | null>(null);
-  const pairingPanelId = useId();
-  const { copyToClipboard } = useCopyToClipboard<void>({
-    onCopy: () => {
-      toastManager.add({
-        type: "success",
-        title: "Pairing link copied",
-        description: "Open it on the device you want to pair to this machine.",
-      });
-    },
-    onError: (error) => {
-      toastManager.add({
-        type: "error",
-        title: "Could not copy pairing link",
-        description: error.message,
-      });
-    },
-  });
-  // Each open mints again rather than reusing the last URL, since a stale link may already be spent.
-  async function togglePairing() {
-    if (pairing !== null) {
-      setPairing(null);
-      return;
-    }
-    setPairing({ kind: "minting" });
-    try {
-      const url = await onMintPairingUrl();
-      setPairing(
-        isOffDeviceReachablePairingUrl(url) ? { kind: "shareable", url } : { kind: "local-only" },
-      );
-    } catch (error) {
-      setPairing({
-        kind: "failed",
-        message:
-          error instanceof Error
-            ? error.message
-            : "The manager could not issue a pairing link. Try again.",
-      });
-    }
-  }
+      : scopeThreadRef(environment.environmentId, environment.threadId);
+  const thread = useThreadShell(threadRef);
+  const navigate = useNavigate();
+  const title = thread?.title ?? environment.label;
   return (
-    <div>
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm">{thread?.title ?? environment.label}</p>
-          <p className="truncate text-xs text-muted-foreground">
-            {environment.repository ?? environment.projectDir} ·{" "}
-            {environment.provider === "e2b" ? "E2B" : "Namespace"}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <p className="truncate text-sm">{title}</p>
+        <p className="truncate text-xs text-muted-foreground">
+          {environment.repository ?? environment.projectDir} ·{" "}
+          {environment.provider === "e2b" ? "E2B" : "Namespace"} ·{" "}
+          {LIFECYCLE_LABELS[environment.lifecycle]}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {environment.lifecycle === "paused" ? (
+          <Button size="xs" variant="outline" disabled={busy} onClick={onResume}>
+            Resume
+          </Button>
+        ) : null}
+        {thread !== null && threadRef !== null ? (
           <Button
             size="xs"
             variant="outline"
-            aria-expanded={pairing !== null}
-            aria-controls={pairingPanelId}
-            disabled={pairing?.kind === "minting"}
-            onClick={() => void togglePairing()}
+            onClick={() => void navigate({ to: "/$environmentId/$threadId", params: threadRef })}
           >
-            Pair device
+            Open chat
           </Button>
-          <Button size="xs" variant="outline" disabled={disabled} onClick={onOpen}>
-            {pending ? "Connecting…" : environment.threadId === null ? "Connect" : "Open thread"}
-          </Button>
-        </div>
+        ) : null}
+        <Button
+          size="xs"
+          variant="destructive-outline"
+          disabled={busy}
+          onClick={() => onDelete(title)}
+        >
+          Delete
+        </Button>
       </div>
-      {pairing !== null ? (
-        <div id={pairingPanelId} className="mt-3 border-t border-border/50 pt-3">
-          {pairing.kind === "minting" ? (
-            <p className="text-xs text-muted-foreground">Creating a pairing link…</p>
-          ) : pairing.kind === "local-only" ? (
-            <p className="text-xs text-muted-foreground">
-              This machine is reachable only through this computer. Another device cannot use a
-              pairing link for it.
-            </p>
-          ) : pairing.kind === "failed" ? (
-            <p className="text-xs text-destructive">{pairing.message}</p>
-          ) : (
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0 flex-1 space-y-3">
-                <p className="text-xs text-muted-foreground">
-                  Scan on the device you want to pair. Anyone with this link can control this
-                  machine.
-                </p>
-                <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5">
-                  <code className="min-w-0 flex-1 truncate font-mono text-2xs text-muted-foreground">
-                    {pairing.url}
-                  </code>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    className="shrink-0"
-                    onClick={() => copyToClipboard(pairing.url, undefined)}
-                  >
-                    Copy link
-                  </Button>
-                </div>
-              </div>
-              <div className="w-fit shrink-0 rounded-xl bg-white p-3">
-                <QRCodeSvg
-                  value={pairing.url}
-                  size={168}
-                  level="M"
-                  marginSize={1}
-                  title="Pairing link — scan to open on another device"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -166,9 +93,13 @@ export function ProvisionedEnvironmentConnections({
       ? serverEnvironment.provisionedEnvironments({ environmentId: managerId, input: {} })
       : null,
   );
-  const { mintPairingUrl, join } = useProvisionedEnvironmentJoin(managerId);
-  const navigate = useNavigate();
-  const [pending, setPending] = useState<string | null>(null);
+  const resume = useAtomCommand(serverEnvironment.resumeProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const dispose = useAtomCommand(serverEnvironment.disposeProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const refresh = query.refresh;
   useEffect(() => {
@@ -177,25 +108,60 @@ export function ProvisionedEnvironmentConnections({
     const timer = globalThis.setInterval(refresh, 15_000);
     return () => globalThis.clearInterval(timer);
   }, [supported, refresh]);
-  async function open(environment: DiscoveredProvisionedEnvironment) {
-    setPending(environment.requestId);
+
+  async function act(
+    environment: DiscoveredProvisionedEnvironment,
+    action: () => Promise<string | null>,
+  ) {
+    setBusy(environment.requestId);
     setMessage(null);
     try {
-      const ref = await join(environment);
-      if (ref) await navigate({ to: "/$environmentId/$threadId", params: ref });
-      else setMessage("Environment connected. Its threads will appear when they are available.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "The environment could not be opened.");
+      setMessage(await action());
     } finally {
-      setPending(null);
+      setBusy(null);
+      refresh();
     }
   }
+  const resumeEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
+    act(environment, async () => {
+      const result = await resume({
+        environmentId: managerId,
+        input: { environmentId: environment.environmentId },
+      });
+      if (result._tag === "Failure") return "The host could not resume this machine. Try again.";
+      return result.value.kind === "resumed" ? null : result.value.message;
+    });
+  const deleteEnvironment = async (
+    environment: DiscoveredProvisionedEnvironment,
+    title: string,
+  ) => {
+    const confirmed = await ensureLocalApi().dialogs.confirm(
+      [
+        `Delete the cloud machine for "${title}"?`,
+        "This permanently stops it and ends any running work. The chat's history stays.",
+      ].join("\n"),
+      { variant: "destructive" },
+    );
+    if (!confirmed) return;
+    await act(environment, async () => {
+      const result = await dispose({
+        environmentId: managerId,
+        input: { requestId: environment.requestId },
+      });
+      if (result._tag === "Failure") return "The host could not delete this machine. Try again.";
+      if (result.value.kind !== "disposed") return "The host could not delete this machine.";
+      if (environment.threadId !== null)
+        forgetProvisionedSandbox(scopeThreadRef(environment.environmentId, environment.threadId));
+      return null;
+    });
+  };
+
   if (!supported || (!query.error && !query.data?.length)) return null;
   return (
     <div className="space-y-3 border-t border-border px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
-          Provisioned environments · {managerLabel}
+          Cloud machines · {managerLabel}
           {query.data ? ` (${query.data.length})` : ""}
         </p>
         <Button size="xs" variant="outline" disabled={query.isPending} onClick={query.refresh}>
@@ -204,17 +170,16 @@ export function ProvisionedEnvironmentConnections({
       </div>
       {query.error ? (
         <p className="text-xs text-destructive">
-          Provisioned environments could not be loaded. Refresh to try again.
+          Cloud machines could not be loaded. Refresh to try again.
         </p>
       ) : null}
       {query.data?.map((environment) => (
         <ProvisionedEnvironmentRow
           key={environment.requestId}
           environment={environment}
-          pending={pending === environment.requestId}
-          disabled={pending !== null}
-          onOpen={() => void open(environment)}
-          onMintPairingUrl={() => mintPairingUrl(environment)}
+          busy={busy === environment.requestId}
+          onResume={() => void resumeEnvironment(environment)}
+          onDelete={(title) => void deleteEnvironment(environment, title)}
         />
       ))}
       {message ? (

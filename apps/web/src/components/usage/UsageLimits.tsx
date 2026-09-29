@@ -20,7 +20,7 @@ import { GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
 import { Fragment, type ReactNode, useState } from "react";
 
 import { usePrimarySettings } from "../../hooks/useSettings";
-import { limitPresentationsAtom } from "../../state/presentation";
+import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
@@ -334,7 +334,7 @@ export function UsageLimitsSection({
   readonly now: number;
   readonly cursorPrompt?: ReactNode;
 }) {
-  const presentations = useAtomValue(limitPresentationsAtom);
+  const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const selected =
     selectedEnvironmentIds === null
       ? presentations

@@ -540,7 +540,7 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
-import { refreshProvisionedEnvironments, useNewChatBoxes } from "../cloud/automationHosts";
+import { refreshProvisionedEnvironments } from "../cloud/automationHosts";
 import { holdBoxDemand, useBoxDemand, useBoxLifecycle } from "../cloud/CloudBoxes";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
@@ -2640,7 +2640,6 @@ export default function ChatView(props: ChatViewProps) {
       primaryEnvironmentId,
     });
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const newChatBoxes = useNewChatBoxes(draftId, threadId);
   const runTargets = useMemo(
     () =>
       newChatRunTargets({
@@ -2648,15 +2647,12 @@ export default function ChatView(props: ChatViewProps) {
         environmentState: (environmentId) => environmentById.get(environmentId),
         environmentId: activeThreadEnvironmentId,
         managerConfig: primaryEnvironment?.serverConfig,
-        boxes: newChatBoxes.others,
-        idleBoxes: newChatBoxes.idle,
       }),
     [
       logicalProjectEnvironments,
       environmentById,
       activeThreadEnvironmentId,
       primaryEnvironment?.serverConfig,
-      newChatBoxes,
     ],
   );
   // A draft offers only machines a new chat can run on, never another chat's
@@ -4127,18 +4123,10 @@ export default function ChatView(props: ChatViewProps) {
             projects: allProjects,
             logicalProjectKey: (project) =>
               deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
-            boxes: cloudBoxIds,
             environmentState: (environmentId) => environmentById.get(environmentId),
           })
         : null,
-    [
-      activeProject,
-      allProjects,
-      cloudBoxIds,
-      environmentById,
-      onAnotherChatsBox,
-      projectGroupingSettings,
-    ],
+    [activeProject, allProjects, environmentById, onAnotherChatsBox, projectGroupingSettings],
   );
   useEffect(() => {
     if (!draftId || !projectOffAnotherChatsBox || sendInFlightRef.current) return;
@@ -8013,7 +8001,6 @@ export default function ChatView(props: ChatViewProps) {
       isReconnectPending() ||
       sendInFlightRef.current ||
       (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
-      newChatBoxes.refreshing ||
       (isInProgressCloudProvisioningPhase(cloudProvisioningPhase) &&
         !resumingCloudSendRef.current) ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
@@ -11085,9 +11072,7 @@ export default function ChatView(props: ChatViewProps) {
                                     ? "Messages loading"
                                     : worktreeSetupBlocksSend
                                       ? "Preparing worktree"
-                                      : newChatBoxes.refreshing
-                                        ? "Checking cloud machines"
-                                        : projectCloneSendBlockReason
+                                      : projectCloneSendBlockReason
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}
