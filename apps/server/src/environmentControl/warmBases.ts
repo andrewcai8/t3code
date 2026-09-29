@@ -116,8 +116,8 @@ const idleExpired = (
   now: number,
   policy: WarmBasePolicy,
 ) => {
-  const used = record && lastUse(record);
-  return !wanted && used !== null && used !== undefined && age(used, now) > policy.idleMs;
+  const used = record ? lastUse(record) : undefined;
+  return !wanted && used !== undefined && age(used, now) > policy.idleMs;
 };
 
 /**
@@ -208,7 +208,7 @@ const retireIdle = (record: WarmBaseRecord, now: number): WarmBaseRecord =>
     ? {
         ...record,
         ready: null,
-        lastUsedAt: lastUse(record),
+        lastUsedAt: record.lastUsedAt ?? record.ready.builtAt,
         retired: [...record.retired, ...retiredReady(record, now)],
       }
     : record;
