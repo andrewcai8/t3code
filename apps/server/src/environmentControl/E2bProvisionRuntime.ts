@@ -7,6 +7,7 @@ import * as NodeStreamPromises from "node:stream/promises";
 import {
   CommandExitError,
   E2B,
+  SandboxError,
   SandboxNotFoundError,
   type CommandResult,
   type E2BClientOpts,
@@ -17,6 +18,7 @@ import * as Schema from "effect/Schema";
 import {
   prepareRemoteHost,
   refreshRemoteCheckout,
+  sealWarmBase,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
@@ -30,6 +32,8 @@ import {
 } from "./ProvisionPreparation.ts";
 
 import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
+import { credentialDestinations } from "./credentialDestinations.ts";
+import { guestCredentialDestination } from "./ProvisioningProviderProfile.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
@@ -90,6 +94,31 @@ export function makeProvisionResolution(config: {
       return revisionResponse(await response.json()).sha;
     },
   };
+}
+
+/**
+ * Home paths a warm base's seal removes whatever its build installed: every
+ * login any driver reads, the GitHub token files, and Claude's account
+ * record. A prepare command can write these too, and a base must never hand
+ * one account's login to the next chat.
+ */
+export function warmSealHomePaths(): string[] {
+  const drivers = Object.keys(credentialDestinations) as Array<keyof typeof credentialDestinations>;
+  return [
+    ...new Set([
+      ...drivers.flatMap((kind) =>
+        credentialDestinations[kind].flatMap((path) => [
+          path,
+          guestCredentialDestination(kind, path, "e2b"),
+        ]),
+      ),
+      // What a configured `githubToken` becomes.
+      ".git-credentials",
+      ".gitconfig",
+      ".config/gh/hosts.yml",
+      ".claude.json",
+    ]),
+  ];
 }
 
 const STDIN_CHUNK = 4 * 1024 * 1024;
@@ -335,6 +364,43 @@ with urllib.request.urlopen(request, timeout=30) as response:
         pairingUrl: `${origin}/pair#token=${encodeURIComponent(credential)}`,
         remoteAccess: { origin, brokerToken },
       };
+    },
+    /** Turns a ready warm base build into what its snapshot should hold. */
+    seal: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+    ) =>
+      sealWarmBase(e2bPythonPort(await connect(operation, sandboxId)), {
+        root: manifest.preparation.root,
+        files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
+        homePaths: warmSealHomePaths(),
+      }),
+    /** Snapshots a sealed build, reusing the snapshot an interrupted call already took. */
+    snapshot: async (operation: ProvisionOperation, sandboxId: string) => {
+      await verify(operation, sandboxId);
+      const [taken] = await client.Sandbox.listSnapshots({ sandboxId }).nextItems();
+      const { snapshotId } = taken ?? (await client.Sandbox.createSnapshot(sandboxId));
+      // A snapshot id is `<template>:<tag>`; a sandbox is created from the bare template.
+      return { snapshotId, templateId: snapshotId.replace(/:.*$/, "") };
+    },
+    /** Every snapshot taken from a sandbox. */
+    snapshotsOf: async (sandboxId: string) => {
+      const paginator = client.Sandbox.listSnapshots({ sandboxId });
+      const snapshotIds: string[] = [];
+      while (paginator.hasNext)
+        for (const { snapshotId } of await paginator.nextItems()) snapshotIds.push(snapshotId);
+      return snapshotIds;
+    },
+    /** E2B refuses to delete a snapshot while any sandbox made from it still exists. */
+    deleteSnapshot: async (snapshotId: string): Promise<"deleted" | "missing" | "in_use"> => {
+      try {
+        return (await client.Sandbox.deleteSnapshot(snapshotId)) ? "deleted" : "missing";
+      } catch (error) {
+        if (error instanceof SandboxError && /sandboxes using it/.test(error.message))
+          return "in_use";
+        throw error;
+      }
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       try {

@@ -53,6 +53,37 @@ it("loads private configuration and rejects ambiguous target mappings", async ()
   }
 });
 
+it("reads a warm base refresh interval of zero or more hours and refuses a negative one", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cloud-config-"));
+  const path = NodePath.join(directory, "config.json");
+  const read = async (warmBaseRefreshHours: number) => {
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        e2bApiKey: "test-key",
+        broker: {
+          sandboxId: "broker",
+          metadata: { owner: "test" },
+          url: "https://controller.invalid",
+          ingressKey: "test-ingress",
+        },
+        targets: [],
+        provisioning: { warmBaseRefreshHours },
+      }),
+      { mode: 0o600 },
+    );
+    return readConfig(path).then(
+      (config) => config.provisioning?.warmBaseRefreshHours,
+      () => "refused",
+    );
+  };
+  try {
+    expect([await read(0), await read(6), await read(-1)]).toEqual([0, 6, "refused"]);
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
+
 it("resolves cloud control configuration from the state directory by default", async () => {
   const seen: string[] = [];
   const path = await resolveControlConfigPath({

@@ -176,6 +176,45 @@ export async function refreshRemoteCheckout(
   return decodeRefreshed(result.stdout);
 }
 
+/** Journal entries a sealed warm base carries to the box that adopts it: the runtime it verified. */
+const warmJournalKeys = ["artifactFiles", "artifactLinks", "runtimes"];
+
+const decodeSealed = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ sealed: Schema.Literal(true) })),
+);
+
+/**
+ * Turns a prepared root into a warm base a snapshot can carry: stops its T3
+ * server and removes everything that is one box's identity (journal, broker
+ * token, T3 home, installed files), keeping the runtime's verified record in
+ * `warm.json` and the checkout as a never-opened `workspace.partial`. The next
+ * preparation of this root adopts both. Converges when rerun after a crash at
+ * any point. Processes a prepare command left running carry no T3 identity and
+ * stay.
+ */
+export async function sealWarmBase(
+  port: RemotePreparationPort,
+  input: {
+    readonly root: string;
+    readonly files: ReadonlyArray<{
+      readonly scope: "home" | "workspace";
+      readonly destination: string;
+    }>;
+    /** Removed from the home whether or not the build installed them. */
+    readonly homePaths: ReadonlyArray<string>;
+  },
+): Promise<void> {
+  const result = await port.executePython({
+    script: sealWarmBaseScript,
+    stdin: JSON.stringify(input),
+  });
+  if (result.exitCode !== 0) {
+    const detail = result.stderr?.trim();
+    throw new Error(detail && detail.length > 0 ? detail : "Sealing the warm base failed.");
+  }
+  decodeSealed(result.stdout);
+}
+
 /** Runs one preparation command, killing its whole process group on timeout. Needs `contextlib`, `os` and `subprocess`. */
 export const boundedRunScript = String.raw`
 def run_bounded(args, cwd, env, timeout, pass_fds=()):
@@ -203,17 +242,8 @@ def run_bounded(args, cwd, env, timeout, pass_fds=()):
     return stdout.strip()
 `;
 
-/** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
-export const remotePreparationScript = String.raw`
-import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
-
-INTERPRETER_START = time.monotonic()
-STARTUP = []
-# Children preparation started without waiting on; stopped if it fails first.
-BACKGROUND = []
-TOOL_INSTALL_SECONDS = 180
-os.umask(0o077)
-
+/** Private-file helpers shared by the guest scripts. Needs `os` and `pathlib`. */
+const guestPathScript = String.raw`
 def atomic(path, value):
     temp = path.with_name(path.name + '.tmp')
     with open(temp, 'w') as output:
@@ -226,13 +256,6 @@ def atomic(path, value):
         os.fsync(directory)
     finally:
         os.close(directory)
-
-def digest(path):
-    result = hashlib.sha256()
-    with open(path, 'rb') as data:
-        for chunk in iter(lambda: data.read(1024 * 1024), b''):
-            result.update(chunk)
-    return result.hexdigest()
 
 def contained(root, relative):
     rel = pathlib.PurePosixPath(relative)
@@ -251,6 +274,27 @@ def contained(root, relative):
     if resolved == resolved_root or resolved_root not in resolved.parents:
         raise RuntimeError('Path escapes its preparation directory')
     return target
+`;
+
+/** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
+export const remotePreparationScript = String.raw`
+import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
+
+INTERPRETER_START = time.monotonic()
+STARTUP = []
+# Children preparation started without waiting on; stopped if it fails first.
+BACKGROUND = []
+TOOL_INSTALL_SECONDS = 180
+WARM_KEYS = ${JSON.stringify(warmJournalKeys)}
+os.umask(0o077)
+
+${guestPathScript}
+def digest(path):
+    result = hashlib.sha256()
+    with open(path, 'rb') as data:
+        for chunk in iter(lambda: data.read(1024 * 1024), b''):
+            result.update(chunk)
+    return result.hexdigest()
 
 def contained_link(root, target, linkname):
     if not linkname or pathlib.PurePosixPath(linkname).is_absolute():
@@ -378,7 +422,13 @@ def prepare(spec):
                 raise RuntimeError('Preparation identity conflict')
         else:
             journal = {'intent': intent, 'environmentId': str(uuid.uuid4()), 'installedFiles': []}
+            # A sealed warm base keeps the runtime it extracted and verified.
+            warm_path = root / 'warm.json'
+            if warm_path.exists():
+                warm = json.loads(warm_path.read_text())
+                journal.update({key: warm[key] for key in WARM_KEYS if key in warm})
             atomic(journal_path, json.dumps(journal))
+            warm_path.unlink(missing_ok=True)
         home = root / 'home'
         home.mkdir(exist_ok=True)
         t3home = home / '.t3'
@@ -633,15 +683,17 @@ def prepare(spec):
                     # tracking origin, so the thread starts on main rather
                     # than a detached HEAD. -B makes a retry of this
                     # never-opened checkout converge. A pinned revision, or a
-                    # branch the remote cannot name, stays detached.
+                    # branch the remote cannot name, stays detached. A partial
+                    # checkout was never opened, so forcing loses nothing, and a
+                    # warm base's prepared tree may have touched tracked files.
                     branch = None
                     with contextlib.suppress(RuntimeError):
                         branch = followed_branch(checkout)
                     if branch is None:
-                        run(['git', 'checkout', '--detach', repository['revision']], checkout, git_env, timeout=600)
+                        run(['git', 'checkout', '-f', '--detach', repository['revision']], checkout, git_env, timeout=600)
                     else:
                         run(['git', 'update-ref', 'refs/remotes/origin/' + branch, repository['revision']], checkout, env)
-                        run(['git', 'checkout', '-q', '-B', branch, '--track', 'origin/' + branch], checkout, git_env, timeout=600)
+                        run(['git', 'checkout', '-q', '-f', '-B', branch, '--track', 'origin/' + branch], checkout, git_env, timeout=600)
                 os.rename(checkout, project)
         if repository is not None:
             with step('repositoryVerify'):
@@ -856,5 +908,74 @@ except Exception as error:
         with contextlib.suppress(OSError):
             os.killpg(child.pid, 9)
     sys.stderr.write('Remote preparation failed: ' + str(error) + '\n')
+    sys.exit(1)
+`;
+
+const sealWarmBaseScript = String.raw`
+import fcntl, json, os, pathlib, shutil, sys, time
+
+os.umask(0o077)
+${guestPathScript}
+def server_lock_free(root):
+    with open(root / 'server.lock', 'a') as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+def stop_server(root):
+    try:
+        pid = json.loads((root / 'server.json').read_text())['pid']
+    except (OSError, ValueError, KeyError):
+        return
+    for signal, grace in ((15, 30), (9, 10)):
+        try:
+            os.killpg(pid, signal)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + grace
+        while not server_lock_free(root):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        else:
+            return
+    raise RuntimeError('The T3 server did not stop for sealing')
+
+def seal(spec):
+    root = pathlib.Path(spec['root'])
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise RuntimeError('Sealing requires a prepared root')
+    home = root / 'home'
+    workspace = root / 'workspace'
+    partial = root / 'workspace.partial'
+    with open(root / 'prepare.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        stop_server(root)
+        journal_path = root / 'preparation.json'
+        if journal_path.exists():
+            journal = json.loads(journal_path.read_text())
+            atomic(root / 'warm.json', json.dumps({key: journal[key] for key in ${JSON.stringify(warmJournalKeys)} if key in journal}))
+            journal_path.unlink()
+        for name in ('broker-token', 'server.json', 'server.log', 'tool-install.log'):
+            (root / name).unlink(missing_ok=True)
+        if (home / '.t3').exists():
+            shutil.rmtree(home / '.t3')
+        for file in spec['files']:
+            base = home if file['scope'] == 'home' else workspace
+            if base.exists():
+                contained(base, file['destination']).unlink(missing_ok=True)
+        if home.exists():
+            for path in spec['homePaths']:
+                contained(home, path).unlink(missing_ok=True)
+        if workspace.exists() and not partial.exists():
+            os.rename(workspace, partial)
+    return {'sealed': True}
+
+try:
+    print(json.dumps(seal(json.load(sys.stdin))))
+except Exception as error:
+    sys.stderr.write('Sealing the warm base failed: ' + str(error) + '\n')
     sys.exit(1)
 `;
