@@ -4,7 +4,11 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import { offeredProvisionProviders, type ProvisionedBoxes } from "../cloud/provisioning.ts";
-import { AVAILABLE_CONNECTION_STATE, type SupervisorConnectionState } from "../connection/model.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  connectionBox,
+  type SupervisorConnectionState,
+} from "../connection/model.ts";
 import {
   presentEnvironmentConnection,
   type EnvironmentPresentation,
@@ -53,9 +57,14 @@ export function createEnvironmentPresentationAtoms<E>(input: {
   );
 
   let previous: ReadonlyMap<EnvironmentId, EnvironmentPresentation> = new Map();
+  /**
+   * Every saved environment but the cloud boxes, switched off ones included so Settings can list
+   * them. A box belongs to its chat; read it through `presentationAtom`.
+   */
   const presentationsAtom = Atom.make((get) => {
     const next = new Map<EnvironmentId, EnvironmentPresentation>();
-    for (const environmentId of get(input.catalogValueAtom).entries.keys()) {
+    for (const [environmentId, entry] of get(input.catalogValueAtom).entries) {
+      if (connectionBox(entry.target) !== null) continue;
       const presentation = get(presentationAtom(environmentId));
       if (presentation !== null) {
         next.set(environmentId, presentation);

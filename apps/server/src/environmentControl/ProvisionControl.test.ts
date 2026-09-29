@@ -156,12 +156,22 @@ it.effect(
         environmentId: "remote",
         pairingUrl: "https://remote/pair#token=grant-2",
       });
-      yield* Effect.promise(() =>
-        actual.claim({
+      // A client names the owner; only the environment the box reported may own its lease.
+      expect(
+        yield* make().claim({
           leaseId: input.requestId,
-          owner: { environmentId: "remote", threadId: "thread" },
+          environmentId: EnvironmentId.make("andrew-megpt-host"),
+          threadId: "thread",
         }),
-      );
+      ).toMatchObject({ kind: "refused", reason: "unknown" });
+      expect((yield* Effect.promise(() => actual.findById(input.requestId)))?.owner).toBeNull();
+      expect(
+        yield* make().claim({
+          leaseId: input.requestId,
+          environmentId: EnvironmentId.make("remote"),
+          threadId: "thread",
+        }),
+      ).toEqual({ kind: "claimed" });
       expect(yield* make().touch({ leaseId: input.requestId })).toEqual({ kind: "touched" });
       expect(calls.slice(-2)).toEqual(["touch-provider", "touch-lease"]);
       rejectTouch = true;

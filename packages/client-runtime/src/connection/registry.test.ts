@@ -116,6 +116,21 @@ const BEARER_CREDENTIAL = new BearerConnectionCredential({
   token: "bearer-token",
 });
 
+/** A cloud box the host `TARGET` provisioned, saved as it is after pairing: `e2b.local`. */
+const HOST_BOX = new BearerConnectionTarget({
+  environmentId: EnvironmentId.make("environment-e2b-box"),
+  label: "e2b.local",
+  connectionId: "bearer:environment-e2b-box",
+  box: { managerId: TARGET.environmentId },
+});
+const HOST_BOX_PROFILE = new BearerConnectionProfile({
+  connectionId: HOST_BOX.connectionId,
+  environmentId: HOST_BOX.environmentId,
+  label: HOST_BOX.label,
+  httpBaseUrl: "https://e2b-box.example.test",
+  wsBaseUrl: "wss://e2b-box.example.test",
+});
+
 const SSH_TARGET: DesktopSshEnvironmentTarget = {
   alias: "test",
   hostname: "test.example.test",
@@ -617,6 +632,210 @@ describe("EnvironmentRegistry", () => {
         expect(yield* Ref.get(harness.releasedSessions)).toBe(0);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
+  );
+
+  it.effect("a saved box connects only while its chat demands it", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [TARGET, HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* TestClock.adjust("1 hour");
+        expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("available");
+        expect(yield* Ref.get(harness.preparations)).toBe(1);
+
+        const chat = yield* Scope.make();
+        const secondView = yield* Scope.make();
+        yield* registry.demand(HOST_BOX.environmentId).pipe(Scope.provide(chat));
+        yield* registry.demand(HOST_BOX.environmentId).pipe(Scope.provide(secondView));
+        yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "connected",
+        );
+        expect(yield* SubscriptionRef.get(registry.demanded)).toEqual(
+          new Set([HOST_BOX.environmentId]),
+        );
+
+        yield* Scope.close(chat, Exit.void);
+        expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+
+        yield* Scope.close(secondView, Exit.void);
+        yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "available",
+        );
+        expect(yield* SubscriptionRef.get(registry.demanded)).toEqual(new Set());
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
+        yield* TestClock.adjust("1 hour");
+        expect(yield* Ref.get(harness.preparations)).toBe(2);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("a legacy saved box stops connecting in the background once it is marked", () =>
+    Effect.gen(function* () {
+      const legacyBox = new BearerConnectionTarget({
+        environmentId: HOST_BOX.environmentId,
+        label: HOST_BOX.label,
+        connectionId: HOST_BOX.connectionId,
+      });
+      const harness = yield* makeHarness(
+        [TARGET, legacyBox, SSH_CONNECTION],
+        [HOST_BOX_PROFILE, SSH_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+      yield* Ref.update(harness.shellCache, (cache) =>
+        new Map(cache).set(HOST_BOX.environmentId, CACHED_SNAPSHOT),
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          legacyBox.environmentId,
+          (state) => state.phase === "connected",
+        );
+
+        yield* registry.markBoxes([
+          { environmentId: legacyBox.environmentId, managerId: TARGET.environmentId },
+          { environmentId: SSH_CONNECTION.environmentId, managerId: TARGET.environmentId },
+          {
+            environmentId: EnvironmentId.make("environment-not-saved"),
+            managerId: TARGET.environmentId,
+          },
+        ]);
+        yield* awaitConnectionState(
+          registry,
+          legacyBox.environmentId,
+          (state) => state.phase === "available",
+        );
+        const stored = yield* Ref.get(harness.storedTargets);
+        expect(stored.get(legacyBox.environmentId)).toEqual(HOST_BOX);
+        expect(stored.get(SSH_CONNECTION.environmentId)).toEqual(SSH_CONNECTION);
+        expect(stored.has(EnvironmentId.make("environment-not-saved"))).toBe(false);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+
+      const preparationsBeforeReload = yield* Ref.get(harness.preparations);
+      yield* Effect.gen(function* () {
+        const reloaded = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* reloaded.start;
+        yield* TestClock.adjust("1 hour");
+        expect((yield* reloaded.state(HOST_BOX.environmentId)).phase).toBe("available");
+        // Only the host and the SSH machine dialed; the box's history and credential stay.
+        expect(yield* Ref.get(harness.preparations)).toBe(preparationsBeforeReload + 2);
+        expect((yield* Ref.get(harness.shellCache)).get(HOST_BOX.environmentId)).toEqual(
+          CACHED_SNAPSHOT,
+        );
+        expect((yield* Ref.get(harness.storedCredentials)).get(HOST_BOX.connectionId)).toEqual(
+          BEARER_CREDENTIAL,
+        );
+
+        yield* reloaded.demand(HOST_BOX.environmentId);
+        yield* awaitConnectionState(
+          reloaded,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("never marks a host as a box, and a wrong mark can be undone", () =>
+    Effect.gen(function* () {
+      const server = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("andrew-megpt-host"),
+        label: "andrew.megpt.app",
+        connectionId: "bearer:andrew-megpt-host",
+      });
+      const serverProfile = new BearerConnectionProfile({
+        connectionId: server.connectionId,
+        environmentId: server.environmentId,
+        label: server.label,
+        httpBaseUrl: "https://andrew.megpt.app",
+        wsBaseUrl: "wss://andrew.megpt.app",
+      });
+      const harness = yield* makeHarness(
+        [server, HOST_BOX],
+        [serverProfile, HOST_BOX_PROFILE],
+        [
+          [server.connectionId, BEARER_CREDENTIAL],
+          [HOST_BOX.connectionId, BEARER_CREDENTIAL],
+        ],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, server.environmentId, (s) => s.phase === "connected");
+        // The server provisions boxes, so it is a manager, whatever a lease or list says.
+        yield* registry.markBoxes([
+          { environmentId: server.environmentId, managerId: EnvironmentId.make("other-host") },
+          { environmentId: EnvironmentId.make("new-box"), managerId: server.environmentId },
+        ]);
+        yield* registry.markBoxes([
+          { environmentId: server.environmentId, managerId: server.environmentId },
+        ]);
+        expect((yield* Ref.get(harness.storedTargets)).get(server.environmentId)).toEqual(server);
+        expect((yield* registry.state(server.environmentId)).phase).toBe("connected");
+
+        // A box marked by mistake goes back to being an ordinary environment.
+        yield* registry.unmarkBox(HOST_BOX.environmentId);
+        const unmarked = new BearerConnectionTarget({
+          environmentId: HOST_BOX.environmentId,
+          label: HOST_BOX.label,
+          connectionId: HOST_BOX.connectionId,
+        });
+        expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)).toEqual(
+          unmarked,
+        );
+        yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("pairing a box again keeps it a box", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: new BearerConnectionTarget({
+              environmentId: HOST_BOX.environmentId,
+              label: HOST_BOX.label,
+              connectionId: HOST_BOX.connectionId,
+            }),
+            profile: HOST_BOX_PROFILE,
+            credential: BEARER_CREDENTIAL,
+          }),
+        );
+        expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)).toEqual(
+          HOST_BOX,
+        );
+        yield* TestClock.adjust("1 hour");
+        expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("available");
+        expect(yield* Ref.get(harness.preparations)).toBe(0);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("stops dialing and offering the saved boxes a host reports gone", () =>

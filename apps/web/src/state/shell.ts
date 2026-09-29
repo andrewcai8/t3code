@@ -11,6 +11,7 @@ import {
 import {
   type EnvironmentCatalogState,
   enabledEnvironmentIds,
+  userEnvironmentIds,
 } from "@t3tools/client-runtime/state/connections";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -68,7 +69,8 @@ export function createAllEnvironmentProjectSnapshotsReadyAtom(input: {
     ) {
       return false;
     }
-    for (const environmentId of enabledEnvironmentIds(catalog)) {
+    // A cloud box is live only while its chat is open, so it cannot hold this back.
+    for (const environmentId of userEnvironmentIds(catalog)) {
       const shell = get(input.shellStateValueAtom(environmentId));
       if (shell.status !== "live" || Option.isNone(shell.snapshot)) return false;
     }

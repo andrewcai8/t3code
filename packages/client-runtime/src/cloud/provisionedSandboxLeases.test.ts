@@ -92,3 +92,39 @@ describe("provisioned sandbox leases", () => {
     expect(records.has(PROVISIONED_SANDBOX_LEASES_STORAGE_KEY)).toBe(false);
   });
 });
+
+describe("boxes", () => {
+  it("names only boxes their host reported, never an environment a thread key names", () => {
+    const { storage } = memoryStorage();
+    const store = createProvisionedSandboxLeaseStore(storage);
+    store.remember("draft-still-provisioning", lease);
+    // A lease a device moved to a thread on a real server by mistake names no box.
+    store.remember(
+      { environmentId: EnvironmentId.make("andrew-megpt-host"), threadId: ThreadId.make("t") },
+      lease,
+    );
+    store.remember(threadRef, { ...lease, environmentId: EnvironmentId.make("reported-box") });
+    store.rememberForEnvironment(EnvironmentId.make("joined"), {
+      ...lease,
+      managerEnvironmentId: EnvironmentId.make("other-host"),
+    });
+    expect(store.boxes()).toEqual([
+      { environmentId: "reported-box", managerId: "manager" },
+      { environmentId: "joined", managerId: "other-host" },
+    ]);
+  });
+});
+
+describe("reload", () => {
+  it("reads leases persisted after the store was made, as once a phone's file is read", () => {
+    const { records, storage } = memoryStorage();
+    const store = createProvisionedSandboxLeaseStore(storage);
+    records.set(
+      PROVISIONED_SANDBOX_LEASES_STORAGE_KEY,
+      JSON.stringify({ [`thread:${threadRef.environmentId}:${threadRef.threadId}`]: lease }),
+    );
+    expect(store.leaseFor(threadRef)).toBeNull();
+    store.reload();
+    expect(store.leaseFor(threadRef)).toEqual(lease);
+  });
+});

@@ -1,4 +1,5 @@
 import { ProvisionedEnvironmentConnections } from "./ProvisionedEnvironmentConnections";
+import { SavedCloudBoxConnections } from "./SavedCloudBoxConnections";
 import { CloudComputeControls } from "./CloudComputeControls";
 import {
   ChevronsLeftRightEllipsisIcon,
@@ -3768,6 +3769,7 @@ export function ConnectionsSettings() {
             />
           </div>
         ))}
+      <SavedCloudBoxConnections />
       <LoadBalancingSettings environments={balancedEnvironments} />
       <GitHubRoutingSettings environments={loadBalancingEnvironments} />
     </SettingsPageContainer>

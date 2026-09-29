@@ -411,27 +411,6 @@ export function createEnvironmentControl(
       leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
       return promise;
     },
-    claim: async (
-      input: EnvironmentProvisionClaimInput,
-    ): Promise<EnvironmentProvisionClaimResult> => {
-      if (!leaseRegistry)
-        return {
-          kind: "refused",
-          reason: "unknown",
-          message: "The cloud sandbox lease registry is unavailable.",
-        };
-      const lease = await leaseRegistry.claim({
-        leaseId: input.leaseId,
-        owner: { environmentId: input.environmentId, threadId: input.threadId },
-      });
-      return lease
-        ? { kind: "claimed" }
-        : {
-            kind: "refused",
-            reason: "unknown",
-            message: "The cloud sandbox lease could not be claimed.",
-          };
-    },
     touch: async (
       input: EnvironmentProvisionTouchInput,
     ): Promise<EnvironmentProvisionTouchResult> => {
@@ -1188,12 +1167,7 @@ export const layer = Layer.effect(
           reason: "unknown" as const,
           message: "This install has no provisioning template configured.",
         }),
-      claim: (input) =>
-        run<EnvironmentProvisionClaimResult>((service) => service.claim(input), {
-          kind: "refused" as const,
-          reason: "unknown" as const,
-          message: "This install has no cloud provisioning template configured.",
-        }),
+      claim: provisionControl.claim,
       resume: Effect.fn("EnvironmentControl.resume")(function* (
         input: EnvironmentProvisionResumeInput,
       ) {

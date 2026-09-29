@@ -16,6 +16,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { connectPairing } from "../../connection/onboarding";
+import { holdBoxDemand } from "../../state/box-demand";
 import { cn } from "../../lib/cn";
 import { useThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
@@ -74,6 +75,8 @@ export function ProvisionedEnvironmentRows(props: {
       const setJoinState = (state: ProvisionedJoinState) =>
         setJoinStates((current) => ({ ...current, [environment.requestId]: state }));
       setJoinState({ kind: "joining" });
+      // A box connects only while something holds it; joining holds it until the pairing lands.
+      const release = holdBoxDemand(environment.environmentId);
       try {
         const outcome = await joinProvisionedEnvironment(environment, {
           isConnected: (id) => isProvisionedEnvironmentConnected(id, connectedEnvironments),
@@ -106,6 +109,7 @@ export function ProvisionedEnvironmentRows(props: {
             const result = await pair({
               pairingUrl,
               expectedEnvironmentId: environment.environmentId,
+              box: { managerId },
             });
             if (AsyncResult.isFailure(result)) {
               const error = Cause.squash(result.cause);
@@ -135,6 +139,8 @@ export function ProvisionedEnvironmentRows(props: {
           kind: "failed",
           message: error instanceof Error ? error.message : "The machine could not be joined.",
         });
+      } finally {
+        release();
       }
     },
     [attach, connectedEnvironments, manager, managerId, pair, resume],

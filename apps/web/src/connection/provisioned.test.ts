@@ -46,6 +46,7 @@ describe("opening a discovered provisioned environment", () => {
           ref === null ? "remember:none" : `remember:${ref.environmentId}:${ref.threadId}`,
         );
       },
+      refreshBoxList: () => undefined,
     };
     expect(await openProvisionedEnvironment(environment, ports)).toEqual({
       environmentId: "remote",
@@ -64,6 +65,29 @@ describe("opening a discovered provisioned environment", () => {
       "wait:remote:existing-thread",
     ]);
   });
+  it("refetches the host's box list once joined, so a turn running on the box keeps it connected", async () => {
+    const calls: string[] = [];
+    await openProvisionedEnvironment(environment, {
+      isConnected: () => false,
+      attach: async () => ({
+        kind: "attached" as const,
+        environmentId: environment.environmentId,
+        pairingUrl: "https://remote.invalid/pair#token=fresh",
+      }),
+      pair: async () => {
+        calls.push("pair");
+        return environment.environmentId;
+      },
+      waitForThread: async () => {
+        calls.push("wait");
+        return true;
+      },
+      rememberLease: () => undefined,
+      refreshBoxList: () => void calls.push("refresh"),
+    });
+    // The list the client holds predates this box; only a listed active box stays held.
+    expect(calls).toEqual(["pair", "refresh", "wait"]);
+  });
   it("rejects attachment and pairing identity mismatches without opening a thread", async () => {
     let pairs = 0;
     let waits = 0;
@@ -81,6 +105,7 @@ describe("opening a discovered provisioned environment", () => {
       rememberLease: () => {
         throw new Error("unexpected remember");
       },
+      refreshBoxList: () => undefined,
       waitForThread: async () => {
         waits++;
         return true;
@@ -112,6 +137,7 @@ describe("opening a discovered provisioned environment", () => {
         throw new Error("unexpected pair");
       },
       rememberLease: () => {},
+      refreshBoxList: () => undefined,
       waitForThread: async () => false,
     };
     await expect(openProvisionedEnvironment(environment, ports)).rejects.toThrow("still loading");
@@ -139,6 +165,7 @@ describe("opening a discovered provisioned environment", () => {
           ref === null ? "remember:none" : `remember:${ref.environmentId}:${ref.threadId}`,
         );
       },
+      refreshBoxList: () => undefined,
     };
     expect(await openProvisionedEnvironment({ ...environment, threadId: null }, ports)).toBeNull();
     expect(calls).toEqual(["https://remote.invalid/pair#token=fresh", "remember:none"]);

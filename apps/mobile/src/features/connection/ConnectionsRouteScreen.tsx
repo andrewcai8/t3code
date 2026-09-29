@@ -12,6 +12,7 @@ import { useRemoteConnections } from "../../state/use-remote-environment-registr
 import { LocalEnvironmentList } from "./LocalEnvironmentList";
 import { ProvisionedEnvironmentRows } from "./ProvisionedEnvironmentRows";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { SavedCloudBoxConnections } from "./SavedCloudBoxConnections";
 
 export function ConnectionsRouteScreen() {
   const {
@@ -92,6 +93,7 @@ export function ConnectionsRouteScreen() {
               />
             </Fragment>
           ))}
+        <SavedCloudBoxConnections />
         <GitHubRoutingSettings />
       </ScrollView>
     </View>

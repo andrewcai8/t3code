@@ -113,6 +113,7 @@ import {
   type NewChatPlacement,
   type NewThreadStart,
 } from "./new-task-project-selection";
+import { useBoxDemand } from "../../state/box-demand";
 import { useProvisionedBoxes } from "./use-provisioned-boxes";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 
@@ -304,6 +305,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     boxes,
     placement,
   });
+  // A fresh cloud machine's draft sits on its box, which stays connected while the draft is open.
+  useBoxDemand(selectedEnvironmentId);
   // Mirrors `editingPendingTask` synchronously so the unmount flush cannot act
   // on a task whose editing session already ended this render.
   const editingPendingTaskRef = useRef<QueuedThreadMessage | null>(null);

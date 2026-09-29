@@ -48,7 +48,7 @@ import { GitCommitSheet } from "./features/threads/git/GitCommitSheet";
 import { GitConfirmSheet } from "./features/threads/git/GitConfirmSheet";
 import { GitOverviewSheet } from "./features/threads/git/GitOverviewSheet";
 import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
-import { useMarkGoneProvisionedBoxes } from "./features/threads/use-provisioned-boxes";
+import { useCloudBoxes } from "./features/threads/use-provisioned-boxes";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
@@ -519,8 +519,8 @@ function ThreadOutboxDrainWorker() {
   return null;
 }
 
-function GoneProvisionedBoxesWorker() {
-  useMarkGoneProvisionedBoxes();
+function CloudBoxesWorker() {
+  useCloudBoxes();
   return null;
 }
 
@@ -560,7 +560,7 @@ function RootStackLayout(props: {
   return (
     <HardwareKeyboardCommandProvider pathname={pathname}>
       <ThreadOutboxDrainWorker />
-      <GoneProvisionedBoxesWorker />
+      <CloudBoxesWorker />
       <ShowcaseCaptureCoordinator pathname={pathname} />
       <ExistingThreadSettingsRouteProvider>
         <AdaptiveWorkspaceLayout

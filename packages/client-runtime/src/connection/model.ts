@@ -15,12 +15,21 @@ export class PrimaryConnectionTarget extends Schema.TaggedClass<PrimaryConnectio
   },
 ) {}
 
+/**
+ * Marks a saved connection as a cloud box: the machine one chat runs on, provisioned by the
+ * host `managerId`. A box is never a user environment. It is not listed anywhere a user picks a
+ * machine, and it connects only while something demands it, such as its open chat.
+ */
+export const BoxAttachment = Schema.Struct({ managerId: EnvironmentId });
+export type BoxAttachment = typeof BoxAttachment.Type;
+
 export class BearerConnectionTarget extends Schema.TaggedClass<BearerConnectionTarget>()(
   "BearerConnectionTarget",
   {
     ...ConnectionTargetBase,
     connectionId: Schema.String,
     workspaceStatus: Schema.optionalKey(Schema.Literal("missing")),
+    box: Schema.optionalKey(BoxAttachment),
   },
 ) {}
 
@@ -55,6 +64,11 @@ export const PersistedConnectionTarget = Schema.Union([
 export type PersistedConnectionTarget = typeof PersistedConnectionTarget.Type;
 
 export type ConnectionTargetKind = ConnectionTarget["_tag"];
+
+/** The box a connection reaches, or null when it reaches a user environment. */
+export function connectionBox(target: ConnectionTarget): BoxAttachment | null {
+  return target._tag === "BearerConnectionTarget" ? (target.box ?? null) : null;
+}
 
 export type NetworkStatus = "unknown" | "offline" | "online";
 

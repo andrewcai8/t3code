@@ -7,7 +7,7 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
-import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
+import { AVAILABLE_CONNECTION_STATE, connectionBox } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import {
   GitHubRoutingPermissions,
@@ -35,6 +35,20 @@ export function* enabledEnvironmentIds(
 ): Generator<EnvironmentIdType> {
   for (const [environmentId, entry] of catalog.entries) {
     if (entry.enabled) {
+      yield environmentId;
+    }
+  }
+}
+
+/**
+ * The environments a user runs things on: enabled, and not a cloud box. A box belongs to its
+ * chat, so it is never listed where a user picks a machine.
+ */
+export function* userEnvironmentIds(
+  catalog: EnvironmentCatalogState,
+): Generator<EnvironmentIdType> {
+  for (const environmentId of enabledEnvironmentIds(catalog)) {
+    if (connectionBox(catalog.entries.get(environmentId)!.target) === null) {
       yield environmentId;
     }
   }
@@ -69,6 +83,19 @@ export function createEnvironmentCatalogAtoms<R, E>(
   const catalogValueAtom = Atom.make((get) =>
     Option.getOrElse(AsyncResult.value(get(catalogAtom)), () => EMPTY_ENVIRONMENT_CATALOG_STATE),
   ).pipe(Atom.withLabel("environment-catalog-value"));
+
+  let previousBoxIds: ReadonlySet<EnvironmentIdType> = new Set();
+  /** The saved connections that reach cloud boxes. */
+  const boxIdsAtom = Atom.make((get) => {
+    const next = new Set<EnvironmentIdType>();
+    for (const [environmentId, entry] of get(catalogValueAtom).entries) {
+      if (connectionBox(entry.target) !== null) next.add(environmentId);
+    }
+    if (next.size !== previousBoxIds.size || [...next].some((id) => !previousBoxIds.has(id))) {
+      previousBoxIds = next;
+    }
+    return previousBoxIds;
+  }).pipe(Atom.withLabel("environment-catalog-box-ids"));
 
   const githubRoutingPermissionsAtom = runtime.atom(
     Stream.unwrap(GitHubRoutingPermissions.pipe(Effect.map((permissions) => permissions.changes))),
@@ -179,6 +206,54 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.markWorkspaceMissing(environmentId)),
       ),
   });
+  /** Mounted while something needs a box connected, such as its open chat. */
+  const demandAtom = Atom.family((environmentId: EnvironmentIdType) =>
+    runtime
+      .atom(
+        EnvironmentRegistry.EnvironmentRegistry.pipe(
+          Effect.flatMap((registry) => registry.demand(environmentId)),
+        ),
+      )
+      .pipe(
+        // Switching between chats should not drop and redial a box.
+        Atom.setIdleTTL(15_000),
+        Atom.withLabel(`environment-demand:${environmentId}`),
+      ),
+  );
+  const demandedAtom = runtime.atom(
+    Stream.unwrap(
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.map((registry) => SubscriptionRef.changes(registry.demanded)),
+      ),
+    ),
+    { initialValue: new Set<EnvironmentIdType>() as ReadonlySet<EnvironmentIdType> },
+  );
+  const demandedValueAtom = Atom.make((get) =>
+    Option.getOrElse(
+      AsyncResult.value(get(demandedAtom)),
+      (): ReadonlySet<EnvironmentIdType> => new Set(),
+    ),
+  ).pipe(Atom.withLabel("environment-demanded-value"));
+  const markBoxes = createRuntimeCommand(runtime, {
+    label: "environment-catalog:mark-boxes",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (
+      boxes: Parameters<EnvironmentRegistry.EnvironmentRegistry["Service"]["markBoxes"]>[0],
+    ) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.markBoxes(boxes)),
+      ),
+  });
+  const unmarkBox = createRuntimeCommand(runtime, {
+    label: "environment-catalog:unmark-box",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (environmentId: EnvironmentIdType) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.unmarkBox(environmentId)),
+      ),
+  });
   const markGoneWorkspacesMissing = createRuntimeCommand(runtime, {
     label: "environment-catalog:mark-gone-workspaces-missing",
     scheduler: commandScheduler,
@@ -204,6 +279,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
   return {
     catalogAtom,
     catalogValueAtom,
+    boxIdsAtom,
     githubRoutingPermissionsValueAtom,
     setGitHubRoutingPermission,
     networkStatusAtom,
@@ -215,6 +291,10 @@ export function createEnvironmentCatalogAtoms<R, E>(
     retryNow,
     markWorkspaceMissing,
     markGoneWorkspacesMissing,
+    markBoxes,
+    unmarkBox,
+    demandAtom,
+    demandedValueAtom,
     awaitConnected,
     setEnabled,
   };

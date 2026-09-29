@@ -143,10 +143,27 @@ export interface ProvisionedBoxClaim {
 export interface ProvisionedBoxClaimPorts {
   /** One `environmentControl.claim` call; true when the host recorded the owner. */
   readonly claim: (request: ProvisionedBoxClaim) => Promise<boolean>;
+  /** The host a saved box connection names, or null when `environmentId` is not a box. */
+  readonly boxManager: (environmentId: EnvironmentId) => EnvironmentId | null;
   /** Refetches the host's box list, so drafts on every screen see the claim. */
   readonly refresh: (managerId: EnvironmentId) => void;
   /** Reports an attempt that failed; the caller owns where that is logged. */
   readonly warn: (attempt: number) => void;
+}
+
+/**
+ * Whether `lease` is for the box `environmentId` reaches: the one its host reported, or on a lease
+ * recorded before that, a box this device marked for the lease's host. A draft can keep its lease
+ * and still run on a real server, whose chat must never claim the box.
+ */
+export function leaseReachesBox(
+  lease: Pick<ProvisionedSandboxLease, "managerEnvironmentId" | "environmentId">,
+  environmentId: EnvironmentId,
+  boxManager: (environmentId: EnvironmentId) => EnvironmentId | null,
+): boolean {
+  return lease.environmentId !== undefined
+    ? lease.environmentId === environmentId
+    : boxManager(environmentId) === lease.managerEnvironmentId;
 }
 
 /**
@@ -156,9 +173,10 @@ export interface ProvisionedBoxClaimPorts {
  */
 export async function claimProvisionedBox(
   ports: ProvisionedBoxClaimPorts,
-  lease: Pick<ProvisionedSandboxLease, "leaseId" | "managerEnvironmentId">,
+  lease: Pick<ProvisionedSandboxLease, "leaseId" | "managerEnvironmentId" | "environmentId">,
   owner: ScopedThreadRef,
 ): Promise<boolean> {
+  if (!leaseReachesBox(lease, owner.environmentId, ports.boxManager)) return false;
   const request = {
     environmentId: lease.managerEnvironmentId,
     input: { leaseId: lease.leaseId, environmentId: owner.environmentId, threadId: owner.threadId },
@@ -418,6 +436,7 @@ export async function provisionCloudEnvironment(
       leaseId: environment.leaseId,
       sandboxId: environment.sandboxId,
       managerEnvironmentId: request.managerEnvironmentId,
+      environmentId: environment.environmentId,
     });
     if (!stillThisRequest()) return { kind: "cancelled" };
     ports.onPhase("pairing");

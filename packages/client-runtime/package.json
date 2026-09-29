@@ -127,6 +127,10 @@
       "types": "./src/delayedStatus.ts",
       "default": "./src/delayedStatus.ts"
     },
+    "./state/boxDemand": {
+      "types": "./src/state/boxDemand.ts",
+      "default": "./src/state/boxDemand.ts"
+    },
     "./state/connections": {
       "types": "./src/state/connections.ts",
       "default": "./src/state/connections.ts"

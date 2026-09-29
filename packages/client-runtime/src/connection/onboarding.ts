@@ -25,6 +25,7 @@ import * as ConnectionCredentialStore from "./credentialStore.ts";
 import { mapRemoteEnvironmentError } from "./errors.ts";
 import {
   BearerConnectionTarget,
+  type BoxAttachment,
   ConnectionBlockedError,
   SshConnectionTarget,
   type ConnectionAttemptError,
@@ -35,6 +36,8 @@ import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 
 export interface PairingConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
+  /** Set when the pairing reaches a cloud box, which is saved as its chat's, not a user environment. */
+  readonly box?: BoxAttachment;
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
@@ -116,6 +119,7 @@ export const preparePairingRegistration = Effect.fn(
       environmentId: descriptor.environmentId,
       label: descriptor.label,
       connectionId,
+      ...(input.box === undefined ? {} : { box: input.box }),
     }),
     profile: new BearerConnectionProfile({
       connectionId,

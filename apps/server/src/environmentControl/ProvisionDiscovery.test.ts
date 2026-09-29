@@ -236,7 +236,7 @@ const boxPorts: ProvisionProviderPorts["Service"] = {
   dispose: () => Effect.void,
 };
 
-it.effect("a box disposed through the host is reported disposed to a client that saved it", () =>
+it.effect("a box disposed through the host is reported disposed, by the id the box reported", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -293,29 +293,42 @@ it.effect("a box disposed through the host is reported disposed to a client that
       yield* provision(4, true);
       yield* provision(5, true);
       yield* dispose(5);
+      // A client claimed this legacy box for a machine that is not the box. The host must not
+      // name that machine a gone box, or every client would mark it missing.
+      const misclaimed = yield* provision(6, false);
+      yield* Effect.promise(() =>
+        registry.claim({
+          leaseId: id(6),
+          owner: { environmentId: EnvironmentId.make("andrew-megpt-host"), threadId: "thread-6" },
+        }),
+      );
+      yield* store.advance(misclaimed, { kind: "disposed" });
+      yield* Effect.promise(() => registry.markDisposed(id(6)));
 
       const listed = yield* listProvisionedEnvironments(sql, [
         EnvironmentId.make("box-1"),
         EnvironmentId.make("box-2"),
         EnvironmentId.make("box-3"),
         EnvironmentId.make("box-4"),
+        EnvironmentId.make("andrew-megpt-host"),
       ]);
+      // Only the id a box reported itself names it gone. A legacy row disposed before that id was
+      // kept names nothing, since its claimed owner is only what a client said.
       expect(listed.map((row) => [row.environmentId, row.lifecycle, row.threadId])).toEqual([
         ["box-4", "active", "thread-4"],
         ["box-1", "disposed", "thread-1"],
         ["box-2", "disposed", null],
-        ["box-3", "disposed", "thread-3"],
       ]);
-      expect(listed[3]).toEqual({
-        requestId: id(3),
-        leaseId: id(3),
-        sandboxId: "sandbox-3",
+      expect(listed[1]).toEqual({
+        requestId: id(1),
+        leaseId: id(1),
+        sandboxId: "sandbox-1",
         lifecycle: "disposed",
-        environmentId: "box-3",
+        environmentId: "box-1",
         provider: "e2b",
         label: "proof/repository",
         repository: "proof/repository",
-        threadId: "thread-3",
+        threadId: "thread-1",
         createdAt: expect.any(String),
         expiresAt: expect.any(String),
       });
