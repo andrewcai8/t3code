@@ -32,9 +32,10 @@ export function withGuestProviderInstall<T extends object>(
 
 /** Box CLIs every Namespace Mac gets. Credentials arrive through the environment. */
 const guestToolPins = {
+  // MeGPT pins the same AWS CLI in install_pinned_aws_cli, so its boxes agree on Linux and macOS.
   awsCli: {
-    version: "2.37.4",
-    sha256: "6cba8327461d2b804e575fd841272951eecb253b2ca94c8a58acd19d5f283786",
+    version: "2.36.45",
+    sha256: "351c45fc36ac36f5af65708625087f27e654bd9319a843dbb9dfeea21c912be3",
   },
   wrangler: "4.141.0",
 };
