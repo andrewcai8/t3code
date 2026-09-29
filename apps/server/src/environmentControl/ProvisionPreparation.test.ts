@@ -21,6 +21,7 @@ import {
   makeProvisionPreparationStore,
   provisionDigest,
   provisionProviders,
+  warmBaseKey,
 } from "./ProvisionPreparation.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
@@ -1076,11 +1077,11 @@ it("lands a plugin holding many skills flat, where the CLI will find each one", 
 const namespaceToken = `e30.${Buffer.from(
   JSON.stringify({ actor_id: "user-test", tenant_id: "tenant-test", exp: 4102444800 }),
 ).toString("base64url")}.signature`;
-it("roots a Namespace preparation on the retained Devbox volume and keeps E2B in /tmp", async () => {
+it("roots a Namespace preparation on the retained Devbox volume and every E2B box at one /tmp root", async () => {
   const f = await fixture();
   try {
     const e2b = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
-    expect(e2b.preparation.root).toBe("/tmp/t3-provision/05d43b4e-0b92-477b-9503-31a377147fb0");
+    expect(e2b.preparation.root).toBe("/tmp/t3-provision/box");
     expect(e2b.preparation.artifact.archivePath).toBe(
       `/tmp/t3-runtime-${provisionDigest("artifact")}.tar`,
     );
@@ -1516,4 +1517,101 @@ it("offers each cloud platform only when its runtime and defaults are configured
       }),
     ),
   ).toEqual(["e2b", "namespace"]);
+});
+
+function warmConfig(config: EnvironmentControlConfig, prepareCommands = ["npm ci"]) {
+  return {
+    ...config,
+    provisioning: {
+      ...config.provisioning!,
+      repositories: [{ repository: "example/repo", e2b: { prepareCommands } }],
+    },
+  };
+}
+
+it("starts a chat from its repository's warm base when one fits, and cold otherwise", async () => {
+  const f = await fixture();
+  try {
+    const config = warmConfig(f.config);
+    const key = await warmBaseKey(config, "example/repo", f.resolver);
+    const asked: Array<[string, string]> = [];
+    const warm = await f.store.freeze(input, config, f.resolver, [f.profile], async (...args) => {
+      asked.push(args);
+      return "warm-snapshot";
+    });
+    const cold = await makeProvisionPreparationStore(f.root + "-cold").freeze(
+      input,
+      config,
+      f.resolver,
+      [f.profile],
+      async () => null,
+    );
+    const unwarmed = await makeProvisionPreparationStore(f.root + "-unwarmed").freeze(
+      input,
+      f.config,
+      f.resolver,
+      [f.profile],
+      async () => "warm-snapshot",
+    );
+    expect(asked).toEqual([["example/repo", key]]);
+    expect(
+      [warm, cold, unwarmed].map((manifest) => [
+        manifest.request.provider === "e2b" ? manifest.request.strategy : null,
+        manifest.request.provider === "e2b" ? manifest.request.templateId : null,
+        manifest.warmKey === key,
+        manifest.preparation.root,
+      ]),
+    ).toEqual([
+      ["direct", "warm-snapshot", true, "/tmp/t3-provision/box"],
+      ["fork", "canonical-template", true, "/tmp/t3-provision/box"],
+      ["fork", "canonical-template", false, "/tmp/t3-provision/box"],
+    ]);
+    expect(unwarmed.warmKey).toBeUndefined();
+  } finally {
+    for (const suffix of ["-cold", "-unwarmed"])
+      await NodeFSP.rm(f.root + suffix, { recursive: true, force: true });
+    await f.cleanup();
+  }
+});
+
+it("keys a warm base on what its disk holds, not on the credentials a chat brings", async () => {
+  const f = await fixture();
+  try {
+    const config = warmConfig(f.config);
+    const linux = config.provisioning.runtimeArtifacts!.linux!;
+    const base = await warmBaseKey(config, "example/repo", f.resolver);
+    const variants = [
+      warmConfig(f.config, ["npm ci", "make"]),
+      {
+        ...config,
+        provisioning: {
+          ...config.provisioning,
+          runtimeArtifacts: { linux: { ...linux, sha256: provisionDigest("next build") } },
+        },
+      },
+      {
+        ...config,
+        provisioning: {
+          ...config.provisioning,
+          homeFiles: [{ source: NodePath.join(f.root, ".codex/auth.json"), destination: ".x" }],
+        },
+      },
+    ];
+    const keys = [];
+    for (const variant of variants)
+      keys.push(await warmBaseKey(variant, "example/repo", f.resolver));
+    keys.push(await warmBaseKey(config, "Example/Repo", f.resolver));
+    expect(base).toMatch(/^[a-f0-9]{64}$/);
+    expect(keys.map((key) => key === base)).toEqual([false, false, true, true]);
+    expect([
+      await warmBaseKey(f.config, "example/repo", f.resolver),
+      await warmBaseKey(
+        { ...config, provisioning: { ...config.provisioning, warmBaseRefreshHours: 0 } },
+        "example/repo",
+        f.resolver,
+      ),
+    ]).toEqual([null, null]);
+  } finally {
+    await f.cleanup();
+  }
 });

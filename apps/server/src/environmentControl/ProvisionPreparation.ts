@@ -35,8 +35,8 @@ import {
 } from "./ProvisioningProviderProfile.ts";
 import { guestProviderInstallCommand } from "./guestProviderInstall.ts";
 
-const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
-const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
+export const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
+export const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 const File = Schema.Struct({
   scope: Schema.Literals(["home", "workspace"]),
   destination: Schema.String,
@@ -79,6 +79,12 @@ export const ProvisionPreparationManifest = Schema.Struct({
   preparation: Preparation,
   localArtifact: ProvisionRuntimeArtifact,
   egressAllow: Schema.Array(Schema.String),
+  /**
+   * The repository's warm base key at freeze time (`warmBaseKey`), for an E2B
+   * request whose repository keeps one. Outside `preparation`, so it is not
+   * part of the preparation's identity.
+   */
+  warmKey: Schema.optional(Sha256),
 });
 export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(
@@ -158,10 +164,16 @@ const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
  *
  * A Namespace Mac wipes /tmp and the runner home on shutdown but keeps its
  * Devbox volume, so only a root on that volume lets a paused Mac resume as the
- * same environment. E2B pauses memory and disk together, so its root stays
- * where every existing manifest already put it.
+ * same environment.
+ *
+ * Every E2B box prepares at one fixed root. A warm snapshot's checkout carries
+ * absolute paths (Python venvs, prepare records, `$HOME` caches), so a base is
+ * only reusable by a box that prepares where it was built. Each E2B request
+ * has its own sandbox, so the request id never needed to be in the path.
+ * Existing manifests keep the root they persisted.
  */
 const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
+const E2B_ROOT = "/tmp/t3-provision/box";
 export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
 /**
@@ -463,8 +475,8 @@ async function writeOnce(path: string, fill: (temporary: string) => Promise<void
   }
 }
 
-/** Atomic replace for the one mutable record the store keeps. */
-async function writeReplace(path: string, data: string) {
+/** Atomic replace for a mutable private record. */
+export async function writeReplace(path: string, data: string) {
   const temporary = `${path}.${NodeCrypto.randomUUID()}.tmp`;
   const handle = await NodeFSP.open(temporary, "wx", 0o600);
   try {
@@ -485,6 +497,48 @@ async function writeReplace(path: string, data: string) {
 export interface ProvisionPreparationResolver {
   readonly template: (configured: string) => Promise<string>;
   readonly revision: (repository: string, branch?: string) => Promise<string>;
+}
+
+/**
+ * What a repository's warm E2B snapshot has on disk, or null when the
+ * repository keeps no warm base. Chat freezes and the warm base upkeep both
+ * key on this, so they cannot disagree about whether a base fits.
+ *
+ * Home files are left out: credentials rotate, and sealing a base removes
+ * them. So are the revision and branch, which each chat fetches into the warm
+ * checkout, and the provider CLI install, which each chat reruns.
+ */
+export async function warmBaseKey(
+  config: EnvironmentControlConfig,
+  repository: string,
+  resolver: Pick<ProvisionPreparationResolver, "template">,
+): Promise<string | null> {
+  const provisioning = config.provisioning;
+  const runtime = configuredRuntimeArtifact(config, "e2b");
+  if (!provisioning?.templateId || !runtime || provisioning.warmBaseRefreshHours === 0) return null;
+  const prepareCommands =
+    provisioning.repositories?.find(
+      (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
+    )?.e2b?.prepareCommands ?? [];
+  if (prepareCommands.length === 0) return null;
+  const workspaceFiles = [];
+  for (const configured of provisioning.workspaceFiles ?? [])
+    workspaceFiles.push({
+      destination: configured.destination,
+      sha256: provisionDigest(await NodeFSP.readFile(configured.source)),
+    });
+  return provisionDigest(
+    stableStringify({
+      version: 1,
+      repository: repositoryUrl(repository),
+      templateId: await resolver.template(provisioning.templateId),
+      runtime: runtime.sha256,
+      root: E2B_ROOT,
+      prepareCommands,
+      egressAllow: provisioning.egressAllow ?? [],
+      workspaceFiles,
+    }),
+  );
 }
 
 /** The first complete, fsynced manifest wins across manager processes. Retries never reread mutable config. */
@@ -551,6 +605,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
        * retry of an accepted request keeps the accounts it froze, whatever routing says now.
        */
       profilesFor: ProvisioningProviderProfiles | (() => Promise<ProvisioningProviderProfiles>),
+      /**
+       * The warm snapshot a new E2B chat starts from, by canonical repository and
+       * warm key, or null to start cold. A warm base's own build passes none.
+       */
+      warmTemplate?: (repository: string, key: string) => Promise<string | null>,
     ): Promise<ProvisionPreparationManifest> => {
       const input = decodeInput(rawInput);
       const submitted = submittedFiles(input);
@@ -587,7 +646,8 @@ export function makeProvisionPreparationStore(stateDir: string) {
           }
         : null;
       const volume = guestVolume[input.provider];
-      const root = `${volume}/t3-provision/${input.requestId}`;
+      const root =
+        input.provider === "e2b" ? E2B_ROOT : `${volume}/t3-provision/${input.requestId}`;
       const localArtifact = await storeArtifact(artifact);
       let files: Array<typeof File.Type> = [...submitted];
       for (const scope of ["home", "workspace"] as const) {
@@ -838,17 +898,28 @@ export function makeProvisionPreparationStore(stateDir: string) {
         ),
       };
       let request: DurableProvisionRequest;
+      let warmKey: string | null = null;
       if (input.provider === "e2b") {
-        if (!provisioning.templateId)
+        const configuredTemplate = provisioning.templateId;
+        if (!configuredTemplate)
           throw new ProvisionRefused({
             reason: "unconfigured",
             message: "Configure an E2B template before provisioning.",
           });
+        let resolved: Promise<string> | undefined;
+        const template = () => (resolved ??= resolver.template(configuredTemplate));
+        let warm: string | null = null;
+        if (input.repository) {
+          warmKey = await warmBaseKey(config, input.repository, { template });
+          if (warmKey && warmTemplate)
+            warm = await warmTemplate(canonicalRepository(input.repository), warmKey);
+        }
         request = {
           ...common,
           provider: "e2b",
-          templateId: await resolver.template(provisioning.templateId),
-          strategy: "fork",
+          ...(warm
+            ? { templateId: warm, strategy: "direct" as const }
+            : { templateId: await template(), strategy: "fork" as const }),
         };
       } else {
         if (!provisioning.namespace)
@@ -872,6 +943,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         preparation,
         localArtifact,
         egressAllow: provisioning.egressAllow ?? [],
+        ...(warmKey ? { warmKey } : {}),
       };
       await writeOnce(manifestPath(input.requestId), (temporary) =>
         NodeFSP.writeFile(temporary, stableStringify(manifest), { flag: "wx", mode: 0o600 }),

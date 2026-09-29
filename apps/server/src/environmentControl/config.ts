@@ -202,6 +202,12 @@ const Provisioning = Schema.Struct({
       }),
     ),
   ),
+  /**
+   * How often, in hours, a repository's warm E2B base is rebuilt from its
+   * default branch. A repository gets one once it has E2B prepare commands and
+   * a chat was created for it. Default 12; `0` disables warm bases.
+   */
+  warmBaseRefreshHours: Schema.optional(Schema.Number),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
   namespace: Schema.optional(
     Schema.Struct({
