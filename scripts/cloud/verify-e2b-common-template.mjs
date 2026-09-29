@@ -122,7 +122,7 @@ try {
   const cloudClis = await run(
     "env -i HOME=/home/user PATH=/usr/bin:/bin AWS_ACCESS_KEY_ID=AKIAT3VERIFYEXAMPLE AWS_SECRET_ACCESS_KEY=verify AWS_DEFAULT_REGION=us-west-2 bash -lc 'aws --version && wrangler --version && aws configure list'",
   );
-  NodeAssert.match(cloudClis, /^aws-cli\/2\.37\.4 /m);
+  NodeAssert.match(cloudClis, /^aws-cli\/2\.36\.45 /m);
   NodeAssert.match(cloudClis, /^4\.141\.0$/m);
   NodeAssert.match(cloudClis, /access_key +: \*+MPLE +: env/);
   NodeAssert.match(cloudClis, /region +: us-west-2 +: env/);

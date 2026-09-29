@@ -13,7 +13,7 @@ const require = NodeModule.createRequire(
 const { Template } = require("e2b");
 const { values } = NodeUtil.parseArgs({
   options: {
-    name: { type: "string", default: "t3-common-tools-node24-bun140-v3" },
+    name: { type: "string", default: "t3-common-tools-node24-bun140-v4" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -28,7 +28,7 @@ if (values.help) {
     "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--config FILE] [--print-dockerfile]",
   );
   console.log(
-    "Builds a clean private E2B template with 4 CPUs and 8 GiB RAM. Copies only the public installer recipe. Does not change environment-control configuration.",
+    "Builds a clean private E2B template with 4 CPUs, 8 GiB RAM and 20 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
   );
   process.exit(0);
 }
@@ -47,6 +47,7 @@ const template = Template({
     BUN_INSTALL: "/home/user/.bun",
     SWIFTLY_HOME_DIR: "/home/user/.local/share/swiftly",
     SWIFTLY_BIN_DIR: "/home/user/.local/bin",
+    BROWSER_EXECUTABLE: "/usr/local/bin/chromium-headless",
     PATH: "/home/user/.local/bin:/home/user/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   })
   .setUser("user")
@@ -92,7 +93,7 @@ try {
     apiKey,
     cpuCount: 4,
     memoryMB: 8192,
-    minFreeDiskMb: 8192,
+    minFreeDiskMb: 20480,
     onBuildLogs: (entry) => {
       const line = JSON.stringify(entry).replaceAll(apiKey, "[redacted]");
       NodeFS.writeSync(log.fd, `${line}\n`);
