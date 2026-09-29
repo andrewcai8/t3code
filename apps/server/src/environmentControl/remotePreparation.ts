@@ -402,8 +402,9 @@ def prepare(spec):
             'GIT_ASKPASS': os.devnull,
             'GCM_INTERACTIVE': 'never',
             'GIT_LFS_SKIP_SMUDGE': '1',
-            # t3 serve forces this off. Cloud guests must publish the cloned workspace.
-            'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '1',
+            # start turns this on, and it would open an empty "New thread" beside the chat's own
+            # thread. The project step below publishes the checkout instead.
+            'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '0',
         })
         project = root / 'workspace'
         def install_files(scope):
@@ -766,10 +767,9 @@ def prepare(spec):
             with step('serverStart'):
                 if healthy and process is not None:
                     stop_server(process['pid'])
-                # serve is headless and forces auto-bootstrap off, so the client
-                # pairs to an empty environment. start --no-browser keeps the same
-                # bind, and the cwd argument is the path we report as projectDir.
-                config = {'root': str(root), 'build': {'sha256': runtime['sha256'], 'revision': runtime['revision']}, 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--auto-bootstrap-project-from-cwd', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
+                # start --no-browser keeps the same bind as serve, and the cwd
+                # argument is the path we report as projectDir.
+                config = {'root': str(root), 'build': {'sha256': runtime['sha256'], 'revision': runtime['revision']}, 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
                 with open(root / 'server.log', 'a') as log:
                     subprocess.Popen([sys.executable, '-c', SUPERVISOR, json.dumps(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
                 deadline = time.monotonic() + spec['readinessTimeoutSeconds']
@@ -777,10 +777,10 @@ def prepare(spec):
                     if time.monotonic() >= deadline:
                         raise RuntimeError('Prepared server did not become authenticated and ready')
                     time.sleep(0.1)
-        # t3 serve never creates a project. Add the checkout explicitly so
-        # pairing can hand off even when an older guest is already running.
-        # The checkout directory is always workspace, so title the project
-        # after the repository instead of the directory.
+        # The server never creates a project here. Add the checkout explicitly,
+        # which also covers an older guest that is already running. The
+        # checkout directory is always workspace, so title the project after
+        # the repository instead of the directory.
         with step('projectAdd'):
             title = []
             if repository is not None:
