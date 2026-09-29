@@ -25,9 +25,9 @@ const decodeDiscovery = Schema.decodeUnknownEffect(DiscoveredProvisionedEnvironm
 
 /**
  * Discovery reads retained identities without renewing leases or issuing credentials. Of the
- * `known` environments, those that were this host's boxes and are gone come back as `disposed`.
- * A disposed operation names its box's environment, or on rows disposed before it did, the
- * lease's owner does, since a box is claimed for a thread on its own environment.
+ * `known` environments, those that were this host's boxes and are gone come back as `disposed`,
+ * matched only by the environment id the box itself reported. Rows disposed before that id was
+ * kept name nothing.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
   function* (sql: SqlClient.SqlClient, known: ReadonlyArray<EnvironmentId> = []) {
@@ -49,8 +49,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         known.length === 0
           ? sql`1 = 0`
           : sql`(json_extract(operations.state_json, '$.kind') = 'disposed'
-        AND (json_extract(operations.state_json, '$.environmentId') IN ${sql.in(known)}
-          OR json_extract(leases.lease_json, '$.owner.environmentId') IN ${sql.in(known)}))`
+        AND json_extract(operations.state_json, '$.environmentId') IN ${sql.in(known)})`
       }
     ORDER BY operations.created_at DESC, operations.request_id
   `;
@@ -84,7 +83,8 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
                 projectDir: state.readiness.projectDir,
               };
       } else if (state.kind === "disposed") {
-        const environmentId = state.environmentId ?? lease.owner?.environmentId;
+        // Only the id the box reported names it. A claim's owner is whatever a client said.
+        const environmentId = state.environmentId;
         box =
           environmentId !== undefined && saved.has(environmentId)
             ? { lifecycle: "disposed", environmentId }

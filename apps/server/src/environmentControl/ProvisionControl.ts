@@ -4,6 +4,8 @@ import {
   ProvisionRequestId,
   type EnvironmentProvisionAttachInput,
   type EnvironmentProvisionAttachResult,
+  type EnvironmentProvisionClaimInput,
+  type EnvironmentProvisionClaimResult,
   type EnvironmentProvisionInput,
   type EnvironmentProvisionResult,
   type EnvironmentProvisionTouchInput,
@@ -15,6 +17,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 
@@ -314,6 +317,31 @@ export function makeProvisionControl(
         environmentId: operation.state.readiness.environmentId,
         pairingUrl: attached.pairingUrl,
       };
+    }),
+    /**
+     * Records the chat that owns a box. The owner's environment must be the one the box itself
+     * reported when it became ready: a client names it, and a wrong one would make the host call
+     * some other machine this box.
+     */
+    claim: Effect.fn("EnvironmentControl.claim")(function* (
+      input: EnvironmentProvisionClaimInput,
+    ): Effect.fn.Return<EnvironmentProvisionClaimResult, EnvironmentControlError> {
+      const refused = (message: string) =>
+        ({ kind: "refused", reason: "unknown", message }) as const;
+      const id = yield* decodeRequestId(input.leaseId).pipe(Effect.option);
+      if (Option.isNone(id)) return refused("This lease is not a cloud box this host started.");
+      const operation = yield* store.get(id.value).pipe(logCause, Effect.mapError(safeError));
+      if (operation.state.kind !== "ready")
+        return refused("This cloud box is not ready to be claimed.");
+      if (operation.state.readiness.environmentId !== input.environmentId)
+        return refused("The lease belongs to another environment.");
+      const lease = yield* promise(() =>
+        leases.claim({
+          leaseId: input.leaseId,
+          owner: { environmentId: input.environmentId, threadId: input.threadId },
+        }),
+      );
+      return lease ? { kind: "claimed" } : refused("The cloud sandbox lease could not be claimed.");
     }),
     touch: Effect.fn("EnvironmentControl.touchProvision")(function* (
       input: EnvironmentProvisionTouchInput,
