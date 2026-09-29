@@ -71,7 +71,7 @@ const fixture = async (
             workspaceFiles: [{ source: NodePath.join(home, "ios.env"), destination: ".env" }],
             namespace: { prepareCommands: ["pod install"] },
           },
-          { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
+          { repository: "acme/web", e2b: { prepareCommands: ["npm ci"], warm: true } },
         ],
         claudeOAuthTokens: { claude_work: "sk-ant-oat01-work" },
         shellEnvironment: [{ name: "GH_TOKEN", source: NodePath.join(home, "secrets/github.bin") }],
@@ -191,7 +191,9 @@ describe("packHostState", () => {
           egressAllow: ["registry.npmjs.org"],
           shellEnvironment: [{ name: "GH_TOKEN", source: "/data/t3/shell-environment/GH_TOKEN" }],
           skills: [{ source: "/data/t3/skills/0/review-skills", name: "review" }],
-          repositories: [{ repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } }],
+          repositories: [
+            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"], warm: true } },
+          ],
         },
       });
     } finally {
@@ -214,7 +216,7 @@ describe("packHostState", () => {
           namespace: { size: "m" },
           repositories: [
             { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
-            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
+            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"], warm: true } },
           ],
         },
       });
@@ -244,7 +246,7 @@ describe("packHostState", () => {
           namespace: { size: "m" },
           repositories: [
             { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
-            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
+            { repository: "acme/web", e2b: { prepareCommands: ["npm ci"], warm: true } },
           ],
         },
       });
@@ -265,7 +267,7 @@ describe("packHostState", () => {
       assert.deepEqual(packed.config.provisioning.namespace, { size: "m" });
       assert.deepEqual(packed.config.provisioning.repositories, [
         { repository: "acme/ios", namespace: { prepareCommands: ["pod install"] } },
-        { repository: "acme/web", e2b: { prepareCommands: ["npm ci"] } },
+        { repository: "acme/web", e2b: { prepareCommands: ["npm ci"], warm: true } },
       ]);
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });

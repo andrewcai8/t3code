@@ -1519,12 +1519,16 @@ it("offers each cloud platform only when its runtime and defaults are configured
   ).toEqual(["e2b", "namespace"]);
 });
 
-function warmConfig(config: EnvironmentControlConfig, prepareCommands = ["npm ci"]) {
+function warmConfig(
+  config: EnvironmentControlConfig,
+  prepareCommands = ["npm ci"],
+  flags: { warm?: boolean } = { warm: true },
+) {
   return {
     ...config,
     provisioning: {
       ...config.provisioning!,
-      repositories: [{ repository: "example/repo", e2b: { prepareCommands } }],
+      repositories: [{ repository: "example/repo", e2b: { prepareCommands, ...flags } }],
     },
   };
 }
@@ -1605,12 +1609,18 @@ it("keys a warm base on what its disk holds, not on the credentials a chat bring
     expect(keys.map((key) => key === base)).toEqual([false, false, true, true]);
     expect([
       await warmBaseKey(f.config, "example/repo", f.resolver),
+      await warmBaseKey(warmConfig(f.config, ["npm ci"], {}), "example/repo", f.resolver),
+      await warmBaseKey(
+        warmConfig(f.config, ["npm ci"], { warm: false }),
+        "example/repo",
+        f.resolver,
+      ),
       await warmBaseKey(
         { ...config, provisioning: { ...config.provisioning, warmBaseRefreshHours: 0 } },
         "example/repo",
         f.resolver,
       ),
-    ]).toEqual([null, null]);
+    ]).toEqual([null, null, null, null]);
   } finally {
     await f.cleanup();
   }

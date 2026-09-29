@@ -147,7 +147,17 @@ const Provisioning = Schema.Struct({
       Schema.Struct({
         repository: TrimmedNonEmptyString,
         workspaceFiles: Schema.optional(Schema.Array(WorkspaceFile)),
-        e2b: Schema.optional(Schema.Struct(Commands)),
+        e2b: Schema.optional(
+          Schema.Struct({
+            ...Commands,
+            /**
+             * Keep a warm E2B snapshot of this repository, prepared once, for
+             * new chats to start from. Opt in only when the prepare commands
+             * are safe to rerun on a tree they already prepared.
+             */
+            warm: Schema.optional(Schema.Boolean),
+          }),
+        ),
         namespace: Schema.optional(
           Schema.Struct({
             ...Commands,
@@ -204,8 +214,9 @@ const Provisioning = Schema.Struct({
   ),
   /**
    * How often, in hours, a repository's warm E2B base is rebuilt from its
-   * default branch. A repository gets one once it has E2B prepare commands and
-   * a chat was created for it. Default 12; `0` disables warm bases.
+   * default branch. A repository gets one once its `e2b` entry sets `warm`
+   * and has prepare commands, and a chat was created for it. Default 12; `0`
+   * disables warm bases.
    */
   warmBaseRefreshHours: Schema.optional(Schema.Number),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */

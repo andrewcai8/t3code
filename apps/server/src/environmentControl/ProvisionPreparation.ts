@@ -516,11 +516,11 @@ export async function warmBaseKey(
   const provisioning = config.provisioning;
   const runtime = configuredRuntimeArtifact(config, "e2b");
   if (!provisioning?.templateId || !runtime || provisioning.warmBaseRefreshHours === 0) return null;
-  const prepareCommands =
-    provisioning.repositories?.find(
-      (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
-    )?.e2b?.prepareCommands ?? [];
-  if (prepareCommands.length === 0) return null;
+  const setup = provisioning.repositories?.find(
+    (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
+  )?.e2b;
+  const prepareCommands = setup?.prepareCommands ?? [];
+  if (setup?.warm !== true || prepareCommands.length === 0) return null;
   const workspaceFiles = [];
   for (const configured of provisioning.workspaceFiles ?? [])
     workspaceFiles.push({
