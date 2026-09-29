@@ -282,6 +282,8 @@ export interface WarmBasePorts {
   /** Drives the build's provision operation as far as it goes now. Re-entrant. */
   readonly ensure: (requestId: ProvisionRequestId) => Promise<ProvisionOperation>;
   readonly cancel: (requestId: ProvisionRequestId) => Promise<ProvisionOperation>;
+  /** Snapshots taken from the build's box, which outlive the box. */
+  readonly buildSnapshots: (requestId: ProvisionRequestId) => Promise<ReadonlyArray<string>>;
   readonly seal: (operation: ProvisionOperation) => Promise<void>;
   readonly snapshot: (
     operation: ProvisionOperation,
@@ -340,9 +342,21 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
 
   const dispose = async (record: WarmBaseRecord, now: number, policy: WarmBasePolicy) => {
     const kept: Retired[] = [];
+    const orphans: Retired[] = [];
+    const known = new Set([
+      record.ready?.snapshotId,
+      ...record.retired.map((item) => (item.kind === "snapshot" ? item.snapshotId : undefined)),
+    ]);
     for (const item of record.retired) {
       try {
         if (item.kind === "build") {
+          // E2B keeps a snapshot after its source box is gone, so one taken
+          // just before the manager lost track of its build is found now.
+          for (const snapshotId of await ports.buildSnapshots(item.requestId))
+            if (!known.has(snapshotId)) {
+              known.add(snapshotId);
+              orphans.push({ kind: "snapshot", snapshotId, retiredAt: iso(now) });
+            }
           if ((await ports.cancel(item.requestId)).state.kind === "disposed") continue;
         } else if (
           age(item.retiredAt, now) >= policy.retireGraceMs &&
@@ -357,7 +371,7 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
       }
       kept.push(item);
     }
-    return { ...record, retired: kept };
+    return { ...record, retired: [...kept, ...orphans] };
   };
 
   const upkeep = async (

@@ -225,6 +225,7 @@ function harness(initial: WarmBaseRecord[], buildState: unknown = { kind: "inten
   const deleteAttempts: string[] = [];
   const deleteAnswers = new Map<string, Array<"deleted" | "missing" | "in_use">>();
   const snapshotErrors: Error[] = [];
+  const taken = new Map<string, string[]>();
   const upkeep = makeWarmBaseUpkeep({
     store: {
       list: async () => [...records.values()],
@@ -241,16 +242,16 @@ function harness(initial: WarmBaseRecord[], buildState: unknown = { kind: "inten
     },
     ensure: async (requestId) => operation(requestId, states.get(requestId)),
     cancel: async (requestId) => operation(requestId, { kind: "disposed" }),
+    buildSnapshots: async (requestId) => taken.get(requestId) ?? [],
     seal: async (built) => {
       sealed.push(built.request.requestId);
     },
     snapshot: async (built) => {
       const error = snapshotErrors.shift();
       if (error) throw error;
-      return {
-        snapshotId: `built-${built.request.requestId}:default`,
-        templateId: `built-${built.request.requestId}`,
-      };
+      const snapshotId = `built-${built.request.requestId}:default`;
+      taken.set(built.request.requestId, [snapshotId]);
+      return { snapshotId, templateId: `built-${built.request.requestId}` };
     },
     deleteSnapshot: async (snapshotId) => {
       deleteAttempts.push(snapshotId);
@@ -267,6 +268,7 @@ function harness(initial: WarmBaseRecord[], buildState: unknown = { kind: "inten
     deleteAttempts,
     deleteAnswers,
     snapshotErrors,
+    taken,
     current: () => records.get("example/repo"),
   };
 }
@@ -340,6 +342,27 @@ describe("warm base upkeep", () => {
     h.upkeep.used("Example/Repo");
     await h.upkeep.tick(policy);
     expect(h.current()).toEqual(record({ ready: ready(KEY, NOW - HOUR), lastUsedAt: iso(NOW) }));
+  });
+
+  it("retires a snapshot an abandoned build took before the manager lost track of it", async () => {
+    const h = harness([
+      record({ build: { key: KEY, requestId: buildId, startedAt: iso(NOW - 91 * 60_000) } }),
+    ]);
+    h.taken.set(buildId, [`built-${buildId}:default`]);
+    await h.upkeep.tick(policy);
+    expect(h.current()).toEqual(
+      record({
+        lastFailure: {
+          key: KEY,
+          reason: "The warm base build did not finish in time.",
+          at: iso(NOW),
+          attempts: 1,
+        },
+        retired: [
+          { kind: "snapshot", snapshotId: `built-${buildId}:default`, retiredAt: iso(NOW) },
+        ],
+      }),
+    );
   });
 
   it("keeps a sealed build whose snapshot E2B refused for now, and snapshots it next tick", async () => {

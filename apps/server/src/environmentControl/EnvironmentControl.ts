@@ -14,6 +14,8 @@ import {
   type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionInput,
   type ProvisionOperation,
+  type ProvisionOperationState,
+  type ProvisionResource,
   type EnvironmentProvisionResult,
   type EnvironmentProvisionDisposeInput,
   type EnvironmentProvisionDisposeResult,
@@ -97,6 +99,22 @@ import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
+
+/** The boxes an operation holds, as far as its state records them. */
+function allocatedResources(state: ProvisionOperationState): ReadonlyArray<ProvisionResource> {
+  switch (state.kind) {
+    case "allocated":
+    case "preparing":
+    case "ready":
+      return [state.allocation.resource];
+    case "cancel_requested":
+      return state.resources;
+    case "failed":
+      return [state.resource];
+    default:
+      return [];
+  }
+}
 const isProvisionRefused = Schema.is(ProvisionRefused);
 
 /** Boxes read at once per usage sweep, so a few stuck boxes cannot stall the rest. */
@@ -1079,6 +1097,17 @@ export const layer = Layer.effect(
         // A build abandoned before it was first driven has no operation yet.
         await runLogged(store.accept((await manifests.load(requestId)).request));
         return runLogged(provisioning.cancel(requestId));
+      },
+      buildSnapshots: async (requestId) => {
+        const operation = await runLogged(store.accept((await manifests.load(requestId)).request));
+        const runtime = makeE2bProvisionRuntime({
+          apiKey: (await requireManager()).config.e2bApiKey,
+        });
+        const snapshotIds: string[] = [];
+        for (const resource of allocatedResources(operation.state))
+          if (resource.provider === "e2b")
+            snapshotIds.push(...(await runtime.snapshotsOf(resource.sandboxId)));
+        return snapshotIds;
       },
       seal: async (operation) => {
         const { runtime, sandboxId } = await readyE2bBuild(operation);

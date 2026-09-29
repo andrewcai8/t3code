@@ -384,6 +384,14 @@ with urllib.request.urlopen(request, timeout=30) as response:
       // A snapshot id is `<template>:<tag>`; a sandbox is created from the bare template.
       return { snapshotId, templateId: snapshotId.replace(/:.*$/, "") };
     },
+    /** Every snapshot taken from a sandbox. */
+    snapshotsOf: async (sandboxId: string) => {
+      const paginator = client.Sandbox.listSnapshots({ sandboxId });
+      const snapshotIds: string[] = [];
+      while (paginator.hasNext)
+        for (const { snapshotId } of await paginator.nextItems()) snapshotIds.push(snapshotId);
+      return snapshotIds;
+    },
     /** E2B refuses to delete a snapshot while any sandbox made from it still exists. */
     deleteSnapshot: async (snapshotId: string): Promise<"deleted" | "missing" | "in_use"> => {
       try {
