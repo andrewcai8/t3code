@@ -8,11 +8,10 @@ import {
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
-import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
-import { environmentCatalog } from "../connection/catalog";
+import { useEnabledEnvironmentIds } from "../state/environments";
 import { environmentShell } from "../state/shell";
 import {
   hasDesktopNotifications,
@@ -26,8 +25,7 @@ import { toastManager } from "./ui/toast";
 
 export function ThreadNotificationCoordinator() {
   // Cloud boxes too: a box's chat notifies while its turn runs and keeps the box connected.
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  const environmentIds = useMemo(() => [...enabledEnvironmentIds(catalog)], [catalog]);
+  const environmentIds = useEnabledEnvironmentIds();
   const mode = useClientSettings((settings) => settings.notificationMode);
   const inAppNotificationsEnabled = useClientSettings(
     (settings) => settings.inAppNotificationsEnabled,

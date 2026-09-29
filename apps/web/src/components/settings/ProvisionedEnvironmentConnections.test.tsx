@@ -141,6 +141,8 @@ it("shows a manager-created environment without a composer draft and opens its s
   expect(state.pair).toHaveBeenCalledWith({
     pairingUrl: "https://remote.invalid/pair#token=fresh",
     expectedEnvironmentId: environment.environmentId,
+    // The manager in these tests is the environment itself.
+    box: { managerId: environment.environmentId },
   });
   expect(state.wait).toHaveBeenCalledWith({ environmentId: "remote", threadId: "existing-thread" });
   expect(state.navigate).toHaveBeenCalledWith({
@@ -174,6 +176,8 @@ it("resumes a paused environment and routes its pairing through the manager", as
     pairingUrl:
       "https://manager.invalid/base/api/provisioned-environment/11111111-1111-4111-a111-111111111112/pair#token=fresh",
     expectedEnvironmentId: environment.environmentId,
+    // The manager in these tests is the environment itself.
+    box: { managerId: environment.environmentId },
   });
 });
 it("keeps attachment refusal visible without pairing or navigation", async () => {
