@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { newChatProject } from "@t3tools/client-runtime/cloud";
 import {
   scopedProjectKey,
   scopeProjectRef,
@@ -26,7 +27,6 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { readProjects, readThreadShell, useProjects, useThread } from "../state/entities";
 import {
   hasExplicitComposerModelSelection,
-  resolveNewChatProjectRef,
   resolveNewDraftStartFromOrigin,
   resolveNewThreadModelSelectionOverride,
 } from "../lib/chatThreadActions";
@@ -34,7 +34,7 @@ import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { useClaimedBoxes } from "../cloud/automationHosts";
+import { useNewChatPlacement } from "../cloud/automationHosts";
 import { useClientSettings } from "./useSettings";
 
 interface NewThreadWorkspaceOptions {
@@ -59,7 +59,7 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const claimedBoxes = useClaimedBoxes();
+  const newChatPlacement = useNewChatPlacement();
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -81,13 +81,23 @@ export function useNewThreadHandler() {
       // up again and finding whichever draft it happens to hold.
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
-      const projectRef = resolveNewChatProjectRef({
-        projectRef: requestedProjectRef,
+      const target = newChatProject({
+        requested: requestedProjectRef,
         projects,
-        boxes: claimedBoxes,
         logicalProjectKey: (project) =>
           deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
+        ...newChatPlacement,
       });
+      // A project whose create event has not landed yet opens as asked.
+      const isKnownProject = projects.some(
+        (project) =>
+          project.environmentId === requestedProjectRef.environmentId &&
+          project.id === requestedProjectRef.projectId,
+      );
+      if (!target && isKnownProject) return Promise.resolve(null);
+      const projectRef = target
+        ? scopeProjectRef(target.environmentId, target.id)
+        : requestedProjectRef;
       const targetServerSettings =
         environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
       const {
@@ -448,9 +458,9 @@ export function useNewThreadHandler() {
       })();
     },
     [
-      claimedBoxes,
       environmentServerConfigs,
       getCurrentRouteTarget,
+      newChatPlacement,
       projectGroupingSettings,
       router,
     ],

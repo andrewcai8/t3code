@@ -21,6 +21,8 @@ import {
   boxesOfOtherChats,
   claimFirstTurnBox,
   idleProvisionedBoxes,
+  type NewChatEnvironmentState,
+  newChatProject,
   newChatRunTargets,
   nextDraftEnvironment,
   offeredProvisionProviders,
@@ -284,6 +286,121 @@ describe("offeredProvisionProviders", () => {
     expect(offeredProvisionProviders({ environmentControl: true })).toEqual(["e2b", "namespace"]);
     expect(offeredProvisionProviders({})).toEqual([]);
     expect(offeredProvisionProviders(null)).toEqual([]);
+  });
+});
+
+describe("newChatProject", () => {
+  const host = EnvironmentId.make("host");
+  const box = EnvironmentId.make("box");
+  const laptop = EnvironmentId.make("laptop");
+  const copy = (environmentId: EnvironmentId, repository = "megpt-mono") => ({
+    environmentId,
+    id: ProjectId.make(`${repository}@${environmentId}`),
+    repository,
+  });
+  type Copy = ReturnType<typeof copy>;
+  const refOf = (project: Copy) => ({
+    environmentId: project.environmentId,
+    projectId: project.id,
+  });
+  const connected: NewChatEnvironmentState = { connection: { phase: "connected" } };
+  const paused: NewChatEnvironmentState = { connection: { phase: "reconnecting" } };
+  const gone: NewChatEnvironmentState = {
+    connection: { phase: "error", blockedReason: "workspace-missing" },
+  };
+  const place = (input: {
+    readonly requested: Copy | null;
+    readonly projects: ReadonlyArray<Copy>;
+    readonly boxes?: ReadonlyArray<EnvironmentId>;
+    readonly states?: Readonly<Record<string, NewChatEnvironmentState>>;
+  }) =>
+    newChatProject({
+      requested: input.requested ? refOf(input.requested) : null,
+      projects: input.projects,
+      logicalProjectKey: (project) => project.repository,
+      boxes: new Set(input.boxes ?? []),
+      environmentState: (environmentId) => input.states?.[environmentId] ?? connected,
+    })?.id ?? null;
+
+  // What the host lists for the box holding a copy of megpt-mono, how the client sees it, and
+  // where a new chat goes when the host holds no copy of its own. A box the host has not listed
+  // yet reads as any offline machine, so with nothing better it is kept.
+  const boxStates = {
+    none: null,
+    "claimed and paused": { listed: true, state: paused, withoutHost: null },
+    "claimed and running": { listed: true, state: connected, withoutHost: null },
+    unclaimed: { listed: true, state: connected, withoutHost: null },
+    "paused, before the host's list arrives": {
+      listed: false,
+      state: paused,
+      withoutHost: "megpt-mono@box",
+    },
+    gone: { listed: false, state: gone, withoutHost: null },
+    missing: { listed: true, state: gone, withoutHost: null },
+  } as const;
+  // The chat in view is on its box, so a chat route asks for the box's copy. Every other page has
+  // no chat in view and asks for the first project in sidebar order, which here is also the box's.
+  const routes = ["chat", "/automations", "/usage", "/settings", "/"] as const;
+  const cases = routes.flatMap((route) =>
+    Object.entries(boxStates).flatMap(([boxState, boxInfo]) =>
+      [true, false].flatMap((onHost) => {
+        if (!boxInfo && !onHost) return [];
+        const projects = [
+          ...(boxInfo ? [copy(box)] : []),
+          ...(onHost ? [copy(host)] : []),
+          copy(host, "t3code"),
+        ];
+        return [
+          {
+            route,
+            boxState,
+            onHost,
+            projects,
+            requested: projects[0]!,
+            boxes: boxInfo?.listed ? [box] : [],
+            states: { [box]: boxInfo?.state ?? connected, [host]: connected },
+            expected: onHost ? "megpt-mono@host" : (boxInfo?.withoutHost ?? null),
+          },
+        ];
+      }),
+    ),
+  );
+
+  it.each(cases)(
+    "from $route with a box that is $boxState, host holds the project: $onHost",
+    ({ requested, projects, boxes, states, expected }) => {
+      expect(place({ requested, projects, boxes, states })).toBe(expected);
+    },
+  );
+
+  it("keeps a requested copy on a machine that is not a box", () => {
+    expect(
+      place({ requested: copy(laptop), projects: [copy(host), copy(laptop)], boxes: [box] }),
+    ).toBe("megpt-mono@laptop");
+  });
+
+  it("moves off a disconnected copy when a connected one exists, else keeps it", () => {
+    const projects = [copy(laptop), copy(host)];
+    const offline = { [laptop]: { connection: { phase: "offline" } } } as const;
+    expect(place({ requested: copy(laptop), projects, states: offline })).toBe("megpt-mono@host");
+    expect(place({ requested: copy(laptop), projects: [copy(laptop)], states: offline })).toBe(
+      "megpt-mono@laptop",
+    );
+  });
+
+  it("starts from the first connected project off every box when nothing is requested", () => {
+    expect(
+      place({
+        requested: null,
+        projects: [copy(box), copy(laptop, "t3code"), copy(host)],
+        boxes: [box],
+        states: { [laptop]: paused },
+      }),
+    ).toBe("megpt-mono@host");
+  });
+
+  it("places nothing it does not know", () => {
+    expect(place({ requested: copy(laptop), projects: [copy(host)] })).toBeNull();
   });
 });
 

@@ -1,4 +1,12 @@
-import { newChatRunTargets, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import {
+  newChatProject,
+  newChatRunTargets,
+  offeredProvisionProviders,
+  runsLocalAgents,
+  type NewChatEnvironmentState,
+  type ProvisionedBox,
+} from "@t3tools/client-runtime/cloud";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cloneRepository, type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 
@@ -10,19 +18,37 @@ type DraftProjectSelectionResolution =
   | { readonly kind: "select"; readonly project: EnvironmentProject }
   | { readonly kind: "pick" };
 
-/** The project a picked scope opens: the one on the preferred machine, else one on no other chat's box. */
+/** What `newChatProject` reads: every box the hosts list, claimed or not, and each environment's state. */
+export function newChatPlacement(
+  provisionedBoxes: ReadonlyArray<ProvisionedBox>,
+  environmentStates: ReadonlyMap<EnvironmentId, NewChatEnvironmentState>,
+) {
+  return {
+    boxes: new Set(provisionedBoxes.map((box) => box.environmentId)),
+    environmentState: (environmentId: EnvironmentId) => environmentStates.get(environmentId),
+  };
+}
+
+export type NewChatPlacement = ReturnType<typeof newChatPlacement>;
+
+/**
+ * The project a picked scope opens: the one on the preferred machine, else the representative,
+ * moved off any box or gone machine. Null when only boxes hold the scope.
+ */
 export function getProjectScopeSelectionTarget(
   scope: HomeProjectScope,
   preferredEnvironmentId: EnvironmentId | null,
-  boxes: ReadonlyMap<EnvironmentId, EnvironmentId>,
-): EnvironmentProject {
-  return (
+  placement: NewChatPlacement,
+): EnvironmentProject | null {
+  const requested =
     scope.projects.find((project) => project.environmentId === preferredEnvironmentId) ??
-    (boxes.has(scope.representative.environmentId)
-      ? scope.projects.find((project) => !boxes.has(project.environmentId))
-      : undefined) ??
-    scope.representative
-  );
+    scope.representative;
+  return newChatProject({
+    requested: scopeProjectRef(requested.environmentId, requested.id),
+    projects: scope.projects,
+    logicalProjectKey: () => scope.key,
+    ...placement,
+  });
 }
 
 export function filterProjectScopes(
@@ -155,35 +181,21 @@ interface NewTaskEnvironmentsInput {
   readonly idleBoxes?: ReadonlySet<EnvironmentId>;
 }
 
-function newTaskRunTargets<Environment extends { readonly environmentId: EnvironmentId }>(
-  environments: ReadonlyArray<Environment>,
-  input: Pick<NewTaskEnvironmentsInput, "serverConfigs" | "boxes" | "idleBoxes">,
-): ReadonlyArray<Environment> {
-  return newChatRunTargets({
-    environments,
-    environmentState: (environmentId) => ({ serverConfig: input.serverConfigs.get(environmentId) }),
-    environmentId: null,
-    managerConfig: null,
-    boxes: input.boxes,
-    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
-  }).environments;
-}
-
 /**
- * Where a new task starts before the user picks: the first machine a new task can run on, else
- * the first that is no other chat's box, so a host that runs no agents starts a fresh box.
+ * Where a new task starts before the user picks: a machine that runs agents, else any, so a host
+ * that runs no agents starts a fresh box. Never a box, claimed or not, nor a gone machine.
  */
-export function defaultNewTaskEnvironmentId(input: NewTaskEnvironmentsInput): EnvironmentId | null {
-  return (
-    (
-      newTaskRunTargets(input.projects, input)[0] ??
-      input.projects.find(
-        (project) =>
-          !input.boxes.has(project.environmentId) &&
-          input.idleBoxes?.has(project.environmentId) !== true,
-      )
-    )?.environmentId ?? null
+export function defaultNewTaskEnvironmentId(input: {
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly serverConfigs: ReadonlyMap<EnvironmentId, NewTaskServerConfig>;
+  readonly placement: NewChatPlacement;
+}): EnvironmentId | null {
+  const place = (projects: ReadonlyArray<EnvironmentProject>) =>
+    newChatProject({ requested: null, projects, logicalProjectKey: () => "", ...input.placement });
+  const runsAgents = input.projects.filter((project) =>
+    runsLocalAgents(input.serverConfigs.get(project.environmentId)),
   );
+  return (place(runsAgents) ?? place(input.projects))?.environmentId ?? null;
 }
 
 /**
@@ -191,10 +203,11 @@ export function defaultNewTaskEnvironmentId(input: NewTaskEnvironmentsInput): En
  * box, and then the default. A queued task being edited stays on its own machine, box or not.
  */
 export function resolveNewTaskEnvironmentId(
-  input: NewTaskEnvironmentsInput & {
-    readonly picked: EnvironmentId | null;
-    readonly pinned: boolean;
-  },
+  input: Parameters<typeof defaultNewTaskEnvironmentId>[0] &
+    Pick<NewTaskEnvironmentsInput, "boxes"> & {
+      readonly picked: EnvironmentId | null;
+      readonly pinned: boolean;
+    },
 ): EnvironmentId | null {
   const { picked } = input;
   return picked !== null &&
@@ -250,7 +263,14 @@ export function newTaskEnvironments(
       environmentLabel: environment.environmentLabel,
     });
   }
-  return newTaskRunTargets(candidates, input);
+  return newChatRunTargets({
+    environments: candidates,
+    environmentState: (environmentId) => ({ serverConfig: input.serverConfigs.get(environmentId) }),
+    environmentId: null,
+    managerConfig: null,
+    boxes: input.boxes,
+    ...(input.idleBoxes ? { idleBoxes: input.idleBoxes } : {}),
+  }).environments;
 }
 
 export type NewThreadStart =

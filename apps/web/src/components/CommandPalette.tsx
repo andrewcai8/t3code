@@ -72,7 +72,7 @@ import {
 } from "react";
 import { useAtomValue } from "@effect/atom-react";
 
-import { useAutomationsAvailable, useClaimedBoxes } from "../cloud/automationHosts";
+import { useAutomationsAvailable, useNewChatPlacement } from "../cloud/automationHosts";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -945,15 +945,15 @@ function OpenCommandPaletteDialog(props: {
       }),
     [activeDraftThread, activeThread, defaultProjectRef, handleNewThread],
   );
-  const claimedBoxes = useClaimedBoxes();
+  const newChatPlacement = useNewChatPlacement();
   const projectPickerEntries = useMemo(
     () =>
       buildSidebarProjectPickerEntries({
         groups: projectGroups,
         preferredProjectRef: contextualProjectRef,
-        boxes: claimedBoxes,
+        ...newChatPlacement,
       }),
-    [claimedBoxes, contextualProjectRef, projectGroups],
+    [contextualProjectRef, newChatPlacement, projectGroups],
   );
   const pickerProjects = useMemo(
     () =>
@@ -1318,29 +1318,11 @@ function OpenCommandPaletteDialog(props: {
           },
           icon: projectFavicon,
           runProject: async (project) => {
-            const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
-            const contextualRefBelongsToGroup =
-              contextualProjectRef !== null &&
-              group?.memberProjectRefs.some(
-                (projectRef) =>
-                  projectRef.environmentId === contextualProjectRef.environmentId &&
-                  projectRef.projectId === contextualProjectRef.projectId,
-              );
-            await handleNewThread(
-              contextualRefBelongsToGroup
-                ? contextualProjectRef
-                : scopeProjectRef(project.environmentId, project.id),
-            );
+            await handleNewThread(scopeProjectRef(project.environmentId, project.id));
           },
         }),
       ),
-    [
-      contextualProjectRef,
-      handleNewThread,
-      pickerProjects,
-      projectEnvironmentLocationById,
-      projectGroupByTargetKey,
-    ],
+    [handleNewThread, pickerProjects, projectEnvironmentLocationById, projectGroupByTargetKey],
   );
 
   const allThreadItems = useMemo(
