@@ -14,6 +14,7 @@ import {
   prepareRemoteHost,
   refreshRemoteCheckout,
   remotePreparationScript,
+  sealWarmBase,
   type RemotePreparationInput,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
@@ -1200,4 +1201,122 @@ describe("bounded preparation commands", () => {
       survived: false,
     });
   }, 45_000);
+});
+
+describe("warm base", () => {
+  const exists = (path: string) =>
+    NodeFSP.access(path).then(
+      () => true,
+      () => false,
+    );
+  const commit = (repository: string, message: string) => {
+    git(repository, "add", ".");
+    git(
+      repository,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-qm",
+      message,
+    );
+    return git(repository, "rev-parse", "HEAD");
+  };
+  const homeFile = (contents: string) => ({
+    scope: "home" as const,
+    destination: ".config/agent/credential",
+    sha256: sha256(contents),
+    contentsBase64: Buffer.from(contents).toString("base64"),
+  });
+
+  it("hands a sealed checkout to a new box with its own identity, on the requested revision", async () => {
+    const { input: followed, source } = await following();
+    git(source, "branch", "-M", "main");
+    await NodeFSP.writeFile(NodePath.join(source, ".gitignore"), "node_modules/\n");
+    const base = commit(source, "ignore dependencies");
+    const input = {
+      ...followed,
+      repository: { ...followed.repository!, revision: base },
+      files: [...followed.files, homeFile("first account")],
+      // A prepared tree carries ignored dependencies and may touch tracked files.
+      prepareCommands: [
+        "mkdir -p node_modules && touch node_modules/marker",
+        "echo local >> README.md",
+      ],
+    };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+
+    const seal = {
+      root: input.root,
+      files: input.files.map(({ scope, destination }) => ({ scope, destination })),
+    };
+    await sealWarmBase(localPort, seal);
+    const sealed = (await NodeFSP.readdir(input.root)).toSorted();
+    await sealWarmBase(localPort, seal);
+    expect(
+      await Promise.all(
+        [
+          "preparation.json",
+          "warm.json",
+          "workspace",
+          "workspace.partial",
+          "broker-token",
+          "server.json",
+          "home/.t3",
+        ].map((name) => exists(NodePath.join(input.root, name))),
+      ),
+    ).toEqual([false, true, false, true, false, false, false]);
+    expect([exited(first.serverPid), (await NodeFSP.readdir(input.root)).toSorted()]).toEqual([
+      true,
+      sealed,
+    ]);
+
+    await NodeFSP.writeFile(NodePath.join(source, "README.md"), "moved on\n");
+    const next = commit(source, "move on");
+    const phases: ProvisionPhase[] = [];
+    const second = await prepareRemoteHost(
+      localPort,
+      {
+        ...input,
+        requestId: "repair-2",
+        resourceIdentity: "local:warm-child",
+        requestHash: "d".repeat(64),
+        repository: { ...input.repository, revision: next },
+        files: [...followed.files, homeFile("second account")],
+      },
+      (phase) => {
+        phases.push(phase);
+      },
+    );
+    pids.add(second.serverPid);
+    const described = await fetch(`http://127.0.0.1:${input.port}/.well-known/t3/environment`);
+    expect({
+      newIdentity: second.environmentId !== first.environmentId,
+      served:
+        ((await described.json()) as { environmentId: string }).environmentId ===
+        second.environmentId,
+      branch: git(second.projectDir, "symbolic-ref", "--short", "HEAD"),
+      head: second.headRevision,
+      readme: await NodeFSP.readFile(NodePath.join(second.projectDir, "README.md"), "utf8"),
+      dependencies: await exists(NodePath.join(second.projectDir, "node_modules/marker")),
+      credential: await NodeFSP.readFile(
+        NodePath.join(input.root, "home/.config/agent/credential"),
+        "utf8",
+      ),
+      extracted: phases.some((phase) => phase.phase === "remote.artifactExtract"),
+      warmLeft: await exists(NodePath.join(input.root, "warm.json")),
+    }).toEqual({
+      newIdentity: true,
+      served: true,
+      branch: "main",
+      head: next,
+      readme: "moved on\nlocal\n",
+      dependencies: true,
+      credential: "second account",
+      extracted: false,
+      warmLeft: false,
+    });
+  });
 });
