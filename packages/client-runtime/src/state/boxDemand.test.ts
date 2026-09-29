@@ -1,7 +1,8 @@
 import { EnvironmentId, type OrchestrationThreadShell } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
@@ -102,14 +103,16 @@ describe("running box demand", () => {
     updatedAt: "2026-09-28T00:00:00.000Z",
   } as unknown as OrchestrationThreadShell["session"];
 
-  it("holds a box connected while a turn runs on it, and lets go when it ends", async () => {
-    const { registry, threads, held } = harness({ session: running, lifecycle: "active" });
-    expect([...held]).toEqual([BOX.environmentId]);
-    registry.set(threads, [{ session: null }]);
-    // The registry drops an atom nothing mounts once the current task ends.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect([...held]).toEqual([]);
-  });
+  it.live("holds a box connected while a turn runs on it, and lets go when it ends", () =>
+    Effect.gen(function* () {
+      const { registry, threads, held } = harness({ session: running, lifecycle: "active" });
+      expect([...held]).toEqual([BOX.environmentId]);
+      registry.set(threads, [{ session: null }]);
+      // The registry drops an atom nothing mounts on its next task.
+      yield* Effect.sleep("1 millis");
+      expect([...held]).toEqual([]);
+    }),
+  );
 
   it("does not dial a box its host paused, whatever the cache last saw", () => {
     const { registry, lifecycle, held } = harness({ session: running, lifecycle: "paused" });
