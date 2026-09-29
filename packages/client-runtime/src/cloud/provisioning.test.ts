@@ -724,6 +724,7 @@ describe("claimFirstTurnBox", () => {
       leaseId: "lease",
       sandboxId: "sandbox",
       managerEnvironmentId: host,
+      environmentId: box,
     });
     // A later chat on the same box finds nothing left to claim.
     await expect(

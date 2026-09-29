@@ -111,6 +111,7 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
       },
       rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
       waitForThread: waitForThreadShell,
+      refreshBoxList: () => serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]),
       rememberLease: (ref) =>
         remember(environment, ref, {
           leaseId: environment.leaseId,

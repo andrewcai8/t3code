@@ -182,6 +182,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     removeRelayEnvironments: () => Effect.die("Unexpected environment removal"),
     markWorkspaceMissing: () => Effect.die("Unexpected missing workspace"),
     markBoxes: () => Effect.die("Unexpected box marking"),
+    unmarkBox: () => Effect.die("Unexpected box unmarking"),
     demand: () => Effect.void,
     demanded: yield* SubscriptionRef.make<ReadonlySet<EnvironmentId>>(new Set()),
     retryNow: () => Effect.void,

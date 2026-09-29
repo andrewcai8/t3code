@@ -7,6 +7,8 @@ export interface ProvisionedSandboxLease {
   readonly leaseId: string;
   readonly sandboxId: string;
   readonly managerEnvironmentId: EnvironmentId;
+  /** The box's environment as its host reported it; absent on leases recorded before. */
+  readonly environmentId?: EnvironmentId;
 }
 
 export const PROVISIONED_SANDBOX_LEASES_STORAGE_KEY = "t3code:provisioned-sandbox-leases:v1";
@@ -14,6 +16,7 @@ const PersistedLease = Schema.Struct({
   leaseId: Schema.optional(Schema.String),
   sandboxId: Schema.String,
   managerEnvironmentId: Schema.String,
+  environmentId: Schema.optional(Schema.String),
 });
 const PersistedLeases = Schema.Record(Schema.String, PersistedLease);
 const decodePersistedLeases = Schema.decodeUnknownSync(PersistedLeases);
@@ -48,6 +51,9 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
           leaseId: value.leaseId ?? value.sandboxId,
           sandboxId: value.sandboxId,
           managerEnvironmentId: EnvironmentId.make(value.managerEnvironmentId),
+          ...(value.environmentId === undefined
+            ? {}
+            : { environmentId: EnvironmentId.make(value.environmentId) }),
         });
       }
     } catch {
@@ -94,8 +100,10 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     environmentId: EnvironmentId,
     threadRef: ScopedThreadRef,
   ): ProvisionedSandboxLease | null {
-    const lease = leases.get(environmentKey(environmentId));
-    if (!lease) return null;
+    const stored = leases.get(environmentKey(environmentId));
+    if (!stored) return null;
+    // The environment key is the id the box's host reported for it.
+    const lease = { ...stored, environmentId: stored.environmentId ?? environmentId };
     leases.delete(environmentKey(environmentId));
     leases.set(key(threadRef), lease);
     persist();
@@ -137,25 +145,24 @@ export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
     readPersisted();
   }
 
-  /** Each box this device holds a lease on by environment, with the host that provisioned it. */
+  /**
+   * Each box this device holds a lease on, with the host that provisioned it. Only ids the box's
+   * host reported count: those recorded on the lease, and a joined box's environment key. A
+   * thread key's environment is only where this device sent a chat, which may be a real server.
+   */
   function boxes(): ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly managerId: EnvironmentId;
   }> {
     return [...leases].flatMap(([entryKey, lease]) => {
-      const environmentId = entryKey.startsWith("environment:")
-        ? entryKey.slice("environment:".length)
-        : entryKey.startsWith("thread:")
-          ? entryKey.slice("thread:".length, entryKey.lastIndexOf(":"))
-          : null;
+      const environmentId =
+        lease.environmentId ??
+        (entryKey.startsWith("environment:")
+          ? EnvironmentId.make(entryKey.slice("environment:".length))
+          : null);
       return environmentId === null
         ? []
-        : [
-            {
-              environmentId: EnvironmentId.make(environmentId),
-              managerId: lease.managerEnvironmentId,
-            },
-          ];
+        : [{ environmentId, managerId: lease.managerEnvironmentId }];
     });
   }
 

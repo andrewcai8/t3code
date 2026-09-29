@@ -7,6 +7,7 @@ import {
 import {
   type CloudProvisioningProgressPhase,
   claimProvisionedBox,
+  leaseReachesBox,
   newChatProject,
   newChatRunTargets,
   nextDraftEnvironment,
@@ -1552,6 +1553,14 @@ function releaseChatTimelineAnchor<T extends { readonly messageId: MessageId | n
   current: T,
 ): T {
   return current.messageId === null ? current : { ...current, messageId: null };
+}
+
+/** The host a saved box connection names, read when a send or pick needs it. */
+function catalogBoxManager(environmentId: EnvironmentId): EnvironmentId | null {
+  const target = appAtomRegistry
+    .get(environmentCatalog.catalogValueAtom)
+    .entries.get(environmentId)?.target;
+  return target === undefined ? null : (connectionBox(target)?.managerId ?? null);
 }
 
 export default function ChatView(props: ChatViewProps) {
@@ -4194,12 +4203,18 @@ export default function ChatView(props: ChatViewProps) {
   const onEnvironmentChange = useCallback(
     (nextEnvironmentId: EnvironmentId) => {
       if (envLocked || !draftId) return;
-      setCloudProvisioningChoice(null);
-      setPendingCloudSendEnvironmentId(null);
       const target = logicalProjectEnvironments.find(
         (env) => env.environmentId === nextEnvironmentId,
       );
       if (!target) return;
+      setCloudProvisioningChoice(null);
+      setPendingCloudSendEnvironmentId(null);
+      // Moving off the box this draft provisioned lets the box go, so no later send claims it.
+      const lease = provisionedSandboxFor(draftId);
+      if (lease && !leaseReachesBox(lease, nextEnvironmentId, catalogBoxManager)) {
+        cancelProvisionRequest(draftId);
+        useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
+      }
       setDraftThreadContext(draftId, {
         projectRef: scopeProjectRef(target.environmentId, target.projectId),
         environmentSelection: "manual",
@@ -9256,10 +9271,19 @@ export default function ChatView(props: ChatViewProps) {
       if (backgroundThreadRef) {
         beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
       }
-      const cloudLease =
+      const draftLease =
         isLocalDraftThread && typeof composerDraftTarget === "string"
           ? provisionedSandboxFor(composerDraftTarget)
           : null;
+      // A draft keeps its lease when provisioning fails, and may then run on a real server. Only
+      // a send on its own box claims the box; any other leaves the box for the draft to dispose.
+      const cloudLease =
+        draftLease && leaseReachesBox(draftLease, environmentId, catalogBoxManager)
+          ? draftLease
+          : null;
+      if (draftLease && !cloudLease && typeof composerDraftTarget === "string") {
+        cancelProvisionRequest(composerDraftTarget);
+      }
       const startPromise = startThreadTurn({
         environmentId,
         input: {
@@ -9356,6 +9380,7 @@ export default function ChatView(props: ChatViewProps) {
                 return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
               },
               refresh: refreshProvisionedEnvironments,
+              boxManager: catalogBoxManager,
               warn: (attempt) =>
                 console.warn("[cloud] could not claim the box for its first turn", {
                   leaseId: cloudLease.leaseId,

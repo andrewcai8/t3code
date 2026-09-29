@@ -245,6 +245,15 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.markBoxes(boxes)),
       ),
   });
+  const unmarkBox = createRuntimeCommand(runtime, {
+    label: "environment-catalog:unmark-box",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (environmentId: EnvironmentIdType) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.unmarkBox(environmentId)),
+      ),
+  });
   const markGoneWorkspacesMissing = createRuntimeCommand(runtime, {
     label: "environment-catalog:mark-gone-workspaces-missing",
     scheduler: commandScheduler,
@@ -283,6 +292,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
     markWorkspaceMissing,
     markGoneWorkspacesMissing,
     markBoxes,
+    unmarkBox,
     demandAtom,
     demandedValueAtom,
     awaitConnected,

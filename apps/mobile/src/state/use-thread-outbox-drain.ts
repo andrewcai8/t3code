@@ -84,6 +84,8 @@ import {
 import { setPendingConnectionError } from "./use-remote-environment-registry";
 import { connectionPhasesAtom } from "./presentation";
 import { useBoxesDemand } from "./box-demand";
+import { connectionBox } from "@t3tools/client-runtime/connection";
+import { environmentCatalog } from "../connection/catalog";
 
 // Ordinary offline behavior (a socket dropping mid-request, a retryable
 // attachment upload failure) must not spam `console.warn` on every backoff
@@ -1073,6 +1075,12 @@ export function useThreadOutboxDrain(): void {
           },
           refresh: (managerId) =>
             serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]),
+          boxManager: (environmentId) => {
+            const target = appAtomRegistry
+              .get(environmentCatalog.catalogValueAtom)
+              .entries.get(environmentId)?.target;
+            return target === undefined ? null : (connectionBox(target)?.managerId ?? null);
+          },
           warn: (attempt) =>
             console.warn("[thread-outbox] could not claim the cloud machine for its first turn", {
               threadId: queuedMessage.threadId,

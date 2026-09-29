@@ -115,6 +115,15 @@ vi.mock("./presentation", async () => {
   return { connectionPhasesAtom: Atom.make(new Map()).pipe(Atom.keepAlive) };
 });
 
+vi.mock("../connection/catalog", async () => {
+  const { Atom } = await import("effect/unstable/reactivity");
+  return {
+    environmentCatalog: {
+      catalogValueAtom: Atom.make({ isReady: true, entries: new Map() }).pipe(Atom.keepAlive),
+    },
+  };
+});
+
 vi.mock("./box-demand", () => ({
   useBoxesDemand: () => undefined,
 }));

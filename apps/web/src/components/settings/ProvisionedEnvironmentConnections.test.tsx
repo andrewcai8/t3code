@@ -43,6 +43,7 @@ vi.mock("../../state/server", () => ({
     provisionedEnvironments: () => "discovery",
     attachProvisionedEnvironment: "attach",
     resumeProvisionedEnvironment: "resume",
+    refreshProvisionedBoxes: () => undefined,
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({

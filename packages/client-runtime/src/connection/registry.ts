@@ -111,11 +111,21 @@ export class EnvironmentRegistry extends Context.Service<
     readonly demanded: SubscriptionRef.SubscriptionRef<ReadonlySet<EnvironmentId>>;
     /**
      * Marks saved connections as the boxes they reach, so they stop being user environments.
-     * Anything not saved, not a bearer connection, or already marked is skipped.
+     * Anything not saved, not a bearer connection, or already marked is skipped, and so is a
+     * host that provisions boxes: one named in `boxes` or by a saved box.
      */
     readonly markBoxes: (
       boxes: ReadonlyArray<{ readonly environmentId: EnvironmentId } & BoxAttachment>,
     ) => Effect.Effect<void>;
+    /** Makes a saved connection marked as a box an ordinary environment again. */
+    readonly unmarkBox: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<
+      void,
+      | Persistence.ConnectionPersistenceError
+      | ConnectionAttemptError
+      | EnvironmentNotRegisteredError
+    >;
     readonly markWorkspaceMissing: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<
@@ -605,24 +615,44 @@ export const make = Effect.gen(function* () {
     ).pipe(Effect.withSpan("EnvironmentRegistry.markWorkspaceMissing"));
 
   const markBoxes: EnvironmentRegistry["Service"]["markBoxes"] = (boxes) =>
-    Effect.forEach(
-      boxes,
-      ({ environmentId, managerId }) =>
-        rewriteBearerTarget(environmentId, (target) =>
-          target.box?.managerId === managerId
-            ? null
-            : new BearerConnectionTarget({ ...target, box: { managerId } }),
-        ).pipe(
-          Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.void),
-          Effect.catch((error) =>
-            Effect.logWarning("Could not mark a saved connection as a box.", {
-              environmentId,
-              error,
-            }),
-          ),
+    Effect.gen(function* () {
+      const managers = new Set<EnvironmentId>(boxes.map(({ managerId }) => managerId));
+      for (const entry of (yield* SubscriptionRef.get(entries)).values()) {
+        const box = connectionBox(entry.target);
+        if (box !== null) managers.add(box.managerId);
+      }
+      return boxes.filter(
+        ({ environmentId, managerId }) =>
+          environmentId !== managerId && !managers.has(environmentId),
+      );
+    }).pipe(
+      Effect.flatMap((boxes) =>
+        Effect.forEach(
+          boxes,
+          ({ environmentId, managerId }) =>
+            rewriteBearerTarget(environmentId, (target) =>
+              target.box?.managerId === managerId
+                ? null
+                : new BearerConnectionTarget({ ...target, box: { managerId } }),
+            ).pipe(
+              Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.void),
+              Effect.catch((error) =>
+                Effect.logWarning("Could not mark a saved connection as a box.", {
+                  environmentId,
+                  error,
+                }),
+              ),
+            ),
+          { discard: true },
         ),
-      { discard: true },
-    ).pipe(Effect.withSpan("EnvironmentRegistry.markBoxes"));
+      ),
+      Effect.withSpan("EnvironmentRegistry.markBoxes"),
+    );
+
+  const unmarkBox = (environmentId: EnvironmentId) =>
+    rewriteBearerTarget(environmentId, ({ box: _box, ...target }) =>
+      _box === undefined ? null : new BearerConnectionTarget(target),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.unmarkBox"));
 
   const setDemand = Effect.fn("EnvironmentRegistry.setDemand")(function* (
     environmentId: EnvironmentId,
@@ -1066,6 +1096,7 @@ export const make = Effect.gen(function* () {
     demand,
     demanded,
     markBoxes,
+    unmarkBox,
     markWorkspaceMissing,
     setEnabled,
     setCompatibility,

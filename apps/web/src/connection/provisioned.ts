@@ -13,6 +13,11 @@ export interface ProvisionedConnectionPorts extends Omit<ProvisionedJoinPorts, "
    * environment has no thread yet and the lease belongs to the environment itself.
    */
   readonly rememberLease: (ref: ScopedThreadRef | null) => void;
+  /**
+   * Refetches the host's box list. The list this client holds predates a box it just joined, and
+   * a turn running on a box keeps it connected only while the host lists it active.
+   */
+  readonly refreshBoxList: () => void;
 }
 
 export async function openProvisionedEnvironment(
@@ -30,6 +35,7 @@ export async function openProvisionedEnvironment(
         ? joined.message
         : "This machine is reachable only through the computer that started it.",
     );
+  ports.refreshBoxList();
   if (environment.threadId === null) {
     ports.rememberLease(null);
     return null;
