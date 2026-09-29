@@ -52,6 +52,11 @@ export const WarmBaseRecord = Schema.Struct({
       attempts: Schema.Int.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
     }),
   ),
+  /**
+   * When a chat last wanted a base or started from one. Absent on records from
+   * before it was tracked, which count their base's build as the last use.
+   */
+  lastUsedAt: Schema.optional(IsoDateTime),
   /** Things to dispose once the provider lets us: replaced snapshots and finished build boxes. */
   retired: Schema.Array(
     Schema.Union([
@@ -86,6 +91,8 @@ export interface WarmBasePolicy {
   readonly failureBackoffMs: number;
   /** How long a replaced snapshot stays for chats that froze it but are not yet created. */
   readonly retireGraceMs: number;
+  /** A repository no chat used for this long keeps no base. */
+  readonly idleMs: number;
 }
 export function warmBasePolicy(refreshHours = 12): WarmBasePolicy {
   const refreshMs = refreshHours * HOUR;
@@ -95,11 +102,23 @@ export function warmBasePolicy(refreshHours = 12): WarmBasePolicy {
     buildDeadlineMs: 90 * MINUTE,
     failureBackoffMs: HOUR,
     retireGraceMs: HOUR,
+    idleMs: 3 * 24 * HOUR,
   };
 }
 
 const age = (iso: string, now: number) => now - Date.parse(iso);
 const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis));
+const lastUse = (record: WarmBaseRecord) => record.lastUsedAt ?? record.ready?.builtAt;
+/** No chat used the repository for so long that keeping a base costs more than it saves. */
+const idleExpired = (
+  record: WarmBaseRecord | null,
+  wanted: boolean,
+  now: number,
+  policy: WarmBasePolicy,
+) => {
+  const used = record && lastUse(record);
+  return !wanted && used !== null && used !== undefined && age(used, now) > policy.idleMs;
+};
 
 /**
  * The bare template a chat keyed `key` starts from, or null to start cold.
@@ -135,6 +154,7 @@ export function nextWarmStep(
 ): "idle" | "start" | "drive" {
   if (currentKey === null) return "idle";
   if (record?.build) return "drive";
+  if (idleExpired(record, wanted, now, policy)) return "idle";
   const ready = record?.ready ?? null;
   const needed =
     ready === null
@@ -179,6 +199,16 @@ const invalidateReady = (record: WarmBaseRecord, reason: string, now: number): W
         ...record,
         ready: null,
         lastFailure: failure(record, record.ready.key, reason, now),
+        retired: [...record.retired, ...retiredReady(record, now)],
+      }
+    : record;
+/** Nobody uses the base, so it is disposed; the last use stays so it stays idle. */
+const retireIdle = (record: WarmBaseRecord, now: number): WarmBaseRecord =>
+  record.ready
+    ? {
+        ...record,
+        ready: null,
+        lastUsedAt: lastUse(record),
         retired: [...record.retired, ...retiredReady(record, now)],
       }
     : record;
@@ -266,6 +296,8 @@ export interface WarmBasePorts {
  */
 export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
   const wanted = new Map<string, WarmBaseSeed>();
+  /** When a chat last wanted or started from each repository's base, until a tick records it. */
+  const uses = new Map<string, number>();
   /** Bases a chat failed to prepare from, by template, until a tick retires them. */
   const failures = new Map<string, { readonly repository: string; readonly reason: string }>();
 
@@ -334,9 +366,11 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     policy: WarmBasePolicy,
   ) => {
     const want = wanted.get(repository);
+    const usedAt = uses.get(repository);
     const reported = [...failures].filter(([, failure]) => failure.repository === repository);
     const settle = () => {
       if (wanted.get(repository) === want) wanted.delete(repository);
+      if (uses.get(repository) === usedAt) uses.delete(repository);
       for (const [templateId, failure] of reported)
         if (failures.get(templateId) === failure) failures.delete(templateId);
     };
@@ -344,7 +378,11 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     const key = await ports.key(repository);
     const now = ports.now();
     const broken = stored?.ready && failures.get(stored.ready.templateId);
-    const current = stored && broken ? invalidateReady(stored, broken.reason, now) : stored;
+    const invalidated = stored && broken ? invalidateReady(stored, broken.reason, now) : stored;
+    const current =
+      invalidated && usedAt !== undefined
+        ? { ...invalidated, lastUsedAt: iso(usedAt) }
+        : invalidated;
     const step = nextWarmStep(current, key, want !== undefined, now, policy);
     if (!seed || (current === null && step === "idle")) {
       settle();
@@ -362,9 +400,11 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
       lastFailure: null,
       retired: [],
       ...current,
+      ...(usedAt === undefined ? {} : { lastUsedAt: iso(usedAt) }),
       seed,
     };
     if (key === null) record = retireAll(record, now);
+    else if (idleExpired(record, want !== undefined, now, policy)) record = retireIdle(record, now);
     if (step === "start" && key !== null) {
       const requestId = ProvisionRequestId.make(NodeCrypto.randomUUID());
       const frozen = await ports
@@ -406,13 +446,23 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     failedTemplates: (): ReadonlySet<string> => new Set(failures.keys()),
     want: (repository: string, seed: WarmBaseSeed) => {
       wanted.set(canonicalRepository(repository), seed);
+      uses.set(canonicalRepository(repository), ports.now());
+    },
+    /** A chat started from the repository's warm base. */
+    used: (repository: string) => {
+      uses.set(canonicalRepository(repository), ports.now());
     },
     tick: async (policy: WarmBasePolicy) => {
       const records = new Map(
         (await ports.store.list()).map((record) => [record.repository, record]),
       );
       const reported = [...failures.values()].map(({ repository }) => repository);
-      for (const repository of new Set([...records.keys(), ...wanted.keys(), ...reported]))
+      for (const repository of new Set([
+        ...records.keys(),
+        ...wanted.keys(),
+        ...uses.keys(),
+        ...reported,
+      ]))
         await upkeep(repository, records.get(repository) ?? null, policy).catch((cause) =>
           ports.warn("warm base upkeep failed", { repository, cause }),
         );

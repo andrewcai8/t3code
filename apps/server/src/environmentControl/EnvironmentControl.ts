@@ -1112,19 +1112,22 @@ export const layer = Layer.effect(
               warmBases.failedTemplates(),
             ),
           );
-          // A chat that had to start cold asks for a base, on the account it routed to.
+          // A chat that had to start cold asks for a base, on the account it
+          // routed to. One that started warm keeps its base in use.
           if (
             manifest.warmKey &&
             manifest.input.repository &&
-            manifest.request.provider === "e2b" &&
-            manifest.request.strategy === "fork"
-          )
-            warmBases.want(manifest.input.repository, {
-              providerInstanceId: manifest.request.providerInstanceId,
-              ...(manifest.request.agentDriver
-                ? { agentDriver: manifest.request.agentDriver }
-                : {}),
-            });
+            manifest.request.provider === "e2b"
+          ) {
+            if (manifest.request.strategy === "direct") warmBases.used(manifest.input.repository);
+            else
+              warmBases.want(manifest.input.repository, {
+                providerInstanceId: manifest.request.providerInstanceId,
+                ...(manifest.request.agentDriver
+                  ? { agentDriver: manifest.request.agentDriver }
+                  : {}),
+              });
+          }
           return manifest;
         },
         load: manifests.load,

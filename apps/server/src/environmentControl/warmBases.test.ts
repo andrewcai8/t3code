@@ -18,6 +18,7 @@ import {
 import { provisionDigest } from "./ProvisionPreparation.ts";
 
 const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 const NOW = Date.parse("2026-09-29T12:00:00.000Z");
 const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis));
 const KEY = "1".repeat(64);
@@ -134,6 +135,38 @@ describe("choosing a warm base", () => {
       false,
       null,
       "start",
+    ],
+    [
+      "a base nobody used for days is neither refreshed nor rebuilt",
+      record({ ready: ready(OLD_KEY, NOW - HOUR), lastUsedAt: iso(NOW - 4 * DAY) }),
+      KEY,
+      false,
+      null,
+      "idle",
+    ],
+    [
+      "an idle repository a chat wants again gets a base",
+      record({ ready: ready(OLD_KEY, NOW - HOUR), lastUsedAt: iso(NOW - 4 * DAY) }),
+      KEY,
+      true,
+      null,
+      "start",
+    ],
+    [
+      "a base used within days is still refreshed",
+      record({ ready: ready(KEY, NOW - 13 * HOUR), lastUsedAt: iso(NOW - 2 * DAY) }),
+      KEY,
+      false,
+      "base",
+      "start",
+    ],
+    [
+      "a record from before use was tracked counts its build as the last use",
+      record({ ready: ready(OLD_KEY, NOW - 4 * DAY) }),
+      KEY,
+      false,
+      null,
+      "idle",
     ],
     ["a repository nobody asked for gets nothing", null, KEY, false, null, "idle"],
     ["a repository a chat started cold for gets a base", null, KEY, true, null, "start"],
@@ -285,6 +318,30 @@ describe("warm base upkeep", () => {
     ]);
   });
 
+  it("retires a base nobody used for days, and builds again once a chat uses the repository", async () => {
+    const h = harness([record({ ready: ready(KEY, NOW - HOUR), lastUsedAt: iso(NOW - 4 * DAY) })]);
+    await h.upkeep.tick(policy);
+    const idle = h.current();
+    h.clock.now += 2 * HOUR;
+    h.upkeep.want("example/repo", seed);
+    await h.upkeep.tick(policy);
+    expect([idle, h.frozen.length, h.current()?.lastUsedAt]).toEqual([
+      record({
+        lastUsedAt: iso(NOW - 4 * DAY),
+        retired: [{ kind: "snapshot", snapshotId: "base:default", retiredAt: iso(NOW) }],
+      }),
+      1,
+      iso(NOW + 2 * HOUR),
+    ]);
+  });
+
+  it("counts a chat that started warm as a use", async () => {
+    const h = harness([record({ ready: ready(KEY, NOW - HOUR), lastUsedAt: iso(NOW - 2 * DAY) })]);
+    h.upkeep.used("Example/Repo");
+    await h.upkeep.tick(policy);
+    expect(h.current()).toEqual(record({ ready: ready(KEY, NOW - HOUR), lastUsedAt: iso(NOW) }));
+  });
+
   it("keeps a sealed build whose snapshot E2B refused for now, and snapshots it next tick", async () => {
     const h = harness([record()]);
     await h.upkeep.tick(policy);
@@ -350,7 +407,10 @@ describe("warm base upkeep", () => {
     await h.upkeep.tick(policy);
     builds.push(h.frozen.length);
     expect([failed, again, builds]).toEqual([
-      record({ lastFailure: { key: KEY, reason: "npm ci exited 1", at: iso(NOW), attempts: 1 } }),
+      record({
+        lastFailure: { key: KEY, reason: "npm ci exited 1", at: iso(NOW), attempts: 1 },
+        lastUsedAt: iso(NOW),
+      }),
       { key: KEY, reason: "npm ci exited 1", at: iso(NOW + 61 * 60_000), attempts: 2 },
       [1, 1, 2, 2, 3],
     ]);
