@@ -19,6 +19,7 @@ import {
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
 import type { ProvisionPhase } from "./provisionTiming.ts";
+import { warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 
 const roots: string[] = [];
 const pids = new Set<number>();
@@ -1230,6 +1231,56 @@ describe("warm base", () => {
     contentsBase64: Buffer.from(contents).toString("base64"),
   });
 
+  it("removes every login a build left in its home, whoever wrote it", async () => {
+    const input = await fixture();
+    const logins = [
+      ".codex/auth.json",
+      ".config/cursor/auth.json",
+      ".cursor/auth.json",
+      ".claude/.credentials.json",
+      ".claude.json",
+      ".git-credentials",
+      ".gitconfig",
+      ".config/gh/hosts.yml",
+    ];
+    const build = await prepareRemoteHost(localPort, {
+      ...input,
+      prepareCommands: logins.map(
+        (path) => `mkdir -p "$(dirname "$HOME/${path}")" && echo build > "$HOME/${path}"`,
+      ),
+    });
+    pids.add(build.serverPid);
+    await sealWarmBase(localPort, {
+      root: input.root,
+      files: input.files.map(({ scope, destination }) => ({ scope, destination })),
+      homePaths: warmSealHomePaths(),
+    });
+    const chat = await prepareRemoteHost(localPort, {
+      ...input,
+      requestId: "repair-2",
+      resourceIdentity: "local:warm-child",
+      requestHash: "d".repeat(64),
+      files: [
+        ...input.files,
+        ...[".codex/auth.json", ".gitconfig"].map((destination) => ({
+          scope: "home" as const,
+          destination,
+          sha256: sha256("chat"),
+          contentsBase64: Buffer.from("chat").toString("base64"),
+        })),
+      ],
+    });
+    pids.add(chat.serverPid);
+    const home = NodePath.join(input.root, "home");
+    expect(
+      await Promise.all(
+        logins.map((path) =>
+          NodeFSP.readFile(NodePath.join(home, path), "utf8").catch(() => "absent"),
+        ),
+      ),
+    ).toEqual(["chat", "absent", "absent", "absent", "absent", "absent", "chat", "absent"]);
+  });
+
   it("hands a sealed checkout to a new box with its own identity, on the requested revision", async () => {
     const { input: followed, source } = await following();
     git(source, "branch", "-M", "main");
@@ -1251,6 +1302,7 @@ describe("warm base", () => {
     const seal = {
       root: input.root,
       files: input.files.map(({ scope, destination }) => ({ scope, destination })),
+      homePaths: warmSealHomePaths(),
     };
     await sealWarmBase(localPort, seal);
     const sealed = (await NodeFSP.readdir(input.root)).toSorted();

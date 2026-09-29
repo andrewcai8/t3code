@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import { CommandExitError } from "e2b";
 import { describe, expect, it } from "vite-plus/test";
 
-import { e2bPythonResult, uploadFile } from "./E2bProvisionRuntime.ts";
+import { e2bPythonResult, uploadFile, warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 
 describe("e2bPythonResult", () => {
   it("returns a successful command as python stdout/stderr", async () => {
@@ -94,5 +94,23 @@ describe("uploadFile", () => {
         response.writeHead(401).end("bad signature");
       }),
     ).rejects.toThrow("The runtime artifact upload failed (401): bad signature");
+  });
+});
+
+describe("warmSealHomePaths", () => {
+  it("names every login, the GitHub token files, and Claude's account record", () => {
+    const paths = warmSealHomePaths();
+    expect(
+      [
+        ".codex/auth.json",
+        ".config/cursor/auth.json",
+        ".cursor/auth.json",
+        ".claude/.credentials.json",
+        ".claude.json",
+        ".git-credentials",
+        ".gitconfig",
+        ".config/gh/hosts.yml",
+      ].filter((path) => !paths.includes(path)),
+    ).toEqual([]);
   });
 });

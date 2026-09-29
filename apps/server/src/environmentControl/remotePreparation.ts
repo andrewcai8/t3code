@@ -200,6 +200,8 @@ export async function sealWarmBase(
       readonly scope: "home" | "workspace";
       readonly destination: string;
     }>;
+    /** Removed from the home whether or not the build installed them. */
+    readonly homePaths: ReadonlyArray<string>;
   },
 ): Promise<void> {
   const result = await port.executePython({
@@ -964,6 +966,9 @@ def seal(spec):
             base = home if file['scope'] == 'home' else workspace
             if base.exists():
                 contained(base, file['destination']).unlink(missing_ok=True)
+        if home.exists():
+            for path in spec['homePaths']:
+                contained(home, path).unlink(missing_ok=True)
         if workspace.exists() and not partial.exists():
             os.rename(workspace, partial)
     return {'sealed': True}
