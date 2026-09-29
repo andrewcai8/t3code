@@ -7,6 +7,7 @@ import * as NodeStreamPromises from "node:stream/promises";
 import {
   CommandExitError,
   E2B,
+  SandboxError,
   SandboxNotFoundError,
   type CommandResult,
   type E2BClientOpts,
@@ -17,6 +18,7 @@ import * as Schema from "effect/Schema";
 import {
   prepareRemoteHost,
   refreshRemoteCheckout,
+  sealWarmBase,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
@@ -335,6 +337,34 @@ with urllib.request.urlopen(request, timeout=30) as response:
         pairingUrl: `${origin}/pair#token=${encodeURIComponent(credential)}`,
         remoteAccess: { origin, brokerToken },
       };
+    },
+    /** Turns a ready warm base build into what its snapshot should hold. */
+    seal: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+    ) =>
+      sealWarmBase(e2bPythonPort(await connect(operation, sandboxId)), {
+        root: manifest.preparation.root,
+        files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
+      }),
+    /** Snapshots a sealed build, reusing the snapshot an interrupted call already took. */
+    snapshot: async (operation: ProvisionOperation, sandboxId: string) => {
+      await verify(operation, sandboxId);
+      const [taken] = await client.Sandbox.listSnapshots({ sandboxId }).nextItems();
+      const { snapshotId } = taken ?? (await client.Sandbox.createSnapshot(sandboxId));
+      // A snapshot id is `<template>:<tag>`; a sandbox is created from the bare template.
+      return { snapshotId, templateId: snapshotId.replace(/:.*$/, "") };
+    },
+    /** E2B refuses to delete a snapshot while any sandbox made from it still exists. */
+    deleteSnapshot: async (snapshotId: string): Promise<"deleted" | "missing" | "in_use"> => {
+      try {
+        return (await client.Sandbox.deleteSnapshot(snapshotId)) ? "deleted" : "missing";
+      } catch (error) {
+        if (error instanceof SandboxError && /sandboxes using it/.test(error.message))
+          return "in_use";
+        throw error;
+      }
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       try {
