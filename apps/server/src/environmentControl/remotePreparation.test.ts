@@ -66,6 +66,7 @@ if (args[0] === 'auth') {
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
   fs.writeFileSync(path.join(root, 'usage-host-id'), process.env.T3CODE_USAGE_HOST_ID ?? '');
+  fs.writeFileSync(path.join(root, 'auto-bootstrap'), JSON.stringify({ flag: args.includes('--auto-bootstrap-project-from-cwd'), env: process.env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD ?? null }));
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url === '/.well-known/t3/environment') {
@@ -493,6 +494,24 @@ describe("remote preparation subprocess", () => {
     );
   });
 
+  it("starts the guest without its own startup thread, and adds the checkout as the project", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, input);
+    pids.add(ready.serverPid);
+    expect(
+      JSON.parse(await NodeFSP.readFile(NodePath.join(input.root, "auto-bootstrap"), "utf8")),
+    ).toEqual({ flag: false, env: "0" });
+    const added = JSON.parse(
+      await NodeFSP.readFile(NodePath.join(input.root, "project-add-args"), "utf8"),
+    ) as string[];
+    expect(added.slice(0, 1).concat(added.slice(-3))).toEqual([
+      "project",
+      "--title",
+      "source",
+      ready.projectDir,
+    ]);
+  });
+
   it("rejects a responding server with a different environment identity", async () => {
     const input = await fixture();
     const ready = await prepareRemoteHost(localPort, input);
@@ -526,14 +545,6 @@ describe("remote preparation subprocess", () => {
     expect(remotePreparationScript).toContain("'protocol.version=2'");
     expect(remotePreparationScript).toContain("'--depth=1'");
     expect(remotePreparationScript).toContain("'GIT_LFS_SKIP_SMUDGE': '1'");
-  });
-
-  it("starts the guest so it publishes the cloned workspace as a project", () => {
-    expect(remotePreparationScript).toContain("'start'");
-    expect(remotePreparationScript).toContain("'--auto-bootstrap-project-from-cwd'");
-    expect(remotePreparationScript).toContain("'T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD': '1'");
-    expect(remotePreparationScript).toContain("['project', 'add'");
-    expect(remotePreparationScript).not.toContain("['serve'");
   });
 
   it("rebuilds native runtime addons with node-gyp 11 instead of the Node 24-incompatible default", () => {
