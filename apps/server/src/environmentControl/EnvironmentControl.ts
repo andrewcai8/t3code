@@ -35,8 +35,10 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ALL_TRAFFIC } from "e2b";
@@ -46,7 +48,14 @@ import {
   configuredRuntimeArtifact,
   provisionProviders,
   makeProvisionPreparationStore,
+  warmBaseKey,
 } from "./ProvisionPreparation.ts";
+import {
+  makeWarmBaseStore,
+  makeWarmBaseUpkeep,
+  selectWarmTemplate,
+  warmBasePolicy,
+} from "./warmBases.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { makeProvisionControl } from "./ProvisionControl.ts";
 import { makeNamespaceAllocationPorts } from "./namespaceAllocation.ts";
@@ -69,7 +78,12 @@ import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
 import { ProvisionRefused, resolveProvisioningProfiles } from "./ProvisioningProviderProfile.ts";
 import * as ServerConfig from "../config.ts";
-import { readConfig, resolveControlConfigPath, type ManagedTarget } from "./config.ts";
+import {
+  readConfig,
+  resolveControlConfigPath,
+  type EnvironmentControlConfig,
+  type ManagedTarget,
+} from "./config.ts";
 import { createCloudDriver, ProvisionedSandboxMissing, type CloudDriver } from "./driver.ts";
 import {
   createProvisionedLeaseRegistry,
@@ -927,79 +941,172 @@ export const layer = Layer.effect(
     const provisioning = yield* Provisioning.make.pipe(
       Effect.provideService(ProvisionProviderPorts, ports),
     );
+    const requireManager = async () => {
+      const manager = await resolve();
+      if (!manager)
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "This install has no cloud provisioning configuration.",
+        });
+      return manager;
+    };
+    const resolution = (config: EnvironmentControlConfig) =>
+      makeProvisionResolution({
+        apiKey: config.e2bApiKey,
+        ...(config.provisioning?.githubToken
+          ? { githubToken: config.provisioning.githubToken }
+          : {}),
+      });
+    /** The one freeze path, shared by chats and warm base builds. */
+    const freeze = async (
+      input: EnvironmentProvisionInput,
+      warmTemplate?: (repository: string, key: string) => Promise<string | null>,
+    ) => {
+      const manager = await requireManager();
+      if (input.provider === "namespace") {
+        if (!manager.config.provisioning?.runtimeArtifacts?.macos)
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Configure a pinned macOS runtime artifact before provisioning.",
+          });
+        try {
+          await resolveNamespace();
+        } catch (error) {
+          if (isProvisionRefused(error)) throw error;
+          throw new ProvisionRefused({
+            reason: "credentials",
+            message: provisionFailureMessage(
+              error,
+              "Log in with nsc login, or set namespaceToken in environment-control.json.",
+            ),
+          });
+        }
+      }
+      return manifests.freeze(
+        input,
+        manager.config,
+        resolution(manager.config),
+        // Credentials and skill roots follow the accounts' real settings
+        // rather than paths this module guesses from driver names.
+        // Each driver runs on the account with the most usage left per
+        // active session right now. The manifest freezes that choice, so
+        // a retry keeps it without routing again.
+        () =>
+          resolveAccounts((current) =>
+            Effect.all({
+              providers: providerRegistry.getProviders,
+              now: Clock.currentTimeMillis,
+              load: readAccountLoad(leaseRegistry, threadSessions),
+            }).pipe(
+              Effect.flatMap((usage) =>
+                resolveProvisioningProfiles(
+                  current,
+                  {
+                    providerInstanceId: input.providerInstanceId,
+                    ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
+                    pinAccount: input.pinAccount,
+                  },
+                  manager.config.provisioning?.claudeOAuthTokens,
+                  usage,
+                  {
+                    localAgentRuns,
+                    // The instance's status probe refreshes a host's own
+                    // login, serialized with its usage probes.
+                    refresh: (instanceId) =>
+                      providerRegistry.refreshInstance(instanceId).pipe(Effect.asVoid),
+                  },
+                ),
+              ),
+            ),
+          ),
+        warmTemplate,
+      );
+    };
+    const warmStore = makeWarmBaseStore(stateDir);
+    const readyE2bBuild = async (operation: ProvisionOperation) => {
+      const manager = await requireManager();
+      if (
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "e2b"
+      )
+        throw new Error("The warm base build is not a ready E2B box.");
+      return {
+        runtime: makeE2bProvisionRuntime({ apiKey: manager.config.e2bApiKey }, logE2bResumeRetry),
+        sandboxId: operation.state.allocation.resource.sandboxId,
+      };
+    };
+    const warmBases = makeWarmBaseUpkeep({
+      store: warmStore,
+      now: Date.now,
+      key: async (repository) => {
+        const manager = await resolve();
+        return manager ? warmBaseKey(manager.config, repository, resolution(manager.config)) : null;
+      },
+      // A build is a cold chat on the repository's default branch. It never
+      // registers a lease, so discovery never offers it to anyone.
+      freezeBuild: async ({ requestId, repository, seed, retentionDeadline }) =>
+        (
+          await freeze({
+            requestId,
+            provider: "e2b",
+            providerInstanceId: seed.providerInstanceId,
+            ...(seed.agentDriver ? { agentDriver: seed.agentDriver } : {}),
+            repository,
+            retentionDeadline,
+          })
+        ).warmKey,
+      ensure: async (requestId) =>
+        runLogged(provisioning.ensure((await manifests.load(requestId)).request)),
+      cancel: async (requestId) => {
+        // A build abandoned before it was first driven has no operation yet.
+        await runLogged(store.accept((await manifests.load(requestId)).request));
+        return runLogged(provisioning.cancel(requestId));
+      },
+      seal: async (operation) => {
+        const { runtime, sandboxId } = await readyE2bBuild(operation);
+        await runtime.seal(operation, sandboxId, await manifests.load(operation.request.requestId));
+      },
+      snapshot: async (operation) => {
+        const { runtime, sandboxId } = await readyE2bBuild(operation);
+        return runtime.snapshot(operation, sandboxId);
+      },
+      deleteSnapshot: async (snapshotId) =>
+        makeE2bProvisionRuntime({
+          apiKey: (await requireManager()).config.e2bApiKey,
+        }).deleteSnapshot(snapshotId),
+      warn: (message, context) => void runLogged(Effect.logWarning(message, context)),
+    });
     const provisionControl = makeProvisionControl(
       store,
       provisioning,
       {
         freeze: async (input) => {
-          const manager = await resolve();
-          if (!manager)
-            throw new ProvisionRefused({
-              reason: "unconfigured",
-              message: "This install has no cloud provisioning configuration.",
-            });
-          if (input.provider === "namespace") {
-            if (!manager.config.provisioning?.runtimeArtifacts?.macos)
-              throw new ProvisionRefused({
-                reason: "unconfigured",
-                message: "Configure a pinned macOS runtime artifact before provisioning.",
-              });
-            try {
-              await resolveNamespace();
-            } catch (error) {
-              if (isProvisionRefused(error)) throw error;
-              throw new ProvisionRefused({
-                reason: "credentials",
-                message: provisionFailureMessage(
-                  error,
-                  "Log in with nsc login, or set namespaceToken in environment-control.json.",
-                ),
-              });
-            }
-          }
-          return manifests.freeze(
-            input,
-            manager.config,
-            makeProvisionResolution({
-              apiKey: manager.config.e2bApiKey,
-              ...(manager.config.provisioning?.githubToken
-                ? { githubToken: manager.config.provisioning.githubToken }
-                : {}),
-            }),
-            // Credentials and skill roots follow the accounts' real settings
-            // rather than paths this module guesses from driver names.
-            // Each driver runs on the account with the most usage left per
-            // active session right now. The manifest freezes that choice, so
-            // a retry keeps it without routing again.
-            () =>
-              resolveAccounts((current) =>
-                Effect.all({
-                  providers: providerRegistry.getProviders,
-                  now: Clock.currentTimeMillis,
-                  load: readAccountLoad(leaseRegistry, threadSessions),
-                }).pipe(
-                  Effect.flatMap((usage) =>
-                    resolveProvisioningProfiles(
-                      current,
-                      {
-                        providerInstanceId: input.providerInstanceId,
-                        ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
-                        pinAccount: input.pinAccount,
-                      },
-                      manager.config.provisioning?.claudeOAuthTokens,
-                      usage,
-                      {
-                        localAgentRuns,
-                        // The instance's status probe refreshes a host's own
-                        // login, serialized with its usage probes.
-                        refresh: (instanceId) =>
-                          providerRegistry.refreshInstance(instanceId).pipe(Effect.asVoid),
-                      },
-                    ),
-                  ),
-                ),
-              ),
+          const policy = warmBasePolicy(
+            (await requireManager()).config.provisioning?.warmBaseRefreshHours,
           );
+          const manifest = await freeze(input, async (repository, key) =>
+            selectWarmTemplate(
+              // An unreadable record costs this chat its warm start, never the chat.
+              await warmStore.read(repository).catch(() => null),
+              key,
+              Date.now(),
+              policy,
+            ),
+          );
+          // A chat that had to start cold asks for a base, on the account it routed to.
+          if (
+            manifest.warmKey &&
+            manifest.input.repository &&
+            manifest.request.provider === "e2b" &&
+            manifest.request.strategy === "fork"
+          )
+            warmBases.want(manifest.input.repository, {
+              providerInstanceId: manifest.request.providerInstanceId,
+              ...(manifest.request.agentDriver
+                ? { agentDriver: manifest.request.agentDriver }
+                : {}),
+            });
+          return manifest;
         },
         load: manifests.load,
         attach: async (operation, manifest, recordedProxy, record) => {
@@ -1095,6 +1202,15 @@ export const layer = Layer.effect(
         boxUsage,
       });
     }).pipe(Effect.forkScoped);
+    yield* Effect.tryPromise(async () => {
+      const manager = await resolve();
+      if (manager)
+        await warmBases.tick(warmBasePolicy(manager.config.provisioning?.warmBaseRefreshHours));
+    }).pipe(
+      Effect.ignore({ log: "Warn", message: "warm bases could not be kept up" }),
+      Effect.repeat(Schedule.spaced(Duration.minutes(1))),
+      Effect.forkScoped,
+    );
     return {
       namespaceProxyOrigin: (leaseId) =>
         Effect.tryPromise({
