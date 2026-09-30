@@ -10,6 +10,7 @@ import {
 import { recordCloudSendStep } from "./cloudSends";
 
 const draftId = DraftId.make("draft");
+const codex = ProviderInstanceId.make("codex");
 const localProject = scopeProjectRef(EnvironmentId.make("laptop"), ProjectId.make("repo"));
 const boxProject = scopeProjectRef(EnvironmentId.make("box"), ProjectId.make("box-repo"));
 const settingUp: PendingCloudEnvironmentSend = {
@@ -21,7 +22,7 @@ const settingUp: PendingCloudEnvironmentSend = {
   outgoingMessageText: "fix the flaky test",
   phase: "pairing",
   startedAt: "2026-09-29T19:37:38.000Z",
-  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+  modelSelection: { instanceId: codex, model: "gpt-5.5" },
 };
 
 function draftSettingUp() {
@@ -42,7 +43,7 @@ function draft() {
     envMode: session?.envMode,
     branch: session?.branch,
     pending: session?.pendingEnvironmentSend ?? null,
-    model: store.getComposerDraft(draftId)?.modelSelectionByProvider.codex ?? null,
+    model: store.getComposerDraft(draftId)?.modelSelectionByProvider[codex] ?? null,
   };
 }
 
