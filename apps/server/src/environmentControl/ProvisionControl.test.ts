@@ -194,6 +194,51 @@ it.effect(
     ),
 );
 
+it.effect("a request the host ended on its own tells the caller why", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* ProvisionOperationStore;
+    const reason = "Setup made no progress for 45 minutes, so its machine was disposed.";
+    yield* store.advance(yield* store.accept(manifest.request), { kind: "disposed", reason });
+    const provisioning = yield* Provisioning.make.pipe(
+      Effect.provideService(ProvisionProviderPorts, {
+        create: () => Effect.die("Unexpected create"),
+        recoverCreate: () => Effect.succeed([]),
+        fork: () => Effect.die("Unexpected fork"),
+        recoverFork: () => Effect.succeed([]),
+        dispose: () => Effect.void,
+        prepare: () => Effect.die("Unexpected prepare"),
+      }),
+    );
+    const control = makeProvisionControl(
+      store,
+      provisioning,
+      {
+        ...noRuntimePorts,
+        freeze: async () => manifest,
+        load: async () => manifest,
+        attach: async () => {
+          throw new Error("Unexpected attach");
+        },
+        touch: async () => "running" as const,
+      },
+      createProvisionedLeaseRegistry(sql),
+    );
+    expect(yield* control.provision(input)).toEqual({
+      kind: "refused",
+      reason: "disposed",
+      message: reason,
+    });
+  }).pipe(
+    Effect.provide(
+      ProvisionOperationStore.layer.pipe(
+        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+  ),
+);
+
 const namespaceInput = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
   requestId: "9c1f2d6e-7d0a-4a7f-9d4e-2b1c3a5e7f90",
   provider: "namespace",

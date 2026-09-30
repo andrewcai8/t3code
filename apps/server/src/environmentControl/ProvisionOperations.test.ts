@@ -18,7 +18,6 @@ import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
@@ -108,6 +107,43 @@ const makeLayer = (file: string, ports: ProvisionProviderPorts["Service"]) =>
     Layer.provide(makeSqlitePersistenceLive(file)),
     Layer.provide(NodeServices.layer),
   );
+/** A prepare that holds until released, recording how often it began and whether it was interrupted. */
+const preparationGate = Effect.fn("test.preparationGate")(function* () {
+  const p = provider();
+  const entered = yield* Deferred.make<void>();
+  const release = yield* Deferred.make<void>();
+  const disposed: ProvisionResource[] = [];
+  let entries = 0;
+  let interrupted = false;
+  const ports: ProvisionProviderPorts["Service"] = {
+    ...p.ports,
+    dispose: (_operation, resource) =>
+      Effect.sync(() => {
+        disposed.push(resource);
+      }),
+    prepare: () =>
+      Effect.gen(function* () {
+        entries += 1;
+        yield* Deferred.succeed(entered, undefined);
+        yield* Deferred.await(release);
+        return readiness;
+      }).pipe(
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            interrupted = true;
+          }),
+        ),
+      ),
+  };
+  return {
+    ports,
+    entered,
+    release,
+    disposed,
+    resources: p.resources,
+    observed: () => ({ entries, interrupted }),
+  };
+});
 const temporaryDatabase = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -350,46 +386,21 @@ describe("durable cloud provisioning", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("concurrent preparation uses one stable host identity under the provider lock", () =>
+  it.effect("concurrent callers share one preparation", () =>
     Effect.gen(function* () {
       const file = yield* temporaryDatabase;
-      const p = provider();
-      const firstEntered = yield* Deferred.make<void>();
-      const bothEntered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const lock = yield* Semaphore.make(1);
-      let entries = 0;
-      let preparations = 0;
-      let prepared: ProvisionReadiness | undefined;
-      const ports: ProvisionProviderPorts["Service"] = {
-        ...p.ports,
-        dispose: () => Effect.void,
-        prepare: () =>
-          Effect.gen(function* () {
-            entries += 1;
-            yield* Deferred.succeed(entries === 1 ? firstEntered : bothEntered, undefined);
-            return yield* Effect.gen(function* () {
-              if (prepared) return prepared;
-              yield* Deferred.await(release);
-              preparations += 1;
-              prepared = readiness;
-              return prepared;
-            }).pipe(lock.withPermits(1));
-          }),
-      };
+      const gate = yield* preparationGate();
       yield* Effect.gen(function* () {
         const first = yield* Effect.forkChild(ensure());
-        yield* Deferred.await(firstEntered);
+        yield* Deferred.await(gate.entered);
         const second = yield* Effect.forkChild(ensure());
-        yield* Deferred.await(bothEntered);
-        yield* Deferred.succeed(release, undefined);
+        yield* Deferred.succeed(gate.release, undefined);
         const results = yield* Effect.all([Fiber.join(first), Fiber.join(second)]);
         for (const result of results)
           expect(result.state).toEqual({ kind: "ready", allocation, readiness });
-      }).pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
-      expect(entries).toBe(2);
-      expect(preparations).toBe(1);
-      expect(p.resources).toEqual([parent, child]);
+      }).pipe(Effect.provide(makeLayer(file, gate.ports)), Effect.scoped);
+      expect(gate.observed()).toEqual({ entries: 1, interrupted: false });
+      expect(gate.resources).toEqual([parent, child]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -910,6 +921,157 @@ describe("an allocation whose outcome a crash lost", () => {
         allocation: { kind: "fork", parent, issuedAt },
         reason: "The provider did not answer in time; recover the allocation before proceeding",
       });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("the host drives an accepted request to its end", () => {
+  const inService = <A, E>(
+    file: string,
+    ports: ProvisionProviderPorts["Service"],
+    effect: Effect.Effect<A, E, Provisioning | ProvisionOperationStore>,
+  ) => effect.pipe(Effect.provide(makeLayer(file, ports)), Effect.scoped);
+  const stored = Effect.gen(function* () {
+    return (yield* (yield* ProvisionOperationStore).get(request.requestId)).state;
+  });
+
+  it.effect(
+    "a caller that leaves mid-prepare leaves it running, and the next caller joins it",
+    () =>
+      Effect.gen(function* () {
+        const file = yield* temporaryDatabase;
+        const gate = yield* preparationGate();
+        yield* inService(
+          file,
+          gate.ports,
+          Effect.gen(function* () {
+            const leaving = yield* Effect.forkChild(ensure());
+            yield* Deferred.await(gate.entered);
+            yield* Fiber.interrupt(leaving);
+            const returning = yield* Effect.forkChild(ensure());
+            yield* Deferred.succeed(gate.release, undefined);
+            expect((yield* Fiber.join(returning)).state).toEqual({
+              kind: "ready",
+              allocation,
+              readiness,
+            });
+          }),
+        );
+        expect(gate.observed()).toEqual({ entries: 1, interrupted: false });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a host restart mid-prepare resumes on the next reconcile", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const before = yield* preparationGate();
+      yield* inService(
+        file,
+        before.ports,
+        Effect.gen(function* () {
+          yield* Effect.forkChild(ensure());
+          yield* Deferred.await(before.entered);
+        }),
+      );
+      const after = yield* preparationGate();
+      yield* inService(
+        file,
+        after.ports,
+        Effect.gen(function* () {
+          expect(yield* stored).toEqual({ kind: "preparing", allocation, lastError: null });
+          yield* (yield* Provisioning).reconcile;
+          yield* Deferred.await(after.entered);
+          yield* Deferred.succeed(after.release, undefined);
+          expect((yield* ensure()).state).toEqual({ kind: "ready", allocation, readiness });
+        }),
+      );
+      expect(after.observed()).toEqual({ entries: 1, interrupted: false });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("an operation with no progress past the bound is disposed with its reason", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const gate = yield* preparationGate();
+      const failedRecently = yield* decodeRequest({
+        ...request,
+        requestId: "4c6f1d2e-8a3b-4f5c-9e7d-1b2a3c4d5e6f",
+      });
+      const acceptedAt = Date.parse("2026-09-29T19:37:48.000Z");
+      yield* TestClock.setTime(acceptedAt);
+      yield* inService(
+        file,
+        gate.ports,
+        Effect.gen(function* () {
+          const store = yield* ProvisionOperationStore;
+          yield* store.advance(yield* store.accept(request), {
+            kind: "preparing",
+            allocation,
+            lastError: null,
+          });
+        }),
+      );
+      yield* TestClock.setTime(acceptedAt + 40 * 60_000);
+      yield* inService(
+        file,
+        gate.ports,
+        Effect.gen(function* () {
+          const store = yield* ProvisionOperationStore;
+          yield* store.advance(yield* store.accept(failedRecently), {
+            kind: "preparing",
+            allocation,
+            lastError: "Install failed",
+          });
+        }),
+      );
+      yield* TestClock.setTime(acceptedAt + 46 * 60_000);
+      const [abandoned, recent] = yield* inService(
+        file,
+        gate.ports,
+        Effect.gen(function* () {
+          yield* (yield* Provisioning).reconcile;
+          const store = yield* ProvisionOperationStore;
+          return [
+            (yield* store.get(request.requestId)).state,
+            (yield* store.get(failedRecently.requestId)).state,
+          ] as const;
+        }),
+      );
+      expect(abandoned).toEqual({
+        kind: "disposed",
+        reason: "Setup made no progress for 45 minutes, so its machine was disposed.",
+      });
+      expect(recent).toEqual({ kind: "preparing", allocation, lastError: "Install failed" });
+      expect(
+        gate.disposed.map((resource) => resource.provider === "e2b" && resource.sandboxId).sort(),
+      ).toEqual([child.sandboxId, parent.sandboxId].sort());
+      expect(gate.observed()).toEqual({ entries: 0, interrupted: false });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("cancel stops an in-flight preparation and disposes its machine", () =>
+    Effect.gen(function* () {
+      const file = yield* temporaryDatabase;
+      const gate = yield* preparationGate();
+      yield* inService(
+        file,
+        gate.ports,
+        Effect.gen(function* () {
+          const caller = yield* Effect.forkChild(ensure());
+          yield* Deferred.await(gate.entered);
+          const service = yield* Provisioning;
+          expect((yield* service.cancel(request.requestId)).state).toEqual({ kind: "disposed" });
+          expect(gate.observed()).toEqual({ entries: 1, interrupted: true });
+          expect((yield* Fiber.join(caller)).state).toEqual({ kind: "disposed" });
+          expect((yield* ensure()).state).toEqual({ kind: "disposed" });
+        }),
+      );
+      expect(
+        gate.disposed
+          .slice(1)
+          .map((resource) => resource.provider === "e2b" && resource.sandboxId)
+          .sort(),
+      ).toEqual([child.sandboxId, parent.sandboxId].sort());
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

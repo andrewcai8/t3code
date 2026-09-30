@@ -2596,6 +2596,23 @@ function toHydratedThreadDraft(
   };
 }
 
+/**
+ * Only the page that started a cloud send follows its setup, so a send read back mid-setup
+ * has nothing following it. The host keeps preparing the machine; the send comes back
+ * failed, and sending again rejoins the same provision request.
+ */
+function hydratedPendingEnvironmentSend(
+  pending: PendingCloudEnvironmentSend,
+): PendingCloudEnvironmentSend {
+  return pending.phase === "ready" || pending.phase === "failed"
+    ? pending
+    : {
+        ...pending,
+        phase: "failed",
+        error: "This page closed during setup. Send again to pick it back up.",
+      };
+}
+
 function toHydratedDraftThreadState(
   persistedDraftThread: PersistedDraftThreadState,
 ): DraftThreadState {
@@ -2634,7 +2651,11 @@ function toHydratedDraftThreadState(
         )
       : null,
     ...(persistedDraftThread.pendingEnvironmentSend
-      ? { pendingEnvironmentSend: persistedDraftThread.pendingEnvironmentSend }
+      ? {
+          pendingEnvironmentSend: hydratedPendingEnvironmentSend(
+            persistedDraftThread.pendingEnvironmentSend,
+          ),
+        }
       : {}),
   };
 }
