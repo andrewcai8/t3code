@@ -76,6 +76,40 @@ describe("guestProviderInstallCommand", () => {
     expect((await calls(home)).trim().split("\n")).toHaveLength(2);
   });
 
+  it("reinstalls a CLI whose package landed but whose command never did", async () => {
+    const home = await makeHome("1.0.0");
+    // What an install killed after unpacking and before linking leaves behind.
+    const pkg = NodePath.join(home, ".local/lib/node_modules/@openai/codex");
+    await NodeFSP.mkdir(pkg, { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(pkg, "package.json"), '{\n  "version": "1.0.0"\n}\n');
+    expect(install(home, "codex").status).toBe(0);
+    expect(await calls(home)).toBe("install @openai/codex\n");
+  });
+
+  it("keeps the installed Cursor agent when cursor.com cannot be reached", async () => {
+    const home = await makeHome("1.0.0");
+    expect(install(home, "cursor").status).toBe(0);
+    await NodeFSP.writeFile(NodePath.join(home, "stubs/curl"), "#!/bin/sh\nexit 22\n");
+    expect(install(home, "cursor").status).toBe(0);
+    expect(await calls(home)).toBe("install cursor 1.0.0\n");
+  });
+
+  it("records Cursor's installer even when the installer made no directory of its own", async () => {
+    const home = await makeHome("1.0.0");
+    await NodeFSP.writeFile(
+      NodePath.join(home, "stubs/curl"),
+      [
+        "#!/bin/sh",
+        'echo "echo \\"install cursor\\" >> \\"\\$HOME/calls\\""',
+        'echo "mkdir -p \\"\\$HOME/.local/bin\\""',
+        'echo "printf \'#!/bin/sh\\\\n\' > \\"\\$HOME/.local/bin/agent\\" && chmod 755 \\"\\$HOME/.local/bin/agent\\""',
+        "",
+      ].join("\n"),
+    );
+    expect([install(home, "cursor").status, install(home, "cursor").status]).toEqual([0, 0]);
+    expect(await calls(home)).toBe("install cursor\n");
+  });
+
   it("fails when the CLI cannot be installed", async () => {
     const home = await makeHome("1.0.0");
     await NodeFSP.writeFile(NodePath.join(home, "stubs/npm"), "#!/bin/sh\nexit 1\n");

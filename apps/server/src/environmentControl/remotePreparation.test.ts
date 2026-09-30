@@ -1281,6 +1281,85 @@ describe("warm base", () => {
     ).toEqual(["chat", "absent", "absent", "absent", "absent", "absent", "chat", "absent"]);
   });
 
+  it("keeps no identity from a rehearsal between two seals, and hands the next chat its own", async () => {
+    const { input: followed, source } = await following();
+    git(source, "branch", "-M", "main");
+    const input = {
+      ...followed,
+      files: [...followed.files, homeFile("build account")],
+      prepareCommands: ["mkdir -p node_modules && touch node_modules/marker"],
+    };
+    const seal = {
+      root: input.root,
+      files: input.files.map(({ scope, destination }) => ({ scope, destination })),
+      homePaths: warmSealHomePaths(),
+    };
+    // What the fixture runtime logs about itself, and its own source, which names its token.
+    const fixture = new Set([
+      "artifact",
+      "auto-bootstrap",
+      "issued",
+      "project-add-args",
+      "started",
+      "usage-host-id",
+    ]);
+    /** Every path under the root outside Git's bookkeeping and the fixture's, with its contents. */
+    const tree = async () => {
+      const entries: Record<string, string> = {};
+      const walk = async (directory: string) => {
+        for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
+          const path = NodePath.join(directory, entry.name);
+          const relative = NodePath.relative(input.root, path);
+          if (entry.name === ".git" || fixture.has(relative)) continue;
+          if (entry.isDirectory()) await walk(path);
+          else entries[relative] = await NodeFSP.readFile(path, "utf8");
+        }
+      };
+      await walk(input.root);
+      return entries;
+    };
+    const build = await prepareRemoteHost(localPort, input);
+    pids.add(build.serverPid);
+    await sealWarmBase(localPort, seal);
+    const sealed = await tree();
+    const rehearsal = await prepareRemoteHost(localPort, input);
+    pids.add(rehearsal.serverPid);
+    await sealWarmBase(localPort, seal);
+    const resealed = await tree();
+    const contents = Object.values(resealed).join("\n");
+
+    const chat = await prepareRemoteHost(localPort, {
+      ...input,
+      requestId: "repair-2",
+      resourceIdentity: "local:warm-child",
+      requestHash: "d".repeat(64),
+      files: [...followed.files, homeFile("chat account")],
+    });
+    pids.add(chat.serverPid);
+    expect({
+      identical: resealed,
+      rehearsedAsNew: rehearsal.environmentId !== build.environmentId,
+      identity: [build.environmentId, rehearsal.environmentId].some((id) => contents.includes(id)),
+      broker: contents.includes("test-private-broker"),
+      credential: contents.includes("build account"),
+      stopped: [exited(build.serverPid), exited(rehearsal.serverPid)],
+      chatIdentity: [build.environmentId, rehearsal.environmentId].includes(chat.environmentId),
+      chatCredential: await NodeFSP.readFile(
+        NodePath.join(input.root, "home/.config/agent/credential"),
+        "utf8",
+      ),
+    }).toEqual({
+      identical: sealed,
+      rehearsedAsNew: true,
+      identity: false,
+      broker: false,
+      credential: false,
+      stopped: [true, true],
+      chatIdentity: false,
+      chatCredential: "chat account",
+    });
+  });
+
   it("hands a sealed checkout to a new box with its own identity, on the requested revision", async () => {
     const { input: followed, source } = await following();
     git(source, "branch", "-M", "main");
