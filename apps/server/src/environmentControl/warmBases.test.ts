@@ -15,6 +15,7 @@ import {
   selectWarmTemplate,
   settleSpare,
   warmBasePolicy,
+  type WarmBasePorts,
   type WarmBaseRecord,
   type WarmBaseSeed,
 } from "./warmBases.ts";
@@ -261,6 +262,7 @@ function harness(initial: WarmBaseRecord[], buildState: unknown = { kind: "inten
       return deleteAnswers.get(snapshotId)?.shift() ?? "deleted";
     },
     warn: () => {},
+    info: () => {},
   });
   return {
     upkeep,
@@ -540,6 +542,7 @@ describe("spare upkeep", () => {
           },
         }),
       warn: () => {},
+      info: () => {},
     });
     return {
       upkeep,
@@ -692,6 +695,60 @@ describe("spare upkeep", () => {
       ]).toEqual([[], [buildId], [], false]);
     } finally {
       await h.cleanup();
+    }
+  });
+});
+
+describe("a repository with a warm base and a spare", () => {
+  it("keeps each in its own record, so neither replaces the other", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-both-"));
+    try {
+      const upkeep = (kind: "warm-bases" | "spares", capture: WarmBasePorts["capture"]) => {
+        const store = makeWarmBaseStore(directory, kind);
+        const states = new Map<string, unknown>();
+        return {
+          store,
+          states,
+          upkeep: makeWarmBaseUpkeep({
+            store,
+            now: () => NOW,
+            key: async () => (kind === "spares" ? KEY : OLD_KEY),
+            freezeBuild: async ({ requestId }) => {
+              states.set(requestId, readyState);
+              return kind === "spares" ? KEY : OLD_KEY;
+            },
+            ensure: async (requestId) => operation(requestId, states.get(requestId)),
+            cancel: async (requestId) => operation(requestId, { kind: "disposed" }),
+            buildSnapshots: async () => [],
+            seal: async () => {},
+            capture,
+            deleteSnapshot: async () => "deleted",
+            warn: () => {},
+            info: () => {},
+          }),
+        };
+      };
+      const e2b = upkeep("warm-bases", async (built) => ({
+        snapshotId: `snapshot-${built.request.requestId}:default`,
+        templateId: `snapshot-${built.request.requestId}`,
+      }));
+      const mac = upkeep("spares", async (built) => ({ requestId: built.request.requestId }));
+      e2b.upkeep.want("example/repo", seed);
+      mac.upkeep.want("example/repo", seed);
+      for (let tick = 0; tick < 2; tick++)
+        await Promise.all([e2b.upkeep.tick(policy), mac.upkeep.tick(policy)]);
+      const [base, spareRecord] = await Promise.all([
+        e2b.store.read("example/repo"),
+        mac.store.read("example/repo"),
+      ]);
+      expect([
+        base?.ready?.key,
+        base?.ready && "templateId" in base.ready,
+        spareRecord?.ready?.key,
+        spareRecord?.ready && "requestId" in spareRecord.ready,
+      ]).toEqual([OLD_KEY, true, KEY, true]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
 });

@@ -460,12 +460,27 @@ export interface WarmBasePorts {
    */
   readonly owns?: (requestId: ProvisionRequestId) => Promise<boolean>;
   readonly warn: (message: string, context: Record<string, unknown>) => void;
+  /** Each change to a repository's base, so a host's log shows why a chat started cold. */
+  readonly info: (message: string, context: Record<string, unknown>) => void;
 }
 
 /**
  * Keeps each repository's warm base current. `want` records that a chat for a
  * repository started cold; `tick` builds, replaces, and disposes bases.
  */
+/** What a log line needs to follow a record: its base, build, last failure and what awaits disposal. */
+const summary = (record: WarmBaseRecord | null) => ({
+  ready: record?.ready
+    ? "snapshotId" in record.ready
+      ? record.ready.snapshotId
+      : record.ready.requestId
+    : null,
+  build: record?.build?.requestId ?? null,
+  failure: record?.lastFailure?.reason ?? null,
+  retired:
+    record?.retired.map((item) => (item.kind === "build" ? item.requestId : item.snapshotId)) ?? [],
+});
+
 export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
   const wanted = new Map<string, WarmBaseSeed>();
   /** When a chat last wanted or started from each repository's base, until a tick records it. */
@@ -530,7 +545,13 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
               known.add(snapshotId);
               orphans.push({ kind: "snapshot", snapshotId, retiredAt: iso(now) });
             }
-          if (ports.owns && !(await ports.owns(item.requestId))) continue;
+          if (ports.owns && !(await ports.owns(item.requestId))) {
+            ports.info("spare handed to the chat that claimed it", {
+              repository: record.repository,
+              spare: item.requestId,
+            });
+            continue;
+          }
           if ((await ports.cancel(item.requestId)).state.kind === "disposed") continue;
         } else if (
           age(item.retiredAt, now) >= policy.retireGraceMs &&
@@ -635,6 +656,10 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     if (record.build && key !== null) record = await drive(record, record.build, key, now, policy);
     record = await dispose(record, now, policy);
     if (stableStringify(record) !== stableStringify(saved)) await save(record);
+    const before = summary(stored);
+    const after = summary(record);
+    if (stableStringify(before) !== stableStringify(after))
+      ports.info("warm base changed", { repository, before, after });
     settle();
   };
 

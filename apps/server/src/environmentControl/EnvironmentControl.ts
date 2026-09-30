@@ -1110,8 +1110,13 @@ export const layer = Layer.effect(
       warn: (message: string, context: Record<string, unknown>) =>
         void runLogged(Effect.logWarning(message, context)),
     };
+    const logBases = (provider: "e2b" | "namespace") => ({
+      info: (message: string, context: Record<string, unknown>) =>
+        void runLogged(Effect.logInfo(message, { provider, ...context })),
+    });
     const warmBases = makeWarmBaseUpkeep({
       ...buildPorts,
+      ...logBases("e2b"),
       store: warmStore,
       key: async (repository) => {
         const manager = await resolve();
@@ -1158,6 +1163,7 @@ export const layer = Layer.effect(
     const spareClaims = makeSpareClaims(stateDir);
     const spares = makeWarmBaseUpkeep({
       ...buildPorts,
+      ...logBases("namespace"),
       store: spareStore,
       key: async (repository) => {
         const manager = await resolve();
