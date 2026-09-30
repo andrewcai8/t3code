@@ -25,7 +25,7 @@ import {
 } from "./ProvisionPreparation.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
-import { withGuestProviderInstall } from "./guestProviderInstall.ts";
+import { guestProviderInstallCommand, withGuestProviderInstall } from "./guestProviderInstall.ts";
 import {
   resolveProvisioningProfiles,
   type ProvisioningProviderProfile,
@@ -1348,10 +1348,7 @@ it("runs every provisioned driver on its own account and login, with skills for 
       ),
     ).toEqual([provisionDigest("why\n"), provisionDigest("why\n"), undefined]);
     expect(manifest.preparation.providerInstall).toBe(
-      'npm install --global --no-fund --no-audit @anthropic-ai/claude-code@latest && "$HOME/.local/bin/claude" --version && ' +
-        "curl https://cursor.com/install -fsS | bash && " +
-        'test -x "$HOME/.local/bin/agent" && ' +
-        'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi',
+      `${guestProviderInstallCommand("claudeAgent")} && ${guestProviderInstallCommand("cursor")}`,
     );
   } finally {
     await f.cleanup();
@@ -1383,7 +1380,7 @@ it("installs what a manifest froze, and what a manifest from before that field a
       'npm install --global --no-fund --no-audit @openai/codex@latest && "$HOME/.local/bin/codex" --version',
     );
     expect(withGuestProviderInstall({ ...frozen.preparation }, "cursor").providerInstall).toBe(
-      'npm install --global --no-fund --no-audit @openai/codex@latest && "$HOME/.local/bin/codex" --version',
+      guestProviderInstallCommand("codex"),
     );
   } finally {
     await f.cleanup();

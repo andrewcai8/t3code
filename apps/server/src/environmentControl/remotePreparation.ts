@@ -278,9 +278,11 @@ def contained(root, relative):
 
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
-import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
-
+import time
+# Before the other imports, so the time a restored box spends paging them in is a phase.
 INTERPRETER_START = time.monotonic()
+import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request, uuid
+
 STARTUP = []
 # Children preparation started without waiting on; stopped if it fails first.
 BACKGROUND = []
@@ -416,6 +418,7 @@ def prepare(spec):
                 raise RuntimeError('Expected an exact revision or hash')
         intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly', 'toolInstall')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
+        adopted = False
         if journal_path.exists():
             journal = json.loads(journal_path.read_text())
             if journal['intent'] != intent:
@@ -427,6 +430,7 @@ def prepare(spec):
             if warm_path.exists():
                 warm = json.loads(warm_path.read_text())
                 journal.update({key: warm[key] for key in WARM_KEYS if key in warm})
+                adopted = True
             atomic(journal_path, json.dumps(journal))
             warm_path.unlink(missing_ok=True)
         home = root / 'home'
@@ -458,10 +462,15 @@ def prepare(spec):
         })
         project = root / 'workspace'
         def install_files(scope):
+            # Journaled once per scope: a skill bundle is hundreds of files,
+            # and rewriting the journal after each cost three fsyncs a file. A
+            # run cut short re-verifies what it wrote by digest on the retry.
+            installed = set(journal['installedFiles'])
+            added = False
             for index, file in enumerate(spec['files']):
                 if file['scope'] != scope:
                     continue
-                if index in journal['installedFiles']:
+                if index in installed:
                     continue
                 data = base64.b64decode(file['contentsBase64'], validate=True)
                 if hashlib.sha256(data).hexdigest() != file['sha256']:
@@ -482,6 +491,8 @@ def prepare(spec):
                     os.replace(temp, target)
                 target.chmod(0o600)
                 journal['installedFiles'].append(index)
+                added = True
+            if added:
                 atomic(journal_path, json.dumps(journal))
         git_env = dict(env)
         if repository is not None and repository.get('accessToken'):
@@ -574,6 +585,10 @@ def prepare(spec):
                 journal['artifactFiles'], journal['artifactLinks'] = files, links
             else:
                 journal.setdefault('runtimes', {})[runtime['sha256']] = {'files': files, 'links': links}
+        # A warm base recorded this runtime from the disk this box started
+        # from, so hashing every file again would compare the base with itself.
+        # A retry or a later open verifies as before.
+        sealed_runtime = adopted and artifact.exists() and recorded_snapshot() is not None
         if not artifact.exists():
             with step('artifactExtract'):
                 if digest(runtime['archivePath']) != runtime['sha256']:
@@ -655,11 +670,12 @@ def prepare(spec):
                 record_snapshot(*artifact_snapshot(stage))
                 atomic(journal_path, json.dumps(journal))
                 os.rename(stage, artifact)
-        with step('artifactVerify'):
-            actual_files, actual_links = artifact_snapshot(artifact)
-            expected = recorded_snapshot()
-            if expected is None or actual_files != expected['files'] or actual_links != expected['links']:
-                raise RuntimeError('Installed artifact changed')
+        if not sealed_runtime:
+            with step('artifactVerify'):
+                actual_files, actual_links = artifact_snapshot(artifact)
+                expected = recorded_snapshot()
+                if expected is None or actual_files != expected['files'] or actual_links != expected['links']:
+                    raise RuntimeError('Installed artifact changed')
         entrypoint = contained(artifact, runtime['entrypoint'])
         command = [spec['runtimeExecutable'], str(entrypoint)]
         userdata = t3home / 'userdata'
@@ -756,10 +772,11 @@ def prepare(spec):
             if not isinstance(prepare, list):
                 raise RuntimeError('Invalid prepare commands')
             with step('prepareCommands'):
-                for command_line in prepare:
+                for index, command_line in enumerate(prepare):
                     if not isinstance(command_line, str) or not command_line.strip() or '\0' in command_line:
                         raise RuntimeError('Invalid prepare command')
-                    run(['sh', '-lc', command_line], project, env, timeout=1800)
+                    with step('prepareCommand.' + str(index)):
+                        run(['sh', '-lc', command_line], project, env, timeout=1800)
         credential_path = root / 'broker-token'
         if not credential_path.exists():
             with step('brokerToken'):
