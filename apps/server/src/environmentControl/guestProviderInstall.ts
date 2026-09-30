@@ -1,21 +1,26 @@
 /**
  * Installs a global npm CLI unless the copy already in the isolated home is
- * the registry's latest. A warm base or a resumed box almost always has it,
- * and reinstalling the same version cost each chat about ten seconds a CLI.
+ * the registry's latest and runs. A warm base or a resumed box almost always
+ * has it, and reinstalling the same version cost each chat about ten seconds a
+ * CLI. An install killed between unpacking and linking leaves the package
+ * without its command, which the check has to see through.
  */
 const npmLatest = (name: string, bin: string) =>
   `{ v=$(npm view ${name}@latest version 2>/dev/null) && [ -n "$v" ] && ` +
-  `grep -Eqs "\\"version\\": ?\\"$v\\"" "$HOME/.local/lib/node_modules/${name}/package.json" || ` +
+  `grep -Eqs "\\"version\\": ?\\"$v\\"" "$HOME/.local/lib/node_modules/${name}/package.json" && ` +
+  `"$HOME/.local/bin/${bin}" --version >/dev/null 2>&1 || ` +
   `npm install --global --no-fund --no-audit ${name}@latest; } && "$HOME/.local/bin/${bin}" --version`;
 
 /**
  * Cursor publishes one installer script per release, so an installer that
- * checksums the same as the one last run has nothing new to install.
+ * checksums the same as the one last run has nothing new to install. When
+ * cursor.com cannot be reached, an agent already installed is kept.
  */
 const cursorLatest =
-  "s=$(curl https://cursor.com/install -fsS) && c=$(printf '%s' \"$s\" | cksum) && " +
+  "if s=$(curl https://cursor.com/install -fsS); then c=$(printf '%s' \"$s\" | cksum) && " +
   '{ { [ -x "$HOME/.local/bin/agent" ] && [ "$(cat "$HOME/.local/share/cursor-agent/installer.cksum" 2>/dev/null)" = "$c" ]; } || ' +
-  '{ printf \'%s\\n\' "$s" | bash && printf \'%s\\n\' "$c" > "$HOME/.local/share/cursor-agent/installer.cksum"; }; } && ' +
+  '{ printf \'%s\\n\' "$s" | bash && mkdir -p "$HOME/.local/share/cursor-agent" && ' +
+  'printf \'%s\\n\' "$c" > "$HOME/.local/share/cursor-agent/installer.cksum"; }; }; fi && ' +
   'test -x "$HOME/.local/bin/agent" && ' +
   'if [ ! -e "$HOME/.local/bin/cursor-agent" ]; then ln -s agent "$HOME/.local/bin/cursor-agent"; fi';
 
