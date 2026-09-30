@@ -343,7 +343,7 @@ export type WarmBaseStore = ReturnType<typeof makeWarmBaseStore>;
 const SpareClaim = Schema.Struct({ by: Schema.String, at: IsoDateTime });
 const decodeClaim = Schema.decodeUnknownSync(Schema.fromJsonString(SpareClaim));
 /** The claimant the upkeep uses to take a spare out of the pool before disposing it. */
-export const SPARE_RETIRED = "retired";
+const SPARE_RETIRED = "retired";
 
 /**
  * Who has each spare, one file per spare. A chat's freeze and the upkeep both
