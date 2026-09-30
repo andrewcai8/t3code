@@ -344,7 +344,9 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
     ),
     ...(presentation.serverConfig?.usageLimitSources ?? []).flatMap((source) =>
       source.accounts.map((account) => ({
-        key: accountKey(account.driver, account.email) ?? `${source.id}:${account.id}`,
+        key:
+          accountKey(account.driver, account.email, account.usageLimits) ??
+          `${source.id}:${account.id}`,
         driver: account.driver,
         name: account.email ?? account.id,
         limits: account.usageLimits,
@@ -366,7 +368,7 @@ interface LimitReading {
 
 function providerReading(provider: ServerProvider, fallbackKey: string): LimitReading {
   return {
-    key: accountKey(provider.driver, provider.auth.email) ?? fallbackKey,
+    key: accountKey(provider.driver, provider.auth.email, provider.usageLimits) ?? fallbackKey,
     driver: provider.driver,
     name: provider.displayName?.trim() || provider.auth.email || String(provider.instanceId),
     limits: provider.usageLimits,
@@ -931,7 +933,8 @@ export function rankAccounts<
     readonly usageLimits?: ServerProviderUsageLimits | undefined;
   },
 >(accounts: readonly A[], now: number, preferred?: ProviderInstanceId, load?: AccountLoad): A[] {
-  const keyOf = (account: A) => accountKey(account.driver, account.email) ?? account.instanceId;
+  const keyOf = (account: A) =>
+    accountKey(account.driver, account.email, account.usageLimits) ?? account.instanceId;
   const sessions = new Map<string, number>();
   for (const account of accounts)
     sessions.set(
