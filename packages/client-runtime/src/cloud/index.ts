@@ -1,4 +1,5 @@
 export * from "./automationRuns.ts";
+export * from "./cloudSends.ts";
 export * from "./provisionRequests.ts";
 export * from "./provisionedSandboxLeases.ts";
 export * from "./provisioning.ts";

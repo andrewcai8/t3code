@@ -32,6 +32,7 @@ import { ThreadNotificationCoordinator } from "../components/ThreadNotificationC
 import { QueuedMessageSender } from "../components/QueuedMessageSender";
 import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoordinator";
 import { AutomationRunAutoJoin } from "../cloud/AutomationRunAutoJoin";
+import { resumeCloudSends } from "../cloud/cloudSends";
 import { ThreadLifecycleOverlayCoordinator } from "../components/ThreadLifecycleOverlayCoordinator";
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
 import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
@@ -142,6 +143,10 @@ function RootRouteView() {
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
   const returningFromWelcomeRef = useRef(pathname === "/welcome");
+
+  useEffect(() => {
+    if (primaryEnvironmentAuthenticated) resumeCloudSends();
+  }, [primaryEnvironmentAuthenticated]);
 
   useEffect(() => {
     if (pathname === "/welcome") {

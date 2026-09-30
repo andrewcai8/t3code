@@ -1521,7 +1521,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(persisted.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
   });
 
-  it("reloads an environment send cut off mid-setup as failed, so sending again rejoins it", () => {
+  it("reloads an environment send cut off mid-setup as it was, for the page to pick back up", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
     store.setProjectDraftThreadId(otherProjectRef, otherDraftId, { threadId: otherThreadId });
@@ -1532,9 +1532,13 @@ describe("composerDraftStore project draft thread mapping", () => {
       createdAt: "2026-09-29T19:37:38.000Z",
       prompt: "verify the harness",
       outgoingMessageText: "verify the harness",
-      phase: "creating",
+      phase: "pairing",
       startedAt: "2026-09-29T19:37:38.000Z",
       repository: "authentic-intelligence/megpt-mono",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.5",
+      },
     };
     const ready: PendingCloudEnvironmentSend = {
       ...pending,
@@ -1567,10 +1571,13 @@ describe("composerDraftStore project draft thread mapping", () => {
       createdAt: "2026-09-29T19:37:38.000Z",
       prompt: "verify the harness",
       outgoingMessageText: "verify the harness",
-      phase: "failed",
-      error: "This page closed during setup. Send again to pick it back up.",
+      phase: "pairing",
       startedAt: "2026-09-29T19:37:38.000Z",
       repository: "authentic-intelligence/megpt-mono",
+      modelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.5",
+      },
     });
     expect(hydrated.draftThreadsByThreadKey[otherDraftId]?.pendingEnvironmentSend).toEqual(ready);
   });
