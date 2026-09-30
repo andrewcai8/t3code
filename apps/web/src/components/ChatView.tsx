@@ -9429,9 +9429,14 @@ export default function ChatView(props: ChatViewProps) {
     setPendingCloudSendEnvironmentId(null);
     setCloudProvisioningPhase(null);
     setCloudProvisioningError(null);
-    // Another tab may hold the same draft; only one of them sends the held message.
+    // Another tab may hold the same draft, and only one of them sends the held message. Until
+    // this tab's turn comes the composer stays held, and leaving the draft drops the send here.
+    const held = heldCloudSendSnapshotRef.current;
+    sendInFlightRef.current = true;
     void cloudSends
       .sendHeld(draftId, async () => {
+        if (heldCloudSendSnapshotRef.current !== held) return;
+        sendInFlightRef.current = false;
         resumingCloudSendRef.current = true;
         try {
           await onSend();
@@ -9440,7 +9445,9 @@ export default function ChatView(props: ChatViewProps) {
         }
       })
       .finally(() => {
+        if (heldCloudSendSnapshotRef.current !== held) return;
         heldCloudSendSnapshotRef.current = null;
+        sendInFlightRef.current = false;
       });
   }, [
     activeEnvironment?.serverConfig,

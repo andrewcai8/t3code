@@ -55,10 +55,10 @@ function memoryStorage(): ProvisionStorage {
   };
 }
 
-function requestStore(storage: ProvisionStorage) {
+function requestStore(storage: ProvisionStorage, randomUUID: () => string) {
   return createProvisionRequestStore({
     storage,
-    randomUUID: () => requestId,
+    randomUUID,
     // Retries run on the next task, so a test waits on the host's answers, not on a clock.
     schedule: (callback) => {
       const timer = setTimeout(callback, 0);
@@ -78,10 +78,13 @@ function device(answers: ReadonlyArray<EnvironmentProvisionResult>) {
   const hostCalls: string[] = [];
   const sent: string[] = [];
   let answered = 0;
+  let requested = 0;
+  // The first request has `requestId`; a replacement gets the next id.
+  const randomUUID = () => `00000000-0000-4000-8000-00000000000${++requested}`;
 
   /** A page loading on this device, with nothing in memory but what storage holds. */
   function page(name: string) {
-    const requests = requestStore(storage);
+    const requests = requestStore(storage, randomUUID);
     const steps: string[] = [];
     const driver = createCloudSendDriver({
       requests,
@@ -125,7 +128,7 @@ function device(answers: ReadonlyArray<EnvironmentProvisionResult>) {
 
   /** A page that sent the draft's first message to the cloud, then closed mid-setup. */
   function sendThenClose() {
-    requestStore(storage).reserve(draftId, { managerEnvironmentId, input: sendInput });
+    requestStore(storage, randomUUID).reserve(draftId, { managerEnvironmentId, input: sendInput });
   }
 
   return { page, sendThenClose, hostCalls, sent };
@@ -265,14 +268,40 @@ describe("createCloudSendDriver", () => {
     expect(second.steps.at(-1)).toBe("draft:cancelled");
   });
 
-  it("clears a picked-up send whose request another tab already cancelled", async () => {
+  it("fails a picked-up send whose request is gone, keeping it to send again", async () => {
     const laptop = device([ready]);
     laptop.sendThenClose();
     laptop.page("other").requests.cancel(draftId);
     const reloaded = laptop.page("reloaded");
 
-    expect(await reloaded.driver.resume(draftId)).toEqual({ kind: "cancelled" });
-    expect(reloaded.steps).toEqual(["draft:cancelled"]);
+    await reloaded.driver.resume(draftId);
+
+    expect(reloaded.steps).toEqual([
+      "draft:failed Setup stopped before the environment was ready. Send again to start it.",
+    ]);
     expect(laptop.hostCalls).toEqual([]);
+  });
+
+  it("leaves a send's steps to the request that replaced it", async () => {
+    const phone = device([inProgress, inProgress, ready]);
+    const page = phone.page("page");
+
+    const first = page.driver.start({ draftId, managerEnvironmentId, input: sendInput });
+    page.requests.cancel(draftId);
+    const second = page.driver.start({
+      draftId,
+      managerEnvironmentId,
+      input: { ...sendInput, branch: "feature" },
+    });
+
+    expect(await first).toEqual({ kind: "cancelled" });
+    expect((await second).kind).toBe("ready");
+    expect(page.steps).toEqual([
+      "draft:creating",
+      "draft:creating",
+      "draft:pairing",
+      "draft:loading-project",
+      "draft:ready box/box-project",
+    ]);
   });
 });

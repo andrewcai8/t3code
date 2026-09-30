@@ -51,10 +51,9 @@ export function createCloudSendDriver(ports: CloudSendDriverPorts) {
       },
     ).then((result) => {
       if (drives.get(draftId)?.requestId === requestId) drives.delete(draftId);
-      // A request cancelled only to be replaced leaves the draft to the replacement's drive.
-      if (result.kind !== "cancelled" || !requests.isActive(draftId)) {
-        ports.record(draftId, result);
-      }
+      // A request cancelled and replaced leaves the draft to the replacement's drive.
+      const live = requests.current(draftId);
+      if (live === null || live.input.requestId === requestId) ports.record(draftId, result);
       return result;
     });
     drives.set(draftId, { requestId, outcome });
@@ -82,14 +81,17 @@ export function createCloudSendDriver(ports: CloudSendDriverPorts) {
 
   /**
    * Picks up a draft's send that no page is driving, such as one a reload cut off mid-setup.
-   * With no live request left, the send was cancelled or sent from another page, and is over.
+   * With no live request to rejoin, the send fails and keeps its message to send again.
    */
   function resume(draftId: string): Promise<CloudProvisionOutcome> {
     const request = requests.current(draftId);
     if (request !== null) return drive(draftId, request);
-    const over = { kind: "cancelled" } as const;
-    ports.record(draftId, over);
-    return Promise.resolve(over);
+    const stopped = {
+      kind: "failed",
+      message: "Setup stopped before the environment was ready. Send again to start it.",
+    } as const;
+    ports.record(draftId, stopped);
+    return Promise.resolve(stopped);
   }
 
   /**
