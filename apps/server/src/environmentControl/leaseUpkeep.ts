@@ -30,12 +30,12 @@ export const runLeaseUpkeep = (input: {
     // A lease is only registered once its provision reached ready, so an
     // expired heartbeat means a finished machine nobody is watching. Pause
     // it and leave it reconnectable. A provision that never reached ready
-    // holds no lease and is disposed by its retention deadline instead.
+    // holds no lease; reconciling below resumes or disposes it.
     yield* Effect.tryPromise(input.reapExpiredLeases).pipe(
       Effect.ignore({ log: "Warn", message: "expired cloud leases could not be paused" }),
     );
-    // A crash between issuing an allocation and recording it leaves a
-    // resource nobody else will look for.
+    // A restart or a stalled step leaves an unfinished provision that no
+    // caller will come back for.
     yield* input.reconcileProvisions.pipe(
       Effect.ignore({ log: "Warn", message: "provisions could not be reconciled" }),
     );

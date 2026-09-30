@@ -114,6 +114,8 @@ export type ProvisionAllocationAttempt = typeof ProvisionAllocationAttempt.Type;
  * rows disposed before it was recorded.
  */
 const DisposedEnvironmentId = Schema.optional(EnvironmentId);
+/** Why the host itself ended an operation nobody finished, carried from cleanup to `disposed`. */
+const DisposedReason = Schema.optional(Schema.String);
 
 export const ProvisionOperationState = Schema.Union([
   Schema.Struct({
@@ -122,6 +124,7 @@ export const ProvisionOperationState = Schema.Union([
     resources: Schema.Array(ProvisionResource),
     lastError: Schema.NullOr(Schema.String),
     environmentId: DisposedEnvironmentId,
+    reason: DisposedReason,
   }),
   Schema.Struct({ kind: Schema.Literal("intent") }),
   Schema.Struct({ kind: Schema.Literal("create_issued"), issuedAt: IssuedAt }),
@@ -152,7 +155,11 @@ export const ProvisionOperationState = Schema.Union([
     reason: Schema.String,
     resource: ProvisionResource,
   }),
-  Schema.Struct({ kind: Schema.Literal("disposed"), environmentId: DisposedEnvironmentId }),
+  Schema.Struct({
+    kind: Schema.Literal("disposed"),
+    environmentId: DisposedEnvironmentId,
+    reason: DisposedReason,
+  }),
 ]);
 export type ProvisionOperationState = typeof ProvisionOperationState.Type;
 export const ProvisionOperation = Schema.Struct({

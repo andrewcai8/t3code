@@ -37,7 +37,7 @@ export class ProvisionOperationStore extends Context.Service<
     readonly get: (
       requestId: ProvisionRequestId,
     ) => Effect.Effect<ProvisionOperation, ProvisionStoreError>;
-    /** Operations with a create or fork whose outcome is not yet recorded. */
+    /** Operations that have not reached ready, failed or disposed. */
     readonly listUnresolved: Effect.Effect<ReadonlyArray<ProvisionOperation>, ProvisionStoreError>;
     readonly advance: (
       current: ProvisionOperation,
@@ -110,9 +110,7 @@ export class ProvisionOperationStore extends Context.Service<
         SELECT request_id AS "requestId", request_json AS request, request_hash AS "requestHash",
           state_json AS state, revision, created_at AS "createdAt", updated_at AS "updatedAt"
         FROM provision_operations
-        WHERE json_extract(state_json, '$.kind') IN ('create_issued', 'fork_issued', 'allocation_unknown')
-          OR (json_extract(state_json, '$.kind') = 'cancel_requested'
-            AND json_extract(state_json, '$.recovery') IS NOT NULL)
+        WHERE json_extract(state_json, '$.kind') NOT IN ('ready', 'failed', 'disposed')
       `;
         const operations = yield* Effect.forEach(rows, (row) =>
           decodeRow(row).pipe(

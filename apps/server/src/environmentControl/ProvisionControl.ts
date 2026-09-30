@@ -259,7 +259,9 @@ export function makeProvisionControl(
           kind: "refused",
           reason: state.kind,
           message:
-            state.kind === "failed" ? state.reason : "This provisioning request was disposed.",
+            state.kind === "failed"
+              ? state.reason
+              : (state.reason ?? "This provisioning request was disposed."),
         };
       return {
         kind: state.kind === "allocation_unknown" ? "allocation_unknown" : "pending",
