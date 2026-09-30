@@ -197,6 +197,47 @@ describe("Namespace durable allocation through the SDK", () => {
       }),
   );
 
+  it.effect("adopts a claimed spare by waking its Devbox instead of creating one", () =>
+    Effect.gen(function* () {
+      const spare = { ...devbox("spare-box"), name: "t3-spare-build" };
+      // A Devbox under the chat's own id is not its machine once it claimed a spare.
+      const server = yield* fixture((method) =>
+        method === "List"
+          ? { devboxes: [devbox(), spare] }
+          : { devbox: spare, instanceId: "woken-instance" },
+      );
+      const commands: ReadonlyArray<string>[] = [];
+      const ports = makeNamespaceAllocationPorts({
+        identity: { creator: "user-test", tenantId: "tenant-test" },
+        client: server.client,
+        execute: async (args) => {
+          commands.push(args);
+        },
+      });
+      const claimed = makeOperation({
+        ...workloadRequest,
+        creator: "user-test",
+        devboxName: "t3-spare-build",
+      });
+      const resource = {
+        provider: "namespace",
+        devboxId: "spare-box",
+        devboxName: "t3-spare-build",
+        instanceId: "woken-instance",
+        region: "iad",
+        workspaceDir: "/Users/runner/workspaces",
+      };
+      expect([yield* ports.create(claimed), yield* ports.recoverCreate(claimed)]).toEqual([
+        resource,
+        [resource],
+      ]);
+      expect(commands).toEqual([
+        ["exec", "t3-spare-build", "--", "true"],
+        ["exec", "t3-spare-build", "--", "true"],
+      ]);
+    }),
+  );
+
   it.effect("recovers a lost CLI response without another create", () =>
     Effect.gen(function* () {
       const server = yield* fixture((method) =>

@@ -101,14 +101,14 @@ export function makeProvisionResolution(config: {
  * record. A prepare command can write these too, and a base must never hand
  * one account's login to the next chat.
  */
-export function warmSealHomePaths(): string[] {
+export function warmSealHomePaths(provider: "e2b" | "namespace" = "e2b"): string[] {
   const drivers = Object.keys(credentialDestinations) as Array<keyof typeof credentialDestinations>;
   return [
     ...new Set([
       ...drivers.flatMap((kind) =>
         credentialDestinations[kind].flatMap((path) => [
           path,
-          guestCredentialDestination(kind, path, "e2b"),
+          guestCredentialDestination(kind, path, provider),
         ]),
       ),
       // What a configured `githubToken` becomes.

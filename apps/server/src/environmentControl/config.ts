@@ -162,6 +162,12 @@ const Provisioning = Schema.Struct({
           Schema.Struct({
             ...Commands,
             artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
+            /**
+             * Keep one prepared, stopped Mac of this repository for the next
+             * chat to claim. Opt in only when the prepare commands are safe
+             * to rerun on a tree they already prepared.
+             */
+            spare: Schema.optional(Schema.Boolean),
           }),
         ),
       }),
@@ -213,10 +219,10 @@ const Provisioning = Schema.Struct({
     ),
   ),
   /**
-   * How often, in hours, a repository's warm E2B base is rebuilt from its
-   * default branch. A repository gets one once its `e2b` entry sets `warm`
-   * and has prepare commands, and a chat was created for it. Default 12; `0`
-   * disables warm bases.
+   * How often, in hours, a repository's warm E2B base or Namespace spare is
+   * rebuilt from its default branch. A repository gets one once its `e2b`
+   * entry sets `warm` (or its `namespace` entry `spare`) and has prepare
+   * commands, and a chat was created for it. Default 12; `0` disables both.
    */
   warmBaseRefreshHours: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */

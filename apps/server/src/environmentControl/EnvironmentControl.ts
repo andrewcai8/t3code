@@ -50,12 +50,16 @@ import {
   configuredRuntimeArtifact,
   provisionProviders,
   makeProvisionPreparationStore,
+  spareKey,
   warmBaseKey,
 } from "./ProvisionPreparation.ts";
 import {
+  makeSpareClaims,
   makeWarmBaseStore,
   makeWarmBaseUpkeep,
+  selectSpare,
   selectWarmTemplate,
+  settleSpare,
   warmBasePolicy,
 } from "./warmBases.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
@@ -915,6 +919,7 @@ export const layer = Layer.effect(
         return Effect.gen(function* () {
           const { runtime, manifest, namespace, build } = yield* provider(operation);
           const resource = allocation.resource;
+          const request = operation.request;
           if (resource.provider === "namespace")
             return yield* Effect.tryPromise({
               try: async () => {
@@ -929,9 +934,28 @@ export const layer = Layer.effect(
                     "Namespace preparation did not finish. Retry the same request.",
                   ),
                 }),
-            });
+            }).pipe(
+              // A chat that could not prepare on a spare sends later chats cold,
+              // like one that could not on a warm base.
+              Effect.tapError((error) =>
+                Effect.sync(() => {
+                  if (
+                    request.provider === "namespace" &&
+                    request.devboxName &&
+                    manifest.warmKey &&
+                    manifest.input.repository &&
+                    build === null &&
+                    !error.retentionFailed &&
+                    // Only a chat's first failure. Its retries run on the same
+                    // spare and say nothing about the ones built since.
+                    operation.state.kind === "preparing" &&
+                    operation.state.lastError === null
+                  )
+                    spares.failed(manifest.input.repository, manifest.warmKey, error.message);
+                }),
+              ),
+            );
           const sandboxId = resource.sandboxId;
-          const request = operation.request;
           return yield* Effect.tryPromise({
             try: () => runtime.prepare(operation, sandboxId, manifest, record, build),
             catch: (error) =>
@@ -996,7 +1020,8 @@ export const layer = Layer.effect(
     /** The one freeze path, shared by chats and warm base builds. */
     const freeze = async (
       input: EnvironmentProvisionInput,
-      warmTemplate?: (repository: string, key: string) => Promise<string | null>,
+      warmTemplate?: Parameters<typeof manifests.freeze>[4],
+      spareClaim?: Parameters<typeof manifests.freeze>[5],
     ) => {
       const manager = await requireManager();
       if (input.provider === "namespace") {
@@ -1056,6 +1081,7 @@ export const layer = Layer.effect(
             ),
           ),
         warmTemplate,
+        spareClaim,
       );
     };
     const warmStore = makeWarmBaseStore(stateDir);
@@ -1071,9 +1097,22 @@ export const layer = Layer.effect(
         sandboxId: operation.state.allocation.resource.sandboxId,
       };
     };
-    const warmBases = makeWarmBaseUpkeep({
-      store: warmStore,
+    /** What building a base takes on either provider. */
+    const buildPorts = {
       now: Date.now,
+      ensure: async (requestId: ProvisionRequestId) =>
+        runLogged(provisioning.ensure((await manifests.load(requestId)).request)),
+      cancel: async (requestId: ProvisionRequestId) => {
+        // A build abandoned before it was first driven has no operation yet.
+        await runLogged(store.accept((await manifests.load(requestId)).request));
+        return runLogged(provisioning.cancel(requestId));
+      },
+      warn: (message: string, context: Record<string, unknown>) =>
+        void runLogged(Effect.logWarning(message, context)),
+    };
+    const warmBases = makeWarmBaseUpkeep({
+      ...buildPorts,
+      store: warmStore,
       key: async (repository) => {
         const manager = await resolve();
         return manager ? warmBaseKey(manager.config, repository, resolution(manager.config)) : null;
@@ -1091,13 +1130,6 @@ export const layer = Layer.effect(
             retentionDeadline,
           })
         ).warmKey,
-      ensure: async (requestId) =>
-        runLogged(provisioning.ensure((await manifests.load(requestId)).request)),
-      cancel: async (requestId) => {
-        // A build abandoned before it was first driven has no operation yet.
-        await runLogged(store.accept((await manifests.load(requestId)).request));
-        return runLogged(provisioning.cancel(requestId));
-      },
       buildSnapshots: async (requestId) => {
         const operation = await runLogged(store.accept((await manifests.load(requestId)).request));
         const runtime = makeE2bProvisionRuntime({
@@ -1113,7 +1145,7 @@ export const layer = Layer.effect(
         const { runtime, sandboxId } = await readyE2bBuild(operation);
         await runtime.seal(operation, sandboxId, await manifests.load(operation.request.requestId));
       },
-      snapshot: async (operation) => {
+      capture: async (operation) => {
         const { runtime, sandboxId } = await readyE2bBuild(operation);
         return runtime.snapshot(operation, sandboxId);
       },
@@ -1121,7 +1153,76 @@ export const layer = Layer.effect(
         makeE2bProvisionRuntime({
           apiKey: (await requireManager()).config.e2bApiKey,
         }).deleteSnapshot(snapshotId),
-      warn: (message, context) => void runLogged(Effect.logWarning(message, context)),
+    });
+    const spareStore = makeWarmBaseStore(stateDir, "spares");
+    const spareClaims = makeSpareClaims(stateDir);
+    const spares = makeWarmBaseUpkeep({
+      ...buildPorts,
+      store: spareStore,
+      key: async (repository) => {
+        const manager = await resolve();
+        return manager ? spareKey(manager.config, repository) : null;
+      },
+      // A cold chat on the default branch, like a warm base build, but with no
+      // retention deadline: the Devbox it makes outlives the build as the spare.
+      freezeBuild: async ({ requestId, repository, seed }) =>
+        (
+          await freeze({
+            requestId,
+            provider: "namespace",
+            providerInstanceId: seed.providerInstanceId,
+            ...(seed.agentDriver ? { agentDriver: seed.agentDriver } : {}),
+            repository,
+          })
+        ).warmKey,
+      buildSnapshots: async () => [],
+      seal: async (operation) => {
+        if (
+          operation.state.kind !== "ready" ||
+          operation.state.allocation.resource.provider !== "namespace"
+        )
+          throw new Error("The spare build is not a ready Namespace Mac.");
+        await (
+          await resolveNamespace()
+        ).runtime.seal(
+          operation,
+          operation.state.allocation.resource,
+          await manifests.load(operation.request.requestId),
+        );
+      },
+      capture: async (operation) => ({ requestId: operation.request.requestId }),
+      deleteSnapshot: async () => "missing",
+      taken: async (requestId) => (await spareClaims.holder(requestId)) !== null,
+      owns: (requestId) =>
+        settleSpare(spareClaims, requestId, Date.now(), {
+          claimant: async (chat, spare) => {
+            if (!isProvisionRequestId(chat)) return "gone";
+            const manifest = await manifests.load(chat).catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            });
+            if (!manifest) return "pending";
+            const { request } = manifest;
+            // A retry of a freeze that failed after its claim may have frozen elsewhere.
+            if (request.provider !== "namespace" || request.devboxName !== `t3-${spare}`)
+              return "gone";
+            // A cancel disposes the Devbox only once the request issued its
+            // allocation. Before that, and after it ended, nobody else would.
+            const { state } = await runLogged(store.accept(request));
+            if (state.kind === "intent") return "pending";
+            return state.kind === "disposed" ? "gone" : "owner";
+          },
+          release: async (spare) => {
+            const operation = await runLogged(store.get(spare));
+            if (operation.state.kind === "ready")
+              await runLogged(
+                store.advance(operation, {
+                  kind: "disposed",
+                  reason: "A chat claimed this spare, and its machine is that chat's now.",
+                }),
+              );
+          },
+        }),
     });
     const provisionControl = makeProvisionControl(
       store,
@@ -1131,30 +1232,40 @@ export const layer = Layer.effect(
           const policy = warmBasePolicy(
             (await requireManager()).config.provisioning?.warmBaseRefreshHours,
           );
-          const manifest = await freeze(input, async (repository, key) =>
-            selectWarmTemplate(
-              // An unreadable record costs this chat its warm start, never the chat.
-              await warmStore.read(repository).catch(() => null),
-              key,
-              Date.now(),
-              policy,
-              warmBases.failedTemplates(),
-            ),
+          const manifest = await freeze(
+            input,
+            async (repository, key) =>
+              selectWarmTemplate(
+                // An unreadable record costs this chat its warm start, never the chat.
+                await warmStore.read(repository).catch(() => null),
+                key,
+                Date.now(),
+                policy,
+                warmBases.failedBases(),
+              ),
+            {
+              select: async (repository, key) =>
+                selectSpare(
+                  await spareStore.read(repository).catch(() => null),
+                  key,
+                  Date.now(),
+                  policy,
+                  spares.failedBases(),
+                ),
+              claim: (spare, chat) => spareClaims.take(spare, chat, Date.now()),
+            },
           );
           // A chat that had to start cold asks for a base, on the account it
           // routed to. One that started warm keeps its base in use.
-          if (
-            manifest.warmKey &&
-            manifest.input.repository &&
-            manifest.request.provider === "e2b"
-          ) {
-            if (manifest.request.strategy === "direct") warmBases.used(manifest.input.repository);
+          const { request } = manifest;
+          if (manifest.warmKey && manifest.input.repository) {
+            const bases = request.provider === "e2b" ? warmBases : spares;
+            if (request.provider === "e2b" ? request.strategy === "direct" : request.devboxName)
+              bases.used(manifest.input.repository);
             else
-              warmBases.want(manifest.input.repository, {
-                providerInstanceId: manifest.request.providerInstanceId,
-                ...(manifest.request.agentDriver
-                  ? { agentDriver: manifest.request.agentDriver }
-                  : {}),
+              bases.want(manifest.input.repository, {
+                providerInstanceId: request.providerInstanceId,
+                ...(request.agentDriver ? { agentDriver: request.agentDriver } : {}),
               });
           }
           return manifest;
@@ -1255,8 +1366,12 @@ export const layer = Layer.effect(
     }).pipe(Effect.forkScoped);
     yield* Effect.tryPromise(async () => {
       const manager = await resolve();
-      if (manager)
-        await warmBases.tick(warmBasePolicy(manager.config.provisioning?.warmBaseRefreshHours));
+      if (!manager) return;
+      const policy = warmBasePolicy(manager.config.provisioning?.warmBaseRefreshHours);
+      // Side by side: a tick waits on its builds, and a Mac takes many minutes.
+      // Both finish before the next round starts, even when one fails.
+      const ticks = await Promise.allSettled([warmBases.tick(policy), spares.tick(policy)]);
+      for (const tick of ticks) if (tick.status === "rejected") throw tick.reason;
     }).pipe(
       Effect.ignore({ log: "Warn", message: "warm bases could not be kept up" }),
       Effect.repeat(Schedule.spaced(Duration.minutes(1))),

@@ -80,9 +80,9 @@ export const ProvisionPreparationManifest = Schema.Struct({
   localArtifact: ProvisionRuntimeArtifact,
   egressAllow: Schema.Array(Schema.String),
   /**
-   * The repository's warm base key at freeze time (`warmBaseKey`), for an E2B
-   * request whose repository keeps one. Outside `preparation`, so it is not
-   * part of the preparation's identity.
+   * The repository's warm base key at freeze time (`warmBaseKey`, or `spareKey`
+   * on Namespace), for a request whose repository keeps one. Outside
+   * `preparation`, so it is not part of the preparation's identity.
    */
   warmKey: Schema.optional(Sha256),
 });
@@ -451,7 +451,7 @@ async function privateRead(path: string) {
   return await NodeFSP.readFile(path, "utf8");
 }
 /** `fill` creates the temporary file; the first complete, fsynced one wins `path`. */
-async function writeOnce(path: string, fill: (temporary: string) => Promise<void>) {
+export async function writeOnce(path: string, fill: (temporary: string) => Promise<void>) {
   const temporary = `${path}.${NodeCrypto.randomUUID()}.tmp`;
   try {
     await fill(temporary);
@@ -499,6 +499,19 @@ export interface ProvisionPreparationResolver {
   readonly revision: (repository: string, branch?: string) => Promise<string>;
 }
 
+/** Digests of the files every checkout receives, which a prepared tree may have consumed. */
+async function workspaceFileDigests(
+  provisioning: NonNullable<EnvironmentControlConfig["provisioning"]>,
+) {
+  const digests = [];
+  for (const configured of provisioning.workspaceFiles ?? [])
+    digests.push({
+      destination: configured.destination,
+      sha256: provisionDigest(await NodeFSP.readFile(configured.source)),
+    });
+  return digests;
+}
+
 /**
  * What a repository's warm E2B snapshot has on disk, or null when the
  * repository keeps no warm base. Chat freezes and the warm base upkeep both
@@ -521,12 +534,6 @@ export async function warmBaseKey(
   )?.e2b;
   const prepareCommands = setup?.prepareCommands ?? [];
   if (setup?.warm !== true || prepareCommands.length === 0) return null;
-  const workspaceFiles = [];
-  for (const configured of provisioning.workspaceFiles ?? [])
-    workspaceFiles.push({
-      destination: configured.destination,
-      sha256: provisionDigest(await NodeFSP.readFile(configured.source)),
-    });
   return provisionDigest(
     stableStringify({
       version: 1,
@@ -536,7 +543,55 @@ export async function warmBaseKey(
       root: E2B_ROOT,
       prepareCommands,
       egressAllow: provisioning.egressAllow ?? [],
-      workspaceFiles,
+      workspaceFiles: await workspaceFileDigests(provisioning),
+    }),
+  );
+}
+
+/** What a Namespace request asks the provider for, which a spare's Devbox must already be. */
+async function namespaceMachine(config: EnvironmentControlConfig) {
+  const namespace = config.provisioning?.namespace;
+  if (!namespace)
+    throw new ProvisionRefused({
+      reason: "unconfigured",
+      message: "Configure Namespace before provisioning.",
+    });
+  return {
+    ...(await resolveNamespaceIdentity(config.namespaceToken)),
+    size: namespace.size,
+    region: namespace.region ?? "iad",
+    image: namespaceMacImage,
+    idleTimeoutMinutes: namespace.idleTimeoutMinutes ?? 360,
+  };
+}
+
+/**
+ * What a repository's Namespace spare is and has on disk, or null when the
+ * repository keeps no spare. The counterpart of `warmBaseKey`, leaving out the
+ * same things. It adds the machine, because a chat adopts the spare's Devbox
+ * as created, and the artifacts its prepare commands consume.
+ */
+export async function spareKey(
+  config: EnvironmentControlConfig,
+  repository: string,
+): Promise<string | null> {
+  const provisioning = config.provisioning;
+  const runtime = configuredRuntimeArtifact(config, "namespace");
+  if (!provisioning?.namespace || !runtime || provisioning.warmBaseRefreshHours === 0) return null;
+  const setup = provisioning.repositories?.find(
+    (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
+  )?.namespace;
+  const prepareCommands = setup?.prepareCommands ?? provisioning.namespace.prepareCommands ?? [];
+  if (setup?.spare !== true || prepareCommands.length === 0) return null;
+  return provisionDigest(
+    stableStringify({
+      version: 1,
+      repository: repositoryUrl(repository),
+      machine: await namespaceMachine(config),
+      runtime: runtime.sha256,
+      prepareCommands,
+      artifacts: setup.artifacts ?? provisioning.namespace.artifacts ?? [],
+      workspaceFiles: await workspaceFileDigests(provisioning),
     }),
   );
 }
@@ -610,6 +665,15 @@ export function makeProvisionPreparationStore(stateDir: string) {
        * warm key, or null to start cold. A warm base's own build passes none.
        */
       warmTemplate?: (repository: string, key: string) => Promise<string | null>,
+      /**
+       * The spare a new Namespace chat may claim, by canonical repository and
+       * spare key, and the claim itself, which only one chat wins. A spare's
+       * own build passes none.
+       */
+      spares?: {
+        readonly select: (repository: string, key: string) => Promise<ProvisionRequestId | null>;
+        readonly claim: (spare: ProvisionRequestId, chat: ProvisionRequestId) => Promise<boolean>;
+      },
     ): Promise<ProvisionPreparationManifest> => {
       const input = decodeInput(rawInput);
       const submitted = submittedFiles(input);
@@ -646,8 +710,24 @@ export function makeProvisionPreparationStore(stateDir: string) {
           }
         : null;
       const volume = guestVolume[input.provider];
+      let warmKey: string | null = null;
+      // A chat that claims a spare becomes the owner of its Devbox and prepares
+      // where the spare was built: its tree carries absolute paths, like a warm
+      // E2B base's. Claimed before anything is derived from the root. A freeze
+      // that fails after this leaves the claim to the upkeep, which disposes a
+      // spare whose chat never starts on it.
+      let spare: ProvisionRequestId | null = null;
+      if (input.provider === "namespace" && input.repository) {
+        warmKey = await spareKey(config, input.repository);
+        const candidate =
+          warmKey && spares
+            ? await spares.select(canonicalRepository(input.repository), warmKey)
+            : null;
+        if (candidate && spares && (await spares.claim(candidate, input.requestId)))
+          spare = candidate;
+      }
       const root =
-        input.provider === "e2b" ? E2B_ROOT : `${volume}/t3-provision/${input.requestId}`;
+        input.provider === "e2b" ? E2B_ROOT : `${volume}/t3-provision/${spare ?? input.requestId}`;
       const localArtifact = await storeArtifact(artifact);
       let files: Array<typeof File.Type> = [...submitted];
       for (const scope of ["home", "workspace"] as const) {
@@ -898,7 +978,6 @@ export function makeProvisionPreparationStore(stateDir: string) {
         ),
       };
       let request: DurableProvisionRequest;
-      let warmKey: string | null = null;
       if (input.provider === "e2b") {
         const configuredTemplate = provisioning.templateId;
         if (!configuredTemplate)
@@ -922,19 +1001,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
             : { templateId: await template(), strategy: "fork" as const }),
         };
       } else {
-        if (!provisioning.namespace)
-          throw new ProvisionRefused({
-            reason: "unconfigured",
-            message: "Configure Namespace before provisioning.",
-          });
         request = {
           ...common,
           provider: "namespace",
-          ...(await resolveNamespaceIdentity(config.namespaceToken)),
-          size: provisioning.namespace.size,
-          region: provisioning.namespace.region ?? "iad",
-          image: namespaceMacImage,
-          idleTimeoutMinutes: provisioning.namespace.idleTimeoutMinutes ?? 360,
+          ...(await namespaceMachine(config)),
+          ...(spare ? { devboxName: `t3-${spare}` } : {}),
         };
       }
       const manifest: ProvisionPreparationManifest = {

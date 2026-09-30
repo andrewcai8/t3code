@@ -23,7 +23,12 @@ import {
 import type { NamespaceResource as ImportedNamespaceResource } from "./namespaceProvisioner.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { guestToolInstallCommand, withGuestProviderInstall } from "./guestProviderInstall.ts";
-import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
+import {
+  prepareRemoteHost,
+  sealWarmBase,
+  type RemotePreparationPort,
+} from "./remotePreparation.ts";
+import { warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
@@ -216,6 +221,17 @@ with open(payload,'rb') as data:
     os.execv(sys.executable,[sys.executable,script])
 `;
 const removeStaging = "import shutil,sys; shutil.rmtree(sys.argv[1])";
+/**
+ * Removes every staging directory under a root. A staged input holds each
+ * credential its preparation installs, and a call the manager did not live to
+ * finish leaves it behind.
+ */
+const removeAllStaging = String.raw`
+import pathlib,shutil,sys
+for path in pathlib.Path(sys.argv[1]).iterdir():
+    if path.name.startswith(('input-','artifact-')) and path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+`;
 
 async function successful(session: NamespaceAccountSession, args: ReadonlyArray<string>) {
   const result = await session.run(args);
@@ -640,6 +656,35 @@ except FileExistsError:
   };
   return {
     prepare,
+    /**
+     * Turns a ready spare build into what the chat that claims it adopts: its
+     * root sealed like a warm E2B base, and the Mac stopped. A stopped Devbox
+     * keeps its volume and nothing else: the runner's own home and every
+     * process are gone, it costs only storage, and claiming it starts a new
+     * instance with a full lifetime ahead of it.
+     */
+    seal: async (
+      operation: ProvisionOperation,
+      resource: NamespaceResource,
+      manifest: ProvisionPreparationManifest,
+    ) => {
+      await assertResource(operation, resource);
+      await sealWarmBase(port(resource, manifest), {
+        root: manifest.preparation.root,
+        files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
+        homePaths: warmSealHomePaths("namespace"),
+      });
+      await successful(config.session, [
+        "exec",
+        resource.devboxId,
+        "--",
+        "python3",
+        "-c",
+        removeAllStaging,
+        manifest.preparation.root,
+      ]);
+      await successful(config.session, ["shutdown", resource.devboxId, "--force"]);
+    },
     attach: async (
       operation: ProvisionOperation,
       resource: NamespaceResource,

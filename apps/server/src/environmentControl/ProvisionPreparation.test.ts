@@ -10,6 +10,7 @@ import {
   EnvironmentProvisionInput,
   ProviderInstanceId,
   ProvisionRequestConflict,
+  ProvisionRequestId,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -19,6 +20,7 @@ import { ServerSettings } from "@t3tools/contracts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import {
   makeProvisionPreparationStore,
+  spareKey,
   provisionDigest,
   provisionProviders,
   warmBaseKey,
@@ -1618,6 +1620,122 @@ it("keys a warm base on what its disk holds, not on the credentials a chat bring
         f.resolver,
       ),
     ]).toEqual([null, null, null, null]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+function spareConfig(config: EnvironmentControlConfig, namespace: object = { spare: true }) {
+  return {
+    ...config,
+    namespaceToken,
+    provisioning: {
+      ...config.provisioning!,
+      namespace: { size: "m", prepareCommands: ["make setup"] },
+      repositories: [{ repository: "example/repo", namespace }],
+    },
+  };
+}
+const SPARE = ProvisionRequestId.make("0d1e2f30-4a5b-4c6d-8e7f-a0b1c2d3e4f5");
+
+it("runs a chat that claims a spare on the spare's Devbox and root, and cold when it loses the claim", async () => {
+  const f = await fixture();
+  try {
+    const config = spareConfig(f.config);
+    const key = await spareKey(config, "example/repo");
+    const chat = decodeProvisionInput({ ...input, provider: "namespace" });
+    const asked: unknown[] = [];
+    const spares = (won: boolean) => ({
+      select: async (...args: [string, string]) => {
+        asked.push(args);
+        return SPARE;
+      },
+      claim: async (...args: [string, string]) => {
+        asked.push(args);
+        return won;
+      },
+    });
+    const claimed = await f.store.freeze(
+      chat,
+      config,
+      f.resolver,
+      [f.profile],
+      undefined,
+      spares(true),
+    );
+    const lost = await makeProvisionPreparationStore(f.root + "-lost").freeze(
+      chat,
+      config,
+      f.resolver,
+      [f.profile],
+      undefined,
+      spares(false),
+    );
+    expect(asked).toEqual([
+      ["example/repo", key],
+      [SPARE, chat.requestId],
+      ["example/repo", key],
+      [SPARE, chat.requestId],
+    ]);
+    expect(
+      [claimed, lost].map((manifest) => [
+        manifest.request.provider === "namespace" ? manifest.request.devboxName : null,
+        manifest.preparation.root,
+        manifest.warmKey === key,
+      ]),
+    ).toEqual([
+      [`t3-${SPARE}`, `/Volumes/devbox/t3-provision/${SPARE}`, true],
+      [undefined, `/Volumes/devbox/t3-provision/${chat.requestId}`, true],
+    ]);
+    const settings = claimed.preparation.files.find(
+      (file) => file.destination === ".t3/userdata/settings.json",
+    );
+    expect(
+      JSON.parse(Buffer.from(settings?.contentsBase64 ?? "", "base64").toString()).providerInstances
+        .codex.config.homePath,
+    ).toBe(`/Volumes/devbox/t3-provision/${SPARE}/home/.codex`);
+  } finally {
+    await NodeFSP.rm(f.root + "-lost", { recursive: true, force: true });
+    await f.cleanup();
+  }
+});
+
+it("keeps a spare only for a repository that opts in, keyed on the machine and what its disk holds", async () => {
+  const f = await fixture();
+  try {
+    const config = spareConfig(f.config);
+    const base = await spareKey(config, "example/repo");
+    const provisioning = config.provisioning;
+    const variants = [
+      {
+        ...config,
+        provisioning: { ...provisioning, namespace: { ...provisioning.namespace, size: "l" } },
+      },
+      spareConfig(f.config, { spare: true, prepareCommands: ["make other"] }),
+      spareConfig(f.config, {
+        spare: true,
+        artifacts: [{ path: "seed.tar", destination: ".t3/seed.tar", sha256: "f".repeat(64) }],
+      }),
+      {
+        ...config,
+        provisioning: {
+          ...provisioning,
+          homeFiles: [{ source: NodePath.join(f.root, ".codex/auth.json"), destination: ".x" }],
+        },
+      },
+    ];
+    const keys = [];
+    for (const variant of variants) keys.push(await spareKey(variant, "example/repo"));
+    expect(base).toMatch(/^[a-f0-9]{64}$/);
+    expect(keys.map((key) => key === base)).toEqual([false, false, false, true]);
+    expect([
+      await spareKey(spareConfig(f.config, {}), "example/repo"),
+      await spareKey(config, "example/other"),
+      await spareKey(
+        { ...config, provisioning: { ...provisioning, warmBaseRefreshHours: 0 } },
+        "example/repo",
+      ),
+    ]).toEqual([null, null, null]);
   } finally {
     await f.cleanup();
   }

@@ -13,32 +13,43 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { canonicalRepository } from "./config.ts";
-import { GitRevision, provisionDigest, Sha256, writeReplace } from "./ProvisionPreparation.ts";
+import {
+  GitRevision,
+  provisionDigest,
+  Sha256,
+  writeOnce,
+  writeReplace,
+} from "./ProvisionPreparation.ts";
 
 /**
- * Per repository, an E2B snapshot of a box that already cloned the repository
- * and ran its prepare commands. A new chat for the repository starts from it
- * and only fetches its own revision and reruns the (now incremental) prepare
- * commands. The upkeep loop is the only writer; chat freezes only read.
+ * Per repository, a box that already cloned the repository and ran its prepare
+ * commands, kept for new chats to start from. A chat only fetches its own
+ * revision and reruns the (now incremental) prepare commands.
+ *
+ * On E2B the base is a snapshot, which outlives the box it was taken from and
+ * starts any number of chats. On Namespace, which cannot snapshot a Mac, it is
+ * a spare: the build's own stopped Devbox, which exactly one chat claims.
+ *
+ * The upkeep loop is the only writer of a record. Chat freezes only read it,
+ * and a chat takes a spare through `makeSpareClaims`.
  */
 export const WarmBaseSeed = Schema.Struct({
   providerInstanceId: EnvironmentProvisionInput.fields.providerInstanceId,
   agentDriver: EnvironmentProvisionInput.fields.agentDriver,
 });
 export type WarmBaseSeed = typeof WarmBaseSeed.Type;
+const builtFields = { key: Sha256, sourceRevision: GitRevision, builtAt: IsoDateTime };
 export const WarmBaseRecord = Schema.Struct({
   /** Canonical `owner/name`. */
   repository: Schema.String,
   /** Routing hint a rebuild freezes with: the last chat's account and driver. */
   seed: WarmBaseSeed,
   ready: Schema.NullOr(
-    Schema.Struct({
-      key: Sha256,
-      snapshotId: Schema.String,
-      templateId: Schema.String,
-      sourceRevision: GitRevision,
-      builtAt: IsoDateTime,
-    }),
+    Schema.Union([
+      Schema.Struct({ ...builtFields, snapshotId: Schema.String, templateId: Schema.String }),
+      /** A spare, named by the build request whose Devbox it is. */
+      Schema.Struct({ ...builtFields, requestId: ProvisionRequestId }),
+    ]),
   ),
   build: Schema.NullOr(
     Schema.Struct({ key: Sha256, requestId: ProvisionRequestId, startedAt: IsoDateTime }),
@@ -57,7 +68,10 @@ export const WarmBaseRecord = Schema.Struct({
    * before it was tracked, which count their base's build as the last use.
    */
   lastUsedAt: Schema.optional(IsoDateTime),
-  /** Things to dispose once the provider lets us: replaced snapshots and finished build boxes. */
+  /**
+   * Things to dispose once the provider lets us: replaced snapshots, finished
+   * build boxes, and spares no chat may claim any more.
+   */
   retired: Schema.Array(
     Schema.Union([
       Schema.Struct({
@@ -120,6 +134,18 @@ const idleExpired = (
   return !wanted && used !== undefined && age(used, now) > policy.idleMs;
 };
 
+type Ready = NonNullable<WarmBaseRecord["ready"]>;
+/** The base a chat keyed `key` may start from. */
+const servable = (
+  record: WarmBaseRecord | null,
+  key: string,
+  now: number,
+  policy: WarmBasePolicy,
+): Ready | null => {
+  const ready = record?.ready;
+  return ready && ready.key === key && age(ready.builtAt, now) <= policy.maxAgeMs ? ready : null;
+};
+
 /**
  * The bare template a chat keyed `key` starts from, or null to start cold.
  * `failedTemplates` are bases a chat already failed to prepare from.
@@ -131,13 +157,25 @@ export function selectWarmTemplate(
   policy: WarmBasePolicy,
   failedTemplates: ReadonlySet<string> = new Set(),
 ): string | null {
-  const ready = record?.ready;
-  return ready &&
-    ready.key === key &&
-    age(ready.builtAt, now) <= policy.maxAgeMs &&
-    !failedTemplates.has(ready.templateId)
+  const ready = servable(record, key, now, policy);
+  return ready && "templateId" in ready && !failedTemplates.has(ready.templateId)
     ? ready.templateId
     : null;
+}
+
+/**
+ * The spare a chat keyed `key` may try to claim, by its build request, or null
+ * to start cold. `failedKeys` are keys a chat already failed to prepare a spare of.
+ */
+export function selectSpare(
+  record: WarmBaseRecord | null,
+  key: string,
+  now: number,
+  policy: WarmBasePolicy,
+  failedKeys: ReadonlySet<string> = new Set(),
+): ProvisionRequestId | null {
+  const ready = servable(record, key, now, policy);
+  return ready && "requestId" in ready && !failedKeys.has(key) ? ready.requestId : null;
 }
 
 /**
@@ -173,10 +211,20 @@ export function nextWarmStep(
 type Retired = WarmBaseRecord["retired"][number];
 const retiredBuild = (record: WarmBaseRecord, now: number): Retired[] =>
   record.build ? [{ kind: "build", requestId: record.build.requestId, retiredAt: iso(now) }] : [];
-const retiredReady = (record: WarmBaseRecord, now: number): Retired[] =>
-  record.ready
-    ? [{ kind: "snapshot", snapshotId: record.ready.snapshotId, retiredAt: iso(now) }]
-    : [];
+/** What holds a base on the provider: its snapshot, or for a spare its build's box. */
+const retiredReady = (record: WarmBaseRecord, now: number): Retired[] => {
+  const ready = record.ready;
+  if (!ready) return [];
+  return "snapshotId" in ready
+    ? [{ kind: "snapshot", snapshotId: ready.snapshotId, retiredAt: iso(now) }]
+    : [{ kind: "build", requestId: ready.requestId, retiredAt: iso(now) }];
+};
+/** A spare left the pool: a chat claimed it, or nothing may claim it any more. */
+const retireReady = (record: WarmBaseRecord, now: number): WarmBaseRecord => ({
+  ...record,
+  ready: null,
+  retired: [...record.retired, ...retiredReady(record, now)],
+});
 
 /** The repository keeps no warm base any more: everything it had is disposed. */
 const retireAll = (record: WarmBaseRecord, now: number): WarmBaseRecord => ({
@@ -212,26 +260,54 @@ const retireIdle = (record: WarmBaseRecord, now: number): WarmBaseRecord =>
         retired: [...record.retired, ...retiredReady(record, now)],
       }
     : record;
+/**
+ * A chat failed to prepare on a spare keyed `key`. The spare that failed is that
+ * chat's by now, and another built from the same inputs would fail the same
+ * way, so none serves or is being built until the backoff has passed.
+ */
+const condemnKey = (
+  record: WarmBaseRecord,
+  key: string,
+  reason: string,
+  now: number,
+): WarmBaseRecord => {
+  const ready = record.ready?.key === key;
+  const build = record.build?.key === key;
+  // Already waiting out this failure: the chat's retries are not new ones.
+  if (!ready && !build && record.lastFailure?.key === key) return record;
+  return {
+    ...record,
+    ready: ready ? null : record.ready,
+    build: build ? null : record.build,
+    lastFailure: failure(record, key, reason, now),
+    retired: [
+      ...record.retired,
+      ...(ready ? retiredReady(record, now) : []),
+      ...(build ? retiredBuild(record, now) : []),
+    ],
+  };
+};
 const abandonBuild = (record: WarmBaseRecord, reason: string, now: number): WarmBaseRecord => ({
   ...record,
   build: null,
   lastFailure: record.build ? failure(record, record.build.key, reason, now) : record.lastFailure,
   retired: [...record.retired, ...retiredBuild(record, now)],
 });
-const promoteBuild = (
-  record: WarmBaseRecord,
-  ready: NonNullable<WarmBaseRecord["ready"]>,
-  now: number,
-): WarmBaseRecord => ({
+/** A snapshot outlives its build's box, which is disposed. A spare is that box. */
+const promoteBuild = (record: WarmBaseRecord, ready: Ready, now: number): WarmBaseRecord => ({
   ...record,
   ready,
   build: null,
   lastFailure: null,
-  retired: [...record.retired, ...retiredReady(record, now), ...retiredBuild(record, now)],
+  retired: [
+    ...record.retired,
+    ...retiredReady(record, now),
+    ...("requestId" in ready ? [] : retiredBuild(record, now)),
+  ],
 });
 
-export function makeWarmBaseStore(stateDir: string) {
-  const directory = NodePath.join(stateDir, "provisioning", "warm-bases");
+export function makeWarmBaseStore(stateDir: string, kind: "warm-bases" | "spares" = "warm-bases") {
+  const directory = NodePath.join(stateDir, "provisioning", kind);
   const path = (repository: string) =>
     NodePath.join(directory, `${provisionDigest(canonicalRepository(repository))}.json`);
   const readPath = async (file: string) => {
@@ -264,6 +340,88 @@ export function makeWarmBaseStore(stateDir: string) {
 }
 export type WarmBaseStore = ReturnType<typeof makeWarmBaseStore>;
 
+const SpareClaim = Schema.Struct({ by: Schema.String, at: IsoDateTime });
+const decodeClaim = Schema.decodeUnknownSync(Schema.fromJsonString(SpareClaim));
+/** The claimant the upkeep uses to take a spare out of the pool before disposing it. */
+const SPARE_RETIRED = "retired";
+
+/**
+ * Who has each spare, one file per spare. A chat's freeze and the upkeep both
+ * want a spare at once (one to start on it, one to dispose it), and whichever
+ * creates the file owns the Devbox. Separate from the record so that neither
+ * ever overwrites the other's decision.
+ */
+export function makeSpareClaims(stateDir: string) {
+  const directory = NodePath.join(stateDir, "provisioning", "spares", "claims");
+  const path = (spare: ProvisionRequestId) => NodePath.join(directory, `${spare}.json`);
+  const holder = async (spare: ProvisionRequestId) => {
+    try {
+      return decodeClaim(await NodeFSP.readFile(path(spare), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  };
+  const claim = (by: string, now: number) => stableStringify({ by, at: iso(now) });
+  return {
+    holder,
+    /** Takes the spare for `by`. Only the first taker succeeds, and it may ask again. */
+    take: async (spare: ProvisionRequestId, by: string, now: number) => {
+      await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeOnce(path(spare), (temporary) =>
+        NodeFSP.writeFile(temporary, claim(by, now), { flag: "wx", mode: 0o600 }),
+      );
+      return (await holder(spare))?.by === by;
+    },
+    /** Hands a claim whose claimant never came back to another. Only the upkeep calls this. */
+    reassign: (spare: ProvisionRequestId, by: string, now: number) =>
+      writeReplace(path(spare), claim(by, now)),
+  };
+}
+export type SpareClaims = ReturnType<typeof makeSpareClaims>;
+
+/** How long a claim waits for its chat to start on the spare before the spare counts as abandoned. */
+const CLAIM_GRACE_MS = 10 * MINUTE;
+
+/**
+ * Settles whose a retired spare's Devbox is. True when it is the upkeep's to
+ * dispose: nobody claimed it, or the chat that did has no use for it. False
+ * once a chat's request runs on it, and then the build that made it is
+ * released, so that only the chat's request can dispose the Devbox.
+ */
+export async function settleSpare(
+  claims: SpareClaims,
+  spare: ProvisionRequestId,
+  now: number,
+  chats: {
+    /**
+     * Where the chat `requestId` names stands with the spare. It is the
+     * `owner` once its request runs on the spare and would dispose it when
+     * cancelled, `pending` while it may still get there, and `gone` when it
+     * ended or runs on another machine.
+     */
+    readonly claimant: (
+      requestId: string,
+      spare: ProvisionRequestId,
+    ) => Promise<"owner" | "pending" | "gone">;
+    /** Ends the spare's build without disposing its Devbox. */
+    readonly release: (spare: ProvisionRequestId) => Promise<void>;
+  },
+): Promise<boolean> {
+  if (await claims.take(spare, SPARE_RETIRED, now)) return true;
+  const holder = await claims.holder(spare);
+  if (!holder) throw new Error("The spare's claim disappeared.");
+  const claimant = await chats.claimant(holder.by, spare);
+  if (claimant === "owner") {
+    await chats.release(spare);
+    return false;
+  }
+  if (claimant === "pending" && age(holder.at, now) < CLAIM_GRACE_MS)
+    throw new Error("A chat is still claiming the spare.");
+  await claims.reassign(spare, SPARE_RETIRED, now);
+  return true;
+}
+
 export interface WarmBasePorts {
   readonly store: Pick<WarmBaseStore, "list" | "write">;
   readonly now: () => number;
@@ -285,10 +443,22 @@ export interface WarmBasePorts {
   /** Snapshots taken from the build's box, which outlive the box. */
   readonly buildSnapshots: (requestId: ProvisionRequestId) => Promise<ReadonlyArray<string>>;
   readonly seal: (operation: ProvisionOperation) => Promise<void>;
-  readonly snapshot: (
+  /** What a sealed build becomes for chats: a snapshot of it, or the box itself as a spare. */
+  readonly capture: (
     operation: ProvisionOperation,
-  ) => Promise<{ readonly snapshotId: string; readonly templateId: string }>;
+  ) => Promise<
+    | { readonly snapshotId: string; readonly templateId: string }
+    | { readonly requestId: ProvisionRequestId }
+  >;
   readonly deleteSnapshot: (snapshotId: string) => Promise<"deleted" | "missing" | "in_use">;
+  /** Whether anyone has taken this spare. Absent where chats share a base. */
+  readonly taken?: (requestId: ProvisionRequestId) => Promise<boolean>;
+  /**
+   * Whether a retired build's box is the upkeep's to dispose. False once a
+   * chat owns it, and then the build is released instead. Absent where no
+   * chat ever owns a build's box.
+   */
+  readonly owns?: (requestId: ProvisionRequestId) => Promise<boolean>;
   readonly warn: (message: string, context: Record<string, unknown>) => void;
 }
 
@@ -300,7 +470,10 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
   const wanted = new Map<string, WarmBaseSeed>();
   /** When a chat last wanted or started from each repository's base, until a tick records it. */
   const uses = new Map<string, number>();
-  /** Bases a chat failed to prepare from, by template, until a tick retires them. */
+  /**
+   * Bases a chat failed to prepare from, until a tick retires them: a snapshot
+   * by its template, a spare by its key.
+   */
   const failures = new Map<string, { readonly repository: string; readonly reason: string }>();
 
   const drive = async (
@@ -322,11 +495,11 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
         if (!sourceRevision)
           return abandonBuild(record, "The warm base build has no repository revision.", now);
         await ports.seal(operation);
-        const snapshot = await ports.snapshot(operation);
+        const captured = await ports.capture(operation);
         const builtAt = ports.now();
         return promoteBuild(
           record,
-          { key: build.key, ...snapshot, sourceRevision, builtAt: iso(builtAt) },
+          { key: build.key, ...captured, sourceRevision, builtAt: iso(builtAt) },
           builtAt,
         );
       }
@@ -344,7 +517,7 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     const kept: Retired[] = [];
     const orphans: Retired[] = [];
     const known = new Set([
-      record.ready?.snapshotId,
+      record.ready && "snapshotId" in record.ready ? record.ready.snapshotId : undefined,
       ...record.retired.map((item) => (item.kind === "snapshot" ? item.snapshotId : undefined)),
     ]);
     for (const item of record.retired) {
@@ -357,6 +530,7 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
               known.add(snapshotId);
               orphans.push({ kind: "snapshot", snapshotId, retiredAt: iso(now) });
             }
+          if (ports.owns && !(await ports.owns(item.requestId))) continue;
           if ((await ports.cancel(item.requestId)).state.kind === "disposed") continue;
         } else if (
           age(item.retiredAt, now) >= policy.retireGraceMs &&
@@ -391,12 +565,24 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
     const seed = want ?? stored?.seed;
     const key = await ports.key(repository);
     const now = ports.now();
-    const broken = stored?.ready && failures.get(stored.ready.templateId);
-    const invalidated = stored && broken ? invalidateReady(stored, broken.reason, now) : stored;
-    const current =
-      invalidated && usedAt !== undefined
-        ? { ...invalidated, lastUsedAt: iso(usedAt) }
+    const broken =
+      stored?.ready && "templateId" in stored.ready && failures.get(stored.ready.templateId);
+    const condemned = key === null ? undefined : failures.get(key);
+    const invalidated =
+      stored && broken
+        ? invalidateReady(stored, broken.reason, now)
+        : stored && condemned && key !== null
+          ? condemnKey(stored, key, condemned.reason, now)
+          : stored;
+    // A spare someone took is no longer in the pool. Disposal settles whose it is.
+    const pooled =
+      invalidated?.ready &&
+      "requestId" in invalidated.ready &&
+      (await ports.taken?.(invalidated.ready.requestId))
+        ? retireReady(invalidated, now)
         : invalidated;
+    const current =
+      pooled && usedAt !== undefined ? { ...pooled, lastUsedAt: iso(usedAt) } : pooled;
     const step = nextWarmStep(current, key, want !== undefined, now, policy);
     if (!seed || (current === null && step === "idle")) {
       settle();
@@ -453,11 +639,11 @@ export function makeWarmBaseUpkeep(ports: WarmBasePorts) {
   };
 
   return {
-    /** A chat created from `templateId` failed to prepare. */
-    failed: (repository: string, templateId: string, reason: string) => {
-      failures.set(templateId, { repository: canonicalRepository(repository), reason });
+    /** A chat failed to prepare from the snapshot template, or on a spare with the key, `base`. */
+    failed: (repository: string, base: string, reason: string) => {
+      failures.set(base, { repository: canonicalRepository(repository), reason });
     },
-    failedTemplates: (): ReadonlySet<string> => new Set(failures.keys()),
+    failedBases: (): ReadonlySet<string> => new Set(failures.keys()),
     want: (repository: string, seed: WarmBaseSeed) => {
       wanted.set(canonicalRepository(repository), seed);
       uses.set(canonicalRepository(repository), ports.now());
