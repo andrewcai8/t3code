@@ -13,7 +13,7 @@ const require = NodeModule.createRequire(
 const { Template } = require("e2b");
 const { values } = NodeUtil.parseArgs({
   options: {
-    name: { type: "string", default: "t3-common-tools-node24-bun140-v4" },
+    name: { type: "string", default: "t3-common-tools-node24-bun140-v5" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
