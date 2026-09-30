@@ -1519,6 +1519,31 @@ describe("composerDraftStore project draft thread mapping", () => {
 
     const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
     expect(persisted.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
+  });
+
+  it("reloads an environment send cut off mid-setup as failed, so sending again resumes it", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setProjectDraftThreadId(otherProjectRef, otherDraftId, { threadId: otherThreadId });
+    const pending: PendingCloudEnvironmentSend = {
+      provider: "e2b",
+      preview: "verify the harness",
+      messageId: "msg-pending",
+      createdAt: "2026-09-29T19:37:38.000Z",
+      prompt: "verify the harness",
+      outgoingMessageText: "verify the harness",
+      phase: "creating",
+      startedAt: "2026-09-29T19:37:38.000Z",
+      repository: "authentic-intelligence/megpt-mono",
+    };
+    const ready: PendingCloudEnvironmentSend = {
+      ...pending,
+      messageId: "msg-ready",
+      phase: "ready",
+      readyEnvironmentId: "box-environment",
+    };
+    store.setDraftPendingEnvironmentSend(draftId, pending);
+    store.setDraftPendingEnvironmentSend(otherDraftId, ready);
 
     const persistApi = useComposerDraftStore.persist as unknown as {
       getOptions: () => {
@@ -1528,8 +1553,26 @@ describe("composerDraftStore project draft thread mapping", () => {
         ) => ReturnType<typeof useComposerDraftStore.getState>;
       };
     };
-    const hydrated = persistApi.getOptions().merge(persisted, useComposerDraftStore.getState());
-    expect(hydrated.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
+    const hydrated = persistApi
+      .getOptions()
+      .merge(
+        partializeComposerDraftStoreState(useComposerDraftStore.getState()),
+        useComposerDraftStore.getState(),
+      );
+
+    expect(hydrated.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual({
+      provider: "e2b",
+      preview: "verify the harness",
+      messageId: "msg-pending",
+      createdAt: "2026-09-29T19:37:38.000Z",
+      prompt: "verify the harness",
+      outgoingMessageText: "verify the harness",
+      phase: "failed",
+      error: "Setup stopped when this page closed. Send again to resume.",
+      startedAt: "2026-09-29T19:37:38.000Z",
+      repository: "authentic-intelligence/megpt-mono",
+    });
+    expect(hydrated.draftThreadsByThreadKey[otherDraftId]?.pendingEnvironmentSend).toEqual(ready);
   });
 
   it("clears every session for a project, including unmapped invested drafts", () => {
