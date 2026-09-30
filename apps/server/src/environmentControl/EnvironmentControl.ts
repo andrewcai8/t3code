@@ -945,7 +945,11 @@ export const layer = Layer.effect(
                     manifest.warmKey &&
                     manifest.input.repository &&
                     build === null &&
-                    !error.retentionFailed
+                    !error.retentionFailed &&
+                    // Only a chat's first failure. Its retries run on the same
+                    // spare and say nothing about the ones built since.
+                    operation.state.kind === "preparing" &&
+                    operation.state.lastError === null
                   )
                     spares.failed(manifest.input.repository, manifest.warmKey, error.message);
                 }),
@@ -1191,15 +1195,23 @@ export const layer = Layer.effect(
       taken: async (requestId) => (await spareClaims.holder(requestId)) !== null,
       owns: (requestId) =>
         settleSpare(spareClaims, requestId, Date.now(), {
-          frozen: async (chat) =>
-            isProvisionRequestId(chat) &&
-            (await manifests.load(chat).then(
-              () => true,
-              (error: NodeJS.ErrnoException) => {
-                if (error.code === "ENOENT") return false;
-                throw error;
-              },
-            )),
+          claimant: async (chat, spare) => {
+            if (!isProvisionRequestId(chat)) return "gone";
+            const manifest = await manifests.load(chat).catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            });
+            if (!manifest) return "pending";
+            const { request } = manifest;
+            // A retry of a freeze that failed after its claim may have frozen elsewhere.
+            if (request.provider !== "namespace" || request.devboxName !== `t3-${spare}`)
+              return "gone";
+            // A cancel disposes the Devbox only once the request issued its
+            // allocation. Before that, and after it ended, nobody else would.
+            const { state } = await runLogged(store.accept(request));
+            if (state.kind === "intent") return "pending";
+            return state.kind === "disposed" ? "gone" : "owner";
+          },
           release: async (spare) => {
             const operation = await runLogged(store.get(spare));
             if (operation.state.kind === "ready")
@@ -1357,7 +1369,9 @@ export const layer = Layer.effect(
       if (!manager) return;
       const policy = warmBasePolicy(manager.config.provisioning?.warmBaseRefreshHours);
       // Side by side: a tick waits on its builds, and a Mac takes many minutes.
-      await Promise.all([warmBases.tick(policy), spares.tick(policy)]);
+      // Both finish before the next round starts, even when one fails.
+      const ticks = await Promise.allSettled([warmBases.tick(policy), spares.tick(policy)]);
+      for (const tick of ticks) if (tick.status === "rejected") throw tick.reason;
     }).pipe(
       Effect.ignore({ log: "Warn", message: "warm bases could not be kept up" }),
       Effect.repeat(Schedule.spaced(Duration.minutes(1))),

@@ -715,7 +715,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       // where the spare was built: its tree carries absolute paths, like a warm
       // E2B base's. Claimed before anything is derived from the root. A freeze
       // that fails after this leaves the claim to the upkeep, which disposes a
-      // spare whose chat never froze.
+      // spare whose chat never starts on it.
       let spare: ProvisionRequestId | null = null;
       if (input.provider === "namespace" && input.repository) {
         warmKey = await spareKey(config, input.repository);

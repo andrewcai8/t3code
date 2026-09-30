@@ -221,6 +221,17 @@ with open(payload,'rb') as data:
     os.execv(sys.executable,[sys.executable,script])
 `;
 const removeStaging = "import shutil,sys; shutil.rmtree(sys.argv[1])";
+/**
+ * Removes every staging directory under a root. A staged input holds each
+ * credential its preparation installs, and a call the manager did not live to
+ * finish leaves it behind.
+ */
+const removeAllStaging = String.raw`
+import pathlib,shutil,sys
+for path in pathlib.Path(sys.argv[1]).iterdir():
+    if path.name.startswith(('input-','artifact-')) and path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+`;
 
 async function successful(session: NamespaceAccountSession, args: ReadonlyArray<string>) {
   const result = await session.run(args);
@@ -663,6 +674,15 @@ except FileExistsError:
         files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
         homePaths: warmSealHomePaths("namespace"),
       });
+      await successful(config.session, [
+        "exec",
+        resource.devboxId,
+        "--",
+        "python3",
+        "-c",
+        removeAllStaging,
+        manifest.preparation.root,
+      ]);
       await successful(config.session, ["shutdown", resource.devboxId, "--force"]);
     },
     attach: async (

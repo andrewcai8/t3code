@@ -379,11 +379,11 @@ describe("warm base upkeep", () => {
     await h.upkeep.tick(policy);
     const refused = h.current();
     await h.upkeep.tick(policy);
-    expect([
-      refused?.build?.requestId,
-      refused?.lastFailure,
-      h.current()?.ready?.templateId,
-    ]).toEqual([requestId, null, `built-${requestId}`]);
+    expect([refused?.build?.requestId, refused?.lastFailure, h.current()?.ready]).toEqual([
+      requestId,
+      null,
+      expect.objectContaining({ templateId: `built-${requestId}` }),
+    ]);
   });
 
   it("deletes a replaced snapshot only after its grace period, and not while a chat uses it", async () => {
@@ -506,7 +506,8 @@ describe("spare upkeep", () => {
     const frozen: string[] = [];
     const disposed: string[] = [];
     const released: string[] = [];
-    const chats = new Set<string>();
+    /** Where each chat that claimed a spare stands; a chat not listed never froze a request. */
+    const chats = new Map<string, "owner" | "pending" | "gone">();
     const upkeep = makeWarmBaseUpkeep({
       store: {
         list: async () => [...records.values()],
@@ -533,9 +534,9 @@ describe("spare upkeep", () => {
       taken: async (requestId) => (await claims.holder(requestId)) !== null,
       owns: (requestId) =>
         settleSpare(claims, requestId, clock.now, {
-          frozen: async (chat) => chats.has(chat),
-          release: async (released_) => {
-            released.push(released_);
+          claimant: async (chat) => chats.get(chat) ?? "pending",
+          release: async (spareId) => {
+            released.push(spareId);
           },
         }),
       warn: () => {},
@@ -599,7 +600,7 @@ describe("spare upkeep", () => {
     const h = await spares([record({ ready: spare(KEY, NOW - HOUR), lastUsedAt: iso(NOW) })]);
     try {
       await h.claims.take(buildId, CHAT, NOW);
-      h.chats.add(CHAT);
+      h.chats.set(CHAT, "owner");
       await h.upkeep.tick(policy);
       expect([
         h.current()?.ready,
@@ -652,6 +653,23 @@ describe("spare upkeep", () => {
       h.upkeep.want("example/repo", seed);
       await h.upkeep.tick(policy);
       expect(h.frozen).toHaveLength(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("disposes a claimed spare at once when its chat ended or runs on another machine", async () => {
+    const h = await spares([record({ ready: spare(KEY, NOW - HOUR), lastUsedAt: iso(NOW) })]);
+    try {
+      await h.claims.take(buildId, CHAT, NOW);
+      h.chats.set(CHAT, "gone");
+      await h.upkeep.tick(policy);
+      expect([
+        h.current()?.retired,
+        h.disposed,
+        h.released,
+        await h.claims.take(buildId, CHAT, NOW),
+      ]).toEqual([[], [buildId], [], false]);
     } finally {
       await h.cleanup();
     }

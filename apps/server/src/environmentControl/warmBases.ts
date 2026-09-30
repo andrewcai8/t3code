@@ -380,22 +380,30 @@ export function makeSpareClaims(stateDir: string) {
 }
 export type SpareClaims = ReturnType<typeof makeSpareClaims>;
 
-/** How long a claim waits for its chat's freeze to finish before the spare counts as abandoned. */
+/** How long a claim waits for its chat to start on the spare before the spare counts as abandoned. */
 const CLAIM_GRACE_MS = 10 * MINUTE;
 
 /**
  * Settles whose a retired spare's Devbox is. True when it is the upkeep's to
- * dispose: nobody claimed it, or the chat that did never froze a request for
- * it. False once a chat's request runs on it, and then the build that made it
- * is released, so that only the chat's request can dispose the Devbox.
+ * dispose: nobody claimed it, or the chat that did has no use for it. False
+ * once a chat's request runs on it, and then the build that made it is
+ * released, so that only the chat's request can dispose the Devbox.
  */
 export async function settleSpare(
   claims: SpareClaims,
   spare: ProvisionRequestId,
   now: number,
   chats: {
-    /** Whether the chat `requestId` names froze a request. */
-    readonly frozen: (requestId: string) => Promise<boolean>;
+    /**
+     * Where the chat `requestId` names stands with the spare. It is the
+     * `owner` once its request runs on the spare and would dispose it when
+     * cancelled, `pending` while it may still get there, and `gone` when it
+     * ended or runs on another machine.
+     */
+    readonly claimant: (
+      requestId: string,
+      spare: ProvisionRequestId,
+    ) => Promise<"owner" | "pending" | "gone">;
     /** Ends the spare's build without disposing its Devbox. */
     readonly release: (spare: ProvisionRequestId) => Promise<void>;
   },
@@ -403,11 +411,13 @@ export async function settleSpare(
   if (await claims.take(spare, SPARE_RETIRED, now)) return true;
   const holder = await claims.holder(spare);
   if (!holder) throw new Error("The spare's claim disappeared.");
-  if (await chats.frozen(holder.by)) {
+  const claimant = await chats.claimant(holder.by, spare);
+  if (claimant === "owner") {
     await chats.release(spare);
     return false;
   }
-  if (age(holder.at, now) < CLAIM_GRACE_MS) throw new Error("A chat is still claiming the spare.");
+  if (claimant === "pending" && age(holder.at, now) < CLAIM_GRACE_MS)
+    throw new Error("A chat is still claiming the spare.");
   await claims.reassign(spare, SPARE_RETIRED, now);
   return true;
 }

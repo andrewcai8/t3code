@@ -1074,7 +1074,15 @@ describe("Namespace runtime transport", () => {
   it("seals a spare build's root and stops its Mac, keeping the prepared tree and no identity", async () => {
     const f = await fixture();
     const root = NodePath.join(f.directory, "volume/t3-provision", requestId);
-    for (const path of ["workspace", "home/.codex", "home/.config/agent", "home/.t3/userdata"])
+    // What a preparation the manager did not live to finish leaves staged.
+    for (const path of [
+      "workspace",
+      "home/.codex",
+      "home/.config/agent",
+      "home/.t3/userdata",
+      "input-interrupted",
+      "artifact-interrupted",
+    ])
       await NodeFSP.mkdir(NodePath.join(root, path), { recursive: true, mode: 0o700 });
     await NodeFSP.chmod(root, 0o700);
     const write = (path: string, contents: string) =>
@@ -1087,6 +1095,8 @@ describe("Namespace runtime transport", () => {
     await write("home/.codex/auth.json", "a login a prepare command wrote");
     await write("home/.config/agent/token", "a configured home file");
     await write("workspace/prepared", "dependencies");
+    await write("input-interrupted/input.json", "every credential the build installed");
+    await write("artifact-interrupted/runtime.tar", "a staged archive");
     const manifest = decodeManifest({
       input: { requestId, provider: "namespace", providerInstanceId: "codex" },
       request: f.request,
@@ -1139,6 +1149,8 @@ describe("Namespace runtime transport", () => {
       t3Home: await present("home/.t3"),
       login: await present("home/.codex/auth.json"),
       homeFile: await present("home/.config/agent/token"),
+      stagedInput: await present("input-interrupted"),
+      stagedArchive: await present("artifact-interrupted"),
       prepared: await present("workspace.partial/prepared"),
       opened: await present("workspace"),
       running: f.state.instanceId,
@@ -1149,6 +1161,8 @@ describe("Namespace runtime transport", () => {
       t3Home: false,
       login: false,
       homeFile: false,
+      stagedInput: false,
+      stagedArchive: false,
       prepared: true,
       opened: false,
       running: "",
