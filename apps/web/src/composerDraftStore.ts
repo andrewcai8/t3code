@@ -2596,6 +2596,23 @@ function toHydratedThreadDraft(
   };
 }
 
+/**
+ * Only the page that started a cloud send drives its setup, so a send read back mid-setup
+ * lost its driver when that page closed. It comes back failed, and sending again resumes
+ * the same provision request.
+ */
+function hydratedPendingEnvironmentSend(
+  pending: PendingCloudEnvironmentSend,
+): PendingCloudEnvironmentSend {
+  return pending.phase === "ready" || pending.phase === "failed"
+    ? pending
+    : {
+        ...pending,
+        phase: "failed",
+        error: "Setup stopped when this page closed. Send again to resume.",
+      };
+}
+
 function toHydratedDraftThreadState(
   persistedDraftThread: PersistedDraftThreadState,
 ): DraftThreadState {
@@ -2634,7 +2651,11 @@ function toHydratedDraftThreadState(
         )
       : null,
     ...(persistedDraftThread.pendingEnvironmentSend
-      ? { pendingEnvironmentSend: persistedDraftThread.pendingEnvironmentSend }
+      ? {
+          pendingEnvironmentSend: hydratedPendingEnvironmentSend(
+            persistedDraftThread.pendingEnvironmentSend,
+          ),
+        }
       : {}),
   };
 }
