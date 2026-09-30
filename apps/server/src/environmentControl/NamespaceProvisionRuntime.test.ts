@@ -1071,6 +1071,91 @@ describe("Namespace runtime transport", () => {
     expect(attempts()).toHaveLength(2);
   });
 
+  it("seals a spare build's root and stops its Mac, keeping the prepared tree and no identity", async () => {
+    const f = await fixture();
+    const root = NodePath.join(f.directory, "volume/t3-provision", requestId);
+    for (const path of ["workspace", "home/.codex", "home/.config/agent", "home/.t3/userdata"])
+      await NodeFSP.mkdir(NodePath.join(root, path), { recursive: true, mode: 0o700 });
+    await NodeFSP.chmod(root, 0o700);
+    const write = (path: string, contents: string) =>
+      NodeFSP.writeFile(NodePath.join(root, path), contents);
+    await write(
+      "preparation.json",
+      encodeJson({ intent: "build", environmentId: "build-environment", installedFiles: [0] }),
+    );
+    await write("broker-token", "build-broker");
+    await write("home/.codex/auth.json", "a login a prepare command wrote");
+    await write("home/.config/agent/token", "a configured home file");
+    await write("workspace/prepared", "dependencies");
+    const manifest = decodeManifest({
+      input: { requestId, provider: "namespace", providerInstanceId: "codex" },
+      request: f.request,
+      preparation: {
+        requestId,
+        root,
+        repository: null,
+        artifact: {
+          archivePath: `${f.directory}/volume/t3-runtime.tar`,
+          sha256: "d".repeat(64),
+          revision: "c".repeat(40),
+          entrypoint: "cli.mjs",
+        },
+        runtimeExecutable: process.execPath,
+        port: 3773,
+        readinessTimeoutSeconds: 30,
+        brokerTtl: "1h",
+        files: [
+          {
+            scope: "home",
+            destination: ".config/agent/token",
+            sha256: provisionDigest("a configured home file"),
+            contentsBase64: Buffer.from("a configured home file").toString("base64"),
+          },
+        ],
+      },
+      localArtifact: {
+        path: `${f.directory}/runtime.tar`,
+        sha256: "d".repeat(64),
+        revision: "c".repeat(40),
+        entrypoint: "cli.mjs",
+        runtimeExecutable: process.execPath,
+      },
+      egressAllow: [],
+    });
+    const runtime = makeNamespaceProvisionRuntime({
+      session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
+      stateDir: f.directory,
+    });
+    await runtime.seal(f.operation, resource, manifest);
+    const present = async (path: string) =>
+      NodeFSP.access(NodePath.join(root, path)).then(
+        () => true,
+        () => false,
+      );
+    expect({
+      journal: await present("preparation.json"),
+      broker: await present("broker-token"),
+      t3Home: await present("home/.t3"),
+      login: await present("home/.codex/auth.json"),
+      homeFile: await present("home/.config/agent/token"),
+      prepared: await present("workspace.partial/prepared"),
+      opened: await present("workspace"),
+      running: f.state.instanceId,
+      last: f.commands.at(-1),
+    }).toEqual({
+      journal: false,
+      broker: false,
+      t3Home: false,
+      login: false,
+      homeFile: false,
+      prepared: true,
+      opened: false,
+      running: "",
+      last: ["shutdown", "owned-box", "--force"],
+    });
+  });
+
   it("accepts provider removal of the devbox during shutdown", async () => {
     const f = await fixture();
     f.state.expireOnShutdown = true;

@@ -114,6 +114,9 @@ const selectorIdentity = (
   );
 const imageIdentity = selectorIdentity(namespaceMacImageSelectors);
 
+/** A request's Devbox: the spare it claimed, or the one created under its own id. */
+const devboxName = (request: NamespaceRequest) => request.devboxName ?? `t3-${request.requestId}`;
+
 /**
  * With an actor, a Mac is ours only if that actor created it, private to them.
  * Without one (a federated credential), Namespace refuses private Macs, so a
@@ -122,7 +125,7 @@ const imageIdentity = selectorIdentity(namespaceMacImageSelectors);
  */
 export function namespaceResourceMatches(box: DevBox, request: NamespaceRequest) {
   return (
-    box.name === `t3-${request.requestId}` &&
+    box.name === devboxName(request) &&
     (request.creator === undefined || box.creator === request.creator) &&
     box.site === request.region &&
     box.repository === "" &&
@@ -167,6 +170,10 @@ export function makeNamespaceAllocationPorts(
       if (cursors.has(identity)) throw new Error("Namespace repeated a recovery cursor");
       cursors.add(identity);
     }
+    // A claimed spare is a stopped Devbox, and only an activated one has the
+    // instance an allocation records. Any exec activates it.
+    if (request.devboxName && candidates.size > 0)
+      await config.execute(["exec", request.devboxName, "--", "true"], signal);
     const resources = [];
     for (const candidate of candidates.values()) {
       const response = await config.client.fetch(
@@ -202,28 +209,29 @@ export function makeNamespaceAllocationPorts(
         try: async (signal) => {
           // Not ephemeral: shutdown must keep the Devbox record and its volume
           // so a paused Mac resumes with everything T3 prepared on it.
-          await config.execute(
-            [
-              "create",
-              "--name",
-              `t3-${request.requestId}`,
-              "--activate",
-              "--platform",
-              "macos/arm64",
-              "--size",
-              request.size,
-              "--image",
-              request.image,
-              "--site",
-              request.region,
-              "--auto_stop_idle_timeout",
-              `${request.idleTimeoutMinutes}m`,
-              "--no_checkout",
-              "--access_mode",
-              request.creator === undefined ? "shared" : "private",
-            ],
-            signal,
-          );
+          if (!request.devboxName)
+            await config.execute(
+              [
+                "create",
+                "--name",
+                `t3-${request.requestId}`,
+                "--activate",
+                "--platform",
+                "macos/arm64",
+                "--size",
+                request.size,
+                "--image",
+                request.image,
+                "--site",
+                request.region,
+                "--auto_stop_idle_timeout",
+                `${request.idleTimeoutMinutes}m`,
+                "--no_checkout",
+                "--access_mode",
+                request.creator === undefined ? "shared" : "private",
+              ],
+              signal,
+            );
           const resources = await discover(request, signal);
           const resource = resources.length === 1 ? resources[0] : undefined;
           if (!resource) throw new Error("Namespace create has no unique matching resource");

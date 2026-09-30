@@ -49,6 +49,12 @@ export const DurableProvisionRequest = Schema.Union([
     image: TrimmedNonEmptyString,
     region: TrimmedNonEmptyString,
     idleTimeoutMinutes: Schema.Int.check(Schema.isGreaterThan(0)),
+    /**
+     * The Devbox this request runs on when none is created for it: a prepared
+     * spare it claimed. A Devbox cannot be renamed, so the request carries the
+     * name its spare was built under. Absent, the Devbox is `t3-<requestId>`.
+     */
+    devboxName: Schema.optional(TrimmedNonEmptyString),
   }),
 ]);
 export type DurableProvisionRequest = typeof DurableProvisionRequest.Type;

@@ -23,7 +23,12 @@ import {
 import type { NamespaceResource as ImportedNamespaceResource } from "./namespaceProvisioner.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { guestToolInstallCommand, withGuestProviderInstall } from "./guestProviderInstall.ts";
-import { prepareRemoteHost, type RemotePreparationPort } from "./remotePreparation.ts";
+import {
+  prepareRemoteHost,
+  sealWarmBase,
+  type RemotePreparationPort,
+} from "./remotePreparation.ts";
+import { warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import {
@@ -640,6 +645,26 @@ except FileExistsError:
   };
   return {
     prepare,
+    /**
+     * Turns a ready spare build into what the chat that claims it adopts: its
+     * root sealed like a warm E2B base, and the Mac stopped. A stopped Devbox
+     * keeps its volume and nothing else: the runner's own home and every
+     * process are gone, it costs only storage, and claiming it starts a new
+     * instance with a full lifetime ahead of it.
+     */
+    seal: async (
+      operation: ProvisionOperation,
+      resource: NamespaceResource,
+      manifest: ProvisionPreparationManifest,
+    ) => {
+      await assertResource(operation, resource);
+      await sealWarmBase(port(resource, manifest), {
+        root: manifest.preparation.root,
+        files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
+        homePaths: warmSealHomePaths("namespace"),
+      });
+      await successful(config.session, ["shutdown", resource.devboxId, "--force"]);
+    },
     attach: async (
       operation: ProvisionOperation,
       resource: NamespaceResource,
