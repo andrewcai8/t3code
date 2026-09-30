@@ -2597,9 +2597,9 @@ function toHydratedThreadDraft(
 }
 
 /**
- * Only the page that started a cloud send drives its setup, so a send read back mid-setup
- * lost its driver when that page closed. It comes back failed, and sending again resumes
- * the same provision request.
+ * Only the page that started a cloud send follows its setup, so a send read back mid-setup
+ * has nothing following it. The host keeps preparing the machine; the send comes back
+ * failed, and sending again rejoins the same provision request.
  */
 function hydratedPendingEnvironmentSend(
   pending: PendingCloudEnvironmentSend,
@@ -2609,7 +2609,7 @@ function hydratedPendingEnvironmentSend(
     : {
         ...pending,
         phase: "failed",
-        error: "Setup stopped when this page closed. Send again to resume.",
+        error: "This page closed during setup. Send again to pick it back up.",
       };
 }
 

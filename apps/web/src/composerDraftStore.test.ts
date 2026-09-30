@@ -1521,7 +1521,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(persisted.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
   });
 
-  it("reloads an environment send cut off mid-setup as failed, so sending again resumes it", () => {
+  it("reloads an environment send cut off mid-setup as failed, so sending again rejoins it", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
     store.setProjectDraftThreadId(otherProjectRef, otherDraftId, { threadId: otherThreadId });
@@ -1568,7 +1568,7 @@ describe("composerDraftStore project draft thread mapping", () => {
       prompt: "verify the harness",
       outgoingMessageText: "verify the harness",
       phase: "failed",
-      error: "Setup stopped when this page closed. Send again to resume.",
+      error: "This page closed during setup. Send again to pick it back up.",
       startedAt: "2026-09-29T19:37:38.000Z",
       repository: "authentic-intelligence/megpt-mono",
     });
