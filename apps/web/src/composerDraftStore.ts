@@ -33,6 +33,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { useMemo } from "react";
@@ -325,8 +326,11 @@ const PendingCloudEnvironmentSend = Schema.Struct({
   /** The branch the environment starts from; absent is the repository's default. */
   branch: Schema.optionalKey(Schema.String),
   readyEnvironmentId: Schema.optionalKey(Schema.String),
+  /** The model the held message goes out on once the environment is ready. */
+  modelSelection: Schema.optionalKey(ModelSelection),
 });
 export type PendingCloudEnvironmentSend = typeof PendingCloudEnvironmentSend.Type;
+const decodeModelSelectionOption = Schema.decodeUnknownOption(ModelSelection);
 
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
@@ -1667,7 +1671,8 @@ function pendingEnvironmentSendsEqual(
     left.error === right.error &&
     left.repository === right.repository &&
     left.branch === right.branch &&
-    left.readyEnvironmentId === right.readyEnvironmentId
+    left.readyEnvironmentId === right.readyEnvironmentId &&
+    Equal.equals(left.modelSelection, right.modelSelection)
   );
 }
 
@@ -1741,6 +1746,7 @@ function parsePendingEnvironmentSend(value: unknown): PendingCloudEnvironmentSen
   if (typeof pending.startedAt !== "string" || pending.startedAt.length === 0) {
     return undefined;
   }
+  const modelSelection = Option.getOrUndefined(decodeModelSelectionOption(pending.modelSelection));
   return {
     provider: pending.provider,
     preview: pending.preview,
@@ -1757,6 +1763,7 @@ function parsePendingEnvironmentSend(value: unknown): PendingCloudEnvironmentSen
     ...(typeof pending.readyEnvironmentId === "string" && pending.readyEnvironmentId.length > 0
       ? { readyEnvironmentId: pending.readyEnvironmentId }
       : {}),
+    ...(modelSelection ? { modelSelection } : {}),
   };
 }
 
@@ -2596,23 +2603,6 @@ function toHydratedThreadDraft(
   };
 }
 
-/**
- * Only the page that started a cloud send follows its setup, so a send read back mid-setup
- * has nothing following it. The host keeps preparing the machine; the send comes back
- * failed, and sending again rejoins the same provision request.
- */
-function hydratedPendingEnvironmentSend(
-  pending: PendingCloudEnvironmentSend,
-): PendingCloudEnvironmentSend {
-  return pending.phase === "ready" || pending.phase === "failed"
-    ? pending
-    : {
-        ...pending,
-        phase: "failed",
-        error: "This page closed during setup. Send again to pick it back up.",
-      };
-}
-
 function toHydratedDraftThreadState(
   persistedDraftThread: PersistedDraftThreadState,
 ): DraftThreadState {
@@ -2651,11 +2641,7 @@ function toHydratedDraftThreadState(
         )
       : null,
     ...(persistedDraftThread.pendingEnvironmentSend
-      ? {
-          pendingEnvironmentSend: hydratedPendingEnvironmentSend(
-            persistedDraftThread.pendingEnvironmentSend,
-          ),
-        }
+      ? { pendingEnvironmentSend: persistedDraftThread.pendingEnvironmentSend }
       : {}),
   };
 }

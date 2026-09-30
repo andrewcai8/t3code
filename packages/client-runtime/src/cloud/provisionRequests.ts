@@ -150,9 +150,14 @@ export function createProvisionRequestStore(ports: ProvisionRequestStorePorts) {
     }
   }
 
-  function isActive(draftId: string): boolean {
+  /** The draft's live request: null when it has none, or has cancelled it. */
+  function current(draftId: string): DraftProvisionRequest | null {
     const request = readRequests()[draftId];
-    return request !== undefined && !request.cancelRequested;
+    return request !== undefined && !request.cancelRequested ? request : null;
+  }
+
+  function isActive(draftId: string): boolean {
+    return current(draftId) !== null;
   }
 
   function isCurrent(draftId: string, requestId: string): boolean {
@@ -261,6 +266,7 @@ export function createProvisionRequestStore(ports: ProvisionRequestStorePorts) {
   return {
     reserve,
     forget,
+    current,
     isActive,
     isCurrent,
     cancel,

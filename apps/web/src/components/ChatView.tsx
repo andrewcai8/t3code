@@ -1,18 +1,13 @@
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
+import { cancelProvisionRequest, forgetProvisionRequest } from "../cloud/provisionRequests";
+import { cloudSends, patchDraftPendingEnvironmentSend } from "../cloud/cloudSends";
 import {
-  cancelProvisionRequest,
-  forgetProvisionRequest,
-  provisionRequests,
-} from "../cloud/provisionRequests";
-import {
-  type CloudProvisioningProgressPhase,
   claimProvisionedBox,
   draftBoxLease,
   leaseReachesBox,
   newChatProject,
   newChatRunTargets,
   nextDraftEnvironment,
-  provisionCloudEnvironment,
 } from "@t3tools/client-runtime/cloud";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
@@ -63,7 +58,6 @@ import {
 } from "@t3tools/contracts";
 import {
   connectionBox,
-  provisionedGatewayPairingUrl,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
 import {
@@ -369,10 +363,8 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { connectPairing } from "../connection/onboarding";
 import {
   provisionedSandboxFor,
-  provisionedSandboxLeases,
   transferProvisionedSandboxLease,
 } from "../cloud/provisionedSandboxLeases";
 import { terminalEnvironment } from "../state/terminal";
@@ -386,21 +378,14 @@ import { vcsEnvironment } from "../state/vcs";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useProjectClone } from "../state/projectClones";
 import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
-import {
-  useEnvironment,
-  useEnvironments,
-  useEnvironmentHttpBaseUrl,
-  usePrimaryEnvironment,
-} from "../state/environments";
+import { useEnvironment, useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   useProject,
   useProjects,
   useThread,
   useThreadRefs,
   useThreadShell,
-  waitForProjectMatch,
 } from "../state/entities";
-import { environmentPresentations } from "../state/presentation";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
@@ -542,7 +527,7 @@ import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { refreshProvisionedEnvironments } from "../cloud/automationHosts";
-import { holdBoxDemand, useBoxDemand, useBoxLifecycle } from "../cloud/CloudBoxes";
+import { useBoxDemand, useBoxLifecycle } from "../cloud/CloudBoxes";
 import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
 import { useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -840,18 +825,6 @@ function isInProgressCloudProvisioningPhase(
   phase: PendingCloudEnvironmentSend["phase"] | null,
 ): boolean {
   return phase === "creating" || phase === "pairing" || phase === "loading-project";
-}
-
-function patchDraftPendingEnvironmentSend(
-  target: DraftId,
-  patch: Partial<PendingCloudEnvironmentSend>,
-): void {
-  const store = useComposerDraftStore.getState();
-  const current = store.getDraftSession(target)?.pendingEnvironmentSend;
-  if (!current) {
-    return;
-  }
-  store.setDraftPendingEnvironmentSend(target, { ...current, ...patch });
 }
 
 function useLocalDispatchState(input: {
@@ -1582,8 +1555,6 @@ export default function ChatView(props: ChatViewProps) {
     forceExpandedMobileComposer = false,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
-  const currentDraftIdRef = useRef(draftId);
-  currentDraftIdRef.current = draftId;
   const threadSyncPhase = routeKind === "server" ? (props.threadSyncPhase ?? null) : null;
   const threadDetailLoading = threadSyncPhase === "loading";
   const handleNewThread = useNewThreadHandler();
@@ -1947,7 +1918,6 @@ export default function ChatView(props: ChatViewProps) {
   const cloudProvisioningStartedAtRef = useRef<string | null>(null);
   const cloudProvisioningEndedAtRef = useRef<string | null>(null);
   const cloudSetupProviderRef = useRef<"e2b" | "namespace">("e2b");
-  const cloudProvisionEpochRef = useRef(0);
   const [cloudProvisioningError, setCloudProvisioningError] = useState<string | null>(null);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
@@ -2503,7 +2473,6 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useProjects();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
-  const primaryEnvironmentHttpBaseUrl = useEnvironmentHttpBaseUrl(primaryEnvironmentId);
   useEffect(() => {
     if (!activeThreadRef || !activeProjectRef) return;
     registerFaviconProjectForThread(activeThreadRef, activeProjectRef);
@@ -3832,15 +3801,9 @@ export default function ChatView(props: ChatViewProps) {
       cancelProvisionRequest(draftId);
       useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
     }
-    cloudProvisionEpochRef.current += 1;
     sendInFlightRef.current = false;
     const held = heldCloudSendSnapshotRef.current;
     heldCloudSendSnapshotRef.current = null;
-    cloudProvisioningStartedAtRef.current = null;
-    cloudProvisioningEndedAtRef.current = null;
-    setCloudProvisioningPhase(null);
-    setCloudProvisioningError(null);
-    setCreatingCloudEnvironment(false);
     if (held) {
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === held.messageId);
@@ -5004,17 +4967,9 @@ export default function ChatView(props: ChatViewProps) {
     activeProject?.repositoryIdentity,
   );
 
-  /** Provisioning is reserved by the draft, then committed when its first message is sent. */
-  const requestCloudProvision = useAtomCommand(serverEnvironment.provisionEnvironment, {
-    reportFailure: false,
-  });
-  const attachCloudEnvironment = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
-    reportFailure: false,
-  });
   const claimCloudLease = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
     reportFailure: false,
   });
-  const connectCloudPairing = useAtomCommand(connectPairing, { reportFailure: false });
   // The manager picks the account; this instance is only the hint the picker shows for the driver.
   const cloudAccount = useMemo(
     () =>
@@ -5074,148 +5029,28 @@ export default function ChatView(props: ChatViewProps) {
         primaryEnvironmentId === null ||
         !cloudAccount
       ) {
-        return false;
+        return;
       }
-      const viewingStartedDraft = () => currentDraftIdRef.current === startedDraftId;
-      const source = cloudCloneSource(activeProject?.repositoryIdentity, cloudBaseBranch);
-      const showPhase = (phase: CloudProvisioningProgressPhase) => {
-        patchDraftPendingEnvironmentSend(startedDraftId, { phase });
-        if (viewingStartedDraft()) {
-          setCloudProvisioningPhase(phase);
-        }
-      };
-      const failProvisioning = (message: string) => {
-        const endedAt = new Date().toISOString();
-        patchDraftPendingEnvironmentSend(startedDraftId, {
-          phase: "failed",
-          endedAt,
-          error: message,
-        });
-        if (viewingStartedDraft()) {
-          cloudProvisioningEndedAtRef.current = endedAt;
-          setCloudProvisioningError(message);
-          setCloudProvisioningPhase("failed");
-        }
-        toastManager.add({ type: "error", title: message });
-      };
-      if (viewingStartedDraft()) {
-        setCreatingCloudEnvironment(true);
-      }
-      try {
-        const outcome = await provisionCloudEnvironment(
-          {
-            draftId: startedDraftId,
-            managerEnvironmentId: primaryEnvironmentId,
-            input: {
-              provider: cloudProvisioningRequested,
-              providerInstanceId: cloudAccount.instanceId,
-              agentDriver: handoff.agentDriver,
-              ...source,
-            },
-          },
-          {
-            requests: provisionRequests,
-            leases: provisionedSandboxLeases,
-            provision: async (request) => {
-              const result = await requestCloudProvision({
-                environmentId: request.managerEnvironmentId,
-                input: request.input,
-                showsOwnProgress: true,
-              });
-              return AsyncResult.isSuccess(result) ? result.value : null;
-            },
-            attach: async (request) => {
-              const result = await attachCloudEnvironment({
-                environmentId: request.managerEnvironmentId,
-                input: { requestId: request.input.requestId },
-                showsOwnProgress: true,
-              });
-              return AsyncResult.isSuccess(result) ? result.value : null;
-            },
-            pair: async (pairingUrl) => {
-              const result = await connectCloudPairing({
-                pairingUrl,
-                box: { managerId: primaryEnvironmentId },
-              });
-              return AsyncResult.isSuccess(result) ? result.value : null;
-            },
-            ...(primaryEnvironmentHttpBaseUrl === null
-              ? {}
-              : {
-                  rewritePairingUrl: (pairingUrl: string, leaseId: string) =>
-                    provisionedGatewayPairingUrl(
-                      primaryEnvironmentHttpBaseUrl,
-                      leaseId,
-                      pairingUrl,
-                    ),
-                }),
-            isConnected: (environmentId) =>
-              appAtomRegistry.get(environmentPresentations.presentationAtom(environmentId))
-                ?.connection.phase === "connected",
-            // The browser may be running on the manager itself, where even a loopback link works.
-            canReach: () => true,
-            waitForProject: (environmentId, timeoutMs) => {
-              // The box publishes its project over its connection; the draft holds it once ready.
-              const release = holdBoxDemand(environmentId);
-              return waitForProjectMatch(
-                (project) => project.environmentId === environmentId,
-                timeoutMs,
-              )
-                .then(
-                  (project) => project.id,
-                  () => null,
-                )
-                .finally(release);
-            },
-            onPhase: showPhase,
-          },
-        );
-        if (outcome.kind === "cancelled") return false;
-        if (outcome.kind === "failed") {
-          failProvisioning(outcome.message);
-          return false;
-        }
-        setComposerDraftModelSelection(startedDraftId, handoff.modelSelection);
-        setDraftThreadContext(startedDraftId, {
-          projectRef: outcome.projectRef,
-          // The sandbox itself is the isolation boundary. Do not try to create
-          // a second worktree inside its already-cloned checkout, which would
-          // require a base branch the draft does not have after pairing.
-          envMode: "local",
-          branch: null,
-          worktreePath: null,
-          startFromOrigin: false,
-          environmentSelection: "manual",
-        });
-        patchDraftPendingEnvironmentSend(startedDraftId, {
-          phase: "ready",
-          readyEnvironmentId: outcome.projectRef.environmentId,
-        });
-        if (viewingStartedDraft()) {
-          setCloudProvisioningChoice(null);
-          setPendingCloudSendEnvironmentId(outcome.projectRef.environmentId);
-          setCloudProvisioningPhase("ready");
-        }
-        return true;
-      } finally {
-        if (viewingStartedDraft()) {
-          setCreatingCloudEnvironment(false);
-        }
-      }
+      // Saved with the draft, so a page that picks the send back up sends it on the same model.
+      patchDraftPendingEnvironmentSend(startedDraftId, { modelSelection: handoff.modelSelection });
+      await cloudSends.start({
+        draftId: startedDraftId,
+        managerEnvironmentId: primaryEnvironmentId,
+        input: {
+          provider: cloudProvisioningRequested,
+          providerInstanceId: cloudAccount.instanceId,
+          agentDriver: handoff.agentDriver,
+          ...cloudCloneSource(activeProject?.repositoryIdentity, cloudBaseBranch),
+        },
+      });
     },
     [
       activeProject,
-      attachCloudEnvironment,
       canCreateCloudEnvironment,
       cloudBaseBranch,
       cloudProvisioningRequested,
       cloudAccount,
-      connectCloudPairing,
       primaryEnvironmentId,
-      primaryEnvironmentHttpBaseUrl,
-      requestCloudProvision,
-      setComposerDraftModelSelection,
-      setDraftThreadContext,
     ],
   );
   const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
@@ -6394,7 +6229,6 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     cloudRestoreKeyRef.current = restoreKey;
-    cloudProvisionEpochRef.current += 1;
     sendInFlightRef.current = false;
     resumingCloudSendRef.current = false;
     const pending =
@@ -6425,31 +6259,12 @@ export default function ChatView(props: ChatViewProps) {
     setExpandedImage(null);
     if (!pending) {
       heldCloudSendSnapshotRef.current = null;
-      cloudProvisioningStartedAtRef.current = null;
-      cloudProvisioningEndedAtRef.current = null;
       setCloudProvisioningChoice(null);
       setCloudBaseBranch(null);
-      setCloudProvisioningPhase(null);
-      setCloudProvisioningError(null);
-      setCreatingCloudEnvironment(false);
-      setPendingCloudSendEnvironmentId(null);
       setDockedDraftHeroThreadKey(null);
       return;
     }
-    cloudSetupProviderRef.current = pending.provider;
     setCloudBaseBranch(pending.branch ?? null);
-    cloudProvisioningStartedAtRef.current = pending.startedAt;
-    cloudProvisioningEndedAtRef.current = pending.endedAt ?? null;
-    setCloudProvisioningError(pending.error ?? null);
-    setCloudProvisioningPhase(pending.phase);
-    setCreatingCloudEnvironment(isInProgressCloudProvisioningPhase(pending.phase));
-    if (pending.phase === "ready" && pending.readyEnvironmentId) {
-      setCloudProvisioningChoice(null);
-      setPendingCloudSendEnvironmentId(EnvironmentId.make(pending.readyEnvironmentId));
-    } else {
-      setCloudProvisioningChoice(pending.provider);
-      setPendingCloudSendEnvironmentId(null);
-    }
     heldCloudSendSnapshotRef.current = {
       messageId: MessageId.make(pending.messageId),
       createdAt: pending.createdAt,
@@ -6461,6 +6276,32 @@ export default function ChatView(props: ChatViewProps) {
       reviewComments: [],
     };
   }, [draftId, resetLocalDispatch, threadId]);
+
+  // Any page with the draft may be driving its cloud send (see `cloudSends`), so the setup card
+  // follows the draft's record, including on the page that pressed Send.
+  const draftPendingCloudSend = useComposerDraftStore((store) =>
+    draftId === null ? null : (store.getDraftSession(draftId)?.pendingEnvironmentSend ?? null),
+  );
+  useLayoutEffect(() => {
+    const pending = draftPendingCloudSend;
+    cloudProvisioningStartedAtRef.current = pending?.startedAt ?? null;
+    cloudProvisioningEndedAtRef.current = pending?.endedAt ?? null;
+    setCloudProvisioningError(pending?.error ?? null);
+    setCloudProvisioningPhase(pending?.phase ?? null);
+    setCreatingCloudEnvironment(isInProgressCloudProvisioningPhase(pending?.phase ?? null));
+    if (!pending) {
+      setPendingCloudSendEnvironmentId(null);
+      return;
+    }
+    cloudSetupProviderRef.current = pending.provider;
+    if (pending.phase === "ready" && pending.readyEnvironmentId) {
+      setCloudProvisioningChoice(null);
+      setPendingCloudSendEnvironmentId(EnvironmentId.make(pending.readyEnvironmentId));
+    } else {
+      setCloudProvisioningChoice(pending.provider);
+      setPendingCloudSendEnvironmentId(null);
+    }
+  }, [draftPendingCloudSend]);
 
   const closeExpandedImage = useCallback(() => {
     setExpandedImage(null);
@@ -8393,10 +8234,6 @@ export default function ChatView(props: ChatViewProps) {
         if (draftId === null) {
           return;
         }
-        cloudProvisioningEndedAtRef.current = null;
-        setCloudProvisioningError(null);
-        setCreatingCloudEnvironment(true);
-        setCloudProvisioningPhase("creating");
         const currentPending = useComposerDraftStore
           .getState()
           .getDraftSession(draftId)?.pendingEnvironmentSend;
@@ -8417,18 +8254,7 @@ export default function ChatView(props: ChatViewProps) {
               : {}),
           });
         }
-        const provisionEpoch = ++cloudProvisionEpochRef.current;
-        sendInFlightRef.current = true;
-        try {
-          await provisionCloudEnvironmentForSend(draftId, cloudHandoff);
-        } finally {
-          if (
-            currentDraftIdRef.current === draftId &&
-            cloudProvisionEpochRef.current === provisionEpoch
-          ) {
-            sendInFlightRef.current = false;
-          }
-        }
+        await provisionCloudEnvironmentForSend(draftId, cloudHandoff);
         return;
       }
       const composerImagesSnapshot = [...composerImages];
@@ -8575,25 +8401,9 @@ export default function ChatView(props: ChatViewProps) {
         previewAnnotations: composerPreviewAnnotationsSnapshot,
         reviewComments: composerReviewCommentsSnapshot,
       };
-      cloudSetupProviderRef.current = cloudProvisioningRequested;
-      cloudProvisioningStartedAtRef.current = startedAt;
-      cloudProvisioningEndedAtRef.current = null;
-      setCloudProvisioningError(null);
-      setCreatingCloudEnvironment(true);
-      setCloudProvisioningPhase("creating");
-      const provisionEpoch = ++cloudProvisionEpochRef.current;
-      sendInFlightRef.current = true;
-      try {
-        await provisionCloudEnvironmentForSend(draftId, cloudHandoff);
-      } finally {
-        if (
-          currentDraftIdRef.current === draftId &&
-          cloudProvisionEpochRef.current === provisionEpoch
-        ) {
-          sendInFlightRef.current = false;
-        }
-      }
-
+      // Not marked in flight: the setup phase holds the composer, and the held message's own
+      // send starts the moment setup records ready, before this call returns.
+      await provisionCloudEnvironmentForSend(draftId, cloudHandoff);
       return;
     }
     const threadIdForSend = activeThread.id;
@@ -9619,11 +9429,19 @@ export default function ChatView(props: ChatViewProps) {
     setPendingCloudSendEnvironmentId(null);
     setCloudProvisioningPhase(null);
     setCloudProvisioningError(null);
-    resumingCloudSendRef.current = true;
-    void onSend().finally(() => {
-      resumingCloudSendRef.current = false;
-      heldCloudSendSnapshotRef.current = null;
-    });
+    // Another tab may hold the same draft; only one of them sends the held message.
+    void cloudSends
+      .sendHeld(draftId, async () => {
+        resumingCloudSendRef.current = true;
+        try {
+          await onSend();
+        } finally {
+          resumingCloudSendRef.current = false;
+        }
+      })
+      .finally(() => {
+        heldCloudSendSnapshotRef.current = null;
+      });
   }, [
     activeEnvironment?.serverConfig,
     activeThread?.environmentId,

@@ -151,7 +151,6 @@ describe("createCloudSendDriver", () => {
     const reloaded = phone.page("reloaded");
 
     const outcome = await reloaded.driver.resume(draftId);
-    const sends = await Promise.all([reloaded.sendHeld(), reloaded.sendHeld()]);
 
     expect(outcome).toEqual({
       kind: "ready",
@@ -163,6 +162,7 @@ describe("createCloudSendDriver", () => {
       "draft:loading-project",
       "draft:ready box/box-project",
     ]);
+    const sends = await Promise.all([reloaded.sendHeld(), reloaded.sendHeld()]);
     expect(phone.hostCalls).toEqual([
       `reloaded provision ${requestId}`,
       `reloaded provision ${requestId}`,
