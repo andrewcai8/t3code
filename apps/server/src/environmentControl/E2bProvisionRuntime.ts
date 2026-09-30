@@ -60,7 +60,6 @@ const templateResponse = Schema.decodeUnknownSync(Schema.Struct({ templateID: Sc
 const revisionResponse = Schema.decodeUnknownSync(
   Schema.Struct({ sha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)) }),
 );
-const archivePresence = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Boolean));
 
 export function makeProvisionResolution(config: {
   readonly apiKey: string;
@@ -120,6 +119,27 @@ export function warmSealHomePaths(): string[] {
     ]),
   ];
 }
+
+/** Needs passwordless sudo, which the E2B template's user has. */
+const dropPageCacheScript = String.raw`
+import os, subprocess
+os.sync()
+subprocess.run(['sudo', '-n', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'], check=True, timeout=120)
+`;
+
+/** Freed pages keep their contents, and a snapshot stores only a zeroed page as nothing. */
+const zeroFreeMemoryScript = String.raw`
+import mmap, re
+with open('/proc/meminfo') as meminfo:
+    free = int(re.search(r'^MemFree:\s+(\d+) kB', meminfo.read(), re.M).group(1)) * 1024
+# Leaves room for what is still running, so zeroing never invokes the OOM killer.
+size = free - 512 * 1024 * 1024
+if size > 0:
+    zeros = bytes(64 * 1024 * 1024)
+    with mmap.mmap(-1, size) as region:
+        for offset in range(0, size, len(zeros)):
+            region[offset:offset + len(zeros)] = zeros[:size - offset]
+`;
 
 const STDIN_CHUNK = 4 * 1024 * 1024;
 
@@ -240,6 +260,63 @@ export function makeE2bProvisionRuntime(
     });
     return sandbox;
   };
+  const prepare = async (
+    operation: ProvisionOperation,
+    sandboxId: string,
+    manifest: ProvisionPreparationManifest,
+    record?: RecordProvisionPhase,
+    runtime: ProvisionRuntimeArtifact | null = null,
+  ) => {
+    const sandbox = await connect(operation, sandboxId);
+    const { local: desired, guest } = desiredRuntime(manifest, runtime);
+    const stopDigest = startProvisionPhase(record);
+    const { size } = await NodeFS.promises.stat(desired.path);
+    if ((await fileDigest(desired.path)) !== desired.sha256)
+      throw new Error("The stored runtime artifact changed.");
+    stopDigest("artifact.digest", { bytes: size });
+    const transport = e2bPythonPort(sandbox);
+    const stopPresence = startProvisionPhase(record);
+    // The guest reads the archive only to extract a runtime it does not have
+    // yet. A box that already holds this build (a warm base, a resume) is
+    // asked nothing more, and the check stays a shell builtin because a
+    // restored box takes seconds to page in its first interpreter.
+    const installed = `${manifest.preparation.root}/${
+      guest.sha256 === manifest.preparation.artifact.sha256 ? "artifact" : `runtime/${guest.sha256}`
+    }`;
+    // A reset mid-upload leaves a truncated archive. Upload it again; the guest
+    // preparation still refuses an archive whose digest does not match.
+    const staged = await e2bPythonResult(
+      sandbox.commands.run(
+        `test -d ${shellQuote(installed)} || sha256sum ${shellQuote(guest.archivePath)}`,
+        { timeoutMs: PREPARE_COMMAND_TIMEOUT_MS },
+      ),
+    );
+    stopPresence("artifact.presence");
+    if (staged.exitCode !== 0 || (staged.stdout && !staged.stdout.startsWith(desired.sha256))) {
+      const stopUpload = startProvisionPhase(record);
+      // A guest that receives a different file fails its preparation hash check.
+      await uploadFile(await sandbox.uploadUrl(guest.archivePath), desired.path, size);
+      stopUpload("artifact.upload", { bytes: size });
+    }
+    const stopPrepare = startProvisionPhase(record);
+    const result = await prepareRemoteHost(
+      transport,
+      guestInput(operation, sandboxId, manifest, runtime ? { runtime: guest } : {}),
+      record,
+    );
+    stopPrepare("remote.prepare");
+    if (
+      result.artifactSha256 !== desired.sha256 ||
+      result.t3Revision !== desired.revision ||
+      result.projectDir !== `${manifest.preparation.root}/workspace`
+    )
+      throw new Error("Prepared runtime does not match the pinned artifact and workspace.");
+    await verifyRetentionDeadline(operation.request.retentionDeadline, {
+      read: async () => (await verify(operation, sandboxId)).endAt,
+      shorten: (timeoutMs) => sandbox.setTimeout(timeoutMs),
+    });
+    return result;
+  };
   return {
     retainImportedLease: async (lease: {
       readonly sandboxId: string;
@@ -262,70 +339,7 @@ export function makeE2bProvisionRuntime(
         if (!(error instanceof SandboxNotFoundError)) throw error;
       }
     },
-    prepare: async (
-      operation: ProvisionOperation,
-      sandboxId: string,
-      manifest: ProvisionPreparationManifest,
-      record?: RecordProvisionPhase,
-      runtime: ProvisionRuntimeArtifact | null = null,
-    ) => {
-      const sandbox = await connect(operation, sandboxId);
-      const { local: desired, guest } = desiredRuntime(manifest, runtime);
-      const stopDigest = startProvisionPhase(record);
-      const { size } = await NodeFS.promises.stat(desired.path);
-      if ((await fileDigest(desired.path)) !== desired.sha256)
-        throw new Error("The stored runtime artifact changed.");
-      stopDigest("artifact.digest", { bytes: size });
-      const transport = e2bPythonPort(sandbox);
-      const stopPresence = startProvisionPhase(record);
-      const existingArchive = await transport.executePython({
-        script: String.raw`
-import hashlib, json, pathlib, stat, sys
-spec = json.load(sys.stdin)
-path = pathlib.Path(spec['path'])
-try:
-    metadata = path.lstat()
-except FileNotFoundError:
-    print('false')
-else:
-    if not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError('The existing runtime archive is not a regular file')
-    digest = hashlib.sha256()
-    with path.open('rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(chunk)
-    # A reset mid-upload leaves a truncated archive. Upload it again; the guest
-    # preparation still refuses an archive whose digest does not match.
-    print('true' if digest.hexdigest() == spec['sha256'] else 'false')
-`,
-        stdin: JSON.stringify({ path: guest.archivePath, sha256: desired.sha256 }),
-      });
-      stopPresence("artifact.presence");
-      if (!archivePresence(existingArchive.stdout)) {
-        const stopUpload = startProvisionPhase(record);
-        // A guest that receives a different file fails its preparation hash check.
-        await uploadFile(await sandbox.uploadUrl(guest.archivePath), desired.path, size);
-        stopUpload("artifact.upload", { bytes: size });
-      }
-      const stopPrepare = startProvisionPhase(record);
-      const result = await prepareRemoteHost(
-        transport,
-        guestInput(operation, sandboxId, manifest, runtime ? { runtime: guest } : {}),
-        record,
-      );
-      stopPrepare("remote.prepare");
-      if (
-        result.artifactSha256 !== desired.sha256 ||
-        result.t3Revision !== desired.revision ||
-        result.projectDir !== `${manifest.preparation.root}/workspace`
-      )
-        throw new Error("Prepared runtime does not match the pinned artifact and workspace.");
-      await verifyRetentionDeadline(operation.request.retentionDeadline, {
-        read: async () => (await verify(operation, sandboxId)).endAt,
-        shorten: (timeoutMs) => sandbox.setTimeout(timeoutMs),
-      });
-      return result;
-    },
+    prepare,
     /** Fetches the followed branch into a prepared, running box and nothing else. */
     refresh: async (
       operation: ProvisionOperation,
@@ -365,17 +379,38 @@ with urllib.request.urlopen(request, timeout=30) as response:
         remoteAccess: { origin, brokerToken },
       };
     },
-    /** Turns a ready warm base build into what its snapshot should hold. */
+    /**
+     * Turns a ready warm base build into what its snapshot should hold.
+     *
+     * A box restored from a snapshot pages its memory in on demand, and a
+     * build leaves gigabytes of page cache that made every restore slow. So
+     * the sealed build drops its cache and rehearses a chat's start, which
+     * reads back only what a chat reads, before it is sealed for good.
+     */
     seal: async (
       operation: ProvisionOperation,
       sandboxId: string,
       manifest: ProvisionPreparationManifest,
-    ) =>
-      sealWarmBase(e2bPythonPort(await connect(operation, sandboxId)), {
-        root: manifest.preparation.root,
-        files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
-        homePaths: warmSealHomePaths(),
-      }),
+    ) => {
+      const port = e2bPythonPort(await connect(operation, sandboxId));
+      const seal = () =>
+        sealWarmBase(port, {
+          root: manifest.preparation.root,
+          files: manifest.preparation.files.map(({ scope, destination }) => ({
+            scope,
+            destination,
+          })),
+          homePaths: warmSealHomePaths(),
+        });
+      // Best effort: a base that kept its memory is only slower to restore.
+      const trim = (script: string) =>
+        port.executePython({ script, stdin: "" }).catch(() => undefined);
+      await seal();
+      await trim(dropPageCacheScript);
+      await prepare(operation, sandboxId, manifest);
+      await seal();
+      await trim(zeroFreeMemoryScript);
+    },
     /** Snapshots a sealed build, reusing the snapshot an interrupted call already took. */
     snapshot: async (operation: ProvisionOperation, sandboxId: string) => {
       await verify(operation, sandboxId);

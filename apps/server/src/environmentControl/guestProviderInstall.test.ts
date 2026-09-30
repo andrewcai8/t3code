@@ -14,10 +14,76 @@ import {
 } from "./guestProviderInstall.ts";
 
 describe("guestProviderInstallCommand", () => {
-  it("installs Codex into the isolated home prefix", () => {
-    expect(guestProviderInstallCommand("codex")).toBe(
-      'npm install --global --no-fund --no-audit @openai/codex@latest && "$HOME/.local/bin/codex" --version',
-    );
+  const homes: string[] = [];
+  afterEach(async () => {
+    await Promise.all(homes.splice(0).map((home) => NodeFSP.rm(home, { recursive: true })));
+  });
+
+  // Stand-ins for the registry and Cursor's download host. `$HOME/latest` is the
+  // release they serve, and each install logs itself to `$HOME/calls`.
+  const stubs = {
+    npm: [
+      'latest=$(cat "$HOME/latest")',
+      'if [ "$1" = view ]; then echo "$latest"; exit 0; fi',
+      "for last; do :; done; name=${last%@latest}",
+      'echo "install $name" >> "$HOME/calls"',
+      'mkdir -p "$NPM_CONFIG_PREFIX/lib/node_modules/$name" "$NPM_CONFIG_PREFIX/bin"',
+      'printf \'{\\n  "version": "%s"\\n}\\n\' "$latest" > "$NPM_CONFIG_PREFIX/lib/node_modules/$name/package.json"',
+      'for bin in codex claude; do printf \'#!/bin/sh\\necho %s\\n\' "$latest" > "$NPM_CONFIG_PREFIX/bin/$bin"; chmod 755 "$NPM_CONFIG_PREFIX/bin/$bin"; done',
+    ].join("\n"),
+    curl: [
+      'latest=$(cat "$HOME/latest")',
+      'echo "echo \\"install cursor $latest\\" >> \\"\\$HOME/calls\\""',
+      'echo "mkdir -p \\"\\$HOME/.local/share/cursor-agent\\" \\"\\$HOME/.local/bin\\""',
+      'echo "printf \'#!/bin/sh\\\\n\' > \\"\\$HOME/.local/bin/agent\\" && chmod 755 \\"\\$HOME/.local/bin/agent\\""',
+    ].join("\n"),
+  };
+
+  async function makeHome(latest: string) {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-provider-install-"));
+    homes.push(home);
+    await NodeFSP.mkdir(NodePath.join(home, "stubs"));
+    for (const [name, body] of Object.entries(stubs))
+      await NodeFSP.writeFile(NodePath.join(home, "stubs", name), `#!/bin/sh\n${body}\n`, {
+        mode: 0o755,
+      });
+    await NodeFSP.writeFile(NodePath.join(home, "latest"), latest);
+    return home;
+  }
+  const install = (home: string, kind: string) =>
+    NodeChildProcess.spawnSync("sh", ["-c", guestProviderInstallCommand(kind)!], {
+      env: {
+        HOME: home,
+        NPM_CONFIG_PREFIX: NodePath.join(home, ".local"),
+        PATH: `${home}/stubs:${home}/.local/bin:/usr/bin:/bin`,
+      },
+      encoding: "utf8",
+    });
+  const calls = (home: string) =>
+    NodeFSP.readFile(NodePath.join(home, "calls"), "utf8").catch(() => "");
+
+  it.each([
+    ["codex", "@openai/codex"],
+    ["claudeAgent", "@anthropic-ai/claude-code"],
+    ["cursor", "cursor 1.0.0"],
+  ])("installs the %s CLI once and again only for a new release", async (kind, name) => {
+    const home = await makeHome("1.0.0");
+    expect([install(home, kind).status, install(home, kind).status]).toEqual([0, 0]);
+    expect(await calls(home)).toBe(`install ${name}\n`);
+
+    await NodeFSP.writeFile(NodePath.join(home, "latest"), "1.0.1");
+    expect(install(home, kind).status).toBe(0);
+    expect((await calls(home)).trim().split("\n")).toHaveLength(2);
+  });
+
+  it("fails when the CLI cannot be installed", async () => {
+    const home = await makeHome("1.0.0");
+    await NodeFSP.writeFile(NodePath.join(home, "stubs/npm"), "#!/bin/sh\nexit 1\n");
+    await NodeFSP.writeFile(NodePath.join(home, "stubs/curl"), "#!/bin/sh\nexit 22\n");
+    expect(["codex", "cursor"].map((kind) => install(home, kind).status === 0)).toEqual([
+      false,
+      false,
+    ]);
   });
 
   it("leaves unknown drivers without a guest install", () => {

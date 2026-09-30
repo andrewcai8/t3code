@@ -1328,21 +1328,25 @@ describe("warm base", () => {
     await NodeFSP.writeFile(NodePath.join(source, "README.md"), "moved on\n");
     const next = commit(source, "move on");
     const phases: ProvisionPhase[] = [];
-    const second = await prepareRemoteHost(
-      localPort,
-      {
-        ...input,
-        requestId: "repair-2",
-        resourceIdentity: "local:warm-child",
-        requestHash: "d".repeat(64),
-        repository: { ...input.repository, revision: next },
-        files: [...followed.files, homeFile("second account")],
-      },
-      (phase) => {
-        phases.push(phase);
-      },
-    );
+    const chat = {
+      ...input,
+      requestId: "repair-2",
+      resourceIdentity: "local:warm-child",
+      requestHash: "d".repeat(64),
+      repository: { ...input.repository, revision: next },
+      files: [...followed.files, homeFile("second account")],
+    };
+    const second = await prepareRemoteHost(localPort, chat, (phase) => {
+      phases.push(phase);
+    });
     pids.add(second.serverPid);
+    const reopened = async () => {
+      const again: ProvisionPhase[] = [];
+      await prepareRemoteHost(localPort, chat, (phase) => {
+        again.push(phase);
+      });
+      return again.some((phase) => phase.phase === "remote.artifactVerify");
+    };
     const described = await fetch(`http://127.0.0.1:${input.port}/.well-known/t3/environment`);
     expect({
       newIdentity: second.environmentId !== first.environmentId,
@@ -1358,6 +1362,10 @@ describe("warm base", () => {
         "utf8",
       ),
       extracted: phases.some((phase) => phase.phase === "remote.artifactExtract"),
+      // The base recorded its runtime from this disk, so the box that adopts
+      // it does not hash it again; a later open of that box does.
+      verified: phases.some((phase) => phase.phase === "remote.artifactVerify"),
+      verifiedOnReopen: await reopened(),
       warmLeft: await exists(NodePath.join(input.root, "warm.json")),
     }).toEqual({
       newIdentity: true,
@@ -1368,6 +1376,8 @@ describe("warm base", () => {
       dependencies: true,
       credential: "second account",
       extracted: false,
+      verified: false,
+      verifiedOnReopen: true,
       warmLeft: false,
     });
   });
