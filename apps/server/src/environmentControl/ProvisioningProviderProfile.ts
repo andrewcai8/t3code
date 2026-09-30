@@ -132,6 +132,14 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
           Effect.mapError(invalidConfig),
         );
         enabled = instance.enabled ?? config.enabled;
+        // A managed login lives in T3's secret store, not auth.json, so any
+        // auth.json in its home belongs to some other account.
+        if (config.setupMode === "managed")
+          return yield* new ProvisionRefused({
+            reason: "credentials",
+            message:
+              "This Codex account signs in with ChatGPT through T3 Code, which cloud machines can't use. Pick a Codex account signed in with the Codex CLI.",
+          });
         const layout = yield* resolveCodexHomeLayout(config);
         source = NodePath.join(layout.effectiveHomePath ?? layout.sharedHomePath, "auth.json");
         destination = ".codex/auth.json";

@@ -135,6 +135,23 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
     }),
   );
 
+  it.effect("refuses a managed ChatGPT Codex account instead of copying the home's auth.json", () =>
+    Effect.gen(function* () {
+      const source = yield* file("managed/auth.json", "unrelated-cli-login");
+      const settings = decodeSettings({
+        providerInstances: {
+          selected: {
+            driver: "codex",
+            config: { setupMode: "managed", homePath: NodePath.dirname(source) },
+          },
+        },
+      });
+      expect((yield* Effect.flip(resolve(settings))).message).toBe(
+        "This Codex account signs in with ChatGPT through T3 Code, which cloud machines can't use. Pick a Codex account signed in with the Codex CLI.",
+      );
+    }),
+  );
+
   it.effect("requires selected Codex file auth even when API environment is configured", () =>
     Effect.gen(function* () {
       const settings = decodeSettings({
