@@ -63,7 +63,7 @@ case "${1:-}" in
   tools)
     test "$HOME" = /home/user
     npm install --global --no-fund --no-audit \
-      t3@0.0.40 vite-plus@0.3.0 pnpm@11.10.0 @openai/codex@0.157.1 @anthropic-ai/claude-code@2.1.283 \
+      t3@0.0.40 vite-plus@0.3.0 pnpm@11.10.0 @openai/codex@0.159.2 @anthropic-ai/claude-code@2.1.285 \
       wrangler@4.141.0
     temporary=$(mktemp -d)
     trap 'rm -rf "$temporary"' EXIT
