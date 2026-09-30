@@ -3,6 +3,7 @@ import {
   type EnvironmentProvisionResult,
   ProjectId,
   ProviderDriverKind,
+  ProvisionRequestId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -14,7 +15,7 @@ import type { ProvisionStorage } from "./storage.ts";
 const draftId = "draft";
 const managerEnvironmentId = EnvironmentId.make("manager");
 const boxEnvironmentId = EnvironmentId.make("box");
-const requestId = "00000000-0000-4000-8000-000000000001";
+const requestId = ProvisionRequestId.make("00000000-0000-4000-8000-000000000001");
 const sendInput = {
   provider: "e2b" as const,
   providerInstanceId: "codex-account",
@@ -39,8 +40,16 @@ const readyEnvironment = {
     runtimeEntrypoint: "/prepared/t3/index.mjs",
   },
 };
-const ready = { kind: "ready", requestId, environment: readyEnvironment } as const;
-const inProgress = { kind: "pending", requestId, message: PROVISION_IN_PROGRESS_MESSAGE } as const;
+const ready: EnvironmentProvisionResult = {
+  kind: "ready",
+  requestId,
+  environment: readyEnvironment,
+};
+const inProgress: EnvironmentProvisionResult = {
+  kind: "pending",
+  requestId,
+  message: PROVISION_IN_PROGRESS_MESSAGE,
+};
 
 function memoryStorage(): ProvisionStorage {
   const records = new Map<string, string>();
@@ -59,10 +68,15 @@ function requestStore(storage: ProvisionStorage, randomUUID: () => string) {
   return createProvisionRequestStore({
     storage,
     randomUUID,
-    // Retries run on the next task, so a test waits on the host's answers, not on a clock.
+    // A retry fires as soon as the current step settles, so nothing waits on a clock.
     schedule: (callback) => {
-      const timer = setTimeout(callback, 0);
-      return () => clearTimeout(timer);
+      let scheduled = true;
+      void Promise.resolve().then(() => {
+        if (scheduled) callback();
+      });
+      return () => {
+        scheduled = false;
+      };
     },
   });
 }
