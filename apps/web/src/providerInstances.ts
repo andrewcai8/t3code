@@ -93,16 +93,28 @@ const CLOUD_AGENT_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent"
  * cloud-capable driver, labeled as the driver rather than an account, because
  * the manager routes the provision to whichever account of that driver has the
  * most usage left. The entry is a real local instance so its id can ride along
- * as the provision hint: a ready instance first, the driver's default next.
- * Its models are the hint's own; every account of a driver serves the same
- * catalog, and a union would offer models the hint cannot fall back to.
+ * as the provision hint: a usable account first, then a ready one, then the
+ * driver's default. Its models are the hint's own; every account of a driver
+ * serves the same catalog, and a union would offer models the hint cannot fall
+ * back to.
+ *
+ * The row is ready whenever the hint is usable, meaning not known to be signed
+ * out. The box runs the agent, not this host, so a host probe that timed out
+ * says nothing about the chat, and the manager refuses with the reason when no
+ * account's login can be copied.
  */
 export function cloudProviderEntries(
   entries: ReadonlyArray<ProviderInstanceEntry>,
 ): ReadonlyArray<ProviderInstanceEntry> {
   const byDriver = new Map<ProviderDriverKind, ProviderInstanceEntry>();
+  const usable = (entry: ProviderInstanceEntry) =>
+    entry.isAvailable &&
+    entry.status !== "disabled" &&
+    entry.snapshot.auth.status !== "unauthenticated";
   const rank = (entry: ProviderInstanceEntry) =>
-    (isProviderInstancePickerReady(entry) ? 2 : 0) + (entry.isDefault ? 1 : 0);
+    (usable(entry) ? 4 : 0) +
+    (isProviderInstancePickerReady(entry) ? 2 : 0) +
+    (entry.isDefault ? 1 : 0);
   for (const entry of entries) {
     if (!CLOUD_AGENT_DRIVERS.has(entry.driverKind) || !isProviderInstancePickerVisible(entry)) {
       continue;
@@ -114,6 +126,7 @@ export function cloudProviderEntries(
     ...entry,
     displayName: PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName,
     accentColor: undefined,
+    status: usable(entry) ? "ready" : entry.status,
   }));
 }
 
