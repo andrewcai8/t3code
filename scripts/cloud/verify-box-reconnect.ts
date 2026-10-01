@@ -653,7 +653,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         );
         if (paused.kind !== "paused")
           return yield* new VerifyFailure({ message: `pause ${paused.kind}` });
-        const timeout = `${options.timeoutMinutes} minutes`;
+        const timeout = Duration.minutes(options.timeoutMinutes);
         const came = yield* waitFor("box reconnected after pause", timeout, (entries) => {
           const after = entries.filter((entry) => entry.environment === "box" && entry.afterPause);
           return (
