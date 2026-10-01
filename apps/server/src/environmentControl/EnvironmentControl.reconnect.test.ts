@@ -274,7 +274,7 @@ it.effect.each(["devbox", "instance"] as const)(
               snapshot: null,
               mac: {
                 incarnation: { instanceId: MAC, site: "iad4", createdAt: 0, deadline: 1 },
-                cache: "reader",
+                cache: "ready",
               },
             },
             garbage: [],
