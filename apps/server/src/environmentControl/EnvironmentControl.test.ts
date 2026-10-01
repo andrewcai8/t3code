@@ -440,6 +440,29 @@ describe("managed cloud commands", () => {
       expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
     });
   });
+  it("leaves an expired box awake while its resume is still preparing it", async () => {
+    await withLease(async ({ driver, manager, registry }) => {
+      let running = true;
+      const preparing = Promise.withResolvers<void>();
+      const prepared = Promise.withResolvers<void>();
+      driver.pause = async () => {
+        running = false;
+      };
+      driver.resume = async () => {
+        preparing.resolve();
+        await prepared.promise;
+        if (!running) throw new Error("websocket: close 1006 (abnormal closure): unexpected EOF");
+        return {};
+      };
+      const resumed = manager.resume(resumeInput);
+      await preparing.promise;
+      await manager.reapExpiredLeases();
+      prepared.resolve();
+      expect(await resumed).toEqual({ kind: "resumed" });
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "active" });
+      expect(running).toBe(true);
+    });
+  });
   it("refresh only observes targets and never contacts or bootstraps the broker", async () => {
     const { manager, calls } = setup();
     const list = await manager.list();
