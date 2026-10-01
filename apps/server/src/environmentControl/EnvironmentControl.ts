@@ -227,24 +227,28 @@ export function createEnvironmentControl(
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
       if (only && !only.has(lease.leaseId)) continue;
-      // An expired heartbeat means no client is watching, not that the agent
-      // stopped. Only a machine confirmed busy stays awake; one that cannot be
-      // read is paused, so a broken machine is never kept alive.
-      if (
-        lease.state === "active" &&
-        (await activity(lease)) === "busy" &&
-        (await leaseRegistry.touch(lease.leaseId))
-      )
-        continue;
-      const release =
-        lease.state === "releasing"
-          ? "started"
-          : await leaseRegistry.beginRelease({
-              leaseId: lease.leaseId,
-              sandboxId: lease.sandboxId,
-            });
-      if (release !== "started") continue;
+      // A resume or renew in flight is working on this box. Stopping it under
+      // them kills their commands, and a resume ends by renewing the lease.
+      if (leaseOperations.has(lease.sandboxId)) continue;
+      leaseOperations.set(lease.sandboxId, { action: "reap" });
       try {
+        // An expired heartbeat means no client is watching, not that the agent
+        // stopped. Only a machine confirmed busy stays awake; one that cannot be
+        // read is paused, so a broken machine is never kept alive.
+        if (
+          lease.state === "active" &&
+          (await activity(lease)) === "busy" &&
+          (await leaseRegistry.touch(lease.leaseId))
+        )
+          continue;
+        const release =
+          lease.state === "releasing"
+            ? "started"
+            : await leaseRegistry.beginRelease({
+                leaseId: lease.leaseId,
+                sandboxId: lease.sandboxId,
+              });
+        if (release !== "started") continue;
         // beginRelease already moved this lease to `releasing`, so the
         // recheck confirms that and not the state it held before.
         const current = await leaseRegistry.findBySandbox(lease.sandboxId);
