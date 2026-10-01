@@ -945,7 +945,7 @@ describe("EnvironmentRegistry", () => {
         yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
         yield* registry.demand(HOST_BOX.environmentId);
         // Resumes the host has been asked for once the box settles into a backoff past `elapsed`.
-        const resumesAt = Effect.fn("resumesAt")(function* (elapsed: string) {
+        const resumesAt = Effect.fn("resumesAt")(function* (elapsed: Duration.Input) {
           const now = Duration.toMillis(Duration.fromInputUnsafe(elapsed));
           yield* TestClock.setTime(now);
           yield* awaitConnectionState(

@@ -9,7 +9,6 @@ export const {
   rememberForEnvironment: rememberProvisionedSandboxForEnvironment,
   transfer: transferProvisionedSandboxLease,
   leaseFor: provisionedSandboxFor,
-  leaseForEnvironment: provisionedSandboxForEnvironment,
   leaseOwnedByEnvironment: provisionedSandboxOwnedByEnvironment,
   forget: forgetProvisionedSandbox,
 } = provisionedSandboxLeases;
