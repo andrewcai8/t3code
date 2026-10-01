@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the token-file test reads a real private directory.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { LabelFilterEntry_LabelFilterOp } from "@namespacelabs/sdk/proto/namespace/stdlib/labels_pb";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
@@ -6,6 +10,7 @@ import {
   InstanceId,
   makeNamespaceArtifacts,
   makeNamespaceInstances,
+  nscWithToken,
   type NamespaceArtifactsClient,
   type NamespaceComputeClient,
   type NscCli,
@@ -44,6 +49,8 @@ interface FakeMac {
   destroyed: boolean;
   halted: boolean;
   volume: "attached" | "committed" | "abandoned" | null;
+  readonly ingresses: Map<string, number>;
+  readonly files: Map<string, string>;
 }
 
 /** Namespace Compute plus ssh, as far as the instance boundary can observe them. */
@@ -78,6 +85,8 @@ function makeMacWorld() {
         destroyed: false,
         halted: false,
         volume: (request.volumes ?? []).length > 0 ? "attached" : null,
+        ingresses: new Map(),
+        files: new Map(),
       };
       macs.set(instanceId, mac);
       return { metadata: metadata(instanceId, mac) };
@@ -96,6 +105,25 @@ function makeMacWorld() {
       if (mac.volume === "attached") mac.volume = mac.halted ? "abandoned" : "committed";
       return {};
     },
+    listIngresses: async ({ instanceId }) => ({
+      allocatedIngresses: [...find(instanceId).ingresses].map(([name]) => ({
+        name,
+        fqdn: `${name}-${instanceId}.ord4.nscluster.cloud`,
+      })),
+    }),
+    createIngress: async ({ instanceId, ingresses }) => {
+      const mac = find(instanceId);
+      for (const ingress of ingresses ?? []) {
+        if (mac.ingresses.has(ingress.name ?? "")) throw rpcError(6, "ingress already exists");
+        mac.ingresses.set(ingress.name ?? "", ingress.exportedPortBackend?.port ?? 0);
+      }
+      return {
+        allocatedIngresses: [...mac.ingresses].map(([name]) => ({
+          name,
+          fqdn: `${name}-${instanceId}.ord4.nscluster.cloud`,
+        })),
+      };
+    },
     listInstances: async ({ labelFilter, paginationCursor }) => {
       const found = [...macs].filter(([, mac]) => matches(mac.labels, labelFilter ?? []));
       const page = pageOf(found, paginationCursor);
@@ -109,6 +137,12 @@ function makeMacWorld() {
   const nsc: NscCli = {
     run: async (args, options) => {
       nscCalls.push({ args, ...(options?.stdin === undefined ? {} : { stdin: options.stdin }) });
+      if (args[0] === "instance" && args[1] === "upload") {
+        const mac = macs.get(args[2] ?? "");
+        if (!mac || mac.destroyed) return { exitCode: 1, stdout: "", stderr: "no such instance" };
+        mac.files.set(args[4] ?? "", args[3] ?? "");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       const [verb, flag, instanceId, separator, command, ...rest] = args;
       if (verb !== "ssh" || flag !== "-T" || separator !== "--" || !command || rest.length > 0)
         throw new Error(`unexpected nsc call: ${args.join(" ")}`);
@@ -277,6 +311,55 @@ describe("makeNamespaceInstances", () => {
       args: ["ssh", "-T", "mac-1", "--", "'cat'"],
       stdin: "token-123",
     });
+  });
+});
+
+describe("ingress and upload", () => {
+  it("exposes a guest port once and hands back the same origin on every call", async () => {
+    const world = makeMacWorld();
+    const { instanceId } = await world.instances.create(cacheSpec);
+
+    expect(await world.instances.expose(instanceId, 3773)).toBe(
+      "https://t3-3773-mac-1.ord4.nscluster.cloud",
+    );
+    expect(await world.instances.expose(instanceId, 3773)).toBe(
+      "https://t3-3773-mac-1.ord4.nscluster.cloud",
+    );
+    expect([...(world.macs.get("mac-1")?.ingresses ?? [])]).toEqual([["t3-3773", 3773]]);
+  });
+
+  it("uploads a manager file onto the Mac and reports a failed copy", async () => {
+    const world = makeMacWorld();
+    const { instanceId } = await world.instances.create(cacheSpec);
+
+    await world.instances.upload(instanceId, "/tmp/runtime.tar", "/Volumes/t3/runtime.tar");
+    expect([...(world.macs.get("mac-1")?.files ?? [])]).toEqual([
+      ["/Volumes/t3/runtime.tar", "/tmp/runtime.tar"],
+    ]);
+    await expect(
+      world.instances.upload(neverExisted, "/tmp/runtime.tar", "/Volumes/t3/runtime.tar"),
+    ).rejects.toThrow("nsc instance upload failed: no such instance");
+  });
+});
+
+describe("nscWithToken", () => {
+  it("hands each command a private token file and removes it afterwards", async () => {
+    const stateDir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-nsc-token-"));
+    try {
+      const nsc = nscWithToken({
+        stateDir,
+        issueToken: async () => "private-token",
+        binary: "/bin/sh",
+      });
+      const { stdout } = await nsc.run([
+        "-c",
+        'cat "$NSC_TOKEN_FILE"; ls -l "$NSC_TOKEN_FILE" | cut -c1-10',
+      ]);
+      expect(stdout).toBe('{"bearer_token":"private-token"}-rw-------\n');
+      expect(await NodeFSP.readdir(stateDir)).toEqual([]);
+    } finally {
+      await NodeFSP.rm(stateDir, { recursive: true, force: true });
+    }
   });
 });
 

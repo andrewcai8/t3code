@@ -9,6 +9,7 @@ import {
   type ProvisionRequestConflict,
   type ProvisionResource,
   type ProvisionRequestId,
+  provisionSandboxId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -470,9 +471,7 @@ export class Provisioning extends Context.Service<
             settled(state.recovery, DateTime.toEpochMillis(yield* DateTime.now));
           const resources = new Map(
             [...state.resources, ...found].map((resource) => [
-              resource.provider === "e2b"
-                ? `e2b:${resource.sandboxId}`
-                : `namespace:${resource.devboxId}`,
+              `${resource.provider}:${provisionSandboxId(resource)}`,
               resource,
             ]),
           );

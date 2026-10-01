@@ -4,6 +4,7 @@ import {
   EnvironmentControlError,
   type EnvironmentId,
   ProvisionOperationState,
+  provisionSandboxId,
   type SavedEnvironmentAddress,
 } from "@t3tools/contracts";
 import { PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX } from "@t3tools/shared/remote";
@@ -111,8 +112,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
               ? "disposed"
               : null;
         box =
-          lifecycle === null ||
-          lease.sandboxId !== (resource.provider === "e2b" ? resource.sandboxId : resource.devboxId)
+          lifecycle === null || lease.sandboxId !== provisionSandboxId(resource)
             ? null
             : {
                 lifecycle,

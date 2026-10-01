@@ -18,6 +18,8 @@ export const LEASE_UPKEEP_INTERVAL = Duration.minutes(5);
 export const runLeaseUpkeep = (input: {
   readonly reapExpiredLeases: () => Promise<void>;
   readonly syncLeaseUsage: () => Promise<void>;
+  /** Periodic saves and deadline releases of instance-engine chats. */
+  readonly upkeepCloudChats?: () => Promise<void>;
   readonly reconcileProvisions: Effect.Effect<void, ProvisionStoreError>;
   /** Starts each awake box's pending first turn. Never fails. */
   readonly settleChats: Effect.Effect<void>;
@@ -53,5 +55,12 @@ export const runLeaseUpkeep = (input: {
       .prune(DateTime.formatIso(DateTime.makeUnsafe(now - CACHE_RETENTION_DAYS * 86_400_000)))
       .pipe(Effect.ignore({ log: "Warn", message: "old cloud box usage could not be pruned" }));
   });
-  return Effect.all([repeat(reap), repeat(collectUsage)], { concurrency: 2, discard: true });
+  // Its own loop: a save uploads a snapshot, which must not hold up a pause.
+  const upkeepChats = Effect.tryPromise(input.upkeepCloudChats ?? (async () => {})).pipe(
+    Effect.ignore({ log: "Warn", message: "cloud chats could not be saved" }),
+  );
+  return Effect.all([repeat(reap), repeat(collectUsage), repeat(upkeepChats)], {
+    concurrency: 3,
+    discard: true,
+  });
 };

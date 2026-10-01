@@ -63,6 +63,12 @@ export const DurableProvisionRequest = Schema.Union([
      * name its spare was built under. Absent, the Devbox is `t3-<requestId>`.
      */
     devboxName: Schema.optional(TrimmedNonEmptyString),
+    /**
+     * Runs the chat on per-chat compute instances with a shared cache volume
+     * instead of a Devbox. Absent, the chat runs on a Devbox. Fixed at freeze,
+     * so a config change never moves a chat between engines.
+     */
+    engine: Schema.optional(Schema.Literal("instance")),
   }),
 ]);
 export type DurableProvisionRequest = typeof DurableProvisionRequest.Type;
@@ -72,6 +78,16 @@ export const E2bProvisionResource = Schema.Struct({
   sandboxId: TrimmedNonEmptyString,
 });
 export type E2bProvisionResource = typeof E2bProvisionResource.Type;
+/**
+ * A chat on the Namespace instance engine. It names no machine: its Macs come
+ * and go, and between them the chat lives in a snapshot the manager records.
+ */
+export const NamespaceChatResource = Schema.Struct({
+  provider: Schema.Literal("namespace"),
+  engine: Schema.Literal("instance"),
+  chatId: TrimmedNonEmptyString,
+});
+export type NamespaceChatResource = typeof NamespaceChatResource.Type;
 export const ProvisionResource = Schema.Union([
   E2bProvisionResource,
   Schema.Struct({
@@ -82,8 +98,18 @@ export const ProvisionResource = Schema.Union([
     region: TrimmedNonEmptyString,
     workspaceDir: TrimmedNonEmptyString,
   }),
+  NamespaceChatResource,
 ]);
 export type ProvisionResource = typeof ProvisionResource.Type;
+export type NamespaceDevboxResource = Extract<ProvisionResource, { devboxId: string }>;
+
+/** The id a lease and its clients name the resource by. */
+export const provisionSandboxId = (resource: ProvisionResource): string =>
+  resource.provider === "e2b"
+    ? resource.sandboxId
+    : "engine" in resource
+      ? resource.chatId
+      : resource.devboxId;
 export const ProvisionAllocation = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("direct"), resource: ProvisionResource }),
   Schema.Struct({

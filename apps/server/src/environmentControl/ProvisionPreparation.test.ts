@@ -1746,6 +1746,47 @@ it("runs a chat that claims a spare on the spare's Devbox and root, and cold whe
   }
 });
 
+it("freezes a repository on the instance engine at the cache volume's one root, without a spare", async () => {
+  const f = await fixture();
+  try {
+    const config = spareConfig(f.config, { spare: true, engine: "instance" });
+    const chat = decodeProvisionInput({ ...input, provider: "namespace" });
+    const asked: unknown[] = [];
+    const manifest = await f.store.freeze(chat, config, f.resolver, [f.profile], undefined, {
+      select: async (...args: [string, string]) => {
+        asked.push(args);
+        return SPARE;
+      },
+      claim: async () => true,
+    });
+    expect(asked, "an instance-engine chat never claims a Devbox spare").toEqual([]);
+    expect([
+      manifest.request.provider === "namespace" ? manifest.request.engine : null,
+      manifest.preparation.root,
+      manifest.preparation.artifact.archivePath,
+      manifest.warmKey,
+    ]).toEqual([
+      "instance",
+      "/Volumes/t3/root",
+      `/Volumes/t3/t3-runtime-${manifest.preparation.artifact.sha256}.tar`,
+      undefined,
+    ]);
+    const other = await makeProvisionPreparationStore(f.root + "-devbox").freeze(
+      decodeProvisionInput({ ...input, provider: "namespace", requestId: SPARE }),
+      spareConfig(f.config, { engine: "devbox" }),
+      f.resolver,
+      [f.profile],
+    );
+    expect([
+      other.request.provider === "namespace" ? other.request.engine : null,
+      other.preparation.root,
+    ]).toEqual([undefined, `/Volumes/devbox/t3-provision/${SPARE}`]);
+  } finally {
+    await NodeFSP.rm(f.root + "-devbox", { recursive: true, force: true });
+    await f.cleanup();
+  }
+});
+
 it("keeps a spare only for a repository that opts in, keyed on the machine and what its disk holds", async () => {
   const f = await fixture();
   try {

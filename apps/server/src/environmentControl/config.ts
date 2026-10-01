@@ -168,6 +168,12 @@ const Provisioning = Schema.Struct({
              * to rerun on a tree they already prepared.
              */
             spare: Schema.optional(Schema.Boolean),
+            /**
+             * `instance` runs new chats of this repository on per-chat compute
+             * instances with a shared cache volume; `devbox` (the default) on
+             * Devboxes. A chat keeps the engine it was frozen with.
+             */
+            engine: Schema.optional(Schema.Literals(["devbox", "instance"])),
           }),
         ),
       }),

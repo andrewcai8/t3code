@@ -14,6 +14,7 @@ import {
   type EnvironmentProvisionUpgradeResult,
   type ProvisionFirstTurn,
   type ProvisionOperation,
+  provisionSandboxId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
@@ -65,8 +66,9 @@ export interface ProvisionControlPorts {
   /**
    * Extends the provider's deadline and reports whether the resource is still
    * there. The runtime that owns the provider decides what "gone" looks like.
+   * `released` means its machine is gone but the environment was saved and resumes.
    */
-  readonly touch: (operation: ProvisionOperation) => Promise<"running" | "missing">;
+  readonly touch: (operation: ProvisionOperation) => Promise<"running" | "released" | "missing">;
   /** The build this manager currently pins for a provider, or null when none is configured. */
   readonly pinnedRuntime: (
     provider: "e2b" | "namespace",
@@ -183,13 +185,13 @@ export function makeProvisionControl(
         ...(operation.request.retentionDeadline === undefined
           ? {}
           : { retentionDeadline: operation.request.retentionDeadline }),
-        sandboxId: resource.provider === "e2b" ? resource.sandboxId : resource.devboxId,
+        sandboxId: provisionSandboxId(resource),
         provider: resource.provider,
         providerInstanceId: operation.request.providerInstanceId,
         ...(operation.request.companionInstanceIds === undefined
           ? {}
           : { companionInstanceIds: operation.request.companionInstanceIds }),
-        ...(resource.provider === "namespace" ? { namespaceResource: resource } : {}),
+        ...("devboxId" in resource ? { namespaceResource: resource } : {}),
         ...(operation.request.chat === undefined
           ? {}
           : {
@@ -434,7 +436,7 @@ export function makeProvisionControl(
             ...state.readiness,
             leaseId: lease.leaseId,
             provider: resource.provider,
-            sandboxId: resource.provider === "e2b" ? resource.sandboxId : resource.devboxId,
+            sandboxId: provisionSandboxId(resource),
             providerInstanceId: operation.request.providerInstanceId,
             ...(lease.firstTurn === undefined ? {} : { firstTurn: lease.firstTurn.status }),
             control: {
@@ -529,9 +531,19 @@ export function makeProvisionControl(
           reason: "unknown",
           message: "This environment has no active claimed lease.",
         };
-      if ((yield* remote(operation, () => ports.touch(operation))) === "missing") {
+      const state = yield* remote(operation, () => ports.touch(operation));
+      if (state === "missing") {
         yield* promise(() => leases.markMissing(input.leaseId));
         return missing;
+      }
+      // The Mac is gone but the chat was saved: a resume brings it back on another.
+      if (state === "released") {
+        yield* promise(() => leases.markPaused(input.leaseId));
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The workspace is paused. Reconnect to continue.",
+        };
       }
       const touched = yield* promise(() => leases.touch(input.leaseId));
       return touched

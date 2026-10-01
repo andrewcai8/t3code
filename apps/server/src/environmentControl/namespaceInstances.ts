@@ -1,5 +1,7 @@
-// @effect-diagnostics nodeBuiltinImport:off - spawnNsc owns the nsc subprocess and its private stdin.
+// @effect-diagnostics nodeBuiltinImport:off - spawnNsc owns the nsc subprocess, its private stdin and token file.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import type { createClient } from "@namespacelabs/sdk/api";
 import {
   type ComputeService,
@@ -12,6 +14,8 @@ import {
 } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { LabelFilterEntry_LabelFilterOp } from "@namespacelabs/sdk/proto/namespace/stdlib/labels_pb";
 import * as Schema from "effect/Schema";
+
+import { namespaceMacImageSelectors } from "./namespaceAllocation.ts";
 
 export const InstanceId = Schema.String.check(Schema.isMinLength(1)).pipe(
   Schema.brand("NamespaceInstanceId"),
@@ -92,6 +96,36 @@ export function spawnNsc(
   };
 }
 
+/**
+ * Runs `nsc` on a private token file per call, so every command acts for the
+ * manager's account rather than whatever login the machine has.
+ */
+export function nscWithToken(config: {
+  readonly stateDir: string;
+  readonly issueToken: (durationMs: number) => Promise<string>;
+  readonly binary?: string;
+}): NscCli {
+  return {
+    run: async (args, options = {}) => {
+      await NodeFSP.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
+      const directory = await NodeFSP.mkdtemp(NodePath.join(config.stateDir, "nsc-"));
+      try {
+        const tokenFile = NodePath.join(directory, "token.json");
+        const token = await config.issueToken(options.timeoutMs ?? 300_000);
+        await NodeFSP.writeFile(tokenFile, JSON.stringify({ bearer_token: token }), {
+          mode: 0o600,
+        });
+        return await spawnNsc({
+          ...(config.binary ? { binary: config.binary } : {}),
+          env: { ...process.env, NSC_TOKEN_FILE: tokenFile },
+        }).run(args, options);
+      } finally {
+        await NodeFSP.rm(directory, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
 type ComputeClient = ReturnType<typeof createClient<typeof ComputeService>>;
 type ArtifactsClient = ReturnType<typeof createClient<typeof ArtifactsService>>;
 type CallOptions = { readonly timeoutMs?: number };
@@ -116,6 +150,14 @@ export interface NamespaceComputeClient {
   ): Promise<unknown>;
   listInstances(
     request: Parameters<ComputeClient["listInstances"]>[0],
+    options?: CallOptions,
+  ): Promise<unknown>;
+  createIngress(
+    request: Parameters<ComputeClient["createIngress"]>[0],
+    options?: CallOptions,
+  ): Promise<unknown>;
+  listIngresses(
+    request: Parameters<ComputeClient["listIngresses"]>[0],
     options?: CallOptions,
   ): Promise<unknown>;
 }
@@ -180,14 +222,14 @@ const decodeResolvedArtifact = Schema.decodeUnknownSync(
 const decodeArtifactPage = Schema.decodeUnknownSync(
   Schema.Struct({ artifacts: Schema.Array(WireArtifact), paginationCursor: Schema.Uint8Array }),
 );
+const decodeIngresses = Schema.decodeUnknownSync(
+  Schema.Struct({
+    allocatedIngresses: Schema.Array(Schema.Struct({ name: Schema.String, fqdn: Schema.String })),
+  }),
+);
 const decodeIncarnation = Schema.decodeUnknownSync(MacIncarnation);
 const decodeInstanceId = Schema.decodeUnknownSync(InstanceId);
 
-const macSelectors = [
-  { name: "macos.version", value: "26.x" },
-  { name: "macos.purpose", value: "githubrunner" },
-  { name: "image.with", value: "xcode-latest" },
-];
 const macShapes = {
   m: { virtualCpu: 6, memoryMegabytes: 14_336 },
   l: { virtualCpu: 12, memoryMegabytes: 28_672 },
@@ -282,6 +324,13 @@ export interface NamespaceInstances {
   ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>;
   /** The single exit for an instance. Departing a gone instance succeeds. */
   depart(instanceId: InstanceId, departure: Departure): Promise<void>;
+  /**
+   * The HTTPS origin Namespace serves a guest port on. Reached only with the tenant's
+   * `x-nsc-ingress-auth` bearer, so the manager's proxy is the only way in.
+   */
+  expose(instanceId: InstanceId, port: number): Promise<string>;
+  /** Copies a manager file onto the Mac. The SDK has no upload call, so this is `nsc`. */
+  upload(instanceId: InstanceId, localPath: string, guestPath: string): Promise<void>;
 }
 
 export function makeNamespaceInstances(config: {
@@ -313,7 +362,7 @@ export function makeNamespaceInstances(config: {
               os: "macos",
               machineArch: "arm64",
               ...macShapes[spec.size],
-              selectors: macSelectors,
+              selectors: namespaceMacImageSelectors,
             },
             documentedPurpose: spec.purpose,
             labels: wireLabels(spec.labels),
@@ -357,6 +406,35 @@ export function makeNamespaceInstances(config: {
       return instances.filter((wire) => !isGone(wire)).map(toIncarnation);
     },
     exec,
+    expose: async (instanceId, port) => {
+      const name = `t3-${port}`;
+      const listed = decodeIngresses(
+        await compute.listIngresses({ instanceId }, { timeoutMs: 30_000 }),
+      ).allocatedIngresses.find((ingress) => ingress.name === name);
+      const fqdn =
+        listed?.fqdn ??
+        decodeIngresses(
+          await compute.createIngress(
+            {
+              instanceId,
+              ingresses: [{ name, exportedPortBackend: { port }, httpMatchRule: [] }],
+            },
+            { timeoutMs: 60_000 },
+          ),
+        ).allocatedIngresses.find((ingress) => ingress.name === name)?.fqdn;
+      if (!fqdn)
+        throw new Error(`Namespace allocated no ingress for port ${port} on ${instanceId}`);
+      return privateHttps(`https://${fqdn}`).replace(/\/$/, "");
+    },
+    upload: async (instanceId, localPath, guestPath) => {
+      const result = await nsc.run(["instance", "upload", instanceId, localPath, guestPath], {
+        timeoutMs: 15 * 60_000,
+      });
+      if (result.exitCode !== 0)
+        throw new Error(
+          `nsc instance upload failed: ${(result.stderr || result.stdout).trim().slice(-500)}`,
+        );
+    },
     depart: async (instanceId, departure) => {
       // Halting before the destroy marks the cache version abandoned, so the tag keeps
       // its parent. The result is ignored: ssh drops as the Mac halts.

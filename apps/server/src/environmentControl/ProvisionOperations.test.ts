@@ -7,6 +7,7 @@ import {
   type ProvisionOperation,
   type ProvisionReadiness,
   type ProvisionResource,
+  provisionSandboxId,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -502,7 +503,7 @@ it.effect("cancel keeps uncertain allocation unresolved until recovery can confi
       ...p.ports,
       dispose: (_operation: ProvisionOperation, resource: ProvisionResource) =>
         Effect.sync(() => {
-          disposed.push(resource.provider === "e2b" ? resource.sandboxId : resource.devboxId);
+          disposed.push(provisionSandboxId(resource));
         }),
     };
     yield* Effect.gen(function* () {
@@ -545,7 +546,7 @@ it.effect(
               fail = false;
               return yield* new ProvisionProviderError({ message: "Cleanup reply lost" });
             }
-            disposed.add(resource.provider === "e2b" ? resource.sandboxId : resource.devboxId);
+            disposed.add(provisionSandboxId(resource));
           }),
       };
       yield* Effect.gen(function* () {

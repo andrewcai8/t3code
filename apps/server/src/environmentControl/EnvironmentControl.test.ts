@@ -111,6 +111,41 @@ describe("managed cloud commands", () => {
     });
   });
 
+  it("pauses a saved chat whose Mac its upkeep released, and leaves a box another operation holds", async () => {
+    await withLease(async ({ registry, driver }) => {
+      const results: Array<"kept" | "released" | null> = ["kept", "released"];
+      const upkept: string[] = [];
+      let release: (() => void) | undefined;
+      const resumeHeld = new Promise<void>((resolve) => (release = resolve));
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          resume: async () => {
+            await resumeHeld;
+            return {};
+          },
+          upkeepChat: async ({ sandboxId }) => {
+            upkept.push(sandboxId);
+            return results.shift() ?? null;
+          },
+        },
+        registry,
+        async () => "idle",
+      );
+      await manager.upkeepCloudChats();
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+      const resuming = manager.resume(resumeInput);
+      await manager.upkeepCloudChats();
+      expect(upkept, "a resume in flight holds the box").toEqual(["sandbox"]);
+      release?.();
+      await resuming;
+      await manager.upkeepCloudChats();
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+      expect(upkept).toEqual(["sandbox", "sandbox"]);
+    });
+  });
+
   it("keeps the lease active when pause fails without confirming absence", async () => {
     await withLease(async ({ registry, driver, manager }) => {
       driver.pause = vi.fn().mockRejectedValue(new Error("permission denied"));

@@ -8,7 +8,7 @@ import { extractClaims } from "@namespacelabs/sdk/auth";
 import { ComputeService } from "@namespacelabs/sdk/proto/namespace/cloud/compute/v1beta/compute_pb";
 import { ArtifactsService } from "@namespacelabs/sdk/proto/namespace/cloud/storage/v1beta/artifact_pb";
 import { DevBoxService } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
-import type { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
+import type { NamespaceDevboxResource, ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -38,7 +38,7 @@ import {
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
 
-type NamespaceResource = Extract<ProvisionResource, { provider: "namespace" }>;
+type NamespaceResource = NamespaceDevboxResource;
 interface CliCommand {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
@@ -189,7 +189,7 @@ export async function makeNamespaceAccountSession(config: {
     issueToken: (duration: number, force?: boolean) => source.issueToken(duration, force),
   };
 }
-type NamespaceAccountSession = Awaited<ReturnType<typeof makeNamespaceAccountSession>>;
+export type NamespaceAccountSession = Awaited<ReturnType<typeof makeNamespaceAccountSession>>;
 
 const prepareDirectory = String.raw`
 import os,pathlib,sys
@@ -302,6 +302,129 @@ export function namespacePythonPort(config: {
   };
 }
 
+/** A signed download URL per configured artifact, fresh for this attempt; the guest fetches the bytes itself. */
+export async function resolveNamespaceArtifactSources(
+  artifacts: Pick<NamespaceAccountSession["artifacts"], "resolveArtifact">,
+  manifest: ProvisionPreparationManifest,
+  record?: RecordProvisionPhase,
+) {
+  const configured = manifest.preparation.artifacts ?? [];
+  if (configured.length === 0) return [];
+  const stopResolve = startProvisionPhase(record);
+  const sources = [];
+  for (const { path } of configured) {
+    const { signedDownloadUrl } = await artifacts.resolveArtifact(
+      { namespace: "main", path },
+      { timeoutMs: 30_000 },
+    );
+    const url = URL.parse(signedDownloadUrl);
+    if (!url || url.protocol !== "https:" || url.username || url.password)
+      throw new Error("Namespace artifact requires a private HTTPS download URL");
+    sources.push({ path, url: url.href });
+  }
+  stopResolve("artifact.resolve", { count: sources.length });
+  return sources;
+}
+
+/** Mints a pairing grant over the guest's loopback with the root's broker token. */
+export async function mintNamespacePairing(
+  guest: RemotePreparationPort,
+  input: { readonly root: string; readonly port: number; readonly environmentId: string },
+  record?: RecordProvisionPhase,
+) {
+  const stopPairing = startProvisionPhase(record);
+  const result = await guest.executePython({
+    script: String.raw`
+import json,pathlib,sys,urllib.request
+spec=json.load(sys.stdin)
+origin='http://127.0.0.1:'+str(spec['port'])
+with urllib.request.urlopen(origin+'/.well-known/t3/environment',timeout=10) as response:
+    if json.load(response)['environmentId']!=spec['environmentId']: raise RuntimeError('Environment identity changed')
+token=pathlib.Path(spec['root'],'broker-token').read_text()
+request=urllib.request.Request(origin+'/api/auth/pairing-token',data=json.dumps({'label':'Cloud environment client'}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'credential':json.load(response)['credential'],'brokerToken':token}))
+`,
+    stdin: encodeJson(input),
+  });
+  stopPairing("attach.pairing");
+  if (result.exitCode !== 0) throw new Error("Namespace pairing failed");
+  return decodePairing(result.stdout);
+}
+
+/**
+ * Serves a guest's T3 port on a loopback proxy and verifies it answers as the
+ * expected environment. A recorded lease re-binds the origin a client already
+ * holds, and so does a repeat publish in this process.
+ */
+export function makeNamespacePublisher(config: {
+  readonly proxies: Pick<NamespaceProxyManager, "open" | "restore" | "close">;
+  readonly ingressAuthorization: () => Promise<string>;
+}) {
+  const published = new Map<string, NamespaceProxyLease>();
+  const publishing = new Map<string, Promise<NamespaceProxyLease>>();
+  return {
+    publish: (input: {
+      readonly proxyId: string;
+      readonly environmentId: string;
+      readonly upstream: () => Promise<string>;
+      readonly recorded?: NamespaceProxyLease;
+      readonly record?: RecordProvisionPhase;
+    }) => {
+      const { proxyId, record } = input;
+      let pending = publishing.get(proxyId);
+      if (pending) return pending;
+      pending = (async () => {
+        const stopExpose = startProvisionPhase(record);
+        const upstream = await input.upstream();
+        stopExpose("attach.expose");
+        const open = {
+          proxyId,
+          upstreamHttpBaseUrl: upstream,
+          upstreamWsBaseUrl: upstream.replace(/^https:/, "wss:").replace(/^http:/, "ws:"),
+          // A proxy outlives any single token, so it asks for one per request
+          // rather than pinning the one it opened with.
+          getUpstreamAuthorization: config.ingressAuthorization,
+        };
+        const retained = input.recorded ?? published.get(proxyId);
+        const stopProxy = startProvisionPhase(record);
+        const lease = retained
+          ? await config.proxies.restore({ ...open, ...retained })
+          : await config.proxies.open(open);
+        stopProxy("attach.proxy");
+        published.set(proxyId, lease);
+        try {
+          const stopVerify = startProvisionPhase(record);
+          const response = await fetch(`${lease.proxyOrigin}/.well-known/t3/environment`, {
+            signal: AbortSignal.timeout(30_000),
+            redirect: "error",
+          });
+          if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error(
+              `Namespace published endpoint returned HTTP ${response.status} before T3 identity verification`,
+            );
+          }
+          const descriptor = decodeDescriptor(await response.json());
+          stopVerify("attach.verify");
+          if (descriptor.environmentId !== input.environmentId)
+            throw new Error("Namespace published endpoint returned a different T3 environment");
+        } catch (error) {
+          await config.proxies.close({ proxyId });
+          throw error;
+        }
+        return lease;
+      })().finally(() => publishing.delete(proxyId));
+      publishing.set(proxyId, pending);
+      return pending;
+    },
+    close: async (proxyId: string) => {
+      await publishing.get(proxyId)?.catch(() => undefined);
+      await config.proxies.close({ proxyId });
+      published.delete(proxyId);
+    },
+  };
+}
+
 export function makeNamespaceProvisionRuntime(config: {
   readonly session: NamespaceAccountSession;
   readonly stateDir: string;
@@ -316,9 +439,7 @@ export function makeNamespaceProvisionRuntime(config: {
   const ingressAuthorization =
     config.getIngressAuthorization ??
     (async () => `Bearer ${await config.session.issueToken(60_000)}`);
-  /** Origins this process handed out, so a repeat attach keeps the one a client already holds. */
-  const published = new Map<string, NamespaceProxyLease>();
-  const publishing = new Map<string, Promise<NamespaceProxyLease>>();
+  const publisher = makeNamespacePublisher({ proxies, ingressAuthorization });
   const retain = async (instanceId: string, retentionDeadline?: string) => {
     try {
       const compute = config.session.compute;
@@ -502,28 +623,6 @@ except FileExistsError:
         .catch(() => undefined);
     }
   };
-  /** A signed download URL per configured artifact, fresh for this attempt; the guest fetches the bytes itself. */
-  const resolveArtifactSources = async (
-    manifest: ProvisionPreparationManifest,
-    record?: RecordProvisionPhase,
-  ) => {
-    const artifacts = manifest.preparation.artifacts ?? [];
-    if (artifacts.length === 0) return [];
-    const stopResolve = startProvisionPhase(record);
-    const sources = [];
-    for (const { path } of artifacts) {
-      const { signedDownloadUrl } = await config.session.artifacts.resolveArtifact(
-        { namespace: "main", path },
-        { timeoutMs: 30_000 },
-      );
-      const url = URL.parse(signedDownloadUrl);
-      if (!url || url.protocol !== "https:" || url.username || url.password)
-        throw new Error("Namespace artifact requires a private HTTPS download URL");
-      sources.push({ path, url: url.href });
-    }
-    stopResolve("artifact.resolve", { count: sources.length });
-    return sources;
-  };
   /**
    * Converges the Mac on the manifest: wakes it if shut down, stages the
    * archive once, and runs the remote preparation, which keeps an intact root's
@@ -546,7 +645,11 @@ except FileExistsError:
       stopRetain("allocate.retain");
     }
     await stageArtifact(resource, manifest, desired, guest, record);
-    const artifactSources = await resolveArtifactSources(manifest, record);
+    const artifactSources = await resolveNamespaceArtifactSources(
+      config.session.artifacts,
+      manifest,
+      record,
+    );
     const follow = followedBranch(manifest);
     const stopPrepare = startProvisionPhase(record);
     const ready = await prepareRemoteHost(
@@ -581,9 +684,9 @@ except FileExistsError:
     return ready;
   };
   /**
-   * Exposes the guest's T3 port and serves it on a loopback proxy. A recorded
-   * lease re-binds the origin a client already holds; the exposure is fetched
-   * fresh every time because a woken Mac may publish a new upstream.
+   * Exposes the guest's T3 port and serves it on a loopback proxy. The
+   * exposure is fetched fresh every time because a woken Mac may publish a
+   * new upstream.
    */
   const publish = (
     operation: ProvisionOperation,
@@ -593,66 +696,29 @@ except FileExistsError:
     record?: RecordProvisionPhase,
   ) => {
     if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
-    const environmentId = operation.state.readiness.environmentId;
-    const proxyId = `provision-${operation.request.requestId}`;
-    let pending = publishing.get(proxyId);
-    if (pending) return pending;
-    pending = (async () => {
-      const stopExpose = startProvisionPhase(record);
-      const output = await successful(config.session, [
-        "url",
-        "expose",
-        resource.devboxId,
-        "--port",
-        String(manifest.preparation.port),
-        "--access",
-        "workspace",
-        "-o",
-        "json",
-      ]);
-      stopExpose("attach.expose");
-      const upstream = decodeExposure(output).urls[0]?.url;
-      if (!upstream || new URL(upstream).protocol !== "https:")
-        throw new Error("Namespace exposure did not return a private HTTPS endpoint");
-      const input = {
-        proxyId,
-        upstreamHttpBaseUrl: upstream,
-        upstreamWsBaseUrl: upstream.replace(/^https:/, "wss:"),
-        // A proxy outlives any single token, so it asks for one per request
-        // rather than pinning the one it opened with.
-        getUpstreamAuthorization: ingressAuthorization,
-      };
-      const retained = recorded ?? published.get(proxyId);
-      const stopProxy = startProvisionPhase(record);
-      const lease = retained
-        ? await proxies.restore({ ...input, ...retained })
-        : await proxies.open(input);
-      stopProxy("attach.proxy");
-      published.set(proxyId, lease);
-      try {
-        const stopVerify = startProvisionPhase(record);
-        const response = await fetch(`${lease.proxyOrigin}/.well-known/t3/environment`, {
-          signal: AbortSignal.timeout(30_000),
-          redirect: "error",
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
-          throw new Error(
-            `Namespace published endpoint returned HTTP ${response.status} before T3 identity verification`,
-          );
-        }
-        const descriptor = decodeDescriptor(await response.json());
-        stopVerify("attach.verify");
-        if (descriptor.environmentId !== environmentId)
-          throw new Error("Namespace published endpoint returned a different T3 environment");
-      } catch (error) {
-        await proxies.close({ proxyId });
-        throw error;
-      }
-      return lease;
-    })().finally(() => publishing.delete(proxyId));
-    publishing.set(proxyId, pending);
-    return pending;
+    return publisher.publish({
+      proxyId: `provision-${operation.request.requestId}`,
+      environmentId: operation.state.readiness.environmentId,
+      ...(recorded ? { recorded } : {}),
+      ...(record ? { record } : {}),
+      upstream: async () => {
+        const output = await successful(config.session, [
+          "url",
+          "expose",
+          resource.devboxId,
+          "--port",
+          String(manifest.preparation.port),
+          "--access",
+          "workspace",
+          "-o",
+          "json",
+        ]);
+        const upstream = decodeExposure(output).urls[0]?.url;
+        if (!upstream || new URL(upstream).protocol !== "https:")
+          throw new Error("Namespace exposure did not return a private HTTPS endpoint");
+        return upstream;
+      },
+    });
   };
   return {
     prepare,
@@ -695,27 +761,11 @@ except FileExistsError:
       await running(operation, resource);
       if (operation.state.kind !== "ready") throw new Error("Namespace environment is not ready");
       const environmentId = operation.state.readiness.environmentId;
-      const stopPairing = startProvisionPhase(record);
-      const result = await port(resource, manifest).executePython({
-        script: String.raw`
-import json,pathlib,sys,urllib.request
-spec=json.load(sys.stdin)
-origin='http://127.0.0.1:'+str(spec['port'])
-with urllib.request.urlopen(origin+'/.well-known/t3/environment',timeout=10) as response:
-    if json.load(response)['environmentId']!=spec['environmentId']: raise RuntimeError('Environment identity changed')
-token=pathlib.Path(spec['root'],'broker-token').read_text()
-request=urllib.request.Request(origin+'/api/auth/pairing-token',data=json.dumps({'label':'Cloud environment client'}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'credential':json.load(response)['credential'],'brokerToken':token}))
-`,
-        stdin: encodeJson({
-          root: manifest.preparation.root,
-          port: manifest.preparation.port,
-          environmentId,
-        }),
-      });
-      stopPairing("attach.pairing");
-      if (result.exitCode !== 0) throw new Error("Namespace pairing failed");
-      const { credential, brokerToken } = decodePairing(result.stdout);
+      const { credential, brokerToken } = await mintNamespacePairing(
+        port(resource, manifest),
+        { root: manifest.preparation.root, port: manifest.preparation.port, environmentId },
+        record,
+      );
       const namespaceProxy = await publish(operation, resource, manifest, recordedProxy, record);
       return {
         pairingUrl: `${namespaceProxy.proxyOrigin}/pair#token=${encodeURIComponent(credential)}`,
@@ -778,10 +828,7 @@ with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'
       await retain(response.instanceId);
     },
     dispose: async (operation: ProvisionOperation, resource: NamespaceResource) => {
-      const proxyId = `provision-${operation.request.requestId}`;
-      await publishing.get(proxyId)?.catch(() => undefined);
-      await proxies.close({ proxyId });
-      published.delete(proxyId);
+      await publisher.close(`provision-${operation.request.requestId}`);
       const observed = await assertResource(operation, resource).catch((error: unknown) => {
         if (isNotFound(error)) return null;
         throw error;
