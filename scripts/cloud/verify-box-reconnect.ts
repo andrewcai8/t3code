@@ -33,6 +33,7 @@ import {
   PrimaryConnectionTarget,
   ProfileStore,
   type SupervisorConnectionState,
+  Presence,
   Wakeups,
   provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
@@ -79,6 +80,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schedule from "effect/Schedule";
@@ -127,6 +129,8 @@ const encodeReport = Schema.encodeEffect(
       provider: Schema.String,
       dryRun: Schema.Boolean,
       timeoutMinutes: Schema.Finite,
+      awaySeconds: Schema.Finite,
+      wokeWhileAway: Schema.Boolean,
       box: Schema.NullOr(
         Schema.Struct({
           requestId: Schema.String,
@@ -185,6 +189,7 @@ interface Options {
   readonly timeoutMinutes: number;
   readonly report: string;
   readonly dryRun: boolean;
+  readonly awaySeconds: number;
 }
 
 const managerBearer = Effect.fn("managerBearer")(function* (options: Options) {
@@ -337,10 +342,18 @@ const unavailable = (detail: string) =>
   new ConnectionBlockedError({ reason: "unsupported", detail });
 const notSignedIn = () => Effect.die("This verifier is not signed in to T3 Connect.");
 
-/** Not signed in to T3 Connect, no SSH, always online, never backgrounded. */
-const platformLayer = (manager: PrimaryConnectionRegistration, bearer: string) =>
+/**
+ * Not signed in to T3 Connect, no SSH, always online, never backgrounded. The user is on screen
+ * while `visible` says so, and touches the app whenever they come back.
+ */
+const platformLayer = (
+  manager: PrimaryConnectionRegistration,
+  bearer: string,
+  visible: Queue.Queue<boolean>,
+) =>
   Layer.mergeAll(
     memoryStorageLayer,
+    Presence.layer({ visible: Stream.fromQueue(visible), inputs: Stream.never }),
     NodeSocket.layerWebSocketConstructor,
     Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
     Wakeups.layer({ changes: Stream.never }),
@@ -404,12 +417,16 @@ const platformLayer = (manager: PrimaryConnectionRegistration, bearer: string) =
     ),
   );
 
-const clientLayer = (manager: PrimaryConnectionRegistration, bearer: string) =>
+const clientLayer = (
+  manager: PrimaryConnectionRegistration,
+  bearer: string,
+  visible: Queue.Queue<boolean>,
+) =>
   Connection.layerWithOptions({
     environmentThemes: true,
     usageLimitSources: true,
     usageLimitsCommand: true,
-  }).pipe(Layer.provideMerge(platformLayer(manager, bearer)));
+  }).pipe(Layer.provideMerge(platformLayer(manager, bearer, visible)));
 
 const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const fs = yield* FileSystem.FileSystem;
@@ -423,6 +440,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   );
 
   const log = yield* SubscriptionRef.make<ReadonlyArray<Transition>>([]);
+  const visible = yield* Queue.unbounded<boolean>();
+  yield* Queue.offer(visible, true);
+  let wokeWhileAway = false;
   const pausedAt = yield* Ref.make<number | null>(null);
   const created: {
     requestId: ProvisionRequestId | null;
@@ -640,6 +660,10 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           return;
         }
 
+        if (options.awaySeconds > 0) {
+          yield* Queue.offer(visible, false);
+          yield* Console.log(`[${yield* elapsed}s] user leaves: the app is hidden`);
+        }
         const paused = yield* onManager(
           "environmentControl.pause",
           request(WS_METHODS.environmentControlPause, {
@@ -653,6 +677,23 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         );
         if (paused.kind !== "paused")
           return yield* new VerifyFailure({ message: `pause ${paused.kind}` });
+        if (options.awaySeconds > 0) {
+          yield* Effect.sleep(Duration.seconds(options.awaySeconds));
+          wokeWhileAway = (yield* SubscriptionRef.get(log)).some(
+            (entry) =>
+              entry.environment === "box" &&
+              entry.afterPause &&
+              (entry.phase === "waking" || entry.phase === "connected"),
+          );
+          yield* Console.log(
+            `[${yield* elapsed}s] user returns after ${options.awaySeconds}s away; woken while away: ${wokeWhileAway}`,
+          );
+          if (wokeWhileAway)
+            return yield* new VerifyFailure({
+              message: "the box was woken while its user was away",
+            });
+          yield* Queue.offer(visible, true);
+        }
         const timeout = Duration.minutes(options.timeoutMinutes);
         const came = yield* waitFor("box reconnected after pause", timeout, (entries) => {
           const after = entries.filter((entry) => entry.environment === "box" && entry.afterPause);
@@ -668,7 +709,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         );
         outcome = came ? "reconnected" : "not-reconnected";
       }).pipe(Effect.scoped);
-    }).pipe(Effect.scoped, Effect.provide(clientLayer(manager, bearer)));
+    }).pipe(Effect.scoped, Effect.provide(clientLayer(manager, bearer, visible)));
   });
 
   /** Disposes the box on the manager, retrying while another lease operation holds it. */
@@ -714,6 +755,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     provider: options.provider,
     dryRun: options.dryRun,
     timeoutMinutes: options.timeoutMinutes,
+    awaySeconds: options.awaySeconds,
+    wokeWhileAway,
     box:
       created.box && created.requestId
         ? {
@@ -763,6 +806,12 @@ const command = Command.make(
       Flag.withDescription("Stop once the box first connects; no pause."),
       Flag.withDefault(false),
     ),
+    awaySeconds: Flag.Int("away-seconds").pipe(
+      Flag.withDescription(
+        "Hide the app as the box is paused and keep it hidden this long, checking nothing wakes the box, then come back.",
+      ),
+      Flag.withDefault(0),
+    ),
   },
   (flags) =>
     Effect.gen(function* () {
@@ -774,6 +823,7 @@ const command = Command.make(
         timeoutMinutes: flags.timeoutMinutes,
         report: path.resolve(flags.report),
         dryRun: flags.dryRun,
+        awaySeconds: flags.awaySeconds,
       });
     }),
 ).pipe(
