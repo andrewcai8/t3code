@@ -73,6 +73,7 @@ import * as Console from "effect/Console";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -162,6 +163,7 @@ const redact = (text: string) =>
   );
 const describe = (cause: unknown) => redact(hasMessage(cause) ? cause.message : String(cause));
 
+const isVerifyFailure = Schema.is(VerifyFailure);
 const bounded = <A, E, R>(self: Effect.Effect<A, E, R>, what: string) =>
   self.pipe(
     Effect.timeoutOrElse({
@@ -170,7 +172,7 @@ const bounded = <A, E, R>(self: Effect.Effect<A, E, R>, what: string) =>
         Effect.fail(new VerifyFailure({ message: `${what}: no answer in ${CALL_TIMEOUT}` })),
     }),
     Effect.mapError((cause) =>
-      cause instanceof VerifyFailure
+      isVerifyFailure(cause)
         ? cause
         : new VerifyFailure({ message: `${what}: ${describe(cause)}` }),
     ),
@@ -427,7 +429,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     box: ProvisionedEnvironment | null;
     profileHttpOrigin: string | null;
   } = { requestId: null, box: null, profileHttpOrigin: null };
-  let outcome: Outcome = "failed";
+  // Assigned inside the run's generator, so the type is widened by hand.
+  let outcome = "failed" as Outcome;
   let error: string | null = null;
   let disposed: string | null = null;
 
@@ -484,7 +487,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
 
   const waitFor = (
     what: string,
-    duration: string,
+    duration: Duration.Input,
     done: (entries: ReadonlyArray<Transition>) => boolean,
   ) =>
     SubscriptionRef.changes(log).pipe(
@@ -493,7 +496,11 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       Effect.timeoutOrElse({
         duration,
         orElse: () =>
-          Effect.fail(new VerifyFailure({ message: `${what}: not within ${duration}` })),
+          Effect.fail(
+            new VerifyFailure({
+              message: `${what}: not within ${Duration.format(Duration.fromInputUnsafe(duration))}`,
+            }),
+          ),
       }),
     );
   const lastOf = (entries: ReadonlyArray<Transition>, environment: Transition["environment"]) =>
@@ -613,9 +620,11 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       created.profileHttpOrigin =
         profile?._tag === "BearerConnectionProfile" ? redact(profile.httpBaseUrl) : null;
       yield* Console.log(
-        `box saved as ${saved?.target._tag} box=${JSON.stringify(
-          saved?.target._tag === "BearerConnectionTarget" ? (saved.target.box ?? null) : null,
-        )} profile=${created.profileHttpOrigin}`,
+        `box saved as ${saved?.target._tag} managerId=${
+          saved?.target._tag === "BearerConnectionTarget"
+            ? (saved.target.box?.managerId ?? "none")
+            : "none"
+        } profile=${created.profileHttpOrigin}`,
       );
 
       yield* Effect.gen(function* () {
