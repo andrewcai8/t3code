@@ -1793,6 +1793,48 @@ it("freezes a repository on the instance engine at the cache volume's one root, 
   }
 });
 
+it("freezes every prepare command for a chat and only the foreground ones for a template builder", async () => {
+  const f = await fixture();
+  try {
+    const serve = "make serve &";
+    const marked = ["make setup", { command: serve, background: true }];
+    const frozen = await Promise.all(
+      (
+        [
+          ["instance", marked],
+          ["instance", ["make setup", serve]],
+          ["devbox", marked],
+        ] as const
+      ).map(([engine, prepareCommands], index) =>
+        makeProvisionPreparationStore(`${f.root}-${index}`).freeze(
+          decodeProvisionInput({ ...input, provider: "namespace" }),
+          spareConfig(f.config, { engine, prepareCommands }),
+          f.resolver,
+          [f.profile],
+        ),
+      ),
+    );
+    expect(
+      frozen.map((manifest) => [
+        manifest.preparation.prepareCommands,
+        manifest.buildPrepareCommands,
+      ]),
+    ).toEqual([
+      [["make setup", serve], ["make setup"]],
+      [["make setup", serve], undefined],
+      [["make setup", serve], undefined],
+    ]);
+    expect(
+      frozen[0]?.request.preparationHash,
+      "the marker is not part of what a chat prepares",
+    ).toBe(frozen[1]?.request.preparationHash);
+  } finally {
+    for (const index of [0, 1, 2])
+      await NodeFSP.rm(`${f.root}-${index}`, { recursive: true, force: true });
+    await f.cleanup();
+  }
+});
+
 it("keeps a spare only for a repository that opts in, keyed on the machine and what its disk holds", async () => {
   const f = await fixture();
   try {

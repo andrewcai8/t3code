@@ -20,8 +20,11 @@ import * as Schema from "effect/Schema";
 import { resolveNamespaceIdentity, namespaceMacImage } from "./namespaceAllocation.ts";
 import {
   canonicalRepository,
+  commandLine,
+  isBackground,
   ProvisionRuntimeArtifact,
   type EnvironmentControlConfig,
+  type NamespacePrepareCommand,
 } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
@@ -91,6 +94,11 @@ export const ProvisionPreparationManifest = Schema.Struct({
    * repository's `namespace.derivedHomePaths`. Outside `preparation`, like `warmKey`.
    */
   derivedHomePaths: Schema.optional(Schema.Array(Schema.String)),
+  /**
+   * The prepare commands an instance-engine template builder runs, when the repository marks some
+   * `background`. Absent, it runs them all. Outside `preparation`: chats run every command.
+   */
+  buildPrepareCommands: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(
@@ -182,7 +190,7 @@ const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
 /**
  * The instance engine's cache volume and its one root. Every Mac mounts the
  * repository's cache volume here and every chat prepares at the same root, so a
- * template sealed by one chat is valid for the next.
+ * template a builder Mac sealed there is valid for every chat.
  */
 const NAMESPACE_INSTANCE_MOUNT = "/Volumes/t3";
 const E2B_ROOT = "/tmp/t3-provision/box";
@@ -593,7 +601,11 @@ export async function spareKey(
   const setup = provisioning.repositories?.find(
     (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
   )?.namespace;
-  const prepareCommands = setup?.prepareCommands ?? provisioning.namespace.prepareCommands ?? [];
+  const prepareCommands = (
+    setup?.prepareCommands ??
+    provisioning.namespace.prepareCommands ??
+    []
+  ).map(commandLine);
   if (setup?.spare !== true || prepareCommands.length === 0) return null;
   return provisionDigest(
     stableStringify({
@@ -991,10 +1003,15 @@ export function makeProvisionPreparationStore(stateDir: string) {
           )
         : undefined;
       const repositorySetup = repositoryEntry?.[input.provider];
-      const prepareCommands =
+      const configuredCommands: ReadonlyArray<NamespacePrepareCommand> =
         repositorySetup?.prepareCommands ??
         (input.provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
         [];
+      const prepareCommands = configuredCommands.map(commandLine);
+      // What a template builder runs: no chat, so none of the services one would use.
+      const buildPrepareCommands = configuredCommands
+        .filter((entry) => !isBackground(entry))
+        .map(commandLine);
       // Identity only. The download URL Namespace signs for an artifact
       // expires long before this manifest stops being replayed, so each
       // convergence resolves one afresh.
@@ -1103,6 +1120,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         ...(warmKey ? { warmKey } : {}),
         ...(instanceEngine && repositoryEntry?.namespace?.derivedHomePaths?.length
           ? { derivedHomePaths: repositoryEntry.namespace.derivedHomePaths }
+          : {}),
+        ...(instanceEngine && buildPrepareCommands.length !== prepareCommands.length
+          ? { buildPrepareCommands }
           : {}),
       };
       await writeOnce(manifestPath(input.requestId), (temporary) =>
