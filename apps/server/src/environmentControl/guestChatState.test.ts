@@ -688,11 +688,18 @@ describe("guest chat state", () => {
     const recreate = NodeChildProcess.spawn(
       "sh",
       ["-c", 'while :; do mkdir -p "$1/.TemporaryItems/folders"; done', "sh", w.mount],
-      { stdio: "ignore" },
+      { stdio: "ignore", detached: true },
     );
-    cleanups.push(() => void recreate.kill("SIGKILL"));
+    // The whole group, so no mkdir outlives the loop and races the world's cleanup.
+    const stop = async () => {
+      if (recreate.exitCode !== null || recreate.signalCode !== null) return;
+      const exited = new Promise((resolve) => recreate.once("exit", resolve));
+      process.kill(-recreate.pid!, "SIGKILL");
+      await exited;
+    };
+    cleanups.push(stop);
     expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
-    recreate.kill("SIGKILL");
+    await stop();
   });
 
   it("refuses to commit a template its chat changed after it was sealed", async () => {
