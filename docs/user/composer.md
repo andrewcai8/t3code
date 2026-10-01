@@ -224,6 +224,17 @@ File links refer to the environment's machine, including when you connect remote
 Previews use the original file, even outside the workspace. Moving or deleting it
 can break the preview, so save a copy if you need to keep it.
 
+## Mermaid diagrams
+
+On web and desktop, a `mermaid` code block in a message appears as a diagram. Ask
+the agent for a Mermaid flowchart or sequence diagram to get one.
+
+A diagram appears after the reply finishes and the block scrolls into view. Until
+then, the block shows its source. Use the code icon in the block's header to switch
+between the diagram and its source. **Copy** always copies the source. If a
+diagram has an error, the block shows its source with a short note. Mobile shows
+these blocks as code.
+
 ## Files outside the workspace
 
 Follow an agent's file link to read a report or other file outside the workspace.
