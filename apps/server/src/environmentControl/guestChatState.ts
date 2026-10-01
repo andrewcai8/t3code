@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import type { RemotePreparationPort } from "./remotePreparation.ts";
+import { warmJournalKeys, type RemotePreparationPort } from "./remotePreparation.ts";
 
 /**
  * Home-relative paths preparation rebuilds. One table, two uses: a snapshot
@@ -22,9 +22,6 @@ export const DERIVED_HOME_PATHS = [
   ".cargo/registry",
 ] as const;
 
-/** Mirrors `warmJournalKeys` in remotePreparation.ts: the runtime record a template carries. */
-const WARM_JOURNAL_KEYS = ["artifactFiles", "artifactLinks", "runtimes"];
-
 /**
  * Guest verbs that move a chat between a Mac and its off-box snapshot and keep
  * the repository's cache template honest. JSON in on stdin, JSON out on
@@ -41,7 +38,7 @@ import base64, contextlib, fcntl, hashlib, io, json, os, pathlib, shutil, sqlite
 
 os.umask(0o077)
 FORMAT = 1
-WARM_KEYS = ${JSON.stringify(WARM_JOURNAL_KEYS)}
+WARM_KEYS = ${JSON.stringify(warmJournalKeys)}
 DERIVED_HOME = ${JSON.stringify(DERIVED_HOME_PATHS)}
 # Thread worktrees live in the home but are saved through git with the repository.
 GIT_SAVED_HOME = ['.t3/worktrees']
@@ -377,7 +374,7 @@ def save(spec):
             with open(archive_path, 'wb') as handle:
                 sink = Sink(handle, spec['maxBytes'])
                 with tarfile.open(fileobj=sink, mode='w|', format=tarfile.PAX_FORMAT) as archive:
-                    manifest = {'format': FORMAT, 'root': str(root), 'mode': spec['mode'], 'fingerprint': print_fingerprint, 'trees': [], 'stash': [], 'remoteRefs': {}, 'prerequisites': []}
+                    manifest = {'format': FORMAT, 'root': str(root), 'mode': spec['mode'], 'fingerprint': print_fingerprint, 'trees': [], 'stash': [], 'refs': {}, 'remoteRefs': {}, 'prerequisites': []}
                     main = trees[0] if trees else None
                     bundle = pathlib.Path(scratch) / 'repo.bundle'
                     if main is not None:
@@ -400,6 +397,9 @@ def save(spec):
                                         manifest['remoteRefs'][name] = commit
                                 elif name != 'refs/stash':
                                     refs.append(name)
+                                    # A bundle leaves out a ref whose commit origin has, so every ref is named here.
+                                    if not name.startswith(SNAPSHOT_REFS):
+                                        manifest['refs'][name] = commit
                             has_origin = git(main, 'remote', 'get-url', 'origin', check=False).returncode == 0
                             git(main, 'bundle', 'create', str(bundle), '--stdin', *(['--not', '--remotes=origin'] if has_origin else []), data=('\n'.join(refs) + '\n').encode())
                             manifest['prerequisites'] = bundle_prerequisites(bundle)
@@ -508,20 +508,19 @@ def restore_repository(root, manifest, archive, scratch, token):
     fetch_env = git_env()
     if token:
         fetch_env.update({'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader', 'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode()})
-    wanted = sorted(set(manifest['prerequisites']) | set(manifest['remoteRefs'].values()))
-    missing = [commit for commit in wanted if git(repo, 'cat-file', '-e', commit + '^{commit}', check=False).returncode != 0]
-    if missing:
-        # Nothing but this locked restore touches the checkout, so a shallow.lock was stranded.
-        (gitdir / 'shallow.lock').unlink(missing_ok=True)
-        git(repo, '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', *missing, env=fetch_env)
+    def fetch_missing(commits):
+        missing = sorted(commit for commit in set(commits) if git(repo, 'cat-file', '-e', commit + '^{commit}', check=False).returncode != 0)
+        if missing:
+            # Nothing but this locked restore touches the checkout, so a shallow.lock was stranded.
+            (gitdir / 'shallow.lock').unlink(missing_ok=True)
+            git(repo, '-c', 'protocol.version=2', 'fetch', '--depth=1', '--no-tags', 'origin', *missing, env=fetch_env)
+    fetch_missing(manifest['prerequisites'])
     bundle = pathlib.Path(scratch) / 'repo.bundle'
     extract(archive, archive.getmember('repo.bundle'), bundle)
-    heads = {}
-    for line in out(repo, 'bundle', 'unbundle', str(bundle)).splitlines():
-        commit, _, name = line.partition(' ')
-        heads[name] = commit
-    desired = {name: commit for name, commit in heads.items() if not name.startswith(SNAPSHOT_REFS)}
+    out(repo, 'bundle', 'unbundle', str(bundle))
+    desired = dict(manifest['refs'])
     desired.update(manifest['remoteRefs'])
+    fetch_missing(desired.values())
     for name in out(repo, 'for-each-ref', '--format=%(refname)').splitlines():
         if name not in desired and not name.startswith(SNAPSHOT_REFS):
             git(repo, 'update-ref', '-d', name)
