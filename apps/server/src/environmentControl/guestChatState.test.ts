@@ -381,6 +381,58 @@ describe("guest chat state", () => {
     ]);
   });
 
+  it("keeps saving and restoring a chat across Macs whose shallow histories differ", async () => {
+    const w = await world();
+    const store = await artifactStore();
+    let generation = 0;
+    const save = async () => {
+      const key = `chat-1/${++generation}`;
+      const saved = await saveChat(localPort, {
+        root: w.root,
+        mode: "final",
+        uploadUrl: store.url(key),
+        maxBytes: 64 * 1024 * 1024,
+        previousFingerprint: null,
+      });
+      if (saved.kind !== "saved") throw new Error("expected a saved snapshot");
+      await w.depart("abandon");
+      return { url: store.url(key), sha256: saved.sha256 };
+    };
+    const reopen = async (snapshot: { url: string; sha256: string }) => {
+      await w.newMac("empty");
+      expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+      await restoreChat(localPort, { root: w.root, snapshot });
+      await prepareRemoteHost(localPort, chat);
+    };
+    // The chat begins at a revision with history behind it, which its shallow clone leaves out.
+    const pinned = await w.advance("pinned");
+    await w.newMac("empty");
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    const chat = await w.prepareInput("chat-1", pinned);
+    await prepareRemoteHost(localPort, chat);
+    const workspace = NodePath.join(w.root, "workspace");
+    await NodeFSP.writeFile(NodePath.join(workspace, "agent.txt"), "turn 1\n");
+    git(workspace, "add", "agent.txt");
+    git(workspace, "commit", "-qm", "agent turn 1");
+    // Main moves on, and the chat's refresh brings it in.
+    await w.advance("later");
+    git(workspace, "fetch", "-q", "origin", "main:refs/remotes/origin/main");
+    await reopen(await save());
+    await reopen(await save());
+    // As a Mac restored before this fix stands: the commit whose parent it never fetched unmarked.
+    const shallow = NodePath.join(workspace, ".git", "shallow");
+    const marked = (await NodeFSP.readFile(shallow, "utf8")).split("\n");
+    expect(marked, "a restore marks where its history stops").toContain(pinned);
+    await NodeFSP.writeFile(shallow, marked.filter((commit) => commit !== pinned).join("\n"));
+
+    await NodeFSP.writeFile(NodePath.join(workspace, "agent.txt"), "turn 2\n");
+    git(workspace, "commit", "-qam", "agent turn 2");
+    const expected = await chatState(w.root);
+    await reopen(await save());
+    expect(await chatState(w.root)).toEqual(expected);
+    expect(git(workspace, "log", "--format=%s", "-3")).toBe("agent turn 2\nagent turn 1\npinned");
+  });
+
   it("converges when a restore is rerun after stopping at any point", async () => {
     const w = await world();
     const store = await artifactStore();

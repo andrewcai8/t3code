@@ -371,6 +371,30 @@ def add_bytes(archive, name, data):
     entry.mode = 0o600
     archive.addfile(entry, io.BytesIO(data))
 
+def bound_history(repo):
+    # A bundle carries commits but not where a shallow clone cut their history short, so a
+    # restored commit can name a parent no Mac ever fetched. Marked shallow, git stops there
+    # instead of failing on it, as in the clone the commit came from.
+    listing = out(repo, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname) %(objecttype)')
+    commits = [line.split()[0] for line in listing.splitlines() if line.endswith(' commit')]
+    if not commits:
+        return
+    present = set(commits)
+    data = git(repo, 'cat-file', '--batch', data=('\n'.join(commits) + '\n').encode()).stdout
+    cut, position = [], 0
+    while position < len(data):
+        header_end = data.index(b'\n', position)
+        name, _, size = data[position:header_end].decode().split(' ')
+        body = data[header_end + 1:header_end + 1 + int(size)]
+        position = header_end + 1 + int(size) + 1
+        parents = [line[7:].decode() for line in body.split(b'\n\n', 1)[0].split(b'\n') if line.startswith(b'parent ')]
+        if any(parent not in present for parent in parents):
+            cut.append(name)
+    shallow = repo / '.git' / 'shallow'
+    known = set(shallow.read_text().split()) if shallow.exists() else set()
+    if not set(cut) <= known:
+        atomic(shallow, ''.join(commit + '\n' for commit in sorted(known | set(cut))))
+
 def bundle_prerequisites(bundle):
     prerequisites = []
     with open(bundle, 'rb') as data:
@@ -429,6 +453,7 @@ def save(spec):
                                     if not name.startswith(SNAPSHOT_REFS):
                                         manifest['refs'][name] = commit
                             has_origin = git(main, 'remote', 'get-url', 'origin', check=False).returncode == 0
+                            bound_history(main)
                             git(main, 'bundle', 'create', str(bundle), '--stdin', *(['--not', '--remotes=origin'] if has_origin else []), data=('\n'.join(refs) + '\n').encode())
                             manifest['prerequisites'] = bundle_prerequisites(bundle)
                         finally:
@@ -549,6 +574,7 @@ def restore_repository(root, manifest, archive, scratch, token):
     desired = dict(manifest['refs'])
     desired.update(manifest['remoteRefs'])
     fetch_missing(desired.values())
+    bound_history(repo)
     for name in out(repo, 'for-each-ref', '--format=%(refname)').splitlines():
         if name not in desired and not name.startswith(SNAPSHOT_REFS):
             git(repo, 'update-ref', '-d', name)
