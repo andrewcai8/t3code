@@ -87,7 +87,10 @@ it.effect.each(["devbox", "instance"] as const)(
         response.end(encodeJson({ environmentId: "namespace-environment", upstream: request.url }));
       });
       // An echo, to prove an upgrade crosses the proxy both ways with the ingress bearer.
-      const upgrades: Array<{ url?: string; authorization?: string | string[] }> = [];
+      const upgrades: Array<{
+        url: string | undefined;
+        authorization: string | string[] | undefined;
+      }> = [];
       const echoes = new NodeWS.WebSocketServer({ noServer: true });
       upstream.on("upgrade", (request, socket, head) => {
         upgrades.push({ url: request.url, authorization: request.headers["x-nsc-ingress-auth"] });
