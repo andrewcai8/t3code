@@ -172,6 +172,7 @@ describe("createCloudSendDriver", () => {
     expect(outcome).toEqual({
       kind: "ready",
       projectRef: { environmentId: boxEnvironmentId, projectId: ProjectId.make("box-project") },
+      firstTurnStarted: false,
     });
     expect(reloaded.steps).toEqual([
       "draft:creating",

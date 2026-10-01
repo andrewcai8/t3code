@@ -59,7 +59,11 @@ describe("recordCloudSendStep", () => {
   it("points a ready send's draft at the box's project, on the model it was sent with", () => {
     draftSettingUp();
 
-    recordCloudSendStep(draftId, { kind: "ready", projectRef: boxProject });
+    recordCloudSendStep(draftId, {
+      kind: "ready",
+      projectRef: boxProject,
+      firstTurnStarted: false,
+    });
 
     expect(draft()).toEqual({
       project: "box/box-repo",
@@ -67,6 +71,19 @@ describe("recordCloudSendStep", () => {
       branch: null,
       pending: { ...settingUp, phase: "ready", readyEnvironmentId: "box" },
       model: { instanceId: "codex", model: "gpt-5.5" },
+    });
+  });
+
+  it("marks a ready send the host already started, so the page does not send it again", () => {
+    draftSettingUp();
+
+    recordCloudSendStep(draftId, { kind: "ready", projectRef: boxProject, firstTurnStarted: true });
+
+    expect(draft().pending).toEqual({
+      ...settingUp,
+      phase: "ready",
+      readyEnvironmentId: "box",
+      hostStartedFirstTurn: true,
     });
   });
 

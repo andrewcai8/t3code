@@ -9468,9 +9468,14 @@ export default function ChatView(props: ChatViewProps) {
     setPendingCloudSendEnvironmentId(null);
     setCloudProvisioningPhase(null);
     setCloudProvisioningError(null);
-    if (provisionRequests.current(draftId)?.input.chat?.firstTurn) {
-      // The host started this turn on the box and gave the box to this chat. The draft becomes
-      // the thread as soon as the box reports it, so the page only stops tracking the request.
+    if (
+      useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend
+        ?.hostStartedFirstTurn
+    ) {
+      // The host confirmed it started this turn on the box, which its chat now owns. The draft
+      // becomes the thread as soon as the box reports it, so the page only stops tracking the
+      // request. Without that confirmation, from an older host or a turn the host could not
+      // start, the page sends the message itself below.
       transferProvisionedSandboxLease(
         draftId,
         scopeThreadRef(pendingCloudSendEnvironmentId, threadId),

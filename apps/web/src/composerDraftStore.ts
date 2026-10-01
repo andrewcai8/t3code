@@ -328,6 +328,8 @@ const PendingCloudEnvironmentSend = Schema.Struct({
   readyEnvironmentId: Schema.optionalKey(Schema.String),
   /** The model the held message goes out on once the environment is ready. */
   modelSelection: Schema.optionalKey(ModelSelection),
+  /** The environment's host started the held message itself; the page never sends it. */
+  hostStartedFirstTurn: Schema.optionalKey(Schema.Boolean),
 });
 export type PendingCloudEnvironmentSend = typeof PendingCloudEnvironmentSend.Type;
 const decodeModelSelectionOption = Schema.decodeUnknownOption(ModelSelection);
@@ -1672,6 +1674,7 @@ function pendingEnvironmentSendsEqual(
     left.repository === right.repository &&
     left.branch === right.branch &&
     left.readyEnvironmentId === right.readyEnvironmentId &&
+    left.hostStartedFirstTurn === right.hostStartedFirstTurn &&
     Equal.equals(left.modelSelection, right.modelSelection)
   );
 }
@@ -1764,6 +1767,7 @@ function parsePendingEnvironmentSend(value: unknown): PendingCloudEnvironmentSen
       ? { readyEnvironmentId: pending.readyEnvironmentId }
       : {}),
     ...(modelSelection ? { modelSelection } : {}),
+    ...(pending.hostStartedFirstTurn === true ? { hostStartedFirstTurn: true } : {}),
   };
 }
 

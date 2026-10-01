@@ -74,6 +74,7 @@ export function recordCloudSendStep(id: string, step: CloudSendStep): void {
       patchDraftPendingEnvironmentSend(draftId, {
         phase: "ready",
         readyEnvironmentId: step.projectRef.environmentId,
+        ...(step.firstTurnStarted ? { hostStartedFirstTurn: true } : {}),
       });
   }
 }
