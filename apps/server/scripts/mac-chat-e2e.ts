@@ -280,9 +280,11 @@ const logLines = async (chat: Chat, message: string) =>
   (await logEntries(message)).filter(
     (entry) => entry.chatId === chat.requestId || entry.requestId === chat.requestId,
   );
-/** This repository's finished template builds, oldest first. */
+/** This repository's finished template builds, oldest first; a failed one also logs its cause. */
 const builds = async () =>
-  (await logEntries("namespace mac template build")).filter((entry) => entry.tag === cacheTag);
+  (await logEntries("namespace mac template build")).filter(
+    (entry) => entry.tag === cacheTag && entry.departure !== undefined,
+  );
 const guest = async (instanceId: InstanceId, script: string) => {
   const result = await namespace.exec(instanceId, ["bash", "-c", script], { timeoutMs: 120_000 });
   if (result.exitCode !== 0) throw new Error(`guest script failed: ${result.stderr.slice(-400)}`);
@@ -453,6 +455,8 @@ try {
   // Another manager's chats may share the repository's cache; their versions are not this run's.
   const atStart = await cacheVersions();
   measure("cache.atStart", atStart);
+  // The manager log may hold builds from before this run.
+  const buildsBefore = (await builds()).length;
 
   const a = await provisionDetached("miss");
   const filler = await liveMac(a.chat);
@@ -498,7 +502,7 @@ try {
   const build = await until(
     "the template build",
     30 * 60_000,
-    async () => (await builds())[0] ?? null,
+    async () => (await builds())[buildsBefore] ?? null,
   );
   measure("builder", {
     site: build.site,
