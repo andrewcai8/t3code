@@ -467,6 +467,12 @@ describe("guest chat state", () => {
       maxBytes: 64 * 1024 * 1024,
       previousFingerprint: null,
     });
+    // Go writes its module cache read-only, so nothing inside can be unlinked as is.
+    const modules = NodePath.join(w.root, "home", "go", "pkg", "mod", "example.com@v1");
+    await NodeFSP.mkdir(modules, { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(modules, "go.mod"), "module example.com\n");
+    await NodeFSP.chmod(modules, 0o555);
+    await NodeFSP.chmod(NodePath.dirname(modules), 0o555);
     await scrubChatRoot(localPort, { mount: w.mount, root: w.root });
     await scrubChatRoot(localPort, { mount: w.mount, root: w.root });
     expect((await NodeFSP.readdir(w.mount)).sort()).toEqual([

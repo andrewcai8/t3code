@@ -88,11 +88,28 @@ def locked(path):
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
 
+def make_writable(func, path, _error):
+    # Go writes its module cache read-only, and an entry only leaves a writable directory.
+    os.chmod(os.path.dirname(path), 0o700)
+    if os.path.isdir(path) and not os.path.islink(path):
+        os.chmod(path, 0o700)
+    func(path)
+
+def rmtree(path, ignore=False):
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=make_writable)
+        else:
+            shutil.rmtree(path, onerror=make_writable)
+    except OSError:
+        if not ignore:
+            raise
+
 def remove(path):
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.exists():
-        shutil.rmtree(path)
+        rmtree(path)
 
 def trash(mount, path, wait=False):
     # A rename is instant and atomic; the delete of a large tree is not.
@@ -100,9 +117,9 @@ def trash(mount, path, wait=False):
     os.rename(path, target)
     fsync_dir(mount)
     if wait:
-        shutil.rmtree(target)
+        rmtree(target)
     else:
-        subprocess.Popen(['rm', '-rf', str(target)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen(['sh', '-c', 'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"', 'sh', str(target)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 def contained(base, relative):
     parts = pathlib.PurePosixPath(relative).parts
@@ -437,7 +454,7 @@ def save(spec):
             upload(spec['uploadUrl'], archive_path, size)
             return {'kind': 'saved', 'sha256': sha256, 'bytes': size, 'fingerprint': print_fingerprint}
         finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+            rmtree(scratch, ignore=True)
 
 def upload(url, path, size):
     failure = None
@@ -501,7 +518,7 @@ def restore_repository(root, manifest, archive, scratch, token):
     repo = main if main.exists() else partial
     if not (repo / '.git').is_dir():
         if repo.exists():
-            shutil.rmtree(repo)
+            rmtree(repo)
         repo.mkdir(mode=0o700)
         git(repo, 'init', '-q')
     gitdir = repo / '.git'
@@ -540,7 +557,7 @@ def restore_repository(root, manifest, archive, scratch, token):
     for index, entry in enumerate(trees[1:], start=1):
         path = contained(root, entry['path'])
         if path.exists():
-            shutil.rmtree(path)
+            rmtree(path)
             git(main, 'worktree', 'prune')
         git(main, 'worktree', 'add', '--force', '--no-checkout', '--detach', str(path), entry['worktree'])
         restore_tree(path, entry, archive, index)
@@ -585,7 +602,7 @@ def restore(spec):
             atomic(receipt_path, json.dumps({'sha256': expected, 'done': True}))
             return {'restored': expected}
         finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+            rmtree(scratch, ignore=True)
 
 
 def probe(spec, marker, template, root):
@@ -658,7 +675,7 @@ def clone(source, target):
         if subprocess.run(['cp', '-cRp', str(source), str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             return
         if target.exists():
-            shutil.rmtree(target)
+            rmtree(target)
         command = ['cp', '-Rp', str(source), str(target)]
     else:
         command = ['cp', '-a', '--reflink=auto', str(source), str(target)]
@@ -708,7 +725,7 @@ def seal(spec):
             raise RuntimeError('Only a prepared root can seal a template')
         partial = mount / 'template.partial'
         if partial.exists():
-            shutil.rmtree(partial)
+            rmtree(partial)
         clone(root, partial)
         scrub_template(partial, spec)
         marker_path.unlink(missing_ok=True)
@@ -727,7 +744,7 @@ def scrub(spec):
             trash(mount, root, wait=True)
         for entry in os.listdir(mount):
             if entry.startswith('trash-'):
-                shutil.rmtree(mount / entry, ignore_errors=True)
+                rmtree(mount / entry, ignore=True)
         remove(mount / 'template.partial')
     return {'scrubbed': True}
 

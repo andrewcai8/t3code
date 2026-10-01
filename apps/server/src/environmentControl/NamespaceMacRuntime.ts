@@ -351,10 +351,25 @@ export function makeNamespaceMacRuntime(config: {
         };
       },
       depart: async ({ instanceId, departure }) => {
-        // Only a filler's sealed template may become the cache's next parent.
-        if (departure === "commit") await scrubChatRoot(guestPort(instanceId), { mount, root });
-        await instances.depart(instanceId, departure);
-        log("namespace mac departed", { chatId, instanceId, departure });
+        // Only a filler's sealed template may become the cache's next parent. A scrub that fails
+        // leaves the chat on the volume, so that Mac abandons: the snapshot is already recorded.
+        const leaving =
+          departure === "commit" &&
+          (await scrubChatRoot(guestPort(instanceId), { mount, root }).then(
+            () => true,
+            (cause: unknown) => {
+              log("namespace mac template not committed", {
+                chatId,
+                instanceId,
+                cause: String(cause),
+              });
+              return false;
+            },
+          ))
+            ? "commit"
+            : "abandon";
+        await instances.depart(instanceId, leaving);
+        log("namespace mac departed", { chatId, instanceId, departure: leaving });
       },
       expire: async ({ paths }) => {
         for (const path of paths) await artifacts.expire(path);
