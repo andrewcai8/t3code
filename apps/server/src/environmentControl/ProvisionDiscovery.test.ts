@@ -401,14 +401,16 @@ it.effect("a box disposed before the host kept its id is named by the address a 
       yield* disposeBare(yield* provision(2, "https://3773-sandbox-2.e2b.app"));
       // The same, for a box this client reached through the host's gateway.
       yield* disposeBare(yield* provision(3, "http://127.0.0.1:44483"));
+      // A legacy Namespace box no saved gateway URL names, whose proxy listened on a host port.
+      yield* disposeBare(yield* provision(4, "http://127.0.0.1:38041"));
 
       const saved = [
         ["andrew-megpt-host", "https://andrew.megpt.app/"],
         ["box-1", "https://3773-sandbox-1.e2b.app/"],
         ["legacy-e2b-box", "https://3773-sandbox-2.e2b.app/"],
         ["legacy-gateway-box", `https://andrew.megpt.app/api/provisioned-environment/${id(3)}/`],
-        // The user's own server, on a loopback port the host also used for a box.
-        ["desktop-local", "http://127.0.0.1:44483/"],
+        // The user's own server, on the loopback port box 4's proxy used on the host.
+        ["desktop-local", "http://127.0.0.1:38041/"],
       ] as const;
       const listed = yield* listProvisionedEnvironments(
         sql,
