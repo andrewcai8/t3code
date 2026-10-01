@@ -443,6 +443,7 @@ export function makeNamespaceMacRuntime(config: {
    * as it is when written, so a release or resume that landed since the caller looked stands.
    */
   const settleGone = async (chatId: string, instanceId: InstanceId) => {
+    lastSave.delete(instanceId);
     const settled = await store.update(chatId, (current) =>
       settle(current, { kind: "lost", instanceId }),
     );
@@ -450,10 +451,20 @@ export function makeNamespaceMacRuntime(config: {
     return current?.kind === "live" ? ("running" as const) : outcome(current);
   };
 
-  const release = async (operation: ProvisionOperation, manifest: ProvisionPreparationManifest) => {
-    const released = await drive("release", chat(operation, manifest).ports);
-    return outcome(released);
+  /** Runs a goal that ends the chat's Mac, then drops that Mac's save cadence. */
+  const endingMac = async <A>(chatId: string, run: () => Promise<A>) => {
+    const before = await store.read(chatId);
+    try {
+      return await run();
+    } finally {
+      if (before?.kind === "live") lastSave.delete(before.mac.incarnation.instanceId);
+    }
   };
+
+  const release = (operation: ProvisionOperation, manifest: ProvisionPreparationManifest) =>
+    endingMac(operation.request.requestId, async () =>
+      outcome(await drive("release", chat(operation, manifest).ports)),
+    );
 
   const publish = (
     operation: ProvisionOperation,
@@ -548,7 +559,6 @@ export function makeNamespaceMacRuntime(config: {
       const left = record.mac.incarnation.deadline - facts.now;
       if (left < ROTATE_FORCE_MS || (left < ROTATE_IDLE_MS && !(await busy()))) {
         log("namespace mac released before its deadline", { chatId, leftMs: left });
-        lastSave.delete(instanceId);
         return release(operation, manifest);
       }
       const last = lastSave.get(instanceId);
@@ -560,7 +570,9 @@ export function makeNamespaceMacRuntime(config: {
     },
     dispose: async (operation: ProvisionOperation, manifest: ProvisionPreparationManifest) => {
       await publisher.close(proxyId(operation));
-      await drive("dispose", chat(operation, manifest).ports);
+      await endingMac(operation.request.requestId, () =>
+        drive("dispose", chat(operation, manifest).ports),
+      );
     },
   };
 }
