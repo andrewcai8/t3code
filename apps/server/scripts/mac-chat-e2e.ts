@@ -419,12 +419,17 @@ async function cacheVersions() {
   return volumes.cacheVolume
     .filter((volume) => volume.tag === cacheTag)
     .map((volume) => ({
+      id: volume.id,
+      // Empty once the Mac detached.
       instanceId: volume.attachment?.attachedTo ?? "",
       state: Number(volume.metadata?.state),
     }));
 }
-const stateOf = async (instanceId: string) =>
-  (await cacheVersions()).find((version) => version.instanceId === instanceId)?.state ?? null;
+/** The version a live Mac holds, found while it is attached. */
+const versionOf = async (instanceId: string) =>
+  (await cacheVersions()).find((version) => version.instanceId === instanceId)?.id ?? null;
+const stateOf = async (versionId: string) =>
+  (await cacheVersions()).find((version) => version.id === versionId)?.state ?? null;
 
 const report = async (failure?: unknown) => {
   await NodeFSP.writeFile(
@@ -445,11 +450,14 @@ const report = async (failure?: unknown) => {
 
 let failure: unknown;
 try {
-  check("cache.emptyAtStart", (await cacheVersions()).length === 0, cacheTag);
+  // Another manager's chats may share the repository's cache; their versions are not this run's.
+  const atStart = await cacheVersions();
+  measure("cache.atStart", atStart);
 
   const a = await provisionDetached("miss");
   const filler = await liveMac(a.chat);
   measure("miss.site", filler.site);
+  const missVersion = await versionOf(filler.instanceId);
   const missAdoption = (await logLines(a.chat, "namespace mac materialized")).at(-1)?.adoption;
   check("miss.adoption", missAdoption === "miss", missAdoption);
   await firstTurn(a.chat, a.asked);
@@ -500,9 +508,11 @@ try {
     sameSiteAsMiss: build.site === filler.site,
   });
   check("builder.commits", build.departure === "commit", build.instanceId);
-  const builderState = await until("the builder's version at rest", 180_000, async () =>
-    (await stateOf(build.instanceId ?? "")) === 2 ? 2 : null,
-  );
+  const committedVersions = await until("the builder's version at rest", 180_000, async () => {
+    const atRest = (await cacheVersions()).filter((version) => version.state === 2);
+    return atRest.length > atStart.filter((version) => version.state === 2).length ? atRest : null;
+  });
+  const builderState = committedVersions.length > 0 ? 2 : null;
   check("builder.atRest", builderState === 2, builderState);
 
   const pausing = Date.now();
@@ -519,11 +529,12 @@ try {
       ? { generation: released.snapshot.generation, bytes: released.snapshot.bytes }
       : null,
   );
+  // An abandoned version reads as state 4 for a while, then is no longer listed.
   const missState = await until("the miss chat's version settled", 180_000, async () => {
-    const state = await stateOf(filler.instanceId);
-    return state === null || state === 1 ? null : state;
+    const state = missVersion === null ? null : await stateOf(missVersion);
+    return state === 1 ? null : { state };
   });
-  check("release.chatAbandons", missState === 4, missState);
+  check("release.chatAbandons", missState.state === 4 || missState.state === null, missState);
 
   const b = await provisionDetached("hit");
   const hitAdoption = (await logLines(b.chat, "namespace mac materialized")).at(-1)?.adoption;
@@ -646,8 +657,19 @@ try {
   measure("cleanup.buildersAbandoned", builders.length);
   measure("builds", await builds().catch(() => []));
   await sleep(30_000);
-  await storage.destroyCacheVolume({ tag: cacheTag }).catch(() => undefined);
-  check("cleanup.cacheVolume", (await cacheVersions()).length === 0, cacheTag);
+  const ours = new Set([
+    ...(await logEntries("namespace mac created"))
+      .filter((entry) => chats.some((chat) => chat.requestId === entry.chatId))
+      .map((entry) => entry.instanceId),
+    ...(await builds().catch(() => [])).map((entry) => entry.instanceId),
+  ]);
+  const foreign = (await cacheVersions()).filter(
+    (version) => version.state === 1 && !ours.has(version.instanceId),
+  );
+  if (foreign.length === 0) {
+    await storage.destroyCacheVolume({ tag: cacheTag }).catch(() => undefined);
+    check("cleanup.cacheVolume", (await cacheVersions()).length === 0, cacheTag);
+  } else measure("cleanup.cacheVolumeKeptFor", foreign);
   measure("totalSeconds", elapsed());
   await report(failure);
 }
