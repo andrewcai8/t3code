@@ -871,7 +871,7 @@ async function runVerb<A>(
   return decode(result.stdout);
 }
 
-/** What the guest found on the cache volume. Only a new chat that adopted no current template fills one. */
+/** What the guest found on the cache volume. Anything but `hit` asks the manager for a builder. */
 export const CacheProbe = Schema.Literals(["hit", "stale", "miss"]);
 export type CacheProbe = typeof CacheProbe.Type;
 
@@ -961,9 +961,9 @@ export function saveChat(
 
 /**
  * Copies a freshly prepared, never-used root into the volume's template and
- * writes the marker last. Run by a chat that filled a miss, before its first
- * turn. Returns the template's digest, which the manager keeps and `scrubChatRoot`
- * checks before the volume may be committed.
+ * writes the marker last. Run only by a builder Mac, which hosts no chat.
+ * Returns the template's digest, which `scrubChatRoot` checks before the
+ * volume may be committed.
  */
 export async function sealChatTemplate(
   port: RemotePreparationPort,
@@ -981,7 +981,7 @@ export async function sealChatTemplate(
 /**
  * Removes the chat root and anything else but the template from the volume, so committing it
  * leaves only the template. With `templateDigest`, refuses a template that changed since it was
- * sealed, since its chat ran with the volume writable.
+ * sealed: whatever changed it would run in every chat that adopts it.
  */
 export async function scrubChatRoot(
   port: RemotePreparationPort,

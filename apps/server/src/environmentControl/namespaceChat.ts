@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
-import { InstanceId, MacIncarnation, type Departure } from "./namespaceInstances.ts";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+import { InstanceId, MacIncarnation } from "./namespaceInstances.ts";
 
 /**
  * A Namespace Mac chat's durable home: one finalized artifact. `final` was taken
@@ -21,19 +22,26 @@ export const ChatSnapshot = Schema.Struct({
 export type ChatSnapshot = typeof ChatSnapshot.Type;
 
 /**
- * What the live Mac may do to the repository's shared cache volume. Only a Mac
- * that started a new chat on a miss or stale template fills it, and only a
- * filler that sealed a pristine template may commit.
+ * Whether a live Mac holds the chat yet: `unknown` until its materialize is recorded. A chat's
+ * Mac only ever reads the cache volume; a builder Mac with no chat fills it.
  */
-export const MacCache = Schema.Literals(["unknown", "reader", "filling", "sealed"]);
-export type MacCache = typeof MacCache.Type;
+export const MacStage = Schema.Literals(["unknown", "ready"]);
+export type MacStage = typeof MacStage.Type;
+/**
+ * Stored as `cache`, which records written when a chat's Mac could fill the cache named by its
+ * role. Those roles all mean ready, and ready is written back as `reader`, which they understand.
+ */
+const StoredStage = Schema.Literals(["unknown", "reader", "filling", "sealed"]).pipe(
+  Schema.decodeTo(
+    MacStage,
+    SchemaTransformation.transform({
+      decode: (stored): MacStage => (stored === "unknown" ? "unknown" : "ready"),
+      encode: (stage) => (stage === "ready" ? "reader" : "unknown"),
+    }),
+  ),
+);
 
-export const LiveMac = Schema.Struct({
-  incarnation: MacIncarnation,
-  cache: MacCache,
-  /** The digest seal reported. A commit departure checks the template still matches it. */
-  template: Schema.optional(Schema.String),
-});
+export const LiveMac = Schema.Struct({ incarnation: MacIncarnation, cache: StoredStage });
 export type LiveMac = typeof LiveMac.Type;
 
 /** Keyed by chat id in the store. A missing record reads as idle with no snapshot. */
@@ -49,8 +57,6 @@ export type ChatRecord = typeof ChatRecord.Type;
 type LiveRecord = Extract<ChatRecord, { kind: "live" }>;
 
 export type ChatGoal = "open" | "release" | "dispose";
-/** What the guest found on the cache volume when it adopted the template. */
-export type Adoption = "hit" | "stale" | "miss";
 
 /** Observed just before each plan. */
 export interface ChatFacts {
@@ -75,14 +81,13 @@ export type ChatStep =
   /** Dispose's last step. Never removes a record that is live again. */
   | { readonly kind: "forget" }
   | { readonly kind: "create" }
-  /** `commit` means the performer scrubs the chat root, then destroys. */
-  | { readonly kind: "depart"; readonly instanceId: InstanceId; readonly departure: Departure }
+  /** Halts, then destroys: a chat's Mac never commits the cache volume. */
+  | { readonly kind: "depart"; readonly instanceId: InstanceId }
   | {
       readonly kind: "materialize";
       readonly instanceId: InstanceId;
       readonly snapshot: ChatSnapshot | null;
     }
-  | { readonly kind: "seal"; readonly instanceId: InstanceId }
   | SaveStep
   | { readonly kind: "expire"; readonly paths: ReadonlyArray<string> };
 type StepOf<K extends ChatStep["kind"]> = Extract<ChatStep, { kind: K }>;
@@ -94,19 +99,12 @@ export type SaveOutcome =
     >)
   | { readonly kind: "unchanged" };
 
-/** A filler's seal: the template's digest when it sealed, or a give-up that leaves it a reader. */
-export type SealOutcome =
-  | { readonly sealed: true; readonly digest: string }
-  | { readonly sealed: false };
-
 /** Carries out the effectful steps. Every handler must tolerate a rerun after a crash. */
 export interface ChatPerformer {
   readonly create: () => Promise<MacIncarnation>;
   readonly depart: (step: StepOf<"depart">) => Promise<void>;
   /** Adopt the template, restore the snapshot and prepare, idempotently on the guest. */
-  readonly materialize: (step: StepOf<"materialize">) => Promise<{ readonly adoption: Adoption }>;
-  /** `sealed: false` gives up on filling the cache; it never fails the open. */
-  readonly seal: (step: StepOf<"seal">) => Promise<SealOutcome>;
+  readonly materialize: (step: StepOf<"materialize">) => Promise<void>;
   readonly save: (step: SaveStep) => Promise<SaveOutcome>;
   readonly expire: (step: StepOf<"expire">) => Promise<void>;
 }
@@ -117,9 +115,8 @@ export type Performed =
   | StepOf<"forget">
   | StepOf<"depart">
   | StepOf<"expire">
+  | StepOf<"materialize">
   | (StepOf<"create"> & { readonly outcome: MacIncarnation })
-  | (StepOf<"materialize"> & { readonly outcome: { readonly adoption: Adoption } })
-  | (StepOf<"seal"> & { readonly outcome: SealOutcome })
   | (SaveStep & { readonly outcome: SaveOutcome });
 
 /** `garbage` names artifacts nothing references any more, to expire best effort. */
@@ -153,13 +150,6 @@ const MAX_STEPS = 32;
 
 const generationOf = (record: ChatRecord | null) => record?.snapshot?.generation ?? 0;
 
-export const departureFor = (cache: MacCache): Departure =>
-  cache === "sealed" ? "commit" : "abandon";
-
-/** A Mac that restored a snapshot carries chat state, so it may never fill the cache. */
-export const cacheRole = (adoption: Adoption, snapshot: ChatSnapshot | null): MacCache =>
-  adoption !== "hit" && snapshot === null ? "filling" : "reader";
-
 const currentOf = (record: LiveRecord) => record.mac.incarnation.instanceId;
 const isCurrent = (record: ChatRecord | null, instanceId: InstanceId): record is LiveRecord =>
   record?.kind === "live" && currentOf(record) === instanceId;
@@ -185,7 +175,7 @@ export function plan(
   if (record?.kind === "live" && !facts.instances.includes(currentOf(record)))
     return { kind: "lost", instanceId: currentOf(record) };
   const stray = facts.instances.find((instanceId) => instanceId !== current);
-  if (stray !== undefined) return { kind: "depart", instanceId: stray, departure: "abandon" };
+  if (stray !== undefined) return { kind: "depart", instanceId: stray };
   return record?.kind === "live"
     ? planLive(record, goal, facts.now)
     : planIdle(record, goal, facts.artifacts);
@@ -193,32 +183,23 @@ export function plan(
 
 function planLive(record: LiveRecord, goal: ChatGoal, now: number): ChatStep | { kind: "done" } {
   const instanceId = currentOf(record);
-  const cache = record.mac.cache;
+  const ready = record.mac.cache === "ready";
   switch (goal) {
     case "open":
       // A release that stopped after its final save left a fenced Mac whose later work
       // that snapshot would hide. Finish the release, then open on a new Mac.
-      if (hasFinal(record)) return { kind: "depart", instanceId, departure: departureFor(cache) };
-      switch (cache) {
-        case "unknown":
-          return { kind: "materialize", instanceId, snapshot: record.snapshot };
-        case "filling":
-          return { kind: "seal", instanceId };
-        case "reader":
-        case "sealed":
-          return { kind: "done" };
-        default:
-          return cache satisfies never;
-      }
+      if (hasFinal(record)) return { kind: "depart", instanceId };
+      return ready
+        ? { kind: "done" }
+        : { kind: "materialize", instanceId, snapshot: record.snapshot };
     case "release":
       // No turn runs before materialize is recorded, so there is nothing to save.
-      if (cache === "unknown") return { kind: "depart", instanceId, departure: "abandon" };
-      if (hasFinal(record)) return { kind: "depart", instanceId, departure: departureFor(cache) };
+      if (!ready || hasFinal(record)) return { kind: "depart", instanceId };
       if (record.mac.incarnation.deadline - now < SAVE_GIVE_UP_MS)
-        return { kind: "depart", instanceId, departure: "abandon" };
+        return { kind: "depart", instanceId };
       return saveStep(record, "final");
     case "dispose":
-      return { kind: "depart", instanceId, departure: "abandon" };
+      return { kind: "depart", instanceId };
     default:
       return goal satisfies never;
   }
@@ -265,10 +246,6 @@ const ok = (record: ChatRecord | null, garbage: ReadonlyArray<string> = []): Set
   record,
   garbage,
 });
-const withCache = (record: LiveRecord, cache: MacCache): ChatRecord => ({
-  ...record,
-  mac: { ...record.mac, cache },
-});
 
 /** Pure. Run it against the freshest record, inside the store's serialized update. */
 export function settle(record: ChatRecord | null, done: Performed): Settled {
@@ -293,15 +270,7 @@ export function settle(record: ChatRecord | null, done: Performed): Settled {
     case "materialize":
       return ok(
         isCurrent(record, done.instanceId)
-          ? withCache(record, cacheRole(done.outcome.adoption, done.snapshot))
-          : record,
-      );
-    case "seal":
-      return ok(
-        isCurrent(record, done.instanceId)
-          ? done.outcome.sealed
-            ? { ...record, mac: { ...record.mac, cache: "sealed", template: done.outcome.digest } }
-            : withCache(record, "reader")
+          ? { ...record, mac: { ...record.mac, cache: "ready" } }
           : record,
       );
     case "save":
@@ -359,9 +328,8 @@ async function perform(
       await performer.depart(step);
       return step;
     case "materialize":
-      return { ...step, outcome: await performer.materialize(step) };
-    case "seal":
-      return { ...step, outcome: await performer.seal(step) };
+      await performer.materialize(step);
+      return step;
     case "save":
       return { ...step, outcome: await performer.save(step) };
     case "expire":

@@ -7,6 +7,7 @@ import { ChatRecord, type ChatStore, type Settled } from "./namespaceChat.ts";
 import { writeReplace } from "./ProvisionPreparation.ts";
 
 const decodeRecord = Schema.decodeUnknownSync(Schema.fromJsonString(ChatRecord));
+const encodeRecord = Schema.encodeSync(ChatRecord);
 const SAFE_CHAT_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
 
 /** One file per chat under `<stateDir>/namespace-chats`, replaced atomically. */
@@ -31,7 +32,7 @@ export function makeChatStore(stateDir: string): ChatStore {
     if (settled.record === null) await NodeFSP.rm(path(chatId), { force: true });
     else {
       await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
-      await writeReplace(path(chatId), stableStringify(settled.record));
+      await writeReplace(path(chatId), stableStringify(encodeRecord(settled.record)));
     }
     return settled;
   };

@@ -31,7 +31,7 @@ const live: ChatRecord = {
   snapshot: snapshot(1),
   mac: {
     incarnation: { instanceId, site: "iad4", createdAt: 0, deadline: 18_000_000 },
-    cache: "reader",
+    cache: "ready",
   },
 };
 const chatFile = (chatId: string) => NodePath.join(stateDir, "namespace-chats", `${chatId}.json`);
