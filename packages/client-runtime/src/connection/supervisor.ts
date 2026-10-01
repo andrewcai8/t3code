@@ -18,6 +18,7 @@ import * as Connectivity from "./connectivity.ts";
 import * as ConnectionDriver from "./driver.ts";
 import {
   type ConnectionAttemptError,
+  type ConnectionBlockedError,
   type ConnectionTarget,
   ConnectionTransientError,
   type NetworkStatus,
@@ -97,8 +98,15 @@ function exitUnlessInterrupted<A, E, R>(
   });
 }
 
+export type BoxWakeOutcome =
+  | { readonly _tag: "Resumed" }
+  | { readonly _tag: "RetryLater"; readonly error: ConnectionTransientError }
+  | { readonly _tag: "Refused"; readonly error: ConnectionBlockedError };
+
 export interface EnvironmentSupervisorOptions {
   readonly initiallyDesired?: boolean;
+  /** Wakes a box whose dial says it is not serving, through the host that provisioned it. */
+  readonly wake?: Effect.Effect<BoxWakeOutcome>;
 }
 
 function retryDelayMs(failureCount: number): number {
@@ -626,6 +634,41 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     );
   });
 
+  const waitForWakeInterrupt = Effect.fnUntraced(function* () {
+    for (;;) {
+      const next = yield* Queue.take(signals);
+      if (
+        next._tag === "DisconnectRequested" ||
+        (next._tag === "NetworkChanged" && next.network === "offline")
+      ) {
+        return { _tag: "Interrupted" } as const;
+      }
+    }
+  });
+
+  const wakeBox = Effect.fnUntraced(function* (
+    wake: Effect.Effect<BoxWakeOutcome>,
+    attempt: number,
+    generation: number,
+    lastFailure: ConnectionAttemptError,
+  ) {
+    const current = yield* Ref.get(intent);
+    if (!current.desired || current.network === "offline") {
+      return { _tag: "Interrupted" } as const;
+    }
+    yield* setState({
+      desired: true,
+      network: current.network,
+      phase: "waking",
+      stage: null,
+      attempt,
+      generation,
+      lastFailure,
+      retryAt: null,
+    });
+    return yield* Effect.raceFirst(wake, waitForWakeInterrupt());
+  });
+
   const waitForSignal = Queue.take(signals).pipe(
     Effect.map(
       (next) => next._tag === "Wakeup" && ConnectionWakeups.isApplicationActiveWakeup(next.reason),
@@ -637,9 +680,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     let generation = 0;
     let latestFailure: ConnectionAttemptError | null = null;
     let pendingRetry = Option.none<PendingRetryTrace>();
+    // Set when the previous step woke the box, so a redial that still finds it not serving backs
+    // off instead of resuming again at once.
+    let justWoke = false;
     const resetRetryLadder = () => {
       failureCount = 0;
       pendingRetry = Option.none();
+      justWoke = false;
     };
 
     for (;;) {
@@ -669,6 +716,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
       const attempt = failureCount + 1;
       const nextGeneration = generation + 1;
+      const afterWake = justWoke;
+      justWoke = false;
       const outcome: AttemptOutcome = yield* Effect.scoped(
         runAttempt(attempt, nextGeneration, latestFailure, pendingRetry),
       );
@@ -690,8 +739,20 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       }
 
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
-      const error: ConnectionAttemptError = outcome.failure.error;
+      let error: ConnectionAttemptError = outcome.failure.error;
       latestFailure = error;
+      if (options?.wake !== undefined && error.reason === "not-serving" && !afterWake) {
+        const woken = yield* wakeBox(options.wake, attempt, generation, error);
+        if (woken._tag === "Interrupted") {
+          continue;
+        }
+        if (woken._tag === "Resumed") {
+          justWoke = true;
+          continue;
+        }
+        error = woken.error;
+        latestFailure = error;
+      }
       if (error._tag === "ConnectionBlockedError") {
         const blockedIntent = yield* Ref.get(intent);
         yield* setState({

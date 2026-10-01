@@ -170,7 +170,6 @@ import {
 } from "~/state/environments";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useProvisionedEnvironmentRecovery } from "../../cloud/useProvisionedEnvironmentRecovery";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import {
@@ -1424,6 +1423,8 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
       return { text: "Connected", tone: "muted" };
     case "connecting":
       return { text: "Connecting", tone: "muted" };
+    case "waking":
+      return { text: "Waking up", tone: "muted" };
     case "reconnecting":
       return {
         text: connection.error ? `Reconnecting: ${connection.error}` : "Reconnecting",
@@ -1811,7 +1812,6 @@ export function ConnectionsSettings() {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
-  const recoverEnvironment = useProvisionedEnvironmentRecovery();
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
@@ -2475,14 +2475,6 @@ export function ConnectionsSettings() {
   const handleSetSavedBackendEnabled = useCallback(
     async (environmentId: EnvironmentId, enabled: boolean) => {
       setSavedBackendError(null);
-      if (enabled) {
-        const recovery = await recoverEnvironment(environmentId);
-        if (recovery.kind === "ready") return;
-        if (recovery.kind === "failed") {
-          setSavedBackendError(recovery.message);
-          return;
-        }
-      }
       const result = await setEnvironmentEnabled({ environmentId, enabled });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2500,7 +2492,7 @@ export function ConnectionsSettings() {
         );
       }
     },
-    [recoverEnvironment, setEnvironmentEnabled],
+    [setEnvironmentEnabled],
   );
 
   const removeSavedBackend = useCallback(

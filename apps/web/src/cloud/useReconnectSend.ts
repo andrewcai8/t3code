@@ -1,11 +1,14 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ProvisionedEnvironmentRecovery } from "./provisionedEnvironmentRecovery";
+
+export type ReconnectResult =
+  | { readonly kind: "ready" }
+  | { readonly kind: "failed"; readonly message: string };
 
 export function useReconnectSend<Input>(options: {
   threadKey: string;
   ready: boolean;
-  recover: (environmentId: EnvironmentId) => Promise<ProvisionedEnvironmentRecovery>;
+  recover: (environmentId: EnvironmentId) => Promise<ReconnectResult>;
   send: (input: Input) => void;
   onFailure: (message: string) => void;
 }) {
@@ -28,11 +31,7 @@ export function useReconnectSend<Input>(options: {
       } else {
         pendingRef.current = null;
         setPending(null);
-        onFailure(
-          recovered.kind === "failed"
-            ? recovered.message
-            : "This environment is not connected. Reconnect it, then send again.",
-        );
+        onFailure(recovered.message);
       }
     },
     [threadKey, recover, onFailure],

@@ -39,6 +39,7 @@ function statusDotTone(
       };
     case "connecting":
     case "reconnecting":
+    case "waking":
       return {
         dotColor: theme["--color-warning-foreground"],
         haloColor: themeColorWithAlpha(theme["--color-warning-foreground"], 0.5),

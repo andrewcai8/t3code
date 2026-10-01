@@ -59,7 +59,8 @@ export function ConnectionEnvironmentRow(props: {
   const isRetrying =
     enabled &&
     (props.environment.connectionState === "connecting" ||
-      props.environment.connectionState === "reconnecting");
+      props.environment.connectionState === "reconnecting" ||
+      props.environment.connectionState === "waking");
   const handleSave = useCallback(async () => {
     const result = await props.onUpdate(props.environment.environmentId, {
       label: label.trim(),

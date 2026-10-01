@@ -10,6 +10,7 @@ export function connectionPhaseDotClassName(phase: EnvironmentConnectionPhase): 
       return "bg-success";
     case "connecting":
     case "reconnecting":
+    case "waking":
       return "bg-warning";
     case "error":
       return "bg-destructive";

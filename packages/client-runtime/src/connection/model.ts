@@ -148,6 +148,8 @@ export type SupervisorConnectionPhase =
   | "offline"
   | "connecting"
   | "backoff"
+  /** A box's host is resuming it after its dial said it is not serving. */
+  | "waking"
   | "connected"
   | "blocked";
 
@@ -177,6 +179,7 @@ export function connectionProjectionPhase(
     case "available":
     case "offline":
     case "backoff":
+    case "waking":
     case "blocked":
       return "disconnected";
   }

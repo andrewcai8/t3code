@@ -265,12 +265,16 @@ export function createEnvironmentCatalogAtoms<R, E>(
     execute: (environmentId: EnvironmentIdType) =>
       EnvironmentRegistry.EnvironmentRegistry.pipe(
         Effect.flatMap((registry) =>
+          // No timeout: waking a box can take many minutes, and a blocked connection fails here.
           registry.stateChanges(environmentId).pipe(
-            Stream.filter((state) => state.phase === "connected"),
+            Stream.filter((state) => state.phase === "connected" || state.phase === "blocked"),
             Stream.runHead,
             Effect.flatMap(Effect.fromOption),
-            Effect.asVoid,
-            Effect.timeout("60 seconds"),
+            Effect.flatMap((state) =>
+              state.phase === "blocked" && state.lastFailure !== null
+                ? Effect.fail(state.lastFailure)
+                : Effect.void,
+            ),
           ),
         ),
       ),

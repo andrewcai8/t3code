@@ -547,6 +547,7 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
               : Effect.never;
           case "connecting":
           case "backoff":
+          case "waking":
             return Effect.never;
           case "available":
           case "offline":

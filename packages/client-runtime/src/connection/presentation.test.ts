@@ -52,6 +52,23 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 }
 
 describe("connection presentation", () => {
+  it("says a box whose host is resuming it is waking up, not failing", () => {
+    const connection = presentConnectionState(
+      supervisorState({
+        phase: "waking",
+        stage: null,
+        lastFailure: new ConnectionTransientError({
+          reason: "not-serving",
+          detail:
+            "Remote environment endpoint https://box.example.test/ returned undeclared status 502.",
+        }),
+      }),
+    );
+
+    expect(connection).toEqual({ phase: "waking", error: null, traceId: null });
+    expect(connectionStatusText(connection)).toBe("Waking up...");
+  });
+
   it("labels a blocked protocol as unsupported", () => {
     const connection = presentConnectionState(
       supervisorState({

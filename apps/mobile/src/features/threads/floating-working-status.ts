@@ -49,6 +49,13 @@ export function connectionFloatingStatus(input: {
             : `Failed to connect. Retrying ${environmentLabel}...`,
         onPress: input.onReconnect,
       };
+    case "waking":
+      return {
+        kind: "connection",
+        tone: "reconnecting",
+        label: "Waking this chat's cloud machine...",
+        onPress: input.onReconnect,
+      };
     case "offline":
       return unavailable("You are offline");
     case "unsupported":

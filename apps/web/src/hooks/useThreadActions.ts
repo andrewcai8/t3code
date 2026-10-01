@@ -65,7 +65,7 @@ import * as ThreadUndo from "./threadUndo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
 import { forgetProvisionedSandbox, provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
-import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
+import { environmentCatalog } from "../connection/catalog";
 import { environmentPresentations } from "../state/presentation";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
@@ -217,7 +217,7 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
 }
 
 export function useThreadActions() {
-  const recoverEnvironment = useProvisionedEnvironmentRecovery();
+  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const closeTerminal = useAtomCommand(terminalEnvironment.close);
   const archiveThreadMutation = useAtomCommand(threadEnvironment.archive, {
     reportFailure: false,
@@ -763,11 +763,7 @@ export function useThreadActions() {
     async (target: ScopedThreadRef) => {
       const pendingLocalSettle =
         appAtomRegistry.get(threadLifecycleOverlayAtom).get(threadKey(target))?.kind === "settled";
-      if (!pendingLocalSettle) {
-        const recovery = await recoverEnvironment(target.environmentId);
-        if (recovery.kind === "failed")
-          return AsyncResult.failure(Cause.fail(new Error(recovery.message)));
-      }
+      if (!pendingLocalSettle) await retryEnvironment(target.environmentId);
       if (!readEnvironmentSupportsSettlement(target.environmentId)) {
         return AsyncResult.failure(
           Cause.fail(
@@ -786,7 +782,7 @@ export function useThreadActions() {
         input: { threadId: target.threadId, reason: "user" },
       });
     },
-    [recoverEnvironment, unsettleThreadMutation],
+    [retryEnvironment, unsettleThreadMutation],
   );
 
   /** Turns automatic settlement (inactivity, merged PR) on or off for one thread. */

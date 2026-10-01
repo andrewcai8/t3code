@@ -2,8 +2,7 @@ import { act, StrictMode, useLayoutEffect } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
-import type { ProvisionedEnvironmentRecovery } from "./provisionedEnvironmentRecovery";
-import { useReconnectSend } from "./useReconnectSend";
+import { type ReconnectResult, useReconnectSend } from "./useReconnectSend";
 
 let renderer: ReactTestRenderer | undefined;
 afterEach(async () => {
@@ -13,8 +12,8 @@ afterEach(async () => {
 
 async function setup() {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  let complete = (_result: ProvisionedEnvironmentRecovery) => {};
-  const recovery = new Promise<ProvisionedEnvironmentRecovery>((resolve) => {
+  let complete = (_result: ReconnectResult) => {};
+  const recovery = new Promise<ReconnectResult>((resolve) => {
     complete = resolve;
   });
   let latest: ReturnType<typeof useReconnectSend<string>> | undefined;

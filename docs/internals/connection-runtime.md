@@ -40,6 +40,14 @@ can offer one. The registry connects a box only while something
 chat, the draft that is provisioning it, or a turn running on it that its host
 still lists active. Read a box's own state through the point atoms.
 
+A paused box's address still answers, with a gateway 404, 502 or 503 that the
+resolver reads as `not-serving`. The supervisor wakes it, not a view: after such
+a dial it enters `waking`, the registry asks the box's host to resume it, and the
+supervisor dials again. A failed wake is retried after the next not-serving dial,
+at most once per backoff step, for as long as the box is demanded. A view that
+woke boxes fired once per cached host list, so a failed resume or a box paused
+under its open chat stayed down.
+
 Boxes saved before the mark existed are marked from this device's lease records
 and from the lists hosts report. A box paired from a bare link stays an ordinary
 environment until its host lists it.

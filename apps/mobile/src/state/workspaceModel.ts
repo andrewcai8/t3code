@@ -59,7 +59,12 @@ function overallConnectionState(
   if (environments.some((environment) => environment.connectionState === "connected")) {
     return "connected";
   }
-  if (environments.some((environment) => environment.connectionState === "reconnecting")) {
+  if (
+    environments.some(
+      (environment) =>
+        environment.connectionState === "reconnecting" || environment.connectionState === "waking",
+    )
+  ) {
     return "reconnecting";
   }
   if (environments.some((environment) => environment.connectionState === "connecting")) {
@@ -89,7 +94,8 @@ export function projectWorkspaceState(input: {
   const connectingEnvironments = activeEnvironments.filter(
     (environment) =>
       environment.connectionState === "connecting" ||
-      environment.connectionState === "reconnecting",
+      environment.connectionState === "reconnecting" ||
+      environment.connectionState === "waking",
   );
 
   return {

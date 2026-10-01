@@ -14,6 +14,7 @@ export type EnvironmentConnectionPhase =
   | "offline"
   | "connecting"
   | "reconnecting"
+  | "waking"
   | "connected"
   | "error"
   | "unsupported";
@@ -47,6 +48,8 @@ export function presentConnectionState(
       };
     case "connected":
       return { phase: "connected", error: null, traceId: null };
+    case "waking":
+      return { phase: "waking", error: null, traceId: null };
     case "backoff":
       return {
         phase: "reconnecting",
@@ -80,6 +83,8 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
       return connection.error
         ? `Failed to connect. Reconnecting... Reason: ${connection.error}`
         : "Reconnecting...";
+    case "waking":
+      return "Waking up...";
     case "connected":
       return "Connected";
     case "unsupported":
