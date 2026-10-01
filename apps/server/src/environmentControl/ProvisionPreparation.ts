@@ -10,6 +10,7 @@ import {
   defaultInstanceIdForDriver,
   EnvironmentProvisionInput,
   ProviderDriverKind,
+  ProvisionFirstTurn,
   ProvisionProvider,
   ProvisionRequestConflict,
   type ProvisionRequestId,
@@ -597,10 +598,29 @@ export async function spareKey(
 }
 
 /** The first complete, fsynced manifest wins across manager processes. Retries never reread mutable config. */
+const decodeFirstTurn = Schema.decodeUnknownSync(Schema.fromJsonString(ProvisionFirstTurn));
+
+/**
+ * Takes the chat's first message out of a request. The frozen request and manifest keep only its
+ * digest, so the message can be deleted once it is settled without changing the request.
+ */
+function splitFirstTurn(decoded: EnvironmentProvisionInput) {
+  const chat = decoded.chat;
+  if (chat?.firstTurn === undefined)
+    return { input: decoded, firstTurn: undefined, firstTurnSha256: undefined };
+  return {
+    input: { ...decoded, chat: { threadId: chat.threadId } },
+    firstTurn: chat.firstTurn,
+    firstTurnSha256: provisionDigest(stableStringify(chat.firstTurn)),
+  };
+}
+
 export function makeProvisionPreparationStore(stateDir: string) {
   const directory = NodePath.join(stateDir, "provisioning");
   const manifestPath = (id: ProvisionRequestId) => NodePath.join(directory, `${id}.json`);
   const runtimePath = (id: ProvisionRequestId) => NodePath.join(directory, `${id}.runtime.json`);
+  const firstTurnPath = (id: ProvisionRequestId) =>
+    NodePath.join(directory, `${id}.first-turn.json`);
   /** Copies a configured artifact into the store so a later config edit cannot change what a guest receives. */
   const storeArtifact = async (artifact: ProvisionRuntimeArtifact) => {
     relativePath(artifact.entrypoint);
@@ -635,6 +655,22 @@ export function makeProvisionPreparationStore(stateDir: string) {
   };
   return {
     load,
+    /** The chat's first message, while the host still owes it to the box; null once settled. */
+    readFirstTurn: async (manifest: ProvisionPreparationManifest) => {
+      const sha256 = manifest.request.chat?.firstTurnSha256;
+      if (sha256 === undefined) return null;
+      const raw = await privateRead(firstTurnPath(manifest.request.requestId)).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        },
+      );
+      if (raw === null) return null;
+      const turn = decodeFirstTurn(raw);
+      return provisionDigest(stableStringify(turn)) === sha256 ? turn : null;
+    },
+    /** Deletes the first message once the host has started or given up on it. */
+    forgetFirstTurn: (id: ProvisionRequestId) => NodeFSP.rm(firstTurnPath(id), { force: true }),
     readRuntime: async (id: ProvisionRequestId): Promise<ProvisionRuntimeArtifact | null> => {
       const raw = await privateRead(runtimePath(id)).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
@@ -675,7 +711,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
         readonly claim: (spare: ProvisionRequestId, chat: ProvisionRequestId) => Promise<boolean>;
       },
     ): Promise<ProvisionPreparationManifest> => {
-      const input = decodeInput(rawInput);
+      const { input, firstTurn, firstTurnSha256 } = splitFirstTurn(decodeInput(rawInput));
+      const sameRequest = (saved: ProvisionPreparationManifest) =>
+        stableStringify(saved.input) === stableStringify(input) &&
+        saved.request.chat?.firstTurnSha256 === firstTurnSha256;
       const submitted = submittedFiles(input);
       await privateDirectory(directory);
       const existing = await load(input.requestId).catch((error: NodeJS.ErrnoException) => {
@@ -683,10 +722,12 @@ export function makeProvisionPreparationStore(stateDir: string) {
         throw error;
       });
       if (existing) {
-        if (stableStringify(existing.input) !== stableStringify(input))
+        if (!sameRequest(existing))
           throw new ProvisionRequestConflict({ requestId: input.requestId });
         return existing;
       }
+      if (firstTurn !== undefined && firstTurnSha256 !== undefined)
+        await writeReplace(firstTurnPath(input.requestId), stableStringify(firstTurn));
       const profiles = typeof profilesFor === "function" ? await profilesFor() : profilesFor;
       const provisioning = config.provisioning;
       const artifact = configuredRuntimeArtifact(config, input.provider);
@@ -966,7 +1007,14 @@ export function makeProvisionPreparationStore(stateDir: string) {
         ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
         ...(input.repository ? { repository: input.repository } : {}),
         ...(input.branch ? { branch: input.branch } : {}),
-        ...(input.chat ? { chat: input.chat } : {}),
+        ...(input.chat
+          ? {
+              chat: {
+                threadId: input.chat.threadId,
+                ...(firstTurnSha256 === undefined ? {} : { firstTurnSha256 }),
+              },
+            }
+          : {}),
         sourceRevision: repository?.revision ?? null,
         preparationHash: provisionDigest(
           stableStringify({ preparation, egressAllow: provisioning.egressAllow ?? [] }),
@@ -1021,8 +1069,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         NodeFSP.writeFile(temporary, stableStringify(manifest), { flag: "wx", mode: 0o600 }),
       );
       const saved = await load(input.requestId);
-      if (stableStringify(saved.input) !== stableStringify(input))
-        throw new ProvisionRequestConflict({ requestId: input.requestId });
+      if (!sameRequest(saved)) throw new ProvisionRequestConflict({ requestId: input.requestId });
       return saved;
     },
   };

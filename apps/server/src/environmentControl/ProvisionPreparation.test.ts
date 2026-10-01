@@ -119,6 +119,50 @@ it("routes accounts for a new request only, so a retry cannot be refused by rout
   }
 });
 
+it("keeps a chat's first message only until it settles, and still matches retries by it", async () => {
+  const f = await fixture();
+  try {
+    const firstTurn = {
+      messageId: "message-1",
+      text: "a private first message",
+      title: "first message",
+      modelSelection: { instanceId: "codex", model: "gpt-6-astra" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: "2026-10-01T00:01:27.000Z",
+    };
+    const withChat = decodeProvisionInput({
+      ...input,
+      chat: { threadId: "draft-thread", firstTurn },
+    });
+    const manifest = await f.store.freeze(withChat, f.config, f.resolver, [f.profile]);
+    const frozen = await NodeFSP.readFile(
+      NodePath.join(f.root, "provisioning", `${withChat.requestId}.json`),
+      "utf8",
+    );
+    expect(frozen).not.toContain("a private first message");
+    expect(await f.store.readFirstTurn(manifest)).toEqual(firstTurn);
+    expect(await f.store.freeze(withChat, f.config, f.resolver, [f.profile])).toEqual(manifest);
+    await expect(
+      f.store.freeze(
+        decodeProvisionInput({
+          ...input,
+          chat: { threadId: "draft-thread", firstTurn: { ...firstTurn, text: "another" } },
+        }),
+        f.config,
+        f.resolver,
+        [f.profile],
+      ),
+    ).rejects.toBeInstanceOf(ProvisionRequestConflict);
+
+    await f.store.forgetFirstTurn(withChat.requestId);
+    expect(await f.store.readFirstTurn(manifest)).toBeNull();
+    expect(await f.store.freeze(withChat, f.config, f.resolver, [f.profile])).toEqual(manifest);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("stores the pinned runtime artifact only when its content matches the pin", async () => {
   const f = await fixture();
   try {

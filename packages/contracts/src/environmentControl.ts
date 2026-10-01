@@ -147,6 +147,14 @@ export const EnvironmentProvisionInput = Schema.Struct({
 });
 export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
 
+/**
+ * Where the host's start of a chat's first turn stands. `started` means the box took the turn
+ * and the page must not send it. Anything else, including a host too old to report this, leaves
+ * the first message to the page.
+ */
+export const ProvisionFirstTurnStatus = Schema.Literals(["pending", "started", "failed"]);
+export type ProvisionFirstTurnStatus = typeof ProvisionFirstTurnStatus.Type;
+
 export const ProvisionedEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   leaseId: TrimmedNonEmptyString,
@@ -157,6 +165,7 @@ export const ProvisionedEnvironment = Schema.Struct({
   sourceRevision: Schema.NullOr(Schema.String),
   t3Revision: Schema.String,
   artifactSha256: Schema.String,
+  firstTurn: Schema.optional(ProvisionFirstTurnStatus),
   control: Schema.Struct({
     preparationRoot: Schema.String,
     brokerCredentialPath: Schema.String,

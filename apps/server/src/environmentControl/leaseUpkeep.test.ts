@@ -39,3 +39,25 @@ it.effect("keeps both loops ticking after a reap rejects and a reconcile dies", 
     ]);
   }).pipe(Effect.scoped),
 );
+
+it.effect("starts owed first turns before every pause check", () =>
+  Effect.gen(function* () {
+    const calls = yield* Queue.unbounded<"settle" | "reap">();
+    yield* runLeaseUpkeep({
+      reapExpiredLeases: async () => {
+        Queue.offerUnsafe(calls, "reap");
+      },
+      syncLeaseUsage: async () => {},
+      reconcileProvisions: Effect.void,
+      settleChats: Effect.sync(() => Queue.offerUnsafe(calls, "settle")),
+      boxUsage: { prune: () => Effect.void },
+    }).pipe(Effect.forkScoped);
+    const ticks = [yield* Queue.takeN(calls, 2)];
+    yield* TestClock.adjust(LEASE_UPKEEP_INTERVAL);
+    ticks.push(yield* Queue.takeN(calls, 2));
+    assert.deepStrictEqual(ticks, [
+      ["settle", "reap"],
+      ["settle", "reap"],
+    ]);
+  }).pipe(Effect.scoped),
+);

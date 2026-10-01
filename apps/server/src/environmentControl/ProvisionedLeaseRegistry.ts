@@ -1,5 +1,5 @@
 // @effect-diagnostics globalDate:off - this registry uses ISO timestamps at the server boundary.
-import { EnvironmentProvisionInput, ProvisionFirstTurn } from "@t3tools/contracts";
+import { EnvironmentProvisionInput } from "@t3tools/contracts";
 import { retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -14,6 +14,18 @@ export const ProvisionedLeaseState = Schema.Literals([
   "disposed",
 ]);
 export type ProvisionedLeaseState = typeof ProvisionedLeaseState.Type;
+
+export const FirstTurnState = Schema.Union([
+  Schema.Struct({ status: Schema.Literals(["pending", "started"]) }),
+  Schema.Struct({ status: Schema.Literal("failed"), reason: Schema.String }),
+]);
+export type FirstTurnState = typeof FirstTurnState.Type;
+/** A first turn the box has not taken this long after its lease began is given up on. */
+export const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
+/** Whether a lease's first turn is still owed and its deadline has passed. */
+export const firstTurnOverdue = (lease: ProvisionedLease, now: number) =>
+  lease.firstTurn?.status === "pending" &&
+  now - Date.parse(lease.createdAt) > FIRST_TURN_DEADLINE_MS;
 
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
@@ -48,10 +60,10 @@ export const StoredProvisionedLease = Schema.Struct({
   state: ProvisionedLeaseState,
   owner: Schema.NullOr(ProvisionedLeaseOwner),
   /**
-   * The owner's first turn, until the host has started it on the box. A lease
-   * holding one is never idle: nothing has run on it yet.
+   * The host's start of the owner's first turn. A lease whose turn is `pending` is not idle,
+   * since nothing has run on it yet, until FIRST_TURN_DEADLINE_MS after it began.
    */
-  firstTurn: Schema.optional(ProvisionFirstTurn),
+  firstTurn: Schema.optional(FirstTurnState),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
@@ -80,7 +92,8 @@ export interface ProvisionedLeaseRegistry {
     readonly retentionDeadline?: string;
     /** The chat the box was provisioned for, which owns it from registration. */
     readonly owner?: ProvisionedLeaseOwner;
-    readonly firstTurn?: ProvisionFirstTurn;
+    /** The host owes the owner a first turn on this box. */
+    readonly firstTurnPending?: boolean;
     readonly now?: Date;
   }) => Promise<ProvisionedLease>;
   readonly claim: (input: {
@@ -89,8 +102,15 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly touch: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
-  /** Records that the owner's first turn has started on the box, or will never start. */
-  readonly settleFirstTurn: (leaseId: string, now?: Date) => Promise<void>;
+  /**
+   * Records how a pending first turn ended. A failed one also drops the owner: that chat may
+   * never exist, and the page that sends the message itself claims the box again.
+   */
+  readonly settleFirstTurn: (
+    leaseId: string,
+    outcome: Exclude<FirstTurnState, { status: "pending" }>,
+    now?: Date,
+  ) => Promise<void>;
   readonly findById: (leaseId: string) => Promise<ProvisionedLease | null>;
   readonly findBySandbox: (sandboxId: string) => Promise<ProvisionedLease | null>;
   readonly beginRelease: (input: {
@@ -213,7 +233,7 @@ export function createProvisionedLeaseRegistry(
             : { companionInstanceIds: input.companionInstanceIds }),
           state: "active",
           owner: input.owner ?? null,
-          ...(input.firstTurn === undefined ? {} : { firstTurn: input.firstTurn }),
+          ...(input.firstTurnPending ? { firstTurn: { status: "pending" as const } } : {}),
           createdAt: now,
           updatedAt: now,
           expiresAt: new Date(
@@ -282,13 +302,18 @@ export function createProvisionedLeaseRegistry(
         next[index] = updated;
         return { leases: next, value: updated };
       }),
-    settleFirstTurn: (leaseId, now) =>
+    settleFirstTurn: (leaseId, outcome, now) =>
       mutate((leases) => ({
-        leases: leases.map((lease) => {
-          if (lease.leaseId !== leaseId || lease.firstTurn === undefined) return lease;
-          const { firstTurn: _settled, ...rest } = lease;
-          return { ...rest, updatedAt: nowIso(now) };
-        }),
+        leases: leases.map((lease) =>
+          lease.leaseId !== leaseId || lease.firstTurn?.status !== "pending"
+            ? lease
+            : {
+                ...lease,
+                firstTurn: outcome,
+                ...(outcome.status === "failed" ? { owner: null } : {}),
+                updatedAt: nowIso(now),
+              },
+        ),
         value: undefined,
       })),
     findById: (leaseId) =>

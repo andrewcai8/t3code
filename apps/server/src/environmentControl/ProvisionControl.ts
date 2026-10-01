@@ -18,7 +18,9 @@ import {
 import * as DateTime from "effect/DateTime";
 import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 
@@ -27,10 +29,11 @@ import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import type { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
-import type {
-  ProvisionedLease,
-  ProvisionedLeaseRegistry,
-  RemoteAccess,
+import {
+  firstTurnOverdue,
+  type ProvisionedLease,
+  type ProvisionedLeaseRegistry,
+  type RemoteAccess,
 } from "./ProvisionedLeaseRegistry.ts";
 import type { NamespaceProxyLease } from "./namespaceProxy.ts";
 import type { FirstTurnDelivery } from "./firstTurn.ts";
@@ -84,9 +87,17 @@ export interface ProvisionControlPorts {
       readonly turn: ProvisionFirstTurn;
     },
   ) => Promise<FirstTurnDelivery>;
+  /** The chat's first message while it is still owed, or null once it is gone. */
+  readonly readFirstTurn: (
+    manifest: ProvisionPreparationManifest,
+  ) => Promise<ProvisionFirstTurn | null>;
+  /** Deletes the first message once it is settled either way. */
+  readonly forgetFirstTurn: (id: ProvisionRequestId) => Promise<void>;
 }
-/** A first turn the box has not taken this long after its lease began is given up on. */
-const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
+/** Retries right after ready, so a box slow to answer does not wait for the next upkeep pass. */
+const FIRST_TURN_RETRY = Schedule.exponential(Duration.seconds(1)).pipe(
+  Schedule.upTo({ times: 5 }),
+);
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
 /**
@@ -149,6 +160,7 @@ export function makeProvisionControl(
   provisioning: Provisioning["Service"],
   ports: ProvisionControlPorts,
   leases: ProvisionedLeaseRegistry,
+  firstTurnRetry: Schedule.Schedule<unknown> = FIRST_TURN_RETRY,
 ) {
   const activeLease = (operation: ProvisionOperation) => {
     const { state } = operation;
@@ -174,9 +186,9 @@ export function makeProvisionControl(
                 environmentId: state.readiness.environmentId,
                 threadId: operation.request.chat.threadId,
               },
-              ...(operation.request.chat.firstTurn === undefined
+              ...(operation.request.chat.firstTurnSha256 === undefined
                 ? {}
-                : { firstTurn: operation.request.chat.firstTurn }),
+                : { firstTurnPending: true }),
             }),
       }),
     );
@@ -252,32 +264,43 @@ export function makeProvisionControl(
   });
   /**
    * Gives a ready box to the chat it was provisioned for and starts that chat's first turn, so
-   * neither waits on a client. Safe to run any number of times: a delivered turn is never sent
-   * again. A failure is logged and left for the next upkeep pass.
+   * neither waits on a client. Safe to run any number of times: a turn is sent at most once, and
+   * a settled one is never sent again. Answers where the first turn stands, null without one.
    */
-  const settleChat = (operation: ProvisionOperation) =>
+  const settleChatOnce = (operation: ProvisionOperation) =>
     Effect.gen(function* () {
       const { state, request } = operation;
       const chat = request.chat;
-      if (state.kind !== "ready" || chat === undefined) return;
+      if (state.kind !== "ready" || chat === undefined) return null;
       const registered = yield* activeLease(operation);
-      const turn = registered?.firstTurn;
-      if (registered?.state !== "active" || turn === undefined) return;
+      if (registered?.state !== "active" || registered.firstTurn === undefined)
+        return registered?.firstTurn?.status ?? null;
+      if (registered.firstTurn.status !== "pending") return registered.firstTurn.status;
       const { requestId } = request;
-      const now = DateTime.toEpochMillis(yield* DateTime.now);
-      if (now - Date.parse(registered.createdAt) > FIRST_TURN_DEADLINE_MS) {
-        yield* Effect.logError("cloud chat first turn abandoned", {
-          requestId,
+      const settle = (outcome: { status: "started" } | { status: "failed"; reason: string }) =>
+        Effect.gen(function* () {
+          if (outcome.status === "failed")
+            yield* Effect.logError("cloud chat first turn not started", {
+              requestId,
+              reason: outcome.reason,
+            });
+          yield* promise(() => leases.settleFirstTurn(registered.leaseId, outcome));
+          yield* promise(() => ports.forgetFirstTurn(requestId));
+          return outcome.status;
+        });
+      if (firstTurnOverdue(registered, DateTime.toEpochMillis(yield* DateTime.now)))
+        return yield* settle({
+          status: "failed",
           reason: "The box did not take the turn in time.",
         });
-        yield* promise(() => leases.settleFirstTurn(registered.leaseId));
-        return;
-      }
+      const turn = yield* promise(async () => ports.readFirstTurn(await ports.load(requestId)));
+      if (turn === null)
+        return yield* settle({ status: "failed", reason: "The first message was not kept." });
       const lease = registered.remoteAccess
         ? registered
         : (yield* publish(operation, registered)).lease;
       const remoteAccess = lease.remoteAccess;
-      if (!remoteAccess) return;
+      if (!remoteAccess) return "pending" as const;
       const delivery = yield* promise(() =>
         ports.deliverFirstTurn(remoteAccess, {
           requestId,
@@ -286,23 +309,30 @@ export function makeProvisionControl(
           turn,
         }),
       );
-      if (delivery === "pending") return;
-      if (delivery === "refused")
-        yield* Effect.logError("cloud chat first turn refused by its box", { requestId });
-      yield* promise(() => leases.settleFirstTurn(lease.leaseId));
-    }).pipe(Effect.ignore({ log: "Warn", message: "cloud chat first turn not started yet" }));
+      if (delivery === "pending") return "pending" as const;
+      return yield* settle(
+        delivery === "delivered"
+          ? { status: "started" }
+          : { status: "failed", reason: "The box refused the turn." },
+      );
+    }).pipe(Effect.catch(() => Effect.succeed("pending" as const)));
+  /** Starts a chat's first turn now, retrying briefly while its box is not answering yet. */
+  const settleChat = (operation: ProvisionOperation) =>
+    settleChatOnce(operation).pipe(
+      Effect.repeat({ schedule: firstTurnRetry, while: (status) => status === "pending" }),
+    );
   return {
     settleChat,
     /** Retries every awake box whose chat's first turn has not started. */
     settleChats: Effect.gen(function* () {
       const waiting = (yield* promise(() => leases.awake())).filter(
-        (lease) => lease.firstTurn !== undefined,
+        (lease) => lease.firstTurn?.status === "pending",
       );
       for (const lease of waiting) {
         const id = yield* decodeRequestId(lease.leaseId).pipe(Effect.option);
         if (Option.isNone(id)) continue;
         const operation = yield* store.get(id.value).pipe(Effect.option);
-        if (Option.isSome(operation)) yield* settleChat(operation.value);
+        if (Option.isSome(operation)) yield* settleChatOnce(operation.value);
       }
     }).pipe(Effect.ignore),
     provision: Effect.fn("EnvironmentControl.provision")(function* (
@@ -363,6 +393,7 @@ export function makeProvisionControl(
             provider: resource.provider,
             sandboxId: resource.provider === "e2b" ? resource.sandboxId : resource.devboxId,
             providerInstanceId: operation.request.providerInstanceId,
+            ...(lease.firstTurn === undefined ? {} : { firstTurn: lease.firstTurn.status }),
             control: {
               preparationRoot: manifest.preparation.root,
               brokerCredentialPath: `${manifest.preparation.root}/broker-token`,

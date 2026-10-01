@@ -5,6 +5,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
@@ -18,6 +19,12 @@ import {
 } from "../auth/http.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
+
+const isCommandRejection = (cause: unknown) =>
+  Predicate.isTagged(cause, "OrchestrationCommandInvariantError") ||
+  Predicate.isTagged(cause, "OrchestrationThreadSettleBlockedError") ||
+  Predicate.isTagged(cause, "OrchestrationCommandPreviouslyRejectedError") ||
+  Predicate.isTagged(cause, "OrchestrationCommandIdConflictError");
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
@@ -116,8 +123,12 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             Effect.tapError(() =>
               cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
             ),
+            // A command the engine turned away stays turned away; only an internal failure is
+            // worth retrying, so callers can tell the two apart by status.
             Effect.catch((cause) =>
-              failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              isCommandRejection(cause)
+                ? failEnvironmentInvalidRequest("invalid_command")
+                : failEnvironmentInternal("orchestration_dispatch_failed", cause),
             ),
           );
           yield* ProjectCloneTracker.discardCloneForDeletedProject(

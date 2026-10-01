@@ -13,6 +13,11 @@ import type { RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 export type FirstTurnDelivery = "delivered" | "pending" | "refused";
 
 const encodeCommand = Schema.encodeSync(ClientOrchestrationCommand);
+const decodeThread = Schema.decodeUnknownExit(
+  Schema.Struct({
+    thread: Schema.Struct({ messages: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+  }),
+);
 const decodeShell = Schema.decodeUnknownExit(
   Schema.Struct({
     projects: Schema.Array(Schema.Struct({ id: ProjectId, workspaceRoot: Schema.String })),
@@ -63,7 +68,21 @@ export async function deliverFirstTurn(
   if (shell._tag === "Failure") return "pending";
   const { turn } = chat;
   const threadId = ThreadId.make(chat.threadId);
-  if (!shell.value.threads.some((thread) => thread.id === threadId)) {
+  if (shell.value.threads.some((thread) => thread.id === threadId)) {
+    // A page that sent the same message first, such as an older tab, already started it.
+    const detail = await fetch(
+      `${remote.origin}/api/orchestration/threads/${encodeURIComponent(threadId)}`,
+      { headers, redirect: "error", signal: AbortSignal.timeout(15_000) },
+    );
+    if (!detail.ok) {
+      await detail.body?.cancel();
+      return "pending";
+    }
+    const thread = decodeThread(await detail.json());
+    if (thread._tag === "Failure") return "pending";
+    if (thread.value.thread.messages.some((message) => message.id === turn.messageId))
+      return "delivered";
+  } else {
     const projects = shell.value.projects;
     const project =
       projects.find((candidate) => candidate.workspaceRoot === chat.projectDir) ??

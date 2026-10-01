@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { EnvironmentProvisionInput, ProvisionRequestId } from "./environmentControl.ts";
 
 const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
@@ -31,7 +31,14 @@ const requestFields = {
    * request id and the files this one carries and so is unique every time.
    */
   buildHash: Schema.optional(Sha256),
-  chat: EnvironmentProvisionInput.fields.chat,
+  /**
+   * The chat the box is for. The first message itself is kept apart and deleted once the host
+   * has started or given up on it; the request keeps only its digest, so a retry can still be
+   * matched against it.
+   */
+  chat: Schema.optional(
+    Schema.Struct({ threadId: ThreadId, firstTurnSha256: Schema.optional(Sha256) }),
+  ),
 };
 export const DurableProvisionRequest = Schema.Union([
   Schema.Struct({

@@ -94,6 +94,7 @@ import {
 } from "./config.ts";
 import { createCloudDriver, ProvisionedSandboxMissing, type CloudDriver } from "./driver.ts";
 import {
+  firstTurnOverdue,
   createProvisionedLeaseRegistry,
   decodeLegacyLeases,
   type ProvisionedLease,
@@ -229,9 +230,16 @@ export function createEnvironmentControl(
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
       if (only && !only.has(lease.leaseId)) continue;
-      // Nothing has run on a box whose chat's first turn has not started, so it is not idle.
-      // Upkeep starts the turn, or gives up on it, before the box can be paused.
-      if (lease.state === "active" && lease.firstTurn !== undefined) continue;
+      // Nothing has run on a box whose chat's first turn has not started, so it is not idle,
+      // until that turn is overdue. Then it is given up here too, so a turn upkeep can never
+      // settle cannot hold the box awake.
+      if (lease.state === "active" && lease.firstTurn?.status === "pending") {
+        if (!firstTurnOverdue(lease, Date.now())) continue;
+        await leaseRegistry.settleFirstTurn(lease.leaseId, {
+          status: "failed",
+          reason: "The box did not take the turn in time.",
+        });
+      }
       // A resume or renew in flight is working on this box. Stopping it under
       // them kills their commands, and a resume ends by renewing the lease.
       if (leaseOperations.has(lease.sandboxId)) continue;
@@ -1329,6 +1337,8 @@ export const layer = Layer.effect(
         setRuntime: manifests.setRuntime,
         prepare: ports.prepare,
         deliverFirstTurn,
+        readFirstTurn: manifests.readFirstTurn,
+        forgetFirstTurn: manifests.forgetFirstTurn,
       },
       leaseRegistry,
     );
