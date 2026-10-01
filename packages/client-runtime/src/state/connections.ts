@@ -266,8 +266,15 @@ export function createEnvironmentCatalogAtoms<R, E>(
       EnvironmentRegistry.EnvironmentRegistry.pipe(
         Effect.flatMap((registry) =>
           // No timeout: waking a box can take many minutes, and a blocked connection fails here.
+          // The state current when the wait starts predates the retry its caller just asked for,
+          // so only a later block counts.
           registry.stateChanges(environmentId).pipe(
-            Stream.filter((state) => state.phase === "connected" || state.phase === "blocked"),
+            Stream.zipWithIndex,
+            Stream.filter(
+              ([state, index]) =>
+                state.phase === "connected" || (state.phase === "blocked" && index > 0),
+            ),
+            Stream.map(([state]) => state),
             Stream.runHead,
             Effect.flatMap(Effect.fromOption),
             Effect.flatMap((state) =>
