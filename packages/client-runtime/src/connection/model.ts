@@ -79,6 +79,8 @@ export const ConnectionTransientReason = Schema.Literals([
   "endpoint-unavailable",
   "relay-unavailable",
   "remote-unavailable",
+  // A box's address answers but nothing serves behind it, as while the box is paused.
+  "not-serving",
 ]);
 export type ConnectionTransientReason = typeof ConnectionTransientReason.Type;
 
