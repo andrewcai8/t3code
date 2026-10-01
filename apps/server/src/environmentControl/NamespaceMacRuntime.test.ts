@@ -170,6 +170,7 @@ async function fakeArtifacts() {
     artifacts,
     live: () => [...records.keys()].filter(isLive),
     expiryOf: (path: string) => expiries.get(path),
+    bytesOf: (path: string) => store.object(path),
   };
 }
 
@@ -177,7 +178,7 @@ const unreachable = async (): Promise<never> => {
   throw new Error("this test configures no Namespace artifacts");
 };
 
-async function setup(lifetimeMs?: number) {
+async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<string>) {
   const w = await makeWorld(cleanups);
   const namespace = fakeNamespace(w, lifetimeMs);
   const storage = await fakeArtifacts();
@@ -245,6 +246,7 @@ async function setup(lifetimeMs?: number) {
       runtimeExecutable: process.execPath,
     },
     egressAllow: [],
+    ...(derivedHomePaths ? { derivedHomePaths } : {}),
   });
   const operation = (environmentId: string, retentionDeadline?: string) =>
     decodeOperation({
@@ -386,6 +388,20 @@ describe("Namespace Mac runtime", () => {
       ProvisionedSandboxMissing,
     );
     expect(t.namespace.live(), "no Mac is opened for a chat with nothing to restore").toEqual([]);
+  });
+
+  it("leaves a repository's derived home paths out of its snapshots", async () => {
+    const t = await setup(undefined, [".claude"]);
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
+    const bytes = t.storage.bytesOf((await t.record())?.snapshot?.artifactPath ?? "");
+    if (bytes === undefined) throw new Error("expected a stored snapshot");
+    const listed = NodeChildProcess.execFileSync("tar", ["-tf", "-"], {
+      input: bytes,
+      encoding: "utf8",
+    }).split("\n");
+    expect(listed.filter((entry) => entry.startsWith("home/.claude"))).toEqual([]);
+    expect(listed).toContain("home/.t3/userdata/environment-id");
   });
 
   it("settles a heartbeat that saw a Mac gone against the record as it is when it writes", async () => {

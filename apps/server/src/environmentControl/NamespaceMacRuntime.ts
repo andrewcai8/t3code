@@ -170,9 +170,10 @@ export function makeNamespaceMacRuntime(config: {
     const mount = NodePath.posix.dirname(root);
     const repository = manifest.input.repository ?? null;
     const { local, guest } = desiredRuntime(manifest, build);
-    const derivedHomePaths = (manifest.preparation.artifacts ?? []).map(
-      ({ destination }) => destination,
-    );
+    const derivedHomePaths = [
+      ...(manifest.preparation.artifacts ?? []).map(({ destination }) => destination),
+      ...(manifest.derivedHomePaths ?? []),
+    ];
     const template = {
       mount,
       root,

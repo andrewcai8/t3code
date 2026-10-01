@@ -174,6 +174,12 @@ const Provisioning = Schema.Struct({
              * Devboxes. A chat keeps the engine it was frozen with.
              */
             engine: Schema.optional(Schema.Literals(["devbox", "instance"])),
+            /**
+             * Home-relative paths this repository's prepare commands rebuild, such as a
+             * toolchain they install. Instance-engine snapshots leave them out and templates
+             * keep them, so a chat's snapshot carries only its own state.
+             */
+            derivedHomePaths: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
           }),
         ),
       }),

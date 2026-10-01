@@ -1749,7 +1749,11 @@ it("runs a chat that claims a spare on the spare's Devbox and root, and cold whe
 it("freezes a repository on the instance engine at the cache volume's one root, without a spare", async () => {
   const f = await fixture();
   try {
-    const config = spareConfig(f.config, { spare: true, engine: "instance" });
+    const config = spareConfig(f.config, {
+      spare: true,
+      engine: "instance",
+      derivedHomePaths: [".local/share/mind-python"],
+    });
     const chat = decodeProvisionInput({ ...input, provider: "namespace" });
     const asked: unknown[] = [];
     const manifest = await f.store.freeze(chat, config, f.resolver, [f.profile], undefined, {
@@ -1765,11 +1769,13 @@ it("freezes a repository on the instance engine at the cache volume's one root, 
       manifest.preparation.root,
       manifest.preparation.artifact.archivePath,
       manifest.warmKey,
+      manifest.derivedHomePaths,
     ]).toEqual([
       "instance",
       "/Volumes/t3/root",
       `/Volumes/t3/t3-runtime-${manifest.preparation.artifact.sha256}.tar`,
       undefined,
+      [".local/share/mind-python"],
     ]);
     const other = await makeProvisionPreparationStore(f.root + "-devbox").freeze(
       decodeProvisionInput({ ...input, provider: "namespace", requestId: SPARE }),

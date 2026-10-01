@@ -86,6 +86,11 @@ export const ProvisionPreparationManifest = Schema.Struct({
    * `preparation`, so it is not part of the preparation's identity.
    */
   warmKey: Schema.optional(Sha256),
+  /**
+   * Home paths the instance engine leaves out of snapshots on top of its own table, from the
+   * repository's `namespace.derivedHomePaths`. Outside `preparation`, like `warmKey`.
+   */
+  derivedHomePaths: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(
@@ -1096,6 +1101,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         localArtifact,
         egressAllow: provisioning.egressAllow ?? [],
         ...(warmKey ? { warmKey } : {}),
+        ...(instanceEngine && repositoryEntry?.namespace?.derivedHomePaths?.length
+          ? { derivedHomePaths: repositoryEntry.namespace.derivedHomePaths }
+          : {}),
       };
       await writeOnce(manifestPath(input.requestId), (temporary) =>
         NodeFSP.writeFile(temporary, stableStringify(manifest), { flag: "wx", mode: 0o600 }),
