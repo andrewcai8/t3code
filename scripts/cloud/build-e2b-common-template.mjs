@@ -13,7 +13,7 @@ const require = NodeModule.createRequire(
 const { Template } = require("e2b");
 const { values } = NodeUtil.parseArgs({
   options: {
-    name: { type: "string", default: "t3-common-tools-node24-bun140-v5" },
+    name: { type: "string", default: "t3-common-tools-node24-bun140-v6" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -28,7 +28,7 @@ if (values.help) {
     "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--config FILE] [--print-dockerfile]",
   );
   console.log(
-    "Builds a clean private E2B template with 4 CPUs, 8 GiB RAM and 20 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
+    "Builds a clean private E2B template with 4 CPUs, 8 GiB RAM, 8 GiB swap and 20 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
   );
   process.exit(0);
 }
@@ -71,7 +71,11 @@ sudo ln -sfn /usr/local/go/bin/go /usr/local/bin/go
 sudo ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 sudo systemctl disable redis-server.service
 test "$(go version)" = 'go version go1.26.4 linux/amd64'`)
-  .runCmd("bash /opt/t3-common-tools.sh verify && ruby --version");
+  .runCmd("bash /opt/t3-common-tools.sh verify && ruby --version")
+  // Sandboxes resume from the VM that ran the start command, not the build-step VM,
+  // so the swapon belongs in the start command.
+  .runCmd("sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile")
+  .setStartCmd("sudo swapon /swapfile", "grep -q '^/swapfile ' /proc/swaps");
 
 if (values["print-dockerfile"]) {
   console.log(Template.toDockerfile(template));
