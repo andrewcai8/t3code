@@ -191,6 +191,8 @@ interface HostOptions {
   readonly retry?: Schedule.Schedule<unknown>;
   /** The provider hands back a resource of the wrong kind, so the request fails. */
   readonly allocationFails?: boolean;
+  /** Leaves the drive's ready hook out, holding the moment between ready and the lease. */
+  readonly withoutReadyHook?: boolean;
 }
 
 const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.recurs(0) }) =>
@@ -265,7 +267,7 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
       leases,
       options.retry,
     );
-    settle = control.settleChat;
+    if (!options.withoutReadyHook) settle = control.settleChat;
     const lease = () => Effect.promise(() => leases.findById(input.requestId));
     return { box, control, provisioning, leases, lease, kept, preparing, prepared };
   });
@@ -480,6 +482,28 @@ it.live("answers ready within seconds when the box hangs, leaving later tries to
       expect(ready).toMatchObject({ kind: "ready", environment: { firstTurn: "pending" } });
       expect(elapsedMs).toBeLessThan(8_000);
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "pending" } });
+    }),
+  ),
+);
+
+it.live("keeps the first message of a ready request whose lease is not registered yet", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { box, control, provisioning, lease, kept, prepared } = yield* host(
+        {},
+        { withoutReadyHook: true },
+      );
+      yield* Deferred.succeed(prepared, undefined);
+      const ready = yield* provisioning.ensure(manifest.request);
+      expect(ready.state.kind).toBe("ready");
+      expect(yield* lease()).toBeNull();
+
+      yield* control.settleChats;
+      expect(kept.size).toBe(1);
+
+      expect(yield* control.settleChat(ready)).toBe("started");
+      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(kept.size).toBe(0);
     }),
   ),
 );
