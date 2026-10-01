@@ -11,11 +11,13 @@ export function useReconnectSend<Input>(options: {
   recover: (environmentId: EnvironmentId) => Promise<ReconnectResult>;
   send: (input: Input) => void;
   onFailure: (message: string) => void;
+  /** The user left the thread before its send went out; the message stays in its draft. */
+  onAbandoned: () => void;
 }) {
   type Pending = { threadKey: string; input: Input; ready: boolean };
   const [pending, setPending] = useState<Pending | null>(null);
   const pendingRef = useRef<Pending | null>(null);
-  const { threadKey, ready, recover, send, onFailure } = options;
+  const { threadKey, ready, recover, send, onFailure, onAbandoned } = options;
   const reconnectAndSend = useCallback(
     async (environmentId: EnvironmentId, input: Input) => {
       if (pendingRef.current) return;
@@ -42,19 +44,31 @@ export function useReconnectSend<Input>(options: {
     if (pending.threadKey !== threadKey) {
       pendingRef.current = null;
       setPending(null);
+      onAbandoned();
       return;
     }
     if (!pending.ready || !ready) return;
     pendingRef.current = null;
     setPending(null);
     send(pending.input);
-  }, [pending, threadKey, ready, send]);
+  }, [pending, threadKey, ready, send, onAbandoned]);
+  const onAbandonedRef = useRef(onAbandoned);
+  useEffect(() => {
+    onAbandonedRef.current = onAbandoned;
+  });
   useEffect(
     () => () => {
+      if (pendingRef.current === null) return;
       pendingRef.current = null;
+      onAbandonedRef.current();
     },
     [],
   );
   const isPending = useCallback(() => pendingRef.current !== null, []);
-  return { reconnectAndSend, reconnecting: pending !== null, isPending };
+  /** Stops waiting to send; the message stays in the composer. */
+  const cancel = useCallback(() => {
+    pendingRef.current = null;
+    setPending(null);
+  }, []);
+  return { reconnectAndSend, reconnecting: pending !== null, isPending, cancel };
 }

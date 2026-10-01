@@ -7,7 +7,13 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
-import { AVAILABLE_CONNECTION_STATE, connectionBox } from "../connection/model.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  type ConnectionAttemptError,
+  ConnectionTransientError,
+  type SupervisorConnectionState,
+  connectionBox,
+} from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import {
   GitHubRoutingPermissions,
@@ -58,6 +64,40 @@ const EMPTY_ENVIRONMENT_CATALOG_STATE: EnvironmentCatalogState = Object.freeze({
   isReady: false,
   entries: new Map(),
 });
+
+/**
+ * Waits on an environment's connection states for a queued send: done once connected, failed once
+ * blocked or switched off. There is no timeout, since waking a box can take many minutes. The state
+ * current when the wait starts predates the retry its caller just asked for, so only a later block
+ * counts.
+ */
+export const awaitConnection = <E, R>(
+  states: Stream.Stream<SupervisorConnectionState, E, R>,
+): Effect.Effect<void, E | ConnectionAttemptError | ConnectionTransientError, R> =>
+  states.pipe(
+    Stream.zipWithIndex,
+    Stream.filter(
+      ([state, index]) =>
+        state.phase === "connected" ||
+        state.phase === "available" ||
+        (state.phase === "blocked" && index > 0),
+    ),
+    Stream.runHead,
+    Effect.flatMap(
+      (head): Effect.Effect<void, ConnectionAttemptError | ConnectionTransientError> => {
+        const state = head._tag === "Some" ? head.value[0] : null;
+        if (state?.phase === "connected") return Effect.void;
+        if (state?.phase === "blocked" && state.lastFailure !== null)
+          return Effect.fail(state.lastFailure);
+        return Effect.fail(
+          new ConnectionTransientError({
+            reason: "transport",
+            detail: "The environment was disconnected. The message is still in the composer.",
+          }),
+        );
+      },
+    ),
+  );
 
 export function createEnvironmentCatalogAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, E>,
@@ -264,26 +304,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
     label: "environment-catalog:await-connected",
     execute: (environmentId: EnvironmentIdType) =>
       EnvironmentRegistry.EnvironmentRegistry.pipe(
-        Effect.flatMap((registry) =>
-          // No timeout: waking a box can take many minutes, and a blocked connection fails here.
-          // The state current when the wait starts predates the retry its caller just asked for,
-          // so only a later block counts.
-          registry.stateChanges(environmentId).pipe(
-            Stream.zipWithIndex,
-            Stream.filter(
-              ([state, index]) =>
-                state.phase === "connected" || (state.phase === "blocked" && index > 0),
-            ),
-            Stream.map(([state]) => state),
-            Stream.runHead,
-            Effect.flatMap(Effect.fromOption),
-            Effect.flatMap((state) =>
-              state.phase === "blocked" && state.lastFailure !== null
-                ? Effect.fail(state.lastFailure)
-                : Effect.void,
-            ),
-          ),
-        ),
+        Effect.flatMap((registry) => awaitConnection(registry.stateChanges(environmentId))),
       ),
   });
 
