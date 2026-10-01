@@ -59,7 +59,13 @@ const noRuntimePorts = {
     throw new Error("Unexpected setRuntime");
   },
   prepare: () => Effect.die("Unexpected prepare"),
-} satisfies Pick<ProvisionControlPorts, "pinnedRuntime" | "setRuntime" | "prepare">;
+  deliverFirstTurn: async () => {
+    throw new Error("Unexpected first turn");
+  },
+} satisfies Pick<
+  ProvisionControlPorts,
+  "pinnedRuntime" | "setRuntime" | "prepare" | "deliverFirstTurn"
+>;
 
 it.effect(
   "ready survives a lost lease receipt, attachment uses fresh grants, and heartbeat extends compute before the lease",
@@ -553,6 +559,7 @@ it.effect(
             return artifact;
           },
           prepare: ports.prepare,
+          deliverFirstTurn: noRuntimePorts.deliverFirstTurn,
         },
         leases,
       );

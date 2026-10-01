@@ -1,5 +1,5 @@
 // @effect-diagnostics globalDate:off - this registry uses ISO timestamps at the server boundary.
-import { EnvironmentProvisionInput } from "@t3tools/contracts";
+import { EnvironmentProvisionInput, ProvisionFirstTurn } from "@t3tools/contracts";
 import { retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -47,6 +47,11 @@ export const StoredProvisionedLease = Schema.Struct({
   companionInstanceIds: Schema.optional(Schema.Array(Schema.String)),
   state: ProvisionedLeaseState,
   owner: Schema.NullOr(ProvisionedLeaseOwner),
+  /**
+   * The owner's first turn, until the host has started it on the box. A lease
+   * holding one is never idle: nothing has run on it yet.
+   */
+  firstTurn: Schema.optional(ProvisionFirstTurn),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
@@ -73,6 +78,9 @@ export interface ProvisionedLeaseRegistry {
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly namespaceResource?: NamespaceResource;
     readonly retentionDeadline?: string;
+    /** The chat the box was provisioned for, which owns it from registration. */
+    readonly owner?: ProvisionedLeaseOwner;
+    readonly firstTurn?: ProvisionFirstTurn;
     readonly now?: Date;
   }) => Promise<ProvisionedLease>;
   readonly claim: (input: {
@@ -81,6 +89,8 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly touch: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
+  /** Records that the owner's first turn has started on the box, or will never start. */
+  readonly settleFirstTurn: (leaseId: string, now?: Date) => Promise<void>;
   readonly findById: (leaseId: string) => Promise<ProvisionedLease | null>;
   readonly findBySandbox: (sandboxId: string) => Promise<ProvisionedLease | null>;
   readonly beginRelease: (input: {
@@ -202,7 +212,8 @@ export function createProvisionedLeaseRegistry(
             ? {}
             : { companionInstanceIds: input.companionInstanceIds }),
           state: "active",
-          owner: null,
+          owner: input.owner ?? null,
+          ...(input.firstTurn === undefined ? {} : { firstTurn: input.firstTurn }),
           createdAt: now,
           updatedAt: now,
           expiresAt: new Date(
@@ -271,6 +282,15 @@ export function createProvisionedLeaseRegistry(
         next[index] = updated;
         return { leases: next, value: updated };
       }),
+    settleFirstTurn: (leaseId, now) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => {
+          if (lease.leaseId !== leaseId || lease.firstTurn === undefined) return lease;
+          const { firstTurn: _settled, ...rest } = lease;
+          return { ...rest, updatedAt: nowIso(now) };
+        }),
+        value: undefined,
+      })),
     findById: (leaseId) =>
       consistentRead((leases) => leases.find((lease) => lease.leaseId === leaseId) ?? null),
     findBySandbox: (sandboxId) =>

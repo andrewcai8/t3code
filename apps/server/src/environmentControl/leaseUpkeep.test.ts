@@ -17,6 +17,7 @@ it.effect("keeps both loops ticking after a reap rejects and a reconcile dies", 
         Queue.offerUnsafe(calls, "usage");
       },
       reconcileProvisions: Effect.die(new Error("reconcile bug")),
+      settleChats: Effect.void,
       boxUsage: { prune: () => Effect.void },
     }).pipe(Effect.forkScoped);
     // Upkeep never ends on its own, so an exit here fails the test with its cause.

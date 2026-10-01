@@ -31,6 +31,7 @@ const requestFields = {
    * request id and the files this one carries and so is unique every time.
    */
   buildHash: Schema.optional(Sha256),
+  chat: EnvironmentProvisionInput.fields.chat,
 };
 export const DurableProvisionRequest = Schema.Union([
   Schema.Struct({

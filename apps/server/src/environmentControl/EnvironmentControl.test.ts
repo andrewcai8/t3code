@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - these tests use a temporary filesystem boundary.
 // @effect-diagnostics globalDate:off - these tests use fixed registry timestamps.
 import { describe, expect, it, vi } from "vite-plus/test";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ProviderInstanceId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
@@ -461,6 +461,32 @@ describe("managed cloud commands", () => {
       expect(await resumed).toEqual({ kind: "resumed" });
       expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "active" });
       expect(running).toBe(true);
+    });
+  });
+  it("never idles out a box whose chat's first turn has not started", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        providerInstanceId: "codex",
+        owner: { environmentId: "child", threadId: "thread" },
+        firstTurn: {
+          messageId: MessageId.make("message"),
+          text: "hi",
+          title: "hi",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const manager = createEnvironmentControl([], setup().driver, registry, async () => "idle");
+      await manager.reapExpiredLeases();
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+      await registry.settleFirstTurn("lease");
+      await manager.reapExpiredLeases();
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
     });
   });
   it("refresh only observes targets and never contacts or bootstraps the broker", async () => {
