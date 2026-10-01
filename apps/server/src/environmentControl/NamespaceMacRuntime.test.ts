@@ -15,6 +15,7 @@ import {
   type World,
 } from "./guestTestFixture.ts";
 import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
+import type { ChatRecord } from "./namespaceChat.ts";
 import { makeChatStore } from "./namespaceChatStore.ts";
 import {
   InstanceId,
@@ -46,6 +47,8 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
     { readonly labels: Readonly<Record<string, string>>; alive: boolean; deadline: number }
   >();
   const departures: Array<{ instanceId: InstanceId; departure: Departure }> = [];
+  /** Runs once inside the next `list`, as another operation would between its read and write. */
+  let duringList: (() => Promise<void>) | null = null;
   const incarnation = (instanceId: InstanceId) => ({
     instanceId,
     site: "iad4",
@@ -73,7 +76,12 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
       return incarnation(instanceId);
     },
     describe: async (instanceId) => (macs.get(instanceId)?.alive ? incarnation(instanceId) : null),
-    list: async (labels) => live(labels),
+    list: async (labels) => {
+      const interleaved = duringList;
+      duringList = null;
+      await interleaved?.();
+      return live(labels);
+    },
     exec: (instanceId, argv, options = {}) =>
       new Promise((resolve, reject) => {
         if (!macs.get(instanceId)?.alive)
@@ -101,6 +109,9 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
   return {
     instances,
     departures,
+    interleave: (run: () => Promise<void>) => {
+      duringList = run;
+    },
     live: () => live({}).map(({ instanceId }) => instanceId),
     kill: async (instanceId: InstanceId) => {
       const mac = macs.get(instanceId);
@@ -261,6 +272,9 @@ async function setup(lifetimeMs?: number) {
     manifest,
     operation,
     record: () => makeChatStore(stateDir).read(chatId),
+    /** Writes the record as a concurrent release or resume under the per-box lock would. */
+    overwrite: (next: ChatRecord) =>
+      makeChatStore(stateDir).update(chatId, () => ({ ok: true, record: next, garbage: [] })),
     write: (name: string, text: string) => NodeFSP.writeFile(NodePath.join(workspace, name), text),
     read: (name: string) =>
       NodeFSP.readFile(NodePath.join(workspace, name), "utf8").catch(() => null),
@@ -316,6 +330,45 @@ describe("Namespace Mac runtime", () => {
     await t.runtime.dispose(op, t.manifest);
     expect([t.namespace.live(), t.storage.live(), await t.record()]).toEqual([[], [], null]);
     expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["commit", "abandon"]);
+  });
+
+  it("settles a heartbeat that saw a Mac gone against the record as it is when it writes", async () => {
+    const t = await setup();
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    const op = t.operation(ready.environmentId);
+    await t.write("agent.txt", "work\n");
+    expect(await t.runtime.upkeep(op, t.manifest, async () => false)).toBe("kept");
+    const before = await t.record();
+    if (before?.kind !== "live" || before.snapshot === null)
+      throw new Error("expected a saved live Mac");
+
+    // A release lands between the heartbeat's read and its write: generation 2, Mac destroyed.
+    const released: ChatRecord = {
+      kind: "idle",
+      snapshot: { ...before.snapshot, generation: 2, mode: "final" },
+    };
+    t.namespace.interleave(async () => {
+      await t.namespace.kill(before.mac.incarnation.instanceId);
+      await t.overwrite(released);
+    });
+    expect(await t.runtime.touch(op)).toBe("released");
+    expect(await t.record(), "the newer snapshot survives a stale heartbeat").toEqual(released);
+
+    // A resume lands on a new Mac while a heartbeat that saw the old one dead is in flight.
+    const resumed: ChatRecord = {
+      kind: "live",
+      snapshot: released.snapshot,
+      mac: {
+        incarnation: { ...before.mac.incarnation, instanceId: InstanceId.make("mac-new") },
+        cache: "reader",
+      },
+    };
+    await t.overwrite({ ...before, snapshot: released.snapshot });
+    // The heartbeat reads that record, sees its Mac gone, and the resume lands before it writes.
+    t.namespace.interleave(() => t.overwrite(resumed).then(() => undefined));
+    expect(await t.runtime.touch(op)).toBe("running");
+    expect(await t.record(), "the resumed Mac is not dropped").toEqual(resumed);
+    await t.runtime.dispose(op, t.manifest);
   });
 
   it("releases a Mac near its deadline once its chat is idle, and refuses a missing snapshot", async () => {

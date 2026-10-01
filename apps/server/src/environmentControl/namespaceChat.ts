@@ -65,7 +65,10 @@ export interface SaveStep {
   readonly generation: number;
 }
 export type ChatStep =
-  | { readonly kind: "write"; readonly record: ChatRecord | null }
+  /** The Mac died out of band. Settles only a record still live on that Mac. */
+  | { readonly kind: "lost"; readonly instanceId: InstanceId }
+  /** Dispose's last step. Never removes a record that is live again. */
+  | { readonly kind: "forget" }
   | { readonly kind: "create" }
   /** `commit` means the performer scrubs the chat root, then destroys. */
   | { readonly kind: "depart"; readonly instanceId: InstanceId; readonly departure: Departure }
@@ -100,7 +103,8 @@ export interface ChatPerformer {
 
 /** A step together with what performing it returned. */
 export type Performed =
-  | StepOf<"write">
+  | StepOf<"lost">
+  | StepOf<"forget">
   | StepOf<"depart">
   | StepOf<"expire">
   | (StepOf<"create"> & { readonly outcome: MacIncarnation })
@@ -169,7 +173,7 @@ export function plan(
   const current = record?.kind === "live" ? currentOf(record) : null;
   // The Mac died out of band: everything since the last save is gone with it.
   if (record?.kind === "live" && !facts.instances.includes(currentOf(record)))
-    return { kind: "write", record: { kind: "idle", snapshot: record.snapshot } };
+    return { kind: "lost", instanceId: currentOf(record) };
   const stray = facts.instances.find((instanceId) => instanceId !== current);
   if (stray !== undefined) return { kind: "depart", instanceId: stray, departure: "abandon" };
   return record?.kind === "live"
@@ -227,7 +231,7 @@ function planIdle(
     case "dispose": {
       const paths = [...new Set([...artifacts, ...(kept === null ? [] : [kept])])];
       if (paths.length > 0) return { kind: "expire", paths };
-      return record === null ? { kind: "done" } : { kind: "write", record: null };
+      return record === null ? { kind: "done" } : { kind: "forget" };
     }
     default:
       return goal satisfies never;
@@ -259,8 +263,13 @@ const withCache = (record: LiveRecord, cache: MacCache): ChatRecord => ({
 /** Pure. Run it against the freshest record, inside the store's serialized update. */
 export function settle(record: ChatRecord | null, done: Performed): Settled {
   switch (done.kind) {
-    case "write":
-      return ok(done.record);
+    case "lost":
+      // Against the record as it is now: a release or resume since the caller looked wins.
+      return ok(
+        isCurrent(record, done.instanceId) ? { kind: "idle", snapshot: record.snapshot } : record,
+      );
+    case "forget":
+      return ok(record?.kind === "live" ? record : null);
     case "create":
       return ok({
         kind: "live",
@@ -328,7 +337,7 @@ function settleSave(record: ChatRecord | null, done: SaveStep & { outcome: SaveO
 }
 
 async function perform(
-  step: Exclude<ChatStep, { kind: "write" }>,
+  step: Exclude<ChatStep, { kind: "lost" | "forget" }>,
   performer: ChatPerformer,
 ): Promise<Performed> {
   switch (step.kind) {
@@ -362,7 +371,8 @@ export async function drive(goal: ChatGoal, ports: ChatPorts): Promise<ChatRecor
     const record = await ports.store.read(ports.chatId);
     const next = plan(record, goal, await ports.facts());
     if (next.kind === "done") return record;
-    const done = next.kind === "write" ? next : await perform(next, ports.perform);
+    const done =
+      next.kind === "lost" || next.kind === "forget" ? next : await perform(next, ports.perform);
     const settled = await ports.store.update(ports.chatId, (current) => settle(current, done));
     await expireGarbage(settled.garbage, ports.perform);
   }

@@ -13,6 +13,7 @@ import {
   departureFor,
   drive,
   type MacCache,
+  type Performed,
   periodicSave,
   plan,
   planPeriodicSave,
@@ -80,21 +81,21 @@ describe("plan", () => {
       record: liveOn("reader", snap(1, "live", MAC_A)),
       goal: "open",
       facts: seen([]),
-      expected: { kind: "write", record: idle(snap(1, "live", MAC_A)) },
+      expected: { kind: "lost", instanceId: MAC_A },
     },
     {
       name: "release: a dead Mac is recorded idle before any stray is handled",
       record: liveOn("sealed", snap(2, "final", MAC_A)),
       goal: "release",
       facts: seen([STRAY]),
-      expected: { kind: "write", record: idle(snap(2, "final", MAC_A)) },
+      expected: { kind: "lost", instanceId: MAC_A },
     },
     {
       name: "dispose: a dead Mac that never materialized leaves no snapshot",
       record: liveOn("unknown", null),
       goal: "dispose",
       facts: seen([]),
-      expected: { kind: "write", record: idle(null) },
+      expected: { kind: "lost", instanceId: MAC_A },
     },
     {
       name: "open: a stray from a crashed create is abandoned first",
@@ -287,7 +288,7 @@ describe("plan", () => {
       record: idle(null),
       goal: "dispose",
       facts: seen([]),
-      expected: { kind: "write", record: null },
+      expected: { kind: "forget" },
     },
     {
       name: "dispose: an unknown chat with nothing left is disposed",
@@ -392,7 +393,7 @@ describe("plan", () => {
           if (
             live &&
             !alive &&
-            JSON.stringify(step) !== JSON.stringify({ kind: "write", record: idle(live.snapshot) })
+            JSON.stringify(step) !== JSON.stringify({ kind: "lost", instanceId: MAC_A })
           )
             broken.push(`a dead Mac is not recorded idle on its snapshot: ${where}`);
         }
@@ -403,10 +404,10 @@ describe("plan", () => {
       "depart",
       "done",
       "expire",
+      "lost",
       "materialize",
       "save",
       "seal",
-      "write",
     ]);
   });
 });
@@ -490,6 +491,48 @@ describe("planPeriodicSave", () => {
     },
   ])("$name", ({ record, instances, expected }) => {
     expect(planPeriodicSave(record, seen(instances))).toEqual(expected);
+  });
+});
+
+describe("settling a lost Mac and a forgotten chat against the current record", () => {
+  it.each<{
+    name: string;
+    record: ChatRecord | null;
+    done: Performed;
+    expected: ChatRecord | null;
+  }>([
+    {
+      name: "the live record on the lost Mac goes idle on its current snapshot",
+      record: liveOn("reader", snap(2, "live", MAC_A)),
+      done: { kind: "lost", instanceId: MAC_A },
+      expected: idle(snap(2, "live", MAC_A)),
+    },
+    {
+      name: "a release that recorded a newer snapshot since is kept",
+      record: idle(snap(3, "final", MAC_A)),
+      done: { kind: "lost", instanceId: MAC_A },
+      expected: idle(snap(3, "final", MAC_A)),
+    },
+    {
+      name: "a resume onto another Mac since is kept",
+      record: liveOn("reader", snap(2, "final", MAC_A), FAR, MAC_B),
+      done: { kind: "lost", instanceId: MAC_A },
+      expected: liveOn("reader", snap(2, "final", MAC_A), FAR, MAC_B),
+    },
+    {
+      name: "dispose forgets an idle chat",
+      record: idle(null),
+      done: { kind: "forget" },
+      expected: null,
+    },
+    {
+      name: "dispose never forgets a chat that is live again",
+      record: liveOn("reader", null),
+      done: { kind: "forget" },
+      expected: liveOn("reader", null),
+    },
+  ])("$name", ({ record, done, expected }) => {
+    expect(settle(record, done)).toEqual({ ok: true, record: expected, garbage: [] });
   });
 });
 

@@ -410,13 +410,16 @@ export function makeNamespaceMacRuntime(config: {
   const outcome = (record: ChatRecord | null): ChatOutcome =>
     record?.snapshot ? "released" : "missing";
 
-  /** A Mac that vanished leaves the chat idle on its last snapshot. */
-  const settleGone = async (chatId: string, record: ChatRecord | null) => {
-    if (record?.kind === "live")
-      await store.update(chatId, (current) =>
-        settle(current, { kind: "write", record: { kind: "idle", snapshot: record.snapshot } }),
-      );
-    return outcome(record);
+  /**
+   * A Mac that vanished leaves the chat idle on its current snapshot. Settled against the record
+   * as it is when written, so a release or resume that landed since the caller looked stands.
+   */
+  const settleGone = async (chatId: string, instanceId: InstanceId) => {
+    const settled = await store.update(chatId, (current) =>
+      settle(current, { kind: "lost", instanceId }),
+    );
+    const current = settled.ok ? settled.record : await store.read(chatId);
+    return current?.kind === "live" ? ("running" as const) : outcome(current);
   };
 
   const release = async (operation: ProvisionOperation, manifest: ProvisionPreparationManifest) => {
@@ -493,7 +496,7 @@ export function makeNamespaceMacRuntime(config: {
       const alive = (await instances.list({ "t3.chat": chatId })).some(
         ({ instanceId }) => instanceId === record.mac.incarnation.instanceId,
       );
-      return alive ? ("running" as const) : settleGone(chatId, record);
+      return alive ? ("running" as const) : settleGone(chatId, record.mac.incarnation.instanceId);
     },
     /**
      * One upkeep pass for an awake chat: release a Mac nearing its deadline,
@@ -509,8 +512,10 @@ export function makeNamespaceMacRuntime(config: {
       if (record?.kind !== "live") return outcome(record);
       const current = chat(operation, manifest);
       const facts = await current.ports.facts();
-      if (!facts.instances.includes(record.mac.incarnation.instanceId))
-        return settleGone(chatId, record);
+      if (!facts.instances.includes(record.mac.incarnation.instanceId)) {
+        const gone = await settleGone(chatId, record.mac.incarnation.instanceId);
+        return gone === "running" ? "kept" : gone;
+      }
       const left = record.mac.incarnation.deadline - facts.now;
       if (left < ROTATE_FORCE_MS || (left < ROTATE_IDLE_MS && !(await busy()))) {
         log("namespace mac released before its deadline", { chatId, leftMs: left });
