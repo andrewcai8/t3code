@@ -6,11 +6,11 @@ import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeTimersPromises from "node:timers/promises";
 import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
-import * as Effect from "effect/Effect";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -239,7 +239,7 @@ async function fixture(
         }
         const booting = state.bootedAt - DateTime.toEpochMillis(DateTime.nowUnsafe());
         if (booting > 0)
-          await Effect.runPromise(Effect.sleep(booting), { signal }).catch(() => {
+          await NodeTimersPromises.setTimeout(booting, undefined, { signal }).catch(() => {
             throw new Error("Namespace CLI command aborted or timed out");
           });
         const separator = args.indexOf("--");
