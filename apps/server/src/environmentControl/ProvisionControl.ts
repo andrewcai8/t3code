@@ -347,7 +347,10 @@ export function makeProvisionControl(
       if (state !== null && state !== "ready" && !TERMINAL_STATES.has(state)) continue;
       if (state === "ready") {
         const lease = yield* promise(() => leases.findById(requestId));
-        if (lease?.firstTurn?.status === "pending") {
+        // A drive records ready just before its lease is registered. Until the lease exists
+        // the turn is still owed; a box that never gets one ends disposed and is swept then.
+        if (lease === null) continue;
+        if (lease.firstTurn?.status === "pending") {
           if (lease.state === "active") continue;
           yield* promise(() =>
             leases.settleFirstTurn(requestId, {
