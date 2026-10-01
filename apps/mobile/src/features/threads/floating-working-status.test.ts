@@ -15,6 +15,17 @@ const status = (
   });
 
 describe("connectionFloatingStatus", () => {
+  it("names a cloud box by its role in every phase, never by its stale machine label", () => {
+    const box = { environmentLabel: "this chat's cloud machine" };
+    expect(status("reconnecting", box)).toMatchObject({
+      label: "Reconnecting to this chat's cloud machine...",
+    });
+    expect(status("waking", box)).toMatchObject({
+      tone: "reconnecting",
+      label: "This chat's cloud machine is waking up...",
+    });
+  });
+
   it("yields the pill to sync and working state once connected", () => {
     expect(status("connected")).toBeNull();
   });

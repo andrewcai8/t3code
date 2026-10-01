@@ -1424,7 +1424,7 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
     case "connecting":
       return { text: "Connecting", tone: "muted" };
     case "waking":
-      return { text: "Waking up", tone: "muted" };
+      return { text: "Waking up...", tone: "muted" };
     case "reconnecting":
       return {
         text: connection.error ? `Reconnecting: ${connection.error}` : "Reconnecting",

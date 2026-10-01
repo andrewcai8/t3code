@@ -53,7 +53,7 @@ export function connectionFloatingStatus(input: {
       return {
         kind: "connection",
         tone: "reconnecting",
-        label: "Waking this chat's cloud machine...",
+        label: `${environmentLabel.charAt(0).toUpperCase()}${environmentLabel.slice(1)} is waking up...`,
         onPress: input.onReconnect,
       };
     case "offline":

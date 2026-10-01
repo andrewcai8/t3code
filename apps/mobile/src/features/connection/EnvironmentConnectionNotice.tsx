@@ -17,7 +17,7 @@ function noticeTitle(phase: EnvironmentConnectionPhase, environmentLabel: string
     case "reconnecting":
       return `Reconnecting to ${environmentLabel}...`;
     case "waking":
-      return "Waking this chat's cloud machine";
+      return `${environmentLabel.charAt(0).toUpperCase()}${environmentLabel.slice(1)} is waking up...`;
     case "unsupported":
       return "Client not supported";
     case "error":

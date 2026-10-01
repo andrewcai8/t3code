@@ -1,3 +1,6 @@
+import { useAtomValue } from "@effect/atom-react";
+import { connectionStatusName } from "@t3tools/client-runtime/connection";
+import { environmentCatalog } from "../../connection/catalog";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import {
@@ -428,6 +431,13 @@ function ThreadRouteContent(
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
   const routeConnectionError = routeEnvironmentRuntime?.connectionError ?? null;
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const routeTarget =
+    environmentId === null ? undefined : catalog.entries.get(environmentId)?.target;
+  const connectionStatusLabel =
+    routeTarget === undefined
+      ? (selectedEnvironmentConnection?.environmentLabel ?? null)
+      : connectionStatusName(routeTarget);
   const selectedThreadWithDraftSettings = useMemo(
     () =>
       selectedThread
@@ -966,6 +976,7 @@ function ThreadRouteContent(
           screenTone={connectionTone(routeConnectionState)}
           connectionError={routeConnectionError}
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
+          connectionStatusLabel={connectionStatusLabel}
           feedbackSubmissions={composer.feedbackSubmissions}
           onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}

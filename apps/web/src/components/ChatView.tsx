@@ -63,6 +63,7 @@ import {
   cloneRepository,
 } from "@t3tools/contracts";
 import {
+  BOX_STATUS_NAME,
   connectionBox,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -263,6 +264,7 @@ import {
   GitBranchIcon,
   Minimize2Icon,
   PaperclipIcon,
+  SendIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, newDraftId, newMessageId, newThreadId, randomHex, randomUUID } from "~/lib/utils";
@@ -2846,6 +2848,8 @@ export default function ChatView(props: ChatViewProps) {
   const serverUpdateFailureDismissed =
     serverUpdateState === dismissedServerUpdateState ||
     isServerUpdateFailureDismissed(serverUpdateState);
+  const activeEnvironmentIsBox =
+    activeEnvironment !== null && connectionBox(activeEnvironment.entry.target) !== null;
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     const updateRunning = serverUpdateState.status === "running";
@@ -2869,8 +2873,11 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
-    // A box's saved label names the machine it first ran on, so the waking copy leaves it out.
     const environmentWaking = unavailableConnection?.phase === "waking";
+    // A box's saved label names the machine it first ran on, so a box is named by its role.
+    const unavailableName = activeEnvironmentIsBox
+      ? BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME.slice(1)
+      : (activeEnvironmentUnavailableState?.label ?? "");
     // While an update runs, transient connect blips are expected (the server
     // restarts) and the update banner already shows progress. Hard failure
     // phases still surface so the Reconnect action stays reachable.
@@ -2882,10 +2889,10 @@ export default function ChatView(props: ChatViewProps) {
         variant: unavailableConnection.phase === "error" ? "error" : "warning",
         icon: <WifiOffIcon />,
         title: workspaceMissing
-          ? `${activeEnvironmentUnavailableState.label} is no longer available`
+          ? `${unavailableName} is no longer available`
           : environmentWaking
-            ? "Waking this chat's cloud machine"
-            : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+            ? `${unavailableName} is waking up...`
+            : `${unavailableName} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         description: workspaceMissing
           ? "This workspace expired. Saved history is available here. Continue in a recovered or new workspace."
           : environmentWaking
@@ -3006,6 +3013,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     automaticEnvironment,
     autoBalanceUpdateBanner,
+    activeEnvironmentIsBox,
     activeEnvironmentUnavailableState,
     reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
@@ -9428,10 +9436,18 @@ export default function ChatView(props: ChatViewProps) {
   // of starting a new turn the moment the interrupted one settles.
   restoreQueuedMessagesRef.current = restoreQueuedMessagesToComposer;
 
+  const notifyReconnectSendAbandoned = useCallback(() => {
+    toastManager.add({
+      type: "info",
+      title: "Message not sent",
+      description: "You left the chat before it reconnected. The message is still in its composer.",
+    });
+  }, []);
   const {
     reconnectAndSend,
     reconnecting: reconnectingSend,
     isPending: isReconnectPending,
+    cancel: cancelReconnectSend,
   } = useReconnectSend<{
     submissionIntent: ComposerSubmissionIntent;
     directAnnotation:
@@ -9445,12 +9461,36 @@ export default function ChatView(props: ChatViewProps) {
     send: ({ submissionIntent, directAnnotation }) => {
       void onSend(undefined, submissionIntent, directAnnotation);
     },
+    onAbandoned: notifyReconnectSendAbandoned,
     onFailure: (message) => {
       toastManager.add(
         stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
       );
     },
   });
+
+  // A send waiting on a reconnect, which a box's wake can stretch to minutes, can be called off;
+  // its message stays in the composer.
+  const composerBannerItemsWithPendingSend = useMemo<ComposerBannerStackItem[]>(
+    () =>
+      reconnectingSend
+        ? [
+            {
+              id: `pending-send:${routeThreadKey}`,
+              variant: "info",
+              icon: <SendIcon />,
+              title: "Your message sends once this chat reconnects",
+              actions: (
+                <Button size="xs" variant="ghost" onClick={cancelReconnectSend}>
+                  Cancel send
+                </Button>
+              ),
+            },
+            ...composerBannerItems,
+          ]
+        : composerBannerItems,
+    [cancelReconnectSend, composerBannerItems, reconnectingSend, routeThreadKey],
+  );
 
   useEffect(() => {
     if (
@@ -10974,7 +11014,7 @@ export default function ChatView(props: ChatViewProps) {
                                       : projectCloneSendBlockReason
                             }
                             isPreparingWorktree={isPreparingWorktree}
-                            bannerItems={composerBannerItems}
+                            bannerItems={composerBannerItemsWithPendingSend}
                             // With attachments or contexts aboard the pick just inserts the
                             // text, so it sends as a prompt like the typed path would.
                             onUsageLimitsCommand={

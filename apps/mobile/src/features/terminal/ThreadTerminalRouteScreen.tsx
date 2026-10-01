@@ -29,6 +29,7 @@ import { LoadingScreen } from "../../components/LoadingScreen";
 import { MaterialScreenContent } from "../../components/MaterialScreenContent";
 import { MaterialButton } from "../../components/MaterialButton";
 import { MaterialIconButton } from "../../components/MaterialIconButton";
+import { connectionStatusName } from "@t3tools/client-runtime/connection";
 import { environmentCatalog } from "../../connection/catalog";
 import { useEnvironmentPresentation } from "../../state/presentation";
 import { terminalEnvironment } from "../../state/terminal";
@@ -1217,7 +1218,9 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
           {!isEnvironmentReady ? (
             <EnvironmentConnectionNotice
               environmentLabel={
-                environment.presentation?.entry.target.label ??
+                (environment.presentation
+                  ? connectionStatusName(environment.presentation.entry.target)
+                  : null) ??
                 selectedEnvironmentConnection?.environmentLabel ??
                 "Environment"
               }
