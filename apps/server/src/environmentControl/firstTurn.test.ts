@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - the box is a real local HTTP server.
-// @effect-diagnostics globalDate:off - a lease is registered at a fixed past time.
+// @effect-diagnostics globalDate:off globalDateInEffect:off - a lease is registered at a past time.
 import * as NodeHttp from "node:http";
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";

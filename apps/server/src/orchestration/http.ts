@@ -126,9 +126,11 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             // A command the engine turned away stays turned away; only an internal failure is
             // worth retrying, so callers can tell the two apart by status.
             Effect.catch((cause) =>
-              isCommandRejection(cause)
-                ? failEnvironmentInvalidRequest("invalid_command")
-                : failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              Effect.gen(function* () {
+                if (isCommandRejection(cause))
+                  return yield* failEnvironmentInvalidRequest("invalid_command");
+                return yield* failEnvironmentInternal("orchestration_dispatch_failed", cause);
+              }),
             ),
           );
           yield* ProjectCloneTracker.discardCloneForDeletedProject(

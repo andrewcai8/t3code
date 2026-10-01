@@ -62,9 +62,16 @@ const noRuntimePorts = {
   deliverFirstTurn: async () => {
     throw new Error("Unexpected first turn");
   },
+  readFirstTurn: async () => null,
+  forgetFirstTurn: async () => {},
 } satisfies Pick<
   ProvisionControlPorts,
-  "pinnedRuntime" | "setRuntime" | "prepare" | "deliverFirstTurn"
+  | "pinnedRuntime"
+  | "setRuntime"
+  | "prepare"
+  | "deliverFirstTurn"
+  | "readFirstTurn"
+  | "forgetFirstTurn"
 >;
 
 it.effect(
@@ -560,6 +567,8 @@ it.effect(
           },
           prepare: ports.prepare,
           deliverFirstTurn: noRuntimePorts.deliverFirstTurn,
+          readFirstTurn: noRuntimePorts.readFirstTurn,
+          forgetFirstTurn: noRuntimePorts.forgetFirstTurn,
         },
         leases,
       );
