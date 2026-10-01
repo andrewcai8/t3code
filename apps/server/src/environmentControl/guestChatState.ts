@@ -635,6 +635,7 @@ def adopt(spec):
             fsync_dir(mount)
             return staged
         if root.exists():
+            purge_chat(root)
             trash(mount, root)
         marker = read_json(mount / 'template.json')
         cache = 'miss' if staged is not None else probe(spec, marker, template, root)
@@ -657,6 +658,15 @@ def adopt(spec):
         os.rename(template, root)
         fsync_dir(mount)
         return result
+
+def purge_chat(root):
+    # A root that arrived with the volume is another chat's, left by a destroy that committed.
+    # Its credentials, journal and transcripts go before anything runs here; the rest, mostly
+    # derived trees, is deleted in the background.
+    for name in ('broker-token', 'preparation.json', 'restore.json', 'adopt.json'):
+        remove(root / name)
+    if (root / 'home').is_dir() and not (root / 'home').is_symlink():
+        keep_only(root / 'home', DERIVED_HOME)
 
 def keep_only(base, keep):
     for entry in sorted(os.listdir(base)):

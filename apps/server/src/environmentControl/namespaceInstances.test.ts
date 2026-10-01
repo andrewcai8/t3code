@@ -523,6 +523,13 @@ describe("makeNamespaceArtifacts", () => {
     expect(await world.artifacts.list({ "t3.chat": "chat-1" })).toEqual([
       { path: "chats/chat-1/2.tgz", bytes: 8192, expiresAt: 1_792_000_000_000 },
     ]);
+    expect(
+      [
+        await world.artifacts.downloadUrl("chats/chat-1/1.tgz"),
+        await world.artifacts.downloadUrl("chats/never-saved.tgz"),
+      ],
+      "an expired or unknown snapshot reads as gone",
+    ).toEqual([null, null]);
   });
 
   it("refuses a signed URL that is not private HTTPS", async () => {

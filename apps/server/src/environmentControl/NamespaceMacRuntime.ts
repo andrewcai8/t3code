@@ -40,6 +40,7 @@ import {
   resolveNamespaceArtifactSources,
   type NamespaceAccountSession,
 } from "./NamespaceProvisionRuntime.ts";
+import { ProvisionedSandboxMissing } from "./driver.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import {
   desiredRuntime,
@@ -190,6 +191,9 @@ export function makeNamespaceMacRuntime(config: {
       repository ? canonicalRepository(repository) : "none",
     ).slice(0, 12)}-v1`;
     let ready: RemotePreparationReady | null = null;
+    const retention = operation.request.retentionDeadline
+      ? DateTime.toEpochMillis(DateTime.makeUnsafe(operation.request.retentionDeadline))
+      : Number.POSITIVE_INFINITY;
 
     const stageRuntime = async (instanceId: InstanceId) => {
       const check = await instances.exec(
@@ -250,9 +254,6 @@ export function makeNamespaceMacRuntime(config: {
     const perform: ChatPerformer = {
       create: async () => {
         const stop = startProvisionPhase(record);
-        const retention = operation.request.retentionDeadline
-          ? DateTime.toEpochMillis(DateTime.makeUnsafe(operation.request.retentionDeadline))
-          : Number.POSITIVE_INFINITY;
         const mac = await instances.create({
           labels: { "t3.chat": chatId },
           cache: { tag: cacheTag, mountPoint: mount, sizeGb: CACHE_VOLUME_GB },
@@ -278,10 +279,12 @@ export function makeNamespaceMacRuntime(config: {
         stopAdopt(`mac.adopt.${adoption}`);
         if (snapshot !== null) {
           const stopRestore = startProvisionPhase(record);
+          const url = await artifacts.downloadUrl(snapshot.artifactPath);
+          if (url === null) throw new ProvisionedSandboxMissing();
           await restoreChat(port, {
             root,
             snapshot: {
-              url: await artifacts.downloadUrl(snapshot.artifactPath),
+              url,
               sha256: snapshot.sha256,
             },
             accessToken: manifest.preparation.repository?.accessToken,
@@ -322,7 +325,8 @@ export function makeNamespaceMacRuntime(config: {
         const path = `t3/chats/${chatId}/${step.generation}-${NodeCrypto.randomUUID()}.tar`;
         const upload = await artifacts.beginUpload({
           path,
-          expiresAt: started + SNAPSHOT_RETENTION_MS,
+          // A lease with a retention deadline keeps its snapshot no longer than that.
+          expiresAt: Math.min(started + SNAPSHOT_RETENTION_MS, retention),
           labels: { "t3.chat": chatId },
         });
         const saved = await saveChat(guestPort(step.instanceId), {
@@ -418,6 +422,14 @@ export function makeNamespaceMacRuntime(config: {
     build: ProvisionRuntimeArtifact | null = null,
   ) => {
     const current = chat(operation, manifest, build, record);
+    // A released chat whose snapshot expired has nothing to restore: no Mac is opened for it.
+    const before = await store.read(current.chatId);
+    if (
+      before?.kind === "idle" &&
+      before.snapshot !== null &&
+      (await artifacts.downloadUrl(before.snapshot.artifactPath)) === null
+    )
+      throw new ProvisionedSandboxMissing();
     const opened = await drive("open", current.ports);
     return current.readied() ?? (await current.prepareGuest(liveMac(opened)));
   };

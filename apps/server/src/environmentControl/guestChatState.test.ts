@@ -520,6 +520,12 @@ describe("guest chat state", () => {
     expect(await NodeFSP.readdir(w.root), "the poisoned chat root is never handed out").toEqual([
       "adopt.json",
     ]);
+    for (const entry of await NodeFSP.readdir(w.mount))
+      if (entry.startsWith("trash-"))
+        expect(
+          await exists(NodePath.join(w.mount, entry, "home", ".claude", ".credentials.json")),
+          "a leftover chat's credentials are gone before adoption returns",
+        ).toBe(false);
   });
 
   it("refuses to commit a template its chat changed after it was sealed", async () => {

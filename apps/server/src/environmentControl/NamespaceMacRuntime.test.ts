@@ -24,6 +24,7 @@ import {
   type NamespaceInstances,
 } from "./namespaceInstances.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
+import { ProvisionedSandboxMissing } from "./driver.ts";
 import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 
 const cleanups: Cleanups = [];
@@ -129,14 +130,16 @@ async function fakeArtifacts() {
     { readonly labels: Readonly<Record<string, string>>; finalized: boolean; expired: boolean }
   >();
   const uploads = new Map<string, string>();
+  const expiries = new Map<string, number>();
   const isLive = (path: string) => {
     const record = records.get(path);
     return record !== undefined && record.finalized && !record.expired;
   };
   const artifacts: NamespaceArtifacts = {
-    beginUpload: async ({ path, labels }) => {
+    beginUpload: async ({ path, labels, expiresAt }) => {
       const uploadId = `upload-${uploads.size + 1}`;
       uploads.set(uploadId, path);
+      expiries.set(path, expiresAt);
       records.set(path, { labels, finalized: false, expired: false });
       return { uploadId, signedUploadUrl: store.url(path) };
     },
@@ -148,8 +151,7 @@ async function fakeArtifacts() {
       return { path, bytes: store.object(path)?.length ?? 0 };
     },
     downloadUrl: async (path) => {
-      if (!isLive(path)) throw new Error(`artifact ${path} not found`);
-      return store.url(path);
+      return isLive(path) ? store.url(path) : null;
     },
     expire: async (path) => {
       const record = records.get(path);
@@ -164,7 +166,11 @@ async function fakeArtifacts() {
         )
         .map(([path]) => ({ path, bytes: store.object(path)?.length ?? 0, expiresAt: null })),
   };
-  return { artifacts, live: () => [...records.keys()].filter(isLive) };
+  return {
+    artifacts,
+    live: () => [...records.keys()].filter(isLive),
+    expiryOf: (path: string) => expiries.get(path),
+  };
 }
 
 const unreachable = async (): Promise<never> => {
@@ -240,9 +246,9 @@ async function setup(lifetimeMs?: number) {
     },
     egressAllow: [],
   });
-  const operation = (environmentId: string) =>
+  const operation = (environmentId: string, retentionDeadline?: string) =>
     decodeOperation({
-      request: manifest.request,
+      request: retentionDeadline ? { ...manifest.request, retentionDeadline } : manifest.request,
       requestHash: "b".repeat(64),
       revision: 1,
       createdAt: "2026-10-01T00:00:00Z",
@@ -361,6 +367,25 @@ describe("Namespace Mac runtime", () => {
     ).toBe("released");
     expect(tampered.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
     expect(tampered.w.committedVolume(), "a changed template is never committed").toBeNull();
+  });
+
+  it("keeps a snapshot only as long as its lease's retention, and resumes an expired one as missing", async () => {
+    const t = await setup();
+    const retention = new Date(Date.now() + 3 * 86_400_000).toISOString();
+    const ready = await t.runtime.prepare(t.operation("pending", retention), t.manifest);
+    const op = t.operation(ready.environmentId, retention);
+    expect(await t.runtime.release(op, t.manifest)).toBe("released");
+    const record = await t.record();
+    const path = record?.snapshot?.artifactPath ?? "";
+    expect(t.storage.expiryOf(path), "the snapshot expires with the lease").toBe(
+      Date.parse(retention),
+    );
+
+    await t.storage.artifacts.expire(path);
+    await expect(t.runtime.resume(op, t.manifest)).rejects.toBeInstanceOf(
+      ProvisionedSandboxMissing,
+    );
+    expect(t.namespace.live(), "no Mac is opened for a chat with nothing to restore").toEqual([]);
   });
 
   it("settles a heartbeat that saw a Mac gone against the record as it is when it writes", async () => {

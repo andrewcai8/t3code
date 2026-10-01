@@ -461,7 +461,8 @@ export interface NamespaceArtifacts {
     readonly labels: Readonly<Record<string, string>>;
   }): Promise<{ readonly uploadId: string; readonly signedUploadUrl: string }>;
   finalize(uploadId: string): Promise<{ readonly path: string; readonly bytes: number }>;
-  downloadUrl(path: string): Promise<string>;
+  /** Null once the artifact expired or never existed. */
+  downloadUrl(path: string): Promise<string | null>;
   /** Expiring an expired or unknown artifact succeeds. */
   expire(path: string): Promise<void>;
   /** Live artifacts carrying every given label. */
@@ -515,9 +516,15 @@ export function makeNamespaceArtifacts(config: {
       return { path: description.path, bytes: Number(description.size) };
     },
     downloadUrl: async (path) => {
-      const { signedDownloadUrl } = decodeResolvedArtifact(
-        await artifacts.resolveArtifact({ namespace, path }, { timeoutMs: 30_000 }),
-      );
+      const resolved = await artifacts
+        .resolveArtifact({ namespace, path }, { timeoutMs: 30_000 })
+        .catch(async (error: unknown) => {
+          if (isNotFound(error) || (await isExpired(path))) return null;
+          throw error;
+        });
+      if (resolved === null) return null;
+      const { description, signedDownloadUrl } = decodeResolvedArtifact(resolved);
+      if (description?.status === Artifact_Status.EXPIRED) return null;
       return privateHttps(signedDownloadUrl);
     },
     expire: async (path) => {
