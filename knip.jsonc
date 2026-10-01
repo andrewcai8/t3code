@@ -34,6 +34,7 @@
         "scripts/import-machine-usage.ts",
         "scripts/mac-chat-e2e.ts",
         "scripts/measure-pr-preview.ts",
+        "scripts/update-test-shard-weights.ts",
         "src/provider/testFixtures/*.mjs",
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
