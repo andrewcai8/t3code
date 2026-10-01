@@ -3,6 +3,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { StatusBar, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { noteUserInput } from "./connection/user-input";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { createStaticNavigation } from "@react-navigation/native";
@@ -73,7 +74,7 @@ function AppContent() {
     <>
       <SplashScreenCoordinator />
       <SubscriptionUsageCoordinator />
-      <GestureHandlerRootView className="flex-1">
+      <GestureHandlerRootView className="flex-1" onTouchStart={noteUserInput}>
         <KeyboardProvider statusBarTranslucent>
           <SafeAreaProvider>
             <StatusBar

@@ -113,6 +113,8 @@ export interface EnvironmentSupervisorOptions {
   readonly wake?: Effect.Effect<BoxWakeOutcome>;
   /** Runs while the connection is up, as a box's lease heartbeat does. */
   readonly keepAlive?: Effect.Effect<void>;
+  /** Whether a wake may start now; a box is woken only while its user is here. */
+  readonly mayWake?: Effect.Effect<boolean>;
 }
 
 function wakeIntervalMs(wakes: number): number {
@@ -756,7 +758,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       if (
         options?.wake !== undefined &&
         error.reason === "not-serving" &&
-        (yield* Clock.currentTimeMillis) >= nextWakeAt
+        (yield* Clock.currentTimeMillis) >= nextWakeAt &&
+        (yield* options.mayWake ?? Effect.succeed(true))
       ) {
         const woken: BoxWakeOutcome | { readonly _tag: "Interrupted" } = yield* wakeBox(
           options.wake,

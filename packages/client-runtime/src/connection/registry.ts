@@ -12,7 +12,6 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -46,6 +45,7 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { UserPresence } from "./presence.ts";
 import * as EnvironmentRpc from "../rpc/client.ts";
 import {
   GitHubRoutingPermissions,
@@ -209,6 +209,23 @@ export const make = Effect.gen(function* () {
   const connectivity = yield* Connectivity.Connectivity;
   const driver = yield* ConnectionDriver.ConnectionDriver;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
+  const presence = yield* UserPresence;
+  // A box is kept awake and woken only while its user is here.
+  const userHere = presence.present.pipe(
+    Stream.runHead,
+    Effect.map((present) => Option.getOrElse(present, () => true)),
+  );
+  const userArrives = presence.present.pipe(
+    Stream.filter((present) => present),
+    Stream.runHead,
+    Effect.asVoid,
+  );
+  const userReturns = presence.present.pipe(
+    Stream.drop(1),
+    Stream.filter((present) => present),
+    Stream.runHead,
+    Effect.asVoid,
+  );
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
   const persistedTargets = yield* storage.list;
   const disabledEnvironmentIds = new Set(yield* storage.listDisabled);
@@ -395,15 +412,16 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentRegistry.wakeBox"),
     );
 
-  // Every client with a box's chat open keeps its lease alive, not only the one that started it,
-  // so a phone or a second tab does not let the host pause the box under the open chat. It runs
+  // Every client whose user has a box's chat open keeps its lease alive, not only the one that
+  // started it, so a phone or a second tab does not let the host pause the box under the open
+  // chat. A hidden or untouched client does not, so a forgotten tab lets the box idle. It runs
   // only while this client is connected to the box, which proves it holds the box's credential;
   // the host still requires an operate session and an active, claimed lease to renew one.
   const keepBoxAlive = (
     environmentId: EnvironmentId,
     managerId: EnvironmentId,
-  ): Effect.Effect<void> =>
-    Effect.gen(function* () {
+  ): Effect.Effect<void> => {
+    const renew = Effect.gen(function* () {
       const listed = yield* run(
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlListProvisioned, {
@@ -430,10 +448,32 @@ export const make = Effect.gen(function* () {
       Effect.catch((error) =>
         Effect.logWarning("Could not renew a cloud box's lease.", { environmentId, error }),
       ),
-      Effect.repeat(Schedule.spaced(BOX_LEASE_HEARTBEAT_INTERVAL)),
-      Effect.asVoid,
-      Effect.withSpan("EnvironmentRegistry.keepBoxAlive"),
     );
+    // A beat waits for the user, and their return renews at once, ahead of the next beat.
+    return Effect.gen(function* () {
+      for (;;) {
+        yield* userArrives;
+        yield* renew;
+        yield* Effect.raceFirst(Effect.sleep(BOX_LEASE_HEARTBEAT_INTERVAL), userReturns);
+      }
+    }).pipe(Effect.withSpan("EnvironmentRegistry.keepBoxAlive"));
+  };
+
+  // A user coming back retries each box that is down at once, waking it without the wait a box
+  // left alone backs off to.
+  yield* userReturns.pipe(
+    Effect.andThen(
+      Effect.gen(function* () {
+        for (const lease of (yield* SubscriptionRef.get(serviceScopes)).values()) {
+          if (connectionBox(lease.entry.target) === null) continue;
+          const state = yield* SubscriptionRef.get(lease.supervisor.state);
+          if (state.desired && state.phase !== "connected") yield* lease.supervisor.retryNow;
+        }
+      }),
+    ),
+    Effect.forever,
+    Effect.forkIn(registryScope),
+  );
 
   const createServiceScope = Effect.fn("EnvironmentRegistry.createServiceScope")(
     (entry: ConnectionCatalogEntry) =>
@@ -448,6 +488,7 @@ export const make = Effect.gen(function* () {
               ? {}
               : {
                   wake: wakeBox(environmentId, box.managerId),
+                  mayWake: userHere,
                   keepAlive: keepBoxAlive(environmentId, box.managerId),
                 }),
           }).pipe(
