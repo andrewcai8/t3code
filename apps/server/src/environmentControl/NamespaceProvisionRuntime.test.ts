@@ -86,7 +86,9 @@ async function listen(handler: NodeHttp.RequestListener) {
   return { port: address.port, origin: `http://127.0.0.1:${address.port}` };
 }
 
-async function fixture() {
+async function fixture(
+  options: { readonly commandTimeoutMs?: number; readonly bootMs?: number } = {},
+) {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-runtime-"));
   cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));
   const applications = NodePath.join(directory, "Applications");
@@ -208,7 +210,8 @@ async function fixture() {
     apiUrl: api.origin,
     computeApiUrl: api.origin,
     artifactsApiUrl: api.origin,
-    execute: async ({ args, env }) => {
+    ...(options.commandTimeoutMs ? { commandTimeoutMs: options.commandTimeoutMs } : {}),
+    execute: async ({ args, env, signal }) => {
       const tokenFile = env.NSC_TOKEN_FILE;
       if (!tokenFile) throw new Error("CLI had no explicit credential file");
       expect(decodeToken(await NodeFSP.readFile(tokenFile, "utf8")).bearer_token).toBe(token);
@@ -224,10 +227,18 @@ async function fixture() {
         return { exitCode: 0, stdout: "" };
       }
       if (args[0] === "exec") {
-        // Any exec activates a shut-down Devbox again, on a fresh instance.
+        // Any exec activates a shut-down Devbox again, on a fresh instance, which answers only
+        // once its Mac has booted.
         if (state.instanceId === "") {
           state.instanceId = "woken-instance";
           state.describedInstanceId = "woken-instance";
+          await new Promise<void>((resolve, reject) => {
+            const booted = setTimeout(resolve, options.bootMs ?? 0);
+            signal?.addEventListener("abort", () => {
+              clearTimeout(booted);
+              reject(new Error("Namespace CLI command aborted or timed out"));
+            });
+          });
         }
         const separator = args.indexOf("--");
         const executable = args[separator + 1];
@@ -837,7 +848,8 @@ describe("Namespace runtime transport", () => {
   });
 
   it("resumes a shut-down Devbox from its retained volume at the origin its client saved", async () => {
-    const f = await fixture();
+    // Its Mac takes longer to boot than an ordinary command may run, as a retained volume does.
+    const f = await fixture({ commandTimeoutMs: 1_500, bootMs: 2_500 });
     const volume = NodePath.join(f.directory, "volume");
     const root = NodePath.join(volume, "t3-provision", requestId);
     const bundle = NodePath.join(f.directory, "bundle");
