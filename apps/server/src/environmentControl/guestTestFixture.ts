@@ -188,6 +188,8 @@ export async function world(cleanups: Cleanups) {
     archivePath,
     advance,
     head: () => git(source, "rev-parse", "HEAD"),
+    /** The volume the next Mac forks: the last one a departure committed, or null. */
+    committedVolume: () => committed,
     instance: () => `mac-${instance}`,
     /** A new Mac whose volume forks the last committed state, or an empty one on a miss. */
     newMac: async (cache: "committed" | "empty" = "committed") => {

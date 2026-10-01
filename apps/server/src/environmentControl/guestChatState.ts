@@ -37,7 +37,7 @@ export const DERIVED_HOME_PATHS = [
  * `mount/template.json` (written last) describes it.
  */
 const guestChatStateScript = String.raw`
-import base64, contextlib, fcntl, hashlib, io, json, os, pathlib, shutil, sqlite3, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
+import base64, contextlib, fcntl, hashlib, io, json, os, pathlib, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
 
 os.umask(0o077)
 FORMAT = 1
@@ -711,6 +711,28 @@ def scrub_template(template, spec):
     git(workspace, 'clean', '-fdq')
     os.rename(workspace, template / 'workspace.partial')
 
+def template_digest(mount):
+    # Metadata, not content: a sealed template is many gigabytes. ctime and the inode number
+    # change on any write, chmod, utime or replacement, and userland cannot set them back.
+    digest = hashlib.sha256()
+    template = mount / 'template'
+    def add(path, rel):
+        info = os.lstat(path)
+        link = os.readlink(path) if stat.S_ISLNK(info.st_mode) else None
+        digest.update(json.dumps([rel, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, link]).encode() + b'\n')
+    add(template, '.')
+    for current, dirs, files in os.walk(template):
+        dirs.sort()
+        for name in sorted(dirs + files):
+            path = os.path.join(current, name)
+            add(path, os.path.relpath(path, template))
+    digest.update((mount / 'template.json').read_bytes())
+    return digest.hexdigest()
+
+# What a committed volume may hold: the template, its marker, and runtime archives a chat only
+# uses after checking their digest. The rest are macOS's own.
+VOLUME_ENTRIES = re.compile(r'(template|template\.json|cache\.lock|t3-runtime-[0-9a-f]{64}\.tar|\.Spotlight-V100|\.Trashes|\.fseventsd|\.TemporaryItems|\.DocumentRevisions-V100)')
+
 def seal(spec):
     mount, root = pathlib.Path(spec['mount']), pathlib.Path(spec['root'])
     with locked(root / 'prepare.lock'), locked(mount / 'cache.lock'):
@@ -720,9 +742,11 @@ def seal(spec):
         marker_path = mount / 'template.json'
         marker = read_json(marker_path)
         if isinstance(marker, dict) and marker.get('sealedFrom') == adopted['nonce']:
-            return {'sealed': True}
+            return {'sealed': True, 'digest': template_digest(mount)}
         if not (root / 'preparation.json').is_file() or not (root / 'workspace' / '.git').is_dir():
             raise RuntimeError('Only a prepared root can seal a template')
+        # Spotlight would rewrite the template's metadata and fail its check at commit.
+        subprocess.run(['sudo', '-n', 'mdutil', '-i', 'off', str(mount)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         partial = mount / 'template.partial'
         if partial.exists():
             rmtree(partial)
@@ -735,7 +759,7 @@ def seal(spec):
         os.rename(partial, mount / 'template')
         fsync_dir(mount)
         atomic(marker_path, json.dumps({'format': FORMAT, 'root': str(root), 'repository': spec['repository'], 'key': spec['key'], 'runtimeSha256': spec['runtimeSha256'], 'sealedAt': time.time(), 'sealedFrom': adopted['nonce']}))
-        return {'sealed': True}
+        return {'sealed': True, 'digest': template_digest(mount)}
 
 def scrub(spec):
     mount, root = pathlib.Path(spec['mount']), pathlib.Path(spec['root'])
@@ -743,9 +767,19 @@ def scrub(spec):
         if root.exists():
             trash(mount, root, wait=True)
         for entry in os.listdir(mount):
-            if entry.startswith('trash-'):
-                rmtree(mount / entry, ignore=True)
-        remove(mount / 'template.partial')
+            if not VOLUME_ENTRIES.fullmatch(entry):
+                with contextlib.suppress(OSError):
+                    remove(mount / entry)
+        expected = spec.get('templateDigest')
+        # The chat ran with the volume writable: anything it planted in the template would run
+        # in every later chat that adopts it.
+        if expected is not None:
+            try:
+                unchanged = template_digest(mount) == expected
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                raise RuntimeError('The template changed after it was sealed')
     return {'scrubbed': True}
 
 VERBS = {'adopt': adopt, 'restore': restore, 'save': save, 'seal': seal, 'scrub': scrub}
@@ -786,7 +820,7 @@ const decodeRestored = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ restored: Schema.String })),
 );
 const decodeSealed = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ sealed: Schema.Literal(true) })),
+  Schema.fromJsonString(Schema.Struct({ sealed: Schema.Literal(true), digest: Schema.String })),
 );
 const decodeScrubbed = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ scrubbed: Schema.Literal(true) })),
@@ -866,7 +900,8 @@ export function saveChat(
 /**
  * Copies a freshly prepared, never-used root into the volume's template and
  * writes the marker last. Run by a chat that filled a miss, before its first
- * turn.
+ * turn. Returns the template's digest, which the manager keeps and `scrubChatRoot`
+ * checks before the volume may be committed.
  */
 export async function sealChatTemplate(
   port: RemotePreparationPort,
@@ -878,13 +913,21 @@ export async function sealChatTemplate(
     readonly derivedHomePaths?: ReadonlyArray<string>;
   },
 ) {
-  await runVerb(port, "seal", input, decodeSealed);
+  return (await runVerb(port, "seal", input, decodeSealed)).digest;
 }
 
-/** Removes the chat root from the volume, so committing it leaves only the template. */
+/**
+ * Removes the chat root and anything else but the template from the volume, so committing it
+ * leaves only the template. With `templateDigest`, refuses a template that changed since it was
+ * sealed, since its chat ran with the volume writable.
+ */
 export async function scrubChatRoot(
   port: RemotePreparationPort,
-  input: { readonly mount: string; readonly root: string },
+  input: {
+    readonly mount: string;
+    readonly root: string;
+    readonly templateDigest?: string | undefined;
+  },
 ) {
   await runVerb(port, "scrub", input, decodeScrubbed);
 }

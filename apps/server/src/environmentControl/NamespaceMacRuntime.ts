@@ -301,7 +301,7 @@ export function makeNamespaceMacRuntime(config: {
       seal: async ({ instanceId }) => {
         const stop = startProvisionPhase(record);
         try {
-          await sealChatTemplate(guestPort(instanceId), {
+          const digest = await sealChatTemplate(guestPort(instanceId), {
             ...template,
             files: manifest.preparation.files.map(({ scope, destination }) => ({
               scope,
@@ -310,7 +310,7 @@ export function makeNamespaceMacRuntime(config: {
             derivedHomePaths,
           });
           stop("mac.seal");
-          return { sealed: true };
+          return { sealed: true, digest };
         } catch (cause) {
           // The chat runs either way; only this site's cache stays unfilled.
           log("namespace mac template not sealed", { chatId, instanceId, cause: String(cause) });
@@ -355,11 +355,22 @@ export function makeNamespaceMacRuntime(config: {
         };
       },
       depart: async ({ instanceId, departure }) => {
-        // Only a filler's sealed template may become the cache's next parent. A scrub that fails
-        // leaves the chat on the volume, so that Mac abandons: the snapshot is already recorded.
+        // Only a filler's sealed template may become the cache's next parent, and only as sealed:
+        // the chat ran with the volume writable. A scrub that fails or finds the template changed
+        // leaves this Mac to abandon; its snapshot is already recorded.
+        const current = await store.read(chatId);
+        const sealedTemplate =
+          current?.kind === "live" && current.mac.incarnation.instanceId === instanceId
+            ? current.mac.template
+            : undefined;
         const leaving =
           departure === "commit" &&
-          (await scrubChatRoot(guestPort(instanceId), { mount, root }).then(
+          sealedTemplate !== undefined &&
+          (await scrubChatRoot(guestPort(instanceId), {
+            mount,
+            root,
+            templateDigest: sealedTemplate,
+          }).then(
             () => true,
             (cause: unknown) => {
               log("namespace mac template not committed", {

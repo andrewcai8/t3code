@@ -28,7 +28,12 @@ export type ChatSnapshot = typeof ChatSnapshot.Type;
 export const MacCache = Schema.Literals(["unknown", "reader", "filling", "sealed"]);
 export type MacCache = typeof MacCache.Type;
 
-export const LiveMac = Schema.Struct({ incarnation: MacIncarnation, cache: MacCache });
+export const LiveMac = Schema.Struct({
+  incarnation: MacIncarnation,
+  cache: MacCache,
+  /** The digest seal reported. A commit departure checks the template still matches it. */
+  template: Schema.optional(Schema.String),
+});
 export type LiveMac = typeof LiveMac.Type;
 
 /** Keyed by chat id in the store. A missing record reads as idle with no snapshot. */
@@ -89,6 +94,11 @@ export type SaveOutcome =
     >)
   | { readonly kind: "unchanged" };
 
+/** A filler's seal: the template's digest when it sealed, or a give-up that leaves it a reader. */
+export type SealOutcome =
+  | { readonly sealed: true; readonly digest: string }
+  | { readonly sealed: false };
+
 /** Carries out the effectful steps. Every handler must tolerate a rerun after a crash. */
 export interface ChatPerformer {
   readonly create: () => Promise<MacIncarnation>;
@@ -96,7 +106,7 @@ export interface ChatPerformer {
   /** Adopt the template, restore the snapshot and prepare, idempotently on the guest. */
   readonly materialize: (step: StepOf<"materialize">) => Promise<{ readonly adoption: Adoption }>;
   /** `sealed: false` gives up on filling the cache; it never fails the open. */
-  readonly seal: (step: StepOf<"seal">) => Promise<{ readonly sealed: boolean }>;
+  readonly seal: (step: StepOf<"seal">) => Promise<SealOutcome>;
   readonly save: (step: SaveStep) => Promise<SaveOutcome>;
   readonly expire: (step: StepOf<"expire">) => Promise<void>;
 }
@@ -109,7 +119,7 @@ export type Performed =
   | StepOf<"expire">
   | (StepOf<"create"> & { readonly outcome: MacIncarnation })
   | (StepOf<"materialize"> & { readonly outcome: { readonly adoption: Adoption } })
-  | (StepOf<"seal"> & { readonly outcome: { readonly sealed: boolean } })
+  | (StepOf<"seal"> & { readonly outcome: SealOutcome })
   | (SaveStep & { readonly outcome: SaveOutcome });
 
 /** `garbage` names artifacts nothing references any more, to expire best effort. */
@@ -289,7 +299,9 @@ export function settle(record: ChatRecord | null, done: Performed): Settled {
     case "seal":
       return ok(
         isCurrent(record, done.instanceId)
-          ? withCache(record, done.outcome.sealed ? "sealed" : "reader")
+          ? done.outcome.sealed
+            ? { ...record, mac: { ...record.mac, cache: "sealed", template: done.outcome.digest } }
+            : withCache(record, "reader")
           : record,
       );
     case "save":

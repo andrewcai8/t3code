@@ -14,6 +14,7 @@ import {
   drive,
   type MacCache,
   type Performed,
+  type SealOutcome,
   periodicSave,
   plan,
   planPeriodicSave,
@@ -605,9 +606,22 @@ describe("settle", () => {
 
   it("makes a filler sealed when it sealed and a reader when it gave up", () => {
     const filling = liveOn("filling", null);
-    expect(settle(filling, { kind: "seal", instanceId: MAC_A, outcome: { sealed: true } })).toEqual(
-      { ok: true, record: liveOn("sealed", null), garbage: [] },
-    );
+    const sealed = liveOn("sealed", null);
+    expect(
+      settle(filling, {
+        kind: "seal",
+        instanceId: MAC_A,
+        outcome: { sealed: true, digest: "template-digest" },
+      }),
+      "the manager keeps the digest a commit is checked against",
+    ).toEqual({
+      ok: true,
+      record:
+        sealed.kind === "live"
+          ? { ...sealed, mac: { ...sealed.mac, template: "template-digest" } }
+          : sealed,
+      garbage: [],
+    });
     expect(
       settle(filling, { kind: "seal", instanceId: MAC_A, outcome: { sealed: false } }),
     ).toEqual({ ok: true, record: liveOn("reader", null), garbage: [] });
@@ -773,7 +787,7 @@ function makeWorld(initial: Record<Site, Marker>) {
       mac.adoption = adoption;
       return { adoption };
     },
-    seal: (instanceId: InstanceId) => {
+    seal: (instanceId: InstanceId): SealOutcome => {
       const mac = alive(instanceId);
       if (mac.adoption === "hit" || mac.restored)
         violations.push(`${instanceId} sealed while reading the cache`);
@@ -782,7 +796,7 @@ function makeWorld(initial: Record<Site, Marker>) {
       if (world.sealGivesUp) return { sealed: false };
       mac.marker = "current";
       mac.sealed = true;
-      return { sealed: true };
+      return { sealed: true, digest: `template-${instanceId}` };
     },
     save: (step: SaveStep) => {
       const mac = alive(step.instanceId);

