@@ -347,3 +347,91 @@ it.effect("a box disposed through the host is reported disposed, by the id the b
     );
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
+
+it.effect("a box disposed before the host kept its id is named by the address a client saved", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const database = path.join(yield* fs.makeTempDirectoryScoped(), "manager.sqlite");
+    yield* Effect.gen(function* () {
+      const provisioning = yield* Provisioning;
+      const store = yield* ProvisionOperationStore;
+      const sql = yield* SqlClient.SqlClient;
+      const registry = createProvisionedLeaseRegistry(sql);
+      const provision = Effect.fn(function* (index: number, origin: string) {
+        const operation = yield* provisioning.ensure(
+          decodeRequest({
+            requestId: id(index),
+            provider: "e2b",
+            providerInstanceId: "account",
+            sourceRevision: null,
+            repository: "proof/repository",
+            preparationHash: "a".repeat(64),
+            strategy: "direct",
+            templateId: "fixture",
+          }),
+        );
+        yield* Effect.promise(() =>
+          registry.register({
+            leaseId: id(index),
+            sandboxId: sandboxOf(operation),
+            provider: "e2b",
+            providerInstanceId: "account",
+          }),
+        );
+        yield* Effect.promise(() =>
+          registry.markActive({
+            leaseId: id(index),
+            remoteAccess: { origin, brokerToken: "broker" },
+          }),
+        );
+        return operation;
+      });
+      const disposeBare = Effect.fn(function* (operation: ProvisionOperation) {
+        yield* store.advance(operation, { kind: "disposed" });
+        yield* Effect.promise(() => registry.markDisposed(operation.request.requestId));
+      });
+
+      // Another chat's box, live and claimed.
+      yield* provision(1, "https://3773-sandbox-1.e2b.app");
+      yield* Effect.promise(() =>
+        registry.claim({ leaseId: id(1), owner: { environmentId: "box-1", threadId: "thread-1" } }),
+      );
+      // A draft's box, paired before boxes were marked and disposed before the host kept its id.
+      yield* disposeBare(yield* provision(2, "https://3773-sandbox-2.e2b.app"));
+      // The same, for a box this client reached through the host's gateway.
+      yield* disposeBare(yield* provision(3, "http://127.0.0.1:44483"));
+
+      const saved = [
+        ["andrew-megpt-host", "https://andrew.megpt.app/"],
+        ["box-1", "https://3773-sandbox-1.e2b.app/"],
+        ["legacy-e2b-box", "https://3773-sandbox-2.e2b.app/"],
+        ["legacy-gateway-box", `https://andrew.megpt.app/api/provisioned-environment/${id(3)}/`],
+        // The user's own server, on a loopback port the host also used for a box.
+        ["desktop-local", "http://127.0.0.1:44483/"],
+      ] as const;
+      const listed = yield* listProvisionedEnvironments(
+        sql,
+        saved.map(([environmentId]) => EnvironmentId.make(environmentId)),
+        saved.map(([environmentId, httpBaseUrl]) => ({
+          environmentId: EnvironmentId.make(environmentId),
+          httpBaseUrl,
+        })),
+      );
+      expect(listed.map((row) => [row.environmentId, row.lifecycle, row.leaseId])).toEqual([
+        ["box-1", "active", id(1)],
+        ["legacy-e2b-box", "disposed", id(2)],
+        ["legacy-gateway-box", "disposed", id(3)],
+      ]);
+    }).pipe(
+      Effect.provide(
+        Provisioning.layer.pipe(
+          Layer.provideMerge(ProvisionOperationStore.layer),
+          Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
+          Layer.provideMerge(makeSqlitePersistenceLive(database)),
+        ),
+      ),
+      Effect.scoped,
+    );
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
