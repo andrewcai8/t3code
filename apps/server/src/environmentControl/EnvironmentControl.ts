@@ -65,6 +65,7 @@ import {
 } from "./warmBases.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { makeProvisionControl } from "./ProvisionControl.ts";
+import { deliverFirstTurn } from "./firstTurn.ts";
 import { makeNamespaceAllocationPorts } from "./namespaceAllocation.ts";
 import {
   makeNamespaceAccountSession,
@@ -228,6 +229,9 @@ export function createEnvironmentControl(
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
       if (only && !only.has(lease.leaseId)) continue;
+      // Nothing has run on a box whose chat's first turn has not started, so it is not idle.
+      // Upkeep starts the turn, or gives up on it, before the box can be paused.
+      if (lease.state === "active" && lease.firstTurn !== undefined) continue;
       // A resume or renew in flight is working on this box. Stopping it under
       // them kills their commands, and a resume ends by renewing the lease.
       if (leaseOperations.has(lease.sandboxId)) continue;
@@ -1008,7 +1012,11 @@ export const layer = Layer.effect(
       },
     };
     const provisioning = yield* Provisioning.make.pipe(
-      Effect.provideService(ProvisionProviderPorts, ports),
+      Effect.provideService(ProvisionProviderPorts, {
+        ...ports,
+        // Bound late: ProvisionControl is built on top of this provisioning service.
+        ready: (operation) => Effect.suspend(() => provisionControl.settleChat(operation)),
+      }),
     );
     const requireManager = async () => {
       const manager = await resolve();
@@ -1320,6 +1328,7 @@ export const layer = Layer.effect(
         },
         setRuntime: manifests.setRuntime,
         prepare: ports.prepare,
+        deliverFirstTurn,
       },
       leaseRegistry,
     );
@@ -1376,6 +1385,7 @@ export const layer = Layer.effect(
         reapExpiredLeases: () => service.reapExpiredLeases(),
         syncLeaseUsage: () => service.syncLeaseUsage(),
         reconcileProvisions: provisioning.reconcile,
+        settleChats: provisionControl.settleChats,
         boxUsage,
       });
     }).pipe(Effect.forkScoped);

@@ -12,6 +12,7 @@ import {
   type EnvironmentProvisionTouchResult,
   type EnvironmentProvisionUpgradeInput,
   type EnvironmentProvisionUpgradeResult,
+  type ProvisionFirstTurn,
   type ProvisionOperation,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -26,8 +27,13 @@ import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import type { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import type { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
-import type { ProvisionedLeaseRegistry, RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
+import type {
+  ProvisionedLease,
+  ProvisionedLeaseRegistry,
+  RemoteAccess,
+} from "./ProvisionedLeaseRegistry.ts";
 import type { NamespaceProxyLease } from "./namespaceProxy.ts";
+import type { FirstTurnDelivery } from "./firstTurn.ts";
 import {
   logProvisionPhases,
   timeProvisionPhase,
@@ -68,7 +74,19 @@ export interface ProvisionControlPorts {
     artifact: ProvisionRuntimeArtifact,
   ) => Promise<ProvisionRuntimeArtifact>;
   readonly prepare: ProvisionProviderPorts["Service"]["prepare"];
+  /** Starts a chat's first turn on its box over the box's published origin. */
+  readonly deliverFirstTurn: (
+    remote: RemoteAccess,
+    chat: {
+      readonly requestId: string;
+      readonly threadId: string;
+      readonly projectDir: string;
+      readonly turn: ProvisionFirstTurn;
+    },
+  ) => Promise<FirstTurnDelivery>;
 }
+/** A first turn the box has not taken this long after its lease began is given up on. */
+const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
 /**
@@ -133,8 +151,9 @@ export function makeProvisionControl(
   leases: ProvisionedLeaseRegistry,
 ) {
   const activeLease = (operation: ProvisionOperation) => {
-    if (operation.state.kind !== "ready") return Effect.succeed(null);
-    const resource = operation.state.allocation.resource;
+    const { state } = operation;
+    if (state.kind !== "ready") return Effect.succeed(null);
+    const resource = state.allocation.resource;
     return promise(() =>
       leases.register({
         leaseId: operation.request.requestId,
@@ -148,6 +167,17 @@ export function makeProvisionControl(
           ? {}
           : { companionInstanceIds: operation.request.companionInstanceIds }),
         ...(resource.provider === "namespace" ? { namespaceResource: resource } : {}),
+        ...(operation.request.chat === undefined
+          ? {}
+          : {
+              owner: {
+                environmentId: state.readiness.environmentId,
+                threadId: operation.request.chat.threadId,
+              },
+              ...(operation.request.chat.firstTurn === undefined
+                ? {}
+                : { firstTurn: operation.request.chat.firstTurn }),
+            }),
       }),
     );
   };
@@ -185,7 +215,96 @@ export function makeProvisionControl(
         }),
       ),
     );
+  /** Publishes a ready box and records where the manager reaches it. */
+  const publish = Effect.fn("EnvironmentControl.publish")(function* (
+    operation: ProvisionOperation,
+    lease: ProvisionedLease,
+  ) {
+    const manifest = yield* promise(() => ports.load(operation.request.requestId));
+    const context = {
+      requestId: operation.request.requestId,
+      provider: operation.request.provider,
+    };
+    const phases: ProvisionPhase[] = [];
+    const record = (phase: ProvisionPhase) => {
+      phases.push(phase);
+    };
+    const attached = yield* remote(operation, () =>
+      ports.attach(operation, manifest, lease.namespaceProxy, record),
+    ).pipe(
+      timeProvisionPhase("attach", context),
+      Effect.ensuring(logProvisionPhases(context, phases)),
+    );
+    // The proxy is recorded so a resume after a manager restart can re-bind
+    // the origin the paired client saved, instead of a fresh port nobody
+    // knows. Remote access lets the manager ask whether the agent is working.
+    const { namespaceProxy, remoteAccess } = attached;
+    const published = yield* promise(async () => {
+      const marked = await leases.markActive({
+        leaseId: lease.leaseId,
+        ...(namespaceProxy ? { namespaceProxy } : {}),
+        remoteAccess,
+      });
+      if (!marked) throw new Error("The lease ended while its environment was being published");
+      return marked;
+    });
+    return { ...attached, lease: published };
+  });
+  /**
+   * Gives a ready box to the chat it was provisioned for and starts that chat's first turn, so
+   * neither waits on a client. Safe to run any number of times: a delivered turn is never sent
+   * again. A failure is logged and left for the next upkeep pass.
+   */
+  const settleChat = (operation: ProvisionOperation) =>
+    Effect.gen(function* () {
+      const { state, request } = operation;
+      const chat = request.chat;
+      if (state.kind !== "ready" || chat === undefined) return;
+      const registered = yield* activeLease(operation);
+      const turn = registered?.firstTurn;
+      if (registered?.state !== "active" || turn === undefined) return;
+      const { requestId } = request;
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      if (now - Date.parse(registered.createdAt) > FIRST_TURN_DEADLINE_MS) {
+        yield* Effect.logError("cloud chat first turn abandoned", {
+          requestId,
+          reason: "The box did not take the turn in time.",
+        });
+        yield* promise(() => leases.settleFirstTurn(registered.leaseId));
+        return;
+      }
+      const lease = registered.remoteAccess
+        ? registered
+        : (yield* publish(operation, registered)).lease;
+      const remoteAccess = lease.remoteAccess;
+      if (!remoteAccess) return;
+      const delivery = yield* promise(() =>
+        ports.deliverFirstTurn(remoteAccess, {
+          requestId,
+          threadId: chat.threadId,
+          projectDir: state.readiness.projectDir,
+          turn,
+        }),
+      );
+      if (delivery === "pending") return;
+      if (delivery === "refused")
+        yield* Effect.logError("cloud chat first turn refused by its box", { requestId });
+      yield* promise(() => leases.settleFirstTurn(lease.leaseId));
+    }).pipe(Effect.ignore({ log: "Warn", message: "cloud chat first turn not started yet" }));
   return {
+    settleChat,
+    /** Retries every awake box whose chat's first turn has not started. */
+    settleChats: Effect.gen(function* () {
+      const waiting = (yield* promise(() => leases.awake())).filter(
+        (lease) => lease.firstTurn !== undefined,
+      );
+      for (const lease of waiting) {
+        const id = yield* decodeRequestId(lease.leaseId).pipe(Effect.option);
+        if (Option.isNone(id)) continue;
+        const operation = yield* store.get(id.value).pipe(Effect.option);
+        if (Option.isSome(operation)) yield* settleChat(operation.value);
+      }
+    }).pipe(Effect.ignore),
     provision: Effect.fn("EnvironmentControl.provision")(function* (
       input: EnvironmentProvisionInput,
     ): Effect.fn.Return<EnvironmentProvisionResult, EnvironmentControlError> {
@@ -285,35 +404,7 @@ export function makeProvisionControl(
       const lease = yield* activeLease(operation);
       if (lease?.state !== "active")
         return { kind: "refused", message: "This environment's lease has ended." };
-      const manifest = yield* promise(() => ports.load(input.requestId));
-      const context = {
-        requestId: operation.request.requestId,
-        provider: operation.state.allocation.resource.provider,
-      };
-      const phases: ProvisionPhase[] = [];
-      const record = (phase: ProvisionPhase) => {
-        phases.push(phase);
-      };
-      const attached = yield* remote(operation, () =>
-        ports.attach(operation, manifest, lease.namespaceProxy, record),
-      ).pipe(
-        timeProvisionPhase("attach", context),
-        Effect.ensuring(logProvisionPhases(context, phases)),
-      );
-      // The proxy is recorded so a resume after a manager restart can re-bind
-      // the origin the paired client saved, instead of a fresh port nobody
-      // knows. Remote access lets the manager ask whether the agent is working.
-      const { namespaceProxy, remoteAccess } = attached;
-      yield* promise(async () => {
-        if (
-          !(await leases.markActive({
-            leaseId: lease.leaseId,
-            ...(namespaceProxy ? { namespaceProxy } : {}),
-            remoteAccess,
-          }))
-        )
-          throw new Error("The lease ended while its environment was being published");
-      });
+      const attached = yield* publish(operation, lease);
       return {
         kind: "attached",
         environmentId: operation.state.readiness.environmentId,

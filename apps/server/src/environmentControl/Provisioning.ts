@@ -58,6 +58,8 @@ export class ProvisionProviderPorts extends Context.Service<
       operation: ProvisionOperation,
       resource: ProvisionResource,
     ) => Effect.Effect<void, ProvisionProviderError>;
+    /** Runs on the host each time a drive ends ready, whether or not its caller is still there. */
+    readonly ready?: (operation: ProvisionOperation) => Effect.Effect<void>;
   }
 >()("t3/environmentControl/Provisioning/ProvisionProviderPorts") {}
 
@@ -528,7 +530,17 @@ export class Provisioning extends Context.Service<
     const driverOf = (request: DurableProvisionRequest) =>
       Effect.withFiberSucceed((caller) =>
         Option.getOrElse(FiberMap.getUnsafe(drivers, request.requestId), () =>
-          own(caller, request.requestId, drive(request)),
+          own(
+            caller,
+            request.requestId,
+            drive(request).pipe(
+              Effect.tap((operation) =>
+                operation.state.kind === "ready" && ports.ready
+                  ? ports.ready(operation)
+                  : Effect.void,
+              ),
+            ),
+          ),
         ),
       );
     /**

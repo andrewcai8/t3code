@@ -966,6 +966,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         ...(input.agentDriver ? { agentDriver: input.agentDriver } : {}),
         ...(input.repository ? { repository: input.repository } : {}),
         ...(input.branch ? { branch: input.branch } : {}),
+        ...(input.chat ? { chat: input.chat } : {}),
         sourceRevision: repository?.revision ?? null,
         preparationHash: provisionDigest(
           stableStringify({ preparation, egressAllow: provisioning.egressAllow ?? [] }),

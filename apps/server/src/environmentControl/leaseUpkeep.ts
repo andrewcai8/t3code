@@ -19,6 +19,8 @@ export const runLeaseUpkeep = (input: {
   readonly reapExpiredLeases: () => Promise<void>;
   readonly syncLeaseUsage: () => Promise<void>;
   readonly reconcileProvisions: Effect.Effect<void, ProvisionStoreError>;
+  /** Starts each awake box's pending first turn. Never fails. */
+  readonly settleChats: Effect.Effect<void>;
   readonly boxUsage: Pick<BoxUsageStore["Service"], "prune">;
 }) => {
   const repeat = (tick: Effect.Effect<void>) =>
@@ -27,6 +29,8 @@ export const runLeaseUpkeep = (input: {
       Effect.repeat(Schedule.spaced(LEASE_UPKEEP_INTERVAL)),
     );
   const reap = Effect.gen(function* () {
+    // First, so a box whose chat's first turn is still pending gets it before any pause check.
+    yield* input.settleChats;
     // A lease is only registered once its provision reached ready, so an
     // expired heartbeat means a finished machine nobody is watching. Pause
     // it and leave it reconnectable. A provision that never reached ready
