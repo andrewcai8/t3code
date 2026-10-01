@@ -5,6 +5,7 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { NodeWS } from "@effect/platform-node-shared/NodeSocket";
 import { it } from "@effect/vitest";
 import { expect, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
@@ -85,6 +86,18 @@ it.effect.each(["devbox", "instance"] as const)(
         response.setHeader("content-type", "application/json");
         response.end(encodeJson({ environmentId: "namespace-environment", upstream: request.url }));
       });
+      // An echo, to prove an upgrade crosses the proxy both ways with the ingress bearer.
+      const upgrades: Array<{
+        url: string | undefined;
+        authorization: string | string[] | undefined;
+      }> = [];
+      const echoes = new NodeWS.WebSocketServer({ noServer: true });
+      upstream.on("upgrade", (request, socket, head) => {
+        upgrades.push({ url: request.url, authorization: request.headers["x-nsc-ingress-auth"] });
+        echoes.handleUpgrade(request, socket, head, (client) =>
+          client.on("message", (message) => client.send(message.toString())),
+        );
+      });
       yield* Effect.acquireRelease(
         Effect.promise(
           () => new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve)),
@@ -93,6 +106,8 @@ it.effect.each(["devbox", "instance"] as const)(
           Effect.promise(
             () =>
               new Promise<void>((resolve) => {
+                // An upgraded socket is no longer the server's to close.
+                for (const client of echoes.clients) client.terminate();
                 upstream.closeAllConnections();
                 upstream.close(() => resolve());
               }),
@@ -129,7 +144,7 @@ it.effect.each(["devbox", "instance"] as const)(
           init,
         );
       });
-      exposeInstance.mockResolvedValue("https://mac.namespace.invalid");
+      exposeInstance.mockImplementation(async () => upstreamOrigin);
       const configPath = NodePath.join(directory, "environment-control.json");
       yield* Effect.promise(() =>
         NodeFSP.writeFile(
@@ -292,9 +307,18 @@ it.effect.each(["devbox", "instance"] as const)(
         const reached = yield* Effect.promise(() => probe(`${origin}/probe`));
         expect(reached).toEqual({
           environmentId: "namespace-environment",
-          upstream: `/${engine === "instance" ? "mac" : "devbox"}/probe`,
+          upstream: engine === "instance" ? "/probe" : "/devbox/probe",
         });
-        if (engine === "instance") expect(exposeInstance).toHaveBeenCalledWith(MAC, 3773);
+        if (engine === "instance") {
+          expect(exposeInstance).toHaveBeenCalledWith(MAC, 3773);
+          const echoed = yield* Effect.promise(() =>
+            echo(`${origin!.replace(/^http/, "ws")}/ws?wsTicket=ticket`),
+          );
+          expect([echoed, upgrades]).toEqual([
+            "ping",
+            [{ url: "/ws?wsTicket=ticket", authorization: "Bearer token" }],
+          ]);
+        }
       }).pipe(
         Effect.provide(
           Layer.merge(layer, ProvisionOperationStore.layer).pipe(
@@ -310,3 +334,20 @@ it.effect.each(["devbox", "instance"] as const)(
 );
 
 const probe = async (url: string) => (await fetch(url)).json().catch(() => null);
+
+const echo = (url: string) =>
+  new Promise<unknown>((resolve, reject) => {
+    const socket = new WebSocket(url);
+    socket.addEventListener("open", () => socket.send("ping"), { once: true });
+    socket.addEventListener(
+      "message",
+      (event) => {
+        resolve(event.data);
+        socket.close();
+      },
+      { once: true },
+    );
+    socket.addEventListener("error", () => reject(new Error(`websocket to ${url} failed`)), {
+      once: true,
+    });
+  });

@@ -967,6 +967,12 @@ export const layer = Layer.effect(
             ? mac.reconnect(operation, manifest, recorded)
             : runtime.reconnect(operation, resource, manifest, recorded));
           reconnectFailedAt.delete(requestId);
+          await runLogged(
+            Effect.logInfo("cloud workspace proxy reconnected", {
+              leaseId: requestId,
+              proxyOrigin: recorded.proxyOrigin,
+            }),
+          );
         })()
           .catch(async (cause: unknown) => {
             reconnectFailedAt.set(requestId, Date.now());
