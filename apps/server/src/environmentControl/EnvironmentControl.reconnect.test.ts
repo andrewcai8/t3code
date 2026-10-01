@@ -289,9 +289,7 @@ it.effect.each(["devbox", "instance"] as const)(
         const manager = yield* EnvironmentControl;
         const origin = yield* manager.namespaceProxyOrigin(requestId);
         expect(origin, "the gateway keeps the origin its clients saved").toBe(recorded.proxyOrigin);
-        const reached = yield* Effect.promise(async () =>
-          (await fetch(`${origin}/probe`)).json().catch(() => null),
-        );
+        const reached = yield* Effect.promise(() => probe(`${origin}/probe`));
         expect(reached).toEqual({
           environmentId: "namespace-environment",
           upstream: `/${engine === "instance" ? "mac" : "devbox"}/probe`,
@@ -310,3 +308,5 @@ it.effect.each(["devbox", "instance"] as const)(
       );
     }).pipe(Effect.scoped),
 );
+
+const probe = async (url: string) => (await fetch(url)).json().catch(() => null);
