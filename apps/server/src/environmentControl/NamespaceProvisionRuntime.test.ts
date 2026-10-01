@@ -6,6 +6,7 @@ import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeTimersPromises from "node:timers/promises";
 import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Schema from "effect/Schema";
@@ -86,7 +87,9 @@ async function listen(handler: NodeHttp.RequestListener) {
   return { port: address.port, origin: `http://127.0.0.1:${address.port}` };
 }
 
-async function fixture() {
+async function fixture(
+  options: { readonly commandTimeoutMs?: number; readonly bootMs?: number } = {},
+) {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-runtime-"));
   cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));
   const applications = NodePath.join(directory, "Applications");
@@ -126,6 +129,8 @@ async function fixture() {
     describedInstanceId: "owned-instance",
     resolved: 0,
     artifactOrigin: "https://artifacts.invalid",
+    /** When the current instance's Mac answers an exec. */
+    bootedAt: 0,
   };
   const apiCalls: Array<{ method: string; body: unknown }> = [];
   const api = await listen((request, response) => {
@@ -208,7 +213,8 @@ async function fixture() {
     apiUrl: api.origin,
     computeApiUrl: api.origin,
     artifactsApiUrl: api.origin,
-    execute: async ({ args, env }) => {
+    ...(options.commandTimeoutMs ? { commandTimeoutMs: options.commandTimeoutMs } : {}),
+    execute: async ({ args, env, signal }) => {
       const tokenFile = env.NSC_TOKEN_FILE;
       if (!tokenFile) throw new Error("CLI had no explicit credential file");
       expect(decodeToken(await NodeFSP.readFile(tokenFile, "utf8")).bearer_token).toBe(token);
@@ -224,11 +230,18 @@ async function fixture() {
         return { exitCode: 0, stdout: "" };
       }
       if (args[0] === "exec") {
-        // Any exec activates a shut-down Devbox again, on a fresh instance.
+        // Any exec activates a shut-down Devbox again, on a fresh instance, which answers only
+        // once its Mac has booted.
         if (state.instanceId === "") {
           state.instanceId = "woken-instance";
           state.describedInstanceId = "woken-instance";
+          state.bootedAt = DateTime.toEpochMillis(DateTime.nowUnsafe()) + (options.bootMs ?? 0);
         }
+        const booting = state.bootedAt - DateTime.toEpochMillis(DateTime.nowUnsafe());
+        if (booting > 0)
+          await NodeTimersPromises.setTimeout(booting, undefined, { signal }).catch(() => {
+            throw new Error("Namespace CLI command aborted or timed out");
+          });
         const separator = args.indexOf("--");
         const executable = args[separator + 1];
         if (!executable) throw new Error("Missing remote executable");
@@ -837,7 +850,8 @@ describe("Namespace runtime transport", () => {
   });
 
   it("resumes a shut-down Devbox from its retained volume at the origin its client saved", async () => {
-    const f = await fixture();
+    // Its Mac takes longer to boot than an ordinary command may run, as a retained volume does.
+    const f = await fixture({ commandTimeoutMs: 1_500, bootMs: 2_500 });
     const volume = NodePath.join(f.directory, "volume");
     const root = NodePath.join(volume, "t3-provision", requestId);
     const bundle = NodePath.join(f.directory, "bundle");
@@ -1005,6 +1019,18 @@ describe("Namespace runtime transport", () => {
     expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
     expect(await started()).toBe("start\nstart\n");
     expect(archiveUploads()).toHaveLength(2);
+
+    // A resume cut short leaves the Mac's instance listed while it still boots. The next resume
+    // waits for the boot instead of running its preparation into a Mac that cannot answer.
+    expect(await (await fetch(`${upstream}/stop`)).text()).toBe("stopped");
+    await serverLockReleased(root);
+    f.state.instanceId = "booting-instance";
+    f.state.describedInstanceId = "booting-instance";
+    f.state.bootedAt = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 2_500;
+    expect(
+      await second.resume(operation, resource, manifest, attached.namespaceProxy, upgraded),
+    ).toEqual({ namespaceProxy: attached.namespaceProxy, refreshError: null });
+    expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
   });
 
   it("resolves a fresh artifact URL on every convergence and refuses one that is not private HTTPS", async () => {

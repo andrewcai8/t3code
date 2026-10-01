@@ -191,6 +191,8 @@ export async function makeNamespaceAccountSession(config: {
 }
 export type NamespaceAccountSession = Awaited<ReturnType<typeof makeNamespaceAccountSession>>;
 
+/** How long a preparation, or a shut-down Mac booting, may take: as long as a credential is issued for. */
+const LONG_CLI_TIMEOUT_MS = 1_200_000;
 const prepareDirectory = String.raw`
 import os,pathlib,sys
 os.umask(0o077)
@@ -289,7 +291,7 @@ export function namespacePythonPort(config: {
             "/Applications",
           ],
           undefined,
-          1_200_000,
+          LONG_CLI_TIMEOUT_MS,
         );
       } finally {
         if (staged)
@@ -529,11 +531,20 @@ export function makeNamespaceProvisionRuntime(config: {
     if (!instanceId) throw new Error("Namespace instance is not running");
     return instanceId;
   };
-  /** A shut-down Devbox keeps its record and volume; any exec activates it again. */
+  /**
+   * A shut-down Devbox keeps its record and volume; any exec activates it again. The exec answers
+   * once the Mac has booted, which for a chat's full volume has taken from three to twenty minutes,
+   * and an instance can be listed long before then, so the exec runs even when one is.
+   */
   const wake = async (operation: ProvisionOperation, resource: NamespaceResource) => {
-    const observed = await assertResource(operation, resource);
-    if (observed.instanceId) return observed.instanceId;
-    await successful(config.session, ["exec", resource.devboxId, "--", "true"]);
+    await assertResource(operation, resource);
+    const woken = await config.session.run(
+      ["exec", resource.devboxId, "--", "true"],
+      undefined,
+      LONG_CLI_TIMEOUT_MS,
+    );
+    if (woken.exitCode !== 0)
+      throw new Error(woken.stderr?.trim() || woken.stdout.trim() || "Namespace Mac did not wake");
     return running(operation, resource);
   };
   const port = (resource: NamespaceResource, manifest: ProvisionPreparationManifest) =>
