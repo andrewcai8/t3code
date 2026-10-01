@@ -1339,6 +1339,7 @@ export const layer = Layer.effect(
         deliverFirstTurn,
         readFirstTurn: manifests.readFirstTurn,
         forgetFirstTurn: manifests.forgetFirstTurn,
+        listFirstTurns: manifests.listFirstTurns,
       },
       leaseRegistry,
     );

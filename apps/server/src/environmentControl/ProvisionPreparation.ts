@@ -13,7 +13,7 @@ import {
   ProvisionFirstTurn,
   ProvisionProvider,
   ProvisionRequestConflict,
-  type ProvisionRequestId,
+  ProvisionRequestId,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Schema from "effect/Schema";
@@ -598,6 +598,8 @@ export async function spareKey(
 }
 
 /** The first complete, fsynced manifest wins across manager processes. Retries never reread mutable config. */
+const FIRST_TURN_SUFFIX = ".first-turn.json";
+const isProvisionRequestId = Schema.is(ProvisionRequestId);
 const decodeFirstTurn = Schema.decodeUnknownSync(Schema.fromJsonString(ProvisionFirstTurn));
 
 /**
@@ -620,7 +622,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
   const manifestPath = (id: ProvisionRequestId) => NodePath.join(directory, `${id}.json`);
   const runtimePath = (id: ProvisionRequestId) => NodePath.join(directory, `${id}.runtime.json`);
   const firstTurnPath = (id: ProvisionRequestId) =>
-    NodePath.join(directory, `${id}.first-turn.json`);
+    NodePath.join(directory, `${id}${FIRST_TURN_SUFFIX}`);
   /** Copies a configured artifact into the store so a later config edit cannot change what a guest receives. */
   const storeArtifact = async (artifact: ProvisionRuntimeArtifact) => {
     relativePath(artifact.entrypoint);
@@ -671,6 +673,18 @@ export function makeProvisionPreparationStore(stateDir: string) {
     },
     /** Deletes the first message once the host has started or given up on it. */
     forgetFirstTurn: (id: ProvisionRequestId) => NodeFSP.rm(firstTurnPath(id), { force: true }),
+    listFirstTurns: async (): Promise<ReadonlyArray<ProvisionRequestId>> => {
+      const names = await NodeFSP.readdir(directory).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      return names.flatMap((name) => {
+        const id = name.endsWith(FIRST_TURN_SUFFIX)
+          ? name.slice(0, -FIRST_TURN_SUFFIX.length)
+          : null;
+        return id !== null && isProvisionRequestId(id) ? [id] : [];
+      });
+    },
     readRuntime: async (id: ProvisionRequestId): Promise<ProvisionRuntimeArtifact | null> => {
       const raw = await privateRead(runtimePath(id)).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;

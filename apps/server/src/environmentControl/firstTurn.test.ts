@@ -111,6 +111,8 @@ interface BoxBehavior {
   readonly rejectCreate?: boolean;
   /** A page already started the same message on the box. */
   readonly alreadySent?: boolean;
+  /** The box takes requests and never answers them. */
+  readonly hang?: boolean;
 }
 
 /** A box's T3 server as the manager sees it: one project, and a receipt per command id. */
@@ -132,6 +134,7 @@ const fakeBox = (behavior: BoxBehavior) =>
           response.writeHead(401).end();
           return;
         }
+        if (behavior.hang) return;
         if (unavailable > 0) {
           unavailable -= 1;
           response.writeHead(503).end();
@@ -173,11 +176,26 @@ const fakeBox = (behavior: BoxBehavior) =>
       return { origin: `http://127.0.0.1:${port}`, commands, turnStarted, server };
     }),
     ({ server }) =>
-      Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+      Effect.promise(
+        () =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections();
+            server.close(() => resolve());
+          }),
+      ),
   );
 
 /** A host whose provisioning drive runs the first-turn settle exactly as EnvironmentControl wires it. */
-const host = (behavior: BoxBehavior, retry: Schedule.Schedule<unknown> = Schedule.recurs(0)) =>
+interface HostOptions {
+  /** Retries right after ready; absent runs the production default. */
+  readonly retry?: Schedule.Schedule<unknown>;
+  /** The provider hands back a resource of the wrong kind, so the request fails. */
+  readonly allocationFails?: boolean;
+  /** Leaves the drive's ready hook out, holding the moment between ready and the lease. */
+  readonly withoutReadyHook?: boolean;
+}
+
+const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.recurs(0) }) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
@@ -191,7 +209,19 @@ const host = (behavior: BoxBehavior, retry: Schedule.Schedule<unknown> = Schedul
     ) => Effect.Effect<unknown> = () => Effect.void;
     const provisioning = yield* Provisioning.make.pipe(
       Effect.provideService(ProvisionProviderPorts, {
-        create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
+        create: () =>
+          Effect.succeed(
+            options.allocationFails
+              ? {
+                  provider: "namespace" as const,
+                  devboxId: "box",
+                  devboxName: "box",
+                  instanceId: "instance",
+                  region: "iad",
+                  workspaceDir: "/workspace",
+                }
+              : { provider: "e2b" as const, sandboxId: "sandbox" },
+          ),
         recoverCreate: () => Effect.succeed([]),
         fork: () => Effect.die("unexpected fork"),
         recoverFork: () => Effect.succeed([]),
@@ -232,13 +262,14 @@ const host = (behavior: BoxBehavior, retry: Schedule.Schedule<unknown> = Schedul
         forgetFirstTurn: async (id) => {
           kept.delete(id);
         },
+        listFirstTurns: async () => [...kept.keys()],
       },
       leases,
-      retry,
+      options.retry,
     );
-    settle = control.settleChat;
+    if (!options.withoutReadyHook) settle = control.settleChat;
     const lease = () => Effect.promise(() => leases.findById(input.requestId));
-    return { box, control, leases, lease, kept, preparing, prepared };
+    return { box, control, provisioning, leases, lease, kept, preparing, prepared };
   });
 
 const withHost = <A, E>(
@@ -286,7 +317,7 @@ it.live("retries a box that is not answering yet, then upkeep starts the turn", 
       // Two quick attempts at ready go unanswered; the next upkeep pass gets through.
       const { box, control, lease, prepared } = yield* host(
         { unavailableFor: 2 },
-        Schedule.recurs(1),
+        { retry: Schedule.recurs(1) },
       );
       yield* Deferred.succeed(prepared, undefined);
       const ready = yield* control.provision(input);
@@ -359,6 +390,120 @@ it.live("does not start a second turn for a message a page already started", () 
       expect(ready).toMatchObject({ kind: "ready", environment: { firstTurn: "started" } });
       expect(box.commands).toEqual([]);
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "started" } });
+    }),
+  ),
+);
+
+it.live("deletes the first message once a turn fails outside the settle, as the reaper does", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { control, leases, kept, prepared } = yield* host({ unavailableFor: 1 });
+      yield* Deferred.succeed(prepared, undefined);
+      expect(yield* control.provision(input)).toMatchObject({
+        environment: { firstTurn: "pending" },
+      });
+      yield* Effect.promise(() =>
+        leases.settleFirstTurn(input.requestId, { status: "failed", reason: "overdue" }),
+      );
+      yield* control.settleChats;
+      expect(kept.size).toBe(0);
+    }),
+  ),
+);
+
+it.live("deletes the first message of a draft cancelled before its box was ready", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { control, provisioning, kept, preparing } = yield* host({});
+      yield* Effect.forkChild(control.provision(input));
+      yield* Deferred.await(preparing);
+      yield* provisioning.cancel(input.requestId);
+      yield* control.settleChats;
+      expect(kept.size).toBe(0);
+    }),
+  ),
+);
+
+it.live("deletes the first message of a request that failed", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { control, kept } = yield* host({}, { allocationFails: true });
+      expect(yield* control.provision(input)).toMatchObject({ kind: "refused", reason: "failed" });
+      yield* control.settleChats;
+      expect(kept.size).toBe(0);
+    }),
+  ),
+);
+
+it.live("keeps the first message of a request still being prepared", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { control, kept, preparing } = yield* host({});
+      yield* Effect.forkChild(control.provision(input));
+      yield* Deferred.await(preparing);
+      yield* control.settleChats;
+      expect(kept.size).toBe(1);
+    }),
+  ),
+);
+
+for (const [stopped, stop] of [
+  ["disposed", "markDisposed"],
+  ["paused", "markPaused"],
+] as const)
+  it.live(`gives up and deletes the first message of a box ${stopped} before its turn`, () =>
+    withHost(
+      Effect.gen(function* () {
+        const { control, leases, lease, kept, prepared } = yield* host({ unavailableFor: 1 });
+        yield* Deferred.succeed(prepared, undefined);
+        expect(yield* control.provision(input)).toMatchObject({
+          environment: { firstTurn: "pending" },
+        });
+        yield* Effect.promise(() => leases[stop](input.requestId));
+        yield* control.settleChats;
+        expect(kept.size).toBe(0);
+        expect(yield* lease()).toMatchObject({
+          state: stopped,
+          owner: null,
+          firstTurn: { status: "failed" },
+        });
+      }),
+    ),
+  );
+
+it.live("answers ready within seconds when the box hangs, leaving later tries to upkeep", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { control, lease, prepared } = yield* host({ hang: true }, {});
+      yield* Deferred.succeed(prepared, undefined);
+      const started = Date.now();
+      const ready = yield* control.provision(input);
+      const elapsedMs = Date.now() - started;
+      expect(ready).toMatchObject({ kind: "ready", environment: { firstTurn: "pending" } });
+      expect(elapsedMs).toBeLessThan(8_000);
+      expect(yield* lease()).toMatchObject({ firstTurn: { status: "pending" } });
+    }),
+  ),
+);
+
+it.live("keeps the first message of a ready request whose lease is not registered yet", () =>
+  withHost(
+    Effect.gen(function* () {
+      const { box, control, provisioning, lease, kept, prepared } = yield* host(
+        {},
+        { withoutReadyHook: true },
+      );
+      yield* Deferred.succeed(prepared, undefined);
+      const ready = yield* provisioning.ensure(manifest.request);
+      expect(ready.state.kind).toBe("ready");
+      expect(yield* lease()).toBeNull();
+
+      yield* control.settleChats;
+      expect(kept.size).toBe(1);
+
+      expect(yield* control.settleChat(ready)).toBe("started");
+      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(kept.size).toBe(0);
     }),
   ),
 );
