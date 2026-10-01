@@ -773,6 +773,16 @@ except FileExistsError:
         remoteAccess: { origin: namespaceProxy.proxyOrigin, brokerToken },
       };
     },
+    /** Serves a running environment at its recorded origin again, as after a manager restart. */
+    reconnect: async (
+      operation: ProvisionOperation,
+      resource: NamespaceResource,
+      manifest: ProvisionPreparationManifest,
+      recordedProxy: NamespaceProxyLease,
+    ) => {
+      await running(operation, resource);
+      return publish(operation, resource, manifest, recordedProxy);
+    },
     /**
      * Brings a paused or orphaned environment back at the origin its client
      * saved: wake, converge the retained root, then publish through the proxy.

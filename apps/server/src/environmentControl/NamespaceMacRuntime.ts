@@ -526,6 +526,18 @@ export function makeNamespaceMacRuntime(config: {
         refreshError: ready.refreshError ?? null,
       };
     },
+    /** Serves a running chat at its recorded origin again, as after a manager restart. */
+    reconnect: async (
+      operation: ProvisionOperation,
+      manifest: ProvisionPreparationManifest,
+      recordedProxy: NamespaceProxyLease,
+    ) =>
+      publish(
+        operation,
+        manifest,
+        liveMac(await store.read(operation.request.requestId)),
+        recordedProxy,
+      ),
     /** Saves the chat off the Mac, then lets the Mac go. Never destroys before the save is recorded. */
     release,
     touch: async (operation: ProvisionOperation) => {

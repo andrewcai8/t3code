@@ -107,6 +107,8 @@ import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
+/** How long a lease whose proxy could not be reconnected waits before the gateway tries again. */
+const RECONNECT_RETRY_MS = 30_000;
 
 /** The boxes an operation holds, as far as its state records them. */
 function allocatedResources(state: ProvisionOperationState): ReadonlyArray<ProvisionResource> {
@@ -935,6 +937,50 @@ export const layer = Layer.effect(
       await runLogged(logRefresh(requestId, refreshError));
       return { namespaceProxy };
     };
+    /**
+     * Proxies live in this process, so a restart leaves every active lease's recorded origin
+     * unserved until something publishes it again. The gateway does, on the first request that
+     * needs one, once per lease at a time and at most every RECONNECT_RETRY_MS after a failure.
+     */
+    const reconnecting = new Map<string, Promise<void>>();
+    const reconnectFailedAt = new Map<string, number>();
+    const reconnectProxy = (lease: ProvisionedLease, recorded: NamespaceProxyLease) => {
+      const requestId = lease.leaseId;
+      if (!isProvisionRequestId(requestId) || importedLeases.has(requestId))
+        return Promise.resolve();
+      const failedAt = reconnectFailedAt.get(requestId);
+      if (failedAt !== undefined && Date.now() - failedAt < RECONNECT_RETRY_MS)
+        return Promise.resolve();
+      const pending =
+        reconnecting.get(requestId) ??
+        (async () => {
+          const operation = await Effect.runPromise(store.get(requestId));
+          if (
+            operation.state.kind !== "ready" ||
+            operation.state.allocation.resource.provider !== "namespace"
+          )
+            return;
+          const manifest = await manifests.load(requestId);
+          const { runtime, mac } = await resolveNamespace();
+          const resource = operation.state.allocation.resource;
+          await ("engine" in resource
+            ? mac.reconnect(operation, manifest, recorded)
+            : runtime.reconnect(operation, resource, manifest, recorded));
+          reconnectFailedAt.delete(requestId);
+        })()
+          .catch(async (cause: unknown) => {
+            reconnectFailedAt.set(requestId, Date.now());
+            await runLogged(
+              Effect.logWarning("cloud workspace proxy could not be reconnected", {
+                leaseId: requestId,
+                cause,
+              }),
+            );
+          })
+          .finally(() => reconnecting.delete(requestId));
+      reconnecting.set(requestId, pending);
+      return pending;
+    };
     /** The chat behind a lease, when it runs on the Namespace instance engine. */
     const instanceChat = async (sandboxId: string) => {
       if (!isProvisionRequestId(sandboxId) || importedLeases.has(sandboxId)) return null;
@@ -1548,6 +1594,8 @@ export const layer = Layer.effect(
               !lease.namespaceProxy
             )
               return null;
+            if (lease.state === "active" && !namespaceProxies.has(lease.namespaceProxy.proxyId))
+              await reconnectProxy(lease, lease.namespaceProxy);
             return lease.namespaceProxy.proxyOrigin;
           },
           catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
