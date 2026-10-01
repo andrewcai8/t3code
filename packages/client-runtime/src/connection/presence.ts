@@ -19,7 +19,7 @@ export class UserPresence extends Context.Reference<{
   /** The current answer first, then each change. */
   readonly present: Stream.Stream<boolean>;
 }>("@t3tools/client-runtime/connection/presence/UserPresence", {
-  defaultValue: () => ({ present: Stream.make(true) }),
+  defaultValue: () => ({ present: Stream.concat(Stream.make(true), Stream.never) }),
 }) {}
 
 /** What a surface reports for presence: whether it is on screen, and each user input. */

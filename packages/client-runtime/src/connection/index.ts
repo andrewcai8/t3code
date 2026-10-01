@@ -12,6 +12,7 @@ export {
   type PairingConnectionInput,
   type SshConnectionInput,
 } from "./onboarding.ts";
+export * as Presence from "./presence.ts";
 export * from "./presentation.ts";
 export * as ProfileStore from "./profileStore.ts";
 export * from "./provisioned.ts";

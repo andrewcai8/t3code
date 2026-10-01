@@ -48,11 +48,19 @@ then at doubling intervals up to every 10 minutes, for as long as it is
 demanded. A view that woke boxes fired once per cached host list, so a failed
 resume or a box paused under its open chat stayed down.
 
-While a box is connected, the registry renews its lease through its host, so
-every client with the chat open keeps the box awake, not only the one that
-started it. Without that, the host pauses the box under a phone's or a second
-tab's open chat and the wake brings it back, a Mac boot every cycle. The host
-still requires an operate session and an active, claimed lease to renew one.
+While a box is connected and its user is here, the registry renews its lease
+through its host, so every client with the chat open keeps the box awake, not
+only the one that started it. Without that, the host pauses the box under a
+phone's or a second tab's open chat and the wake brings it back, a Mac boot
+every cycle. The host still requires an operate session and an active, claimed
+lease to renew one.
+
+"Here" is `UserPresence`: the app is visible (foreground on mobile) and the
+user touched it within the hour. Each surface reports visibility and input; the
+rule lives in client-runtime. A box is woken only while its user is here too,
+and their return retries every box that is down. An open connection alone does
+not keep a Mac running, so a forgotten tab lets its box idle out. The host
+never pauses a box whose agent is busy, whatever the clients do.
 
 Boxes saved before the mark existed are marked from this device's lease records
 and from the lists hosts report. A box paired from a bare link stays an ordinary
