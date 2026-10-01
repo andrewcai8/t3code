@@ -659,6 +659,42 @@ describe("guest chat state", () => {
     ).toEqual([]);
   });
 
+  it("empties the volume's trash folders and leaves an inherited bin unreadable on adopt", async () => {
+    const w = await world();
+    await w.newMac();
+    for (const bin of [".Trashes/501", "trash-stash"]) {
+      await NodeFSP.mkdir(NodePath.join(w.mount, bin), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(w.mount, bin, "auth.json"), "{}\n");
+    }
+    await w.depart("commit");
+
+    await w.newMac();
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    for (const path of [".Trashes/501/auth.json", "trash-stash/auth.json"])
+      await expect(
+        NodeFSP.readFile(NodePath.join(w.mount, path), "utf8"),
+        `${path} is gone or unreadable once adopt returns`,
+      ).rejects.toThrow();
+    // The bin is deleted by root on a Mac; here the background delete may still be running.
+    for (const entry of await NodeFSP.readdir(w.mount))
+      if (entry.startsWith("trash-"))
+        await NodeFSP.chmod(NodePath.join(w.mount, entry), 0o700).catch(() => undefined);
+  });
+
+  it("opens a chat even when macOS recreates its system folders while adopt clears them", async () => {
+    const w = await world();
+    await w.newMac();
+    // macOS writes these on its own schedule; a loop stands in for it.
+    const recreate = NodeChildProcess.spawn(
+      "sh",
+      ["-c", 'while :; do mkdir -p "$1/.TemporaryItems/folders"; done', "sh", w.mount],
+      { stdio: "ignore" },
+    );
+    cleanups.push(() => void recreate.kill("SIGKILL"));
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    recreate.kill("SIGKILL");
+  });
+
   it("refuses to commit a template its chat changed after it was sealed", async () => {
     const w = await world();
     await w.newMac("empty");

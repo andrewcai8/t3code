@@ -127,7 +127,10 @@ def trash(mount, path, wait=False):
     if wait:
         rmtree(target)
     else:
-        subprocess.Popen(['sh', '-c', 'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"', 'sh', str(target)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        delete_later(target)
+
+def delete_later(path):
+    subprocess.Popen(['sh', '-c', 'sudo -n rm -rf "$1" 2>/dev/null || { chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"; }', 'sh', str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 def contained(base, relative):
     parts = pathlib.PurePosixPath(relative).parts
@@ -659,10 +662,25 @@ def adopt(spec):
     with locked(mount / 'cache.lock'):
         # Anything else that arrived with the volume is another Mac's, left by a destroy that
         # committed: a builder's half-sealed copy of a chat root holds that chat's credentials.
-        # It goes before anything here reads the volume. A leftover root is purged below, and the
-        # bin holds only roots purged that way.
+        # It goes before anything here reads the volume. A leftover root is purged below.
         for entry in sorted(os.listdir(mount)):
-            if entry not in ('root', '.Trashes') and not entry.startswith('trash-') and not VOLUME_ENTRIES.fullmatch(entry):
+            if entry == 'root' or VOLUME_ENTRIES.fullmatch(entry):
+                continue
+            if entry.startswith('trash-'):
+                # Another Mac's bin, whose deletion died with it: moved and shut now, deleted in
+                # the background by root, which needs no permission to read it.
+                target = mount / ('trash-' + uuid.uuid4().hex)
+                os.rename(mount / entry, target)
+                with contextlib.suppress(OSError):
+                    os.chmod(target, 0)
+                delete_later(target)
+            elif entry in MACOS_FOLDERS:
+                # macOS may recreate these at any moment, which must not stop a chat from opening.
+                try:
+                    clear_entry(mount, entry)
+                except Exception as error:
+                    sys.stderr.write('Guest chat state kept ' + entry + ': ' + str(error) + '\n')
+            else:
                 clear_entry(mount, entry)
         # A receipt counts only on the Mac that wrote it. A root or template that
         # arrived with the volume is another machine's, left by a commit that
@@ -822,6 +840,9 @@ def seal(spec):
         fsync_dir(mount)
         atomic(marker_path, json.dumps({'format': FORMAT, 'root': str(root), 'repository': spec['repository'], 'key': spec['key'], 'runtimeSha256': spec['runtimeSha256'], 'sealedAt': time.time(), 'sealedFrom': adopted['nonce']}))
         return {'sealed': True, 'digest': template_digest(mount)}
+
+# Folders macOS makes on a volume by itself. A chat clears them as best it can; scrub insists.
+MACOS_FOLDERS = ('.Trashes', '.TemporaryItems', '.DocumentRevisions-V100')
 
 def clear_entry(mount, entry):
     try:
