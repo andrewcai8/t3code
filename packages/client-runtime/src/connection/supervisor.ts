@@ -35,6 +35,10 @@ const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const MOBILE_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
+// A box that keeps saying it is not serving is woken again after 30 s, then 1, 2, 4 and 8
+// minutes, and every 10 minutes after that, so no client resumes it in a loop.
+const WAKE_INTERVAL_MS = 30_000;
+const WAKE_INTERVAL_MAX_MS = 600_000;
 
 interface SupervisorIntent {
   readonly desired: boolean;
@@ -107,6 +111,12 @@ export interface EnvironmentSupervisorOptions {
   readonly initiallyDesired?: boolean;
   /** Wakes a box whose dial says it is not serving, through the host that provisioned it. */
   readonly wake?: Effect.Effect<BoxWakeOutcome>;
+  /** Runs while the connection is up, as a box's lease heartbeat does. */
+  readonly keepAlive?: Effect.Effect<void>;
+}
+
+function wakeIntervalMs(wakes: number): number {
+  return Math.min(WAKE_INTERVAL_MS * 2 ** (wakes - 1), WAKE_INTERVAL_MAX_MS);
 }
 
 function retryDelayMs(failureCount: number): number {
@@ -586,6 +596,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       lastFailure: null,
       retryAt: null,
     });
+    if (options?.keepAlive !== undefined) yield* Effect.forkScoped(options.keepAlive);
 
     const connectedExit = yield* Effect.raceFirst(
       active.lease.session.closed.pipe(
@@ -680,13 +691,12 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     let generation = 0;
     let latestFailure: ConnectionAttemptError | null = null;
     let pendingRetry = Option.none<PendingRetryTrace>();
-    // Set when the previous step woke the box, so a redial that still finds it not serving backs
-    // off instead of resuming again at once.
-    let justWoke = false;
+    // Wakes since the box last stayed connected, and when the next one may start.
+    let wakes = 0;
+    let nextWakeAt = 0;
     const resetRetryLadder = () => {
       failureCount = 0;
       pendingRetry = Option.none();
-      justWoke = false;
     };
 
     for (;;) {
@@ -694,6 +704,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         failureCount = 0;
         latestFailure = null;
         pendingRetry = Option.none();
+        wakes = 0;
+        nextWakeAt = 0;
       }
       const currentIntent = yield* Ref.get(intent);
       if (!currentIntent.desired) {
@@ -716,8 +728,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
       const attempt = failureCount + 1;
       const nextGeneration = generation + 1;
-      const afterWake = justWoke;
-      justWoke = false;
       const outcome: AttemptOutcome = yield* Effect.scoped(
         runAttempt(attempt, nextGeneration, latestFailure, pendingRetry),
       );
@@ -729,6 +739,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         if (outcome.stable) {
           resetRetryLadder();
           latestFailure = null;
+          wakes = 0;
+          nextWakeAt = 0;
         }
       }
       if (outcome._tag === "Interrupted") {
@@ -741,13 +753,20 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
       let error: ConnectionAttemptError = outcome.failure.error;
       latestFailure = error;
-      if (options?.wake !== undefined && error.reason === "not-serving" && !afterWake) {
-        const woken = yield* wakeBox(options.wake, attempt, generation, error);
-        if (woken._tag === "Interrupted") {
-          continue;
-        }
-        if (woken._tag === "Resumed") {
-          justWoke = true;
+      if (
+        options?.wake !== undefined &&
+        error.reason === "not-serving" &&
+        (yield* Clock.currentTimeMillis) >= nextWakeAt
+      ) {
+        const woken: BoxWakeOutcome | { readonly _tag: "Interrupted" } = yield* wakeBox(
+          options.wake,
+          attempt,
+          generation,
+          error,
+        );
+        wakes += 1;
+        nextWakeAt = (yield* Clock.currentTimeMillis) + wakeIntervalMs(wakes);
+        if (woken._tag === "Interrupted" || woken._tag === "Resumed") {
           continue;
         }
         error = woken.error;
