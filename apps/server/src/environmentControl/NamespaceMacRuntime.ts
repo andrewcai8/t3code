@@ -46,7 +46,9 @@ import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProx
 import {
   desiredRuntime,
   followedBranch,
+  frozenMacTemplate,
   provisionDigest,
+  type MacTemplateIdentity,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
@@ -67,6 +69,10 @@ const CACHE_VOLUME_GB = 100;
 const TEMPLATE_MAX_AGE_SECONDS = 12 * 3_600;
 /** Ample for a builder's prepare and seal; bounds what a manager crash mid-build leaves running. */
 const BUILDER_LIFETIME_MS = 60 * 60_000;
+/** Builds a repository may start in an hour, and the backoff after a failed one, doubling. */
+const BUILDS_PER_HOUR = 3;
+const BUILD_BACKOFF_MS = 5 * 60_000;
+const BUILD_BACKOFF_MAX_MS = 2 * 3_600_000;
 /** Inside this much of its deadline an idle Mac is released; inside the second, a busy one too. */
 const ROTATE_IDLE_MS = 30 * 60_000;
 const ROTATE_FORCE_MS = 8 * 60_000;
@@ -112,6 +118,30 @@ else:
 
 type ChatOutcome = "released" | "missing";
 
+interface BuildHistory {
+  /** When builds started, kept for the last hour. */
+  readonly started: ReadonlyArray<number>;
+  readonly failures: number;
+  readonly retryAt: number;
+}
+
+/** Whether a repository may start a template build at `now`, or what holds it back. */
+export function nextBuild(history: BuildHistory, now: number): "due" | "backoff" | "cap" {
+  if (now < history.retryAt) return "backoff";
+  const recent = history.started.filter((at) => now - at < 3_600_000);
+  return recent.length >= BUILDS_PER_HOUR ? "cap" : "due";
+}
+
+/** The history after a build that started at `at` failed: the next waits twice as long. */
+export function failedBuild(history: BuildHistory, at: number): BuildHistory {
+  const failures = history.failures + 1;
+  return {
+    started: history.started.filter((started) => at - started < 3_600_000),
+    failures,
+    retryAt: at + Math.min(BUILD_BACKOFF_MS * 2 ** (failures - 1), BUILD_BACKOFF_MAX_MS),
+  };
+}
+
 /**
  * Namespace Mac chats on per-chat compute instances. Same verbs as the Devbox
  * runtime, plus `release` and `upkeep`. A chat's durable home is a snapshot in
@@ -128,7 +158,13 @@ export function makeNamespaceMacRuntime(config: {
   readonly toolInstall?: string;
   /** Runs a template build in the background. Tests run it when their one fake Mac is free. */
   readonly startBuild?: (build: () => Promise<void>) => void;
+  /**
+   * The template a chat of this repository would be frozen for now. Only a chat frozen for it
+   * gets a build, so chats frozen under older config never replace a newer template.
+   */
+  readonly currentTemplate: (repository: string | null) => Promise<MacTemplateIdentity | null>;
   readonly log?: (message: string, fields: Record<string, unknown>) => void;
+  readonly warn?: (message: string, fields: Record<string, unknown>) => void;
 }) {
   const issueToken = (durationMs: number) => config.session.issueToken(durationMs);
   const instances =
@@ -150,13 +186,29 @@ export function makeNamespaceMacRuntime(config: {
     ingressAuthorization: async () => `Bearer ${await issueToken(60_000)}`,
   });
   const log = (message: string, fields: Record<string, unknown>) => config.log?.(message, fields);
+  const warn = (message: string, fields: Record<string, unknown>) =>
+    (config.warn ?? config.log)?.(message, fields);
   const now = () => Effect.runPromise(Clock.currentTimeMillis);
   const proxyId = (operation: ProvisionOperation) => `provision-${operation.request.requestId}`;
   /** When each Mac last tried a periodic save; a new Mac starts its own cadence. */
   const lastSave = new Map<InstanceId, number>();
   /** Cache tags with a template build in flight from this manager. */
   const building = new Set<string>();
+  /** Per cache tag: when its recent builds started, and how failures have pushed the next one. */
+  const buildHistory = new Map<string, BuildHistory>();
   const startBuild = config.startBuild ?? ((build: () => Promise<void>) => void build());
+  /** Labels every builder this manager starts, so a restarted one can find what it left. */
+  const managerLabel = { "t3.manager": provisionDigest(config.stateDir).slice(0, 12) };
+  const abandonAll = async (labels: Readonly<Record<string, string>>) => {
+    const left = await instances.list(labels);
+    for (const { instanceId } of left) await instances.depart(instanceId, "abandon");
+    return left.length;
+  };
+  // Nothing builds in a manager that just started, so every builder labelled for it is an orphan.
+  const swept = abandonAll(managerLabel).then(
+    (count) => count > 0 && warn("namespace mac orphaned builders abandoned", { count }),
+    (cause: unknown) => warn("namespace mac orphaned builders not swept", { cause: String(cause) }),
+  );
 
   const guestPort = (instanceId: InstanceId): RemotePreparationPort => ({
     executePython: ({ script, stdin }) =>
@@ -184,19 +236,12 @@ export function makeNamespaceMacRuntime(config: {
     ];
     const buildCommands =
       manifest.buildPrepareCommands ?? manifest.preparation.prepareCommands ?? [];
+    const frozen = frozenMacTemplate(manifest, build);
     const template = {
       mount,
       root,
       repository: manifest.preparation.repository?.url ?? null,
-      // What a builder prepares: a change makes the volume's template stale.
-      key: provisionDigest(
-        JSON.stringify([
-          buildCommands,
-          manifest.preparation.artifacts ?? [],
-          manifest.preparation.providerInstall ?? "",
-        ]),
-      ),
-      runtimeSha256: guest.sha256,
+      ...frozen,
     };
     const cacheTag = `t3-mac-${provisionDigest(
       repository ? canonicalRepository(repository) : "none",
@@ -382,6 +427,8 @@ export function makeNamespaceMacRuntime(config: {
       prepareGuest,
       stageRuntime,
       template,
+      frozen,
+      repository,
       cacheTag,
       size,
       files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
@@ -391,6 +438,13 @@ export function makeNamespaceMacRuntime(config: {
   };
   type ChatContext = ReturnType<typeof chat>;
 
+  const isCurrent = async (context: ChatContext) => {
+    const current = await config.currentTemplate(context.repository);
+    return (
+      current?.key === context.frozen.key && current.runtimeSha256 === context.frozen.runtimeSha256
+    );
+  };
+
   /**
    * Fills the cache volume of whatever site Namespace places it in with a template prepared from
    * this chat's manifest: a Mac with no chat, no turns and no background commands, which adopts,
@@ -398,19 +452,21 @@ export function makeNamespaceMacRuntime(config: {
    */
   const buildTemplate = async (context: ChatContext) => {
     const { cacheTag: tag } = context;
-    // Another manager, or this one before a restart, may be building already.
-    if ((await instances.list({ "t3.builder": tag })).length > 0) {
-      log("namespace mac template build skipped", { tag, reason: "running" });
-      return;
-    }
+    const labels = { "t3.builder": tag, ...managerLabel };
     const started = await now();
-    const mac = await instances.create({
-      labels: { "t3.builder": tag },
-      cache: { tag, mountPoint: context.template.mount, sizeGb: CACHE_VOLUME_GB },
-      deadline: started + BUILDER_LIFETIME_MS,
-      size: context.size,
-      purpose: `t3 template ${tag}`,
-    });
+    const mac = await instances
+      .create({
+        labels,
+        cache: { tag, mountPoint: context.template.mount, sizeGb: CACHE_VOLUME_GB },
+        deadline: started + BUILDER_LIFETIME_MS,
+        size: context.size,
+        purpose: `t3 template ${tag}`,
+      })
+      .catch(async (cause: unknown) => {
+        // A create that failed after Namespace made the instance leaves it running.
+        await abandonAll(labels).catch(() => undefined);
+        throw cause;
+      });
     const { instanceId } = mac;
     const port = guestPort(instanceId);
     let adoption: string | null = null;
@@ -424,6 +480,11 @@ export function makeNamespaceMacRuntime(config: {
       if (adoption === "hit") return;
       await context.stageRuntime(instanceId);
       await context.prepareGuest(instanceId, true);
+      // The config may have moved on while this prepared; a superseded template never replaces one.
+      if (!(await isCurrent(context))) {
+        log("namespace mac template build skipped", { tag, reason: "superseded" });
+        return;
+      }
       const templateDigest = await sealChatTemplate(port, {
         ...context.template,
         files: context.files,
@@ -448,14 +509,48 @@ export function makeNamespaceMacRuntime(config: {
     }
   };
 
+  /** Starts a build unless the chat is out of date, one runs already, or the bounds say wait. */
+  const buildIfDue = async (context: ChatContext) => {
+    const tag = context.cacheTag;
+    await swept;
+    if (!(await isCurrent(context))) {
+      log("namespace mac template build skipped", { tag, reason: "superseded" });
+      return;
+    }
+    const at = await now();
+    const history = buildHistory.get(tag) ?? { started: [], failures: 0, retryAt: 0 };
+    const due = nextBuild(history, at);
+    if (due !== "due") {
+      warn("namespace mac template build suppressed", { tag, reason: due });
+      return;
+    }
+    // Another manager, or this one before a restart, may be building already.
+    if ((await instances.list({ "t3.builder": tag })).length > 0) {
+      log("namespace mac template build skipped", { tag, reason: "running" });
+      return;
+    }
+    const started = {
+      ...history,
+      started: [...history.started.filter((before) => at - before < 3_600_000), at],
+    };
+    buildHistory.set(tag, started);
+    try {
+      await buildTemplate(context);
+      buildHistory.set(tag, { ...started, failures: 0, retryAt: 0 });
+    } catch (cause) {
+      buildHistory.set(tag, failedBuild(started, at));
+      throw cause;
+    }
+  };
+
   /** At most one build per repository's cache at a time; a failed one waits for the next miss. */
   const requestBuild = (context: ChatContext) => {
     if (building.has(context.cacheTag)) return;
     building.add(context.cacheTag);
     startBuild(() =>
-      buildTemplate(context)
+      buildIfDue(context)
         .catch((cause: unknown) =>
-          log("namespace mac template build failed", {
+          warn("namespace mac template build failed", {
             tag: context.cacheTag,
             cause: String(cause),
           }),

@@ -21,6 +21,8 @@ import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInst
 import {
   makeProvisionPreparationStore,
   spareKey,
+  currentMacTemplate,
+  frozenMacTemplate,
   provisionDigest,
   provisionProviders,
   warmBaseKey,
@@ -1828,6 +1830,26 @@ it("freezes every prepare command for a chat and only the foreground ones for a 
       frozen[0]?.request.preparationHash,
       "the marker is not part of what a chat prepares",
     ).toBe(frozen[1]?.request.preparationHash);
+    const config = spareConfig(f.config, { engine: "instance", prepareCommands: marked });
+    const current = currentMacTemplate(config, "example/repo");
+    expect(current, "a chat frozen now builds the current template").toEqual(
+      frozenMacTemplate(frozen[0]!, null),
+    );
+    expect(
+      frozenMacTemplate(frozen[1]!, null).key,
+      "a chat frozen before the marker builds another",
+    ).not.toBe(current?.key);
+    const repinned = {
+      ...config,
+      provisioning: {
+        ...config.provisioning,
+        runtimeArtifacts: {
+          ...config.provisioning.runtimeArtifacts,
+          macos: { ...config.provisioning.runtimeArtifacts!.macos!, sha256: "f".repeat(64) },
+        },
+      },
+    };
+    expect(currentMacTemplate(repinned, "example/repo")?.runtimeSha256).toBe("f".repeat(64));
   } finally {
     for (const index of [0, 1, 2])
       await NodeFSP.rm(`${f.root}-${index}`, { recursive: true, force: true });

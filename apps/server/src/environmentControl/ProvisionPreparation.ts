@@ -132,6 +132,64 @@ export function desiredRuntime(
   };
 }
 /**
+ * What an instance-engine template is built from: the commands a builder runs, the artifacts
+ * they consume, and the runtime it stages. Agent CLIs are left out, since every chat installs
+ * its own. A chat adopts a template whatever its identity; only the current one is rebuilt.
+ */
+export interface MacTemplateIdentity {
+  readonly key: string;
+  readonly runtimeSha256: string;
+}
+const macTemplateKey = (
+  commands: ReadonlyArray<string>,
+  artifacts: ReadonlyArray<{ path: string; destination: string; sha256: string }>,
+) =>
+  provisionDigest(
+    stableStringify({
+      commands,
+      artifacts: artifacts.map(({ path, destination, sha256 }) => ({ path, destination, sha256 })),
+    }),
+  );
+
+/** The template a chat was frozen for, on the runtime it runs now. */
+export function frozenMacTemplate(
+  manifest: ProvisionPreparationManifest,
+  runtime: ProvisionRuntimeArtifact | null,
+): MacTemplateIdentity {
+  return {
+    key: macTemplateKey(
+      manifest.buildPrepareCommands ?? manifest.preparation.prepareCommands ?? [],
+      manifest.preparation.artifacts ?? [],
+    ),
+    runtimeSha256: desiredRuntime(manifest, runtime).local.sha256,
+  };
+}
+
+/** The template a chat frozen now would get, or null when Macs cannot be provisioned. */
+export function currentMacTemplate(
+  config: EnvironmentControlConfig,
+  repository: string | null,
+): MacTemplateIdentity | null {
+  const provisioning = config.provisioning;
+  const runtime = configuredRuntimeArtifact(config, "namespace");
+  if (!provisioning?.namespace || !runtime) return null;
+  const setup = repository
+    ? provisioning.repositories?.find(
+        (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
+      )?.namespace
+    : undefined;
+  const commands: ReadonlyArray<NamespacePrepareCommand> =
+    setup?.prepareCommands ?? provisioning.namespace.prepareCommands ?? [];
+  return {
+    key: macTemplateKey(
+      commands.filter((entry) => !isBackground(entry)).map(commandLine),
+      setup?.artifacts ?? provisioning.namespace.artifacts ?? [],
+    ),
+    runtimeSha256: runtime.sha256,
+  };
+}
+
+/**
  * The branch a box's checkout follows each time it opens: the requested one, or
  * `HEAD` for the default. A request that pinned an exact revision follows none.
  */

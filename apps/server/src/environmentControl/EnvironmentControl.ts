@@ -49,6 +49,7 @@ import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts, ProvisionProviderError } from "./Provisioning.ts";
 import {
   configuredRuntimeArtifact,
+  currentMacTemplate,
   provisionProviders,
   makeProvisionPreparationStore,
   spareKey,
@@ -906,8 +907,15 @@ export const layer = Layer.effect(
             session,
             stateDir,
             proxies: namespaceProxies,
+            // Read per build, so a config change takes effect without a restart.
+            currentTemplate: async (repository) => {
+              const current = await resolve();
+              return current ? currentMacTemplate(current.config, repository) : null;
+            },
             log: (message, fields) =>
               void runLogged(Effect.logInfo(message).pipe(Effect.annotateLogs(fields))),
+            warn: (message, fields) =>
+              void runLogged(Effect.logWarning(message).pipe(Effect.annotateLogs(fields))),
           }),
         };
       })();
