@@ -5,8 +5,10 @@ import {
   encodeComposerContextClipboardHtml,
 } from "@t3tools/shared/composerContextClipboard";
 import {
+  ChartNetworkIcon,
   CheckIcon,
   ChevronRightIcon,
+  CodeXmlIcon,
   CopyIcon,
   FileSpreadsheetIcon,
   FileTextIcon,
@@ -139,6 +141,8 @@ import { GitHubIcon } from "./Icons";
 import { createIncrementalHighlightedDocument } from "../lib/incrementalHighlighting";
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
+import { MarkdownMermaidBlock } from "./MarkdownMermaidBlock";
+import { isMermaidLanguage } from "../lib/mermaidRendering";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
@@ -941,6 +945,7 @@ function MarkdownCodeBlock({
   theme,
   onRunShellCommand,
   isStreaming,
+  renderPreview,
   children,
 }: {
   code: string;
@@ -949,9 +954,12 @@ function MarkdownCodeBlock({
   theme: "light" | "dark";
   onRunShellCommand?: ((command: string) => void) | undefined;
   isStreaming: boolean;
+  renderPreview?: ((source: ReactNode) => ReactNode) | undefined;
   children: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
+  const [showSource, setShowSource] = useState(false);
+  const previewLabel = showSource ? "Show diagram" : "Show source";
   const [wrapped, setWrapped] = useState(readInitialWordWrapSetting);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
@@ -1021,6 +1029,28 @@ function MarkdownCodeBlock({
           />
         </span>
         <span className="flex items-center gap-0.5" role="toolbar" aria-label="Code block actions">
+          {renderPreview ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost-muted"
+                    size="icon-xs"
+                    onClick={() => setShowSource((value) => !value)}
+                    aria-label={previewLabel}
+                  />
+                }
+              >
+                {showSource ? (
+                  <ChartNetworkIcon className="size-3" />
+                ) : (
+                  <CodeXmlIcon className="size-3" />
+                )}
+              </TooltipTrigger>
+              <TooltipPopup side="top">{previewLabel}</TooltipPopup>
+            </Tooltip>
+          ) : null}
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1074,7 +1104,7 @@ function MarkdownCodeBlock({
           </Tooltip>
         </span>
       </div>
-      {children}
+      {renderPreview && !showSource ? renderPreview(children) : children}
     </div>
   );
 }
@@ -3288,6 +3318,13 @@ const CHAT_MARKDOWN_COMPONENTS = {
             : undefined
         }
         isStreaming={isStreaming}
+        renderPreview={
+          isMermaidLanguage(language) && !isStreaming && isClosedCodeFence(node, text)
+            ? (source) => (
+                <MarkdownMermaidBlock code={codeBlock.code} theme={resolvedTheme} source={source} />
+              )
+            : undefined
+        }
       >
         <RenderErrorBoundary
           resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}

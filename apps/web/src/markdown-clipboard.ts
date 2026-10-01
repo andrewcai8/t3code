@@ -63,7 +63,7 @@ function wrapInlineCode(code: string): string {
   return `${fence}${pad}${code}${pad}${fence}`;
 }
 
-function codeFenceFor(code: string): string {
+export function codeFenceFor(code: string): string {
   const longestRun = [...(code.match(/`{3,}/g) ?? [])].reduce(
     (max, run) => Math.max(max, run.length),
     0,
