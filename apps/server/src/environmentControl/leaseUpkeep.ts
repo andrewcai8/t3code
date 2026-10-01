@@ -8,6 +8,11 @@ import { CACHE_RETENTION_DAYS } from "../usage/UsageService.ts";
 import type { ProvisionStoreError } from "./ProvisionOperationStore.ts";
 
 export const LEASE_UPKEEP_INTERVAL = Duration.minutes(5);
+/**
+ * How often each awake instance-engine chat is checked against its Mac's deadline. Its saves keep
+ * their own five-minute cadence; this only bounds how late a deadline is noticed.
+ */
+const CHAT_UPKEEP_INTERVAL = Duration.minutes(1);
 
 /**
  * The manager's background upkeep. Pausing expired leases and collecting box
@@ -55,11 +60,11 @@ export const runLeaseUpkeep = (input: {
       .prune(DateTime.formatIso(DateTime.makeUnsafe(now - CACHE_RETENTION_DAYS * 86_400_000)))
       .pipe(Effect.ignore({ log: "Warn", message: "old cloud box usage could not be pruned" }));
   });
-  // Its own loop: a save uploads a snapshot, which must not hold up a pause.
-  const upkeepChats = Effect.tryPromise(input.upkeepCloudChats ?? (async () => {})).pipe(
-    Effect.ignore({ log: "Warn", message: "cloud chats could not be saved" }),
-  );
-  return Effect.all([repeat(reap), repeat(collectUsage), repeat(upkeepChats)], {
+  // Started, not awaited: each chat's pass runs on its own and a slow one never delays the tick.
+  const upkeepChats = Effect.sync(() => {
+    void input.upkeepCloudChats?.().catch(() => undefined);
+  }).pipe(Effect.repeat(Schedule.spaced(CHAT_UPKEEP_INTERVAL)));
+  return Effect.all([repeat(reap), repeat(collectUsage), upkeepChats], {
     concurrency: 3,
     discard: true,
   });

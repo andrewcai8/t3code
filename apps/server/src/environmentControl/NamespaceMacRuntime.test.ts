@@ -371,6 +371,19 @@ describe("Namespace Mac runtime", () => {
     await t.runtime.dispose(op, t.manifest);
   });
 
+  it("saves a Mac at most once per cadence but checks its deadline on every pass", async () => {
+    const t = await setup();
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    const op = t.operation(ready.environmentId);
+    const idle = async () => false;
+    await t.write("agent.txt", "first\n");
+    expect(await t.runtime.upkeep(op, t.manifest, idle)).toBe("kept");
+    await t.write("agent.txt", "second\n");
+    expect(await t.runtime.upkeep(op, t.manifest, idle)).toBe("kept");
+    expect((await t.record())?.snapshot?.generation, "the next save waits for its cadence").toBe(1);
+    await t.runtime.dispose(op, t.manifest);
+  });
+
   it("releases a Mac near its deadline once its chat is idle, and refuses a missing snapshot", async () => {
     const t = await setup(20 * MINUTE);
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);

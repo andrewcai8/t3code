@@ -66,6 +66,8 @@ const TEMPLATE_MAX_AGE_SECONDS = 86_400;
 /** Inside this much of its deadline an idle Mac is released; inside the second, a busy one too. */
 const ROTATE_IDLE_MS = 30 * 60_000;
 const ROTATE_FORCE_MS = 8 * 60_000;
+/** A chat's periodic saves, which bound the work an unplanned Mac death loses. */
+const SAVE_INTERVAL_MS = 5 * 60_000;
 
 /**
  * Runs a script with the qualified Xcode when the image has one, like the
@@ -144,6 +146,8 @@ export function makeNamespaceMacRuntime(config: {
   const log = (message: string, fields: Record<string, unknown>) => config.log?.(message, fields);
   const now = () => Effect.runPromise(Clock.currentTimeMillis);
   const proxyId = (operation: ProvisionOperation) => `provision-${operation.request.requestId}`;
+  /** When each Mac last tried a periodic save; a new Mac starts its own cadence. */
+  const lastSave = new Map<InstanceId, number>();
 
   const guestPort = (instanceId: InstanceId): RemotePreparationPort => ({
     executePython: ({ script, stdin }) =>
@@ -516,11 +520,16 @@ export function makeNamespaceMacRuntime(config: {
         const gone = await settleGone(chatId, record.mac.incarnation.instanceId);
         return gone === "running" ? "kept" : gone;
       }
+      const instanceId = record.mac.incarnation.instanceId;
       const left = record.mac.incarnation.deadline - facts.now;
       if (left < ROTATE_FORCE_MS || (left < ROTATE_IDLE_MS && !(await busy()))) {
         log("namespace mac released before its deadline", { chatId, leftMs: left });
+        lastSave.delete(instanceId);
         return release(operation, manifest);
       }
+      const last = lastSave.get(instanceId);
+      if (last !== undefined && facts.now - last < SAVE_INTERVAL_MS) return "kept";
+      lastSave.set(instanceId, facts.now);
       const saved = await periodicSave(current.ports);
       log("namespace mac periodic save", { chatId, result: saved });
       return "kept";

@@ -157,6 +157,11 @@ export function createEnvironmentControl(
   leaseRegistry?: ProvisionedLeaseRegistry,
   activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = readLeaseActivity,
   pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
+  /** Where a failure this service retries later, rather than returns, is reported. */
+  reportFailure: (
+    message: string,
+    fields: { readonly chatId: string; readonly cause: unknown },
+  ) => void = () => {},
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -288,8 +293,9 @@ export function createEnvironmentControl(
         });
         if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
         else await leaseRegistry.markPaused(lease.leaseId);
-      } catch {
+      } catch (cause) {
         // Keep the lease eligible for another pause attempt on the next sweep.
+        reportFailure("expired cloud box could not be paused", { chatId: lease.leaseId, cause });
       } finally {
         leaseOperations.delete(lease.sandboxId);
       }
@@ -408,7 +414,8 @@ export function createEnvironmentControl(
         }
         await leaseRegistry.markPaused(lease.leaseId);
         return { kind: "paused" };
-      } catch {
+      } catch (cause) {
+        reportFailure("cloud box could not be paused", { chatId: input.sandboxId, cause });
         return {
           kind: "refused",
           reason: "unknown",
@@ -553,28 +560,37 @@ export function createEnvironmentControl(
       };
     },
     /**
-     * Saves each awake instance-engine chat that changed and releases a Mac
-     * nearing its deadline, under the same per-box lock as pause and resume.
+     * Starts an upkeep pass for each awake instance-engine chat not already in one: a save of what
+     * changed, or a release ahead of its Mac's deadline, under the same per-box lock as pause and
+     * resume. Each chat runs on its own, so one slow save never delays another chat's deadline.
      */
     upkeepCloudChats: async (): Promise<void> => {
       const upkeepChat = driver.upkeepChat;
       if (!leaseRegistry || !upkeepChat) return;
+      const passes: Array<Promise<void>> = [];
       for (const lease of await leaseRegistry.awake()) {
         if (lease.state !== "active" || leaseOperations.has(lease.sandboxId)) continue;
         leaseOperations.set(lease.sandboxId, { action: "save" });
-        try {
-          const result = await upkeepChat({
-            sandboxId: lease.sandboxId,
-            busy: async () => (await activity(lease)) === "busy",
-          });
-          if (result === "released") await leaseRegistry.markPaused(lease.leaseId);
-          if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
-        } catch {
-          // The next pass retries; a Mac that died is found by its next touch or reap.
-        } finally {
-          leaseOperations.delete(lease.sandboxId);
-        }
+        passes.push(
+          (async () => {
+            try {
+              const result = await upkeepChat({
+                sandboxId: lease.sandboxId,
+                busy: async () => (await activity(lease)) === "busy",
+              });
+              if (result === "released") await leaseRegistry.markPaused(lease.leaseId);
+              if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
+            } catch (cause) {
+              // The next pass retries. A snapshot over its cap fails here every pass until the
+              // deadline, so it must be visible.
+              reportFailure("cloud chat upkeep failed", { chatId: lease.leaseId, cause });
+            } finally {
+              leaseOperations.delete(lease.sandboxId);
+            }
+          })(),
+        );
       }
+      await Promise.all(passes);
     },
     /**
      * Pulls each awake box's usage when its agent settles from busy to idle,
@@ -846,6 +862,7 @@ export const layer = Layer.effect(
             leaseRegistry,
             readLeaseActivity,
             pullUsage,
+            (message, fields) => void runLogged(Effect.logError(message, fields)),
           );
           return { ...control, config };
         })();
