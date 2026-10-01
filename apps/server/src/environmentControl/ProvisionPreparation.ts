@@ -86,6 +86,11 @@ export const ProvisionPreparationManifest = Schema.Struct({
    * `preparation`, so it is not part of the preparation's identity.
    */
   warmKey: Schema.optional(Sha256),
+  /**
+   * Home paths the instance engine leaves out of snapshots on top of its own table, from the
+   * repository's `namespace.derivedHomePaths`. Outside `preparation`, like `warmKey`.
+   */
+  derivedHomePaths: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(
@@ -174,6 +179,12 @@ const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
  * Existing manifests keep the root they persisted.
  */
 const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
+/**
+ * The instance engine's cache volume and its one root. Every Mac mounts the
+ * repository's cache volume here and every chat prepares at the same root, so a
+ * template sealed by one chat is valid for the next.
+ */
+const NAMESPACE_INSTANCE_MOUNT = "/Volumes/t3";
 const E2B_ROOT = "/tmp/t3-provision/box";
 export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
@@ -764,7 +775,14 @@ export function makeProvisionPreparationStore(stateDir: string) {
             ...(provisioning.githubToken ? { accessToken: provisioning.githubToken } : {}),
           }
         : null;
-      const volume = guestVolume[input.provider];
+      const repositoryEngine = input.repository
+        ? provisioning.repositories?.find(
+            (entry) =>
+              canonicalRepository(entry.repository) === canonicalRepository(input.repository!),
+          )?.namespace?.engine
+        : undefined;
+      const instanceEngine = input.provider === "namespace" && repositoryEngine === "instance";
+      const volume = instanceEngine ? NAMESPACE_INSTANCE_MOUNT : guestVolume[input.provider];
       let warmKey: string | null = null;
       // A chat that claims a spare becomes the owner of its Devbox and prepares
       // where the spare was built: its tree carries absolute paths, like a warm
@@ -772,7 +790,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       // that fails after this leaves the claim to the upkeep, which disposes a
       // spare whose chat never starts on it.
       let spare: ProvisionRequestId | null = null;
-      if (input.provider === "namespace" && input.repository) {
+      if (input.provider === "namespace" && input.repository && !instanceEngine) {
         warmKey = await spareKey(config, input.repository);
         const candidate =
           warmKey && spares
@@ -782,7 +800,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
           spare = candidate;
       }
       const root =
-        input.provider === "e2b" ? E2B_ROOT : `${volume}/t3-provision/${spare ?? input.requestId}`;
+        input.provider === "e2b"
+          ? E2B_ROOT
+          : instanceEngine
+            ? `${volume}/root`
+            : `${volume}/t3-provision/${spare ?? input.requestId}`;
       const localArtifact = await storeArtifact(artifact);
       let files: Array<typeof File.Type> = [...submitted];
       for (const scope of ["home", "workspace"] as const) {
@@ -1069,6 +1091,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
           provider: "namespace",
           ...(await namespaceMachine(config)),
           ...(spare ? { devboxName: `t3-${spare}` } : {}),
+          ...(instanceEngine ? { engine: "instance" as const } : {}),
         };
       }
       const manifest: ProvisionPreparationManifest = {
@@ -1078,6 +1101,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         localArtifact,
         egressAllow: provisioning.egressAllow ?? [],
         ...(warmKey ? { warmKey } : {}),
+        ...(instanceEngine && repositoryEntry?.namespace?.derivedHomePaths?.length
+          ? { derivedHomePaths: repositoryEntry.namespace.derivedHomePaths }
+          : {}),
       };
       await writeOnce(manifestPath(input.requestId), (temporary) =>
         NodeFSP.writeFile(temporary, stableStringify(manifest), { flag: "wx", mode: 0o600 }),

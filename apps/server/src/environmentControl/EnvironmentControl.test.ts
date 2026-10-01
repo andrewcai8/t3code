@@ -111,6 +111,119 @@ describe("managed cloud commands", () => {
     });
   });
 
+  it("pauses a saved chat whose Mac its upkeep released, and leaves a box another operation holds", async () => {
+    await withLease(async ({ registry, driver }) => {
+      const results: Array<"kept" | "released" | null> = ["kept", "released"];
+      const upkept: string[] = [];
+      let release: (() => void) | undefined;
+      const resumeHeld = new Promise<void>((resolve) => (release = resolve));
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          resume: async () => {
+            await resumeHeld;
+            return {};
+          },
+          upkeepChat: async ({ sandboxId }) => {
+            upkept.push(sandboxId);
+            return results.shift() ?? null;
+          },
+        },
+        registry,
+        async () => "idle",
+      );
+      await manager.upkeepCloudChats();
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+      const resuming = manager.resume(resumeInput);
+      await manager.upkeepCloudChats();
+      expect(upkept, "a resume in flight holds the box").toEqual(["sandbox"]);
+      release?.();
+      await resuming;
+      await manager.upkeepCloudChats();
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+      expect(upkept).toEqual(["sandbox", "sandbox"]);
+    });
+  });
+
+  it("upkeeps each chat on its own, so one slow save never holds up another chat's deadline", async () => {
+    await withSqlRegistry(async (registry) => {
+      // The slow chat is listed first, so a pass that awaited chats in turn would never reach the other.
+      for (const id of ["a-slow", "b-quick"])
+        await registry.register({
+          leaseId: id,
+          sandboxId: id,
+          providerInstanceId: "codex",
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        });
+      const upkept: string[] = [];
+      let finishSlow: (() => void) | undefined;
+      const slowSave = new Promise<void>((resolve) => (finishSlow = resolve));
+      let slowStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => (slowStarted = resolve));
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...setup().driver,
+          upkeepChat: async ({ sandboxId }) => {
+            upkept.push(sandboxId);
+            if (sandboxId === "a-slow") {
+              slowStarted?.();
+              await slowSave;
+            }
+            return "kept";
+          },
+        },
+        registry,
+        async () => "idle",
+      );
+      const first = manager.upkeepCloudChats();
+      await started;
+      await manager.upkeepCloudChats();
+      expect(
+        upkept,
+        "the quick chat ran on both ticks; the slow one never overlapped itself",
+      ).toEqual(["a-slow", "b-quick", "b-quick"]);
+      finishSlow?.();
+      await first;
+    });
+  });
+
+  it("reports a failed upkeep with its chat and cause instead of swallowing it", async () => {
+    await withLease(async ({ registry, driver }) => {
+      const reported: Array<{ message: string; chatId: string; cause: string }> = [];
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          upkeepChat: async () => {
+            throw new Error(
+              "The chat snapshot exceeds 4294967296 bytes; a cache is probably being saved",
+            );
+          },
+        },
+        registry,
+        async () => "idle",
+        async () => {},
+        (message, { chatId, cause }) =>
+          reported.push({
+            message,
+            chatId,
+            cause: cause instanceof Error ? cause.message : String(cause),
+          }),
+      );
+      await manager.upkeepCloudChats();
+      expect(reported).toEqual([
+        {
+          message: "cloud chat upkeep failed",
+          chatId: "lease",
+          cause: "The chat snapshot exceeds 4294967296 bytes; a cache is probably being saved",
+        },
+      ]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+    });
+  });
+
   it("keeps the lease active when pause fails without confirming absence", async () => {
     await withLease(async ({ registry, driver, manager }) => {
       driver.pause = vi.fn().mockRejectedValue(new Error("permission denied"));

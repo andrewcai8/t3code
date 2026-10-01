@@ -71,6 +71,7 @@ import {
   makeNamespaceAccountSession,
   makeNamespaceProvisionRuntime,
 } from "./NamespaceProvisionRuntime.ts";
+import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
 import type { E2bResumeRetry } from "./e2bResume.ts";
@@ -141,12 +142,26 @@ const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult
   message: refusalMessages[reason],
 });
 
+/**
+ * One upkeep pass for a chat on the Namespace instance engine: a periodic
+ * save, or a release ahead of its Mac's deadline. Null for any other lease.
+ */
+type UpkeepChat = (input: {
+  readonly sandboxId: string;
+  readonly busy: () => Promise<boolean>;
+}) => Promise<"kept" | "released" | "missing" | null>;
+
 export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
-  driver: CloudDriver,
+  driver: CloudDriver & { readonly upkeepChat?: UpkeepChat },
   leaseRegistry?: ProvisionedLeaseRegistry,
   activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = readLeaseActivity,
   pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
+  /** Where a failure this service retries later, rather than returns, is reported. */
+  reportFailure: (
+    message: string,
+    fields: { readonly chatId: string; readonly cause: unknown },
+  ) => void = () => {},
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -154,7 +169,7 @@ export function createEnvironmentControl(
   >();
   const leaseOperations = new Map<
     string,
-    | { action: "pause" | "dispose" | "reap" | "renew" }
+    | { action: "pause" | "dispose" | "reap" | "renew" | "save" | "hold" }
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
@@ -278,8 +293,9 @@ export function createEnvironmentControl(
         });
         if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
         else await leaseRegistry.markPaused(lease.leaseId);
-      } catch {
+      } catch (cause) {
         // Keep the lease eligible for another pause attempt on the next sweep.
+        reportFailure("expired cloud box could not be paused", { chatId: lease.leaseId, cause });
       } finally {
         leaseOperations.delete(lease.sandboxId);
       }
@@ -398,7 +414,8 @@ export function createEnvironmentControl(
         }
         await leaseRegistry.markPaused(lease.leaseId);
         return { kind: "paused" };
-      } catch {
+      } catch (cause) {
+        reportFailure("cloud box could not be paused", { chatId: input.sandboxId, cause });
         return {
           kind: "refused",
           reason: "unknown",
@@ -534,6 +551,47 @@ export function createEnvironmentControl(
       }
     },
     reapExpiredLeases,
+    /** Takes a box's per-box lock for work outside this service, or null while it is held. */
+    holdBox: (sandboxId: string) => {
+      if (leaseOperations.has(sandboxId)) return null;
+      leaseOperations.set(sandboxId, { action: "hold" });
+      return () => {
+        leaseOperations.delete(sandboxId);
+      };
+    },
+    /**
+     * Starts an upkeep pass for each awake instance-engine chat not already in one: a save of what
+     * changed, or a release ahead of its Mac's deadline, under the same per-box lock as pause and
+     * resume. Each chat runs on its own, so one slow save never delays another chat's deadline.
+     */
+    upkeepCloudChats: async (): Promise<void> => {
+      const upkeepChat = driver.upkeepChat;
+      if (!leaseRegistry || !upkeepChat) return;
+      const passes: Array<Promise<void>> = [];
+      for (const lease of await leaseRegistry.awake()) {
+        if (lease.state !== "active" || leaseOperations.has(lease.sandboxId)) continue;
+        leaseOperations.set(lease.sandboxId, { action: "save" });
+        passes.push(
+          (async () => {
+            try {
+              const result = await upkeepChat({
+                sandboxId: lease.sandboxId,
+                busy: async () => (await activity(lease)) === "busy",
+              });
+              if (result === "released") await leaseRegistry.markPaused(lease.leaseId);
+              if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
+            } catch (cause) {
+              // The next pass retries. A snapshot over its cap fails here every pass until the
+              // deadline, so it must be visible.
+              reportFailure("cloud chat upkeep failed", { chatId: lease.leaseId, cause });
+            } finally {
+              leaseOperations.delete(lease.sandboxId);
+            }
+          })(),
+        );
+      }
+      await Promise.all(passes);
+    },
     /**
      * Pulls each awake box's usage when its agent settles from busy to idle,
      * or the first time it is seen idle. A failed pull retries next sweep.
@@ -662,6 +720,7 @@ export const layer = Layer.effect(
       | Promise<{
           allocator: ReturnType<typeof makeNamespaceAllocationPorts>;
           runtime: ReturnType<typeof makeNamespaceProvisionRuntime>;
+          mac: ReturnType<typeof makeNamespaceMacRuntime>;
         }>
       | undefined;
     let scannedSkills:
@@ -747,6 +806,30 @@ export const layer = Layer.effect(
             config.targets,
             {
               ...cloud,
+              // A chat on the instance engine owns no Devbox or sandbox: its Mac is
+              // released, renewed and disposed through the runtime that keeps its snapshot.
+              pause: async (input) => {
+                const chat = await instanceChat(input.sandboxId);
+                if (!chat) return cloud.pause(input);
+                return (await chat.mac.release(chat.operation, chat.manifest)) === "missing"
+                  ? "missing"
+                  : undefined;
+              },
+              dispose: async (input) => {
+                const chat = await instanceChat(input.sandboxId);
+                if (!chat) return cloud.dispose(input);
+                await chat.mac.dispose(chat.operation, chat.manifest);
+              },
+              renew: async (input) => {
+                const chat = await instanceChat(input.sandboxId);
+                if (!chat) return cloud.renew(input);
+                const state = await chat.mac.touch(chat.operation);
+                return state === "released" ? "paused" : state;
+              },
+              upkeepChat: async ({ sandboxId, busy }) => {
+                const chat = await instanceChat(sandboxId);
+                return chat ? chat.mac.upkeep(chat.operation, chat.manifest, busy) : null;
+              },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, and fetches its followed branch so the thread sees
               // what was pushed while it slept. Imported leases keep the legacy
@@ -755,7 +838,7 @@ export const layer = Layer.effect(
                 try {
                   if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
                     return await cloud.resume(input);
-                  if (input.namespaceResource)
+                  if (input.namespaceResource || (await instanceChat(input.sandboxId)))
                     return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
                   const resumed = await cloud.resume(input);
                   // Best effort: the sandbox is awake and resumed either way.
@@ -779,6 +862,7 @@ export const layer = Layer.effect(
             leaseRegistry,
             readLeaseActivity,
             pullUsage,
+            (message, fields) => void runLogged(Effect.logError(message, fields)),
           );
           return { ...control, config };
         })();
@@ -816,6 +900,13 @@ export const layer = Layer.effect(
             },
           }),
           runtime: makeNamespaceProvisionRuntime({ session, stateDir, proxies: namespaceProxies }),
+          mac: makeNamespaceMacRuntime({
+            session,
+            stateDir,
+            proxies: namespaceProxies,
+            log: (message, fields) =>
+              void runLogged(Effect.logInfo(message).pipe(Effect.annotateLogs(fields))),
+          }),
         };
       })();
       void namespace.catch(() => {
@@ -835,16 +926,29 @@ export const layer = Layer.effect(
         throw new Error("No ready Namespace runtime");
       const manifest = await manifests.load(requestId);
       const build = await manifests.readRuntime(requestId);
-      const { runtime } = await resolveNamespace();
-      const { namespaceProxy, refreshError } = await runtime.resume(
-        operation,
-        operation.state.allocation.resource,
-        manifest,
-        recordedProxy,
-        build,
-      );
+      const { runtime, mac } = await resolveNamespace();
+      const resource = operation.state.allocation.resource;
+      const { namespaceProxy, refreshError } =
+        "engine" in resource
+          ? await mac.resume(operation, manifest, recordedProxy, build)
+          : await runtime.resume(operation, resource, manifest, recordedProxy, build);
       await runLogged(logRefresh(requestId, refreshError));
       return { namespaceProxy };
+    };
+    /** The chat behind a lease, when it runs on the Namespace instance engine. */
+    const instanceChat = async (sandboxId: string) => {
+      if (!isProvisionRequestId(sandboxId) || importedLeases.has(sandboxId)) return null;
+      const operation = await Effect.runPromise(store.get(sandboxId)).catch(() => null);
+      if (
+        !operation ||
+        !allocatedResources(operation.state).some((resource) => "engine" in resource)
+      )
+        return null;
+      return {
+        operation,
+        manifest: await manifests.load(sandboxId),
+        mac: (await resolveNamespace()).mac,
+      };
     };
     const refreshProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
       const operation = await Effect.runPromise(store.get(requestId));
@@ -891,15 +995,30 @@ export const layer = Layer.effect(
             }),
         ),
       );
+    /** An instance-engine chat names no machine, so allocating it calls no provider. */
+    const chatResource = (operation: ProvisionOperation) =>
+      operation.request.provider === "namespace" && operation.request.engine === "instance"
+        ? ({
+            provider: "namespace",
+            engine: "instance",
+            chatId: operation.request.requestId,
+          } as const)
+        : null;
     const ports: ProvisionProviderPorts["Service"] = {
-      create: (operation) =>
-        Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
+      create: (operation) => {
+        const chat = chatResource(operation);
+        if (chat) return Effect.succeed(chat);
+        return Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
           (namespace?.allocator ?? allocator).create(operation),
-        ),
-      recoverCreate: (operation) =>
-        Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
+        );
+      },
+      recoverCreate: (operation) => {
+        const chat = chatResource(operation);
+        if (chat) return Effect.succeed([chat]);
+        return Effect.flatMap(provider(operation), ({ allocator, namespace }) =>
           (namespace?.allocator ?? allocator).recoverCreate(operation),
-        ),
+        );
+      },
       fork: (operation, parent) =>
         Effect.flatMap(provider(operation), ({ allocator }) => allocator.fork(operation, parent)),
       recoverFork: (operation, parent) =>
@@ -908,12 +1027,13 @@ export const layer = Layer.effect(
         ),
       dispose: (operation, resource) =>
         Effect.gen(function* () {
-          const { runtime, namespace } = yield* provider(operation);
+          const { runtime, namespace, manifest } = yield* provider(operation);
           if (resource.provider === "namespace")
             return yield* Effect.tryPromise({
               try: async () => {
                 if (!namespace) throw new Error("Namespace unavailable");
-                await namespace.runtime.dispose(operation, resource);
+                if ("engine" in resource) await namespace.mac.dispose(operation, manifest);
+                else await namespace.runtime.dispose(operation, resource);
               },
               catch: () =>
                 new ProvisionProviderError({
@@ -945,6 +1065,8 @@ export const layer = Layer.effect(
             return yield* Effect.tryPromise({
               try: async () => {
                 if (!namespace) throw new Error("Namespace unavailable");
+                if ("engine" in resource)
+                  return namespace.mac.prepare(operation, manifest, record, build);
                 return namespace.runtime.prepare(operation, resource, manifest, record, build);
               },
               catch: (error) =>
@@ -1208,18 +1330,13 @@ export const layer = Layer.effect(
         ).warmKey,
       buildSnapshots: async () => [],
       seal: async (operation) => {
-        if (
-          operation.state.kind !== "ready" ||
-          operation.state.allocation.resource.provider !== "namespace"
-        )
-          throw new Error("The spare build is not a ready Namespace Mac.");
+        const resource =
+          operation.state.kind === "ready" ? operation.state.allocation.resource : null;
+        if (resource?.provider !== "namespace" || "engine" in resource)
+          throw new Error("The spare build is not a ready Namespace Devbox.");
         await (
           await resolveNamespace()
-        ).runtime.seal(
-          operation,
-          operation.state.allocation.resource,
-          await manifests.load(operation.request.requestId),
-        );
+        ).runtime.seal(operation, resource, await manifests.load(operation.request.requestId));
       },
       capture: async (operation) => ({ requestId: operation.request.requestId }),
       deleteSnapshot: async () => "missing",
@@ -1306,14 +1423,12 @@ export const layer = Layer.effect(
           const manager = await resolve();
           if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
           const resource = operation.state.allocation.resource;
-          if (resource.provider === "namespace")
-            return (await resolveNamespace()).runtime.attach(
-              operation,
-              resource,
-              manifest,
-              recordedProxy,
-              record,
-            );
+          if (resource.provider === "namespace") {
+            const namespace = await resolveNamespace();
+            return "engine" in resource
+              ? namespace.mac.attach(operation, manifest, recordedProxy, record)
+              : namespace.runtime.attach(operation, resource, manifest, recordedProxy, record);
+          }
           return makeE2bProvisionRuntime(
             { apiKey: manager.config.e2bApiKey },
             logE2bResumeRetry,
@@ -1323,8 +1438,12 @@ export const layer = Layer.effect(
           const manager = await resolve();
           if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
           const resource = operation.state.allocation.resource;
-          if (resource.provider === "namespace")
-            return (await resolveNamespace()).runtime.touch(operation, resource);
+          if (resource.provider === "namespace") {
+            const namespace = await resolveNamespace();
+            return "engine" in resource
+              ? namespace.mac.touch(operation)
+              : namespace.runtime.touch(operation, resource);
+          }
           return makeE2bProvisionRuntime(
             { apiKey: manager.config.e2bApiKey },
             logE2bResumeRetry,
@@ -1336,6 +1455,10 @@ export const layer = Layer.effect(
         },
         setRuntime: manifests.setRuntime,
         prepare: ports.prepare,
+        holdBox: async (sandboxId) => {
+          const manager = await resolve();
+          return manager ? manager.holdBox(sandboxId) : () => {};
+        },
         deliverFirstTurn,
         readFirstTurn: manifests.readFirstTurn,
         forgetFirstTurn: manifests.forgetFirstTurn,
@@ -1395,6 +1518,7 @@ export const layer = Layer.effect(
       yield* runLeaseUpkeep({
         reapExpiredLeases: () => service.reapExpiredLeases(),
         syncLeaseUsage: () => service.syncLeaseUsage(),
+        upkeepCloudChats: () => service.upkeepCloudChats(),
         reconcileProvisions: provisioning.reconcile,
         settleChats: provisionControl.settleChats,
         boxUsage,

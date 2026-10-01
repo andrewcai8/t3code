@@ -44,7 +44,7 @@ const resource = Schema.decodeUnknownSync(ProvisionResource)({
   region: "iad",
   workspaceDir: "/Users/runner/workspaces",
 });
-if (resource.provider !== "namespace") throw new Error("Expected Namespace fixture");
+if (!("devboxId" in resource)) throw new Error("Expected a Namespace Devbox fixture");
 const box = {
   id: "owned-box",
   name: `t3-${requestId}`,

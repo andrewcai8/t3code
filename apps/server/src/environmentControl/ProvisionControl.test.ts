@@ -436,6 +436,74 @@ it.effect(
     ),
 );
 
+it.effect(
+  "a heartbeat whose box is gone but saved pauses the lease so a resume brings it back",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      let provider: "running" | "released" | "missing" = "running";
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, {
+          create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
+          recoverCreate: () => Effect.succeed([]),
+          fork: () => Effect.die("unexpected fork"),
+          recoverFork: () => Effect.succeed([]),
+          dispose: () => Effect.void,
+          prepare: () =>
+            Effect.succeed({
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/private/operation/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: "c".repeat(40),
+              artifactSha256: "b".repeat(64),
+            }),
+        }),
+      );
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          ...noRuntimePorts,
+          freeze: async () => manifest,
+          load: async () => manifest,
+          attach: async () => ({
+            pairingUrl: "https://remote/pair#token=grant",
+            remoteAccess: { origin: "https://remote", brokerToken: "private-broker" },
+          }),
+          touch: async () => provider,
+        },
+        leases,
+      );
+      expect(yield* control.provision(input)).toMatchObject({ kind: "ready" });
+      yield* Effect.promise(() =>
+        leases.claim({
+          leaseId: input.requestId,
+          owner: { environmentId: "remote", threadId: "thread" },
+        }),
+      );
+      expect(yield* control.touch({ leaseId: input.requestId })).toEqual({ kind: "touched" });
+      provider = "released";
+      expect(yield* control.touch({ leaseId: input.requestId })).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "The workspace is paused. Reconnect to continue.",
+      });
+      expect(yield* Effect.promise(() => leases.findById(input.requestId))).toMatchObject({
+        state: "paused",
+      });
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
 it.effect.each(["attach", "touch"] as const)(
   "expired ready requests dispose instead of issuing %s effects",
   (action) =>
@@ -670,6 +738,136 @@ it.effect(
 
       yield* Effect.promise(() => leases.markMissing(input.requestId));
       expect(yield* control.upgrade(request)).toMatchObject({ kind: "refused", reason: "missing" });
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+const chatInput = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+  requestId: "7a1d2c3b-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  provider: "namespace",
+  providerInstanceId: "codex",
+});
+const chatManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)({
+  ...manifest,
+  input: chatInput,
+  request: {
+    ...chatInput,
+    tenantId: "tenant",
+    size: "m",
+    image: "tahoe-slim",
+    region: "iad",
+    idleTimeoutMinutes: 30,
+    engine: "instance",
+    sourceRevision: null,
+    preparationHash: "a".repeat(64),
+  },
+  preparation: {
+    ...manifest.preparation,
+    requestId: chatInput.requestId,
+    root: "/Volumes/t3/root",
+  },
+});
+
+it.effect(
+  "an instance-engine chat upgrades only while active and holding its box, and a heartbeat that cannot hold it only renews",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      let prepared = 0;
+      let held = false;
+      const ports: ProvisionProviderPorts["Service"] = {
+        create: () =>
+          Effect.succeed({
+            provider: "namespace" as const,
+            engine: "instance" as const,
+            chatId: chatInput.requestId,
+          }),
+        recoverCreate: () => Effect.succeed([]),
+        fork: () => Effect.die("unexpected fork"),
+        recoverFork: () => Effect.succeed([]),
+        dispose: () => Effect.void,
+        prepare: () =>
+          Effect.sync(() => {
+            prepared += 1;
+            return {
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/Volumes/t3/root/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: prepared === 1 ? "c".repeat(40) : "e".repeat(40),
+              artifactSha256: prepared === 1 ? "b".repeat(64) : "d".repeat(64),
+            };
+          }),
+      };
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, ports),
+      );
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          ...noRuntimePorts,
+          freeze: async () => chatManifest,
+          load: async () => chatManifest,
+          attach: async () => ({
+            pairingUrl: "https://remote/pair#token=grant",
+            remoteAccess: { origin: "https://remote", brokerToken: "private-broker" },
+          }),
+          // The Mac is gone but the chat was saved.
+          touch: async () => "released" as const,
+          pinnedRuntime: async () => ({
+            ...chatManifest.localArtifact,
+            sha256: "d".repeat(64),
+            revision: "e".repeat(40),
+          }),
+          setRuntime: async (_id, artifact) => artifact,
+          prepare: ports.prepare,
+          holdBox: async () => {
+            if (held) return null;
+            held = true;
+            return () => {
+              held = false;
+            };
+          },
+        },
+        leases,
+      );
+      expect(yield* control.provision(chatInput)).toMatchObject({ kind: "ready" });
+      const request = {
+        leaseId: chatInput.requestId,
+        sandboxId: chatInput.requestId,
+        environmentId: EnvironmentId.make("remote"),
+      };
+      yield* Effect.promise(() =>
+        leases.claim({
+          leaseId: chatInput.requestId,
+          owner: { environmentId: "remote", threadId: "thread" },
+        }),
+      );
+
+      held = true;
+      expect(yield* control.touch({ leaseId: chatInput.requestId })).toEqual({ kind: "touched" });
+      expect(yield* control.upgrade(request)).toMatchObject({ kind: "refused", reason: "busy" });
+      held = false;
+      expect(
+        yield* Effect.promise(() => leases.findById(chatInput.requestId)),
+        "a heartbeat during another operation leaves the box to it",
+      ).toMatchObject({ state: "active" });
+
+      expect(yield* control.touch({ leaseId: chatInput.requestId })).toMatchObject({
+        kind: "refused",
+        message: "The workspace is paused. Reconnect to continue.",
+      });
+      expect(yield* control.upgrade(request)).toMatchObject({ kind: "refused" });
+      expect(prepared, "a paused chat's Mac is not reopened by an upgrade").toBe(1);
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(

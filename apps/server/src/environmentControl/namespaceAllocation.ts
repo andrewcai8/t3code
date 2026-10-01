@@ -17,7 +17,7 @@ import * as Schema from "effect/Schema";
 import { ProvisionProviderError, type ProvisionProviderPorts } from "./Provisioning.ts";
 
 export const namespaceMacImage = "tahoe-slim";
-const namespaceMacImageSelectors = [
+export const namespaceMacImageSelectors = [
   { name: "macos.version", value: "26.x" },
   { name: "macos.purpose", value: "githubrunner" },
   { name: "image.with", value: "xcode-latest" },

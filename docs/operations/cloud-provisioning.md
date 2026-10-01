@@ -85,6 +85,20 @@ node scripts/cloud/smoke-cloud-chat.ts --origin http://127.0.0.1:$(cat .t3/manag
 
 `--manager-log` copies the manager's per-phase provisioning timings into the report. `--manager-state` lets each `account.<driver>` check compare the account the box signed in as with the one routing froze for every driver, companions included; without it only the chat's own account is checked against routing. A Claude setup-token carries no email, so that check compares the weekly reset the box sees with the manager's for the same account, which catches a token minted from the wrong login. The `device` step is Namespace-only. It boots a simulator, builds and launches a sample app, takes a screenshot, records a video, and stops at an LLDB breakpoint, then checks the files each step left on the box.
 
+## Run Mac chats on compute instances
+
+A repository whose `provisioning.repositories[].namespace.engine` is `"instance"` runs new Mac chats on per-chat Namespace compute instances instead of Devboxes; the default is `"devbox"`, and a chat keeps the engine it was frozen with. The instance engine mounts a per-repository cache volume at `/Volumes/t3`, prepares every chat at `/Volumes/t3/root`, and keeps a released chat as a snapshot in Namespace artifact storage, so a pause costs nothing on Namespace and a resume can land on any Mac. Only a chat that starts on an empty cache seals a template onto it. The manager's chat records live in `<state>/namespace-chats`, and Macs and snapshots carry the label `t3.chat=<requestId>`. A snapshot leaves out what preparation rebuilds. When a repository's prepare commands install a toolchain into the home, list it in `namespace.derivedHomePaths` (for megpt-mono, `.local/share/megpt-mind-python`, `.local/share/modal-cli` and `.bun/bin`) so its chats' snapshots carry only their own state.
+
+Prove a change to it end to end against a local manager with the engine set in `.t3/manager/environment-control.json`:
+
+```
+node apps/server/scripts/mac-chat-e2e.ts --origin http://127.0.0.1:$(cat .t3/manager/manager.port) \
+  --pairing-token-file .t3/manager/pairing-token --manager-state .t3/manager/userdata \
+  --manager-log .t3/manager/manager.log --repo andrewcai8/t3code --report /tmp/mac-e2e.json
+```
+
+It needs `nsc login` on the machine running it, and it disposes what it made and releases the repository's cache volume at the end.
+
 ## Why the manager runs the artifact
 
 The E2B template ships the published `t3` package from npm. That is upstream's build. It does not contain this fork's provisioning code, and the version number matches, so the mismatch is invisible until the server fails to start.

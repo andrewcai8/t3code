@@ -177,7 +177,7 @@ export async function refreshRemoteCheckout(
 }
 
 /** Journal entries a sealed warm base carries to the box that adopts it: the runtime it verified. */
-const warmJournalKeys = ["artifactFiles", "artifactLinks", "runtimes"];
+export const warmJournalKeys = ["artifactFiles", "artifactLinks", "runtimes"];
 
 const decodeSealed = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ sealed: Schema.Literal(true) })),

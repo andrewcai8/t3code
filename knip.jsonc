@@ -32,6 +32,7 @@
         "scripts/cli.ts",
         "scripts/evaluate-thread-titles.ts",
         "scripts/import-machine-usage.ts",
+        "scripts/mac-chat-e2e.ts",
         "scripts/measure-pr-preview.ts",
         "src/provider/testFixtures/*.mjs",
       ],

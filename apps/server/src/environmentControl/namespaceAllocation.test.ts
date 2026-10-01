@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - this fixture exercises the SDK's real HTTP serialization.
 import * as NodeHttp from "node:http";
-import { ProvisionOperation } from "@t3tools/contracts";
+import { ProvisionOperation, provisionSandboxId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { afterEach, describe, expect } from "vite-plus/test";
@@ -256,11 +256,7 @@ describe("Namespace durable allocation through the SDK", () => {
       });
       expect((yield* Effect.flip(ports.create(operation))).message).toContain("uncertain");
       const recovered = yield* ports.recoverCreate(operation);
-      expect(
-        recovered.map((resource) =>
-          resource.provider === "namespace" ? resource.devboxId : resource.sandboxId,
-        ),
-      ).toEqual(["box-1"]);
+      expect(recovered.map(provisionSandboxId)).toEqual(["box-1"]);
       expect(creates).toBe(1);
     }),
   );
