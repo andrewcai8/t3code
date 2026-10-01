@@ -657,6 +657,13 @@ def adopt(spec):
     template = mount / 'template'
     instance = spec['instanceId']
     with locked(mount / 'cache.lock'):
+        # Anything else that arrived with the volume is another Mac's, left by a destroy that
+        # committed: a builder's half-sealed copy of a chat root holds that chat's credentials.
+        # It goes before anything here reads the volume. A leftover root is purged below, and the
+        # bin holds only roots purged that way.
+        for entry in sorted(os.listdir(mount)):
+            if entry not in ('root', '.Trashes') and not entry.startswith('trash-') and not VOLUME_ENTRIES.fullmatch(entry):
+                clear_entry(mount, entry)
         # A receipt counts only on the Mac that wrote it. A root or template that
         # arrived with the volume is another machine's, left by a commit that
         # should have been an abandon.
@@ -816,6 +823,16 @@ def seal(spec):
         atomic(marker_path, json.dumps({'format': FORMAT, 'root': str(root), 'repository': spec['repository'], 'key': spec['key'], 'runtimeSha256': spec['runtimeSha256'], 'sealedAt': time.time(), 'sealedFrom': adopted['nonce']}))
         return {'sealed': True, 'digest': template_digest(mount)}
 
+def clear_entry(mount, entry):
+    try:
+        remove(mount / entry)
+    except OSError:
+        # macOS makes its trash folders root-owned; Namespace Macs have passwordless sudo.
+        for command in (['chflags', '-R', 'nouchg'], ['rm', '-rf']):
+            subprocess.run(['sudo', '-n', *command, str(mount / entry)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.lexists(mount / entry):
+        raise RuntimeError('The volume still holds ' + entry)
+
 def scrub(spec):
     mount, root = pathlib.Path(spec['mount']), pathlib.Path(spec['root'])
     with locked(mount / 'cache.lock'):
@@ -823,15 +840,7 @@ def scrub(spec):
             trash(mount, root, wait=True)
         for entry in os.listdir(mount):
             if not VOLUME_ENTRIES.fullmatch(entry):
-                try:
-                    remove(mount / entry)
-                except OSError:
-                    # macOS makes its trash folders root-owned; Namespace Macs have passwordless sudo.
-                    for command in (['chflags', '-R', 'nouchg'], ['rm', '-rf']):
-                        subprocess.run(['sudo', '-n', *command, str(mount / entry)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        left = sorted(entry for entry in os.listdir(mount) if not VOLUME_ENTRIES.fullmatch(entry))
-        if left:
-            raise RuntimeError('The volume still holds ' + ', '.join(left))
+                clear_entry(mount, entry)
         expected = spec.get('templateDigest')
         # The chat ran with the volume writable: anything it planted in the template would run
         # in every later chat that adopts it.

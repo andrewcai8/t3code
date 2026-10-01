@@ -632,9 +632,31 @@ describe("guest chat state", () => {
             await exists(NodePath.join(w.mount, entry, "home", ".claude", ".credentials.json")),
             await exists(NodePath.join(w.mount, entry, "workspace", ".env.local")),
             await exists(NodePath.join(w.mount, entry, "workspace", "service", ".env")),
+            await exists(NodePath.join(w.mount, entry, "broker-token")),
           ],
           "a leftover chat's credentials and dotenv files are gone before adoption returns",
-        ).toEqual([false, false, false]);
+        ).toEqual([false, false, false, false]);
+  });
+
+  it("clears a builder's half-sealed copy and anything else unknown from the volume before adopting", async () => {
+    const w = await world();
+    await w.newMac();
+    // A builder that died between cloning its root and scrubbing the clone, then committed.
+    const partial = NodePath.join(w.mount, "template.partial");
+    await NodeFSP.mkdir(NodePath.join(partial, "home", ".codex"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(partial, "home", ".codex", "auth.json"), "{}\n");
+    await NodeFSP.writeFile(NodePath.join(partial, "broker-token"), "token\n");
+    await NodeFSP.mkdir(NodePath.join(w.mount, "stray", "deep"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(w.mount, "stray", "deep", "secret"), "secret\n");
+    await w.depart("commit");
+
+    await w.newMac();
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    const left = NodeChildProcess.execFileSync("find", [w.mount], { encoding: "utf8" });
+    expect(
+      left.split("\n").filter((path) => /auth\.json$|broker-token$|secret$|stray/.test(path)),
+      "nothing of another Mac's credentials outlives adoption",
+    ).toEqual([]);
   });
 
   it("refuses to commit a template its chat changed after it was sealed", async () => {
