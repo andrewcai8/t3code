@@ -483,6 +483,16 @@ describe("guest chat state", () => {
       NodePath.join(w.mount, "stash.txt"),
       "a chat's data left on the volume\n",
     );
+    // An immutable file survives a plain rmtree, and macOS's trash folders sit outside the digest.
+    const pinned = NodePath.join(w.mount, "pinned.txt");
+    await NodeFSP.writeFile(pinned, "a chat's data the chat made immutable\n");
+    try {
+      NodeChildProcess.execFileSync("chflags", ["uchg", pinned]);
+    } catch {
+      // No chflags on this platform: the file is merely left over, which scrub removes too.
+    }
+    await NodeFSP.mkdir(NodePath.join(w.mount, ".Trashes", "501"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(w.mount, ".Trashes", "501", "trashed.txt"), "data\n");
     await scrubChatRoot(localPort, { mount: w.mount, root: w.root, templateDigest: digest });
     await scrubChatRoot(localPort, { mount: w.mount, root: w.root, templateDigest: digest });
     expect(
@@ -512,6 +522,12 @@ describe("guest chat state", () => {
     ).toBe(false);
     const reader = await w.prepareInput("reader-chat", w.head());
     await prepareRemoteHost(localPort, reader);
+    await NodeFSP.writeFile(NodePath.join(w.root, "workspace", ".env.local"), "SECRET=reader\n");
+    await NodeFSP.mkdir(NodePath.join(w.root, "workspace", "service"));
+    await NodeFSP.writeFile(
+      NodePath.join(w.root, "workspace", "service", ".env"),
+      "TOKEN=reader\n",
+    );
     // A reader whose halt was skipped: its volume, chat root and all, becomes the next parent.
     await w.depart("commit");
 
@@ -520,12 +536,17 @@ describe("guest chat state", () => {
     expect(await NodeFSP.readdir(w.root), "the poisoned chat root is never handed out").toEqual([
       "adopt.json",
     ]);
+    // The rest of a leftover root is deleted in the background, so this checks whatever is left.
     for (const entry of await NodeFSP.readdir(w.mount))
       if (entry.startsWith("trash-"))
         expect(
-          await exists(NodePath.join(w.mount, entry, "home", ".claude", ".credentials.json")),
-          "a leftover chat's credentials are gone before adoption returns",
-        ).toBe(false);
+          [
+            await exists(NodePath.join(w.mount, entry, "home", ".claude", ".credentials.json")),
+            await exists(NodePath.join(w.mount, entry, "workspace", ".env.local")),
+            await exists(NodePath.join(w.mount, entry, "workspace", "service", ".env")),
+          ],
+          "a leftover chat's credentials and dotenv files are gone before adoption returns",
+        ).toEqual([false, false, false]);
   });
 
   it("refuses to commit a template its chat changed after it was sealed", async () => {

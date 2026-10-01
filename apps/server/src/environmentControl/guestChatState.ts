@@ -90,6 +90,11 @@ def locked(path):
 
 def make_writable(func, path, _error):
     # Go writes its module cache read-only, and an entry only leaves a writable directory.
+    # A chat may also have made files immutable (chflags uchg), which no chmod undoes.
+    if hasattr(os, 'lchflags'):
+        for target in (os.path.dirname(path), path):
+            with contextlib.suppress(OSError):
+                os.lchflags(target, 0)
     os.chmod(os.path.dirname(path), 0o700)
     if os.path.isdir(path) and not os.path.islink(path):
         os.chmod(path, 0o700)
@@ -107,7 +112,10 @@ def rmtree(path, ignore=False):
 
 def remove(path):
     if path.is_symlink() or path.is_file():
-        path.unlink()
+        try:
+            path.unlink()
+        except PermissionError:
+            make_writable(os.unlink, str(path), None)
     elif path.exists():
         rmtree(path)
 
@@ -667,6 +675,16 @@ def purge_chat(root):
         remove(root / name)
     if (root / 'home').is_dir() and not (root / 'home').is_symlink():
         keep_only(root / 'home', DERIVED_HOME)
+    for name in ('workspace', 'workspace.partial'):
+        tree = root / name
+        if not tree.is_dir() or tree.is_symlink():
+            continue
+        for current, dirs, files in os.walk(tree):
+            # Dependency and git trees hold no dotenv files of the chat's own, and are vast.
+            dirs[:] = [d for d in dirs if d not in ('node_modules', '.git')]
+            for file in files:
+                if file.startswith('.env'):
+                    remove(pathlib.Path(current) / file)
 
 def keep_only(base, keep):
     for entry in sorted(os.listdir(base)):
@@ -740,8 +758,9 @@ def template_digest(mount):
     return digest.hexdigest()
 
 # What a committed volume may hold: the template, its marker, and runtime archives a chat only
-# uses after checking their digest. The rest are macOS's own.
-VOLUME_ENTRIES = re.compile(r'(template|template\.json|cache\.lock|t3-runtime-[0-9a-f]{64}\.tar|\.Spotlight-V100|\.Trashes|\.fseventsd|\.TemporaryItems|\.DocumentRevisions-V100)')
+# uses after checking their digest. The last two are macOS's own and only root writes them;
+# its trash folders are not kept, since any user can put files there.
+VOLUME_ENTRIES = re.compile(r'(template|template\.json|cache\.lock|t3-runtime-[0-9a-f]{64}\.tar|\.Spotlight-V100|\.fseventsd)')
 
 def seal(spec):
     mount, root = pathlib.Path(spec['mount']), pathlib.Path(spec['root'])
@@ -778,8 +797,15 @@ def scrub(spec):
             trash(mount, root, wait=True)
         for entry in os.listdir(mount):
             if not VOLUME_ENTRIES.fullmatch(entry):
-                with contextlib.suppress(OSError):
+                try:
                     remove(mount / entry)
+                except OSError:
+                    # macOS makes its trash folders root-owned; Namespace Macs have passwordless sudo.
+                    for command in (['chflags', '-R', 'nouchg'], ['rm', '-rf']):
+                        subprocess.run(['sudo', '-n', *command, str(mount / entry)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        left = sorted(entry for entry in os.listdir(mount) if not VOLUME_ENTRIES.fullmatch(entry))
+        if left:
+            raise RuntimeError('The volume still holds ' + ', '.join(left))
         expected = spec.get('templateDigest')
         # The chat ran with the volume writable: anything it planted in the template would run
         # in every later chat that adopts it.
