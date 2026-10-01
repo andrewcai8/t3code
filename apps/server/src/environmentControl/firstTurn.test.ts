@@ -397,7 +397,9 @@ it.live("deletes the first message once a turn fails outside the settle, as the 
     Effect.gen(function* () {
       const { control, leases, kept, prepared } = yield* host({ unavailableFor: 1 });
       yield* Deferred.succeed(prepared, undefined);
-      expect(yield* control.provision(input)).toMatchObject({ environment: { firstTurn: "pending" } });
+      expect(yield* control.provision(input)).toMatchObject({
+        environment: { firstTurn: "pending" },
+      });
       yield* Effect.promise(() =>
         leases.settleFirstTurn(input.requestId, { status: "failed", reason: "overdue" }),
       );
