@@ -632,9 +632,74 @@ describe("guest chat state", () => {
             await exists(NodePath.join(w.mount, entry, "home", ".claude", ".credentials.json")),
             await exists(NodePath.join(w.mount, entry, "workspace", ".env.local")),
             await exists(NodePath.join(w.mount, entry, "workspace", "service", ".env")),
+            await exists(NodePath.join(w.mount, entry, "broker-token")),
           ],
           "a leftover chat's credentials and dotenv files are gone before adoption returns",
-        ).toEqual([false, false, false]);
+        ).toEqual([false, false, false, false]);
+  });
+
+  it("clears a builder's half-sealed copy and anything else unknown from the volume before adopting", async () => {
+    const w = await world();
+    await w.newMac();
+    // A builder that died between cloning its root and scrubbing the clone, then committed.
+    const partial = NodePath.join(w.mount, "template.partial");
+    await NodeFSP.mkdir(NodePath.join(partial, "home", ".codex"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(partial, "home", ".codex", "auth.json"), "{}\n");
+    await NodeFSP.writeFile(NodePath.join(partial, "broker-token"), "token\n");
+    await NodeFSP.mkdir(NodePath.join(w.mount, "stray", "deep"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(w.mount, "stray", "deep", "secret"), "secret\n");
+    await w.depart("commit");
+
+    await w.newMac();
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    const left = NodeChildProcess.execFileSync("find", [w.mount], { encoding: "utf8" });
+    expect(
+      left.split("\n").filter((path) => /auth\.json$|broker-token$|secret$|stray/.test(path)),
+      "nothing of another Mac's credentials outlives adoption",
+    ).toEqual([]);
+  });
+
+  it("empties the volume's trash folders and leaves an inherited bin unreadable on adopt", async () => {
+    const w = await world();
+    await w.newMac();
+    for (const bin of [".Trashes/501", "trash-stash"]) {
+      await NodeFSP.mkdir(NodePath.join(w.mount, bin), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(w.mount, bin, "auth.json"), "{}\n");
+    }
+    await w.depart("commit");
+
+    await w.newMac();
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    for (const path of [".Trashes/501/auth.json", "trash-stash/auth.json"])
+      await expect(
+        NodeFSP.readFile(NodePath.join(w.mount, path), "utf8"),
+        `${path} is gone or unreadable once adopt returns`,
+      ).rejects.toThrow();
+    // The bin is deleted by root on a Mac; here the background delete may still be running.
+    for (const entry of await NodeFSP.readdir(w.mount))
+      if (entry.startsWith("trash-"))
+        await NodeFSP.chmod(NodePath.join(w.mount, entry), 0o700).catch(() => undefined);
+  });
+
+  it("opens a chat even when macOS recreates its system folders while adopt clears them", async () => {
+    const w = await world();
+    await w.newMac();
+    // macOS writes these on its own schedule; a loop stands in for it.
+    const recreate = NodeChildProcess.spawn(
+      "sh",
+      ["-c", 'while :; do mkdir -p "$1/.TemporaryItems/folders"; done', "sh", w.mount],
+      { stdio: "ignore", detached: true },
+    );
+    // The whole group, so no mkdir outlives the loop and races the world's cleanup.
+    const stop = async () => {
+      if (recreate.exitCode !== null || recreate.signalCode !== null) return;
+      const exited = new Promise((resolve) => recreate.once("exit", resolve));
+      process.kill(-recreate.pid!, "SIGKILL");
+      await exited;
+    };
+    cleanups.push(stop);
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    await stop();
   });
 
   it("refuses to commit a template its chat changed after it was sealed", async () => {

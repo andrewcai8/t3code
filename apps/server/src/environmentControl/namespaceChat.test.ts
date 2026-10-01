@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 import {
-  type Adoption,
-  cacheRole,
   type ChatFacts,
   type ChatGoal,
   type ChatPerformer,
@@ -10,18 +9,17 @@ import {
   type ChatSnapshot,
   type ChatStep,
   type ChatStore,
-  departureFor,
   drive,
-  type MacCache,
+  LiveMac,
+  type MacStage,
   type Performed,
-  type SealOutcome,
   periodicSave,
   plan,
   planPeriodicSave,
   type SaveStep,
   settle,
 } from "./namespaceChat.ts";
-import { type Departure, InstanceId, type MacIncarnation } from "./namespaceInstances.ts";
+import { InstanceId, type MacIncarnation } from "./namespaceInstances.ts";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
@@ -53,7 +51,7 @@ const incarnation = (instanceId: InstanceId, deadline = FAR): MacIncarnation => 
   deadline,
 });
 const liveOn = (
-  cache: MacCache,
+  cache: MacStage,
   snapshot: ChatSnapshot | null,
   deadline = FAR,
   instanceId = MAC_A,
@@ -79,14 +77,14 @@ describe("plan", () => {
   }>([
     {
       name: "open: a Mac that died out of band leaves the chat idle on its last snapshot",
-      record: liveOn("reader", snap(1, "live", MAC_A)),
+      record: liveOn("ready", snap(1, "live", MAC_A)),
       goal: "open",
       facts: seen([]),
       expected: { kind: "lost", instanceId: MAC_A },
     },
     {
       name: "release: a dead Mac is recorded idle before any stray is handled",
-      record: liveOn("sealed", snap(2, "final", MAC_A)),
+      record: liveOn("ready", snap(2, "final", MAC_A)),
       goal: "release",
       facts: seen([STRAY]),
       expected: { kind: "lost", instanceId: MAC_A },
@@ -103,14 +101,14 @@ describe("plan", () => {
       record: null,
       goal: "open",
       facts: seen([STRAY]),
-      expected: { kind: "depart", instanceId: STRAY, departure: "abandon" },
+      expected: { kind: "depart", instanceId: STRAY },
     },
     {
-      name: "release: a stray beside a sealed Mac is abandoned, never committed",
-      record: liveOn("sealed", snap(2, "final", MAC_A)),
+      name: "release: a stray beside a Mac is abandoned first",
+      record: liveOn("ready", snap(2, "final", MAC_A)),
       goal: "release",
       facts: seen([MAC_A, STRAY]),
-      expected: { kind: "depart", instanceId: STRAY, departure: "abandon" },
+      expected: { kind: "depart", instanceId: STRAY },
     },
     {
       name: "open: a new chat creates a Mac",
@@ -134,39 +132,18 @@ describe("plan", () => {
       expected: { kind: "materialize", instanceId: MAC_A, snapshot: snap(3, "final", MAC_B) },
     },
     {
-      name: "open: a filler seals before any turn",
-      record: liveOn("filling", null),
-      goal: "open",
-      facts: seen([MAC_A]),
-      expected: { kind: "seal", instanceId: MAC_A },
-    },
-    {
-      name: "open: a reader is ready",
-      record: liveOn("reader", null),
+      name: "open: a materialized Mac is ready",
+      record: liveOn("ready", null),
       goal: "open",
       facts: seen([MAC_A]),
       expected: { kind: "done" },
     },
     {
       name: "open: a release that stopped after its final save is finished first",
-      record: liveOn("reader", snap(2, "final", MAC_A)),
+      record: liveOn("ready", snap(2, "final", MAC_A)),
       goal: "open",
       facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "abandon" },
-    },
-    {
-      name: "open: a sealed filler that stopped after its final save commits before reopening",
-      record: liveOn("sealed", snap(2, "final", MAC_A)),
-      goal: "open",
-      facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "commit" },
-    },
-    {
-      name: "open: a sealed filler is ready",
-      record: liveOn("sealed", snap(1, "live", MAC_A)),
-      goal: "open",
-      facts: seen([MAC_A]),
-      expected: { kind: "done" },
+      expected: { kind: "depart", instanceId: MAC_A },
     },
     {
       name: "release: a chat that never started is already released",
@@ -194,46 +171,25 @@ describe("plan", () => {
       record: liveOn("unknown", snap(3, "final", MAC_B)),
       goal: "release",
       facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "abandon" },
+      expected: { kind: "depart", instanceId: MAC_A },
     },
     {
-      name: "release: a sealed filler with its own final snapshot commits",
-      record: liveOn("sealed", snap(4, "final", MAC_A)),
+      name: "release: a Mac with its own final snapshot departs",
+      record: liveOn("ready", snap(4, "final", MAC_A)),
       goal: "release",
       facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "commit" },
-    },
-    {
-      name: "release: a sealed filler with its own final snapshot commits even near the deadline",
-      record: liveOn("sealed", snap(4, "final", MAC_A), NEAR),
-      goal: "release",
-      facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "commit" },
-    },
-    {
-      name: "release: a reader with its own final snapshot abandons",
-      record: liveOn("reader", snap(4, "final", MAC_A)),
-      goal: "release",
-      facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "abandon" },
-    },
-    {
-      name: "release: a filler that never sealed abandons after its final save",
-      record: liveOn("filling", snap(1, "final", MAC_A)),
-      goal: "release",
-      facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "abandon" },
+      expected: { kind: "depart", instanceId: MAC_A },
     },
     {
       name: "release: inside the give-up window the Mac abandons on its last periodic save",
-      record: liveOn("sealed", snap(2, "live", MAC_A), NEAR),
+      record: liveOn("ready", snap(2, "live", MAC_A), NEAR),
       goal: "release",
       facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "abandon" },
+      expected: { kind: "depart", instanceId: MAC_A },
     },
     {
       name: "release: a final save offers the Mac's own fingerprint",
-      record: liveOn("reader", snap(2, "live", MAC_A)),
+      record: liveOn("ready", snap(2, "live", MAC_A)),
       goal: "release",
       facts: seen([MAC_A]),
       expected: {
@@ -246,7 +202,7 @@ describe("plan", () => {
     },
     {
       name: "release: a snapshot restored from another Mac is never treated as unchanged",
-      record: liveOn("sealed", snap(2, "final", MAC_B)),
+      record: liveOn("ready", snap(2, "final", MAC_B)),
       goal: "release",
       facts: seen([MAC_A]),
       expected: {
@@ -259,7 +215,7 @@ describe("plan", () => {
     },
     {
       name: "release: a chat with no snapshot saves generation 1",
-      record: liveOn("reader", null),
+      record: liveOn("ready", null),
       goal: "release",
       facts: seen([MAC_A]),
       expected: {
@@ -271,11 +227,11 @@ describe("plan", () => {
       },
     },
     {
-      name: "dispose: a live sealed Mac is abandoned even with its own final snapshot",
-      record: liveOn("sealed", snap(4, "final", MAC_A)),
+      name: "dispose: a live Mac departs without a save",
+      record: liveOn("ready", snap(4, "final", MAC_A)),
       goal: "dispose",
       facts: seen([MAC_A]),
-      expected: { kind: "depart", instanceId: MAC_A, departure: "abandon" },
+      expected: { kind: "depart", instanceId: MAC_A },
     },
     {
       name: "dispose: an idle chat expires its snapshot and every labelled artifact",
@@ -309,14 +265,14 @@ describe("plan", () => {
     expect(plan(record, goal, facts)).toEqual(expected);
   });
 
-  it("keeps the cache and save invariants across every record, goal and observation", () => {
+  it("keeps the save invariants across every record, goal and observation", () => {
     const snapshots = {
       none: null,
       ownLive: snap(2, "live", MAC_A),
       ownFinal: snap(2, "final", MAC_A),
       otherFinal: snap(2, "final", MAC_B),
     };
-    const caches: ReadonlyArray<MacCache> = ["unknown", "reader", "filling", "sealed"];
+    const caches: ReadonlyArray<MacStage> = ["unknown", "ready"];
     const goals: ReadonlyArray<ChatGoal> = ["open", "release", "dispose"];
     const cases: Array<{
       label: string;
@@ -360,11 +316,7 @@ describe("plan", () => {
           const live = record?.kind === "live" ? record : null;
           const cache = live?.mac.cache ?? null;
           const departsCurrent = step.kind === "depart" && step.instanceId === MAC_A;
-          const commits = step.kind === "depart" && step.departure === "commit";
-
           const finishesRelease = goal !== "dispose" && alive && !strays && ownFinal;
-          if (commits !== (finishesRelease && cache === "sealed"))
-            broken.push(`commits only for a sealed Mac departing after its own final: ${where}`);
           if (finishesRelease && !departsCurrent)
             broken.push(`a Mac fenced by its own final save is reused: ${where}`);
           if (
@@ -388,9 +340,6 @@ describe("plan", () => {
             broken.push(`release saves before departing: ${where}`);
           if (goal === "open" && (step.kind === "save" || (departsCurrent && !ownFinal)))
             broken.push(`open saves, or departs a Mac whose work is not saved: ${where}`);
-          if (goal === "dispose" && commits) broken.push(`dispose commits: ${where}`);
-          if (step.kind === "depart" && step.instanceId === STRAY && step.departure !== "abandon")
-            broken.push(`a stray commits: ${where}`);
           if (
             live &&
             !alive &&
@@ -408,30 +357,28 @@ describe("plan", () => {
       "lost",
       "materialize",
       "save",
-      "seal",
     ]);
   });
 });
 
-describe("cache roles", () => {
-  it.each<[MacCache, Departure]>([
-    ["unknown", "abandon"],
-    ["reader", "abandon"],
-    ["filling", "abandon"],
-    ["sealed", "commit"],
-  ])("a %s Mac departs with %s", (cache, departure) => {
-    expect(departureFor(cache)).toBe(departure);
+const decodeLiveMac = Schema.decodeUnknownSync(LiveMac);
+const encodeLiveMac = Schema.encodeSync(LiveMac);
+
+describe("a live Mac's stage as stored", () => {
+  const stored = (cache: string) => ({ incarnation: incarnation(MAC_A), cache });
+  it.each<[string, MacStage]>([
+    ["unknown", "unknown"],
+    ["reader", "ready"],
+    ["filling", "ready"],
+    ["sealed", "ready"],
+  ])("reads %s, from a manager that let chats fill the cache, as %s", (cache, stage) => {
+    expect(decodeLiveMac(stored(cache)).cache).toBe(stage);
   });
 
-  it.each<[Adoption, ChatSnapshot | null, MacCache]>([
-    ["hit", null, "reader"],
-    ["stale", null, "filling"],
-    ["miss", null, "filling"],
-    ["hit", snap(1, "final", MAC_B), "reader"],
-    ["stale", snap(1, "final", MAC_B), "reader"],
-    ["miss", snap(1, "final", MAC_B), "reader"],
-  ])("adopting on a %s with snapshot %j makes a %s", (adoption, snapshot, role) => {
-    expect(cacheRole(adoption, snapshot)).toBe(role);
+  it("writes ready as the reader role, which such a manager departs by abandoning", () => {
+    expect(encodeLiveMac({ incarnation: incarnation(MAC_A), cache: "ready" })).toEqual(
+      stored("reader"),
+    );
   });
 });
 
@@ -443,8 +390,8 @@ describe("planPeriodicSave", () => {
     expected: SaveStep | null;
   }>([
     {
-      name: "a reader saves live over its own snapshot",
-      record: liveOn("reader", snap(2, "live", MAC_A)),
+      name: "a ready Mac saves live over its own snapshot",
+      record: liveOn("ready", snap(2, "live", MAC_A)),
       instances: [MAC_A],
       expected: {
         kind: "save",
@@ -456,7 +403,7 @@ describe("planPeriodicSave", () => {
     },
     {
       name: "a resumed Mac saves over the snapshot it restored",
-      record: liveOn("sealed", snap(1, "final", MAC_B)),
+      record: liveOn("ready", snap(1, "final", MAC_B)),
       instances: [MAC_A],
       expected: {
         kind: "save",
@@ -474,13 +421,13 @@ describe("planPeriodicSave", () => {
     },
     {
       name: "a Mac fenced by its final save is skipped",
-      record: liveOn("sealed", snap(3, "final", MAC_A)),
+      record: liveOn("ready", snap(3, "final", MAC_A)),
       instances: [MAC_A],
       expected: null,
     },
     {
       name: "a dead Mac is skipped",
-      record: liveOn("reader", snap(2, "live", MAC_A)),
+      record: liveOn("ready", snap(2, "live", MAC_A)),
       instances: [],
       expected: null,
     },
@@ -504,7 +451,7 @@ describe("settling a lost Mac and a forgotten chat against the current record", 
   }>([
     {
       name: "the live record on the lost Mac goes idle on its current snapshot",
-      record: liveOn("reader", snap(2, "live", MAC_A)),
+      record: liveOn("ready", snap(2, "live", MAC_A)),
       done: { kind: "lost", instanceId: MAC_A },
       expected: idle(snap(2, "live", MAC_A)),
     },
@@ -516,9 +463,9 @@ describe("settling a lost Mac and a forgotten chat against the current record", 
     },
     {
       name: "a resume onto another Mac since is kept",
-      record: liveOn("reader", snap(2, "final", MAC_A), FAR, MAC_B),
+      record: liveOn("ready", snap(2, "final", MAC_A), FAR, MAC_B),
       done: { kind: "lost", instanceId: MAC_A },
-      expected: liveOn("reader", snap(2, "final", MAC_A), FAR, MAC_B),
+      expected: liveOn("ready", snap(2, "final", MAC_A), FAR, MAC_B),
     },
     {
       name: "dispose forgets an idle chat",
@@ -528,9 +475,9 @@ describe("settling a lost Mac and a forgotten chat against the current record", 
     },
     {
       name: "dispose never forgets a chat that is live again",
-      record: liveOn("reader", null),
+      record: liveOn("ready", null),
       done: { kind: "forget" },
-      expected: liveOn("reader", null),
+      expected: liveOn("ready", null),
     },
   ])("$name", ({ record, done, expected }) => {
     expect(settle(record, done)).toEqual({ ok: true, record: expected, garbage: [] });
@@ -572,70 +519,40 @@ describe("settle", () => {
   });
 
   it("idles the chat when its own Mac departs and ignores a stray's departure", () => {
-    const record = liveOn("sealed", snap(2, "final", MAC_A));
-    expect(settle(record, { kind: "depart", instanceId: MAC_A, departure: "commit" })).toEqual({
+    const record = liveOn("ready", snap(2, "final", MAC_A));
+    expect(settle(record, { kind: "depart", instanceId: MAC_A })).toEqual({
       ok: true,
       record: idle(snap(2, "final", MAC_A)),
       garbage: [],
     });
-    expect(settle(record, { kind: "depart", instanceId: STRAY, departure: "abandon" })).toEqual({
+    expect(settle(record, { kind: "depart", instanceId: STRAY })).toEqual({
       ok: true,
       record,
       garbage: [],
     });
   });
 
-  it("gives a new chat on a miss the filler role and a resumed chat the reader role", () => {
+  it("makes its own Mac ready once materialized, and ignores another's", () => {
+    const fresh = liveOn("unknown", snap(1, "final", MAC_B));
     expect(
-      settle(liveOn("unknown", null), {
-        kind: "materialize",
-        instanceId: MAC_A,
-        snapshot: null,
-        outcome: { adoption: "miss" },
-      }),
-    ).toEqual({ ok: true, record: liveOn("filling", null), garbage: [] });
-    expect(
-      settle(liveOn("unknown", snap(1, "final", MAC_B)), {
-        kind: "materialize",
-        instanceId: MAC_A,
-        snapshot: snap(1, "final", MAC_B),
-        outcome: { adoption: "miss" },
-      }),
-    ).toEqual({ ok: true, record: liveOn("reader", snap(1, "final", MAC_B)), garbage: [] });
-  });
-
-  it("makes a filler sealed when it sealed and a reader when it gave up", () => {
-    const filling = liveOn("filling", null);
-    const sealed = liveOn("sealed", null);
-    expect(
-      settle(filling, {
-        kind: "seal",
-        instanceId: MAC_A,
-        outcome: { sealed: true, digest: "template-digest" },
-      }),
-      "the manager keeps the digest a commit is checked against",
-    ).toEqual({
+      settle(fresh, { kind: "materialize", instanceId: MAC_A, snapshot: snap(1, "final", MAC_B) }),
+    ).toEqual({ ok: true, record: liveOn("ready", snap(1, "final", MAC_B)), garbage: [] });
+    expect(settle(fresh, { kind: "materialize", instanceId: STRAY, snapshot: null })).toEqual({
       ok: true,
-      record:
-        sealed.kind === "live"
-          ? { ...sealed, mac: { ...sealed.mac, template: "template-digest" } }
-          : sealed,
+      record: fresh,
       garbage: [],
     });
-    expect(
-      settle(filling, { kind: "seal", instanceId: MAC_A, outcome: { sealed: false } }),
-    ).toEqual({ ok: true, record: liveOn("reader", null), garbage: [] });
   });
 
   it("records a new save and names the snapshot it replaced as garbage", () => {
     expect(
       settle(
-        liveOn("reader", snap(2, "live", MAC_A)),
+        liveOn("ready", snap(2, "live", MAC_A)),
         save(MAC_A, "final", 3, saved("t3/chats/chat-1/new", "fp-new")),
       ),
     ).toEqual({
       ok: true,
-      record: liveOn("reader", {
+      record: liveOn("ready", {
         generation: 3,
         artifactPath: "t3/chats/chat-1/new",
         sha256: "sha-new",
@@ -650,10 +567,10 @@ describe("settle", () => {
   });
 
   it("promotes the Mac's own unchanged snapshot to final, and leaves it alone on a live save", () => {
-    const record = liveOn("sealed", snap(2, "live", MAC_A));
+    const record = liveOn("ready", snap(2, "live", MAC_A));
     expect(settle(record, save(MAC_A, "final", 3, { kind: "unchanged" }))).toEqual({
       ok: true,
-      record: liveOn("sealed", snap(2, "final", MAC_A)),
+      record: liveOn("ready", snap(2, "final", MAC_A)),
       garbage: [],
     });
     expect(settle(record, save(MAC_A, "live", 3, { kind: "unchanged" }))).toEqual({
@@ -666,7 +583,7 @@ describe("settle", () => {
   it.each<{ name: string; record: ChatRecord | null; done: ReturnType<typeof save> }>([
     {
       name: "a live save planned at generation 1 after a final save recorded generation 2",
-      record: liveOn("sealed", snap(2, "final", MAC_A)),
+      record: liveOn("ready", snap(2, "final", MAC_A)),
       done: save(MAC_A, "live", 2, saved(ORPHAN, "fp-late")),
     },
     {
@@ -686,7 +603,7 @@ describe("settle", () => {
   it("refuses an unchanged final save with no snapshot of its own to promote", () => {
     expect(
       settle(
-        liveOn("reader", snap(1, "final", MAC_B)),
+        liveOn("ready", snap(1, "final", MAC_B)),
         save(MAC_A, "final", 2, { kind: "unchanged" }),
       ),
     ).toEqual({ ok: false, reason: "stale", garbage: [] });
@@ -707,26 +624,15 @@ describe("settle", () => {
   });
 });
 
-type Site = "iad4" | "ord4";
-/** A sealed template's marker on a cache volume. `stale` was sealed for an older template. */
-type Marker = "current" | "stale" | null;
 interface SimMac {
   readonly id: InstanceId;
   readonly chatId: string;
-  readonly site: Site;
-  /** This Mac's private fork of its site's committed cache volume. */
-  marker: Marker;
   root: { work: string; fenced: boolean } | null;
-  adoption: Adoption | null;
-  restored: boolean;
-  sealed: boolean;
-  scrubbed: boolean;
-  fate: "alive" | Departure | "killed";
+  fate: "alive" | "departed" | "killed";
 }
 
-/** Namespace, the guest and the cache volumes, reduced to what the chat protocol can break. */
-function makeWorld(initial: Record<Site, Marker>) {
-  const sites = { ...initial };
+/** Namespace and the guest, reduced to what the chat protocol can break. */
+function makeWorld() {
   const macs = new Map<InstanceId, SimMac>();
   const artifacts = new Map<string, { chatId: string; work: string; live: boolean }>();
   const violations: string[] = [];
@@ -738,12 +644,9 @@ function makeWorld(initial: Record<Site, Marker>) {
     return mac;
   };
   const world = {
-    sites,
     macs,
     artifacts,
     violations,
-    pickSite: (): Site => "iad4",
-    sealGivesUp: false,
     facts: (chatId: string): ChatFacts => ({
       instances: [...macs.values()]
         .filter((mac) => mac.chatId === chatId && mac.fate === "alive")
@@ -754,28 +657,13 @@ function makeWorld(initial: Record<Site, Marker>) {
       now: NOW,
     }),
     create: (chatId: string): MacIncarnation => {
-      const site = world.pickSite();
       const id = InstanceId.make(`mac-${++created}`);
-      macs.set(id, {
-        id,
-        chatId,
-        site,
-        marker: sites[site],
-        root: null,
-        adoption: null,
-        restored: false,
-        sealed: false,
-        scrubbed: false,
-        fate: "alive",
-      });
-      return { instanceId: id, site, createdAt: NOW, deadline: NOW + 5 * HOUR };
+      macs.set(id, { id, chatId, root: null, fate: "alive" });
+      return { instanceId: id, site: "iad4", createdAt: NOW, deadline: NOW + 5 * HOUR };
     },
     materialize: (instanceId: InstanceId, snapshot: ChatSnapshot | null) => {
       const mac = alive(instanceId);
-      if (mac.adoption !== null) return { adoption: mac.adoption };
-      const adoption: Adoption =
-        mac.marker === "current" ? "hit" : mac.marker === "stale" ? "stale" : "miss";
-      mac.marker = null;
+      if (mac.root !== null) return;
       let work = "";
       if (snapshot !== null) {
         const artifact = artifacts.get(snapshot.artifactPath);
@@ -783,20 +671,6 @@ function makeWorld(initial: Record<Site, Marker>) {
         work = artifact.work;
       }
       mac.root = { work, fenced: false };
-      mac.restored = snapshot !== null;
-      mac.adoption = adoption;
-      return { adoption };
-    },
-    seal: (instanceId: InstanceId): SealOutcome => {
-      const mac = alive(instanceId);
-      if (mac.adoption === "hit" || mac.restored)
-        violations.push(`${instanceId} sealed while reading the cache`);
-      if (mac.root?.work !== "")
-        violations.push(`${instanceId} sealed a root that is not pristine`);
-      if (world.sealGivesUp) return { sealed: false };
-      mac.marker = "current";
-      mac.sealed = true;
-      return { sealed: true, digest: `template-${instanceId}` };
     },
     save: (step: SaveStep) => {
       const mac = alive(step.instanceId);
@@ -820,21 +694,9 @@ function makeWorld(initial: Record<Site, Marker>) {
         savedAt: NOW,
       };
     },
-    scrub: (instanceId: InstanceId) => {
-      const mac = alive(instanceId);
-      mac.root = null;
-      mac.scrubbed = true;
-    },
-    destroy: (instanceId: InstanceId, departure: Departure) => {
+    depart: (instanceId: InstanceId) => {
       const mac = macs.get(instanceId);
-      if (mac?.fate !== "alive") return;
-      mac.fate = departure;
-      if (departure === "abandon") return;
-      if (mac.root !== null) violations.push(`${instanceId} committed a chat root`);
-      if (mac.adoption === "hit" || mac.restored)
-        violations.push(`${instanceId} committed after reading the cache`);
-      if (mac.marker !== "current") violations.push(`${instanceId} committed an unsealed volume`);
-      sites[mac.site] = mac.marker;
+      if (mac?.fate === "alive") mac.fate = "departed";
     },
     kill: (instanceId: InstanceId) => {
       alive(instanceId).fate = "killed";
@@ -894,13 +756,8 @@ function makeChat(world: World, chatId = "chat-1") {
   };
   const perform: ChatPerformer = {
     create: () => act(() => world.create(chatId)),
-    depart: (step) =>
-      act(() => {
-        if (step.departure === "commit") world.scrub(step.instanceId);
-        world.destroy(step.instanceId, step.departure);
-      }),
+    depart: (step) => act(() => world.depart(step.instanceId)),
     materialize: (step) => act(() => world.materialize(step.instanceId, step.snapshot)),
-    seal: (step) => act(() => world.seal(step.instanceId)),
     save: (step) => act(() => world.save(step)),
     expire: (step) => act(() => world.expire(step.paths)),
   };
@@ -926,12 +783,7 @@ function makeChat(world: World, chatId = "chat-1") {
     },
     turn: (text: string) => {
       const current = record();
-      if (
-        current?.kind !== "live" ||
-        current.mac.cache === "unknown" ||
-        current.mac.cache === "filling"
-      )
-        return false;
+      if (current?.kind !== "live" || current.mac.cache === "unknown") return false;
       return world.work(current.mac.incarnation.instanceId, text);
     },
     durableWork: () => {
@@ -943,7 +795,7 @@ function makeChat(world: World, chatId = "chat-1") {
 type Chat = ReturnType<typeof makeChat>;
 
 type Op =
-  | { readonly op: "goal"; readonly goal: ChatGoal; readonly site?: Site }
+  | { readonly op: "goal"; readonly goal: ChatGoal }
   | { readonly op: "turn"; readonly text: string }
   | { readonly op: "periodic" }
   | { readonly op: "kill" };
@@ -963,24 +815,21 @@ function endState(world: World, chat: Chat) {
           },
     liveInstances: facts.instances.length,
     liveArtifacts: facts.artifacts.map((path) => world.artifacts.get(path)?.work).toSorted(),
-    sites: { ...world.sites },
     violations: [...world.violations],
   };
 }
 
 async function runScenario(
-  initial: Record<Site, Marker>,
   ops: ReadonlyArray<Op>,
   crash: (CrashPoint & { readonly op: number }) | null = null,
 ) {
-  const world = makeWorld(initial);
+  const world = makeWorld();
   const chat = makeChat(world);
   const actionCounts = new Map<number, number>();
   let crashed = false;
   for (const [index, op] of ops.entries()) {
     switch (op.op) {
       case "goal": {
-        world.pickSite = () => op.site ?? "iad4";
         const first = await chat.run(op.goal, crash?.op === index ? crash : null);
         actionCounts.set(index, first.actions);
         crashed ||= first.crashed;
@@ -1006,7 +855,7 @@ async function runScenario(
   return { end: endState(world, chat), actionCounts, crashed };
 }
 
-const open = (site: Site): Op => ({ op: "goal", goal: "open", site });
+const open: Op = { op: "goal", goal: "open" };
 const release: Op = { op: "goal", goal: "release" };
 const dispose: Op = { op: "goal", goal: "dispose" };
 const turn = (text: string): Op => ({ op: "turn", text });
@@ -1016,123 +865,68 @@ const kill: Op = { op: "kill" };
 describe("driving a chat through a crash at every step", () => {
   it.each<{
     name: string;
-    initial: Record<Site, Marker>;
     ops: ReadonlyArray<Op>;
     expected: ReturnType<typeof endState>;
   }>([
     {
-      name: "a new chat on a miss seals, saves periodically, and commits its template on release",
-      initial: { iad4: null, ord4: null },
-      ops: [open("iad4"), turn("a"), periodic, turn("b"), periodic, turn("c"), release],
+      name: "a new chat saves periodically and finally on release",
+      ops: [open, turn("a"), periodic, turn("b"), periodic, turn("c"), release],
       expected: {
         record: { kind: "idle", generation: 3, mode: "final", work: "abc" },
         liveInstances: 0,
         liveArtifacts: ["abc"],
-        sites: { iad4: "current", ord4: null },
         violations: [],
       },
     },
     {
-      name: "a new chat on a stale template refills it",
-      initial: { iad4: "stale", ord4: null },
-      ops: [open("iad4"), turn("a"), periodic, release],
-      expected: {
-        record: { kind: "idle", generation: 1, mode: "final", work: "a" },
-        liveInstances: 0,
-        liveArtifacts: ["a"],
-        sites: { iad4: "current", ord4: null },
-        violations: [],
-      },
-    },
-    {
-      name: "a new chat on a hit reads the cache and abandons on release",
-      initial: { iad4: "current", ord4: null },
-      ops: [open("iad4"), turn("a"), release],
-      expected: {
-        record: { kind: "idle", generation: 1, mode: "final", work: "a" },
-        liveInstances: 0,
-        liveArtifacts: ["a"],
-        sites: { iad4: "current", ord4: null },
-        violations: [],
-      },
-    },
-    {
-      name: "a released chat resumes on an empty site and on the other site",
-      initial: { iad4: "current", ord4: null },
-      ops: [
-        open("iad4"),
-        turn("a"),
-        release,
-        open("ord4"),
-        turn("b"),
-        release,
-        open("iad4"),
-        turn("c"),
-        release,
-      ],
+      name: "a released chat resumes on a new Mac each time",
+      ops: [open, turn("a"), release, open, turn("b"), release, open, turn("c"), release],
       expected: {
         record: { kind: "idle", generation: 3, mode: "final", work: "abc" },
         liveInstances: 0,
         liveArtifacts: ["abc"],
-        sites: { iad4: "current", ord4: null },
         violations: [],
       },
     },
     {
-      name: "disposing a live filler leaves nothing and fills no cache",
-      initial: { iad4: null, ord4: null },
-      ops: [open("iad4"), turn("a"), periodic, dispose],
+      name: "disposing a live chat leaves nothing",
+      ops: [open, turn("a"), periodic, dispose],
       expected: {
         record: null,
         liveInstances: 0,
         liveArtifacts: [],
-        sites: { iad4: null, ord4: null },
         violations: [],
       },
     },
     {
       name: "disposing an idle chat leaves nothing",
-      initial: { iad4: "current", ord4: null },
-      ops: [open("iad4"), turn("a"), release, dispose],
+      ops: [open, turn("a"), release, dispose],
       expected: {
         record: null,
         liveInstances: 0,
         liveArtifacts: [],
-        sites: { iad4: "current", ord4: null },
         violations: [],
       },
     },
     {
       name: "a Mac destroyed out of band loses only the work since its last save",
-      initial: { iad4: "current", ord4: null },
-      ops: [
-        open("iad4"),
-        turn("a"),
-        periodic,
-        turn("b"),
-        kill,
-        release,
-        open("ord4"),
-        turn("c"),
-        release,
-      ],
+      ops: [open, turn("a"), periodic, turn("b"), kill, release, open, turn("c"), release],
       expected: {
         record: { kind: "idle", generation: 2, mode: "final", work: "ac" },
         liveInstances: 0,
         liveArtifacts: ["ac"],
-        sites: { iad4: "current", ord4: null },
         violations: [],
       },
     },
-  ])("$name", async ({ initial, ops, expected }) => {
-    const reference = await runScenario(initial, ops);
+  ])("$name", async ({ ops, expected }) => {
+    const reference = await runScenario(ops);
     expect(reference.end).toEqual(expected);
 
     let crashRuns = 0;
     for (const [op, count] of reference.actionCounts)
       for (let at = 0; at < count; at++)
         for (const when of ["before", "after"] as const) {
-          const run = await runScenario(initial, ops, { op, at, when });
+          const run = await runScenario(ops, { op, at, when });
           expect(run.crashed, `a crash fired ${when} action ${at} of op ${op}`).toBe(true);
           expect(run.end, `converged after a crash ${when} action ${at} of op ${op}`).toEqual(
             expected,
@@ -1142,43 +936,36 @@ describe("driving a chat through a crash at every step", () => {
     expect(crashRuns).toBeGreaterThan(2 * ops.filter((op) => op.op === "goal").length);
   });
 
-  it.each<[Marker, Marker]>([
-    [null, "current"],
-    ["current", "current"],
-  ])(
-    "a reopen after a release stopped at its final save keeps the later work (cache %s)",
-    async (initial, expectedSite) => {
-      let stoppedAfterFinal = 0;
-      for (let at = 0; ; at++) {
-        const world = makeWorld({ iad4: initial, ord4: null });
-        const chat = makeChat(world);
-        await chat.run("open");
-        expect(chat.turn("a")).toBe(true);
-        const stopped = await chat.run("release", { at, when: "after" });
-        if (!stopped.crashed) break;
-        const current = chat.record();
-        if (current?.kind !== "live" || current.snapshot?.mode !== "final") continue;
-        stoppedAfterFinal++;
+  it("a reopen after a release stopped at its final save keeps the later work", async () => {
+    let stoppedAfterFinal = 0;
+    for (let at = 0; ; at++) {
+      const world = makeWorld();
+      const chat = makeChat(world);
+      await chat.run("open");
+      expect(chat.turn("a")).toBe(true);
+      const stopped = await chat.run("release", { at, when: "after" });
+      if (!stopped.crashed) break;
+      const current = chat.record();
+      if (current?.kind !== "live" || current.snapshot?.mode !== "final") continue;
+      stoppedAfterFinal++;
 
-        await chat.run("open");
-        expect(chat.turn("b"), "the reopened chat takes turns").toBe(true);
-        await chat.run("release");
-        expect(endState(world, chat)).toEqual({
-          record: { kind: "idle", generation: 2, mode: "final", work: "ab" },
-          liveInstances: 0,
-          liveArtifacts: ["ab"],
-          sites: { iad4: expectedSite, ord4: null },
-          violations: [],
-        });
-      }
-      expect(stoppedAfterFinal, "some crash point leaves a recorded final on a live Mac").toBe(2);
-    },
-  );
+      await chat.run("open");
+      expect(chat.turn("b"), "the reopened chat takes turns").toBe(true);
+      await chat.run("release");
+      expect(endState(world, chat)).toEqual({
+        record: { kind: "idle", generation: 2, mode: "final", work: "ab" },
+        liveInstances: 0,
+        liveArtifacts: ["ab"],
+        violations: [],
+      });
+    }
+    expect(stoppedAfterFinal, "some crash point leaves a recorded final on a live Mac").toBe(2);
+  });
 });
 
 describe("saves racing each other", () => {
   async function liveChat() {
-    const world = makeWorld({ iad4: "current", ord4: null });
+    const world = makeWorld();
     const chat = makeChat(world);
     await chat.run("open");
     chat.turn("a");
@@ -1220,7 +1007,6 @@ describe("saves racing each other", () => {
       record: { kind: "idle", generation: 2, mode: "final", work: "ab" },
       liveInstances: 0,
       liveArtifacts: ["ab"],
-      sites: { iad4: "current", ord4: null },
       violations: [],
     });
   });
@@ -1241,7 +1027,7 @@ describe("saves racing each other", () => {
     expect(result).toBe("stale");
     expect(after).toMatchObject({
       kind: "live",
-      mac: { incarnation: { instanceId: "mac-2" }, cache: "reader" },
+      mac: { incarnation: { instanceId: "mac-2" }, cache: "ready" },
     });
     expect(after?.snapshot?.generation).toBe(1);
     expect(world.facts("chat-1").artifacts).toEqual([after?.snapshot?.artifactPath]);
@@ -1262,13 +1048,11 @@ function seeded(seed: number) {
 }
 
 describe("a seeded run of goals, turns, crashes and deaths", () => {
-  it.each([1, 7, 42, 2026])("keeps chats and the cache intact with seed %i", async (seed) => {
+  it.each([1, 7, 42, 2026])("keeps the chat intact with seed %i", async (seed) => {
     const random = seeded(seed);
     const pick = <T>(items: readonly [T, ...T[]]): T =>
       items[Math.floor(random() * items.length)] ?? items[0];
-    const markers = ["current", "stale", null] as const;
-    const world = makeWorld({ iad4: pick(markers), ord4: pick(markers) });
-    world.pickSite = () => pick(["iad4", "ord4"] as const);
+    const world = makeWorld();
     const chat = makeChat(world);
     let expected = "";
     let turns = 0;
@@ -1306,17 +1090,15 @@ describe("a seeded run of goals, turns, crashes and deaths", () => {
         "periodic",
         "kill",
         "race",
-        "staleTemplate",
       ] as const);
       switch (action) {
         case "open": {
-          world.sealGivesUp = random() < 0.2;
           await reach("open");
           const current = chat.record();
           const mac =
             current?.kind === "live" ? world.macs.get(current.mac.incarnation.instanceId) : null;
           expect(current?.kind === "live" && current.mac.cache, `step ${step}: opened`).toMatch(
-            /^(reader|sealed)$/,
+            /^ready$/,
           );
           expect(mac?.root?.work, `step ${step}: open restored every saved turn`).toBe(expected);
           break;
@@ -1371,35 +1153,15 @@ describe("a seeded run of goals, turns, crashes and deaths", () => {
           checkReleased(step);
           break;
         }
-        case "staleTemplate": {
-          const site = pick(["iad4", "ord4"] as const);
-          if (world.sites[site] === "current") world.sites[site] = "stale";
-          break;
-        }
         default:
           action satisfies never;
       }
       expect(world.violations, `step ${step}: ${action}`).toEqual([]);
     }
 
-    const macs = [...world.macs.values()];
-    const committed = macs.filter((mac) => mac.fate === "commit");
-    const hits = macs.filter((mac) => mac.adoption === "hit");
     expect(
-      committed.map(({ adoption, restored, sealed, scrubbed }) => ({
-        filled: adoption === "miss" || adoption === "stale",
-        restored,
-        sealed,
-        scrubbed,
-      })),
-    ).toEqual(
-      committed.map(() => ({ filled: true, restored: false, sealed: true, scrubbed: true })),
-    );
-    expect(hits.filter((mac) => mac.fate === "commit")).toEqual([]);
-    expect(committed.length, "the run committed at least one template").toBeGreaterThan(0);
-    expect(
-      hits.filter((mac) => mac.fate === "abandon").length,
-      "the run abandoned at least one reader",
-    ).toBeGreaterThan(0);
+      [...world.macs.values()].filter((mac) => mac.fate === "alive").length,
+      "at most the chat's current Mac is left running",
+    ).toBeLessThanOrEqual(1);
   });
 });

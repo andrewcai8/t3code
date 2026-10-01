@@ -33,6 +33,24 @@ const Commands = {
   prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   verifyCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 };
+/**
+ * A Namespace prepare command. `background: true` marks one that starts a service for the chat,
+ * such as a dev server or a simulator, rather than preparing its checkout: an instance-engine
+ * template builder runs no chat, so it skips these. Chats run every command as written.
+ */
+const NamespacePrepareCommand = Schema.Union([
+  TrimmedNonEmptyString,
+  Schema.Struct({ command: TrimmedNonEmptyString, background: Schema.optional(Schema.Boolean) }),
+]);
+export type NamespacePrepareCommand = typeof NamespacePrepareCommand.Type;
+const NamespaceCommands = {
+  ...Commands,
+  prepareCommands: Schema.optional(Schema.Array(NamespacePrepareCommand)),
+};
+export const commandLine = (entry: NamespacePrepareCommand) =>
+  typeof entry === "string" ? entry : entry.command;
+export const isBackground = (entry: NamespacePrepareCommand) =>
+  typeof entry !== "string" && entry.background === true;
 
 const E2bIdentity = Schema.Struct({
   sandboxId: TrimmedNonEmptyString,
@@ -160,7 +178,7 @@ const Provisioning = Schema.Struct({
         ),
         namespace: Schema.optional(
           Schema.Struct({
-            ...Commands,
+            ...NamespaceCommands,
             artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
             /**
              * Keep one prepared, stopped Mac of this repository for the next
@@ -243,7 +261,7 @@ const Provisioning = Schema.Struct({
       size: TrimmedNonEmptyString,
       region: Schema.optional(TrimmedNonEmptyString),
       idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
-      ...Commands,
+      ...NamespaceCommands,
       artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
     }),
   ),

@@ -7,11 +7,12 @@
  *     --pairing-token-file .t3/manager/pairing-token --manager-state .t3/manager/userdata \
  *     --manager-log .t3/manager/manager.log --repo andrewcai8/t3code --report /tmp/mac-e2e.json
  *
- * Runs, in order: a new chat on a cache miss that fills the template, release while idle, a new
- * chat on a hit, resume onto a new Mac with its worktree, checkpoints, transcripts and environment
- * id compared byte for byte, a Mac destroyed out of band that comes back from its last periodic
- * save, and dispose. Then it checks that no Mac, snapshot or chat record is left and releases the
- * cache volume. Tokens and pairing URLs never reach stdout or the report.
+ * Runs, in order: a new chat on a cache miss, the builder Mac it asks for committing a template,
+ * release while idle, a new chat on a hit, resume onto a new Mac with its worktree, checkpoints,
+ * transcripts and environment id compared byte for byte, a Mac destroyed out of band that comes
+ * back from its last periodic save, and dispose. Then it checks that no Mac, builder, snapshot or
+ * chat record is left and releases the cache volume. Tokens and pairing URLs never reach stdout or
+ * the report.
  */
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off cryptoRandomUUID:off globalConsole:off globalTimers:off - an operator lever that drives a live manager and Namespace, reporting as it goes.
 import * as NodeCrypto from "node:crypto";
@@ -258,8 +259,8 @@ const listed = (chat: Chat) =>
     (environments) =>
       environments.find((environment) => environment.requestId === chat.requestId) ?? null,
   );
-/** The manager log's lines for one chat, with the fields Effect's logger prints under them. */
-const logLines = async (chat: Chat, message: string) => {
+/** The manager log's entries for a message, with the fields Effect's logger prints under them. */
+const logEntries = async (message: string) => {
   const log = await NodeFSP.readFile(managerLog, "utf8");
   const found: Array<Record<string, string>> = [];
   let current: Record<string, string> | null = null;
@@ -273,10 +274,17 @@ const logLines = async (chat: Chat, message: string) => {
     if (current && field) current[field[1]!] = field[2]!;
     else current = null;
   }
-  return found.filter(
+  return found;
+};
+const logLines = async (chat: Chat, message: string) =>
+  (await logEntries(message)).filter(
     (entry) => entry.chatId === chat.requestId || entry.requestId === chat.requestId,
   );
-};
+/** This repository's finished template builds, oldest first; a failed one also logs its cause. */
+const builds = async () =>
+  (await logEntries("namespace mac template build")).filter(
+    (entry) => entry.tag === cacheTag && entry.departure !== undefined,
+  );
 const guest = async (instanceId: InstanceId, script: string) => {
   const result = await namespace.exec(instanceId, ["bash", "-c", script], { timeoutMs: 120_000 });
   if (result.exitCode !== 0) throw new Error(`guest script failed: ${result.stderr.slice(-400)}`);
@@ -407,12 +415,23 @@ async function firstTurn(chat: Chat, asked: number) {
   );
 }
 
+/** Each version of the cache volume by the Mac that held it: 1 in use, 2 committed, 4 abandoned. */
 async function cacheVersions() {
   const volumes = await storage.listCacheVolumes({});
   return volumes.cacheVolume
     .filter((volume) => volume.tag === cacheTag)
-    .map((volume) => Number(volume.metadata?.state));
+    .map((volume) => ({
+      id: volume.id,
+      // Empty once the Mac detached.
+      instanceId: volume.attachment?.attachedTo ?? "",
+      state: Number(volume.metadata?.state),
+    }));
 }
+/** The version a live Mac holds, found while it is attached. */
+const versionOf = async (instanceId: string) =>
+  (await cacheVersions()).find((version) => version.instanceId === instanceId)?.id ?? null;
+const stateOf = async (versionId: string) =>
+  (await cacheVersions()).find((version) => version.id === versionId)?.state ?? null;
 
 const report = async (failure?: unknown) => {
   await NodeFSP.writeFile(
@@ -433,14 +452,19 @@ const report = async (failure?: unknown) => {
 
 let failure: unknown;
 try {
-  check("cache.emptyAtStart", (await cacheVersions()).length === 0, cacheTag);
+  // Another manager's chats may share the repository's cache; their versions are not this run's.
+  const atStart = await cacheVersions();
+  measure("cache.atStart", atStart);
+  // The manager log may hold builds from before this run.
+  const buildsBefore = (await builds()).length;
 
   const a = await provisionDetached("miss");
-  await firstTurn(a.chat, a.asked);
   const filler = await liveMac(a.chat);
   measure("miss.site", filler.site);
+  const missVersion = await versionOf(filler.instanceId);
   const missAdoption = (await logLines(a.chat, "namespace mac materialized")).at(-1)?.adoption;
   check("miss.adoption", missAdoption === "miss", missAdoption);
+  await firstTurn(a.chat, a.asked);
   await guest(
     filler.instanceId,
     `cd ${ROOT}/workspace && echo staged > e2e-staged.txt && git add e2e-staged.txt && echo untracked > e2e-untracked.txt && printf 'edit\\n' >> README.md`,
@@ -475,6 +499,26 @@ try {
     ).split("\n"),
   );
 
+  const build = await until(
+    "the template build",
+    30 * 60_000,
+    async () => (await builds())[buildsBefore] ?? null,
+  );
+  measure("builder", {
+    site: build.site,
+    adoption: build.adoption,
+    departure: build.departure,
+    minutes: Math.round(Number(build.durationMs) / 6_000) / 10,
+    sameSiteAsMiss: build.site === filler.site,
+  });
+  check("builder.commits", build.departure === "commit", build.instanceId);
+  const committedVersions = await until("the builder's version at rest", 180_000, async () => {
+    const atRest = (await cacheVersions()).filter((version) => version.state === 2);
+    return atRest.length > atStart.filter((version) => version.state === 2).length ? atRest : null;
+  });
+  const builderState = committedVersions.length > 0 ? 2 : null;
+  check("builder.atRest", builderState === 2, builderState);
+
   const pausing = Date.now();
   const paused = await manager((client) =>
     client["environmentControl.pause"]({ leaseId: a.chat.leaseId, sandboxId: a.chat.sandboxId }),
@@ -489,22 +533,20 @@ try {
       ? { generation: released.snapshot.generation, bytes: released.snapshot.bytes }
       : null,
   );
-  check(
-    "release.fillerCommits",
-    (await logLines(a.chat, "namespace mac departed")).at(-1)?.departure === "commit",
-    filler.instanceId,
-  );
-  const committed = await until("template committed", 180_000, async () => {
-    const versions = await cacheVersions();
-    return versions.includes(2) && !versions.includes(1) ? versions : null;
+  // An abandoned version reads as state 4 for a while, then is no longer listed.
+  const missState = await until("the miss chat's version settled", 180_000, async () => {
+    const state = missVersion === null ? null : await stateOf(missVersion);
+    return state === 1 ? null : { state };
   });
-  measure("cache.afterFill", committed);
+  check("release.chatAbandons", missState.state === 4 || missState.state === null, missState);
 
   const b = await provisionDetached("hit");
   const hitAdoption = (await logLines(b.chat, "namespace mac materialized")).at(-1)?.adoption;
-  check("hit.adoption", hitAdoption === "hit", hitAdoption);
+  const hitSite = (await liveMac(b.chat)).site;
+  measure("hit.site", hitSite);
+  // Namespace places a Mac in a site of its choosing; only the builder's site holds the template.
+  check("hit.adoption", hitAdoption === "hit", { adoption: hitAdoption, builderSite: build.site });
   await firstTurn(b.chat, b.asked);
-  measure("hit.site", (await liveMac(b.chat)).site);
   const disposingB = Date.now();
   const disposedB = await manager((client) =>
     client["environmentControl.dispose"]({ requestId: b.chat.requestId }),
@@ -613,9 +655,25 @@ try {
       { disposed, instances: instances.length, artifacts: left.length },
     );
   }
+  // A miss on a later chat may have started another build; this run owns the tag, so stop it.
+  const builders = await namespace.list({ "t3.builder": cacheTag });
+  for (const { instanceId } of builders) await namespace.depart(instanceId, "abandon");
+  measure("cleanup.buildersAbandoned", builders.length);
+  measure("builds", await builds().catch(() => []));
   await sleep(30_000);
-  await storage.destroyCacheVolume({ tag: cacheTag }).catch(() => undefined);
-  check("cleanup.cacheVolume", (await cacheVersions()).length === 0, cacheTag);
+  const ours = new Set([
+    ...(await logEntries("namespace mac created"))
+      .filter((entry) => chats.some((chat) => chat.requestId === entry.chatId))
+      .map((entry) => entry.instanceId),
+    ...(await builds().catch(() => [])).map((entry) => entry.instanceId),
+  ]);
+  const foreign = (await cacheVersions()).filter(
+    (version) => version.state === 1 && !ours.has(version.instanceId),
+  );
+  if (foreign.length === 0) {
+    await storage.destroyCacheVolume({ tag: cacheTag }).catch(() => undefined);
+    check("cleanup.cacheVolume", (await cacheVersions()).length === 0, cacheTag);
+  } else measure("cleanup.cacheVolumeKeptFor", foreign);
   measure("totalSeconds", elapsed());
   await report(failure);
 }

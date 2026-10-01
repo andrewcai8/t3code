@@ -30,6 +30,7 @@ import {
   makeNamespaceArtifacts,
   makeNamespaceInstances,
   nscWithToken,
+  type Departure,
   type InstanceId,
   type NamespaceArtifacts,
   type NamespaceInstances,
@@ -45,7 +46,9 @@ import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProx
 import {
   desiredRuntime,
   followedBranch,
+  frozenMacTemplate,
   provisionDigest,
+  type MacTemplateIdentity,
   type ProvisionPreparationManifest,
 } from "./ProvisionPreparation.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
@@ -62,8 +65,14 @@ const SNAPSHOT_RETENTION_MS = 90 * 86_400_000;
 /** Larger than any chat's own state; past it a save is probably carrying a cache. */
 const SNAPSHOT_MAX_BYTES = 4 * 1024 ** 3;
 const CACHE_VOLUME_GB = 100;
-/** A template older than this is still adopted, but its chat refills it. */
-const TEMPLATE_MAX_AGE_SECONDS = 86_400;
+/** A template older than this is still adopted, and a builder refreshes it. */
+const TEMPLATE_MAX_AGE_SECONDS = 12 * 3_600;
+/** Ample for a builder's prepare and seal; bounds what a manager crash mid-build leaves running. */
+const BUILDER_LIFETIME_MS = 60 * 60_000;
+/** Builds a repository may start in an hour, and the backoff after a failed one, doubling. */
+const BUILDS_PER_HOUR = 3;
+const BUILD_BACKOFF_MS = 5 * 60_000;
+const BUILD_BACKOFF_MAX_MS = 2 * 3_600_000;
 /** Inside this much of its deadline an idle Mac is released; inside the second, a busy one too. */
 const ROTATE_IDLE_MS = 30 * 60_000;
 const ROTATE_FORCE_MS = 8 * 60_000;
@@ -109,6 +118,30 @@ else:
 
 type ChatOutcome = "released" | "missing";
 
+interface BuildHistory {
+  /** When builds started, kept for the last hour. */
+  readonly started: ReadonlyArray<number>;
+  readonly failures: number;
+  readonly retryAt: number;
+}
+
+/** Whether a repository may start a template build at `now`, or what holds it back. */
+export function nextBuild(history: BuildHistory, now: number): "due" | "backoff" | "cap" {
+  if (now < history.retryAt) return "backoff";
+  const recent = history.started.filter((at) => now - at < 3_600_000);
+  return recent.length >= BUILDS_PER_HOUR ? "cap" : "due";
+}
+
+/** The history after a build that started at `at` failed: the next waits twice as long. */
+export function failedBuild(history: BuildHistory, at: number): BuildHistory {
+  const failures = history.failures + 1;
+  return {
+    started: history.started.filter((started) => at - started < 3_600_000),
+    failures,
+    retryAt: at + Math.min(BUILD_BACKOFF_MS * 2 ** (failures - 1), BUILD_BACKOFF_MAX_MS),
+  };
+}
+
 /**
  * Namespace Mac chats on per-chat compute instances. Same verbs as the Devbox
  * runtime, plus `release` and `upkeep`. A chat's durable home is a snapshot in
@@ -123,7 +156,15 @@ export function makeNamespaceMacRuntime(config: {
   readonly artifacts?: NamespaceArtifacts;
   /** Installs the box CLIs on every prepare. Tests replace the real downloads. */
   readonly toolInstall?: string;
+  /** Runs a template build in the background. Tests run it when their one fake Mac is free. */
+  readonly startBuild?: (build: () => Promise<void>) => void;
+  /**
+   * The template a chat of this repository would be frozen for now. Only a chat frozen for it
+   * gets a build, so chats frozen under older config never replace a newer template.
+   */
+  readonly currentTemplate: (repository: string | null) => Promise<MacTemplateIdentity | null>;
   readonly log?: (message: string, fields: Record<string, unknown>) => void;
+  readonly warn?: (message: string, fields: Record<string, unknown>) => void;
 }) {
   const issueToken = (durationMs: number) => config.session.issueToken(durationMs);
   const instances =
@@ -145,10 +186,29 @@ export function makeNamespaceMacRuntime(config: {
     ingressAuthorization: async () => `Bearer ${await issueToken(60_000)}`,
   });
   const log = (message: string, fields: Record<string, unknown>) => config.log?.(message, fields);
+  const warn = (message: string, fields: Record<string, unknown>) =>
+    (config.warn ?? config.log)?.(message, fields);
   const now = () => Effect.runPromise(Clock.currentTimeMillis);
   const proxyId = (operation: ProvisionOperation) => `provision-${operation.request.requestId}`;
   /** When each Mac last tried a periodic save; a new Mac starts its own cadence. */
   const lastSave = new Map<InstanceId, number>();
+  /** Cache tags with a template build in flight from this manager. */
+  const building = new Set<string>();
+  /** Per cache tag: when its recent builds started, and how failures have pushed the next one. */
+  const buildHistory = new Map<string, BuildHistory>();
+  const startBuild = config.startBuild ?? ((build: () => Promise<void>) => void build());
+  /** Labels every builder this manager starts, so a restarted one can find what it left. */
+  const managerLabel = { "t3.manager": provisionDigest(config.stateDir).slice(0, 12) };
+  const abandonAll = async (labels: Readonly<Record<string, string>>) => {
+    const left = await instances.list(labels);
+    for (const { instanceId } of left) await instances.depart(instanceId, "abandon");
+    return left.length;
+  };
+  // Nothing builds in a manager that just started, so every builder labelled for it is an orphan.
+  const swept = abandonAll(managerLabel).then(
+    (count) => count > 0 && warn("namespace mac orphaned builders abandoned", { count }),
+    (cause: unknown) => warn("namespace mac orphaned builders not swept", { cause: String(cause) }),
+  );
 
   const guestPort = (instanceId: InstanceId): RemotePreparationPort => ({
     executePython: ({ script, stdin }) =>
@@ -174,19 +234,14 @@ export function makeNamespaceMacRuntime(config: {
       ...(manifest.preparation.artifacts ?? []).map(({ destination }) => destination),
       ...(manifest.derivedHomePaths ?? []),
     ];
+    const buildCommands =
+      manifest.buildPrepareCommands ?? manifest.preparation.prepareCommands ?? [];
+    const frozen = frozenMacTemplate(manifest, build);
     const template = {
       mount,
       root,
       repository: manifest.preparation.repository?.url ?? null,
-      // What preparation builds: a change makes the volume's template stale.
-      key: provisionDigest(
-        JSON.stringify([
-          manifest.preparation.prepareCommands ?? [],
-          manifest.preparation.artifacts ?? [],
-          manifest.preparation.providerInstall ?? "",
-        ]),
-      ),
-      runtimeSha256: guest.sha256,
+      ...frozen,
     };
     const cacheTag = `t3-mac-${provisionDigest(
       repository ? canonicalRepository(repository) : "none",
@@ -216,7 +271,13 @@ export function makeNamespaceMacRuntime(config: {
       if (moved.exitCode !== 0) throw new Error(`Runtime staging failed: ${moved.stderr.trim()}`);
     };
 
-    const prepareGuest = async (instanceId: InstanceId) => {
+    const size =
+      operation.request.provider === "namespace" && operation.request.size === "l"
+        ? ("l" as const)
+        : ("m" as const);
+
+    /** A chat prepares under its own identity and runs every command; a builder only its own. */
+    const prepareGuest = async (instanceId: InstanceId, builder = false) => {
       const artifactSources = await resolveNamespaceArtifactSources(
         config.session.artifacts,
         manifest,
@@ -230,7 +291,8 @@ export function makeNamespaceMacRuntime(config: {
           {
             ...manifest.preparation,
             // The chat, not the machine: its Macs change and its identity must not.
-            resourceIdentity: `namespace:${chatId}`,
+            resourceIdentity: builder ? `namespace-builder:${cacheTag}` : `namespace:${chatId}`,
+            ...(builder ? { prepareCommands: buildCommands } : {}),
             requestHash: operation.requestHash,
             preparationHash: operation.request.preparationHash,
             ...(artifactSources.length ? { artifactSources } : {}),
@@ -259,10 +321,7 @@ export function makeNamespaceMacRuntime(config: {
           labels: { "t3.chat": chatId },
           cache: { tag: cacheTag, mountPoint: mount, sizeGb: CACHE_VOLUME_GB },
           deadline: Math.min((await now()) + MAC_LIFETIME_MS, retention),
-          size:
-            operation.request.provider === "namespace" && operation.request.size === "l"
-              ? "l"
-              : "m",
+          size,
           purpose: `t3 chat ${chatId}`,
         });
         stop("mac.create");
@@ -278,6 +337,8 @@ export function makeNamespaceMacRuntime(config: {
           maxAgeSeconds: TEMPLATE_MAX_AGE_SECONDS,
         });
         stopAdopt(`mac.adopt.${adoption}`);
+        // In parallel with this chat's own prepare, on another Mac, with its own phases.
+        if (adoption !== "hit") requestBuild(chat(operation, manifest, build));
         if (snapshot !== null) {
           const stopRestore = startProvisionPhase(record);
           const url = await artifacts.downloadUrl(snapshot.artifactPath);
@@ -300,26 +361,6 @@ export function makeNamespaceMacRuntime(config: {
           adoption,
           restored: snapshot?.generation ?? null,
         });
-        return { adoption };
-      },
-      seal: async ({ instanceId }) => {
-        const stop = startProvisionPhase(record);
-        try {
-          const digest = await sealChatTemplate(guestPort(instanceId), {
-            ...template,
-            files: manifest.preparation.files.map(({ scope, destination }) => ({
-              scope,
-              destination,
-            })),
-            derivedHomePaths,
-          });
-          stop("mac.seal");
-          return { sealed: true, digest };
-        } catch (cause) {
-          // The chat runs either way; only this site's cache stays unfilled.
-          log("namespace mac template not sealed", { chatId, instanceId, cause: String(cause) });
-          return { sealed: false };
-        }
       },
       save: async (step) => {
         const started = await now();
@@ -359,37 +400,10 @@ export function makeNamespaceMacRuntime(config: {
           savedAt: started,
         };
       },
-      depart: async ({ instanceId, departure }) => {
-        // Only a filler's sealed template may become the cache's next parent, and only as sealed:
-        // the chat ran with the volume writable. A scrub that fails or finds the template changed
-        // leaves this Mac to abandon; its snapshot is already recorded.
-        const current = await store.read(chatId);
-        const sealedTemplate =
-          current?.kind === "live" && current.mac.incarnation.instanceId === instanceId
-            ? current.mac.template
-            : undefined;
-        const leaving =
-          departure === "commit" &&
-          sealedTemplate !== undefined &&
-          (await scrubChatRoot(guestPort(instanceId), {
-            mount,
-            root,
-            templateDigest: sealedTemplate,
-          }).then(
-            () => true,
-            (cause: unknown) => {
-              log("namespace mac template not committed", {
-                chatId,
-                instanceId,
-                cause: String(cause),
-              });
-              return false;
-            },
-          ))
-            ? "commit"
-            : "abandon";
-        await instances.depart(instanceId, leaving);
-        log("namespace mac departed", { chatId, instanceId, departure: leaving });
+      depart: async ({ instanceId }) => {
+        // A chat ran on this volume, so nothing of it may become the cache's next parent.
+        await instances.depart(instanceId, "abandon");
+        log("namespace mac departed", { chatId, instanceId });
       },
       expire: async ({ paths }) => {
         for (const path of paths) await artifacts.expire(path);
@@ -407,7 +421,142 @@ export function makeNamespaceMacRuntime(config: {
         now: await now(),
       }),
     };
-    return { chatId, ports, prepareGuest, readied: () => ready };
+    return {
+      chatId,
+      ports,
+      prepareGuest,
+      stageRuntime,
+      template,
+      frozen,
+      repository,
+      cacheTag,
+      size,
+      files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
+      derivedHomePaths,
+      readied: () => ready,
+    };
+  };
+  type ChatContext = ReturnType<typeof chat>;
+
+  const isCurrent = async (context: ChatContext) => {
+    const current = await config.currentTemplate(context.repository);
+    return (
+      current?.key === context.frozen.key && current.runtimeSha256 === context.frozen.runtimeSha256
+    );
+  };
+
+  /**
+   * Fills the cache volume of whatever site Namespace places it in with a template prepared from
+   * this chat's manifest: a Mac with no chat, no turns and no background commands, which adopts,
+   * prepares, seals, scrubs and commits. A current template there is left as it is.
+   */
+  const buildTemplate = async (context: ChatContext) => {
+    const { cacheTag: tag } = context;
+    const labels = { "t3.builder": tag, ...managerLabel };
+    const started = await now();
+    const mac = await instances
+      .create({
+        labels,
+        cache: { tag, mountPoint: context.template.mount, sizeGb: CACHE_VOLUME_GB },
+        deadline: started + BUILDER_LIFETIME_MS,
+        size: context.size,
+        purpose: `t3 template ${tag}`,
+      })
+      .catch(async (cause: unknown) => {
+        // A create that failed after Namespace made the instance leaves it running.
+        await abandonAll(labels).catch(() => undefined);
+        throw cause;
+      });
+    const { instanceId } = mac;
+    const port = guestPort(instanceId);
+    let adoption: string | null = null;
+    let departure: Departure = "abandon";
+    try {
+      adoption = await adoptChatTemplate(port, {
+        ...context.template,
+        instanceId,
+        maxAgeSeconds: TEMPLATE_MAX_AGE_SECONDS,
+      });
+      if (adoption === "hit") return;
+      await context.stageRuntime(instanceId);
+      await context.prepareGuest(instanceId, true);
+      // The config may have moved on while this prepared; a superseded template never replaces one.
+      if (!(await isCurrent(context))) {
+        log("namespace mac template build skipped", { tag, reason: "superseded" });
+        return;
+      }
+      const templateDigest = await sealChatTemplate(port, {
+        ...context.template,
+        files: context.files,
+        derivedHomePaths: context.derivedHomePaths,
+      });
+      await scrubChatRoot(port, {
+        mount: context.template.mount,
+        root: context.template.root,
+        templateDigest,
+      });
+      departure = "commit";
+    } finally {
+      await instances.depart(instanceId, departure);
+      log("namespace mac template build", {
+        tag,
+        instanceId,
+        site: mac.site,
+        adoption,
+        departure,
+        durationMs: (await now()) - started,
+      });
+    }
+  };
+
+  /** Starts a build unless the chat is out of date, one runs already, or the bounds say wait. */
+  const buildIfDue = async (context: ChatContext) => {
+    const tag = context.cacheTag;
+    await swept;
+    if (!(await isCurrent(context))) {
+      log("namespace mac template build skipped", { tag, reason: "superseded" });
+      return;
+    }
+    const at = await now();
+    const history = buildHistory.get(tag) ?? { started: [], failures: 0, retryAt: 0 };
+    const due = nextBuild(history, at);
+    if (due !== "due") {
+      warn("namespace mac template build suppressed", { tag, reason: due });
+      return;
+    }
+    // Another manager, or this one before a restart, may be building already.
+    if ((await instances.list({ "t3.builder": tag })).length > 0) {
+      log("namespace mac template build skipped", { tag, reason: "running" });
+      return;
+    }
+    const started = {
+      ...history,
+      started: [...history.started.filter((before) => at - before < 3_600_000), at],
+    };
+    buildHistory.set(tag, started);
+    try {
+      await buildTemplate(context);
+      buildHistory.set(tag, { ...started, failures: 0, retryAt: 0 });
+    } catch (cause) {
+      buildHistory.set(tag, failedBuild(started, at));
+      throw cause;
+    }
+  };
+
+  /** At most one build per repository's cache at a time; a failed one waits for the next miss. */
+  const requestBuild = (context: ChatContext) => {
+    if (building.has(context.cacheTag)) return;
+    building.add(context.cacheTag);
+    startBuild(() =>
+      buildIfDue(context)
+        .catch((cause: unknown) =>
+          warn("namespace mac template build failed", {
+            tag: context.cacheTag,
+            cause: String(cause),
+          }),
+        )
+        .finally(() => building.delete(context.cacheTag)),
+    );
   };
 
   const liveMac = (record: ChatRecord | null) => {

@@ -127,7 +127,10 @@ def trash(mount, path, wait=False):
     if wait:
         rmtree(target)
     else:
-        subprocess.Popen(['sh', '-c', 'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"', 'sh', str(target)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        delete_later(target)
+
+def delete_later(path):
+    subprocess.Popen(['sh', '-c', 'sudo -n rm -rf "$1" 2>/dev/null || { chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"; }', 'sh', str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 def contained(base, relative):
     parts = pathlib.PurePosixPath(relative).parts
@@ -657,6 +660,28 @@ def adopt(spec):
     template = mount / 'template'
     instance = spec['instanceId']
     with locked(mount / 'cache.lock'):
+        # Anything else that arrived with the volume is another Mac's, left by a destroy that
+        # committed: a builder's half-sealed copy of a chat root holds that chat's credentials.
+        # It goes before anything here reads the volume. A leftover root is purged below.
+        for entry in sorted(os.listdir(mount)):
+            if entry == 'root' or VOLUME_ENTRIES.fullmatch(entry):
+                continue
+            if entry.startswith('trash-'):
+                # Another Mac's bin, whose deletion died with it: moved and shut now, deleted in
+                # the background by root, which needs no permission to read it.
+                target = mount / ('trash-' + uuid.uuid4().hex)
+                os.rename(mount / entry, target)
+                with contextlib.suppress(OSError):
+                    os.chmod(target, 0)
+                delete_later(target)
+            elif entry in MACOS_FOLDERS:
+                # macOS may recreate these at any moment, which must not stop a chat from opening.
+                try:
+                    clear_entry(mount, entry)
+                except Exception as error:
+                    sys.stderr.write('Guest chat state kept ' + entry + ': ' + str(error) + '\n')
+            else:
+                clear_entry(mount, entry)
         # A receipt counts only on the Mac that wrote it. A root or template that
         # arrived with the volume is another machine's, left by a commit that
         # should have been an abandon.
@@ -816,6 +841,19 @@ def seal(spec):
         atomic(marker_path, json.dumps({'format': FORMAT, 'root': str(root), 'repository': spec['repository'], 'key': spec['key'], 'runtimeSha256': spec['runtimeSha256'], 'sealedAt': time.time(), 'sealedFrom': adopted['nonce']}))
         return {'sealed': True, 'digest': template_digest(mount)}
 
+# Folders macOS makes on a volume by itself. A chat clears them as best it can; scrub insists.
+MACOS_FOLDERS = ('.Trashes', '.TemporaryItems', '.DocumentRevisions-V100')
+
+def clear_entry(mount, entry):
+    try:
+        remove(mount / entry)
+    except OSError:
+        # macOS makes its trash folders root-owned; Namespace Macs have passwordless sudo.
+        for command in (['chflags', '-R', 'nouchg'], ['rm', '-rf']):
+            subprocess.run(['sudo', '-n', *command, str(mount / entry)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.lexists(mount / entry):
+        raise RuntimeError('The volume still holds ' + entry)
+
 def scrub(spec):
     mount, root = pathlib.Path(spec['mount']), pathlib.Path(spec['root'])
     with locked(mount / 'cache.lock'):
@@ -823,15 +861,7 @@ def scrub(spec):
             trash(mount, root, wait=True)
         for entry in os.listdir(mount):
             if not VOLUME_ENTRIES.fullmatch(entry):
-                try:
-                    remove(mount / entry)
-                except OSError:
-                    # macOS makes its trash folders root-owned; Namespace Macs have passwordless sudo.
-                    for command in (['chflags', '-R', 'nouchg'], ['rm', '-rf']):
-                        subprocess.run(['sudo', '-n', *command, str(mount / entry)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        left = sorted(entry for entry in os.listdir(mount) if not VOLUME_ENTRIES.fullmatch(entry))
-        if left:
-            raise RuntimeError('The volume still holds ' + ', '.join(left))
+                clear_entry(mount, entry)
         expected = spec.get('templateDigest')
         # The chat ran with the volume writable: anything it planted in the template would run
         # in every later chat that adopts it.
@@ -871,7 +901,7 @@ async function runVerb<A>(
   return decode(result.stdout);
 }
 
-/** What the guest found on the cache volume. Only a new chat that adopted no current template fills one. */
+/** What the guest found on the cache volume. Anything but `hit` asks the manager for a builder. */
 export const CacheProbe = Schema.Literals(["hit", "stale", "miss"]);
 export type CacheProbe = typeof CacheProbe.Type;
 
@@ -961,9 +991,9 @@ export function saveChat(
 
 /**
  * Copies a freshly prepared, never-used root into the volume's template and
- * writes the marker last. Run by a chat that filled a miss, before its first
- * turn. Returns the template's digest, which the manager keeps and `scrubChatRoot`
- * checks before the volume may be committed.
+ * writes the marker last. Run only by a builder Mac, which hosts no chat.
+ * Returns the template's digest, which `scrubChatRoot` checks before the
+ * volume may be committed.
  */
 export async function sealChatTemplate(
   port: RemotePreparationPort,
@@ -981,7 +1011,7 @@ export async function sealChatTemplate(
 /**
  * Removes the chat root and anything else but the template from the volume, so committing it
  * leaves only the template. With `templateDigest`, refuses a template that changed since it was
- * sealed, since its chat ran with the volume writable.
+ * sealed: whatever changed it would run in every chat that adopts it.
  */
 export async function scrubChatRoot(
   port: RemotePreparationPort,
