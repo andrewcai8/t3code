@@ -345,6 +345,42 @@ describe("guest chat state", () => {
     expect(statusLines(NodePath.join(w.root, "workspace"))).toEqual(workspaceStatus);
   });
 
+  it("reopens a chat whose branch moved past the revision it was created at", async () => {
+    const w = await world();
+    const store = await artifactStore();
+    const c1 = w.head();
+    await w.newMac("empty");
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    const chat = await w.prepareInput("chat-1", c1);
+    const ready = await prepareRemoteHost(localPort, chat);
+    // The agent pulls what landed on main since the chat began.
+    const c2 = await w.advance("c2");
+    const workspace = NodePath.join(w.root, "workspace");
+    git(workspace, "fetch", "-q", "origin", "main");
+    git(workspace, "merge", "-q", "--ff-only", "FETCH_HEAD");
+    const saved = await saveChat(localPort, {
+      root: w.root,
+      mode: "final",
+      uploadUrl: store.url("chat-1/1"),
+      maxBytes: 64 * 1024 * 1024,
+      previousFingerprint: null,
+    });
+    if (saved.kind !== "saved") throw new Error("expected a saved snapshot");
+    await w.depart("abandon");
+
+    await w.newMac("empty");
+    expect(await adoptChatTemplate(localPort, templateIdentity(w))).toBe("miss");
+    await restoreChat(localPort, {
+      root: w.root,
+      snapshot: { url: store.url("chat-1/1"), sha256: saved.sha256 },
+    });
+    const reopened = await prepareRemoteHost(localPort, chat);
+    expect([reopened.environmentId, git(workspace, "rev-parse", "HEAD")]).toEqual([
+      ready.environmentId,
+      c2,
+    ]);
+  });
+
   it("converges when a restore is rerun after stopping at any point", async () => {
     const w = await world();
     const store = await artifactStore();

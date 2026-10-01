@@ -553,7 +553,11 @@ def prepare(spec):
             installing = start(['sh', '-c', install], home, env)
         checkout = root / 'workspace.partial'
         fetching = None
-        if repository is not None and not project.exists():
+        # Only a checkout made here is at the requested revision. One that exists is the chat's
+        # own: it may have pulled past that revision, and a restored one holds only shallow
+        # history, so the revision need not even be present.
+        creating = repository is not None and not project.exists()
+        if creating:
             # Keep a partial clone across retries. Wiping it restarts a
             # large fetch from zero after every timeout.
             if not (checkout / '.git').is_dir():
@@ -715,7 +719,8 @@ def prepare(spec):
             with step('repositoryVerify'):
                 if run(['git', 'remote', 'get-url', 'origin'], project, env) != repository['url']:
                     raise RuntimeError('Repository identity conflict')
-                run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
+                if creating:
+                    run(['git', 'merge-base', '--is-ancestor', repository['revision'], 'HEAD'], project, env)
         with step('repositoryRefresh'):
             refresh_error = fetch_followed()
         with step('workspaceFiles'):
