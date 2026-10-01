@@ -64,6 +64,7 @@ const noRuntimePorts = {
   },
   readFirstTurn: async () => null,
   forgetFirstTurn: async () => {},
+  listFirstTurns: async () => [],
 } satisfies Pick<
   ProvisionControlPorts,
   | "pinnedRuntime"
@@ -72,6 +73,7 @@ const noRuntimePorts = {
   | "deliverFirstTurn"
   | "readFirstTurn"
   | "forgetFirstTurn"
+  | "listFirstTurns"
 >;
 
 it.effect(
@@ -569,6 +571,7 @@ it.effect(
           deliverFirstTurn: noRuntimePorts.deliverFirstTurn,
           readFirstTurn: noRuntimePorts.readFirstTurn,
           forgetFirstTurn: noRuntimePorts.forgetFirstTurn,
+          listFirstTurns: noRuntimePorts.listFirstTurns,
         },
         leases,
       );

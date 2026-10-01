@@ -155,8 +155,10 @@ it("keeps a chat's first message only until it settles, and still matches retrie
       ),
     ).rejects.toBeInstanceOf(ProvisionRequestConflict);
 
+    expect(await f.store.listFirstTurns()).toEqual([withChat.requestId]);
     await f.store.forgetFirstTurn(withChat.requestId);
     expect(await f.store.readFirstTurn(manifest)).toBeNull();
+    expect(await f.store.listFirstTurns()).toEqual([]);
     expect(await f.store.freeze(withChat, f.config, f.resolver, [f.profile])).toEqual(manifest);
   } finally {
     await f.cleanup();

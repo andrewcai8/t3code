@@ -93,11 +93,22 @@ export interface ProvisionControlPorts {
   ) => Promise<ProvisionFirstTurn | null>;
   /** Deletes the first message once it is settled either way. */
   readonly forgetFirstTurn: (id: ProvisionRequestId) => Promise<void>;
+  /** Every request whose first message is still kept. */
+  readonly listFirstTurns: () => Promise<ReadonlyArray<ProvisionRequestId>>;
 }
-/** Retries right after ready, so a box slow to answer does not wait for the next upkeep pass. */
-const FIRST_TURN_RETRY = Schedule.exponential(Duration.seconds(1)).pipe(
-  Schedule.upTo({ times: 5 }),
-);
+/**
+ * Right after ready the host retries a box slow to answer, but only for FIRST_TURN_BUDGET: the
+ * ready result waits on it, and a page that hears `pending` sends the message itself. Upkeep owns
+ * every later try.
+ */
+const FIRST_TURN_RETRY = Schedule.spaced(Duration.seconds(1));
+const FIRST_TURN_BUDGET = Duration.seconds(6);
+/** States a request never leaves; a first message kept for one of them is never sent. */
+const TERMINAL_STATES: ReadonlySet<ProvisionOperation["state"]["kind"]> = new Set([
+  "cancel_requested",
+  "failed",
+  "disposed",
+]);
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
 /**
@@ -320,7 +331,35 @@ export function makeProvisionControl(
   const settleChat = (operation: ProvisionOperation) =>
     settleChatOnce(operation).pipe(
       Effect.repeat({ schedule: firstTurnRetry, while: (status) => status === "pending" }),
+      Effect.timeoutOption(FIRST_TURN_BUDGET),
+      Effect.map(Option.getOrElse(() => "pending" as const)),
     );
+  /**
+   * Deletes every kept first message the host no longer owes: its request ended or was
+   * cancelled, its box stopped or went away before taking the turn, or the turn settled where
+   * the settle above did not run, such as the reaper's deadline. A turn whose box stopped first
+   * is given up, so it can never start later from a message that is gone.
+   */
+  const forgetUnowedFirstTurns = Effect.gen(function* () {
+    for (const requestId of yield* promise(() => ports.listFirstTurns())) {
+      const operation = yield* store.get(requestId).pipe(Effect.option);
+      const state = Option.isSome(operation) ? operation.value.state.kind : null;
+      if (state !== null && state !== "ready" && !TERMINAL_STATES.has(state)) continue;
+      if (state === "ready") {
+        const lease = yield* promise(() => leases.findById(requestId));
+        if (lease?.firstTurn?.status === "pending") {
+          if (lease.state === "active") continue;
+          yield* promise(() =>
+            leases.settleFirstTurn(requestId, {
+              status: "failed",
+              reason: "The box stopped before it took the turn.",
+            }),
+          );
+        }
+      }
+      yield* promise(() => ports.forgetFirstTurn(requestId));
+    }
+  });
   return {
     settleChat,
     /** Retries every awake box whose chat's first turn has not started. */
@@ -334,6 +373,7 @@ export function makeProvisionControl(
         const operation = yield* store.get(id.value).pipe(Effect.option);
         if (Option.isSome(operation)) yield* settleChatOnce(operation.value);
       }
+      yield* forgetUnowedFirstTurns;
     }).pipe(Effect.ignore),
     provision: Effect.fn("EnvironmentControl.provision")(function* (
       input: EnvironmentProvisionInput,
