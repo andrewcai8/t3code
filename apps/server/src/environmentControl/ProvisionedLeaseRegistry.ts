@@ -21,7 +21,7 @@ export const FirstTurnState = Schema.Union([
 ]);
 export type FirstTurnState = typeof FirstTurnState.Type;
 /** A first turn the box has not taken this long after its lease began is given up on. */
-export const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
+const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
 /** Whether a lease's first turn is still owed and its deadline has passed. */
 export const firstTurnOverdue = (lease: ProvisionedLease, now: number) =>
   lease.firstTurn?.status === "pending" &&
