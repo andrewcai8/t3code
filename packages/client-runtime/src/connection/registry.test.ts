@@ -19,6 +19,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Scheduler from "effect/Scheduler";
@@ -71,6 +72,7 @@ import {
 import * as RpcSession from "../rpc/session.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { UserPresence, makeUserPresence } from "./presence.ts";
 import { watchDiscoveredCompatibility } from "./layer.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
@@ -137,6 +139,21 @@ const HOST_BOX_PROFILE = new BearerConnectionProfile({
   httpBaseUrl: "https://e2b-box.example.test",
   wsBaseUrl: "wss://e2b-box.example.test",
 });
+
+/** How the host lists `HOST_BOX`. */
+const LISTED_HOST_BOX = {
+  requestId: "11111111-1111-4111-8111-111111111111",
+  leaseId: "lease-e2b-box",
+  sandboxId: "sandbox-e2b-box",
+  lifecycle: "active",
+  environmentId: HOST_BOX.environmentId,
+  provider: "e2b",
+  label: "e2b.local",
+  repository: null,
+  threadId: null,
+  createdAt: "2026-10-01T00:00:00.000Z",
+  expiresAt: "2026-10-02T00:00:00.000Z",
+} as unknown as DiscoveredProvisionedEnvironment;
 
 const SSH_TARGET: DesktopSshEnvironmentTarget = {
   alias: "test",
@@ -1010,19 +1027,7 @@ describe("EnvironmentRegistry", () => {
 
   it.effect("a connected box keeps its lease alive through its host until its chat closes", () =>
     Effect.gen(function* () {
-      const listed = {
-        requestId: "11111111-1111-4111-8111-111111111111",
-        leaseId: "lease-e2b-box",
-        sandboxId: "sandbox-e2b-box",
-        lifecycle: "active",
-        environmentId: HOST_BOX.environmentId,
-        provider: "e2b",
-        label: "e2b.local",
-        repository: null,
-        threadId: null,
-        createdAt: "2026-10-01T00:00:00.000Z",
-        expiresAt: "2026-10-02T00:00:00.000Z",
-      } as unknown as DiscoveredProvisionedEnvironment;
+      const listed = LISTED_HOST_BOX;
       const { harness, touches } = yield* makeBoxWakeHarness([{ kind: "resumed" }], {
         serving: true,
         listProvisioned: [listed],
@@ -1058,6 +1063,99 @@ describe("EnvironmentRegistry", () => {
         expect(yield* Ref.get(touches)).toHaveLength(2);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a box's lease is renewed only while its user is here: not while the app is hidden or untouched for an hour",
+    () =>
+      Effect.gen(function* () {
+        const visible = yield* Queue.unbounded<boolean>();
+        const inputs = yield* Queue.unbounded<void>();
+        const presence = yield* makeUserPresence({
+          visible: Stream.fromQueue(visible),
+          inputs: Stream.fromQueue(inputs),
+        });
+        yield* Queue.offer(visible, true);
+        const { harness, touches } = yield* makeBoxWakeHarness([{ kind: "resumed" }], {
+          serving: true,
+          listProvisioned: [LISTED_HOST_BOX],
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "connected",
+          );
+          const touchCount = Effect.fn("touchCount")(function* (elapsed: Duration.Input) {
+            yield* TestClock.adjust(elapsed);
+            return (yield* Ref.get(touches)).length;
+          });
+          expect(yield* touchCount("1 second")).toBe(1);
+
+          yield* Queue.offer(visible, false);
+          expect(yield* touchCount("20 minutes")).toBe(1);
+          yield* Queue.offer(visible, true);
+          expect(yield* touchCount("1 second")).toBe(2);
+
+          // Input a minute after coming back keeps the user here until an hour after it, past
+          // the beat at 60 minutes and short of the one at 64.
+          yield* TestClock.adjust("1 minute");
+          yield* Queue.offer(inputs, undefined);
+          expect(yield* touchCount("61 minutes")).toBe(17);
+          expect(yield* touchCount("1 hour")).toBe(17);
+          yield* Queue.offer(inputs, undefined);
+          expect(yield* touchCount("1 second")).toBe(18);
+        }).pipe(
+          Effect.provide(harness.layer),
+          Effect.provideService(UserPresence, presence),
+          Effect.scoped,
+        );
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("a box paused while its user is away wakes only once they come back", () =>
+    Effect.gen(function* () {
+      const visible = yield* Queue.unbounded<boolean>();
+      const presence = yield* makeUserPresence({
+        visible: Stream.fromQueue(visible),
+        inputs: Stream.never,
+      });
+      yield* Queue.offer(visible, false);
+      const { harness, resumes } = yield* makeBoxWakeHarness([{ kind: "resumed" }]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const phases = yield* recordPhases(registry, HOST_BOX.environmentId);
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* registry.demand(HOST_BOX.environmentId);
+        yield* TestClock.adjust("10 minutes");
+        const away = yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "backoff",
+        );
+        expect(away.lastFailure?.reason).toBe("not-serving");
+        expect(yield* Ref.get(phases)).not.toContain("waking");
+        expect(yield* Ref.get(resumes)).toEqual([]);
+
+        yield* Queue.offer(visible, true);
+        yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (state) => state.phase === "connected",
+        );
+        expect(yield* Ref.get(resumes)).toEqual([{ environmentId: HOST_BOX.environmentId }]);
+      }).pipe(
+        Effect.provide(harness.layer),
+        Effect.provideService(UserPresence, presence),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
   it.effect("a legacy saved box stops connecting in the background once it is marked", () =>
