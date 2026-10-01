@@ -1,6 +1,13 @@
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
-import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  MessageId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
+import { ModelSelection, ProviderInteractionMode, RuntimeMode } from "./orchestration.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
@@ -71,6 +78,30 @@ export const SavedEnvironmentAddress = Schema.Struct({
 });
 export type SavedEnvironmentAddress = typeof SavedEnvironmentAddress.Type;
 
+/** The first message of the chat a box is provisioned for, as that chat's first turn sends it. */
+export const ProvisionFirstTurn = Schema.Struct({
+  messageId: MessageId,
+  text: Schema.String,
+  title: TrimmedNonEmptyString,
+  titleSeed: Schema.optional(TrimmedNonEmptyString),
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  createdAt: IsoDateTime,
+});
+export type ProvisionFirstTurn = typeof ProvisionFirstTurn.Type;
+
+/**
+ * The chat a box is provisioned for. The chat owns the box from the moment the box is ready, and
+ * the host starts `firstTurn` on it whether or not a client is still connected. A message with
+ * attachments or context has no `firstTurn`; the page that sent it uploads and sends it itself.
+ */
+export const ProvisionChat = Schema.Struct({
+  threadId: ThreadId,
+  firstTurn: Schema.optional(ProvisionFirstTurn),
+});
+export type ProvisionChat = typeof ProvisionChat.Type;
+
 /**
  * A cloud environment asked for on demand, rather than declared in advance.
  *
@@ -112,8 +143,17 @@ export const EnvironmentProvisionInput = Schema.Struct({
       }),
     ).check(Schema.isMaxLength(256)),
   ),
+  chat: Schema.optional(ProvisionChat),
 });
 export type EnvironmentProvisionInput = typeof EnvironmentProvisionInput.Type;
+
+/**
+ * Where the host's start of a chat's first turn stands. `started` means the box took the turn
+ * and the page must not send it. Anything else, including a host too old to report this, leaves
+ * the first message to the page.
+ */
+export const ProvisionFirstTurnStatus = Schema.Literals(["pending", "started", "failed"]);
+export type ProvisionFirstTurnStatus = typeof ProvisionFirstTurnStatus.Type;
 
 export const ProvisionedEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
@@ -125,6 +165,7 @@ export const ProvisionedEnvironment = Schema.Struct({
   sourceRevision: Schema.NullOr(Schema.String),
   t3Revision: Schema.String,
   artifactSha256: Schema.String,
+  firstTurn: Schema.optional(ProvisionFirstTurnStatus),
   control: Schema.Struct({
     preparationRoot: Schema.String,
     brokerCredentialPath: Schema.String,

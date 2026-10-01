@@ -59,7 +59,20 @@ const noRuntimePorts = {
     throw new Error("Unexpected setRuntime");
   },
   prepare: () => Effect.die("Unexpected prepare"),
-} satisfies Pick<ProvisionControlPorts, "pinnedRuntime" | "setRuntime" | "prepare">;
+  deliverFirstTurn: async () => {
+    throw new Error("Unexpected first turn");
+  },
+  readFirstTurn: async () => null,
+  forgetFirstTurn: async () => {},
+} satisfies Pick<
+  ProvisionControlPorts,
+  | "pinnedRuntime"
+  | "setRuntime"
+  | "prepare"
+  | "deliverFirstTurn"
+  | "readFirstTurn"
+  | "forgetFirstTurn"
+>;
 
 it.effect(
   "ready survives a lost lease receipt, attachment uses fresh grants, and heartbeat extends compute before the lease",
@@ -553,6 +566,9 @@ it.effect(
             return artifact;
           },
           prepare: ports.prepare,
+          deliverFirstTurn: noRuntimePorts.deliverFirstTurn,
+          readFirstTurn: noRuntimePorts.readFirstTurn,
+          forgetFirstTurn: noRuntimePorts.forgetFirstTurn,
         },
         leases,
       );

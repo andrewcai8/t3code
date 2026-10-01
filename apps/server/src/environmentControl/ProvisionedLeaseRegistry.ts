@@ -15,6 +15,18 @@ export const ProvisionedLeaseState = Schema.Literals([
 ]);
 export type ProvisionedLeaseState = typeof ProvisionedLeaseState.Type;
 
+export const FirstTurnState = Schema.Union([
+  Schema.Struct({ status: Schema.Literals(["pending", "started"]) }),
+  Schema.Struct({ status: Schema.Literal("failed"), reason: Schema.String }),
+]);
+export type FirstTurnState = typeof FirstTurnState.Type;
+/** A first turn the box has not taken this long after its lease began is given up on. */
+const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
+/** Whether a lease's first turn is still owed and its deadline has passed. */
+export const firstTurnOverdue = (lease: ProvisionedLease, now: number) =>
+  lease.firstTurn?.status === "pending" &&
+  now - Date.parse(lease.createdAt) > FIRST_TURN_DEADLINE_MS;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -47,6 +59,11 @@ export const StoredProvisionedLease = Schema.Struct({
   companionInstanceIds: Schema.optional(Schema.Array(Schema.String)),
   state: ProvisionedLeaseState,
   owner: Schema.NullOr(ProvisionedLeaseOwner),
+  /**
+   * The host's start of the owner's first turn. A lease whose turn is `pending` is not idle,
+   * since nothing has run on it yet, until FIRST_TURN_DEADLINE_MS after it began.
+   */
+  firstTurn: Schema.optional(FirstTurnState),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
@@ -73,6 +90,10 @@ export interface ProvisionedLeaseRegistry {
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly namespaceResource?: NamespaceResource;
     readonly retentionDeadline?: string;
+    /** The chat the box was provisioned for, which owns it from registration. */
+    readonly owner?: ProvisionedLeaseOwner;
+    /** The host owes the owner a first turn on this box. */
+    readonly firstTurnPending?: boolean;
     readonly now?: Date;
   }) => Promise<ProvisionedLease>;
   readonly claim: (input: {
@@ -81,6 +102,15 @@ export interface ProvisionedLeaseRegistry {
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly touch: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
+  /**
+   * Records how a pending first turn ended. A failed one also drops the owner: that chat may
+   * never exist, and the page that sends the message itself claims the box again.
+   */
+  readonly settleFirstTurn: (
+    leaseId: string,
+    outcome: Exclude<FirstTurnState, { status: "pending" }>,
+    now?: Date,
+  ) => Promise<void>;
   readonly findById: (leaseId: string) => Promise<ProvisionedLease | null>;
   readonly findBySandbox: (sandboxId: string) => Promise<ProvisionedLease | null>;
   readonly beginRelease: (input: {
@@ -202,7 +232,8 @@ export function createProvisionedLeaseRegistry(
             ? {}
             : { companionInstanceIds: input.companionInstanceIds }),
           state: "active",
-          owner: null,
+          owner: input.owner ?? null,
+          ...(input.firstTurnPending ? { firstTurn: { status: "pending" as const } } : {}),
           createdAt: now,
           updatedAt: now,
           expiresAt: new Date(
@@ -271,6 +302,20 @@ export function createProvisionedLeaseRegistry(
         next[index] = updated;
         return { leases: next, value: updated };
       }),
+    settleFirstTurn: (leaseId, outcome, now) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) =>
+          lease.leaseId !== leaseId || lease.firstTurn?.status !== "pending"
+            ? lease
+            : {
+                ...lease,
+                firstTurn: outcome,
+                ...(outcome.status === "failed" ? { owner: null } : {}),
+                updatedAt: nowIso(now),
+              },
+        ),
+        value: undefined,
+      })),
     findById: (leaseId) =>
       consistentRead((leases) => leases.find((lease) => lease.leaseId === leaseId) ?? null),
     findBySandbox: (sandboxId) =>

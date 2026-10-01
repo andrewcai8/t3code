@@ -359,7 +359,12 @@ export interface CloudProvisionPorts {
 }
 
 export type CloudProvisionOutcome =
-  | { readonly kind: "ready"; readonly projectRef: ScopedProjectRef }
+  | {
+      readonly kind: "ready";
+      readonly projectRef: ScopedProjectRef;
+      /** The host started the chat's first turn on the box, so the page must not send it. */
+      readonly firstTurnStarted: boolean;
+    }
   | { readonly kind: "failed"; readonly message: string }
   /** The draft cancelled or replaced its request; there is nothing to show. */
   | { readonly kind: "cancelled" };
@@ -462,7 +467,11 @@ export async function provisionCloudEnvironment(
         message: `${label} ready, but its project is still loading. Open a new ${label} chat after the project appears.`,
       };
     }
-    return { kind: "ready", projectRef: scopeProjectRef(environment.environmentId, projectId) };
+    return {
+      kind: "ready",
+      projectRef: scopeProjectRef(environment.environmentId, projectId),
+      firstTurnStarted: environment.firstTurn === "started",
+    };
   } catch (error) {
     if (!requests.isActive(draft.draftId)) return { kind: "cancelled" };
     return {

@@ -135,12 +135,34 @@ function harness(answers: {
 }
 
 describe("provisionCloudEnvironment", () => {
+  it("leaves the first message to the page unless the host says it started it", async () => {
+    for (const [firstTurn, firstTurnStarted] of [
+      [undefined, false],
+      ["pending", false],
+      ["failed", false],
+      ["started", true],
+    ] as const) {
+      const { ports } = harness({
+        provision: (requestId) => ({
+          kind: "ready",
+          requestId,
+          environment: { ...readyEnvironment, ...(firstTurn ? { firstTurn } : {}) },
+        }),
+      });
+      expect(await provisionCloudEnvironment(draft, ports)).toMatchObject({
+        kind: "ready",
+        firstTurnStarted,
+      });
+    }
+  });
+
   it("advances through the phases in order and points the draft at the published project", async () => {
     const { calls, phases, ports } = harness({});
 
     expect(await provisionCloudEnvironment(draft, ports)).toEqual({
       kind: "ready",
       projectRef: { environmentId: "prepared", projectId: "project" },
+      firstTurnStarted: false,
     });
     expect(phases).toEqual(["creating", "pairing", "loading-project"]);
     expect(calls).toEqual([

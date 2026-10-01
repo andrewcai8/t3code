@@ -463,6 +463,43 @@ describe("managed cloud commands", () => {
       expect(running).toBe(true);
     });
   });
+  it("never idles out a box whose chat's first turn has not started", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        providerInstanceId: "codex",
+        owner: { environmentId: "child", threadId: "thread" },
+        firstTurnPending: true,
+        now: new Date(Date.now() - 16 * 60_000),
+      });
+      const manager = createEnvironmentControl([], setup().driver, registry, async () => "idle");
+      await manager.reapExpiredLeases();
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+      await registry.settleFirstTurn("lease", { status: "started" });
+      await manager.reapExpiredLeases();
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+    });
+  });
+  it("gives up an overdue first turn itself, so a box no upkeep settles still pauses", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        providerInstanceId: "codex",
+        owner: { environmentId: "child", threadId: "thread" },
+        firstTurnPending: true,
+        now: new Date(Date.now() - 31 * 60_000),
+      });
+      const manager = createEnvironmentControl([], setup().driver, registry, async () => "idle");
+      await manager.reapExpiredLeases();
+      expect(await registry.findById("lease")).toMatchObject({
+        state: "paused",
+        owner: null,
+        firstTurn: { status: "failed", reason: "The box did not take the turn in time." },
+      });
+    });
+  });
   it("refresh only observes targets and never contacts or bootstraps the broker", async () => {
     const { manager, calls } = setup();
     const list = await manager.list();

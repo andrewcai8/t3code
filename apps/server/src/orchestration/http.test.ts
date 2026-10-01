@@ -185,8 +185,8 @@ describe("orchestration HTTP automation launch", () => {
             commandId: CommandId.make("blocked-http-turn"),
           }).pipe(Effect.flip);
           expect(error).toMatchObject({
-            _tag: "EnvironmentInternalError",
-            reason: "orchestration_dispatch_failed",
+            _tag: "EnvironmentRequestInvalidError",
+            reason: "invalid_command",
           });
           yield* dispatch({
             type: "thread.handoff.cancel",
@@ -254,6 +254,29 @@ describe("orchestration HTTP automation launch", () => {
         messageId: "automation-message",
         text: "Repair the reported bug and verify the result.",
       });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("answers a command the engine rejects as invalid, now and on every retry", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-http-rejected-" });
+      const [project, thread] = launchCommands(directory);
+      yield* Effect.gen(function* () {
+        yield* dispatch(project!);
+        yield* dispatch(thread!);
+        const duplicate = {
+          ...(thread as Extract<HttpTestCommand, { type: "thread.create" }>),
+          commandId: CommandId.make("automation-thread-create-again"),
+        };
+        for (const _attempt of [1, 2]) {
+          const error = yield* dispatch(duplicate).pipe(Effect.flip);
+          expect(error).toMatchObject({
+            _tag: "EnvironmentRequestInvalidError",
+            reason: "invalid_command",
+          });
+        }
+      }).pipe(Effect.provide(makeLayer(directory)));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

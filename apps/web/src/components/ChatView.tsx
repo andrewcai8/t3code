@@ -1,6 +1,10 @@
 import { isChatGptUsageLimitError } from "@t3tools/shared/usageLimits";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
-import { cancelProvisionRequest, forgetProvisionRequest } from "../cloud/provisionRequests";
+import {
+  cancelProvisionRequest,
+  forgetProvisionRequest,
+  provisionRequests,
+} from "../cloud/provisionRequests";
 import { cloudSends, patchDraftPendingEnvironmentSend } from "../cloud/cloudSends";
 import {
   claimProvisionedBox,
@@ -37,6 +41,7 @@ import {
   MessageId,
   type ModelSelection,
   type ProjectScript,
+  type ProvisionChat,
   type ProjectId,
   type ProviderApprovalDecision,
   type PreviewAnnotationPayload,
@@ -5023,6 +5028,7 @@ export default function ChatView(props: ChatViewProps) {
         readonly agentDriver: ProviderDriverKind;
         readonly modelSelection: ModelSelection;
       },
+      chat: ProvisionChat | undefined,
     ) => {
       if (
         !cloudProvisioningRequested ||
@@ -5042,6 +5048,7 @@ export default function ChatView(props: ChatViewProps) {
           providerInstanceId: cloudAccount.instanceId,
           agentDriver: handoff.agentDriver,
           ...cloudCloneSource(activeProject?.repositoryIdentity, cloudBaseBranch),
+          ...(chat ? { chat } : {}),
         },
       });
     },
@@ -8255,7 +8262,12 @@ export default function ChatView(props: ChatViewProps) {
               : {}),
           });
         }
-        await provisionCloudEnvironmentForSend(draftId, cloudHandoff);
+        // The request is reserved with its exact input, so a retry sends the chat it saved.
+        await provisionCloudEnvironmentForSend(
+          draftId,
+          cloudHandoff,
+          provisionRequests.current(draftId)?.input.chat,
+        );
         return;
       }
       const composerImagesSnapshot = [...composerImages];
@@ -8402,9 +8414,35 @@ export default function ChatView(props: ChatViewProps) {
         previewAnnotations: composerPreviewAnnotationsSnapshot,
         reviewComments: composerReviewCommentsSnapshot,
       };
+      const firstTurnTitleSeed =
+        assistantCitationsToPlainText(stripInlineContextReferences(trimmed)).trim() || "New thread";
+      // The host starts a plain-text first turn itself once the box is ready, so it runs whether
+      // or not this page is still open. Attachments and context still go out from this page.
+      const sendsFromHost =
+        composerAttachmentsSnapshot.length === 0 &&
+        composerTerminalContextsSnapshot.length === 0 &&
+        composerPreviewAnnotationsSnapshot.length === 0 &&
+        composerReviewCommentsSnapshot.length === 0;
+      const chat: ProvisionChat = {
+        threadId: activeThread.id,
+        ...(sendsFromHost
+          ? {
+              firstTurn: {
+                messageId: messageIdForSend,
+                text: outgoingMessageText,
+                title: truncate(firstTurnTitleSeed),
+                titleSeed: firstTurnTitleSeed,
+                modelSelection: cloudHandoff.modelSelection,
+                runtimeMode,
+                interactionMode: sendInteractionMode,
+                createdAt: messageCreatedAt,
+              },
+            }
+          : {}),
+      };
       // Not marked in flight: the setup phase holds the composer, and the held message's own
       // send starts the moment setup records ready, before this call returns.
-      await provisionCloudEnvironmentForSend(draftId, cloudHandoff);
+      await provisionCloudEnvironmentForSend(draftId, cloudHandoff, chat);
       return;
     }
     const threadIdForSend = activeThread.id;
@@ -9430,6 +9468,21 @@ export default function ChatView(props: ChatViewProps) {
     setPendingCloudSendEnvironmentId(null);
     setCloudProvisioningPhase(null);
     setCloudProvisioningError(null);
+    if (
+      useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend
+        ?.hostStartedFirstTurn
+    ) {
+      // The host confirmed it started this turn on the box, which its chat now owns. The draft
+      // becomes the thread as soon as the box reports it, so the page only stops tracking the
+      // request. Without that confirmation, from an older host or a turn the host could not
+      // start, the page sends the message itself below.
+      transferProvisionedSandboxLease(
+        draftId,
+        scopeThreadRef(pendingCloudSendEnvironmentId, threadId),
+      );
+      forgetProvisionRequest(draftId);
+      return;
+    }
     // Another tab may hold the same draft, and only one of them sends the held message. Until
     // this tab's turn comes the composer stays held, and leaving the draft drops the send here.
     const held = heldCloudSendSnapshotRef.current;
@@ -9457,6 +9510,7 @@ export default function ChatView(props: ChatViewProps) {
     draftId,
     onSend,
     pendingCloudSendEnvironmentId,
+    threadId,
   ]);
 
   const onRespondToApproval = useCallback(
