@@ -13,7 +13,11 @@ import {
 import { DPOP_RETRY_HINT, DPOP_UNKNOWN_HINT } from "../relay/errorPresentation.ts";
 import { ManagedRelayRequestFailedError } from "../relay/managedRelay.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
-import { RemoteEnvironmentAuthFetchError, RemoteEnvironmentAuthTimeoutError } from "../rpc/http.ts";
+import {
+  RemoteEnvironmentAuthFetchError,
+  RemoteEnvironmentAuthTimeoutError,
+  RemoteEnvironmentAuthUndeclaredStatusError,
+} from "../rpc/http.ts";
 
 describe("mapManagedRelayError", () => {
   it("keeps a timeout reported by the relay distinct from a local network failure", () => {
@@ -72,6 +76,28 @@ describe("mapManagedRelayError", () => {
     );
 
     expect(mapped.message).toBe(`Relay rejected the DPoP proof. ${DPOP_RETRY_HINT}`);
+  });
+});
+
+describe("mapRemoteEnvironmentError", () => {
+  it.each([404, 502, 503])("reads an undeclared %i as a box that is not serving yet", (status) => {
+    expect(
+      mapRemoteEnvironmentError(
+        new RemoteEnvironmentAuthUndeclaredStatusError("https://box.example.test/", status),
+      ),
+    ).toMatchObject({
+      _tag: "ConnectionTransientError",
+      reason: "not-serving",
+      detail: `Remote environment endpoint https://box.example.test/ returned undeclared status ${status}.`,
+    });
+  });
+
+  it("keeps an undeclared 500 a remote failure", () => {
+    expect(
+      mapRemoteEnvironmentError(
+        new RemoteEnvironmentAuthUndeclaredStatusError("https://box.example.test/", 500),
+      ),
+    ).toMatchObject({ _tag: "ConnectionTransientError", reason: "remote-unavailable" });
   });
 });
 

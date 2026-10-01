@@ -11,6 +11,7 @@ import {
 } from "./model.ts";
 import {
   connectionCatalogDisplayUrl,
+  connectionStatusName,
   connectionStatusText,
   connectionStatusTitle,
   presentEnvironmentConnection,
@@ -52,6 +53,33 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 }
 
 describe("connection presentation", () => {
+  it("names a cloud box by its role and anything else by its label", () => {
+    const box = new BearerConnectionTarget({
+      ...TARGET,
+      label: "eme8vbl7bl7fe",
+      box: { managerId: EnvironmentId.make("host") },
+    });
+    expect(connectionStatusName(box)).toBe("this chat's cloud machine");
+    expect(connectionStatusName(TARGET)).toBe("Remote environment");
+  });
+
+  it("says a box whose host is resuming it is waking up, not failing", () => {
+    const connection = presentConnectionState(
+      supervisorState({
+        phase: "waking",
+        stage: null,
+        lastFailure: new ConnectionTransientError({
+          reason: "not-serving",
+          detail:
+            "Remote environment endpoint https://box.example.test/ returned undeclared status 502.",
+        }),
+      }),
+    );
+
+    expect(connection).toEqual({ phase: "waking", error: null, traceId: null });
+    expect(connectionStatusText(connection)).toBe("Waking up...");
+  });
+
   it("labels a blocked protocol as unsupported", () => {
     const connection = presentConnectionState(
       supervisorState({

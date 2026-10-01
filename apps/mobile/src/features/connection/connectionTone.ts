@@ -15,6 +15,12 @@ export function connectionTone(state: RemoteClientConnectionState): StatusTone {
         pillClassName: "bg-warning",
         textClassName: "text-warning-foreground",
       };
+    case "waking":
+      return {
+        label: "Waking up",
+        pillClassName: "bg-warning",
+        textClassName: "text-warning-foreground",
+      };
     case "connecting":
       return {
         label: "Connecting",

@@ -16,6 +16,8 @@ function noticeTitle(phase: EnvironmentConnectionPhase, environmentLabel: string
       return `Connecting to ${environmentLabel}...`;
     case "reconnecting":
       return `Reconnecting to ${environmentLabel}...`;
+    case "waking":
+      return `${environmentLabel.charAt(0).toUpperCase()}${environmentLabel.slice(1)} is waking up...`;
     case "unsupported":
       return "Client not supported";
     case "error":
@@ -42,6 +44,8 @@ function noticeDetail(
     case "connecting":
     case "reconnecting":
       return `The ${resourceName} will load as soon as the environment is ready.`;
+    case "waking":
+      return "This can take a few minutes. It reconnects on its own.";
     case "unsupported":
       return "Use compatible versions of the app and server to connect.";
     case "available":
@@ -59,7 +63,9 @@ export function EnvironmentConnectionNotice(props: {
   readonly onRetry: () => void;
 }) {
   const isRetrying =
-    props.connection.phase === "connecting" || props.connection.phase === "reconnecting";
+    props.connection.phase === "connecting" ||
+    props.connection.phase === "reconnecting" ||
+    props.connection.phase === "waking";
 
   return (
     <View className="flex-1 items-center justify-center px-8">

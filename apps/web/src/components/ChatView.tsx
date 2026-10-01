@@ -63,6 +63,7 @@ import {
   cloneRepository,
 } from "@t3tools/contracts";
 import {
+  BOX_STATUS_NAME,
   connectionBox,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -263,6 +264,7 @@ import {
   GitBranchIcon,
   Minimize2Icon,
   PaperclipIcon,
+  SendIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, newDraftId, newMessageId, newThreadId, randomHex, randomUUID } from "~/lib/utils";
@@ -533,9 +535,8 @@ import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { refreshProvisionedEnvironments } from "../cloud/automationHosts";
-import { useBoxDemand, useBoxLifecycle } from "../cloud/CloudBoxes";
-import { useProvisionedEnvironmentRecovery } from "../cloud/useProvisionedEnvironmentRecovery";
-import { useReconnectSend } from "../cloud/useReconnectSend";
+import { useBoxDemand } from "../cloud/CloudBoxes";
+import { type ReconnectResult, useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
 import {
@@ -1629,11 +1630,22 @@ export default function ChatView(props: ChatViewProps) {
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
-  const recoverEnvironment = useProvisionedEnvironmentRecovery();
-  // The send button spins while a queued send wakes its workspace.
-  const recoverEnvironmentForSend = useCallback(
-    (environmentId: EnvironmentId) => recoverEnvironment(environmentId, { showsOwnProgress: true }),
-    [recoverEnvironment],
+  const awaitEnvironmentConnected = useAtomCommand(environmentCatalog.awaitConnected, {
+    reportFailure: false,
+  });
+  // The send button spins while a queued send waits for its environment, through a box's wake.
+  const reconnectEnvironmentForSend = useCallback(
+    async (environmentId: EnvironmentId): Promise<ReconnectResult> => {
+      await retryEnvironment(environmentId);
+      const connected = await awaitEnvironmentConnected(environmentId);
+      if (connected._tag !== "Failure") return { kind: "ready" };
+      const error = squashAtomCommandFailure(connected);
+      return {
+        kind: "failed",
+        message: error instanceof Error ? error.message : "The environment could not reconnect.",
+      };
+    },
+    [awaitEnvironmentConnected, retryEnvironment],
   );
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
@@ -2510,8 +2522,6 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const activeEnvironment =
     activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
-  // Opening a paused box's chat wakes it through its host.
-  const activeBoxLifecycle = useBoxLifecycle(onAnotherChatsBox ? null : activeThreadEnvironmentId);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
@@ -2551,18 +2561,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeEnvironment, activeEnvironmentUnavailable, activeEnvironmentUnavailableLabel]);
   const handleReconnectActiveEnvironment = useCallback(
     async (environmentId: EnvironmentId) => {
-      const recovery = await recoverEnvironment(environmentId);
-      if (recovery.kind === "ready") return;
-      if (recovery.kind === "failed") {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not reconnect environment",
-            description: recovery.message,
-          }),
-        );
-        return;
-      }
       const result = await retryEnvironment(environmentId);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2575,12 +2573,8 @@ export default function ChatView(props: ChatViewProps) {
         );
       }
     },
-    [recoverEnvironment, retryEnvironment],
+    [retryEnvironment],
   );
-  useEffect(() => {
-    if (activeBoxLifecycle !== "paused" || activeThreadEnvironmentId === null) return;
-    void handleReconnectActiveEnvironment(activeThreadEnvironmentId);
-  }, [activeBoxLifecycle, activeThreadEnvironmentId, handleReconnectActiveEnvironment]);
   const disconnectDelayElapsed = useEnvironmentDisconnectDelay(
     activeEnvironmentUnavailable ? activeEnvironment.environmentId : null,
   );
@@ -2854,6 +2848,8 @@ export default function ChatView(props: ChatViewProps) {
   const serverUpdateFailureDismissed =
     serverUpdateState === dismissedServerUpdateState ||
     isServerUpdateFailureDismissed(serverUpdateState);
+  const activeEnvironmentIsBox =
+    activeEnvironment !== null && connectionBox(activeEnvironment.entry.target) !== null;
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     const updateRunning = serverUpdateState.status === "running";
@@ -2877,6 +2873,11 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
+    const environmentWaking = unavailableConnection?.phase === "waking";
+    // A box's saved label names the machine it first ran on, so a box is named by its role.
+    const unavailableName = activeEnvironmentIsBox
+      ? BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME.slice(1)
+      : (activeEnvironmentUnavailableState?.label ?? "");
     // While an update runs, transient connect blips are expected (the server
     // restarts) and the update banner already shows progress. Hard failure
     // phases still surface so the Reconnect action stays reachable.
@@ -2888,16 +2889,20 @@ export default function ChatView(props: ChatViewProps) {
         variant: unavailableConnection.phase === "error" ? "error" : "warning",
         icon: <WifiOffIcon />,
         title: workspaceMissing
-          ? `${activeEnvironmentUnavailableState.label} is no longer available`
-          : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+          ? `${unavailableName} is no longer available`
+          : environmentWaking
+            ? `${unavailableName} is waking up...`
+            : `${unavailableName} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         description: workspaceMissing
           ? "This workspace expired. Saved history is available here. Continue in a recovered or new workspace."
-          : environmentReconnecting
-            ? "Trying again"
-            : "Reconnect to continue",
+          : environmentWaking
+            ? "This can take a few minutes. It reconnects on its own."
+            : environmentReconnecting
+              ? "Trying again"
+              : "Reconnect to continue",
         actions: (
           <>
-            {!workspaceMissing && (
+            {!workspaceMissing && !environmentWaking && (
               <Button
                 size="xs"
                 variant="ghost"
@@ -3008,6 +3013,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     automaticEnvironment,
     autoBalanceUpdateBanner,
+    activeEnvironmentIsBox,
     activeEnvironmentUnavailableState,
     reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
@@ -9430,10 +9436,18 @@ export default function ChatView(props: ChatViewProps) {
   // of starting a new turn the moment the interrupted one settles.
   restoreQueuedMessagesRef.current = restoreQueuedMessagesToComposer;
 
+  const notifyReconnectSendAbandoned = useCallback(() => {
+    toastManager.add({
+      type: "info",
+      title: "Message not sent",
+      description: "You left the chat before it reconnected. The message is still in its composer.",
+    });
+  }, []);
   const {
     reconnectAndSend,
     reconnecting: reconnectingSend,
     isPending: isReconnectPending,
+    cancel: cancelReconnectSend,
   } = useReconnectSend<{
     submissionIntent: ComposerSubmissionIntent;
     directAnnotation:
@@ -9443,16 +9457,40 @@ export default function ChatView(props: ChatViewProps) {
     threadKey: routeThreadKey,
     ready:
       !activeEnvironmentUnavailable && !threadDetailLoading && !isSendBusy && serverConfig !== null,
-    recover: recoverEnvironmentForSend,
+    recover: reconnectEnvironmentForSend,
     send: ({ submissionIntent, directAnnotation }) => {
       void onSend(undefined, submissionIntent, directAnnotation);
     },
+    onAbandoned: notifyReconnectSendAbandoned,
     onFailure: (message) => {
       toastManager.add(
         stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
       );
     },
   });
+
+  // A send waiting on a reconnect, which a box's wake can stretch to minutes, can be called off;
+  // its message stays in the composer.
+  const composerBannerItemsWithPendingSend = useMemo<ComposerBannerStackItem[]>(
+    () =>
+      reconnectingSend
+        ? [
+            {
+              id: `pending-send:${routeThreadKey}`,
+              variant: "info",
+              icon: <SendIcon />,
+              title: "Your message sends once this chat reconnects",
+              actions: (
+                <Button size="xs" variant="ghost" onClick={cancelReconnectSend}>
+                  Cancel send
+                </Button>
+              ),
+            },
+            ...composerBannerItems,
+          ]
+        : composerBannerItems,
+    [cancelReconnectSend, composerBannerItems, reconnectingSend, routeThreadKey],
+  );
 
   useEffect(() => {
     if (
@@ -10976,7 +11014,7 @@ export default function ChatView(props: ChatViewProps) {
                                       : projectCloneSendBlockReason
                             }
                             isPreparingWorktree={isPreparingWorktree}
-                            bannerItems={composerBannerItems}
+                            bannerItems={composerBannerItemsWithPendingSend}
                             // With attachments or contexts aboard the pick just inserts the
                             // text, so it sends as a prompt like the typed path would.
                             onUsageLimitsCommand={

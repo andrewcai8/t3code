@@ -120,6 +120,8 @@ export interface ThreadDetailScreenProps {
   readonly screenTone: StatusTone;
   readonly connectionError: string | null;
   readonly environmentLabel: string | null;
+  /** What the connection status calls this environment: a cloud box goes by its role. */
+  readonly connectionStatusLabel: string | null;
   readonly feedbackSubmissions: ReadonlyArray<CodexFeedbackSubmission>;
   readonly onDismissFeedback: (id: MessageId) => void;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
@@ -378,7 +380,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
       connectionState: props.connectionStateLabel,
-      environmentLabel: props.environmentLabel,
+      environmentLabel: props.connectionStatusLabel,
       onReconnect: props.onReconnectEnvironment,
     });
     if (connectionStatus !== null) {

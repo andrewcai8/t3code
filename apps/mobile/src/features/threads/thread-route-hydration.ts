@@ -30,6 +30,7 @@ export function threadRouteIsHydrating(input: {
   return (
     input.connectionState === "connecting" ||
     input.connectionState === "reconnecting" ||
+    input.connectionState === "waking" ||
     input.shellStatus === "synchronizing" ||
     (input.connectionState === "connected" && input.shellStatus === "empty") ||
     input.detailStatus === "synchronizing" ||

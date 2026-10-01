@@ -308,7 +308,9 @@ function CloudEnvironmentRowShell(props: {
   readonly value: boolean;
 }) {
   const isRetrying =
-    props.connectionState === "connecting" || props.connectionState === "reconnecting";
+    props.connectionState === "connecting" ||
+    props.connectionState === "reconnecting" ||
+    props.connectionState === "waking";
   const shouldPulse = isRetrying;
   const statusText =
     props.statusText ??

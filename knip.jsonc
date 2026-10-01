@@ -22,6 +22,7 @@
         "setup-worktree.ts",
         "cloud/*.mjs",
         "cloud/smoke-cloud-chat.ts",
+        "cloud/verify-box-reconnect.ts",
       ],
     },
     "apps/server": {

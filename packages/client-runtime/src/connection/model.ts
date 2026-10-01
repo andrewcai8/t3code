@@ -79,6 +79,8 @@ export const ConnectionTransientReason = Schema.Literals([
   "endpoint-unavailable",
   "relay-unavailable",
   "remote-unavailable",
+  // A box's address answers but nothing serves behind it, as while the box is paused.
+  "not-serving",
 ]);
 export type ConnectionTransientReason = typeof ConnectionTransientReason.Type;
 
@@ -146,6 +148,8 @@ export type SupervisorConnectionPhase =
   | "offline"
   | "connecting"
   | "backoff"
+  /** A box's host is resuming it after its dial said it is not serving. */
+  | "waking"
   | "connected"
   | "blocked";
 
@@ -175,6 +179,7 @@ export function connectionProjectionPhase(
     case "available":
     case "offline":
     case "backoff":
+    case "waking":
     case "blocked":
       return "disconnected";
   }

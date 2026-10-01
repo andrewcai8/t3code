@@ -2,8 +2,7 @@ import { act, StrictMode, useLayoutEffect } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
-import type { ProvisionedEnvironmentRecovery } from "./provisionedEnvironmentRecovery";
-import { useReconnectSend } from "./useReconnectSend";
+import { type ReconnectResult, useReconnectSend } from "./useReconnectSend";
 
 let renderer: ReactTestRenderer | undefined;
 afterEach(async () => {
@@ -13,13 +12,14 @@ afterEach(async () => {
 
 async function setup() {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  let complete = (_result: ProvisionedEnvironmentRecovery) => {};
-  const recovery = new Promise<ProvisionedEnvironmentRecovery>((resolve) => {
+  let complete = (_result: ReconnectResult) => {};
+  const recovery = new Promise<ReconnectResult>((resolve) => {
     complete = resolve;
   });
   let latest: ReturnType<typeof useReconnectSend<string>> | undefined;
   const sent: string[] = [];
   const failures: string[] = [];
+  const abandoned: string[] = [];
   const recover = vi.fn(() => recovery);
   let threadKey = "original";
   let ready = false;
@@ -35,6 +35,7 @@ async function setup() {
         if (!action.isPending()) sent.push(`${snapshotThread}/${intent}/${snapshotDraft}`);
       },
       onFailure: (message) => failures.push(message),
+      onAbandoned: () => abandoned.push(snapshotThread),
     });
     useLayoutEffect(() => {
       latest = action;
@@ -51,6 +52,12 @@ async function setup() {
   return {
     sent,
     failures,
+    abandoned,
+    cancel: () => {
+      if (!latest) throw new Error("Composer did not mount");
+      latest.cancel();
+    },
+    reconnecting: () => latest?.reconnecting ?? false,
     recover,
     complete,
     request: () => {
@@ -91,7 +98,7 @@ describe("send after reconnect", () => {
     await state.render({ draft: "next draft" });
     expect(state.sent).toEqual(["original/foreground/hello from the retained draft"]);
   });
-  it("does not send to a different route when the user navigates during recovery", async () => {
+  it("does not send to a different route when the user navigates during recovery, and says the message stayed", async () => {
     const state = await setup();
     let pending: Promise<void> | undefined;
     await act(() => {
@@ -104,6 +111,25 @@ describe("send after reconnect", () => {
     });
     expect(state.sent).toEqual([]);
     expect(state.failures).toEqual([]);
+    expect(state.abandoned).toEqual(["other"]);
+  });
+  it("cancels a send that waits on a reconnect, leaving the draft unsent", async () => {
+    const state = await setup();
+    let pending: Promise<void> | undefined;
+    await act(() => {
+      pending = state.request();
+    });
+    expect(state.reconnecting()).toBe(true);
+    await act(() => state.cancel());
+    expect(state.reconnecting()).toBe(false);
+    await act(async () => {
+      state.complete({ kind: "ready" });
+      await pending;
+    });
+    await state.render({ ready: true });
+    expect(state.sent).toEqual([]);
+    expect(state.failures).toEqual([]);
+    expect(state.abandoned).toEqual([]);
   });
   it("retains the draft on failure without dispatching a turn", async () => {
     const state = await setup();

@@ -1,4 +1,8 @@
-import { type DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import {
+  type DiscoveredProvisionedEnvironment,
+  EnvironmentId,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -8,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -35,18 +40,22 @@ import {
   type SupervisorConnectionState,
   connectionBox,
 } from "./model.ts";
-import { ConnectionBlockedError } from "./model.ts";
-import { credentialMissingError, profileMissingError } from "./errors.ts";
+import { ConnectionBlockedError, ConnectionTransientError } from "./model.ts";
+import { credentialMissingError, profileMissingError, workspaceMissingError } from "./errors.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import * as EnvironmentRpc from "../rpc/client.ts";
 import {
   GitHubRoutingPermissions,
   gitHubRoutingConnectionKey,
 } from "./githubRoutingPermissions.ts";
 
 const isSshConnectionProfile = Schema.is(SshConnectionProfile);
+
+/** Under a third of the host's 15-minute lease, so one missed beat never lets it lapse. */
+const BOX_LEASE_HEARTBEAT_INTERVAL = "4 minutes";
 
 export class EnvironmentNotRegisteredError extends Schema.TaggedError<EnvironmentNotRegisteredError>()(
   "EnvironmentNotRegisteredError",
@@ -327,14 +336,120 @@ export const make = Effect.gen(function* () {
     yield* Scope.close(lease.scope, Exit.void);
   });
 
+  const wakeRetryLater = (detail: string): EnvironmentSupervisor.BoxWakeOutcome => ({
+    _tag: "RetryLater",
+    error: new ConnectionTransientError({ reason: "not-serving", detail }),
+  });
+
+  // Resumes a box through its host. The host joins concurrent resumes of one box and finishes a
+  // resume this request stops waiting for, so there is no client timeout.
+  const wakeBox = (
+    environmentId: EnvironmentId,
+    managerId: EnvironmentId,
+  ): Effect.Effect<EnvironmentSupervisor.BoxWakeOutcome> =>
+    Effect.gen(function* () {
+      yield* getEntry(managerId);
+      const host = yield* stateChanges(managerId).pipe(
+        Stream.filter((state) => state.phase !== "connecting"),
+        Stream.runHead,
+      );
+      if (Option.isNone(host) || host.value.phase !== "connected") {
+        return wakeRetryLater("This chat's cloud host is not connected.");
+      }
+      const result = yield* run(
+        managerId,
+        EnvironmentRpc.request(WS_METHODS.environmentControlResume, { environmentId }),
+      ).pipe(Effect.provideService(EnvironmentRpc.EnvironmentRpcShowsOwnProgress, true));
+      if (result.kind === "resumed") {
+        return { _tag: "Resumed" } as const;
+      }
+      switch (result.reason) {
+        case "missing":
+          // Marking replaces this box's supervisor, which is running this wake.
+          yield* markWorkspaceMissing(environmentId).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("Could not mark a gone workspace missing.", {
+                environmentId,
+                error,
+              }),
+            ),
+            Effect.forkIn(registryScope),
+          );
+          return { _tag: "Refused", error: workspaceMissingError() } as const;
+        case "not-provisioned":
+          return {
+            _tag: "Refused",
+            error: new ConnectionBlockedError({ reason: "configuration", detail: result.message }),
+          } as const;
+        case "unknown":
+          return wakeRetryLater(result.message);
+      }
+    }).pipe(
+      Effect.catchTag("EnvironmentNotRegisteredError", (error) =>
+        Effect.succeed<EnvironmentSupervisor.BoxWakeOutcome>({
+          _tag: "Refused",
+          error: new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
+        }),
+      ),
+      Effect.catch((error) => Effect.succeed(wakeRetryLater(error.message))),
+      Effect.withSpan("EnvironmentRegistry.wakeBox"),
+    );
+
+  // Every client with a box's chat open keeps its lease alive, not only the one that started it,
+  // so a phone or a second tab does not let the host pause the box under the open chat. It runs
+  // only while this client is connected to the box, which proves it holds the box's credential;
+  // the host still requires an operate session and an active, claimed lease to renew one.
+  const keepBoxAlive = (
+    environmentId: EnvironmentId,
+    managerId: EnvironmentId,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const listed = yield* run(
+        managerId,
+        EnvironmentRpc.request(WS_METHODS.environmentControlListProvisioned, {
+          environmentIds: [environmentId],
+        }),
+      );
+      const lease = listed.find(
+        (box) => box.environmentId === environmentId && box.lifecycle === "active",
+      );
+      if (lease === undefined) return;
+      const touched = yield* run(
+        managerId,
+        EnvironmentRpc.request(WS_METHODS.environmentControlTouch, { leaseId: lease.leaseId }),
+      );
+      if (touched.kind === "refused" && touched.reason === "missing")
+        // Marking replaces this box's supervisor, which is running this heartbeat.
+        yield* markWorkspaceMissing(environmentId).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Could not mark a gone workspace missing.", { environmentId, error }),
+          ),
+          Effect.forkIn(registryScope),
+        );
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Could not renew a cloud box's lease.", { environmentId, error }),
+      ),
+      Effect.repeat(Schedule.spaced(BOX_LEASE_HEARTBEAT_INTERVAL)),
+      Effect.asVoid,
+      Effect.withSpan("EnvironmentRegistry.keepBoxAlive"),
+    );
+
   const createServiceScope = Effect.fn("EnvironmentRegistry.createServiceScope")(
     (entry: ConnectionCatalogEntry) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const environmentId = entry.target.environmentId;
           const scope = yield* Scope.fork(registryScope);
+          const box = connectionBox(entry.target);
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
             initiallyDesired: false,
+            ...(box === null
+              ? {}
+              : {
+                  wake: wakeBox(environmentId, box.managerId),
+                  keepAlive: keepBoxAlive(environmentId, box.managerId),
+                }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
             Effect.provideService(ConnectionDriver.ConnectionDriver, driver),

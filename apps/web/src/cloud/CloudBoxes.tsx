@@ -1,5 +1,4 @@
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
-import { connectionBox } from "@t3tools/client-runtime/connection";
 import { createRunningBoxDemandAtom } from "@t3tools/client-runtime/state/boxDemand";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
@@ -23,20 +22,6 @@ export function useBoxDemand(environmentId: EnvironmentId | null): void {
 /** Holds a box connected until the returned release runs, as while pairing or joining it. */
 export function holdBoxDemand(environmentId: EnvironmentId): () => void {
   return appAtomRegistry.mount(environmentCatalog.demandAtom(environmentId));
-}
-
-/** How the host that provisioned `environmentId` lists it, or null when it is not a box. */
-export function useBoxLifecycle(environmentId: EnvironmentId | null) {
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  const target = environmentId === null ? undefined : catalog.entries.get(environmentId)?.target;
-  const managerId = target === undefined ? null : (connectionBox(target)?.managerId ?? null);
-  const hostIds = useMemo(() => (managerId === null ? [] : [managerId]), [managerId]);
-  useEffect(() => {
-    // Opening a box's chat asks its host again, since the box may have paused since.
-    if (managerId !== null) serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]);
-  }, [environmentId, managerId]);
-  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
-  return boxes.find((box) => box.environmentId === environmentId)?.lifecycle ?? null;
 }
 
 const runningBoxDemandAtom = createRunningBoxDemandAtom({

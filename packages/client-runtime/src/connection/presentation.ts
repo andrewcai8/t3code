@@ -2,10 +2,11 @@ import type { ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
-import type {
-  ConnectionBlockedReason,
-  ConnectionTarget,
-  SupervisorConnectionState,
+import {
+  type ConnectionBlockedReason,
+  type ConnectionTarget,
+  type SupervisorConnectionState,
+  connectionBox,
 } from "./model.ts";
 import { workspaceMissingError } from "./errors.ts";
 
@@ -14,6 +15,7 @@ export type EnvironmentConnectionPhase =
   | "offline"
   | "connecting"
   | "reconnecting"
+  | "waking"
   | "connected"
   | "error"
   | "unsupported";
@@ -47,6 +49,8 @@ export function presentConnectionState(
       };
     case "connected":
       return { phase: "connected", error: null, traceId: null };
+    case "waking":
+      return { phase: "waking", error: null, traceId: null };
     case "backoff":
       return {
         phase: "reconnecting",
@@ -65,6 +69,17 @@ export function presentConnectionState(
   }
 }
 
+/** What a cloud box is called in status copy. */
+export const BOX_STATUS_NAME = "this chat's cloud machine";
+
+/**
+ * What status copy calls a connection, mid-sentence. A box's saved label names the first machine
+ * it ran on and goes stale when the box moves, so a box is named by its role.
+ */
+export function connectionStatusName(target: ConnectionTarget): string {
+  return connectionBox(target) === null ? target.label : BOX_STATUS_NAME;
+}
+
 export function connectionStatusText(connection: EnvironmentConnectionPresentation): string {
   if (connection.blockedReason === "workspace-missing") {
     return "Workspace expired";
@@ -80,6 +95,8 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
       return connection.error
         ? `Failed to connect. Reconnecting... Reason: ${connection.error}`
         : "Reconnecting...";
+    case "waking":
+      return "Waking up...";
     case "connected":
       return "Connected";
     case "unsupported":
