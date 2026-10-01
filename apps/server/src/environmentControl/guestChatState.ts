@@ -20,6 +20,9 @@ export const DERIVED_HOME_PATHS = [
   "go/pkg",
   ".rustup",
   ".cargo/registry",
+  // Codex's app and plugin caches: about 58 MB of a fresh chat's 78 MB snapshot.
+  ".codex/cache",
+  ".codex/plugins/cache",
 ] as const;
 
 /**
