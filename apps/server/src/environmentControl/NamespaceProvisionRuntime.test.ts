@@ -10,6 +10,7 @@ import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -128,6 +129,8 @@ async function fixture(
     describedInstanceId: "owned-instance",
     resolved: 0,
     artifactOrigin: "https://artifacts.invalid",
+    /** When the current instance's Mac answers an exec. */
+    bootedAt: 0,
   };
   const apiCalls: Array<{ method: string; body: unknown }> = [];
   const api = await listen((request, response) => {
@@ -232,14 +235,13 @@ async function fixture(
         if (state.instanceId === "") {
           state.instanceId = "woken-instance";
           state.describedInstanceId = "woken-instance";
-          await new Promise<void>((resolve, reject) => {
-            const booted = setTimeout(resolve, options.bootMs ?? 0);
-            signal?.addEventListener("abort", () => {
-              clearTimeout(booted);
-              reject(new Error("Namespace CLI command aborted or timed out"));
-            });
-          });
+          state.bootedAt = DateTime.toEpochMillis(DateTime.nowUnsafe()) + (options.bootMs ?? 0);
         }
+        const booting = state.bootedAt - DateTime.toEpochMillis(DateTime.nowUnsafe());
+        if (booting > 0)
+          await Effect.runPromise(Effect.sleep(booting), { signal }).catch(() => {
+            throw new Error("Namespace CLI command aborted or timed out");
+          });
         const separator = args.indexOf("--");
         const executable = args[separator + 1];
         if (!executable) throw new Error("Missing remote executable");
@@ -1017,6 +1019,18 @@ describe("Namespace runtime transport", () => {
     expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
     expect(await started()).toBe("start\nstart\n");
     expect(archiveUploads()).toHaveLength(2);
+
+    // A resume cut short leaves the Mac's instance listed while it still boots. The next resume
+    // waits for the boot instead of running its preparation into a Mac that cannot answer.
+    expect(await (await fetch(`${upstream}/stop`)).text()).toBe("stopped");
+    await serverLockReleased(root);
+    f.state.instanceId = "booting-instance";
+    f.state.describedInstanceId = "booting-instance";
+    f.state.bootedAt = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 2_500;
+    expect(
+      await second.resume(operation, resource, manifest, attached.namespaceProxy, upgraded),
+    ).toEqual({ namespaceProxy: attached.namespaceProxy, refreshError: null });
+    expect(await environmentAt(origin)).toEqual({ environmentId: ready.environmentId });
   });
 
   it("resolves a fresh artifact URL on every convergence and refuses one that is not private HTTPS", async () => {
