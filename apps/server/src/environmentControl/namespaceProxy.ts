@@ -56,6 +56,11 @@ const joinUrl = (base: string, requestUrl: string): URL => {
 export class NamespaceProxyManager {
   private readonly leases = new Map<string, StoredLease>();
 
+  /** Whether this process serves the proxy; none survive a restart of the manager. */
+  has(proxyId: string): boolean {
+    return this.leases.has(proxyId);
+  }
+
   async open(input: NamespaceProxyOpenInput): Promise<NamespaceProxyLease> {
     return this.bind(input, 0);
   }
