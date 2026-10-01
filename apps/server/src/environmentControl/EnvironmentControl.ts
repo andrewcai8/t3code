@@ -164,7 +164,7 @@ export function createEnvironmentControl(
   >();
   const leaseOperations = new Map<
     string,
-    | { action: "pause" | "dispose" | "reap" | "renew" | "save" }
+    | { action: "pause" | "dispose" | "reap" | "renew" | "save" | "hold" }
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
@@ -544,6 +544,14 @@ export function createEnvironmentControl(
       }
     },
     reapExpiredLeases,
+    /** Takes a box's per-box lock for work outside this service, or null while it is held. */
+    holdBox: (sandboxId: string) => {
+      if (leaseOperations.has(sandboxId)) return null;
+      leaseOperations.set(sandboxId, { action: "hold" });
+      return () => {
+        leaseOperations.delete(sandboxId);
+      };
+    },
     /**
      * Saves each awake instance-engine chat that changed and releases a Mac
      * nearing its deadline, under the same per-box lock as pause and resume.
@@ -1430,6 +1438,10 @@ export const layer = Layer.effect(
         },
         setRuntime: manifests.setRuntime,
         prepare: ports.prepare,
+        holdBox: async (sandboxId) => {
+          const manager = await resolve();
+          return manager ? manager.holdBox(sandboxId) : () => {};
+        },
         deliverFirstTurn,
         readFirstTurn: manifests.readFirstTurn,
         forgetFirstTurn: manifests.forgetFirstTurn,

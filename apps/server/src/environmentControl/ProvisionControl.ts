@@ -93,6 +93,11 @@ export interface ProvisionControlPorts {
   readonly readFirstTurn: (
     manifest: ProvisionPreparationManifest,
   ) => Promise<ProvisionFirstTurn | null>;
+  /**
+   * Takes the box's per-box lock, the one pause, resume and the reaper hold, and hands back its
+   * release, or null while another operation holds it.
+   */
+  readonly holdBox?: (sandboxId: string) => Promise<(() => void) | null>;
   /** Deletes the first message once it is settled either way. */
   readonly forgetFirstTurn: (id: ProvisionRequestId) => Promise<void>;
   /** Every request whose first message is still kept. */
@@ -531,7 +536,21 @@ export function makeProvisionControl(
           reason: "unknown",
           message: "This environment has no active claimed lease.",
         };
-      const state = yield* remote(operation, () => ports.touch(operation));
+      const release = ports.holdBox ? yield* promise(() => ports.holdBox!(lease.sandboxId)) : null;
+      // Another operation owns the box right now; renewing the lease is all a heartbeat may do.
+      if (ports.holdBox && release === null) {
+        const renewed = yield* promise(() => leases.touch(input.leaseId));
+        return renewed
+          ? ({ kind: "touched" } as const)
+          : ({
+              kind: "refused",
+              reason: "unknown",
+              message: "This environment's lease has ended.",
+            } as const);
+      }
+      const state = yield* remote(operation, () => ports.touch(operation)).pipe(
+        Effect.ensuring(Effect.sync(() => release?.())),
+      );
       if (state === "missing") {
         yield* promise(() => leases.markMissing(input.leaseId));
         return missing;
@@ -595,23 +614,42 @@ export function makeProvisionControl(
           } satisfies EnvironmentProvisionUpgradeResult;
         if (pinned.sha256 === state.readiness.artifactSha256)
           return { kind: "current" as const, t3Revision: state.readiness.t3Revision };
-        yield* promise(() => ports.setRuntime(id, pinned));
-        const context = { requestId: id, provider: state.allocation.resource.provider };
-        const readiness = yield* ports
-          .prepare(operation, state.allocation)
-          .pipe(timeProvisionPhase("upgrade", context), logCause, Effect.mapError(safeError));
-        const saved = yield* store
-          .advance(operation, { kind: "ready", allocation: state.allocation, readiness })
-          .pipe(logCause, Effect.mapError(safeError));
-        // The guest already runs the new build. Losing the write to a concurrent
-        // pause or resume only means the next upgrade call re-converges and records it.
-        if (!saved.changed)
+        // Preparing a released instance-engine chat would open a Mac that nothing upkeeps or
+        // releases; the client's resume is what brings it back.
+        if ("engine" in state.allocation.resource && lease.state !== "active")
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "Reconnect this workspace, then upgrade it.",
+          } satisfies EnvironmentProvisionUpgradeResult;
+        const release = ports.holdBox
+          ? yield* promise(() => ports.holdBox!(lease.sandboxId))
+          : null;
+        if (ports.holdBox && release === null)
           return {
             kind: "refused",
             reason: "busy",
-            message: "This workspace changed while it was being upgraded. Try again.",
+            message: "Another workspace operation is in progress. Retry shortly.",
           } satisfies EnvironmentProvisionUpgradeResult;
-        return { kind: "upgraded" as const, t3Revision: readiness.t3Revision };
+        return yield* Effect.gen(function* () {
+          yield* promise(() => ports.setRuntime(id, pinned));
+          const context = { requestId: id, provider: state.allocation.resource.provider };
+          const readiness = yield* ports
+            .prepare(operation, state.allocation)
+            .pipe(timeProvisionPhase("upgrade", context), logCause, Effect.mapError(safeError));
+          const saved = yield* store
+            .advance(operation, { kind: "ready", allocation: state.allocation, readiness })
+            .pipe(logCause, Effect.mapError(safeError));
+          // The guest already runs the new build. Losing the write to a concurrent
+          // pause or resume only means the next upgrade call re-converges and records it.
+          if (!saved.changed)
+            return {
+              kind: "refused",
+              reason: "busy",
+              message: "This workspace changed while it was being upgraded. Try again.",
+            } satisfies EnvironmentProvisionUpgradeResult;
+          return { kind: "upgraded" as const, t3Revision: readiness.t3Revision };
+        }).pipe(Effect.ensuring(Effect.sync(() => release?.())));
       }).pipe(Effect.ensuring(Effect.sync(() => upgrading.delete(input.leaseId))));
     }),
   };
