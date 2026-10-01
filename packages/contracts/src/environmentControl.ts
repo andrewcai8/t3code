@@ -64,6 +64,13 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
 export type DiscoveredProvisionedEnvironment = typeof DiscoveredProvisionedEnvironment.Type;
 export const ProvisionedEnvironmentList = Schema.Array(DiscoveredProvisionedEnvironment);
 
+/** Where a client dials one of its saved environments. */
+export const SavedEnvironmentAddress = Schema.Struct({
+  environmentId: EnvironmentId,
+  httpBaseUrl: Schema.String,
+});
+export type SavedEnvironmentAddress = typeof SavedEnvironmentAddress.Type;
+
 /**
  * A cloud environment asked for on demand, rather than declared in advance.
  *

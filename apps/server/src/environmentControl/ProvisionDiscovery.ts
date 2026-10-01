@@ -4,11 +4,14 @@ import {
   EnvironmentControlError,
   type EnvironmentId,
   ProvisionOperationState,
+  type SavedEnvironmentAddress,
 } from "@t3tools/contracts";
+import { PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX } from "@t3tools/shared/remote";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import { isLoopbackHostname } from "../http.ts";
 import { StoredProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 const decodeRows = Schema.decodeUnknownEffect(
@@ -23,14 +26,37 @@ const decodeRows = Schema.decodeUnknownEffect(
 );
 const decodeDiscovery = Schema.decodeUnknownEffect(DiscoveredProvisionedEnvironment);
 
+const GATEWAY_LEASE = new RegExp(`${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/([^/]+)`);
+
+/**
+ * The saved environments a client dials at a box's own address: this host's gateway for the
+ * box's lease, or the box's public origin. A loopback URL is a machine of the client's own.
+ */
+function savedBoxAddresses(addresses: ReadonlyArray<SavedEnvironmentAddress>) {
+  const byLease = new Map<string, EnvironmentId>();
+  const byOrigin = new Map<string, EnvironmentId>();
+  for (const { environmentId, httpBaseUrl } of addresses) {
+    const url = URL.canParse(httpBaseUrl) ? new URL(httpBaseUrl) : null;
+    const lease = url?.pathname.match(GATEWAY_LEASE)?.[1];
+    if (lease !== undefined) byLease.set(lease, environmentId);
+    else if (url && !isLoopbackHostname(url.hostname)) byOrigin.set(url.origin, environmentId);
+  }
+  return { byLease, byOrigin };
+}
+
 /**
  * Discovery reads retained identities without renewing leases or issuing credentials. Of the
  * `known` environments, those that were this host's boxes and are gone come back as `disposed`,
- * matched only by the environment id the box itself reported. Rows disposed before that id was
- * kept name nothing.
+ * matched by the environment id the box itself reported. A row disposed before that id was kept
+ * is matched by the address one of `addresses` dials it at instead.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
-  function* (sql: SqlClient.SqlClient, known: ReadonlyArray<EnvironmentId> = []) {
+  function* (
+    sql: SqlClient.SqlClient,
+    known: ReadonlyArray<EnvironmentId> = [],
+    addresses: ReadonlyArray<SavedEnvironmentAddress> = [],
+  ) {
+    const { byLease, byOrigin } = savedBoxAddresses(addresses);
     const now = DateTime.formatIso(yield* DateTime.now);
     const rows = yield* sql`
     SELECT operations.request_json AS request, operations.state_json AS state,
@@ -51,9 +77,20 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
           : sql`(json_extract(operations.state_json, '$.kind') = 'disposed'
         AND json_extract(operations.state_json, '$.environmentId') IN ${sql.in(known)})`
       }
+      OR (json_extract(operations.state_json, '$.kind') = 'disposed'
+        AND json_extract(operations.state_json, '$.environmentId') IS NULL
+        AND (${byLease.size === 0 ? sql`1 = 0` : sql`leases.lease_id IN ${sql.in([...byLease.keys()])}`}
+          OR ${
+            byOrigin.size === 0
+              ? sql`1 = 0`
+              : sql`json_extract(leases.lease_json, '$.remoteAccess.origin') IN ${sql.in([...byOrigin.keys()])}`
+          }))
     ORDER BY operations.created_at DESC, operations.request_id
   `;
-    const saved = new Set<string>(known);
+    const saved = new Set<string>([
+      ...known,
+      ...addresses.map(({ environmentId }) => environmentId),
+    ]);
     const result: Array<DiscoveredProvisionedEnvironment> = [];
     const gone = new Map<string, DiscoveredProvisionedEnvironment>();
     for (const { request, state, lease, automationId } of yield* decodeRows(rows)) {
@@ -83,8 +120,12 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
                 projectDir: state.readiness.projectDir,
               };
       } else if (state.kind === "disposed") {
-        // Only the id the box reported names it. A claim's owner is whatever a client said.
-        const environmentId = state.environmentId;
+        // Only the id the box reported, or the address a client dials it at, names it. A claim's
+        // owner is whatever a client said.
+        const environmentId =
+          state.environmentId ??
+          byLease.get(lease.leaseId) ??
+          (lease.remoteAccess && byOrigin.get(lease.remoteAccess.origin));
         box =
           environmentId !== undefined && saved.has(environmentId)
             ? { lifecycle: "disposed", environmentId }

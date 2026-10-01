@@ -3,6 +3,7 @@ import {
   EnvironmentControlInput,
   EnvironmentControlList,
   ProvisionedEnvironmentList,
+  SavedEnvironmentAddress,
   EnvironmentControlResult,
   EnvironmentProvisionInput,
   EnvironmentProvisionResult,
@@ -742,6 +743,11 @@ const EnvironmentControlListProvisionedRpc = Rpc.make(
        * its boxes and are gone, with lifecycle `disposed`.
        */
       environmentIds: Schema.optional(Schema.Array(EnvironmentId)),
+      /**
+       * Where the client dials those environments. A box disposed before the host kept its id
+       * is named gone by its address instead.
+       */
+      addresses: Schema.optional(Schema.Array(SavedEnvironmentAddress)),
     }),
     success: ProvisionedEnvironmentList,
     error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),

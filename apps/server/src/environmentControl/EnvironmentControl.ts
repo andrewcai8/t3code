@@ -31,6 +31,7 @@ import {
   type EnvironmentProvisionUpgradeResult,
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
+  type SavedEnvironmentAddress,
   type ProvisionProvider,
   type ServerProvisionedSkills,
   type ServerSettings,
@@ -566,9 +567,13 @@ export class EnvironmentControl extends Context.Service<
      * snapshots cannot see them. Absent on every other host.
      */
     readonly provisionedSkills: Effect.Effect<ServerProvisionedSkills | undefined>;
-    /** Also reports those of `knownEnvironmentIds` that were this host's boxes and are gone. */
+    /**
+     * Also reports those of `knownEnvironmentIds` that were this host's boxes and are gone, and
+     * those of `addresses` that dial such a box.
+     */
     readonly listProvisioned: (
       knownEnvironmentIds?: ReadonlyArray<EnvironmentId>,
+      addresses?: ReadonlyArray<SavedEnvironmentAddress>,
     ) => Effect.Effect<ReadonlyArray<DiscoveredProvisionedEnvironment>, EnvironmentControlError>;
     readonly start: (
       id: EnvironmentId,
@@ -1422,8 +1427,8 @@ export const layer = Layer.effect(
               scannedSkills = { service, mtimes, skills: readProvisionedSkills(bundles) };
             return scannedSkills.skills;
           }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
-      listProvisioned: (knownEnvironmentIds) =>
-        listProvisionedEnvironments(sql, knownEnvironmentIds),
+      listProvisioned: (knownEnvironmentIds, addresses) =>
+        listProvisionedEnvironments(sql, knownEnvironmentIds, addresses),
       provision: provisionControl.provision,
       attach: provisionControl.attach,
       dispose: Effect.fn("EnvironmentControl.dispose")(function* (

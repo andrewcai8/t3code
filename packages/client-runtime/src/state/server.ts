@@ -985,8 +985,9 @@ export function createServerEnvironmentAtoms<R, E>(
         Effect.timeout("20 seconds"),
       ),
   });
-  // Asks about every saved environment, so a host also lists the saved ones that were its boxes and
-  // are gone. The key stays `{}` so every reader shares one fetch per host; the ids are read when
+  // Asks about every saved environment, by id and by the address it is dialed at, so a host also
+  // lists the saved ones that were its boxes and are gone, even one it disposed before it kept the
+  // box's id. The key stays `{}` so every reader shares one fetch per host; the ids are read when
   // it runs. Settings and Automations use `provisionedEnvironments`, which never lists gone boxes.
   const provisionedBoxLists = createEnvironmentQueryAtomFamily(runtime, {
     label: "environment-data:cloud:provisioned-box-lists",
@@ -997,6 +998,11 @@ export function createServerEnvironmentAtoms<R, E>(
         Effect.flatMap((entries) =>
           request(WS_METHODS.environmentControlListProvisioned, {
             environmentIds: [...entries.keys()],
+            addresses: [...entries].flatMap(([environmentId, { profile }]) =>
+              Option.isSome(profile) && profile.value._tag === "BearerConnectionProfile"
+                ? [{ environmentId, httpBaseUrl: profile.value.httpBaseUrl }]
+                : [],
+            ),
           }),
         ),
         Effect.timeout("20 seconds"),
