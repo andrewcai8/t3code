@@ -8,7 +8,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 /** How long the user may leave the app untouched before they count as away. */
-export const USER_AWAY_AFTER = Duration.minutes(60);
+const USER_AWAY_AFTER = Duration.minutes(60);
 
 /**
  * Whether the user is here: the app is visible and they touched it within the last hour. A cloud
