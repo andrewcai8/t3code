@@ -513,6 +513,11 @@
         "licenseId": "Apache-2.0",
         "copyrights": ["Copyright 2021-2026 The Connect Authors"]
       }
+    },
+    {
+      "license": "MIT",
+      "name": "khroma",
+      "sourceUrl": "https://github.com/fabiospampinato/khroma"
     }
   ]
 }
