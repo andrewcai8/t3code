@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   WS_METHODS,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -357,6 +358,39 @@ export const make = Effect.gen(function* () {
     _tag: "RetryLater",
     error: new ConnectionTransientError({ reason: "not-serving", detail }),
   });
+  const wakeUndelivered = (detail: string): EnvironmentSupervisor.BoxWakeOutcome => ({
+    _tag: "Undelivered",
+    error: new ConnectionTransientError({ reason: "not-serving", detail }),
+  });
+
+  const hostConnected = (managerId: EnvironmentId) =>
+    SubscriptionRef.get(serviceScopes).pipe(
+      Effect.flatMap((current) => {
+        const host = current.get(managerId);
+        return host === undefined
+          ? Effect.succeed(false)
+          : Effect.map(
+              SubscriptionRef.get(host.supervisor.state),
+              (state) => state.phase === "connected",
+            );
+      }),
+    );
+
+  // The RPC client ends a call whose session is closed under it as interrupted rather than failed,
+  // which would end the background loop that made it. A box's calls to its host fail instead.
+  const runOnHost = <A, E, R>(managerId: EnvironmentId, effect: Effect.Effect<A, E, R>) =>
+    run(managerId, effect).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.fail(
+              new EnvironmentRpc.EnvironmentRpcUnavailableError({
+                environmentId: managerId,
+                message: "This chat's cloud host disconnected before it answered.",
+              }),
+            )
+          : Effect.failCause(cause),
+      ),
+    );
 
   // Resumes a box through its host. The host joins concurrent resumes of one box and finishes a
   // resume this request stops waiting for, so there is no client timeout.
@@ -365,15 +399,7 @@ export const make = Effect.gen(function* () {
     managerId: EnvironmentId,
   ): Effect.Effect<EnvironmentSupervisor.BoxWakeOutcome> =>
     Effect.gen(function* () {
-      yield* getEntry(managerId);
-      const host = yield* stateChanges(managerId).pipe(
-        Stream.filter((state) => state.phase !== "connecting"),
-        Stream.runHead,
-      );
-      if (Option.isNone(host) || host.value.phase !== "connected") {
-        return wakeRetryLater("This chat's cloud host is not connected.");
-      }
-      const result = yield* run(
+      const result = yield* runOnHost(
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlResume, { environmentId }),
       ).pipe(Effect.provideService(EnvironmentRpc.EnvironmentRpcShowsOwnProgress, true));
@@ -408,6 +434,10 @@ export const make = Effect.gen(function* () {
           error: new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
         }),
       ),
+      Effect.catchTags({
+        EnvironmentRpcUnavailableError: (error) => Effect.succeed(wakeUndelivered(error.message)),
+        RpcClientError: (error) => Effect.succeed(wakeUndelivered(error.message)),
+      }),
       Effect.catch((error) => Effect.succeed(wakeRetryLater(error.message))),
       Effect.withSpan("EnvironmentRegistry.wakeBox"),
     );
@@ -422,7 +452,7 @@ export const make = Effect.gen(function* () {
     managerId: EnvironmentId,
   ): Effect.Effect<void> => {
     const renew = Effect.gen(function* () {
-      const listed = yield* run(
+      const listed = yield* runOnHost(
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlListProvisioned, {
           environmentIds: [environmentId],
@@ -432,7 +462,7 @@ export const make = Effect.gen(function* () {
         (box) => box.environmentId === environmentId && box.lifecycle === "active",
       );
       if (lease === undefined) return;
-      const touched = yield* run(
+      const touched = yield* runOnHost(
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlTouch, { leaseId: lease.leaseId }),
       );
@@ -467,7 +497,9 @@ export const make = Effect.gen(function* () {
         for (const lease of (yield* SubscriptionRef.get(serviceScopes)).values()) {
           if (connectionBox(lease.entry.target) === null) continue;
           const state = yield* SubscriptionRef.get(lease.supervisor.state);
-          if (state.desired && state.phase !== "connected") yield* lease.supervisor.retryNow;
+          // A wake in flight is left to finish; a retry would start it over.
+          if (state.desired && state.phase !== "connected" && state.phase !== "waking")
+            yield* lease.supervisor.retryNow;
         }
       }),
     ),
@@ -488,7 +520,10 @@ export const make = Effect.gen(function* () {
               ? {}
               : {
                   wake: wakeBox(environmentId, box.managerId),
-                  mayWake: userHere,
+                  mayWake: Effect.map(
+                    Effect.all([userHere, hostConnected(box.managerId)]),
+                    ([here, connected]) => here && connected,
+                  ),
                   keepAlive: keepBoxAlive(environmentId, box.managerId),
                 }),
           }).pipe(

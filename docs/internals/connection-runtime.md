@@ -43,10 +43,14 @@ still lists active. Read a box's own state through the point atoms.
 A paused box's address still answers, with a gateway 404, 502 or 503 that the
 resolver reads as `not-serving`. The supervisor wakes it, not a view: after such
 a dial it enters `waking`, the registry asks the box's host to resume it, and the
-supervisor dials again. A box that stays down is woken again after 30 seconds,
-then at doubling intervals up to every 10 minutes, for as long as it is
-demanded. A view that woke boxes fired once per cached host list, so a failed
-resume or a box paused under its open chat stayed down.
+supervisor dials again. `waking` means a resume is in flight to a connected
+host; while the host is down the box backs off and redials instead, and a
+resume the host never answered is sent again on the next dial. A box the host
+did answer for but that stays down is woken again after 30 seconds, then at
+doubling intervals up to every 10 minutes, for as long as it is demanded.
+Reopening its chat or a retry starts that interval over. A view that woke boxes
+fired once per cached host list, so a failed resume or a box paused under its
+open chat stayed down.
 
 While a box is connected and its user is here, the registry renews its lease
 through its host, so every client with the chat open keeps the box awake, not

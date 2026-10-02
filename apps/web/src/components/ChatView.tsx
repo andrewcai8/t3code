@@ -2902,7 +2902,7 @@ export default function ChatView(props: ChatViewProps) {
               : "Reconnect to continue",
         actions: (
           <>
-            {!workspaceMissing && !environmentWaking && (
+            {!workspaceMissing && (
               <Button
                 size="xs"
                 variant="ghost"
