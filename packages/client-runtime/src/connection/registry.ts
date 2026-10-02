@@ -378,17 +378,22 @@ export const make = Effect.gen(function* () {
 
   // The RPC client ends a call whose session is closed under it as interrupted rather than failed,
   // which would end the background loop that made it. A box's calls to its host fail instead.
-  const runOnHost = <A, E, R>(managerId: EnvironmentId, effect: Effect.Effect<A, E, R>) =>
+  const runOnHost = <A, E, R>(
+    managerId: EnvironmentId,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<
+    A,
+    E | EnvironmentNotRegisteredError | EnvironmentRpc.EnvironmentRpcUnavailableError,
+    Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>
+  > =>
     run(managerId, effect).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.fail(
-              new EnvironmentRpc.EnvironmentRpcUnavailableError({
-                environmentId: managerId,
-                message: "This chat's cloud host disconnected before it answered.",
-              }),
-            )
-          : Effect.failCause(cause),
+      Effect.catchCauseIf(Cause.hasInterruptsOnly, () =>
+        Effect.fail(
+          new EnvironmentRpc.EnvironmentRpcUnavailableError({
+            environmentId: managerId,
+            message: "This chat's cloud host disconnected before it answered.",
+          }),
+        ),
       ),
     );
 
