@@ -103,7 +103,8 @@ import {
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
-import { pullLeaseUsage, readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
+import { observeLease, pullLeaseUsage, type LeaseObservation } from "./leaseActivity.ts";
+import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
@@ -130,6 +131,8 @@ const isProvisionRefused = Schema.is(ProvisionRefused);
 
 /** Boxes read at once per usage sweep, so a few stuck boxes cannot stall the rest. */
 const USAGE_SYNC_CONCURRENCY = 4;
+/** How long a box that showed no chat waits before a list reads it again. */
+const NEW_CHAT_RETRY_MS = 60_000;
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -158,13 +161,15 @@ export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
   driver: CloudDriver & { readonly upkeepChat?: UpkeepChat },
   leaseRegistry?: ProvisionedLeaseRegistry,
-  activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = readLeaseActivity,
+  observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
   pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
   /** Where a failure this service retries later, rather than returns, is reported. */
   reportFailure: (
     message: string,
-    fields: { readonly chatId: string; readonly cause: unknown },
+    fields: { readonly chatId?: string; readonly cause: unknown },
   ) => void = () => {},
+  /** Where each read of a box's chat is kept, so clients can list it while the box sleeps. */
+  chats?: ProvisionedChatStore,
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -176,6 +181,21 @@ export function createEnvironmentControl(
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
+  let readingNewChats: Promise<void> | undefined;
+  /** When each box was last read for a new chat, so one that never shows one is not read per list. */
+  const newChatReadAt = new Map<string, number>();
+  // Every read of a box's shell also keeps its chat, so the chat a paused box shows is the one it
+  // held when last read: at the latest, right before its pause.
+  const activity = async (lease: ProvisionedLease) => {
+    const observation = await observe(lease);
+    if (observation.chat && chats)
+      await chats
+        .record(lease.leaseId, observation.chat)
+        .catch((cause: unknown) =>
+          reportFailure("cloud box chat could not be kept", { chatId: lease.leaseId, cause }),
+        );
+    return observation.activity;
+  };
   /** The last activity each awake lease settled on, so a finished turn pulls once. */
   const settledActivity = new Map<string, "busy" | "idle">();
   // A stopped box's transcripts are unreachable, so its usage is pulled first.
@@ -596,6 +616,38 @@ export function createEnvironmentControl(
       await Promise.all(passes);
     },
     /**
+     * Reads the chat of each awake claimed box the host holds none for, or holds another
+     * thread's, so a new chat lists on other clients before the next usage sweep. One pass at a
+     * time; a box read in the last minute, a box with its owner's chat and a paused box are never
+     * read.
+     */
+    readNewChats: (): Promise<void> =>
+      (readingNewChats ??= (async () => {
+        if (!leaseRegistry || !chats) return;
+        const held = await chats.heldThreads();
+        const awake = await leaseRegistry.awake();
+        const now = Date.now();
+        for (const leaseId of newChatReadAt.keys())
+          if (!awake.some((lease) => lease.leaseId === leaseId)) newChatReadAt.delete(leaseId);
+        const queue = awake.filter(
+          (lease) =>
+            lease.owner !== null &&
+            held.get(lease.leaseId) !== lease.owner.threadId &&
+            now - (newChatReadAt.get(lease.leaseId) ?? -Infinity) >= NEW_CHAT_RETRY_MS,
+        );
+        for (const lease of queue) newChatReadAt.set(lease.leaseId, now);
+        const read = async () => {
+          for (let lease = queue.shift(); lease; lease = queue.shift()) await activity(lease);
+        };
+        await Promise.all(Array.from({ length: USAGE_SYNC_CONCURRENCY }, read));
+      })()
+        .catch((cause: unknown) =>
+          reportFailure("new cloud box chats could not be read", { cause }),
+        )
+        .finally(() => {
+          readingNewChats = undefined;
+        })),
+    /**
      * Pulls each awake box's usage when its agent settles from busy to idle,
      * or the first time it is seen idle. A failed pull retries next sweep.
      */
@@ -646,11 +698,13 @@ export class EnvironmentControl extends Context.Service<
     readonly provisionedSkills: Effect.Effect<ServerProvisionedSkills | undefined>;
     /**
      * Also reports those of `knownEnvironmentIds` that were this host's boxes and are gone, and
-     * those of `addresses` that dial such a box.
+     * those of `addresses` that dial such a box. With `chats`, each box carries the chat the host
+     * last read from it, when newer than the one the client holds.
      */
     readonly listProvisioned: (
       knownEnvironmentIds?: ReadonlyArray<EnvironmentId>,
       addresses?: ReadonlyArray<SavedEnvironmentAddress>,
+      chats?: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly sequence: number }>,
     ) => Effect.Effect<ReadonlyArray<DiscoveredProvisionedEnvironment>, EnvironmentControlError>;
     readonly start: (
       id: EnvironmentId,
@@ -705,6 +759,7 @@ export const layer = Layer.effect(
         new EnvironmentControlError({ message: "Existing cloud leases could not be loaded." }),
     });
     const leaseRegistry = createProvisionedLeaseRegistry(sql, legacyLeases);
+    const chatStore = createProvisionedChatStore(sql);
     const namespaceProxies = new NamespaceProxyManager();
     const importedLeases = new Map(
       decodeLegacyLeases(legacyLeases).map((lease) => [lease.leaseId, lease]),
@@ -867,9 +922,10 @@ export const layer = Layer.effect(
               },
             },
             leaseRegistry,
-            readLeaseActivity,
+            observeLease,
             pullUsage,
             (message, fields) => void runLogged(Effect.logError(message, fields)),
+            chatStore,
           );
           return { ...control, config };
         })();
@@ -1653,8 +1709,20 @@ export const layer = Layer.effect(
               scannedSkills = { service, mtimes, skills: readProvisionedSkills(bundles) };
             return scannedSkills.skills;
           }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
-      listProvisioned: (knownEnvironmentIds, addresses) =>
-        listProvisionedEnvironments(sql, knownEnvironmentIds, addresses),
+      listProvisioned: (knownEnvironmentIds, addresses, chats) =>
+        listProvisionedEnvironments(sql, knownEnvironmentIds, addresses, chats).pipe(
+          // A chat started since the last sweep has no card yet, so it is read in the background
+          // and the client's next list carries it.
+          Effect.tap(() =>
+            chats === undefined
+              ? Effect.void
+              : Effect.sync(() => {
+                  void resolve()
+                    .then((service) => service?.readNewChats())
+                    .catch(() => undefined);
+                }),
+          ),
+        ),
       provision: provisionControl.provision,
       attach: provisionControl.attach,
       dispose: Effect.fn("EnvironmentControl.dispose")(function* (

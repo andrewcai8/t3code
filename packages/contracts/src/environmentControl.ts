@@ -1,13 +1,21 @@
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
   IsoDateTime,
   MessageId,
+  NonNegativeInt,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { ModelSelection, ProviderInteractionMode, RuntimeMode } from "./orchestration.ts";
+import {
+  ModelSelection,
+  OrchestrationProjectShell,
+  OrchestrationThreadShell,
+  ProviderInteractionMode,
+  RuntimeMode,
+} from "./orchestration.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
@@ -50,6 +58,18 @@ export const ProvisionRequestId = Schema.String.check(
 ).pipe(Schema.brand("ProvisionRequestId"));
 export type ProvisionRequestId = typeof ProvisionRequestId.Type;
 
+/**
+ * The host's last read of a box's chat: the chat's thread and its project, as the box's own shell
+ * held them at `sequence`. It lets a client list a chat it has never opened without reaching the
+ * box, so a paused box stays paused.
+ */
+export const ProvisionedChat = Schema.Struct({
+  sequence: NonNegativeInt,
+  project: OrchestrationProjectShell,
+  thread: OrchestrationThreadShell,
+});
+export type ProvisionedChat = typeof ProvisionedChat.Type;
+
 export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
   leaseId: TrimmedNonEmptyString,
@@ -65,6 +85,11 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   threadId: Schema.NullOr(ThreadId),
   /** Set when the host started this environment for an automation run rather than a client. */
   automationId: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Only when the request asked for chats and the client does not hold this one already. A chat
+   * this client cannot read, as from a newer host, is dropped rather than failing the list.
+   */
+  chat: Schema.optional(ProvisionedChat).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
   createdAt: Schema.String,
   expiresAt: Schema.String,
 });

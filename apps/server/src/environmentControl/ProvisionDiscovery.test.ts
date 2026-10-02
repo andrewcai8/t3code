@@ -14,9 +14,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
-import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
+import { boxLabel, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import { createProvisionedChatStore, ownerChat } from "./provisionedChats.ts";
+import { boxShell, boxThread } from "./shellTestFixture.ts";
 import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 
 const expiredAt = new Date("1960-01-01T00:00:00.000Z");
@@ -39,7 +41,7 @@ it.effect(
       yield* Effect.gen(function* () {
         const store = yield* ProvisionOperationStore;
         const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-        for (let index = 1; index <= 11; index++) {
+        for (let index = 1; index <= 12; index++) {
           const operation = yield* store.accept(
             decodeRequest({
               requestId: id(index),
@@ -101,6 +103,10 @@ it.effect(
           if (index === 7) yield* Effect.promise(() => registry.markDisposed(id(index)));
           if (index === 10) yield* Effect.promise(() => registry.markPaused(id(index)));
           if (index === 11) yield* Effect.promise(() => registry.markMissing(id(index)));
+          if (index === 12)
+            yield* Effect.promise(() =>
+              registry.beginRelease({ leaseId: id(index), sandboxId: `sandbox-${index}` }),
+            );
         }
       }).pipe(Effect.provide(layer), Effect.scoped);
       yield* Effect.gen(function* () {
@@ -120,6 +126,7 @@ it.effect(
           id(9),
           id(10),
           id(11),
+          id(12),
         ]);
         expect(listed.find((row) => row.requestId === id(1))).toEqual({
           requestId: id(1),
@@ -128,7 +135,7 @@ it.effect(
           lifecycle: "active",
           environmentId: "environment-1",
           provider: "e2b",
-          label: "proof/repository",
+          label: "repository · E2B",
           repository: "proof/repository",
           projectDir: "/private/project",
           threadId: "thread-1",
@@ -156,6 +163,12 @@ it.effect(
           lifecycle: "paused",
           threadId: "thread-10",
         });
+        // A box being paused stays listed, so clients do not take a pause for a deletion.
+        expect(listed.find((row) => row.requestId === id(12))).toMatchObject({
+          leaseId: id(12),
+          lifecycle: "paused",
+          threadId: "thread-12",
+        });
         expect(listed.find((row) => row.requestId === id(11))).toMatchObject({
           leaseId: id(11),
           sandboxId: "sandbox-11",
@@ -181,7 +194,7 @@ it.effect(
             lifecycle: "disposed",
             environmentId: "environment-7",
             provider: "e2b",
-            label: "proof/repository",
+            label: "repository · E2B",
             repository: "proof/repository",
             projectDir: "/private/project",
             threadId: "thread-7",
@@ -195,7 +208,7 @@ it.effect(
             lifecycle: "disposed",
             environmentId: "environment-8",
             provider: "e2b",
-            label: "proof/repository",
+            label: "repository · E2B",
             repository: "proof/repository",
             projectDir: "/private/project",
             threadId: "thread-8",
@@ -326,7 +339,7 @@ it.effect("a box disposed through the host is reported disposed, by the id the b
         lifecycle: "disposed",
         environmentId: "box-1",
         provider: "e2b",
-        label: "proof/repository",
+        label: "repository · E2B",
         repository: "proof/repository",
         threadId: "thread-1",
         createdAt: expect.any(String),
@@ -437,3 +450,165 @@ it.effect("a box disposed before the host kept its id is named by the address a 
     );
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
+
+it.effect(
+  "a list that asks for chats gets each box's owner chat the client does not hold yet",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const database = path.join(yield* fs.makeTempDirectoryScoped(), "manager.sqlite");
+      yield* Effect.gen(function* () {
+        const provisioning = yield* Provisioning;
+        const sql = yield* SqlClient.SqlClient;
+        const registry = createProvisionedLeaseRegistry(sql);
+        const chats = createProvisionedChatStore(sql);
+        const provision = Effect.fn(function* (index: number) {
+          const operation = yield* provisioning.ensure(
+            decodeRequest({
+              requestId: id(index),
+              provider: "e2b",
+              providerInstanceId: "account",
+              sourceRevision: null,
+              repository: "proof/repository",
+              preparationHash: "a".repeat(64),
+              strategy: "direct",
+              templateId: "fixture",
+            }),
+          );
+          yield* Effect.promise(() =>
+            registry.register({
+              leaseId: id(index),
+              sandboxId: sandboxOf(operation),
+              provider: "e2b",
+              providerInstanceId: "account",
+            }),
+          );
+          yield* Effect.promise(() =>
+            registry.claim({
+              leaseId: id(index),
+              owner: { environmentId: boxEnvironment(operation), threadId: `thread-${index}` },
+            }),
+          );
+        });
+        const keepChat = (index: number, threadId: string, title: string) =>
+          Effect.promise(() => {
+            const chat = ownerChat(boxShell([boxThread(threadId, "project-app", title)]), threadId);
+            if (!chat) throw new Error("the fixture shell holds the thread");
+            return chats.record(id(index), chat);
+          });
+
+        yield* provision(1);
+        yield* keepChat(1, "thread-1", "Fix the login redirect");
+        // A card whose thread is no longer the lease's owner is never sent.
+        yield* provision(2);
+        yield* keepChat(2, "thread-other", "Someone else's chat");
+        yield* provision(3);
+        yield* keepChat(3, "thread-3", "Paused chat");
+        yield* Effect.promise(() => registry.markPaused(id(3)));
+        yield* provision(4);
+        yield* keepChat(4, "thread-4", "Gone chat");
+        expect((yield* provisioning.cancel(id(4))).state.kind).toBe("disposed");
+        yield* Effect.promise(() => registry.markDisposed(id(4)));
+
+        const listedChats = (
+          chatsHeld?: ReadonlyArray<{ readonly environmentId: string; readonly sequence: number }>,
+        ) =>
+          listProvisionedEnvironments(
+            sql,
+            [EnvironmentId.make("box-4")],
+            [],
+            chatsHeld?.map((held) => ({
+              ...held,
+              environmentId: EnvironmentId.make(held.environmentId),
+            })),
+          ).pipe(
+            Effect.map((rows) =>
+              rows.map((row) => [
+                row.environmentId,
+                row.lifecycle,
+                row.chat
+                  ? `${row.chat.sequence} ${row.chat.project.id} ${row.chat.thread.title}`
+                  : null,
+              ]),
+            ),
+          );
+        expect(yield* listedChats()).toEqual([
+          ["box-1", "active", null],
+          ["box-2", "active", null],
+          ["box-3", "paused", null],
+          ["box-4", "disposed", null],
+        ]);
+        expect(yield* listedChats([])).toEqual([
+          ["box-1", "active", "42 project-app Fix the login redirect"],
+          ["box-2", "active", null],
+          ["box-3", "paused", "42 project-app Paused chat"],
+          ["box-4", "disposed", null],
+        ]);
+        expect(
+          yield* listedChats([
+            { environmentId: "box-1", sequence: 41 },
+            { environmentId: "box-3", sequence: 42 },
+          ]),
+        ).toEqual([
+          ["box-1", "active", "42 project-app Fix the login redirect"],
+          ["box-2", "active", null],
+          ["box-3", "paused", null],
+          ["box-4", "disposed", null],
+        ]);
+        // A kept chat this host can no longer read, as after a contract change.
+        yield* sql`
+          UPDATE provisioned_chats SET sequence = 50, chat_json = '{"sequence":50}'
+          WHERE lease_id = ${id(1)}
+        `;
+        expect(yield* listedChats([])).toEqual([
+          ["box-1", "active", null],
+          ["box-2", "active", null],
+          ["box-3", "paused", "42 project-app Paused chat"],
+          ["box-4", "disposed", null],
+        ]);
+      }).pipe(
+        Effect.provide(
+          Provisioning.layer.pipe(
+            Layer.provideMerge(ProvisionOperationStore.layer),
+            Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
+            Layer.provideMerge(makeSqlitePersistenceLive(database)),
+          ),
+        ),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it("labels a box by its repository's name and where it runs", () => {
+  const e2b = {
+    requestId: id(1),
+    provider: "e2b",
+    providerInstanceId: "account",
+    sourceRevision: null,
+    preparationHash: "a".repeat(64),
+    strategy: "direct",
+    templateId: "fixture",
+  };
+  const namespace = {
+    requestId: id(2),
+    provider: "namespace",
+    providerInstanceId: "account",
+    sourceRevision: null,
+    preparationHash: "a".repeat(64),
+    tenantId: "tenant",
+    size: "M",
+    image: "image",
+    region: "us",
+    idleTimeoutMinutes: 30,
+  };
+  const label = (request: Record<string, unknown>) => boxLabel(decodeRequest(request));
+  expect(label({ ...e2b, repository: "pingdotgg/t3code" })).toBe("t3code · E2B");
+  expect(label(e2b)).toBe("E2B");
+  expect(label({ ...namespace, repository: "pingdotgg/t3code", engine: "instance" })).toBe(
+    "t3code · Namespace Mac",
+  );
+  expect(label({ ...namespace, engine: "instance" })).toBe("Namespace Mac");
+  expect(label({ ...namespace, repository: "pingdotgg/t3code" })).toBe("t3code · Namespace Mac");
+  expect(label(namespace)).toBe("Namespace Mac");
+});

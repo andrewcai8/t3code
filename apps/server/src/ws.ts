@@ -2963,7 +2963,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.environmentControlListProvisioned]: (input) =>
           observeRpcEffect(
             WS_METHODS.environmentControlListProvisioned,
-            environmentControl.listProvisioned(input.environmentIds, input.addresses),
+            environmentControl.listProvisioned(input.environmentIds, input.addresses, input.chats),
           ),
         [WS_METHODS.environmentControlList]: () =>
           observeRpcEffect(WS_METHODS.environmentControlList, environmentControl.list),

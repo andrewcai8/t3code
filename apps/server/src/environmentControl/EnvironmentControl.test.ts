@@ -9,6 +9,8 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import { ownerChat, type ProvisionedChatStore } from "./provisionedChats.ts";
+import { boxShell, boxThread } from "./shellTestFixture.ts";
 
 /**
  * Leases live in SQLite beside provision_operations, so tests need a client.
@@ -131,7 +133,7 @@ describe("managed cloud commands", () => {
           },
         },
         registry,
-        async () => "idle",
+        async () => ({ activity: "idle" }),
       );
       await manager.upkeepCloudChats();
       expect(await registry.findById("lease")).toMatchObject({ state: "active" });
@@ -175,7 +177,7 @@ describe("managed cloud commands", () => {
           },
         },
         registry,
-        async () => "idle",
+        async () => ({ activity: "idle" }),
       );
       const first = manager.upkeepCloudChats();
       await started;
@@ -191,7 +193,7 @@ describe("managed cloud commands", () => {
 
   it("reports a failed upkeep with its chat and cause instead of swallowing it", async () => {
     await withLease(async ({ registry, driver }) => {
-      const reported: Array<{ message: string; chatId: string; cause: string }> = [];
+      const reported: Array<{ message: string; chatId: string | undefined; cause: string }> = [];
       const manager = createEnvironmentControl(
         [],
         {
@@ -203,7 +205,7 @@ describe("managed cloud commands", () => {
           },
         },
         registry,
-        async () => "idle",
+        async () => ({ activity: "idle" }),
         async () => {},
         (message, { chatId, cause }) =>
           reported.push({
@@ -586,7 +588,9 @@ describe("managed cloud commands", () => {
         firstTurnPending: true,
         now: new Date(Date.now() - 16 * 60_000),
       });
-      const manager = createEnvironmentControl([], setup().driver, registry, async () => "idle");
+      const manager = createEnvironmentControl([], setup().driver, registry, async () => ({
+        activity: "idle",
+      }));
       await manager.reapExpiredLeases();
       expect(await registry.findById("lease")).toMatchObject({ state: "active" });
       await registry.settleFirstTurn("lease", { status: "started" });
@@ -604,7 +608,9 @@ describe("managed cloud commands", () => {
         firstTurnPending: true,
         now: new Date(Date.now() - 31 * 60_000),
       });
-      const manager = createEnvironmentControl([], setup().driver, registry, async () => "idle");
+      const manager = createEnvironmentControl([], setup().driver, registry, async () => ({
+        activity: "idle",
+      }));
       await manager.reapExpiredLeases();
       expect(await registry.findById("lease")).toMatchObject({
         state: "paused",
@@ -794,7 +800,7 @@ describe("a cloud machine whose agent is working", () => {
       };
       const manager = createEnvironmentControl([], driver, registry, async (lease) => {
         checked.push(lease.leaseId);
-        return activity;
+        return { activity };
       });
       await test({ registry, calls, checked, manager });
     });
@@ -893,7 +899,7 @@ describe("a cloud box's usage", () => {
         [],
         driver,
         registry,
-        async () => activity.shift() ?? "idle",
+        async () => ({ activity: activity.shift() ?? "idle" }),
         async (lease) => {
           pulled.push(lease.leaseId);
           events.push("pull");
@@ -956,6 +962,167 @@ describe("a cloud box's usage", () => {
       activity.push("unknown", "unknown", "idle");
       for (let sweep = 0; sweep < 3; sweep += 1) await manager.syncLeaseUsage();
       expect(pulled).toEqual(["lease"]);
+    });
+  });
+});
+
+describe("a cloud box's chat", () => {
+  const chatTitled = (title: string) => {
+    const chat = ownerChat(boxShell([boxThread("thread", "project-app", title)]), "thread");
+    if (!chat) throw new Error("the fixture shell holds the owner thread");
+    return chat;
+  };
+  async function withChats(
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      events: string[];
+      recorded: Array<readonly [string, string]>;
+      carded: Map<string, string>;
+      chatless: Set<string>;
+      failures: Array<{ message: string; cause: string }>;
+      store: { broken: boolean };
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      const events: string[] = [];
+      const recorded: Array<readonly [string, string]> = [];
+      const carded = new Map<string, string>();
+      const chatless = new Set<string>();
+      const failures: Array<{ message: string; cause: string }> = [];
+      const store = { broken: false };
+      const chats: ProvisionedChatStore = {
+        record: async (leaseId, chat) => {
+          recorded.push([leaseId, chat.thread.title]);
+          carded.set(leaseId, chat.thread.id);
+        },
+        heldThreads: async () => {
+          if (store.broken) throw new Error("database is locked");
+          return new Map(carded);
+        },
+      };
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        events.push(`pause:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl(
+        [],
+        driver,
+        registry,
+        async (lease) => {
+          events.push(`observe:${lease.leaseId}`);
+          return {
+            activity: "idle",
+            chat: chatless.has(lease.leaseId) ? null : chatTitled(`Chat on ${lease.leaseId}`),
+          };
+        },
+        async () => {},
+        (message, { cause }) =>
+          failures.push({ message, cause: cause instanceof Error ? cause.message : String(cause) }),
+        chats,
+      );
+      await test({ registry, events, recorded, carded, chatless, failures, store, manager });
+    });
+  }
+  const claimedBox = async (
+    registry: ReturnType<typeof createProvisionedLeaseRegistry>,
+    leaseId: string,
+    now?: Date,
+  ) => {
+    await registry.register({
+      leaseId,
+      sandboxId: `sandbox-${leaseId}`,
+      providerInstanceId: "codex",
+      ...(now ? { now } : {}),
+    });
+    await registry.claim({
+      leaseId,
+      owner: { environmentId: `box-${leaseId}`, threadId: "thread" },
+      ...(now ? { now } : {}),
+    });
+  };
+
+  it("remembers each awake box's chat on the usage sweep", async () => {
+    await withChats(async ({ registry, recorded, manager }) => {
+      await claimedBox(registry, "a");
+      await claimedBox(registry, "b");
+      await manager.syncLeaseUsage();
+      expect(recorded.toSorted()).toEqual([
+        ["a", "Chat on a"],
+        ["b", "Chat on b"],
+      ]);
+    });
+  });
+
+  it("remembers a box's chat right before the reaper pauses it", async () => {
+    await withChats(async ({ registry, events, recorded, manager }) => {
+      await claimedBox(registry, "lease", new Date("2026-01-01T00:00:00.000Z"));
+      await manager.reapExpiredLeases();
+      expect(events).toEqual(["observe:lease", "pause:sandbox-lease"]);
+      expect(recorded).toEqual([["lease", "Chat on lease"]]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+    });
+  });
+
+  it("reads a new chat once, only from awake claimed boxes the host holds no chat for", async () => {
+    await withChats(async ({ registry, events, recorded, carded, manager }) => {
+      await claimedBox(registry, "carded");
+      carded.set("carded", "thread");
+      await claimedBox(registry, "new");
+      await claimedBox(registry, "paused");
+      await registry.markPaused("paused");
+      await registry.register({
+        leaseId: "unclaimed",
+        sandboxId: "unclaimed",
+        providerInstanceId: "codex",
+      });
+      await Promise.all([manager.readNewChats(), manager.readNewChats()]);
+      expect(events).toEqual(["observe:new"]);
+      expect(recorded).toEqual([["new", "Chat on new"]]);
+      await manager.readNewChats();
+      expect(events).toEqual(["observe:new"]);
+    });
+  });
+
+  it("reads again a box whose kept chat is another thread's", async () => {
+    await withChats(async ({ registry, events, recorded, carded, manager }) => {
+      await claimedBox(registry, "reclaimed");
+      carded.set("reclaimed", "thread-before");
+      await manager.readNewChats();
+      expect(events).toEqual(["observe:reclaimed"]);
+      expect(recorded).toEqual([["reclaimed", "Chat on reclaimed"]]);
+    });
+  });
+
+  it("waits a minute before reading again a box that showed no chat", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+      await withChats(async ({ registry, events, chatless, manager }) => {
+        await claimedBox(registry, "early");
+        chatless.add("early");
+        await manager.readNewChats();
+        vi.setSystemTime(new Date("2026-10-01T00:00:59.000Z"));
+        await manager.readNewChats();
+        expect(events).toEqual(["observe:early"]);
+        vi.setSystemTime(new Date("2026-10-01T00:01:01.000Z"));
+        await manager.readNewChats();
+        expect(events).toEqual(["observe:early", "observe:early"]);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a pass that could not read the kept chats", async () => {
+    await withChats(async ({ registry, events, failures, store, manager }) => {
+      await claimedBox(registry, "new");
+      store.broken = true;
+      await manager.readNewChats();
+      expect(events).toEqual([]);
+      expect(failures).toEqual([
+        { message: "new cloud box chats could not be read", cause: "database is locked" },
+      ]);
     });
   });
 });
