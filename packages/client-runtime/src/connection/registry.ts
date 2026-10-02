@@ -1248,8 +1248,10 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(platformRegistrations, installPlatformRegistration, { discard: true });
   });
 
+  /** Removes an entry and everything saved for it, unless `keep` holds for it under its lock. */
   const forgetEntry = Effect.fn("EnvironmentRegistry.forgetEntry")(function* (
     environmentId: EnvironmentId,
+    keep?: (entry: ConnectionCatalogEntry) => boolean,
   ) {
     return yield* withLeaseLock(
       environmentId,
@@ -1259,7 +1261,9 @@ export const make = Effect.gen(function* () {
             environmentId,
           });
         }
-        const target = (yield* getEntry(environmentId)).target;
+        const entry = yield* getEntry(environmentId);
+        if (keep?.(entry) === true) return;
+        const target = entry.target;
         const profile =
           target._tag === "BearerConnectionTarget" || target._tag === "SshConnectionTarget"
             ? yield* profiles.get(target.connectionId)
@@ -1322,13 +1326,18 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  // A host's list is read from a snapshot of the catalog, and the box's dial may pair it before
+  // the list is applied. A box this device paired is its own to keep.
+  const forgetUnpairedBox = (environmentId: EnvironmentId) =>
+    forgetEntry(environmentId, (current) => !isUnpairedBox(current));
+
   const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
     yield* forgetEntry(environmentId);
     // A host's unpaired boxes exist on this device only because it listed them, so they go too.
     for (const entry of (yield* SubscriptionRef.get(entries)).values()) {
       if (!isUnpairedBox(entry) || connectionBox(entry.target)?.managerId !== environmentId)
         continue;
-      yield* forgetEntry(entry.target.environmentId).pipe(
+      yield* forgetUnpairedBox(entry.target.environmentId).pipe(
         Effect.catch((error) =>
           Effect.logWarning("Could not forget a removed host's unpaired box.", {
             environmentId: entry.target.environmentId,
@@ -1413,7 +1422,7 @@ export const make = Effect.gen(function* () {
       case "MarkMissing":
         return markWorkspaceMissing(step.environmentId);
       case "Forget":
-        return forgetEntry(step.environmentId);
+        return forgetUnpairedBox(step.environmentId);
     }
   };
 

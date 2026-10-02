@@ -300,6 +300,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       target: ConnectionTarget,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly initialDisabled?: ReadonlyArray<EnvironmentId>;
+    /** Runs as the cache is read, holding whoever reads it. */
+    readonly beforeLoadShell?: (environmentId: EnvironmentId) => Effect.Effect<void>;
   },
 ) {
   const storedTargets = yield* Ref.make(
@@ -421,7 +423,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   });
   const cacheStore = Persistence.EnvironmentCacheStore.of({
     loadShell: (environmentId) =>
-      Ref.get(shellCache).pipe(
+      (options?.beforeLoadShell?.(environmentId) ?? Effect.void).pipe(
+        Effect.andThen(Ref.get(shellCache)),
         Effect.map((cache) => Option.fromUndefinedOr(cache.get(environmentId))),
       ),
     saveShell: (environmentId, snapshot) =>
@@ -3337,6 +3340,48 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
         ).toEqual(BEARER_CREDENTIAL);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
+  );
+
+  it.effect("a box that pairs while its host's list is applied keeps its pairing", () =>
+    Effect.gen(function* () {
+      const planning = yield* Deferred.make<void>();
+      const paired = yield* Deferred.make<void>();
+      const harness = yield* makeHarness([TARGET], [], [], {
+        listProvisioned: [listedBox(CHAT_BOX_ID)],
+        // The sync reads the box's cache after it took its snapshot of the catalog.
+        beforeLoadShell: (environmentId) =>
+          environmentId === CHAT_BOX_ID
+            ? Deferred.succeed(planning, undefined).pipe(Effect.andThen(Deferred.await(paired)))
+            : Effect.void,
+      });
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* registry.syncHostBoxes(TARGET.environmentId, listing(listedBox(CHAT_BOX_ID)));
+        const sync = yield* registry
+          .syncHostBoxes(
+            TARGET.environmentId,
+            listing(listedBox(CHAT_BOX_ID, { lifecycle: "disposed", chat: chatAt(4) })),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(planning);
+        yield* registry.demand(CHAT_BOX_ID);
+        yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+        yield* Deferred.succeed(paired, undefined);
+        yield* Fiber.join(sync);
+
+        expect(
+          (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
+        ).toEqual(new BearerConnectionCredential({ token: "box-token-1" }));
+        const entry = (yield* SubscriptionRef.get(registry.entries)).get(CHAT_BOX_ID);
+        expect(entry === undefined ? null : Option.getOrNull(entry.profile)?.connectionId).toBe(
+          UNPAIRED_CHAT_BOX.connectionId,
+        );
+        expect((yield* registry.state(CHAT_BOX_ID)).phase).toBe("connected");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("the same list twice writes nothing", () =>
