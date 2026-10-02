@@ -142,6 +142,7 @@ const encodeReport = Schema.encodeEffect(
       wokeWhileAway: Schema.Boolean,
       reopen: Schema.Boolean,
       cutHostMidWake: Schema.Boolean,
+      cutInFlight: Schema.NullOr(Schema.Boolean),
       box: Schema.NullOr(
         Schema.Struct({
           requestId: Schema.String,
@@ -459,6 +460,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const inputs = yield* Queue.unbounded<void>();
   yield* Queue.offer(visible, true);
   let wokeWhileAway = false;
+  // Whether --cut-host-mid-wake closed the manager's session while the resume was in flight.
+  let cutInFlight: boolean | null = null;
   const pausedAt = yield* Ref.make<number | null>(null);
   const created: {
     requestId: ProvisionRequestId | null;
@@ -694,13 +697,16 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
               ),
             ),
             Stream.runHead,
-            // Long enough for the resume to be on the wire, well short of any resume finishing.
-            Effect.andThen(Effect.sleep("2 seconds")),
-            Effect.andThen(registry.retryNow(managerId)),
+            // Long enough for the resume to be on the wire, short of the quickest resume (E2B, ~2.5 s).
+            Effect.andThen(Effect.sleep("500 millis")),
             Effect.andThen(
               Effect.gen(function* () {
+                cutInFlight = (yield* registry.state(boxId)).phase === "waking";
+                if (cutInFlight) yield* registry.retryNow(managerId);
                 yield* Console.log(
-                  `[${yield* elapsed}s] manager reconnected under the box's in-flight resume`,
+                  cutInFlight
+                    ? `[${yield* elapsed}s] manager reconnected under the box's in-flight resume`
+                    : `[${yield* elapsed}s] the resume finished before the manager could be cut`,
                 );
               }),
             ),
@@ -803,7 +809,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const afterPause = entries.filter((entry) => entry.environment === "box" && entry.afterPause);
   const pausedAtSeconds = pause === null ? null : Math.round((pause - runStart) / 100) / 10;
   const reconnect = outcome === "reconnected" ? afterPause.at(-1) : undefined;
-  const ok = outcome === "reconnected" || (options.dryRun && outcome === "connected-dry-run");
+  const ok =
+    (outcome === "reconnected" && (!options.cutHostMidWake || cutInFlight === true)) ||
+    (options.dryRun && outcome === "connected-dry-run");
   const report = yield* encodeReport({
     harness: "verify-box-reconnect",
     startedAt,
@@ -816,6 +824,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     wokeWhileAway,
     reopen: options.reopen,
     cutHostMidWake: options.cutHostMidWake,
+    cutInFlight,
     box:
       created.box && created.requestId
         ? {
