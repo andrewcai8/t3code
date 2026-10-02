@@ -538,11 +538,11 @@ const HOST_UNREACHABLE = new ConnectionTransientError({
 /**
  * The host `TARGET` and its box `HOST_BOX`. The box's dial says not serving until a resume the
  * host answers `resumed` wakes it. The host answers resumes with `answers` in order, repeating the
- * last; `"never"` never answers, and `"cut-off"` ends the call the way the RPC client ends a call
- * whose session is closed under it: interrupted. The host's dial fails while `hostUp` is false.
+ * last; `"never"` never answers, `"cut-off"` ends the call the way the RPC client ends a call
+ * whose session is closed under it: interrupted, and `"defect"` ends it as a crashed handler does. The host's dial fails while `hostUp` is false.
  */
 const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness")(function* (
-  answers: ReadonlyArray<EnvironmentProvisionResumeResult | "never" | "cut-off">,
+  answers: ReadonlyArray<EnvironmentProvisionResumeResult | "never" | "cut-off" | "defect">,
   options?: {
     readonly serving?: boolean;
     readonly hostUp?: boolean;
@@ -578,6 +578,8 @@ const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness
             const answer = answers[Math.min(index, answers.length - 1)] ?? "never";
             if (answer === "never") return Effect.never;
             if (answer === "cut-off") return Effect.interrupt;
+            if (answer === "defect")
+              return Effect.die(new Error("The host's resume handler crashed."));
             return answer.kind === "resumed"
               ? Ref.set(serving, true).pipe(Effect.as(answer))
               : Effect.succeed(answer);
@@ -1033,6 +1035,23 @@ describe("EnvironmentRegistry", () => {
           ]);
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("a box whose wake ends in a defect is not left waking, and wakes again", () =>
+    Effect.gen(function* () {
+      const { harness, resumes } = yield* makeBoxWakeHarness(["defect", { kind: "resumed" }]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* registry.demand(HOST_BOX.environmentId);
+        yield* TestClock.adjust("5 seconds");
+
+        expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+        expect(yield* Ref.get(resumes)).toHaveLength(2);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect(
