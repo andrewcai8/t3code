@@ -283,6 +283,24 @@ export function StorageSettingsPanel() {
           />
         </SettingsSection>
       )}
+
+      {!isProjectScope && (
+        <SettingsSection id="storage-cloud-machines" title="Cloud machines">
+          <SettingsRow
+            title="Remove unused cloud machines"
+            status={ruleStatus("cloudMachinesAfterDays")}
+            description="Remove a paused Namespace Mac after this many unused days, or a settled chat's machine an hour after it pauses. Unpushed work is first pushed to a t3-backup branch; a machine whose work cannot be backed up is kept."
+            serverScoped
+            control={
+              <RetentionControl
+                label="Remove unused cloud machines"
+                value={settings.cloudMachinesAfterDays}
+                onChange={(cloudMachinesAfterDays) => update({ cloudMachinesAfterDays })}
+              />
+            }
+          />
+        </SettingsSection>
+      )}
     </SettingsPageContainer>
   );
 }

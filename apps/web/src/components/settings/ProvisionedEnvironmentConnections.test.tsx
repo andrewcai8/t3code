@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
   refresh: vi.fn(),
   resume: vi.fn(),
   dispose: vi.fn(),
+  keep: vi.fn(),
   confirm: vi.fn(),
   forget: vi.fn(),
   navigate: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }))
 vi.mock("../../cloud/provisionedSandboxLeases", () => ({
   forgetProvisionedSandbox: (...args: unknown[]) => state.forget(...args),
 }));
+vi.mock("../../hooks/useNowMinute", () => ({ useNowMinute: () => "2026-03-01T12:00" }));
 vi.mock("../../localApi", () => ({
   ensureLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
 }));
@@ -41,10 +43,12 @@ vi.mock("../../state/server", () => ({
     provisionedEnvironments: () => "discovery",
     resumeProvisionedEnvironment: "resume",
     disposeProvisionedEnvironment: "dispose",
+    keepProvisionedEnvironment: "keep",
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (command: string) => (command === "resume" ? state.resume : state.dispose),
+  useAtomCommand: (command: string) =>
+    command === "resume" ? state.resume : command === "keep" ? state.keep : state.dispose,
 }));
 vi.mock("../ui/button", () => ({
   Button: (props: ComponentProps<"button">) => <button {...props} />,
@@ -72,6 +76,7 @@ beforeEach(() => {
   state.title = null;
   state.resume.mockResolvedValue(AsyncResult.success({ kind: "resumed" }));
   state.dispose.mockResolvedValue(AsyncResult.success({ kind: "disposed" }));
+  state.keep.mockResolvedValue(AsyncResult.success({ kind: "updated" }));
 });
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -149,4 +154,31 @@ it("keeps a refused delete visible", async () => {
   await click(view, "Delete");
   expect(paragraphs(view)).toContain("The host could not delete this machine.");
   expect(state.forget).not.toHaveBeenCalled();
+});
+
+it("shows when a paused machine will be removed and keeps it on request", async () => {
+  state.rows = [
+    {
+      ...machine("paused"),
+      cleanup: { kind: "scheduled", at: "2026-03-07T12:00:00.000Z", reason: "idle" },
+    },
+  ];
+  const view = await mount();
+  expect(paragraphs(view)).toContain("proof/repo · E2B · Paused · Removed in 6 days");
+  await click(view, "Keep");
+  expect(state.keep).toHaveBeenCalledWith({
+    environmentId: "host",
+    input: { requestId: "11111111-1111-4111-a111-111111111111", keep: true },
+  });
+});
+
+it("allows cleanup again of a machine the user kept", async () => {
+  state.rows = [{ ...machine("paused"), cleanup: { kind: "kept", reason: "user" } }];
+  const view = await mount();
+  expect(paragraphs(view)).toContain("proof/repo · E2B · Paused · Kept");
+  await click(view, "Allow cleanup");
+  expect(state.keep).toHaveBeenCalledWith({
+    environmentId: "host",
+    input: { requestId: "11111111-1111-4111-a111-111111111111", keep: false },
+  });
 });

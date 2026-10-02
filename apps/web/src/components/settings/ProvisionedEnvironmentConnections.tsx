@@ -1,3 +1,4 @@
+import { describeCloudCleanup } from "@t3tools/client-runtime/cloud";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -5,6 +6,7 @@ import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/c
 import { useEffect, useState } from "react";
 
 import { forgetProvisionedSandbox } from "../../cloud/provisionedSandboxLeases";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { ensureLocalApi } from "../../localApi";
 import { useThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
@@ -21,19 +23,24 @@ const LIFECYCLE_LABELS: Record<DiscoveredProvisionedEnvironment["lifecycle"], st
 
 /**
  * One cloud machine the host runs for a chat. Its chat opens it, when that chat is on this
- * device; here it can only be woken or deleted.
+ * device; here it can only be woken, kept from cleanup, or deleted.
  */
 function ProvisionedEnvironmentRow({
   environment,
   busy,
   onResume,
+  onKeep,
   onDelete,
 }: {
   environment: DiscoveredProvisionedEnvironment;
   busy: boolean;
   onResume: () => void;
+  onKeep: (keep: boolean) => void;
   onDelete: (title: string) => void;
 }) {
+  // The minute clock is UTC without its zone.
+  const now = Date.parse(`${useNowMinute()}Z`);
+  const cleanup = describeCloudCleanup(environment.cleanup, now);
   const threadRef =
     environment.threadId === null
       ? null
@@ -49,12 +56,23 @@ function ProvisionedEnvironmentRow({
           {environment.repository ?? environment.projectDir} ·{" "}
           {environment.provider === "e2b" ? "E2B" : "Namespace"} ·{" "}
           {LIFECYCLE_LABELS[environment.lifecycle]}
+          {cleanup ? ` · ${cleanup.text}` : null}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {environment.lifecycle === "paused" ? (
           <Button size="xs" variant="outline" disabled={busy} onClick={onResume}>
             Resume
+          </Button>
+        ) : null}
+        {cleanup?.action ? (
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={busy}
+            onClick={() => onKeep(cleanup.action === "keep")}
+          >
+            {cleanup.action === "keep" ? "Keep" : "Allow cleanup"}
           </Button>
         ) : null}
         {thread !== null && threadRef !== null ? (
@@ -99,6 +117,9 @@ export function ProvisionedEnvironmentConnections({
   const dispose = useAtomCommand(serverEnvironment.disposeProvisionedEnvironment, {
     reportFailure: false,
   });
+  const keep = useAtomCommand(serverEnvironment.keepProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const refresh = query.refresh;
@@ -130,6 +151,15 @@ export function ProvisionedEnvironmentConnections({
       });
       if (result._tag === "Failure") return "The host could not resume this machine. Try again.";
       return result.value.kind === "resumed" ? null : result.value.message;
+    });
+  const keepEnvironment = (environment: DiscoveredProvisionedEnvironment, kept: boolean) =>
+    act(environment, async () => {
+      const result = await keep({
+        environmentId: managerId,
+        input: { requestId: environment.requestId, keep: kept },
+      });
+      if (result._tag === "Failure") return "The host could not update this machine. Try again.";
+      return result.value.kind === "updated" ? null : result.value.message;
     });
   const deleteEnvironment = async (
     environment: DiscoveredProvisionedEnvironment,
@@ -179,6 +209,7 @@ export function ProvisionedEnvironmentConnections({
           environment={environment}
           busy={busy === environment.requestId}
           onResume={() => void resumeEnvironment(environment)}
+          onKeep={(kept) => void keepEnvironment(environment, kept)}
           onDelete={(title) => void deleteEnvironment(environment, title)}
         />
       ))}
