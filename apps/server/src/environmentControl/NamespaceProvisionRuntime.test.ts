@@ -19,7 +19,7 @@ import {
   mintNamespacePairing,
   namespacePythonPort,
 } from "./NamespaceProvisionRuntime.ts";
-import { localPort } from "./guestTestFixture.ts";
+import { git, localPort } from "./guestTestFixture.ts";
 import { prepareRemoteHost } from "./remotePreparation.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import { namespaceMacImage } from "./namespaceAllocation.ts";
@@ -1305,5 +1305,55 @@ describe("Namespace runtime transport", () => {
     await runtime.dispose(f.operation, resource);
     await runtime.dispose(f.operation, resource);
     expect(f.commands).toEqual([["expire", "owned-box", "--force"]]);
+  });
+
+  it("wakes a shut-down Devbox before pushing its chat's unsaved work", async () => {
+    // Its Mac takes longer to boot than an ordinary command may run.
+    const f = await fixture({ commandTimeoutMs: 1_500, bootMs: 2_500 });
+    f.state.instanceId = "";
+    const root = NodePath.join(f.directory, "volume/t3-provision", requestId);
+    const origin = NodePath.join(f.directory, "origin.git");
+    git(f.directory, "init", "-q", "--bare", "-b", "main", origin);
+    await NodeFSP.mkdir(root, { recursive: true });
+    await NodeFSP.chmod(root, 0o700);
+    git(root, "clone", "-q", origin, "workspace");
+    await NodeFSP.writeFile(NodePath.join(root, "workspace", "notes.txt"), "unsaved\n");
+    const manifest = decodeManifest({
+      input: { requestId, provider: "namespace", providerInstanceId: "codex" },
+      request: f.request,
+      preparation: {
+        requestId,
+        root,
+        repository: null,
+        artifact: {
+          archivePath: `${f.directory}/volume/t3-runtime.tar`,
+          sha256: "d".repeat(64),
+          revision: "c".repeat(40),
+          entrypoint: "cli.mjs",
+        },
+        runtimeExecutable: process.execPath,
+        port: 3773,
+        readinessTimeoutSeconds: 30,
+        brokerTtl: "1h",
+        files: [],
+      },
+      localArtifact: {
+        path: `${f.directory}/runtime.tar`,
+        sha256: "d".repeat(64),
+        revision: "c".repeat(40),
+        entrypoint: "cli.mjs",
+        runtimeExecutable: process.execPath,
+      },
+      egressAllow: [],
+    });
+    const runtime = makeNamespaceProvisionRuntime({
+      session: f.session,
+      getIngressAuthorization: async () => "Bearer private-ingress",
+      stateDir: f.directory,
+    });
+    expect(
+      await runtime.backUpWork(f.operation, resource, manifest, { branch: requestId, push: true }),
+    ).toEqual({ kind: "saved", branches: [`t3-backup/${requestId}`] });
+    expect(git(origin, "show", `t3-backup/${requestId}:notes.txt`)).toBe("unsaved");
   });
 });

@@ -14,7 +14,8 @@ const workspaceBackupScript = String.raw`
 import base64, json, os, pathlib, subprocess, sys, tempfile
 
 request = json.load(sys.stdin)
-root = pathlib.Path(request['root'])
+# Resolved, so it compares equal to the real paths git lists worktrees at.
+root = pathlib.Path(request['root']).resolve()
 main = root / 'workspace'
 env = dict(os.environ)
 env.update({
