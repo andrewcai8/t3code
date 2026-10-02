@@ -13,7 +13,8 @@ import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
-const input = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
+const input = decodeInput({
   requestId: "56d8ba31-df41-4918-be6a-acab453c8aed",
   provider: "e2b",
   providerInstanceId: "codex",
@@ -876,4 +877,76 @@ it.effect(
         ),
       ),
     ),
+);
+
+it.effect("saves each launch before the next one routes, so two at once take two accounts", () =>
+  Effect.gen(function* () {
+    const actual = yield* ProvisionOperationStore;
+    const saved = new Set<string>();
+    const store = {
+      ...actual,
+      accept: (request: Parameters<typeof actual.accept>[0]) =>
+        actual
+          .accept(request)
+          .pipe(Effect.tap(() => Effect.sync(() => saved.add(request.providerInstanceId)))),
+    };
+    const provisioning = yield* Provisioning.make.pipe(
+      Effect.provideService(ProvisionOperationStore, store),
+      Effect.provideService(ProvisionProviderPorts, {
+        create: () => Effect.never,
+        recoverCreate: () => Effect.succeed([]),
+        fork: () => Effect.die("Unexpected fork"),
+        recoverFork: () => Effect.succeed([]),
+        dispose: () => Effect.void,
+        prepare: () => Effect.die("Unexpected prepare"),
+      }),
+    );
+    const routed: string[] = [];
+    let bothRouted!: () => void;
+    const routedTwice = new Promise<void>((resolve) => (bothRouted = resolve));
+    const control = makeProvisionControl(
+      store,
+      provisioning,
+      {
+        ...noRuntimePorts,
+        // Routes like the host: to the first account no saved request runs on.
+        freeze: async (launch) => {
+          const account = ["codex_ac1", "codex_ac3"].find((id) => !saved.has(id))!;
+          for (let tick = 0; tick < 3; tick++)
+            await new Promise((resolve) => setImmediate(resolve));
+          if (routed.push(account) === 2) bothRouted();
+          return {
+            ...manifest,
+            input: launch,
+            request: {
+              ...manifest.request,
+              requestId: launch.requestId,
+              providerInstanceId: account,
+            },
+            preparation: { ...manifest.preparation, requestId: launch.requestId },
+          };
+        },
+        load: async () => manifest,
+        attach: async () => {
+          throw new Error("Unexpected attach");
+        },
+        touch: async () => "running" as const,
+      },
+      createProvisionedLeaseRegistry(yield* SqlClient.SqlClient),
+    );
+    const launches = yield* Effect.forEach(
+      ["0b9f7d2e-5a43-4c8e-9f1a-2d6b8c4e7a01", "0b9f7d2e-5a43-4c8e-9f1a-2d6b8c4e7a02"],
+      (requestId) => control.provision(decodeInput({ ...input, requestId })).pipe(Effect.forkChild),
+    );
+    yield* Effect.promise(() => routedTwice);
+    expect(routed).toEqual(["codex_ac1", "codex_ac3"]);
+    yield* Fiber.interruptAll(launches);
+  }).pipe(
+    Effect.provide(
+      ProvisionOperationStore.layer.pipe(
+        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+  ),
 );

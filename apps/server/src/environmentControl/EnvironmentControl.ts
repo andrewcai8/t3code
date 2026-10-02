@@ -1335,7 +1335,7 @@ export const layer = Layer.effect(
             Effect.all({
               providers: providerRegistry.getProviders,
               now: Clock.currentTimeMillis,
-              load: readAccountLoad(leaseRegistry, threadSessions),
+              load: readAccountLoad(leaseRegistry, threadSessions, store),
             }).pipe(
               Effect.flatMap((usage) =>
                 resolveProvisioningProfiles(
