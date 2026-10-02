@@ -88,6 +88,8 @@ export interface WorkLogEntry {
   turnId: TurnId | null;
   label: string;
   detail?: string;
+  /** When a usage-limit pause lifts, rendered in the viewer's timezone. */
+  resetsAt?: string;
   viewedImagePath?: string;
   command?: string;
   rawCommand?: string;
@@ -573,6 +575,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (!entry.detail && (activity.kind === "runtime.error" || activity.kind === "runtime.warning")) {
     const message = asTrimmedString(payload?.message);
     if (message) entry.detail = message;
+  }
+  if (activity.kind === "runtime.warning") {
+    const resetsAt = asTrimmedString(payload?.resetsAt);
+    if (resetsAt && !Number.isNaN(Date.parse(resetsAt))) entry.resetsAt = resetsAt;
   }
   if (viewedImagePath) {
     entry.viewedImagePath = viewedImagePath;

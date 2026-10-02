@@ -4822,8 +4822,7 @@ describe("ClaudeAdapterLive", () => {
       // line can arrive more than once inside one turn.
       harness.query.emit(rejected as unknown as SDKMessage);
       yield* drainSdkMessages;
-      // The repeat lands minutes later, so the remaining wait has visibly
-      // shrunk. Deduping on the rendered row would let that drift through.
+      // The same window repeats minutes later and stays one row.
       yield* TestClock.adjust("5 minutes");
       harness.query.emit(rejected as unknown as SDKMessage);
       yield* drainSdkMessages;

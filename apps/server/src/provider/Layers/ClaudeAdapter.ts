@@ -639,44 +639,36 @@ const CLAUDE_USAGE_LIMIT_WINDOWS = {
   overage: "overage",
 } satisfies Record<NonNullable<SDKRateLimitInfo["rateLimitType"]>, string>;
 
-/** Beyond this the reset time is not credible, so the row ships without a wait. */
+/** Beyond this the reset time is not credible, so the row ships without one. */
 const CLAUDE_USAGE_LIMIT_MAX_WAIT_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
- * `resetsAt` is epoch seconds. The row states the remaining wait rather than a
- * wall-clock time: this renders on the server, while the row is read on clients
- * that may sit in another timezone and locale, and that carry their own
- * timestamp preference. A wait reads the same everywhere.
+ * `resetsAt` is epoch seconds. The message names no time: it renders on the
+ * server, while clients read it in other timezones and locales with their own
+ * timestamp preference. The instant ships as `resetsAt` for them to format.
  */
 function describeClaudeUsageLimit(
   info: SDKRateLimitInfo,
   nowMs: number,
   names: ClaudeScopedLimitNames,
-): string {
+): { readonly message: string; readonly resetsAt: string | undefined } {
   const label =
     info.rateLimitType === "seven_day_overage_included" && names.overageIncluded
       ? `7-day ${names.overageIncluded}`
       : info.rateLimitType
         ? CLAUDE_USAGE_LIMIT_WINDOWS[info.rateLimitType]
         : undefined;
-  const resetsAtMs = info.resetsAt === undefined ? undefined : info.resetsAt * 1000;
-  const waitMs =
-    resetsAtMs === undefined || !Number.isFinite(nowMs) ? undefined : resetsAtMs - nowMs;
-  const wait =
-    waitMs !== undefined && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
-      ? formatClaudeUsageLimitWait(waitMs)
-      : undefined;
-  return `Claude usage limit reached. This turn is paused until the ${
-    label ? `${label} ` : ""
-  }limit resets${wait ? ` in ${wait}` : ""}.`;
-}
-
-function formatClaudeUsageLimitWait(waitMs: number): string {
-  const totalMinutes = Math.ceil(waitMs / 60_000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours === 0) return `${totalMinutes}m`;
-  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+  const resetsAtMs = (info.resetsAt ?? Number.NaN) * 1000;
+  const waitMs = resetsAtMs - nowMs;
+  return {
+    message: `Claude usage limit reached. This turn is paused until the ${
+      label ? `${label} ` : ""
+    }limit resets.`,
+    resetsAt:
+      waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
+        ? new Date(resetsAtMs).toISOString()
+        : undefined,
+  };
 }
 
 function asRuntimeItemId(value: string): RuntimeItemId {
@@ -2546,6 +2538,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: string,
     detail?: unknown,
+    resetsAt?: string,
   ) {
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
@@ -2559,6 +2552,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       payload: {
         message,
         ...(detail !== undefined ? { detail } : {}),
+        ...(resetsAt !== undefined ? { resetsAt } : {}),
       },
       providerRefs: nativeProviderRefs(context),
     });
@@ -3525,7 +3519,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.turnState.compactedSinceLatestAssistantUsage = false;
       }
       yield* backfillThinkingFromSnapshot(context, message);
-      yield* backfillAssistantTextBlocksFromSnapshot(context, message);
+      // The CLI's synthetic rate-limit reply formats the reset in the host's
+      // timezone. The usage-limit warning carries the instant for viewers.
+      if (message.error !== "rate_limit") {
+        yield* backfillAssistantTextBlocksFromSnapshot(context, message);
+      }
     }
 
     context.lastAssistantUuid = message.uuid;
@@ -4191,10 +4189,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
       }
       if (blocked && context.turnState !== undefined) {
-        // Tracked per turn as a set of limit identities, not as the rendered
-        // row: a parked window re-fires while the remaining wait shrinks, and a
-        // turn can park on more than one window, so a single slot would let an
-        // interleaved repeat through. A new turn — including a synthetic one —
+        // Tracked per turn as a set of limit identities: a turn can park on
+        // more than one window, so a single slot would let an interleaved
+        // repeat through. A new turn — including a synthetic one —
         // starts a fresh set and announces its pause again.
         const turnId = context.turnState.turnId;
         if (context.announcedUsageLimits?.turnId !== turnId) {
@@ -4207,7 +4204,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             Date.parse(stamp.createdAt),
             names,
           );
-          yield* emitRuntimeWarning(context, notice, rateLimitInfo);
+          yield* emitRuntimeWarning(context, notice.message, rateLimitInfo, notice.resetsAt);
         }
       }
       return;
