@@ -839,7 +839,7 @@ const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
  * A window's usage only rises until it resets, so an old reading still
  * counts as the best the host knows. `null` means unknown: a failed probe,
  * no report at all, or an old reading of a spent window that never reports
- * when it resets.
+ * when it resets and no other window still spent.
  * Ranking divides it among the account's active sessions plus the new one.
  */
 export interface AccountHeadroom {
@@ -888,18 +888,22 @@ function accountHeadroom(
   if (!Number.isFinite(checkedAt)) return null;
   const stale = now - checkedAt > USAGE_LIMITS_STALE_MS;
   let tightest: AccountHeadroom = { remainingPercent: 100, resetsAt: null };
+  let unvouched = false;
   for (const window of headroomWindows(driver, limits.windows, now)) {
     const resetsAt = resetMillis(window);
     if (resetsAt !== null && resetsAt <= now) continue;
     const remaining = remainingPercent(window);
-    if (stale && resetsAt === null && remaining <= 0) return null;
+    if (stale && resetsAt === null && remaining <= 0) {
+      unvouched = true;
+      continue;
+    }
     if (
       remaining < tightest.remainingPercent ||
       (remaining === tightest.remainingPercent && earlier(resetsAt, tightest.resetsAt))
     )
       tightest = { remainingPercent: remaining, resetsAt };
   }
-  return tightest;
+  return unvouched && tightest.remainingPercent > 0 ? null : tightest;
 }
 
 /** Whether an account is known to have no usage left in some window that has not reset. */

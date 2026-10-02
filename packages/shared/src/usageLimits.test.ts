@@ -1314,8 +1314,9 @@ describe("rankAccounts", () => {
         { checkedAt: old, windows: [session(100, "2026-09-03T11:30:00.000Z")] },
         { checkedAt: old, windows: [unreset(100)] },
         { checkedAt, windows: [unreset(100)] },
+        { checkedAt: old, windows: [weekly(100), unreset(100)] },
       ].map((limits) => isAccountSpent(claude, limits, now)),
-    ).toEqual([true, false, false, true]);
+    ).toEqual([true, false, false, true, true]);
   });
 
   it("breaks ties by earliest refill, then the preferred account, then id", () => {
