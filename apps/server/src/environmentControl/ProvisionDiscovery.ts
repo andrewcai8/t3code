@@ -45,6 +45,18 @@ function savedBoxAddresses(addresses: ReadonlyArray<SavedEnvironmentAddress>) {
   return { byLease, byOrigin };
 }
 
+/** A box's name in client lists: its repository's name and where it runs, as "Run on" names it. */
+export function boxLabel(request: DurableProvisionRequest): string {
+  const where =
+    request.provider === "e2b"
+      ? "E2B"
+      : request.engine === "instance"
+        ? "Namespace Mac"
+        : "Namespace";
+  const name = request.repository?.split("/").findLast((segment) => segment !== "");
+  return name === undefined ? where : `${name} · ${where}`;
+}
+
 /**
  * Discovery reads retained identities without renewing leases or issuing credentials. Of the
  * `known` environments, those that were this host's boxes and are gone come back as `disposed`,
@@ -146,9 +158,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         lifecycle: box.lifecycle,
         environmentId: box.environmentId,
         provider: request.provider,
-        label:
-          request.repository ??
-          `${request.provider === "e2b" ? "E2B" : "Namespace"} · ${request.requestId.slice(0, 8)}`,
+        label: boxLabel(request),
         repository: request.repository ?? null,
         ...(box.projectDir === undefined ? {} : { projectDir: box.projectDir }),
         threadId: lease.owner?.threadId ?? null,

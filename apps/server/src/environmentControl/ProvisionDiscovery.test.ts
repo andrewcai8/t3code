@@ -14,7 +14,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
-import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
+import { boxLabel, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
@@ -128,7 +128,7 @@ it.effect(
           lifecycle: "active",
           environmentId: "environment-1",
           provider: "e2b",
-          label: "proof/repository",
+          label: "repository · E2B",
           repository: "proof/repository",
           projectDir: "/private/project",
           threadId: "thread-1",
@@ -181,7 +181,7 @@ it.effect(
             lifecycle: "disposed",
             environmentId: "environment-7",
             provider: "e2b",
-            label: "proof/repository",
+            label: "repository · E2B",
             repository: "proof/repository",
             projectDir: "/private/project",
             threadId: "thread-7",
@@ -195,7 +195,7 @@ it.effect(
             lifecycle: "disposed",
             environmentId: "environment-8",
             provider: "e2b",
-            label: "proof/repository",
+            label: "repository · E2B",
             repository: "proof/repository",
             projectDir: "/private/project",
             threadId: "thread-8",
@@ -326,7 +326,7 @@ it.effect("a box disposed through the host is reported disposed, by the id the b
         lifecycle: "disposed",
         environmentId: "box-1",
         provider: "e2b",
-        label: "proof/repository",
+        label: "repository · E2B",
         repository: "proof/repository",
         threadId: "thread-1",
         createdAt: expect.any(String),
@@ -437,3 +437,36 @@ it.effect("a box disposed before the host kept its id is named by the address a 
     );
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
+
+it("labels a box by its repository's name and where it runs", () => {
+  const e2b = {
+    requestId: id(1),
+    provider: "e2b",
+    providerInstanceId: "account",
+    sourceRevision: null,
+    preparationHash: "a".repeat(64),
+    strategy: "direct",
+    templateId: "fixture",
+  };
+  const namespace = {
+    requestId: id(2),
+    provider: "namespace",
+    providerInstanceId: "account",
+    sourceRevision: null,
+    preparationHash: "a".repeat(64),
+    tenantId: "tenant",
+    size: "M",
+    image: "image",
+    region: "us",
+    idleTimeoutMinutes: 30,
+  };
+  const label = (request: Record<string, unknown>) => boxLabel(decodeRequest(request));
+  expect(label({ ...e2b, repository: "pingdotgg/t3code" })).toBe("t3code · E2B");
+  expect(label(e2b)).toBe("E2B");
+  expect(label({ ...namespace, repository: "pingdotgg/t3code", engine: "instance" })).toBe(
+    "t3code · Namespace Mac",
+  );
+  expect(label({ ...namespace, engine: "instance" })).toBe("Namespace Mac");
+  expect(label({ ...namespace, repository: "pingdotgg/t3code" })).toBe("t3code · Namespace");
+  expect(label(namespace)).toBe("Namespace");
+});
