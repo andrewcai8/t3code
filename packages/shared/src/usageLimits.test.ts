@@ -1305,6 +1305,43 @@ describe("rankAccounts", () => {
     ]);
   });
 
+  it("counts a window that refills early in a long job as nearly full", () => {
+    const ranked = rankAccounts(
+      [
+        account("spent-until-soon", {
+          checkedAt,
+          windows: [session(100, "2026-09-03T12:05:00.000Z")],
+        }),
+        account("refills-late", { checkedAt, windows: [session(95, "2026-09-03T16:00:00.000Z")] }),
+        account("half-left-all-week", { checkedAt, windows: [weekly(50)] }),
+        account("refills-soon", { checkedAt, windows: [session(95, "2026-09-03T12:10:00.000Z")] }),
+      ],
+      now,
+    );
+    expect(ids(ranked)).toEqual([
+      "refills-soon",
+      "half-left-all-week",
+      "refills-late",
+      "spent-until-soon",
+    ]);
+  });
+
+  it("pools accounts whose readings match exactly as one subscription", () => {
+    const shared = { checkedAt, windows: [weekly(40)] };
+    const ranked = rankAccounts(
+      [
+        account("a", shared),
+        account("b", shared),
+        account("c", shared),
+        account("d", { checkedAt, windows: [weekly(55)] }),
+      ],
+      now,
+      undefined,
+      new Map([[ProviderInstanceId.make("a"), 1]]),
+    );
+    expect(ids(ranked)).toEqual(["d", "a", "b", "c"]);
+  });
+
   it("calls an account spent on an old reading only while that window has not reset", () => {
     const old = "2026-09-03T10:50:00.000Z";
     const claude = ProviderDriverKind.make("claudeAgent");
