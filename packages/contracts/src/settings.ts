@@ -1112,6 +1112,8 @@ export const StorageCleanupSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   logsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /** Days a paused Namespace Devbox may sit unused before it is removed. Null keeps it. */
+  cloudMachinesAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(7))),
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
@@ -1501,6 +1503,7 @@ export const ServerSettingsPatch = Schema.Struct({
       worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      cloudMachinesAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
   ),
   // Server settings

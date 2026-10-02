@@ -39,6 +39,7 @@ describe("serverSettings helpers", () => {
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: 30,
+      cloudMachinesAfterDays: 7,
     });
   });
   it("replaces SSH host lists when saving, editing, and removing hosts", () => {
