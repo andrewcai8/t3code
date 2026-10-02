@@ -185,17 +185,6 @@ export function mergeCodexRateLimits(
   };
 }
 
-/** Coarse remaining wait, matching how the usage rows read: `5d 5h`, `3h 20m`, `12m`. */
-function formatCodexUsageLimitWait(waitMs: number): string {
-  const totalMinutes = Math.ceil(waitMs / 60_000);
-  const days = Math.floor(totalMinutes / (24 * 60));
-  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
-  const minutes = totalMinutes % 60;
-  if (days > 0) return hours === 0 ? `${days}d` : `${days}d ${hours}h`;
-  if (hours === 0) return `${totalMinutes}m`;
-  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
-}
-
 function codexUsageLimitNextStep(rateLimitReachedType: string | null | undefined): string {
   switch (rateLimitReachedType) {
     case "workspace_owner_credits_depleted":
@@ -213,22 +202,26 @@ function codexUsageLimitNextStep(rateLimitReachedType: string | null | undefined
  * The message a usage-limit stop shows instead of the provider sentence, which
  * on a Business workspace blames credits for a window that simply ran out. The
  * window named is the exhausted one that has yet to reset, latest first; `atIso`
- * is the stopping event's timestamp, not the wall clock.
+ * is the stopping event's timestamp, not the wall clock. The message names no
+ * time: clients render `resetsAt` in the viewer's timezone and format.
  */
 export function codexUsageLimitMessage(
   snapshot: CodexRateLimitSnapshot | undefined,
   atIso: string,
-): string {
+): { readonly message: string; readonly resetsAt: string | undefined } {
   const atMs = Date.parse(atIso);
   const windows = snapshot && Number.isFinite(atMs) ? codexRateLimitsToWindows(snapshot) : [];
-  let reset = "";
+  let exhausted: ServerProviderUsageWindow | undefined;
   let latestResetMs = Number.NEGATIVE_INFINITY;
   for (const window of windows) {
     if (window.usedPercent < 100 || !window.resetsAt) continue;
     const resetMs = Date.parse(window.resetsAt);
     if (!Number.isFinite(resetMs) || resetMs <= atMs || resetMs <= latestResetMs) continue;
     latestResetMs = resetMs;
-    reset = ` The ${window.kind} limit resets in ${formatCodexUsageLimitWait(resetMs - atMs)}.`;
+    exhausted = window;
   }
-  return `Codex usage limit reached.${reset}${codexUsageLimitNextStep(snapshot?.rateLimitReachedType)}`;
+  return {
+    message: `Codex ${exhausted ? `${exhausted.kind} ` : ""}usage limit reached.${codexUsageLimitNextStep(snapshot?.rateLimitReachedType)}`,
+    resetsAt: exhausted?.resetsAt,
+  };
 }

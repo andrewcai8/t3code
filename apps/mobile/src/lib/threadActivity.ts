@@ -576,7 +576,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     const message = asTrimmedString(payload?.message);
     if (message) entry.detail = message;
   }
-  if (activity.kind === "runtime.warning") {
+  if (activity.kind === "runtime.error" || activity.kind === "runtime.warning") {
     const resetsAt = asTrimmedString(payload?.resetsAt);
     if (resetsAt && !Number.isNaN(Date.parse(resetsAt))) entry.resetsAt = resetsAt;
   }

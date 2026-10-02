@@ -2444,7 +2444,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   },
                 };
               } else if (turnError?.codexErrorInfo === "usageLimitExceeded") {
-                usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
+                const usageLimit = codexUsageLimitMessage(rateLimits, event.createdAt);
+                usageLimitMessage = usageLimit.message;
                 usageLimitError = {
                   ...runtimeEventBase(event, event.threadId),
                   type: "runtime.error",
@@ -2452,6 +2453,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     message: usageLimitMessage,
                     class: "provider_error",
                     ...(turnError.message ? { detail: turnError.message } : {}),
+                    ...(usageLimit.resetsAt ? { resetsAt: usageLimit.resetsAt } : {}),
                   },
                 };
               }
