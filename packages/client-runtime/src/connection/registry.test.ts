@@ -27,6 +27,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
+import * as Tracer from "effect/Tracer";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
@@ -73,7 +74,7 @@ import * as RpcSession from "../rpc/session.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 import { UserPresence, makeUserPresence } from "./presence.ts";
-import { watchDiscoveredCompatibility } from "./layer.ts";
+import { followPlatformRegistrations, watchDiscoveredCompatibility } from "./layer.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import { runDesktopCommitWithReconnectObserver } from "../state/server.ts";
@@ -707,6 +708,49 @@ describe("EnvironmentRegistry", () => {
         );
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a platform poll that reports the same environments does no work and records no spans",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness([]);
+        const spans: Array<string> = [];
+        const tracer = Tracer.make({
+          span(options) {
+            spans.push(options.name);
+            return new Tracer.NativeSpan(options);
+          },
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          // Each poll builds its registrations afresh, as the web's does once a bearer is refreshed.
+          const polls = Stream.tick("3 seconds").pipe(
+            Stream.map(() => [new PrimaryConnectionRegistration({ target: TARGET })]),
+          );
+          yield* followPlatformRegistrations(registry, polls).pipe(
+            Effect.withTracer(tracer),
+            Effect.forkScoped,
+          );
+          yield* SubscriptionRef.changes(registry.entries).pipe(
+            Stream.filter((entries) => entries.has(TARGET.environmentId)),
+            Stream.runHead,
+          );
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          spans.length = 0;
+
+          yield* TestClock.adjust("1 minute");
+
+          expect(spans).toEqual([]);
+          expect((yield* registry.state(TARGET.environmentId)).phase).toBe("connected");
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("does not mark platform or non-bearer environments as missing", () =>

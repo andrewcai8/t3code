@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -24,8 +25,18 @@ const CLIENT_TRACING_RESOURCE = {
   },
 } as const;
 
+// The exporter never reads a response body, and the browser reports a fetch whose body is left
+// unread as aborted (net::ERR_ABORTED), though the server took the spans. Reading the empty body
+// ends each export cleanly.
+const exporterHttpLayer = Layer.effect(
+  HttpClient.HttpClient,
+  Effect.map(HttpClient.HttpClient, (client) =>
+    client.pipe(HttpClient.tap((response) => Effect.ignore(response.text))),
+  ),
+).pipe(Layer.provideMerge(primaryEnvironmentHttpLayer));
+
 const delegateRuntimeLayer = Layer.mergeAll(
-  primaryEnvironmentHttpLayer,
+  exporterHttpLayer,
   OtlpExporter.layerFlusher,
   OtlpSerialization.layerJson,
   Layer.succeed(HttpClient.TracerDisabledWhen, () => true),
