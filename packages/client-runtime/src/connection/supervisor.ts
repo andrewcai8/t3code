@@ -682,7 +682,20 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       lastFailure,
       retryAt: null,
     });
-    return yield* Effect.raceFirst(wake, waitForWakeInterrupt());
+    // However a wake ends, the loop goes on: a wake that fails instead of answering is treated as
+    // one the host never heard, so the box cannot be left waking with nothing running.
+    const settledWake = wake.pipe(
+      Effect.catchCause(() =>
+        Effect.succeed<BoxWakeOutcome>({
+          _tag: "Undelivered",
+          error: new ConnectionTransientError({
+            reason: "not-serving",
+            detail: "This chat's cloud host did not answer the wake.",
+          }),
+        }),
+      ),
+    );
+    return yield* Effect.raceFirst(settledWake, waitForWakeInterrupt());
   });
 
   const waitForSignal = Queue.take(signals).pipe(
