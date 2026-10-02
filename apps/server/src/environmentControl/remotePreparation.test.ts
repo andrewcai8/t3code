@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   boundedRunScript,
+  brokerTokenScript,
   prepareRemoteHost,
   refreshRemoteCheckout,
   remotePreparationScript,
@@ -61,6 +62,7 @@ if (args[0] === 'auth') {
     process.exit(1);
   }
   fs.appendFileSync(path.join(root, 'issued'), 'issue\n');
+  fs.appendFileSync(path.join(root, 'issued-by'), path.relative(root, process.argv[1]) + '\n');
   const ttl = args[args.indexOf('--ttl') + 1];
   const iat = Date.now();
   const exp = iat + Number(ttl.slice(0, -1)) * { m: 60000, h: 3600000, d: 86400000 }[ttl.slice(-1)];
@@ -92,6 +94,18 @@ if (args[0] === 'auth') {
   server.listen(Number(args[args.indexOf('--port') + 1]), '127.0.0.1');
 }
 `;
+
+const expiredBroker = () => {
+  const now = Date.now();
+  return `${Buffer.from(JSON.stringify({ iat: now - 7_200_000, exp: now - 3_600_000 })).toString("base64url")}.test-private-broker`;
+};
+
+/** What a pairing mint runs on the guest before it asks the server for a grant. */
+const brokerToken = (root: string, proc = "/proc") =>
+  localPort.executePython({
+    script: `import base64,contextlib,fcntl,json,os,pathlib,subprocess,sys,time\n${brokerTokenScript}\nspec=json.load(sys.stdin)\nprint(broker_token(pathlib.Path(spec['root']), spec['proc']))`,
+    stdin: JSON.stringify({ root, proc }),
+  });
 
 async function fixture(install = false): Promise<RemotePreparationInput> {
   const base = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-preparation-"));
@@ -437,8 +451,7 @@ describe("remote preparation subprocess", () => {
     const input = await fixture();
     const first = await prepareRemoteHost(localPort, input);
     pids.add(first.serverPid);
-    const now = Date.now();
-    const expired = `${Buffer.from(JSON.stringify({ iat: now - 7_200_000, exp: now - 3_600_000 })).toString("base64url")}.test-private-broker`;
+    const expired = expiredBroker();
     await NodeFSP.writeFile(first.brokerCredentialPath, expired);
 
     const renewed = await prepareRemoteHost(localPort, input);
@@ -461,6 +474,99 @@ describe("remote preparation subprocess", () => {
       replaced: true,
       mode: 0o600,
       authenticated: true,
+    });
+  });
+
+  it("renews with the build that is serving, and names the new build only once it serves", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    await NodeFSP.writeFile(first.brokerCredentialPath, expiredBroker());
+    const runtime = await secondBuild(input);
+    const upgraded = await prepareRemoteHost(localPort, { ...input, runtime });
+    pids.add(upgraded.serverPid);
+    await NodeFSP.writeFile(upgraded.brokerCredentialPath, expiredBroker());
+    const minted = await brokerToken(input.root);
+    expect({
+      exitCode: minted.exitCode,
+      issuedBy: await NodeFSP.readFile(NodePath.join(input.root, "issued-by"), "utf8"),
+    }).toEqual({
+      exitCode: 0,
+      issuedBy: `artifact/cli.mjs\nartifact/cli.mjs\nruntime/${runtime.sha256}/cli.mjs\n`,
+    });
+  });
+
+  it("renews a root prepared before renewal existed with its running server's CLI", async () => {
+    const base = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-broker-"));
+    roots.push(base);
+    const root = NodePath.join(base, "root");
+    const t3home = NodePath.join(root, "home/.t3");
+    const workspace = NodePath.join(root, "workspace");
+    await NodeFSP.mkdir(t3home, { recursive: true });
+    await NodeFSP.mkdir(workspace);
+    const cli = NodePath.join(base, "cli.mjs");
+    await NodeFSP.writeFile(
+      cli,
+      `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(NodePath.join(base, "issued-with"))}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), marker: process.env.SERVER_MARKER ?? null }));\nprocess.stdout.write('renewed-broker');\n`,
+    );
+    await NodeFSP.writeFile(NodePath.join(root, "broker-token"), expiredBroker());
+    await NodeFSP.writeFile(
+      NodePath.join(root, "preparation.json"),
+      JSON.stringify({ intent: "a".repeat(64), environmentId: "legacy", installedFiles: [] }),
+    );
+    await NodeFSP.writeFile(
+      NodePath.join(root, "server.json"),
+      JSON.stringify({ pid: 4242, sha256: "d".repeat(64), revision: "c".repeat(40) }),
+    );
+    const proc = NodePath.join(base, "proc");
+    await NodeFSP.mkdir(NodePath.join(proc, "4242"), { recursive: true });
+    const nul = (entries: string[]) => `${entries.join("\0")}\0`;
+    await NodeFSP.writeFile(
+      NodePath.join(proc, "4242/cmdline"),
+      nul([
+        process.execPath,
+        cli,
+        "start",
+        "--base-dir",
+        t3home,
+        "--no-browser",
+        "--port",
+        "1",
+        workspace,
+      ]),
+    );
+    await NodeFSP.writeFile(
+      NodePath.join(proc, "4242/environ"),
+      nul([`PATH=${process.env.PATH ?? ""}`, "SERVER_MARKER=from-server"]),
+    );
+    await NodeFSP.symlink(workspace, NodePath.join(proc, "4242/cwd"));
+
+    const minted = await brokerToken(root, proc);
+    expect({
+      stdout: minted.stdout,
+      issuedWith: JSON.parse(await NodeFSP.readFile(NodePath.join(base, "issued-with"), "utf8")),
+      stored: await NodeFSP.readFile(NodePath.join(root, "broker-token"), "utf8"),
+      mode: (await NodeFSP.stat(NodePath.join(root, "broker-token"))).mode & 0o777,
+    }).toEqual({
+      stdout: "renewed-broker\n",
+      issuedWith: {
+        args: [
+          "auth",
+          "session",
+          "issue",
+          "--base-dir",
+          t3home,
+          "--ttl",
+          "7d",
+          "--subject",
+          "provision-broker",
+          "--token-only",
+        ],
+        cwd: await NodeFSP.realpath(workspace),
+        marker: "from-server",
+      },
+      stored: "renewed-broker",
+      mode: 0o600,
     });
   });
 
@@ -1337,6 +1443,7 @@ describe("warm base", () => {
       "artifact",
       "auto-bootstrap",
       "issued",
+      "issued-by",
       "project-add-args",
       "started",
       "usage-host-id",
