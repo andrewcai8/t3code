@@ -545,6 +545,17 @@ it.effect(
           ["box-3", "paused", null],
           ["box-4", "disposed", null],
         ]);
+        // A kept chat this host can no longer read, as after a contract change.
+        yield* sql`
+          UPDATE provisioned_chats SET sequence = 50, chat_json = '{"sequence":50}'
+          WHERE lease_id = ${id(1)}
+        `;
+        expect(yield* listedChats([])).toEqual([
+          ["box-1", "active", null],
+          ["box-2", "active", null],
+          ["box-3", "paused", "42 project-app Paused chat"],
+          ["box-4", "disposed", null],
+        ]);
       }).pipe(
         Effect.provide(
           Provisioning.layer.pipe(
@@ -587,6 +598,6 @@ it("labels a box by its repository's name and where it runs", () => {
     "t3code · Namespace Mac",
   );
   expect(label({ ...namespace, engine: "instance" })).toBe("Namespace Mac");
-  expect(label({ ...namespace, repository: "pingdotgg/t3code" })).toBe("t3code · Namespace");
-  expect(label(namespace)).toBe("Namespace");
+  expect(label({ ...namespace, repository: "pingdotgg/t3code" })).toBe("t3code · Namespace Mac");
+  expect(label(namespace)).toBe("Namespace Mac");
 });

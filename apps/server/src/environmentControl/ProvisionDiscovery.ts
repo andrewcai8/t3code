@@ -24,6 +24,7 @@ const decodeRows = Schema.decodeUnknownEffect(
       lease: Schema.fromJsonString(StoredProvisionedLease),
       automationId: Schema.NullOr(Schema.String),
       chat: Schema.NullOr(Schema.String),
+      chatSequence: Schema.NullOr(Schema.Number),
     }),
   ),
 );
@@ -50,12 +51,7 @@ function savedBoxAddresses(addresses: ReadonlyArray<SavedEnvironmentAddress>) {
 
 /** A box's name in client lists: its repository's name and where it runs, as "Run on" names it. */
 export function boxLabel(request: DurableProvisionRequest): string {
-  const where =
-    request.provider === "e2b"
-      ? "E2B"
-      : request.engine === "instance"
-        ? "Namespace Mac"
-        : "Namespace";
+  const where = request.provider === "e2b" ? "E2B" : "Namespace Mac";
   const name = request.repository?.split("/").findLast((segment) => segment !== "");
   return name === undefined ? where : `${name} · ${where}`;
 }
@@ -85,7 +81,8 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     const now = DateTime.formatIso(yield* DateTime.now);
     const rows = yield* sql`
     SELECT operations.request_json AS request, operations.state_json AS state,
-      leases.lease_json AS lease, runs.automation_id AS "automationId", chats.chat_json AS chat
+      leases.lease_json AS lease, runs.automation_id AS "automationId",
+      ${heldChats ? sql`chats.chat_json` : sql`NULL`} AS chat, chats.sequence AS "chatSequence"
     FROM provision_operations AS operations
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
     LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
@@ -119,7 +116,14 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     ]);
     const result: Array<DiscoveredProvisionedEnvironment> = [];
     const gone = new Map<string, DiscoveredProvisionedEnvironment>();
-    for (const { request, state, lease, automationId, chat: chatJson } of yield* decodeRows(rows)) {
+    for (const {
+      request,
+      state,
+      lease,
+      automationId,
+      chat: chatJson,
+      chatSequence,
+    } of yield* decodeRows(rows)) {
       let box: {
         readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
         readonly environmentId: string;
@@ -164,15 +168,18 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         (lease.owner !== null && lease.owner.environmentId !== box.environmentId)
       )
         continue;
-      // A stored chat that no longer decodes is left out rather than failing the list.
+      // Only a chat newer than the client's is decoded. One that no longer decodes is left out
+      // rather than failing the list.
       const stored =
-        heldChats && chatJson !== null && box.lifecycle !== "disposed"
+        heldChats &&
+        chatJson !== null &&
+        chatSequence !== null &&
+        box.lifecycle !== "disposed" &&
+        (heldChats.get(box.environmentId) ?? -1) < chatSequence
           ? decodeChat(chatJson)
           : undefined;
       const chat =
-        stored?._tag === "Success" &&
-        stored.value.thread.id === lease.owner?.threadId &&
-        (heldChats?.get(box.environmentId) ?? -1) < stored.value.sequence
+        stored?._tag === "Success" && stored.value.thread.id === lease.owner?.threadId
           ? stored.value
           : undefined;
       const discovered = yield* decodeDiscovery({

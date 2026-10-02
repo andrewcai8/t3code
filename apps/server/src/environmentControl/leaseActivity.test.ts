@@ -6,12 +6,18 @@ import { USAGE_CONTRACT_VERSION, UsageSummary } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 import { observeLease, pullLeaseUsage, readLeaseUsage, shellActivity } from "./leaseActivity.ts";
+import { ownerChat } from "./provisionedChats.ts";
 import { boxShell, boxThread } from "./shellTestFixture.ts";
 import type { ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
+
+vi.mock("./provisionedChats.ts", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./provisionedChats.ts")>();
+  return { ...original, ownerChat: vi.fn(original.ownerChat) };
+});
 
 const thread = (fields: Record<string, unknown>) => ({
   id: "thread",
@@ -100,6 +106,13 @@ describe("observeLease", () => {
         activity: "busy",
         chat: null,
       });
+      vi.mocked(ownerChat).mockImplementationOnce(() => {
+        throw new Error("unexpected shell");
+      });
+      expect(
+        await observeLease(lease({ origin, brokerToken: "broker" })),
+        "a chat that cannot be read never hides a busy box",
+      ).toEqual({ activity: "busy" });
       expect(await observeLease(lease({ origin, brokerToken: "stale" }))).toEqual({
         activity: "unknown",
       });

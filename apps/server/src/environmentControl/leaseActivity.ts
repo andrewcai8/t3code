@@ -68,12 +68,18 @@ export async function observeLease(lease: ProvisionedLease): Promise<LeaseObserv
       return { activity: "unknown" };
     }
     const body: unknown = await response.json();
-    return {
-      activity: shellActivity(body),
-      chat: lease.owner ? ownerChat(body, lease.owner.threadId) : null,
-    };
+    return { activity: shellActivity(body), chat: readOwnerChat(lease, body) };
   } catch {
     return { activity: "unknown" };
+  }
+}
+
+/** A chat that cannot be read leaves the previous one kept, and never hides a busy box. */
+function readOwnerChat(lease: ProvisionedLease, body: unknown) {
+  try {
+    return lease.owner ? ownerChat(body, lease.owner.threadId) : null;
+  } catch {
+    return undefined;
   }
 }
 
