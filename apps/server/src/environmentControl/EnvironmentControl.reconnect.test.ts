@@ -72,236 +72,282 @@ const freePort = () =>
     });
   });
 
+// A box whose agent is mid-turn, as its shell reads.
+const workingShell = {
+  threads: [{ archivedAt: null, session: { status: "running" }, hasPendingApprovals: false }],
+};
+
+type Engine = "devbox" | "instance";
+
+/**
+ * Runs `body` against a manager that just started, holding an active `engine` lease the previous
+ * process recorded at a loopback proxy origin no process listens on any more.
+ */
+const afterRestart = <E>(
+  engine: Engine,
+  body: (input: {
+    readonly manager: EnvironmentControl["Service"];
+    readonly recorded: { readonly proxyId: string; readonly proxyOrigin: string };
+    readonly upgrades: ReadonlyArray<{
+      url: string | undefined;
+      authorization: string | string[] | undefined;
+    }>;
+  }) => Effect.Effect<void, E>,
+) =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-reconnect-"))),
+      (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
+    );
+    const upstream = NodeHttp.createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(
+        encodeJson(
+          request.url?.endsWith("/api/orchestration/shell")
+            ? workingShell
+            : { environmentId: "namespace-environment", upstream: request.url },
+        ),
+      );
+    });
+    // An echo, to prove an upgrade crosses the proxy both ways with the ingress bearer.
+    const upgrades: Array<{
+      url: string | undefined;
+      authorization: string | string[] | undefined;
+    }> = [];
+    const echoes = new NodeWS.WebSocketServer({ noServer: true });
+    upstream.on("upgrade", (request, socket, head) => {
+      upgrades.push({ url: request.url, authorization: request.headers["x-nsc-ingress-auth"] });
+      echoes.handleUpgrade(request, socket, head, (client) =>
+        client.on("message", (message) => client.send(message.toString())),
+      );
+    });
+    yield* Effect.acquireRelease(
+      Effect.promise(
+        () => new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve)),
+      ),
+      () =>
+        Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              // An upgraded socket is no longer the server's to close.
+              for (const client of echoes.clients) client.terminate();
+              upstream.closeAllConnections();
+              upstream.close(() => resolve());
+            }),
+        ),
+    );
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("Missing upstream port");
+    const upstreamOrigin = `http://127.0.0.1:${address.port}`;
+    const originalFetch = globalThis.fetch;
+    const managers = new Set<NamespaceProxyManager>();
+    const originalRestore = NamespaceProxyManager.prototype.restore;
+    vi.spyOn(NamespaceProxyManager.prototype, "restore").mockImplementation(function (
+      this: NamespaceProxyManager,
+      input,
+    ) {
+      managers.add(this);
+      return originalRestore.call(this, input);
+    });
+    yield* Effect.addFinalizer(() =>
+      Effect.promise(async () => {
+        for (const manager of managers) await manager.close({ proxyId: `provision-${requestId}` });
+        vi.restoreAllMocks();
+        vi.unstubAllEnvs();
+      }),
+    );
+    // Namespace exposes HTTPS; route only that synthetic provider host to our real HTTP upstream.
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      return originalFetch(
+        url.hostname.endsWith(".namespace.invalid")
+          ? `${upstreamOrigin}/${url.hostname.split(".")[0]}${url.pathname}`
+          : input,
+        init,
+      );
+    });
+    exposeInstance.mockImplementation(async () => upstreamOrigin);
+    const configPath = NodePath.join(directory, "environment-control.json");
+    yield* Effect.promise(() =>
+      NodeFSP.writeFile(
+        configPath,
+        encodeJson({
+          namespaceToken: "token",
+          e2bApiKey: "unused-test-key",
+          broker: {
+            sandboxId: "unused",
+            metadata: { owner: "fixture" },
+            url: "https://unused.invalid",
+            ingressKey: "unused",
+          },
+          targets: [],
+        }),
+      ),
+    );
+    vi.stubEnv("T3CODE_ENVIRONMENT_CONTROL_CONFIG", configPath);
+    sessionFactory.mockImplementation(async () => ({
+      identity: { creator: "user-test", tenantId: "tenant-test" },
+      issueToken: async () => "token",
+      artifacts: {},
+      client: {
+        fetch: async () => ({
+          devbox: {
+            id: devbox.devboxId,
+            name: devbox.devboxName,
+            creator: "user-test",
+            site: "iad",
+            workspaceDir: devbox.workspaceDir,
+            repository: "",
+            imageRef: "",
+            accessMode: AccessMode.USER_PRIVATE,
+            instanceShape: {
+              os: "macos",
+              machineArch: "arm64",
+              virtualCpu: 6,
+              memoryMegabytes: 14336,
+              selectors: [
+                { name: "macos.version", value: "26.x" },
+                { name: "macos.purpose", value: "githubrunner" },
+                { name: "image.with", value: "xcode-latest" },
+              ],
+            },
+          },
+          instanceId: devbox.instanceId,
+        }),
+      },
+      run: async (args: ReadonlyArray<string>) => ({
+        exitCode: 0,
+        stdout:
+          args[0] === "url"
+            ? encodeJson({ urls: [{ url: "https://devbox.namespace.invalid" }] })
+            : "present",
+      }),
+    }));
+    const artifact = {
+      archivePath: "/guest/runtime.tar",
+      sha256: provisionDigest("fixture"),
+      revision: "c".repeat(40),
+      entrypoint: "dist/bin.mjs",
+    };
+    const preparation = {
+      requestId,
+      root: "/guest/operation",
+      repository: null,
+      artifact,
+      runtimeExecutable: "node",
+      port: 3773,
+      readinessTimeoutSeconds: 180,
+      brokerTtl: "7d",
+      files: [],
+    };
+    const preparationHash = provisionDigest(stableStringify({ preparation, egressAllow: [] }));
+    const manifest = decodeManifest({
+      input: { requestId, provider: "namespace", providerInstanceId: "codex" },
+      request: {
+        requestId,
+        provider: "namespace",
+        creator: "user-test",
+        tenantId: "tenant-test",
+        providerInstanceId: "codex",
+        sourceRevision: null,
+        preparationHash,
+        image: namespaceMacImage,
+        size: "m",
+        region: "iad",
+        idleTimeoutMinutes: 30,
+        ...(engine === "instance" ? { engine: "instance" } : {}),
+      },
+      preparation,
+      localArtifact: { path: "/local/runtime.tar", ...artifact, runtimeExecutable: "node" },
+      egressAllow: [],
+    });
+    const readiness = {
+      environmentId: EnvironmentId.make("namespace-environment"),
+      projectDir: "/guest/operation/workspace",
+      sourceRevision: null,
+      preparationHash,
+      t3Revision: artifact.revision,
+      artifactSha256: artifact.sha256,
+    };
+    // What the previous process recorded: an active lease served at a loopback port that no
+    // process listens on any more.
+    const recorded = {
+      proxyId: `provision-${requestId}`,
+      proxyOrigin: `http://127.0.0.1:${yield* Effect.promise(freePort)}`,
+    };
+    yield* Effect.gen(function* () {
+      const { stateDir } = yield* ServerConfig.ServerConfig;
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.join(stateDir, "provisioning"), {
+          recursive: true,
+          mode: 0o700,
+        });
+        await NodeFSP.writeFile(
+          NodePath.join(stateDir, "provisioning", `${requestId}.json`),
+          encodeJson(manifest),
+          { mode: 0o600 },
+        );
+        await makeChatStore(stateDir).update(requestId, () => ({
+          ok: true,
+          record: {
+            kind: "live",
+            snapshot: null,
+            mac: {
+              incarnation: { instanceId: MAC, site: "iad4", createdAt: 0, deadline: 1 },
+              cache: "ready",
+            },
+          },
+          garbage: [],
+        }));
+      });
+      const operation = yield* store.accept(manifest.request);
+      const resource = engine === "instance" ? instance : devbox;
+      yield* store.advance(operation, {
+        kind: "ready",
+        allocation: { kind: "direct", resource },
+        readiness,
+      });
+      const registry = createProvisionedLeaseRegistry(sql);
+      yield* Effect.promise(() =>
+        registry.register({
+          leaseId: requestId,
+          sandboxId: engine === "instance" ? requestId : devbox.devboxId,
+          provider: "namespace",
+          providerInstanceId: "codex",
+          namespaceProxy: recorded,
+          ...(engine === "instance" ? {} : { namespaceResource: devbox }),
+          owner: { environmentId: readiness.environmentId, threadId: "thread" },
+        }),
+      );
+      const active = yield* Effect.promise(() =>
+        registry.markActive({
+          leaseId: requestId,
+          remoteAccess: { origin: recorded.proxyOrigin, brokerToken: "broker" },
+        }),
+      );
+      expect(active?.state).toBe("active");
+
+      yield* body({ manager: yield* EnvironmentControl, recorded, upgrades });
+    }).pipe(
+      Effect.provide(
+        Layer.merge(layer, ProvisionOperationStore.layer).pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(makeProviderRegistryLayer()),
+          Layer.provideMerge(ServerConfig.layerTest(directory, directory)),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped);
+
 it.effect.each(["devbox", "instance"] as const)(
   "serves an active %s lease's recorded origin again after the manager restarted",
   (engine) =>
-    Effect.gen(function* () {
-      const directory = yield* Effect.acquireRelease(
-        Effect.promise(() =>
-          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "namespace-reconnect-")),
-        ),
-        (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
-      );
-      const upstream = NodeHttp.createServer((request, response) => {
-        response.setHeader("content-type", "application/json");
-        response.end(encodeJson({ environmentId: "namespace-environment", upstream: request.url }));
-      });
-      // An echo, to prove an upgrade crosses the proxy both ways with the ingress bearer.
-      const upgrades: Array<{
-        url: string | undefined;
-        authorization: string | string[] | undefined;
-      }> = [];
-      const echoes = new NodeWS.WebSocketServer({ noServer: true });
-      upstream.on("upgrade", (request, socket, head) => {
-        upgrades.push({ url: request.url, authorization: request.headers["x-nsc-ingress-auth"] });
-        echoes.handleUpgrade(request, socket, head, (client) =>
-          client.on("message", (message) => client.send(message.toString())),
-        );
-      });
-      yield* Effect.acquireRelease(
-        Effect.promise(
-          () => new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve)),
-        ),
-        () =>
-          Effect.promise(
-            () =>
-              new Promise<void>((resolve) => {
-                // An upgraded socket is no longer the server's to close.
-                for (const client of echoes.clients) client.terminate();
-                upstream.closeAllConnections();
-                upstream.close(() => resolve());
-              }),
-          ),
-      );
-      const address = upstream.address();
-      if (!address || typeof address === "string") throw new Error("Missing upstream port");
-      const upstreamOrigin = `http://127.0.0.1:${address.port}`;
-      const originalFetch = globalThis.fetch;
-      const managers = new Set<NamespaceProxyManager>();
-      const originalRestore = NamespaceProxyManager.prototype.restore;
-      vi.spyOn(NamespaceProxyManager.prototype, "restore").mockImplementation(function (
-        this: NamespaceProxyManager,
-        input,
-      ) {
-        managers.add(this);
-        return originalRestore.call(this, input);
-      });
-      yield* Effect.addFinalizer(() =>
-        Effect.promise(async () => {
-          for (const manager of managers)
-            await manager.close({ proxyId: `provision-${requestId}` });
-          vi.restoreAllMocks();
-          vi.unstubAllEnvs();
-        }),
-      );
-      // Namespace exposes HTTPS; route only that synthetic provider host to our real HTTP upstream.
-      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-        const url = new URL(input instanceof Request ? input.url : input);
-        return originalFetch(
-          url.hostname.endsWith(".namespace.invalid")
-            ? `${upstreamOrigin}/${url.hostname.split(".")[0]}${url.pathname}`
-            : input,
-          init,
-        );
-      });
-      exposeInstance.mockImplementation(async () => upstreamOrigin);
-      const configPath = NodePath.join(directory, "environment-control.json");
-      yield* Effect.promise(() =>
-        NodeFSP.writeFile(
-          configPath,
-          encodeJson({
-            namespaceToken: "token",
-            e2bApiKey: "unused-test-key",
-            broker: {
-              sandboxId: "unused",
-              metadata: { owner: "fixture" },
-              url: "https://unused.invalid",
-              ingressKey: "unused",
-            },
-            targets: [],
-          }),
-        ),
-      );
-      vi.stubEnv("T3CODE_ENVIRONMENT_CONTROL_CONFIG", configPath);
-      sessionFactory.mockImplementation(async () => ({
-        identity: { creator: "user-test", tenantId: "tenant-test" },
-        issueToken: async () => "token",
-        artifacts: {},
-        client: {
-          fetch: async () => ({
-            devbox: {
-              id: devbox.devboxId,
-              name: devbox.devboxName,
-              creator: "user-test",
-              site: "iad",
-              workspaceDir: devbox.workspaceDir,
-              repository: "",
-              imageRef: "",
-              accessMode: AccessMode.USER_PRIVATE,
-              instanceShape: {
-                os: "macos",
-                machineArch: "arm64",
-                virtualCpu: 6,
-                memoryMegabytes: 14336,
-                selectors: [
-                  { name: "macos.version", value: "26.x" },
-                  { name: "macos.purpose", value: "githubrunner" },
-                  { name: "image.with", value: "xcode-latest" },
-                ],
-              },
-            },
-            instanceId: devbox.instanceId,
-          }),
-        },
-        run: async (args: ReadonlyArray<string>) => ({
-          exitCode: 0,
-          stdout:
-            args[0] === "url"
-              ? encodeJson({ urls: [{ url: "https://devbox.namespace.invalid" }] })
-              : "present",
-        }),
-      }));
-      const artifact = {
-        archivePath: "/guest/runtime.tar",
-        sha256: provisionDigest("fixture"),
-        revision: "c".repeat(40),
-        entrypoint: "dist/bin.mjs",
-      };
-      const preparation = {
-        requestId,
-        root: "/guest/operation",
-        repository: null,
-        artifact,
-        runtimeExecutable: "node",
-        port: 3773,
-        readinessTimeoutSeconds: 180,
-        brokerTtl: "7d",
-        files: [],
-      };
-      const preparationHash = provisionDigest(stableStringify({ preparation, egressAllow: [] }));
-      const manifest = decodeManifest({
-        input: { requestId, provider: "namespace", providerInstanceId: "codex" },
-        request: {
-          requestId,
-          provider: "namespace",
-          creator: "user-test",
-          tenantId: "tenant-test",
-          providerInstanceId: "codex",
-          sourceRevision: null,
-          preparationHash,
-          image: namespaceMacImage,
-          size: "m",
-          region: "iad",
-          idleTimeoutMinutes: 30,
-          ...(engine === "instance" ? { engine: "instance" } : {}),
-        },
-        preparation,
-        localArtifact: { path: "/local/runtime.tar", ...artifact, runtimeExecutable: "node" },
-        egressAllow: [],
-      });
-      const readiness = {
-        environmentId: EnvironmentId.make("namespace-environment"),
-        projectDir: "/guest/operation/workspace",
-        sourceRevision: null,
-        preparationHash,
-        t3Revision: artifact.revision,
-        artifactSha256: artifact.sha256,
-      };
-      // What the previous process recorded: an active lease served at a loopback port that no
-      // process listens on any more.
-      const recorded = {
-        proxyId: `provision-${requestId}`,
-        proxyOrigin: `http://127.0.0.1:${yield* Effect.promise(freePort)}`,
-      };
-      yield* Effect.gen(function* () {
-        const { stateDir } = yield* ServerConfig.ServerConfig;
-        const sql = yield* SqlClient.SqlClient;
-        const store = yield* ProvisionOperationStore;
-        yield* Effect.promise(async () => {
-          await NodeFSP.mkdir(NodePath.join(stateDir, "provisioning"), {
-            recursive: true,
-            mode: 0o700,
-          });
-          await NodeFSP.writeFile(
-            NodePath.join(stateDir, "provisioning", `${requestId}.json`),
-            encodeJson(manifest),
-            { mode: 0o600 },
-          );
-          await makeChatStore(stateDir).update(requestId, () => ({
-            ok: true,
-            record: {
-              kind: "live",
-              snapshot: null,
-              mac: {
-                incarnation: { instanceId: MAC, site: "iad4", createdAt: 0, deadline: 1 },
-                cache: "ready",
-              },
-            },
-            garbage: [],
-          }));
-        });
-        const operation = yield* store.accept(manifest.request);
-        const resource = engine === "instance" ? instance : devbox;
-        yield* store.advance(operation, {
-          kind: "ready",
-          allocation: { kind: "direct", resource },
-          readiness,
-        });
-        const registry = createProvisionedLeaseRegistry(sql);
-        yield* Effect.promise(() =>
-          registry.register({
-            leaseId: requestId,
-            sandboxId: engine === "instance" ? requestId : devbox.devboxId,
-            provider: "namespace",
-            providerInstanceId: "codex",
-            namespaceProxy: recorded,
-            ...(engine === "instance" ? {} : { namespaceResource: devbox }),
-            owner: { environmentId: readiness.environmentId, threadId: "thread" },
-          }),
-        );
-        expect((yield* Effect.promise(() => registry.findById(requestId)))?.state).toBe("active");
-
-        const manager = yield* EnvironmentControl;
+    afterRestart(engine, ({ manager, recorded, upgrades }) =>
+      Effect.gen(function* () {
         const origin = yield* manager.namespaceProxyOrigin(requestId);
         expect(origin, "the gateway keeps the origin its clients saved").toBe(recorded.proxyOrigin);
         const reached = yield* Effect.promise(() => probe(`${origin}/probe`));
@@ -319,18 +365,27 @@ it.effect.each(["devbox", "instance"] as const)(
             [{ url: "/ws?wsTicket=ticket", authorization: "Bearer token" }],
           ]);
         }
-      }).pipe(
-        Effect.provide(
-          Layer.merge(layer, ProvisionOperationStore.layer).pipe(
-            Layer.provideMerge(SqlitePersistenceMemory),
-            Layer.provide(ServerSettings.layerTest()),
-            Layer.provide(makeProviderRegistryLayer()),
-            Layer.provideMerge(ServerConfig.layerTest(directory, directory)),
-            Layer.provide(NodeServices.layer),
-          ),
-        ),
-      );
-    }).pipe(Effect.scoped),
+      }),
+    ),
+);
+
+// Pause, the reaper and a Mac's deadline upkeep judge a box by the same read. None may take a
+// working agent for idle only because no client has asked for its origin since the restart.
+it.effect.each(["devbox", "instance"] as const)(
+  "reads a working agent on an active %s lease after the manager restarted, before any client asks for it",
+  (engine) =>
+    afterRestart(engine, ({ manager }) =>
+      Effect.gen(function* () {
+        const paused = yield* manager.pause({
+          sandboxId: engine === "instance" ? requestId : devbox.devboxId,
+        });
+        expect(paused).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          message: "Another chat on this machine is still working.",
+        });
+      }),
+    ),
 );
 
 const probe = async (url: string) => (await fetch(url)).json().catch(() => null);
