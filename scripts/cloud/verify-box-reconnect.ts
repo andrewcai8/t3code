@@ -20,6 +20,14 @@
  * 30 seconds of opening it. `--cut-host-mid-wake` reconnects the manager while the box's resume
  * is in flight, closing the session under it, and fails unless the box still comes back.
  *
+ * `--second-client` proves a second device lists and opens a chat it never paired. Client A
+ * provisions the box with a chat whose first turn the host starts, waits for the chat's thread,
+ * closes it and pauses the box through the host. Client B, a fresh catalog paired only to the
+ * host, follows the host's list: the chat is listed with A's thread and title, B has not dialed
+ * the box, and the box is still paused. B then opens the chat: the box wakes, pairs once and
+ * connects, and its thread loads. A fresh runtime over B's storage opens it again with the same
+ * pairing, and after the box is disposed B's sync stops dialing it.
+ *
  * The manager bearer is cached beside the pairing token (0600), shared with smoke-cloud-chat.ts.
  * Tokens and pairing URLs never reach stdout or the report; URLs in failure details lose their
  * query and fragment.
@@ -66,12 +74,17 @@ import {
   setConnectionEnabledInCatalog,
 } from "@t3tools/client-runtime/platform";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
-import { request, remoteHttpClientLayer } from "@t3tools/client-runtime/rpc";
+import { request, remoteHttpClientLayer, subscribe } from "@t3tools/client-runtime/rpc";
+import { provisionedBox } from "@t3tools/client-runtime/cloud";
 import {
   AuthStandardClientScopes,
   type EnvironmentId,
+  MessageId,
+  type OrchestrationShellSnapshot,
+  ORCHESTRATION_WS_METHODS,
   type ProvisionedEnvironment,
   ProvisionRequestId,
+  ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -104,13 +117,16 @@ const CALL_TIMEOUT = "2 minutes";
 const DISPOSE_TIMEOUT = "3 minutes";
 const WAKE_AFTER_OPEN_TIMEOUT = "30 seconds";
 const CLIENT_METADATA = { label: "box reconnect verifier", deviceType: "bot" } as const;
+const SECOND_CLIENT_CHAT_TITLE = "Second client proof";
+/** How long client B waits without opening the chat, to show listing it dials nothing. */
+const SECOND_CLIENT_IDLE = "10 seconds";
 
 class VerifyFailure extends Schema.TaggedError<VerifyFailure>()("VerifyFailure", {
   message: Schema.String,
 }) {}
 
 const Transition = Schema.Struct({
-  environment: Schema.Literals(["manager", "box"]),
+  environment: Schema.Literals(["manager", "box", "second-box"]),
   at: Schema.String,
   seconds: Schema.Finite,
   afterPause: Schema.Boolean,
@@ -125,7 +141,13 @@ const Transition = Schema.Struct({
 });
 type Transition = typeof Transition.Type;
 
-const Outcome = Schema.Literals(["reconnected", "not-reconnected", "connected-dry-run", "failed"]);
+const Outcome = Schema.Literals([
+  "reconnected",
+  "not-reconnected",
+  "connected-dry-run",
+  "second-client-opened",
+  "failed",
+]);
 type Outcome = typeof Outcome.Type;
 
 const encodeReport = Schema.encodeEffect(
@@ -143,6 +165,7 @@ const encodeReport = Schema.encodeEffect(
       reopen: Schema.Boolean,
       cutHostMidWake: Schema.Boolean,
       cutInFlight: Schema.NullOr(Schema.Boolean),
+      secondClient: Schema.Boolean,
       box: Schema.NullOr(
         Schema.Struct({
           requestId: Schema.String,
@@ -204,6 +227,7 @@ interface Options {
   readonly awaySeconds: number;
   readonly reopen: boolean;
   readonly cutHostMidWake: boolean;
+  readonly secondClient: boolean;
 }
 
 const managerBearer = Effect.fn("managerBearer")(function* (options: Options) {
@@ -327,10 +351,18 @@ const memoryStorageLayer = Layer.effectContext(
           ),
         })),
     });
-    // Snapshots are a startup cache; a fresh process has none and nothing reads them back.
+    // Shells are kept so a second client's seeded chat can be read back; the rest is a startup
+    // cache a fresh process has none of.
+    const shells = yield* Ref.make<ReadonlyMap<EnvironmentId, OrchestrationShellSnapshot>>(
+      new Map(),
+    );
     const cache = EnvironmentCacheStore.of({
-      loadShell: () => Effect.succeedNone,
-      saveShell: () => Effect.void,
+      loadShell: (environmentId) =>
+        Effect.map(Ref.get(shells), (current) =>
+          Option.fromUndefinedOr(current.get(environmentId)),
+        ),
+      saveShell: (environmentId, snapshot) =>
+        Ref.update(shells, (current) => new Map(current).set(environmentId, snapshot)),
       loadThread: () => Effect.succeedNone,
       saveThread: () => Effect.void,
       removeThread: () => Effect.void,
@@ -340,7 +372,12 @@ const memoryStorageLayer = Layer.effectContext(
       saveVcsRefs: () => Effect.void,
       removeVcsRefs: () => Effect.void,
       clearVcsRefs: () => Effect.void,
-      clear: () => Effect.void,
+      clear: (environmentId) =>
+        Ref.update(shells, (current) => {
+          const next = new Map(current);
+          next.delete(environmentId);
+          return next;
+        }),
     });
     return Context.make(ConnectionTargetStore, targets).pipe(
       Context.add(ConnectionRegistrationStore, registrations),
@@ -365,9 +402,10 @@ const platformLayer = (
   bearer: string,
   visible: Queue.Queue<boolean>,
   inputs: Queue.Queue<void>,
+  storage: typeof memoryStorageLayer,
 ) =>
   Layer.mergeAll(
-    memoryStorageLayer,
+    storage,
     Presence.layer({ visible: Stream.fromQueue(visible), inputs: Stream.fromQueue(inputs) }),
     NodeSocket.layerWebSocketConstructor,
     Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
@@ -432,17 +470,19 @@ const platformLayer = (
     ),
   );
 
+/** One client runtime. Pass the same `storage` to run a fresh runtime over a saved catalog. */
 const clientLayer = (
   manager: PrimaryConnectionRegistration,
   bearer: string,
   visible: Queue.Queue<boolean>,
   inputs: Queue.Queue<void>,
+  storage: typeof memoryStorageLayer = memoryStorageLayer,
 ) =>
   Connection.layerWithOptions({
     environmentThemes: true,
     usageLimitSources: true,
     usageLimitsCommand: true,
-  }).pipe(Layer.provideMerge(platformLayer(manager, bearer, visible, inputs)));
+  }).pipe(Layer.provideMerge(platformLayer(manager, bearer, visible, inputs, storage)));
 
 const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const fs = yield* FileSystem.FileSystem;
@@ -545,6 +585,204 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const lastOf = (entries: ReadonlyArray<Transition>, environment: Transition["environment"]) =>
     entries.findLast((entry) => entry.environment === environment);
 
+  const check = (ok: boolean, message: string) =>
+    ok ? Effect.void : Effect.fail(new VerifyFailure({ message }));
+
+  /** The title of a chat's thread as the box serves it, once the box has the thread. */
+  const threadTitle = (
+    registry: EnvironmentRegistry["Service"],
+    boxId: EnvironmentId,
+    threadId: ThreadId,
+    what: string,
+  ) =>
+    bounded(
+      registry
+        .runStream(boxId, subscribe(ORCHESTRATION_WS_METHODS.subscribeThread, { threadId }))
+        .pipe(
+          Stream.filter((item) => item.kind === "snapshot"),
+          Stream.runHead,
+          Effect.flatMap((item) =>
+            Option.isSome(item) &&
+            item.value.kind === "snapshot" &&
+            item.value.snapshot.thread.id === threadId
+              ? Effect.succeed(item.value.snapshot.thread.title)
+              : Effect.fail(new VerifyFailure({ message: `${what}: no snapshot of the thread` })),
+          ),
+          Effect.retry(Schedule.spaced("5 seconds")),
+        ),
+      what,
+    );
+
+  const listOnHost = (registry: EnvironmentRegistry["Service"], managerId: EnvironmentId) =>
+    Effect.gen(function* () {
+      const entries = yield* SubscriptionRef.get(registry.entries);
+      return yield* bounded(
+        registry.run(
+          managerId,
+          request(WS_METHODS.environmentControlListProvisioned, {
+            environmentIds: [...entries.keys()],
+            chats: [],
+          }),
+        ),
+        "list the host's boxes",
+      );
+    });
+
+  const awaitManager = (registry: EnvironmentRegistry["Service"], managerId: EnvironmentId) =>
+    registry.stateChanges(managerId).pipe(
+      Stream.filter((state) => state.phase === "connected"),
+      Stream.runHead,
+      Effect.timeoutOrElse({
+        duration: MANAGER_CONNECT_TIMEOUT,
+        orElse: () =>
+          Effect.fail(new VerifyFailure({ message: "client B: manager not connected" })),
+      }),
+    );
+
+  /**
+   * Client B: a fresh catalog paired only to the host. It lists the chat from the host without
+   * dialing the paused box, opens it (wake, one pairing, connect), opens it again from a fresh
+   * runtime over the same storage with that pairing, and stops dialing it once it is disposed.
+   */
+  const verifySecondClient = Effect.fn("verifySecondClient")(function* (input: {
+    readonly manager: PrimaryConnectionRegistration;
+    readonly bearer: string;
+    readonly managerId: EnvironmentId;
+    readonly boxId: EnvironmentId;
+    readonly threadId: ThreadId;
+    readonly title: string;
+  }) {
+    const { managerId, boxId, threadId } = input;
+    const storage = Layer.succeedContext(yield* Layer.build(memoryStorageLayer));
+    const visibleB = yield* Queue.unbounded<boolean>();
+    const inputsB = yield* Queue.unbounded<void>();
+    yield* Queue.offer(visibleB, true);
+    const clientB = clientLayer(input.manager, input.bearer, visibleB, inputsB, storage);
+    const credentialToken = Effect.gen(function* () {
+      const credentials = yield* CredentialStore.ConnectionCredentialStore;
+      const credential = yield* credentials.get(`bearer:${boxId}`);
+      return Option.getOrNull(Option.map(credential, ({ token }) => token));
+    });
+
+    const firstToken = yield* Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry;
+      const cache = yield* EnvironmentCacheStore;
+      yield* awaitManager(registry, managerId);
+      const rows = yield* listOnHost(registry, managerId);
+      const row = rows.find((candidate) => candidate.environmentId === boxId);
+      yield* check(
+        row?.lifecycle === "paused",
+        `client B: the host lists the box ${row?.lifecycle}`,
+      );
+      yield* check(
+        row?.chat?.thread.id === threadId && row.chat.thread.title === input.title,
+        `client B: the host lists the chat as ${row?.chat?.thread.id ?? "none"} "${row?.chat?.thread.title ?? ""}"`,
+      );
+      yield* registry.syncHostBoxes(
+        managerId,
+        rows.map((candidate) => provisionedBox(managerId, candidate)),
+      );
+      const entry = (yield* SubscriptionRef.get(registry.entries)).get(boxId);
+      yield* check(
+        entry !== undefined &&
+          Option.isNone(entry.profile) &&
+          entry.target._tag === "BearerConnectionTarget" &&
+          entry.target.box?.managerId === managerId,
+        "client B: the box is not saved unpaired",
+      );
+      const seeded = yield* cache.loadShell(boxId);
+      yield* check(
+        Option.exists(seeded, (shell) => shell.threads.some(({ id }) => id === threadId)),
+        "client B: the chat is not in the box's cached shell",
+      );
+      yield* Console.log(
+        `[${yield* elapsed}s] client B lists the chat "${input.title}" on ${entry?.target.label}`,
+      );
+
+      yield* registry.stateChanges(boxId).pipe(
+        Stream.runForEach((state) => record("second-box", state)),
+        Effect.forkScoped,
+      );
+      yield* Effect.sleep(SECOND_CLIENT_IDLE);
+      const idle = (yield* SubscriptionRef.get(log)).filter(
+        (entry) => entry.environment === "second-box",
+      );
+      yield* check(
+        idle.every((entry) => entry.phase === "available"),
+        `client B dialed a chat it did not open: ${idle.map((entry) => entry.phase).join(", ")}`,
+      );
+      const relisted = yield* listOnHost(registry, managerId);
+      yield* check(
+        relisted.find((candidate) => candidate.environmentId === boxId)?.lifecycle === "paused",
+        "client B: listing the chat woke its box",
+      );
+
+      const openedAt = (yield* SubscriptionRef.get(log)).length;
+      yield* Queue.offer(inputsB, undefined);
+      yield* registry.demand(boxId);
+      yield* Console.log(`[${yield* elapsed}s] client B opens the chat`);
+      yield* waitFor(
+        "client B's box connected",
+        Duration.minutes(options.timeoutMinutes),
+        (entries) =>
+          entries
+            .slice(openedAt)
+            .some((entry) => entry.environment === "second-box" && entry.phase === "connected"),
+      );
+      const phases = (yield* SubscriptionRef.get(log))
+        .slice(openedAt)
+        .filter((entry) => entry.environment === "second-box")
+        .map((entry) => entry.phase);
+      yield* check(
+        phases.includes("waking") && phases.indexOf("waking") < phases.indexOf("connected"),
+        `client B: the box did not wake before it connected: ${phases.join(", ")}`,
+      );
+      yield* check(
+        (yield* threadTitle(registry, boxId, threadId, "client B loads the chat")) === input.title,
+        "client B: the chat's thread does not match client A's",
+      );
+      const token = yield* credentialToken;
+      yield* check(token !== null, "client B: no pairing saved for the box");
+      return token;
+    }).pipe(Effect.scoped, Effect.provide(clientB));
+
+    yield* Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry;
+      yield* awaitManager(registry, managerId);
+      const openedAt = (yield* SubscriptionRef.get(log)).length;
+      yield* registry.stateChanges(boxId).pipe(
+        Stream.runForEach((state) => record("second-box", state)),
+        Effect.forkScoped,
+      );
+      yield* registry.demand(boxId);
+      yield* waitFor("client B reopens the box", BOX_CONNECT_TIMEOUT, (entries) =>
+        entries
+          .slice(openedAt)
+          .some((entry) => entry.environment === "second-box" && entry.phase === "connected"),
+      );
+      yield* check(
+        (yield* credentialToken) === firstToken,
+        "client B paired the box again after a restart",
+      );
+      yield* Console.log(`[${yield* elapsed}s] client B reopened the chat with its saved pairing`);
+
+      yield* dispose(registry, managerId);
+      yield* registry.syncHostBoxes(
+        managerId,
+        (yield* listOnHost(registry, managerId)).map((candidate) =>
+          provisionedBox(managerId, candidate),
+        ),
+      );
+      const entry = (yield* SubscriptionRef.get(registry.entries)).get(boxId);
+      yield* check(
+        entry === undefined ||
+          (entry.target._tag === "BearerConnectionTarget" &&
+            entry.target.workspaceStatus === "missing"),
+        "client B still dials the disposed box",
+      );
+    }).pipe(Effect.scoped, Effect.provide(clientB));
+  }, Effect.scoped);
+
   const run = Effect.gen(function* () {
     const bearer = yield* managerBearer(options);
     const descriptor = yield* bounded(
@@ -600,6 +838,27 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         return yield* new VerifyFailure({ message: "the manager has no enabled provider account" });
       const requestId = ProvisionRequestId.make(yield* crypto.randomUUIDv4);
       created.requestId = requestId;
+      const threadId = ThreadId.make(yield* crypto.randomUUIDv4);
+      const model =
+        instance.models.find((candidate) => candidate.isDefault === true) ?? instance.models[0];
+      if (options.secondClient && model === undefined)
+        return yield* new VerifyFailure({ message: "the manager's provider account has no model" });
+      // The host starts this first turn on the box, so the box holds a chat without client A.
+      const provisionChat =
+        options.secondClient && model !== undefined
+          ? {
+              threadId,
+              firstTurn: {
+                messageId: MessageId.make(yield* crypto.randomUUIDv4),
+                text: "Reply with the single word: ready.",
+                title: SECOND_CLIENT_CHAT_TITLE,
+                modelSelection: { instanceId: instance.instanceId, model: model.slug },
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+                createdAt: DateTime.formatIso(yield* DateTime.now),
+              },
+            }
+          : undefined;
       yield* Console.log(
         `provisioning ${options.provider} box request=${requestId} account=${instance.instanceId}`,
       );
@@ -610,6 +869,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           provider: options.provider,
           providerInstanceId: instance.instanceId,
           agentDriver: instance.driver,
+          ...(provisionChat === undefined ? {} : { chat: provisionChat }),
         }),
       ).pipe(
         Effect.repeat({
@@ -677,6 +937,26 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         );
         if (options.dryRun) {
           outcome = "connected-dry-run";
+          return;
+        }
+        if (options.secondClient) {
+          const title = yield* threadTitle(registry, boxId, threadId, "client A loads the chat");
+          yield* Console.log(`[${yield* elapsed}s] client A has the chat "${title}"`);
+          // Closed first, or client A's own demand would wake the box it pauses.
+          yield* Scope.close(chat, Exit.void);
+          const paused = yield* onManager(
+            "environmentControl.pause",
+            request(WS_METHODS.environmentControlPause, {
+              leaseId: box.leaseId,
+              sandboxId: box.sandboxId,
+            }),
+          );
+          if (paused.kind !== "paused")
+            return yield* new VerifyFailure({ message: `pause ${paused.kind}` });
+          yield* Ref.set(pausedAt, yield* Clock.currentTimeMillis);
+          yield* Console.log(`[${yield* elapsed}s] client A closed the chat and paused its box`);
+          yield* verifySecondClient({ manager, bearer, managerId, boxId, threadId, title });
+          outcome = "second-client-opened";
           return;
         }
 
@@ -780,7 +1060,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     registry: EnvironmentRegistry["Service"],
     managerId: EnvironmentId,
   ) {
-    if (created.requestId === null) return;
+    if (created.requestId === null || disposed === "disposed") return;
     const input = created.box
       ? { leaseId: created.box.leaseId, sandboxId: created.box.sandboxId }
       : { requestId: created.requestId };
@@ -811,7 +1091,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const reconnect = outcome === "reconnected" ? afterPause.at(-1) : undefined;
   const ok =
     (outcome === "reconnected" && (!options.cutHostMidWake || cutInFlight === true)) ||
-    (options.dryRun && outcome === "connected-dry-run");
+    (options.dryRun && outcome === "connected-dry-run") ||
+    (options.secondClient && outcome === "second-client-opened");
   const report = yield* encodeReport({
     harness: "verify-box-reconnect",
     startedAt,
@@ -825,6 +1106,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     reopen: options.reopen,
     cutHostMidWake: options.cutHostMidWake,
     cutInFlight,
+    secondClient: options.secondClient,
     box:
       created.box && created.requestId
         ? {
@@ -892,6 +1174,12 @@ const command = Command.make(
       ),
       Flag.withDefault(false),
     ),
+    secondClient: Flag.Boolean("second-client").pipe(
+      Flag.withDescription(
+        "Pause the box with a chat on it, then prove a second client paired only to the host lists the chat without waking the box and opens it with one pairing.",
+      ),
+      Flag.withDefault(false),
+    ),
   },
   (flags) =>
     Effect.gen(function* () {
@@ -906,6 +1194,7 @@ const command = Command.make(
         awaySeconds: flags.awaySeconds,
         reopen: flags.reopen,
         cutHostMidWake: flags.cutHostMidWake,
+        secondClient: flags.secondClient,
       });
     }),
 ).pipe(
