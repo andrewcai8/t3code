@@ -276,6 +276,64 @@ def contained(root, relative):
     return target
 `;
 
+/**
+ * Keeps a root's broker token usable for as long as its box lives, which has
+ * no deadline by default. Preparation records how to issue one in the journal,
+ * so a script outside preparation renews with the CLI of the build it last
+ * prepared. Needs `atomic`, `run_bounded`, `base64`, `fcntl`, `json` and `time`.
+ */
+const brokerTokenFunctions = String.raw`
+def broker_token_usable(token):
+    # A session token is base64url(claims).signature. Renewing at half its
+    # lifetime leaves days of slack on the 7 day broker TTL.
+    try:
+        payload = token.split('.', 1)[0]
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        return time.time() * 1000 < (claims['iat'] + claims['exp']) / 2
+    except (ValueError, KeyError, TypeError):
+        return False
+
+def renew_broker_token(root, run):
+    # The caller holds prepare.lock, so renewals replace the file one at a time.
+    path = root / 'broker-token'
+    token = path.read_text() if path.exists() else None
+    if token is not None and broker_token_usable(token):
+        return token
+    journal_path = root / 'preparation.json'
+    issue = json.loads(journal_path.read_text()).get('brokerIssue') if journal_path.exists() else None
+    if issue is None:
+        # Prepared before renewal existed; its next preparation records how.
+        if token is None:
+            raise RuntimeError('The environment has no broker credential')
+        return token
+    token = run(issue['argv'], issue['cwd'], issue['env'])
+    if not token or any(c.isspace() for c in token):
+        raise RuntimeError('Invalid broker credential output')
+    atomic(path, token)
+    return token
+
+def broker_token(root):
+    path = root / 'broker-token'
+    if path.exists():
+        token = path.read_text()
+        if broker_token_usable(token):
+            return token
+    with open(root / 'prepare.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return renew_broker_token(root, lambda args, cwd, env: run_bounded(args, cwd, env, 120, (lock.fileno(),)))
+`;
+
+/**
+ * `broker_token(root)` for scripts that run outside preparation. Needs
+ * `base64`, `contextlib`, `fcntl`, `json`, `os`, `pathlib`, `subprocess` and `time`.
+ */
+export const brokerTokenScript = String.raw`
+os.umask(0o077)
+${guestPathScript}
+${boundedRunScript}
+${brokerTokenFunctions}
+`;
+
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
 import time
@@ -317,6 +375,7 @@ def artifact_snapshot(root):
     return files, links
 
 ${boundedRunScript}
+${brokerTokenFunctions}
 def prepare(spec):
     phases = []
     entered = time.monotonic()
@@ -783,13 +842,12 @@ def prepare(spec):
                     with step('prepareCommand.' + str(index)):
                         run(['sh', '-lc', command_line], project, env, timeout=1800)
         credential_path = root / 'broker-token'
-        if not credential_path.exists():
-            with step('brokerToken'):
-                token = run(command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', spec['brokerTtl'], '--subject', 'provision-broker', '--token-only'], project, env)
-                if not token or any(c.isspace() for c in token):
-                    raise RuntimeError('Invalid broker credential output')
-                atomic(credential_path, token)
-        token = credential_path.read_text()
+        broker_issue = {'argv': command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', spec['brokerTtl'], '--subject', 'provision-broker', '--token-only'], 'cwd': str(project), 'env': env}
+        if journal.get('brokerIssue') != broker_issue:
+            journal['brokerIssue'] = broker_issue
+            atomic(journal_path, json.dumps(journal))
+        with step('brokerToken'):
+            token = renew_broker_token(root, run)
         origin = 'http://127.0.0.1:' + str(spec['port'])
         def probe():
             try:

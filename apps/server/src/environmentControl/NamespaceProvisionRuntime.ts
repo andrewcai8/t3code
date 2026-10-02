@@ -24,6 +24,7 @@ import type { NamespaceResource as ImportedNamespaceResource } from "./namespace
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
 import { guestToolInstallCommand, withGuestProviderInstall } from "./guestProviderInstall.ts";
 import {
+  brokerTokenScript,
   prepareRemoteHost,
   sealWarmBase,
   type RemotePreparationPort,
@@ -337,12 +338,13 @@ export async function mintNamespacePairing(
   const stopPairing = startProvisionPhase(record);
   const result = await guest.executePython({
     script: String.raw`
-import json,pathlib,sys,urllib.request
+import base64,contextlib,fcntl,json,os,pathlib,subprocess,sys,time,urllib.request
+${brokerTokenScript}
 spec=json.load(sys.stdin)
 origin='http://127.0.0.1:'+str(spec['port'])
 with urllib.request.urlopen(origin+'/.well-known/t3/environment',timeout=10) as response:
     if json.load(response)['environmentId']!=spec['environmentId']: raise RuntimeError('Environment identity changed')
-token=pathlib.Path(spec['root'],'broker-token').read_text()
+token=broker_token(pathlib.Path(spec['root']))
 request=urllib.request.Request(origin+'/api/auth/pairing-token',data=json.dumps({'label':'Cloud environment client'}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
 with urllib.request.urlopen(request,timeout=30) as response: print(json.dumps({'credential':json.load(response)['credential'],'brokerToken':token}))
 `,
