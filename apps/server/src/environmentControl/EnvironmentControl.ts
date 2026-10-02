@@ -1678,13 +1678,26 @@ export const layer = Layer.effect(
         const workspace = (yield* listProvisionedEnvironments(sql)).find(
           (candidate) => candidate.environmentId === input.environmentId,
         );
-        if (!workspace)
+        if (!workspace) {
+          yield* Effect.logInfo("cloud workspace resume refused", {
+            environmentId: input.environmentId,
+            reason: "not-provisioned",
+          });
           return {
             kind: "refused" as const,
             reason: "not-provisioned" as const,
             message: "This machine has no workspace for that environment.",
           };
-        return yield* run<EnvironmentProvisionResumeResult>(
+        }
+        // A resume can run for many minutes (a Mac boot, a stopped Devbox), and its first sign
+        // otherwise is the machine it creates, so each one is logged as it starts and ends.
+        const startedAt = yield* Clock.currentTimeMillis;
+        yield* Effect.logInfo("cloud workspace resume started", {
+          environmentId: input.environmentId,
+          leaseId: workspace.leaseId,
+          lifecycle: workspace.lifecycle,
+        });
+        const result = yield* run<EnvironmentProvisionResumeResult>(
           (service) => service.resume(workspace),
           {
             kind: "refused",
@@ -1692,6 +1705,12 @@ export const layer = Layer.effect(
             message: "This install has no provisioning template configured.",
           },
         );
+        yield* Effect.logInfo("cloud workspace resume answered", {
+          leaseId: workspace.leaseId,
+          result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
+          durationMs: (yield* Clock.currentTimeMillis) - startedAt,
+        });
+        return result;
       }),
       upgrade: provisionControl.upgrade,
       touch: (input) =>
