@@ -23,6 +23,7 @@ import {
   elapsedShare,
   formatResetsIn,
   identicalProviderReadings,
+  isAccountSpent,
   limitsNotice,
   paceOf,
   providersWithLimits,
@@ -1145,6 +1146,8 @@ describe("rankAccounts", () => {
       windowDurationMins: 10_080,
       resetsAt,
     }) as const;
+  const unreset = (usedPercent: number) =>
+    ({ id: "credits", kind: "monthly", label: "Credits", usedPercent }) as const;
   const pool = (id: string, usedPercent: number) =>
     ({
       id,
@@ -1262,14 +1265,57 @@ describe("rankAccounts", () => {
     const ranked = rankAccounts(
       [
         account("failed", { checkedAt, windows: [], unavailable: { reason: "probeFailed" } }),
-        account("stale", { checkedAt: "2026-09-03T10:00:00.000Z", windows: [session(0)] }),
         account("unreported"),
         account("used", { checkedAt, windows: [session(99), weekly(99)] }),
         account("api-key", { checkedAt, windows: [], unavailable: { reason: "unsupported" } }),
       ],
       now,
     );
-    expect(ids(ranked)).toEqual(["api-key", "used", "failed", "stale", "unreported"]);
+    expect(ids(ranked)).toEqual(["api-key", "used", "failed", "unreported"]);
+  });
+
+  it("ranks an old reading by what it said, unless it saw a spent window with no reset", () => {
+    const old = "2026-09-03T10:50:00.000Z";
+    const ranked = rankAccounts(
+      [
+        account("old-spent", { checkedAt: old, windows: [session(10), weekly(100)] }),
+        account("unreported"),
+        account("old-busy", { checkedAt: old, windows: [session(60)] }),
+        account("old-refilled", {
+          checkedAt: old,
+          windows: [session(100, "2026-09-03T11:30:00.000Z")],
+        }),
+        account("fresh-unreset", { checkedAt, windows: [unreset(100)] }),
+        account("old-idle", { checkedAt: old, windows: [session(10)] }),
+        account("old-unreset", { checkedAt: old, windows: [unreset(100)] }),
+        account("fresh-busy", { checkedAt, windows: [session(95)] }),
+      ],
+      now,
+      ProviderInstanceId.make("unreported"),
+    );
+    expect(ids(ranked)).toEqual([
+      "old-refilled",
+      "old-idle",
+      "old-busy",
+      "fresh-busy",
+      "unreported",
+      "old-unreset",
+      "old-spent",
+      "fresh-unreset",
+    ]);
+  });
+
+  it("calls an account spent on an old reading only while that window has not reset", () => {
+    const old = "2026-09-03T10:50:00.000Z";
+    const claude = ProviderDriverKind.make("claudeAgent");
+    expect(
+      [
+        { checkedAt: old, windows: [weekly(100)] },
+        { checkedAt: old, windows: [session(100, "2026-09-03T11:30:00.000Z")] },
+        { checkedAt: old, windows: [unreset(100)] },
+        { checkedAt, windows: [unreset(100)] },
+      ].map((limits) => isAccountSpent(claude, limits, now)),
+    ).toEqual([true, false, false, true]);
   });
 
   it("breaks ties by earliest refill, then the preferred account, then id", () => {
