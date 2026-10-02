@@ -15,6 +15,8 @@ import type { WorkspaceBackup } from "./workspaceBackup.ts";
 const DAY_MS = 86_400_000;
 /** How long a settled chat's machine outlives its pause or its settle, whichever is later. */
 const SETTLED_GRACE_MS = 3_600_000;
+/** How long a lease whose backup failed outright waits before the sweep tries it again. */
+const BACKUP_RETRY_MS = 6 * 3_600_000;
 
 type CleanupThread = Pick<OrchestrationThreadShell, "id" | "settledOverride" | "settledAt">;
 type CleanupLease = Pick<
@@ -57,7 +59,7 @@ export interface CleanupCandidate {
 
 export interface CleanupPorts {
   readonly now: () => number;
-  /** The host's `cloudMachinesAfterDays`, read each pass. */
+  /** The host's `cloudMachinesAfterDays`, read each pass and again right before each removal. */
   readonly afterDays: () => Promise<number | null>;
   /** Paused leases this host provisioned, each with its kept chat's thread. */
   readonly candidates: () => Promise<ReadonlyArray<CleanupCandidate>>;
@@ -76,59 +78,87 @@ export interface CleanupPorts {
 }
 
 /**
- * Removes each paused machine whose cleanup time has passed, one at a time, after pushing its
- * unsaved work. A machine whose work cannot be backed up is kept until it is next woken. A box
- * opened or resumed while its backup ran is left to whoever opened it.
+ * The cleanup pass upkeep repeats: removes each paused machine whose cleanup time has passed, one
+ * at a time, after pushing its unsaved work. Every machine a pass wakes ends it removed or asleep.
+ * Only work the backup reports unpushable keeps a machine; a backup that fails outright is tried
+ * again after `BACKUP_RETRY_MS`, and a failed sleep at the start of each later pass.
  */
-export async function cleanUpBoxes(ports: CleanupPorts): Promise<void> {
-  const afterDays = await ports.afterDays();
-  if (afterDays === null) return;
-  const due = (candidate: CleanupCandidate | null) => {
+export function createCleanupSweep(ports: CleanupPorts): () => Promise<void> {
+  const retryAt = new Map<string, number>();
+  const awake = new Map<string, ProvisionedLease>();
+  const sleep = async (lease: ProvisionedLease) => {
+    try {
+      await ports.sleep(lease);
+      awake.delete(lease.leaseId);
+    } catch (cause) {
+      awake.set(lease.leaseId, lease);
+      ports.warn("cloud box could not be put back to sleep", { leaseId: lease.leaseId, cause });
+    }
+  };
+  const due = (candidate: CleanupCandidate | null, afterDays: number | null) => {
     const plan = candidate && cleanupPlan({ ...candidate, afterDays });
     return plan?.kind === "scheduled" && Date.parse(plan.at) <= ports.now() ? plan : null;
   };
-  for (const candidate of await ports.candidates()) {
-    if (!due(candidate)) continue;
-    const { leaseId, sandboxId } = candidate.lease;
-    const release = await ports.holdBox(sandboxId);
-    if (!release) continue;
-    try {
-      const current = await ports.read(leaseId);
-      const plan = due(current);
-      if (!current || !plan) continue;
-      const backup = await ports
-        .backUpWork(current.lease)
-        .catch((cause: unknown): WorkspaceBackup => ({
-          kind: "unsaved",
-          reason: cause instanceof Error ? cause.message : "The backup did not finish.",
-        }));
-      if (backup.kind === "unsaved") {
-        await ports.setKeep(leaseId, "unsaved-work");
-        await ports.sleep(current.lease);
-        ports.warn("cloud box kept: its work could not be backed up", {
-          leaseId,
-          reason: backup.reason,
-        });
-        continue;
+
+  return async () => {
+    for (const [leaseId, lease] of awake) {
+      const release = await ports.holdBox(lease.sandboxId);
+      if (!release) continue;
+      try {
+        const current = await ports.read(leaseId);
+        if (current?.lease.state === "paused") await sleep(current.lease);
+        else awake.delete(leaseId);
+      } catch (cause) {
+        ports.warn("cloud box could not be put back to sleep", { leaseId, cause });
+      } finally {
+        release();
       }
-      const after = await ports.read(leaseId);
-      if (!due(after)) {
-        if (after?.lease.state === "paused") await ports.sleep(current.lease);
-        continue;
-      }
-      if (!(await ports.dispose(leaseId))) {
-        ports.warn("cloud box cleanup is still pending", { leaseId });
-        continue;
-      }
-      ports.log("cloud box cleaned up", {
-        leaseId,
-        reason: plan.reason,
-        branches: backup.kind === "saved" ? backup.branches : [],
-      });
-    } catch (cause) {
-      ports.warn("cloud box could not be cleaned up", { leaseId, cause });
-    } finally {
-      release();
     }
-  }
+
+    const afterDays = await ports.afterDays();
+    if (afterDays === null) return;
+    for (const candidate of await ports.candidates()) {
+      const { leaseId, sandboxId } = candidate.lease;
+      if (!due(candidate, afterDays) || (retryAt.get(leaseId) ?? 0) > ports.now()) continue;
+      const release = await ports.holdBox(sandboxId);
+      if (!release) continue;
+      let woken: ProvisionedLease | null = null;
+      try {
+        const current = await ports.read(leaseId);
+        const plan = due(current, afterDays);
+        if (!current || !plan) continue;
+        woken = current.lease;
+        const backup = await ports.backUpWork(current.lease).catch((cause: unknown) => {
+          retryAt.set(leaseId, ports.now() + BACKUP_RETRY_MS);
+          throw cause;
+        });
+        retryAt.delete(leaseId);
+        if (backup.kind === "unsaved") {
+          await ports.setKeep(leaseId, "unsaved-work");
+          ports.warn("cloud box kept: its work could not be backed up", {
+            leaseId,
+            reason: backup.reason,
+          });
+          continue;
+        }
+        // Opening the chat or turning cleanup off while the backup ran makes it no longer due.
+        if (!due(await ports.read(leaseId), await ports.afterDays())) continue;
+        if (!(await ports.dispose(leaseId))) {
+          ports.warn("cloud box cleanup is still pending", { leaseId });
+          continue;
+        }
+        woken = null;
+        ports.log("cloud box cleaned up", {
+          leaseId,
+          reason: plan.reason,
+          branches: backup.kind === "saved" ? backup.branches : [],
+        });
+      } catch (cause) {
+        ports.warn("cloud box could not be cleaned up", { leaseId, cause });
+      } finally {
+        if (woken) await sleep(woken);
+        release();
+      }
+    }
+  };
 }

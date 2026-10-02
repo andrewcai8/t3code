@@ -108,7 +108,7 @@ import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProx
 import { observeLease, pullLeaseUsage, type LeaseObservation } from "./leaseActivity.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
-import { cleanUpBoxes, type CleanupCandidate } from "./cloudCleanup.ts";
+import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
@@ -1676,56 +1676,58 @@ export const layer = Layer.effect(
       if (!operation || resource?.provider !== "namespace" || "engine" in resource) return null;
       return { operation, resource };
     };
-    /**
-     * Removes paused Devboxes past their cleanup time, through the same cancel a user's delete
-     * takes. Their work is pushed with the configured GitHub token, which reaches the guest only
-     * on the backup script's stdin.
-     */
-    const cleanUpPausedBoxes = async () => {
-      const service = await resolve();
-      if (!service) return;
-      const token = service.config.provisioning?.githubToken;
-      const log = (level: "info" | "warn") => (message: string, fields: Record<string, unknown>) =>
+    const logCleanup =
+      (level: "info" | "warn") => (message: string, fields: Record<string, unknown>) =>
         void runLogged(
           (level === "info" ? Effect.logInfo(message) : Effect.logWarning(message)).pipe(
             Effect.annotateLogs(fields),
           ),
         );
-      await cleanUpBoxes({
-        now: () => Date.now(),
-        afterDays: () => runLogged(cloudMachinesAfterDays),
-        candidates: async () => {
-          const candidates: Array<CleanupCandidate> = [];
-          for (const lease of await leaseRegistry.paused())
-            if (lease.namespaceResource && (await readyDevbox(lease.leaseId)))
-              candidates.push(await cleanupCandidate(lease));
-          return candidates;
-        },
-        read: async (leaseId) => {
-          const lease = await leaseRegistry.findById(leaseId);
-          return lease ? cleanupCandidate(lease) : null;
-        },
-        holdBox: async (sandboxId) => service.holdBox(sandboxId),
-        backUpWork: async (lease) => {
-          const devbox = await readyDevbox(lease.leaseId);
-          if (!devbox) throw new Error("The cloud box has no ready Devbox.");
-          const manifest = await manifests.load(devbox.operation.request.requestId);
-          return (await resolveNamespace()).runtime.backUpWork(
-            devbox.operation,
-            devbox.resource,
-            manifest,
-            { branch: lease.leaseId, push: token !== undefined, ...(token ? { token } : {}) },
-          );
-        },
-        setKeep: (leaseId, keep) => leaseRegistry.setKeep(leaseId, keep),
-        sleep: (lease) => service.sleepBox(lease),
-        dispose: async (leaseId) =>
-          isProvisionRequestId(leaseId) &&
-          (await runLogged(cancelProvision(leaseId))).kind === "disposed",
-        log: log("info"),
-        warn: log("warn"),
-      });
-    };
+    /**
+     * Removes paused Devboxes past their cleanup time, through the same cancel a user's delete
+     * takes. Their work is pushed with the configured GitHub token, which reaches the guest only
+     * on the backup script's stdin. Each step resolves the current service, so the sweep takes
+     * the same per-box lock a client's resume does.
+     */
+    const cleanUpPausedBoxes = createCleanupSweep({
+      now: () => Date.now(),
+      afterDays: () => runLogged(cloudMachinesAfterDays),
+      candidates: async () => {
+        const candidates: Array<CleanupCandidate> = [];
+        for (const lease of await leaseRegistry.paused())
+          if (lease.namespaceResource && (await readyDevbox(lease.leaseId)))
+            candidates.push(await cleanupCandidate(lease));
+        return candidates;
+      },
+      read: async (leaseId) => {
+        const lease = await leaseRegistry.findById(leaseId);
+        return lease ? cleanupCandidate(lease) : null;
+      },
+      holdBox: async (sandboxId) => (await resolve())?.holdBox(sandboxId) ?? null,
+      backUpWork: async (lease) => {
+        const token = (await resolve())?.config.provisioning?.githubToken;
+        const devbox = await readyDevbox(lease.leaseId);
+        if (!devbox) throw new Error("The cloud box has no ready Devbox.");
+        const manifest = await manifests.load(devbox.operation.request.requestId);
+        return (await resolveNamespace()).runtime.backUpWork(
+          devbox.operation,
+          devbox.resource,
+          manifest,
+          { branch: lease.leaseId, push: token !== undefined, ...(token ? { token } : {}) },
+        );
+      },
+      setKeep: (leaseId, keep) => leaseRegistry.setKeep(leaseId, keep),
+      sleep: async (lease) => {
+        const service = await resolve();
+        if (!service) throw new Error("The cloud lease manager is unavailable.");
+        await service.sleepBox(lease);
+      },
+      dispose: async (leaseId) =>
+        isProvisionRequestId(leaseId) &&
+        (await runLogged(cancelProvision(leaseId))).kind === "disposed",
+      log: logCleanup("info"),
+      warn: logCleanup("warn"),
+    });
     yield* Effect.gen(function* () {
       const service = yield* Effect.promise(resolve);
       if (!service) return;

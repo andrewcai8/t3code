@@ -1,7 +1,7 @@
 // @effect-diagnostics globalDate:off - fixed timestamps exercise cleanup times.
 import { describe, expect, it } from "vite-plus/test";
 
-import { cleanUpBoxes, cleanupPlan, type CleanupCandidate } from "./cloudCleanup.ts";
+import { cleanupPlan, createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
 import type { LeaseKeep, ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 import type { WorkspaceBackup } from "./workspaceBackup.ts";
 
@@ -105,6 +105,8 @@ describe("cleanupPlan", () => {
 
 type FakeBox = { lease: ProvisionedLease; awake: boolean; locked: boolean };
 
+const HOUR_MS = 3_600_000;
+
 function fakeHost(
   leases: ReadonlyArray<ProvisionedLease>,
   backup: (box: FakeBox) => WorkspaceBackup | Promise<WorkspaceBackup>,
@@ -112,12 +114,17 @@ function fakeHost(
   const boxes = new Map(
     leases.map((item) => [item.leaseId, { lease: item, awake: false, locked: false }]),
   );
+  const settings: { now: number; afterDays: number | null } = {
+    now: Date.parse("2026-03-09T00:00:00.000Z"),
+    afterDays: 7,
+  };
   const candidate = (box: FakeBox): CleanupCandidate => ({ lease: box.lease, thread: null });
   const logs: Array<{ message: string; fields: Record<string, unknown> }> = [];
   const warnings: Array<{ message: string; fields: Record<string, unknown> }> = [];
+  let backups = 0;
   const ports = {
-    now: () => Date.parse("2026-03-09T00:00:00.000Z"),
-    afterDays: async () => 7,
+    now: () => settings.now,
+    afterDays: async () => settings.afterDays,
     candidates: async () => [...boxes.values()].map(candidate),
     read: async (leaseId: string) => {
       const box = boxes.get(leaseId);
@@ -134,6 +141,7 @@ function fakeHost(
     backUpWork: async (target: ProvisionedLease) => {
       const box = boxes.get(target.leaseId)!;
       box.awake = true;
+      backups += 1;
       return backup(box);
     },
     setKeep: async (leaseId: string, keep: LeaseKeep | null) => {
@@ -162,13 +170,15 @@ function fakeHost(
       locked: box.locked,
     };
   };
-  return { ports, boxes, state, logs, warnings };
+  return { ports, boxes, settings, state, logs, warnings, backups: () => backups };
 }
 
-describe("cleanUpBoxes", () => {
+const asleep = { state: "paused", keep: null, awake: false, locked: false };
+
+describe("createCleanupSweep", () => {
   it("removes a due box whose work is backed up", async () => {
     const host = fakeHost([lease()], () => ({ kind: "saved", branches: ["t3-backup/lease-1"] }));
-    await cleanUpBoxes(host.ports);
+    await createCleanupSweep(host.ports)();
     expect(host.state("lease-1")).toEqual({
       state: "disposed",
       keep: null,
@@ -185,13 +195,8 @@ describe("cleanUpBoxes", () => {
 
   it("keeps and sleeps a due box whose work could not be backed up", async () => {
     const host = fakeHost([lease()], () => ({ kind: "unsaved", reason: "no origin remote" }));
-    await cleanUpBoxes(host.ports);
-    expect(host.state("lease-1")).toEqual({
-      state: "paused",
-      keep: "unsaved-work",
-      awake: false,
-      locked: false,
-    });
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual({ ...asleep, keep: "unsaved-work" });
     expect(host.warnings).toEqual([
       {
         message: "cloud box kept: its work could not be backed up",
@@ -200,73 +205,87 @@ describe("cleanUpBoxes", () => {
     ]);
   });
 
-  it("keeps and sleeps a due box whose backup failed outright", async () => {
+  it("sleeps a box whose backup failed outright and tries it again six hours later", async () => {
     const host = fakeHost([lease()], () => {
       throw new Error("exec timed out");
     });
-    await cleanUpBoxes(host.ports);
-    expect(host.state("lease-1")).toEqual({
-      state: "paused",
-      keep: "unsaved-work",
-      awake: false,
-      locked: false,
+    const sweep = createCleanupSweep(host.ports);
+    await sweep();
+    expect(host.state("lease-1")).toEqual(asleep);
+    await sweep();
+    expect(host.backups()).toBe(1);
+    host.settings.now += 6 * HOUR_MS;
+    await sweep();
+    expect(host.backups()).toBe(2);
+    expect(host.state("lease-1")).toEqual(asleep);
+  });
+
+  it("puts a box back to sleep on the next pass when its sleep failed", async () => {
+    const host = fakeHost([lease()], () => ({ kind: "unsaved", reason: "no origin remote" }));
+    const sleep = host.ports.sleep;
+    let failures = 1;
+    host.ports.sleep = async (target) => {
+      if (failures-- > 0) throw new Error("Namespace unreachable");
+      return sleep(target);
+    };
+    const sweep = createCleanupSweep(host.ports);
+    await sweep();
+    expect(host.state("lease-1").awake).toBe(true);
+    await sweep();
+    expect(host.state("lease-1")).toEqual({ ...asleep, keep: "unsaved-work" });
+  });
+
+  it("sleeps a box whose removal is still pending", async () => {
+    const host = fakeHost([lease()], () => ({ kind: "clean" }));
+    host.ports.dispose = async () => false;
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual(asleep);
+  });
+
+  it("sleeps a box without removing it when cleanup is turned off during its backup", async () => {
+    const host = fakeHost([lease()], () => {
+      host.settings.afterDays = null;
+      return { kind: "clean" };
     });
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual(asleep);
   });
 
   it("skips a box another operation holds", async () => {
     const host = fakeHost([lease()], () => ({ kind: "clean" }));
     host.boxes.get("lease-1")!.locked = true;
-    await cleanUpBoxes(host.ports);
-    expect(host.state("lease-1")).toEqual({
-      state: "paused",
-      keep: null,
-      awake: false,
-      locked: true,
-    });
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual({ ...asleep, locked: true });
   });
 
-  it("leaves a box that was resumed during its backup running", async () => {
+  it("sleeps a box its owner kept during its backup, without removing it", async () => {
     const host = fakeHost([lease()], (box) => {
-      box.lease = { ...box.lease, state: "active" };
+      box.lease = { ...box.lease, keep: "user" };
       return { kind: "clean" };
     });
-    await cleanUpBoxes(host.ports);
-    expect(host.state("lease-1")).toEqual({
-      state: "active",
-      keep: null,
-      awake: true,
-      locked: false,
-    });
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual({ ...asleep, keep: "user" });
   });
 
-  it("sleeps a box opened during its backup without removing it", async () => {
+  it("sleeps a box whose chat was opened during its backup, without removing it", async () => {
     const host = fakeHost([lease()], (box) => {
       box.lease = { ...box.lease, updatedAt: "2026-03-08T23:00:00.000Z" };
       return { kind: "clean" };
     });
-    await cleanUpBoxes(host.ports);
-    expect(host.state("lease-1")).toEqual({
-      state: "paused",
-      keep: null,
-      awake: false,
-      locked: false,
-    });
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual(asleep);
   });
 
   it("leaves a box that is not yet due untouched", async () => {
     const host = fakeHost([lease({ updatedAt: "2026-03-05T00:00:00.000Z" })], () => ({
       kind: "clean",
     }));
-    await cleanUpBoxes(host.ports);
-    expect(host.state("lease-1")).toEqual({
-      state: "paused",
-      keep: null,
-      awake: false,
-      locked: false,
-    });
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual(asleep);
+    expect(host.backups()).toBe(0);
   });
 
-  it("goes on to the next box after one fails to dispose", async () => {
+  it("sleeps a box that fails to dispose and goes on to the next", async () => {
     const host = fakeHost([lease(), lease({ leaseId: "lease-2", sandboxId: "sandbox-2" })], () => ({
       kind: "clean",
     }));
@@ -275,11 +294,8 @@ describe("cleanUpBoxes", () => {
       if (leaseId === "lease-1") throw new Error("Namespace refused");
       return dispose(leaseId);
     };
-    await cleanUpBoxes(host.ports);
-    expect([host.state("lease-1").state, host.state("lease-2").state]).toEqual([
-      "paused",
-      "disposed",
-    ]);
-    expect(host.state("lease-1").locked).toBe(false);
+    await createCleanupSweep(host.ports)();
+    expect(host.state("lease-1")).toEqual(asleep);
+    expect(host.state("lease-2").state).toBe("disposed");
   });
 });
