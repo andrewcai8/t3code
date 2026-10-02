@@ -19,6 +19,8 @@ const machine = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
   expiresAt: "2100-01-01T00:00:00.000Z",
 });
 
+const now = Date.parse("2026-03-01T12:00:00.000Z");
+
 describe("presentProvisionedEnvironment", () => {
   it("names a machine for its chat and shows what its host says of it", () => {
     expect(
@@ -26,12 +28,14 @@ describe("presentProvisionedEnvironment", () => {
         environment: machine,
         threadTitle: "Fix the login flow",
         action: { kind: "idle" },
+        now,
       }),
     ).toEqual({
       title: "Fix the login flow",
       detail: "E2B · proof/repo",
       status: "Paused",
       tone: "muted",
+      cleanupAction: null,
     });
   });
 
@@ -41,6 +45,7 @@ describe("presentProvisionedEnvironment", () => {
         environment: machine,
         threadTitle: null,
         action: { kind: "working", label: "Resuming…" },
+        now,
       }),
     ).toMatchObject({ title: "proof/repo", status: "Resuming…" });
   });
@@ -51,7 +56,36 @@ describe("presentProvisionedEnvironment", () => {
         environment: machine,
         threadTitle: null,
         action: { kind: "failed", message: "The host could not delete this machine." },
+        now,
       }),
     ).toMatchObject({ status: "The host could not delete this machine.", tone: "danger" });
+  });
+
+  it("shows when a paused machine will be removed and offers to keep it", () => {
+    expect(
+      presentProvisionedEnvironment({
+        environment: {
+          ...machine,
+          cleanup: { kind: "scheduled", at: "2026-03-01T12:40:00.000Z", reason: "settled" },
+        },
+        threadTitle: null,
+        action: { kind: "idle" },
+        now,
+      }),
+    ).toMatchObject({ status: "Paused · Settled · Removed in 40 min", cleanupAction: "keep" });
+  });
+
+  it("offers to allow cleanup of a machine the user kept, but not of one kept for its work", () => {
+    const present = (reason: "user" | "unsaved-work") =>
+      presentProvisionedEnvironment({
+        environment: { ...machine, cleanup: { kind: "kept", reason } },
+        threadTitle: null,
+        action: { kind: "idle" },
+        now,
+      });
+    expect([present("user"), present("unsaved-work")]).toMatchObject([
+      { status: "Paused · Kept", cleanupAction: "allow" },
+      { status: "Paused · Kept · work could not be backed up", cleanupAction: null },
+    ]);
   });
 });
