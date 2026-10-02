@@ -91,4 +91,23 @@ describe("ProvisionedChatStore", () => {
       ]);
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
+
+  effectIt.effect("keeps a read of a new owner's chat even at the same sequence", () =>
+    Effect.gen(function* () {
+      const store = createProvisionedChatStore(yield* SqlClient.SqlClient);
+      yield* Effect.promise(() => store.record("lease-a", chatAt(9, "First owner")));
+      const claimed = ownerChat(
+        {
+          ...shellBody([thread("thread-claimed", "project-app", "Second owner")]),
+          snapshotSequence: 9,
+        },
+        "thread-claimed",
+      );
+      if (!claimed) throw new Error("fixture shell holds the claimed thread");
+      yield* Effect.promise(() => store.record("lease-a", claimed));
+      expect((yield* storedRows()).map(({ sequence, title }) => ({ sequence, title }))).toEqual([
+        { sequence: 9, title: "Second owner" },
+      ]);
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
 });

@@ -51,7 +51,10 @@ export function ownerChat(
 }
 
 export interface ProvisionedChatStore {
-  /** Keeps a box's chat unless the host already holds it at this sequence or a newer one. */
+  /**
+   * Keeps a box's chat unless the host already holds that thread at this sequence or a newer one.
+   * A claim can hand the box to another thread at the same sequence.
+   */
   readonly record: (leaseId: string, chat: ProvisionedChat, now?: Date) => Promise<void>;
   /** The leases the host holds a chat for. */
   readonly leaseIds: () => Promise<ReadonlySet<string>>;
@@ -68,6 +71,8 @@ export function createProvisionedChatStore(sql: SqlClient.SqlClient): Provisione
           chat_json = excluded.chat_json,
           read_at = excluded.read_at
         WHERE excluded.sequence > provisioned_chats.sequence
+          OR json_extract(excluded.chat_json, '$.thread.id')
+            IS NOT json_extract(provisioned_chats.chat_json, '$.thread.id')
       `);
     },
     leaseIds: async () => {
