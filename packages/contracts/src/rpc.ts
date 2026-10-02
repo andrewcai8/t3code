@@ -756,6 +756,13 @@ const EnvironmentControlListProvisionedRpc = Rpc.make(
        * is named gone by its address instead.
        */
       addresses: Schema.optional(Schema.Array(SavedEnvironmentAddress)),
+      /**
+       * Asks for each box's chat. The host leaves out a chat the client already holds at this
+       * sequence or a newer one.
+       */
+      chats: Schema.optional(
+        Schema.Array(Schema.Struct({ environmentId: EnvironmentId, sequence: NonNegativeInt })),
+      ),
     }),
     success: ProvisionedEnvironmentList,
     error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
