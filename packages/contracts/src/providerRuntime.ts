@@ -814,6 +814,8 @@ const RuntimeErrorPayload = Schema.Struct({
   code: Schema.optional(TrimmedNonEmptyStringSchema),
   class: Schema.optional(RuntimeErrorClass),
   detail: Schema.optional(Schema.Unknown),
+  /** When a usage-limit stop lifts. Clients render it in the viewer's zone. */
+  resetsAt: Schema.optional(IsoDateTime),
 });
 export type RuntimeErrorPayload = typeof RuntimeErrorPayload.Type;
 

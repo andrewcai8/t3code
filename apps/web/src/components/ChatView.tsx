@@ -427,6 +427,7 @@ import {
   isThreadErrorBannerDismissedForSession,
   shouldShowThreadErrorBanner,
   ThreadErrorBanner,
+  threadErrorResetsAt,
 } from "./chat/ThreadErrorBanner";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import type { CloudEnvironmentSetupSnapshot } from "./chat/EnvironmentSetupCard";
@@ -10752,6 +10753,8 @@ export default function ChatView(props: ChatViewProps) {
               <ThreadErrorBanner
                 error={visibleThreadError}
                 chatGptUsageLimit={isChatGptUsageLimitError(threadActivities, visibleThreadError)}
+                resetsAt={threadErrorResetsAt(threadActivities, visibleThreadError)}
+                timestampFormat={timestampFormat}
                 onDismiss={() => {
                   setThreadError(activeThread.id, null);
                   dismissThreadErrorBannerForSession(threadErrorBannerKey);
