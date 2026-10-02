@@ -13,7 +13,7 @@ const require = NodeModule.createRequire(
 const { Template } = require("e2b");
 const { values } = NodeUtil.parseArgs({
   options: {
-    name: { type: "string", default: "t3-common-tools-node24-bun140-v6" },
+    name: { type: "string", default: "t3-common-tools-node24-bun140-v7" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -28,7 +28,7 @@ if (values.help) {
     "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--config FILE] [--print-dockerfile]",
   );
   console.log(
-    "Builds a clean private E2B template with 4 CPUs, 8 GiB RAM, 8 GiB swap and 20 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
+    "Builds a clean private E2B template with 4 CPUs, 8 GiB RAM, 8 GiB swap and 50 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
   );
   process.exit(0);
 }
@@ -97,7 +97,7 @@ try {
     apiKey,
     cpuCount: 4,
     memoryMB: 8192,
-    minFreeDiskMb: 20480,
+    minFreeDiskMb: 51200,
     onBuildLogs: (entry) => {
       const line = JSON.stringify(entry).replaceAll(apiKey, "[redacted]");
       NodeFS.writeSync(log.fd, `${line}\n`);
