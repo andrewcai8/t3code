@@ -1388,8 +1388,8 @@ describe("rankAccounts", () => {
     it("sends the new chat to the idle account when usage left is equal", () => {
       const ranked = rankAccounts(
         [
-          account("a", { checkedAt, windows: [session(40)] }),
-          account("b", { checkedAt, windows: [session(40)] }),
+          account("a", { checkedAt, windows: [weekly(40)] }),
+          account("b", { checkedAt, windows: [weekly(40, "2026-09-08T00:00:00.000Z")] }),
         ],
         now,
         ProviderInstanceId.make("a"),

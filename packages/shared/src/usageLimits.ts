@@ -388,18 +388,8 @@ function providerReading(provider: ServerProvider, fallbackKey: string): LimitRe
 function findIdenticalReadings(readings: readonly LimitReading[]): string[][] {
   const bySignature = new Map<string, Map<string, LimitReading>>();
   for (const reading of readings) {
-    if (!reading.limits || reading.limits.unavailable) continue;
-    const timed = reading.limits.windows.flatMap((window) => {
-      const at = resetMillis(window);
-      return at === null ? [] : [{ window, at }];
-    });
-    if (timed.every(({ window }) => window.usedPercent === 0)) continue;
-    const signature = [
-      reading.driver,
-      ...timed
-        .map(({ window, at }) => `${window.kind}:${window.id}:${window.usedPercent}:${at}`)
-        .sort(),
-    ].join("|");
+    const signature = readingSignature(reading.driver, reading.limits);
+    if (signature === null) continue;
     const group = bySignature.get(signature) ?? new Map<string, LimitReading>();
     if (!group.has(reading.key)) group.set(reading.key, reading);
     bySignature.set(signature, group);
@@ -407,6 +397,25 @@ function findIdenticalReadings(readings: readonly LimitReading[]): string[][] {
   return [...bySignature.values()]
     .map((group) => [...new Set([...group.values()].map(({ name }) => name))])
     .filter((names) => names.length > 1);
+}
+
+/** What `findIdenticalReadings` compares, null for a reading that cannot tell accounts apart. */
+function readingSignature(
+  driver: ServerProvider["driver"],
+  limits: ServerProviderUsageLimits | undefined,
+): string | null {
+  if (!limits || limits.unavailable) return null;
+  const timed = limits.windows.flatMap((window) => {
+    const at = resetMillis(window);
+    return at === null ? [] : [{ window, at }];
+  });
+  if (timed.every(({ window }) => window.usedPercent === 0)) return null;
+  return [
+    driver,
+    ...timed
+      .map(({ window, at }) => `${window.kind}:${window.id}:${window.usedPercent}:${at}`)
+      .sort(),
+  ].join("|");
 }
 
 /** Names of one machine's instances that read identical limits, a list per suspected shared account. */
@@ -833,9 +842,22 @@ export function collectProviderUsageLimits(
 const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
 
 /**
- * How much an account has left before any of its windows stops it: the
- * tightest window's remaining percent. A window past its reset counts as
- * full, and an account with no subscription limits (an API key) as 100.
+ * How far ahead routing looks for a new chat, whose length it cannot know.
+ * An agent run lasts hours, and five hours is the shortest window any
+ * provider resets on, so a session window always refills within it and a
+ * weekly or monthly one days away never does.
+ */
+const ROUTING_HORIZON_MS = 5 * HOUR;
+
+/**
+ * How much an account has for a chat over `ROUTING_HORIZON_MS` before any of
+ * its windows stops it, in percent of a full window: the tightest window's.
+ * A window that refills within the horizon is full for the part of it left
+ * after the reset, so 5% left with a reset in ten minutes counts as nearly
+ * 100, and 40% left with a reset in six days as 40. A window spent right now
+ * counts as 0 however soon it refills, since the chat's first turn would
+ * fail. A window past its reset counts as full, and an account with no
+ * subscription limits (an API key) as 100.
  * A window's usage only rises until it resets, so an old reading still
  * counts as the best the host knows. `null` means unknown: a failed probe,
  * no report at all, or an old reading of a spent window that never reports
@@ -897,11 +919,16 @@ function accountHeadroom(
       unvouched = true;
       continue;
     }
+    const refilled =
+      remaining <= 0 || resetsAt === null
+        ? 0
+        : Math.max(0, 1 - (resetsAt - now) / ROUTING_HORIZON_MS) * (100 - remaining);
+    const available = remaining + refilled;
     if (
-      remaining < tightest.remainingPercent ||
-      (remaining === tightest.remainingPercent && earlier(resetsAt, tightest.resetsAt))
+      available < tightest.remainingPercent ||
+      (available === tightest.remainingPercent && earlier(resetsAt, tightest.resetsAt))
     )
-      tightest = { remainingPercent: remaining, resetsAt };
+      tightest = { remainingPercent: available, resetsAt };
   }
   return unvouched && tightest.remainingPercent > 0 ? null : tightest;
 }
@@ -927,8 +954,11 @@ export type AccountLoad = ReadonlyMap<ProviderInstanceId, number>;
 
 /**
  * Accounts of one driver, the one whose remaining usage leaves the new chat
- * the largest share first: `remainingPercent / (active + 1)`. Instances with
- * one email are one subscription, so each counts the sessions of all. Unknown
+ * the largest share first: `remainingPercent / (active + 1)`. Not knowing how
+ * much a chat will use, routing gives it the account where its fair share of
+ * what is left is largest, which spreads chats out. Instances of one
+ * subscription, by email, credential, or identical readings, count the
+ * sessions of all. Unknown
  * headroom ranks below any account with room left, fewest active sessions
  * first, and above a spent one. Ties go to the account whose tightest window
  * refills first, then the preferred account, then the id, so the same
@@ -942,8 +972,23 @@ export function rankAccounts<
     readonly usageLimits?: ServerProviderUsageLimits | undefined;
   },
 >(accounts: readonly A[], now: number, preferred?: ProviderInstanceId, load?: AccountLoad): A[] {
-  const keyOf = (account: A) =>
-    accountKey(account.driver, account.email, account.usageLimits) ?? account.instanceId;
+  // One subscription is one pool, whichever key names it: an email, a
+  // credential, or readings that match window for window.
+  const parent = new Map<string, string>();
+  const root = (key: string): string => {
+    const up = parent.get(key) ?? key;
+    return up === key ? key : root(up);
+  };
+  const keysOf = (account: A) =>
+    [
+      accountKey(account.driver, account.email, account.usageLimits) ?? account.instanceId,
+      readingSignature(account.driver, account.usageLimits),
+    ].filter((key) => key !== null);
+  for (const account of accounts) {
+    const [first, ...rest] = keysOf(account).map(root);
+    for (const key of rest) if (key !== first) parent.set(key, first!);
+  }
+  const keyOf = (account: A) => root(keysOf(account)[0]!);
   const sessions = new Map<string, number>();
   for (const account of accounts)
     sessions.set(
