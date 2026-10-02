@@ -82,7 +82,7 @@ export function connectionStatusName(target: ConnectionTarget): string {
 
 export function connectionStatusText(connection: EnvironmentConnectionPresentation): string {
   if (connection.blockedReason === "workspace-missing") {
-    return "Workspace expired";
+    return "Machine removed";
   }
   switch (connection.phase) {
     case "available":

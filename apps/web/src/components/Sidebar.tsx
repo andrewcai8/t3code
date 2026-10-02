@@ -1199,7 +1199,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               }
             : status === "failed" || status === "expired"
               ? {
-                  label: status === "expired" ? "Expired" : "Failed",
+                  label: status === "expired" ? "Removed" : "Failed",
                   icon: status === "expired" ? null : ("failed" as const),
                   className: "text-red-700 dark:text-red-300",
                 }

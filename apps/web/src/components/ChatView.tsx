@@ -2895,7 +2895,7 @@ export default function ChatView(props: ChatViewProps) {
             ? `${unavailableName} is waking up...`
             : `${unavailableName} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         description: workspaceMissing
-          ? "This workspace expired. Saved history is available here. Continue in a recovered or new workspace."
+          ? "This chat's cloud machine was removed. Its saved history stays readable here."
           : environmentWaking
             ? "This can take a few minutes. It reconnects on its own."
             : environmentReconnecting
