@@ -69,7 +69,7 @@ if (args[0] === 'auth') {
   process.stdout.write(Buffer.from(JSON.stringify({ iat, exp })).toString('base64url') + '.test-private-broker');
 } else if (args[0] === 'project') {
   fs.writeFileSync(path.join(root, 'project-add-args'), JSON.stringify(args));
-  process.exit(0);
+  process.exit(fs.existsSync(path.join(root, 'fail-project-add')) ? 1 : 0);
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
   fs.writeFileSync(path.join(root, 'usage-host-id'), process.env.T3CODE_USAGE_HOST_ID ?? '');
@@ -424,7 +424,7 @@ describe("remote preparation subprocess", () => {
     );
     expect(
       JSON.parse(await NodeFSP.readFile(NodePath.join(input.root, "server.json"), "utf8")),
-    ).toEqual({
+    ).toMatchObject({
       pid: upgraded.serverPid,
       sha256: runtime.sha256,
       revision: runtime.revision,
@@ -496,7 +496,62 @@ describe("remote preparation subprocess", () => {
     });
   });
 
-  it("renews a root prepared before renewal existed with its running server's CLI", async () => {
+  it("renews with the build a failed upgrade left serving", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const runtime = await secondBuild(input);
+    await NodeFSP.writeFile(NodePath.join(input.root, "fail-project-add"), "1");
+    await expect(prepareRemoteHost(localPort, { ...input, runtime })).rejects.toThrow(
+      "Could not add the workspace as a project",
+    );
+    const serving = JSON.parse(
+      await NodeFSP.readFile(NodePath.join(input.root, "server.json"), "utf8"),
+    );
+    pids.add(serving.pid);
+    await NodeFSP.writeFile(first.brokerCredentialPath, expiredBroker());
+    const minted = await brokerToken(input.root);
+    expect({
+      exitCode: minted.exitCode,
+      serving: serving.sha256,
+      issuedBy: await NodeFSP.readFile(NodePath.join(input.root, "issued-by"), "utf8"),
+    }).toEqual({
+      exitCode: 0,
+      serving: runtime.sha256,
+      issuedBy: `artifact/cli.mjs\nruntime/${runtime.sha256}/cli.mjs\n`,
+    });
+  });
+
+  it("renews with the requested build when that build is already serving without a recorded recipe", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    // What a root prepared before renewal looks like: no recipe beside its running server.
+    const forget = async () => {
+      for (const name of ["server.json", "preparation.json"]) {
+        const path = NodePath.join(input.root, name);
+        const recorded = JSON.parse(await NodeFSP.readFile(path, "utf8"));
+        delete recorded.brokerIssue;
+        await NodeFSP.writeFile(path, JSON.stringify(recorded));
+      }
+    };
+    await forget();
+    await NodeFSP.writeFile(first.brokerCredentialPath, expiredBroker());
+    const expired = await prepareRemoteHost(localPort, input);
+    await forget();
+    await NodeFSP.rm(first.brokerCredentialPath);
+    const missing = await prepareRemoteHost(localPort, input);
+    expect({
+      serverPids: [expired.serverPid, missing.serverPid],
+      issued: await NodeFSP.readFile(NodePath.join(input.root, "issued"), "utf8"),
+    }).toEqual({
+      serverPids: [first.serverPid, first.serverPid],
+      issued: "issue\nissue\nissue\n",
+    });
+  });
+
+  /** A root prepared before its server recorded a recipe, whose server /proc describes. */
+  async function legacyRoot(serverHome?: string) {
     const base = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-broker-"));
     roots.push(base);
     const root = NodePath.join(base, "root");
@@ -505,15 +560,13 @@ describe("remote preparation subprocess", () => {
     await NodeFSP.mkdir(t3home, { recursive: true });
     await NodeFSP.mkdir(workspace);
     const cli = NodePath.join(base, "cli.mjs");
+    const issuedWith = NodePath.join(base, "issued-with");
     await NodeFSP.writeFile(
       cli,
-      `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(NodePath.join(base, "issued-with"))}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), marker: process.env.SERVER_MARKER ?? null }));\nprocess.stdout.write('renewed-broker');\n`,
+      `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(issuedWith)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), marker: process.env.SERVER_MARKER ?? null }));\nprocess.stdout.write('renewed-broker');\n`,
     );
-    await NodeFSP.writeFile(NodePath.join(root, "broker-token"), expiredBroker());
-    await NodeFSP.writeFile(
-      NodePath.join(root, "preparation.json"),
-      JSON.stringify({ intent: "a".repeat(64), environmentId: "legacy", installedFiles: [] }),
-    );
+    const expired = expiredBroker();
+    await NodeFSP.writeFile(NodePath.join(root, "broker-token"), expired);
     await NodeFSP.writeFile(
       NodePath.join(root, "server.json"),
       JSON.stringify({ pid: 4242, sha256: "d".repeat(64), revision: "c".repeat(40) }),
@@ -528,7 +581,7 @@ describe("remote preparation subprocess", () => {
         cli,
         "start",
         "--base-dir",
-        t3home,
+        serverHome ?? t3home,
         "--no-browser",
         "--port",
         "1",
@@ -540,13 +593,17 @@ describe("remote preparation subprocess", () => {
       nul([`PATH=${process.env.PATH ?? ""}`, "SERVER_MARKER=from-server"]),
     );
     await NodeFSP.symlink(workspace, NodePath.join(proc, "4242/cwd"));
+    return { root, t3home, workspace, proc, issuedWith, expired };
+  }
 
-    const minted = await brokerToken(root, proc);
+  it("renews a root prepared before renewal existed with its running server's CLI", async () => {
+    const legacy = await legacyRoot();
+    const minted = await brokerToken(legacy.root, legacy.proc);
     expect({
       stdout: minted.stdout,
-      issuedWith: JSON.parse(await NodeFSP.readFile(NodePath.join(base, "issued-with"), "utf8")),
-      stored: await NodeFSP.readFile(NodePath.join(root, "broker-token"), "utf8"),
-      mode: (await NodeFSP.stat(NodePath.join(root, "broker-token"))).mode & 0o777,
+      issuedWith: JSON.parse(await NodeFSP.readFile(legacy.issuedWith, "utf8")),
+      stored: await NodeFSP.readFile(NodePath.join(legacy.root, "broker-token"), "utf8"),
+      mode: (await NodeFSP.stat(NodePath.join(legacy.root, "broker-token"))).mode & 0o777,
     }).toEqual({
       stdout: "renewed-broker\n",
       issuedWith: {
@@ -555,19 +612,32 @@ describe("remote preparation subprocess", () => {
           "session",
           "issue",
           "--base-dir",
-          t3home,
+          legacy.t3home,
           "--ttl",
           "7d",
           "--subject",
           "provision-broker",
           "--token-only",
         ],
-        cwd: await NodeFSP.realpath(workspace),
+        cwd: await NodeFSP.realpath(legacy.workspace),
         marker: "from-server",
       },
       stored: "renewed-broker",
       mode: 0o600,
     });
+  });
+
+  it("never renews through a recycled pid that serves another root", async () => {
+    const legacy = await legacyRoot("/elsewhere/home/.t3");
+    const minted = await brokerToken(legacy.root, legacy.proc);
+    expect({
+      stdout: minted.stdout,
+      ran: await NodeFSP.access(legacy.issuedWith).then(
+        () => true,
+        () => false,
+      ),
+      stored: await NodeFSP.readFile(NodePath.join(legacy.root, "broker-token"), "utf8"),
+    }).toEqual({ stdout: `${legacy.expired}\n`, ran: false, stored: legacy.expired });
   });
 
   it("recovers a lost readiness response and restarts an exited owned server", async () => {
