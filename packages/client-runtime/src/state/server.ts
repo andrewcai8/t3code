@@ -1173,6 +1173,14 @@ export function createServerEnvironmentAtoms<R, E>(
           `${environmentId}:${"requestId" in input ? input.requestId : input.sandboxId}`,
       },
     }),
+    keepProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:keep",
+      tag: WS_METHODS.environmentControlKeep,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.requestId}`,
+      },
+    }),
     pauseProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:pause",
       tag: WS_METHODS.environmentControlPause,
