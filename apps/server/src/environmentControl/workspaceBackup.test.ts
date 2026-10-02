@@ -9,7 +9,7 @@ import { backUpWorkspace } from "./workspaceBackup.ts";
 
 const cleanups: Cleanups = [];
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
 });
 
 /** A chat root whose workspace clones a local bare `origin`, as a box's checkout clones GitHub. */
