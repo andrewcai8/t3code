@@ -13,7 +13,7 @@ import {
   boundedRunScript,
   brokerTokenScript,
   prepareRemoteHost,
-  refreshRemoteCheckout,
+  checkRemoteHost,
   remotePreparationScript,
   sealWarmBase,
   type RemotePreparationInput,
@@ -670,6 +670,37 @@ describe("remote preparation subprocess", () => {
     );
   });
 
+  it("tells a resume whether the box's server still answers, without starting one", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, input);
+    pids.add(ready.serverPid);
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
+    expect(await (await fetch(`http://127.0.0.1:${input.port}/stop`)).text()).toBe("stopped");
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: false,
+    });
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "started"), "utf8")).toBe("start\n");
+  });
+
+  it("finds a box that slept past its broker token's lifetime still serving, renewing the token", async () => {
+    const input = await fixture();
+    const ready = await prepareRemoteHost(localPort, input);
+    pids.add(ready.serverPid);
+    await NodeFSP.writeFile(ready.brokerCredentialPath, expiredBroker());
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
+    expect({
+      issued: await NodeFSP.readFile(NodePath.join(input.root, "issued"), "utf8"),
+      started: await NodeFSP.readFile(NodePath.join(input.root, "started"), "utf8"),
+    }).toEqual({ issued: "issue\nissue\n", started: "start\n" });
+  });
+
   it("refuses an archive whose content does not match the pinned digest", async () => {
     const input = await fixture();
     await expect(
@@ -1208,7 +1239,10 @@ describe("remote branch refresh", () => {
     advance(first.projectDir, "agent work");
     const agentHead = git(first.projectDir, "rev-parse", "HEAD");
     const pushed = advance(source, "pushed while open");
-    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
     expect([
       git(first.projectDir, "symbolic-ref", "--short", "HEAD"),
       git(first.projectDir, "rev-parse", "--abbrev-ref", "@{upstream}"),
@@ -1253,7 +1287,10 @@ describe("remote branch refresh", () => {
       pushed,
     ]);
     const later = advance(source, "pushed while paused");
-    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
     expect([
       git(first.projectDir, "rev-parse", "HEAD"),
       git(first.projectDir, "rev-parse", tracking),
@@ -1267,7 +1304,10 @@ describe("remote branch refresh", () => {
     pids.add(first.serverPid);
     await NodeFSP.writeFile(NodePath.join(first.projectDir, ".git/shallow.lock"), "");
     const pushed = advance(source, "pushed");
-    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
     expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
   });
 
@@ -1298,7 +1338,7 @@ describe("remote branch refresh", () => {
     const reopened = await prepareRemoteHost(localPort, input);
     expect(reopened.headRevision).toBe(first.headRevision);
     expect(reopened.refreshError).toMatch(/Preparation command failed/);
-    expect((await refreshRemoteCheckout(localPort, input)).refreshError).toMatch(
+    expect((await checkRemoteHost(localPort, input)).refreshError).toMatch(
       /Preparation command failed/,
     );
   });
@@ -1347,7 +1387,10 @@ describe("remote branch refresh", () => {
       await NodeFSP.writeFile(NodePath.join(source, name), `${name}\n`);
       git(source, "add", ".");
       const pushed = advance(source, name);
-      expect(await refreshRemoteCheckout(localPort, opened)).toEqual({ refreshError: null });
+      expect(await checkRemoteHost(localPort, opened)).toEqual({
+        refreshError: null,
+        serverReady: true,
+      });
       expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
       return [...(await packs())]
         .filter((pack) => !before.has(pack))
@@ -1370,7 +1413,10 @@ describe("remote branch refresh", () => {
     pids.add(first.serverPid);
     git(first.projectDir, "switch", "-q", "--orphan", "scratch");
     const pushed = advance(source, "pushed");
-    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
     expect(git(first.projectDir, "rev-parse", tracking)).toBe(pushed);
   });
 
@@ -1382,7 +1428,10 @@ describe("remote branch refresh", () => {
     pids.add(first.serverPid);
     git(source, "checkout", "-q", "-");
     git(source, "branch", "-D", "feature");
-    expect(await refreshRemoteCheckout(localPort, input)).toEqual({ refreshError: null });
+    expect(await checkRemoteHost(localPort, input)).toEqual({
+      refreshError: null,
+      serverReady: true,
+    });
   });
 });
 
