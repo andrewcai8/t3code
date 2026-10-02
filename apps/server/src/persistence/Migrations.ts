@@ -72,6 +72,7 @@ import Migration0057 from "./Migrations/057_ProjectionThreadsAutoSettleDisabledA
 import Migration0058 from "./Migrations/058_BoxUsage.ts";
 import Migration0059 from "./Migrations/059_AutomationsModel.ts";
 import Migration0060 from "./Migrations/060_BoxUsageOrigin.ts";
+import Migration0061 from "./Migrations/061_ProvisionedChats.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -83,7 +84,7 @@ import Migration0060 from "./Migrations/060_BoxUsageOrigin.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  *
- * Fork numbering: 052-056, 058 and 059 are this fork's own and deployed
+ * Fork numbering: 052-056 and 058-061 are this fork's own and deployed
  * databases have them applied, so their ids never change. 057 came from
  * upstream. When syncing upstream, an upstream migration takes the next free
  * id above the highest one here, and one whose contents match a fork migration
@@ -150,6 +151,7 @@ const migrationEntries = [
   [58, "BoxUsage", Migration0058],
   [59, "AutomationsModel", Migration0059],
   [60, "BoxUsageOrigin", Migration0060],
+  [61, "ProvisionedChats", Migration0061],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

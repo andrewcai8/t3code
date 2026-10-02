@@ -103,7 +103,7 @@ import {
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
-import { pullLeaseUsage, readLeaseActivity, type LeaseActivity } from "./leaseActivity.ts";
+import { observeLease, pullLeaseUsage, type LeaseActivity } from "./leaseActivity.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
@@ -158,7 +158,8 @@ export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
   driver: CloudDriver & { readonly upkeepChat?: UpkeepChat },
   leaseRegistry?: ProvisionedLeaseRegistry,
-  activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = readLeaseActivity,
+  activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = async (lease) =>
+    (await observeLease(lease)).activity,
   pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
   /** Where a failure this service retries later, rather than returns, is reported. */
   reportFailure: (
@@ -867,7 +868,7 @@ export const layer = Layer.effect(
               },
             },
             leaseRegistry,
-            readLeaseActivity,
+            async (lease) => (await observeLease(lease)).activity,
             pullUsage,
             (message, fields) => void runLogged(Effect.logError(message, fields)),
           );

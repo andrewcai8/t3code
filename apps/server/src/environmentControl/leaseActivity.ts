@@ -2,6 +2,7 @@
 import {
   OrchestrationSession,
   OrchestrationThreadShell,
+  type ProvisionedChat,
   UsageHistoryInput,
   UsageSummary,
 } from "@t3tools/contracts";
@@ -10,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { leaseOwnedUsage, type BoxUsageStore } from "../usage/boxUsage.ts";
 import type { ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
+import { ownerChat } from "./provisionedChats.ts";
 
 export type LeaseActivity = "busy" | "idle" | "unknown";
 
@@ -46,8 +48,15 @@ export function shellActivity(body: unknown): LeaseActivity {
     : "idle";
 }
 
-export async function readLeaseActivity(lease: ProvisionedLease): Promise<LeaseActivity> {
-  if (!lease.remoteAccess) return "unknown";
+export interface LeaseObservation {
+  readonly activity: LeaseActivity;
+  /** The owner's chat in the box's shell, as `ownerChat` reads it. Absent when unread. */
+  readonly chat?: ProvisionedChat | null | undefined;
+}
+
+/** Reads a box's shell once, as its activity and its owner's chat. */
+export async function observeLease(lease: ProvisionedLease): Promise<LeaseObservation> {
+  if (!lease.remoteAccess) return { activity: "unknown" };
   try {
     const response = await fetch(`${lease.remoteAccess.origin}/api/orchestration/shell`, {
       headers: { authorization: `Bearer ${lease.remoteAccess.brokerToken}` },
@@ -56,11 +65,15 @@ export async function readLeaseActivity(lease: ProvisionedLease): Promise<LeaseA
     });
     if (!response.ok) {
       await response.body?.cancel();
-      return "unknown";
+      return { activity: "unknown" };
     }
-    return shellActivity(await response.json());
+    const body: unknown = await response.json();
+    return {
+      activity: shellActivity(body),
+      chat: lease.owner ? ownerChat(body, lease.owner.threadId) : null,
+    };
   } catch {
-    return "unknown";
+    return { activity: "unknown" };
   }
 }
 

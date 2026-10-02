@@ -9,12 +9,8 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
-import {
-  pullLeaseUsage,
-  readLeaseActivity,
-  readLeaseUsage,
-  shellActivity,
-} from "./leaseActivity.ts";
+import { observeLease, pullLeaseUsage, readLeaseUsage, shellActivity } from "./leaseActivity.ts";
+import { boxShell, boxThread } from "./shellTestFixture.ts";
 import type { ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 const thread = (fields: Record<string, unknown>) => ({
@@ -57,8 +53,8 @@ describe("shellActivity", () => {
   });
 });
 
-describe("readLeaseActivity", () => {
-  it("asks the remote shell with the broker token and treats anything else as unknown", async () => {
+describe("observeLease", () => {
+  it("reads the box's shell with the broker token as its activity and its owner's chat", async () => {
     const server = NodeHttp.createServer((request, response) => {
       if (
         request.url !== "/api/orchestration/shell" ||
@@ -68,20 +64,52 @@ describe("readLeaseActivity", () => {
         return;
       }
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ threads: [thread({ session: session("running") })] }));
+      response.end(
+        JSON.stringify(
+          boxShell([
+            boxThread("thread-owner", "project-app", "Fix the login redirect", {
+              session: {
+                ...session("running"),
+                threadId: "thread-owner",
+                providerName: "codex",
+                lastError: null,
+                updatedAt: "2026-09-30T10:05:00.000Z",
+              },
+            }),
+          ]),
+        ),
+      );
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const origin = `http://127.0.0.1:${(server.address() as NodeNet.AddressInfo).port}`;
-    const lease = (remoteAccess?: ProvisionedLease["remoteAccess"]) =>
-      ({ leaseId: "lease", ...(remoteAccess ? { remoteAccess } : {}) }) as ProvisionedLease;
+    const lease = (remoteAccess?: ProvisionedLease["remoteAccess"], owned = true) =>
+      ({
+        leaseId: "lease",
+        owner: owned ? { environmentId: "box", threadId: "thread-owner" } : null,
+        ...(remoteAccess ? { remoteAccess } : {}),
+      }) as ProvisionedLease;
     try {
-      expect(await readLeaseActivity(lease({ origin, brokerToken: "broker" }))).toBe("busy");
-      expect(await readLeaseActivity(lease({ origin, brokerToken: "stale" }))).toBe("unknown");
-      expect(await readLeaseActivity(lease())).toBe("unknown");
+      const observed = await observeLease(lease({ origin, brokerToken: "broker" }));
+      expect(observed.activity).toBe("busy");
+      expect([
+        observed.chat?.sequence,
+        observed.chat?.thread.title,
+        observed.chat?.project.id,
+      ]).toEqual([42, "Fix the login redirect", "project-app"]);
+      expect(await observeLease(lease({ origin, brokerToken: "broker" }, false))).toEqual({
+        activity: "busy",
+        chat: null,
+      });
+      expect(await observeLease(lease({ origin, brokerToken: "stale" }))).toEqual({
+        activity: "unknown",
+      });
+      expect(await observeLease(lease())).toEqual({ activity: "unknown" });
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
-    expect(await readLeaseActivity(lease({ origin, brokerToken: "broker" }))).toBe("unknown");
+    expect(await observeLease(lease({ origin, brokerToken: "broker" }))).toEqual({
+      activity: "unknown",
+    });
   });
 });
 
