@@ -1,8 +1,12 @@
 import {
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
+  type OrchestrationProjectShell,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
+  OrchestrationThreadShell,
+  ProjectId,
+  type ProvisionedChat,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -10,6 +14,7 @@ import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
@@ -40,6 +45,8 @@ const PREPARED: PreparedConnection = {
   httpAuthorization: null,
   target: TARGET,
 };
+
+const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
 
 const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   snapshotSequence: 1,
@@ -450,5 +457,124 @@ describe("environment shell synchronization", () => {
       expect(yield* Ref.get(capturedAfterSequences)).toEqual([10, 40, 40, 20]);
       expect(yield* Ref.get(loaderCalls)).toBe(2);
     }),
+  );
+
+  it.effect(
+    "a box's shell takes its host's newer read of the chat until its own stream is live",
+    () =>
+      Effect.gen(function* () {
+        const project: OrchestrationProjectShell = {
+          id: ProjectId.make("project-cloud"),
+          title: "t3code",
+          workspaceRoot: "/workspace/t3code",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-10-01T00:00:00.000Z",
+          updatedAt: "2026-10-01T00:00:00.000Z",
+        };
+        const thread = decodeThreadShell({
+          id: "thread-cloud-chat",
+          projectId: project.id,
+          title: "Fix the flaky test",
+          modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          latestTurn: null,
+          createdAt: "2026-10-01T00:00:00.000Z",
+          updatedAt: "2026-10-01T01:00:00.000Z",
+          session: null,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        });
+        const chats = yield* Queue.unbounded<ProvisionedChat>();
+        const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+        const client = {
+          [ORCHESTRATION_WS_METHODS.subscribeShell]: () => Stream.fromQueue(events),
+        } as unknown as WsRpcProtocolClient;
+        const supervisorState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+        const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
+          Option.none(),
+        );
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: supervisorState,
+          session: activeSession,
+          prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const cache = Persistence.EnvironmentCacheStore.of({
+          loadShell: () => Effect.succeedSome(LIVE_SHELL_SNAPSHOT),
+          saveShell: () => Effect.void,
+          loadThread: () => Effect.succeedNone,
+          saveThread: () => Effect.void,
+          removeThread: () => Effect.void,
+          loadServerConfig: () => Effect.succeedNone,
+          saveServerConfig: () => Effect.void,
+          loadVcsRefs: () => Effect.succeedNone,
+          saveVcsRefs: () => Effect.void,
+          removeVcsRefs: () => Effect.void,
+          clearVcsRefs: () => Effect.void,
+          clear: () => Effect.void,
+        });
+        const shellState = yield* makeEnvironmentShellState({
+          hostChat: Stream.fromQueue(chats),
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+          Effect.provideService(
+            ShellSnapshotLoader,
+            ShellSnapshotLoader.of({ load: () => Effect.succeedNone }),
+          ),
+        );
+        const snapshotAt = (sequence: number) =>
+          SubscriptionRef.changes(shellState).pipe(
+            Stream.filter((state) =>
+              Option.exists(state.snapshot, (snapshot) => snapshot.snapshotSequence === sequence),
+            ),
+            Stream.runHead,
+            Effect.map((state) => Option.getOrThrow(state)),
+          );
+
+        yield* Queue.offer(chats, { sequence: 4, project, thread });
+        const adopted = yield* snapshotAt(4);
+        expect([adopted.status, Option.getOrThrow(adopted.snapshot)]).toEqual([
+          "cached",
+          {
+            snapshotSequence: 4,
+            projects: [project],
+            threads: [thread],
+            updatedAt: "2026-10-01T01:00:00.000Z",
+          },
+        ]);
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        yield* SubscriptionRef.set(supervisorState, {
+          ...AVAILABLE_CONNECTION_STATE,
+          desired: true,
+          network: "online",
+          phase: "connected",
+          generation: 1,
+        });
+        yield* Queue.offerAll(events, [
+          { kind: "snapshot", snapshot: { ...LIVE_SHELL_SNAPSHOT, snapshotSequence: 10 } },
+          { kind: "synchronized" },
+        ]);
+        yield* SubscriptionRef.changes(shellState).pipe(
+          Stream.filter((state) => state.status === "live"),
+          Stream.runHead,
+        );
+        yield* Queue.offer(chats, { sequence: 12, project, thread });
+        for (let index = 0; index < 10; index += 1) yield* Effect.yieldNow;
+        const live = yield* SubscriptionRef.get(shellState);
+        expect([live.status, Option.getOrThrow(live.snapshot).snapshotSequence]).toEqual([
+          "live",
+          10,
+        ]);
+      }),
   );
 });

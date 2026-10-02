@@ -3,6 +3,7 @@ import type {
   OrchestrationShellSnapshot,
   ProvisionedChat,
 } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { type ConnectionCatalogEntry, isUnpairedBox } from "./catalog.ts";
@@ -121,7 +122,7 @@ export function planHostBoxSync(input: HostBoxSyncInput): ReadonlyArray<HostBoxS
 /** The chat a box's host last listed for it, as this runtime received it. */
 export interface HostChat {
   readonly managerId: EnvironmentId;
-  readonly shell: OrchestrationShellSnapshot;
+  readonly chat: ProvisionedChat;
 }
 
 /** A box's shell as its host last read it: the box's chat and that chat's project. */
@@ -132,4 +133,34 @@ export function chatShellSnapshot(chat: ProvisionedChat): OrchestrationShellSnap
     threads: [chat.thread],
     updatedAt: chat.thread.updatedAt,
   };
+}
+
+/**
+ * A box's shell with its host's newer read of the chat merged in: the chat's thread and project
+ * replace their copies and the box's other threads stay. Null when the shell already holds this
+ * chat or a newer one.
+ */
+export function withHostChat(
+  shell: Option.Option<OrchestrationShellSnapshot>,
+  chat: ProvisionedChat,
+): OrchestrationShellSnapshot | null {
+  if (Option.isNone(shell)) return chatShellSnapshot(chat);
+  const current = shell.value;
+  if (current.snapshotSequence >= chat.sequence) return null;
+  return {
+    snapshotSequence: chat.sequence,
+    projects: upsertById(current.projects, chat.project),
+    threads: upsertById(current.threads, chat.thread),
+    updatedAt:
+      chat.thread.updatedAt > current.updatedAt ? chat.thread.updatedAt : current.updatedAt,
+  };
+}
+
+function upsertById<A extends { readonly id: string }>(
+  values: ReadonlyArray<A>,
+  next: A,
+): ReadonlyArray<A> {
+  return values.some(({ id }) => id === next.id)
+    ? values.map((value) => (value.id === next.id ? next : value))
+    : [...values, next];
 }

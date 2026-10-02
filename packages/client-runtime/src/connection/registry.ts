@@ -38,6 +38,7 @@ import {
   type HostChat,
   chatShellSnapshot,
   planHostBoxSync,
+  withHostChat,
 } from "./hostBoxSync.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
@@ -1397,7 +1398,12 @@ export const make = Effect.gen(function* () {
       case "Relabel":
         return relabelBox(step.environmentId, step.label);
       case "Reseed":
-        return cache.saveShell(step.environmentId, chatShellSnapshot(step.chat));
+        return cache.loadShell(step.environmentId).pipe(
+          Effect.flatMap((cached) => {
+            const reseeded = withHostChat(cached, step.chat);
+            return reseeded === null ? Effect.void : cache.saveShell(step.environmentId, reseeded);
+          }),
+        );
       case "MarkBox":
         return rewriteBearerTarget(step.environmentId, (target) =>
           target.box?.managerId === step.box.managerId
@@ -1436,8 +1442,7 @@ export const make = Effect.gen(function* () {
       if (chats.length > 0)
         yield* SubscriptionRef.update(hostChats, (held) => {
           const next = new Map(held);
-          for (const { environmentId, chat } of chats)
-            next.set(environmentId, { managerId, shell: chatShellSnapshot(chat) });
+          for (const { environmentId, chat } of chats) next.set(environmentId, { managerId, chat });
           return next;
         });
       const steps = planHostBoxSync({

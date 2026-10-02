@@ -12,7 +12,7 @@ import * as Schema from "effect/Schema";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./catalog.ts";
-import { chatShellSnapshot, planHostBoxSync } from "./hostBoxSync.ts";
+import { chatShellSnapshot, planHostBoxSync, withHostChat } from "./hostBoxSync.ts";
 import { BearerConnectionTarget } from "./model.ts";
 
 const HOST = EnvironmentId.make("host");
@@ -241,5 +241,35 @@ describe("chatShellSnapshot", () => {
       threads: [THREAD],
       updatedAt: "2026-10-01T01:00:00.000Z",
     });
+  });
+});
+
+describe("withHostChat", () => {
+  const otherThread = { ...THREAD, id: ThreadId.make("thread-subagent"), title: "Subagent" };
+  const cached = {
+    snapshotSequence: 5,
+    projects: [{ ...PROJECT, title: "old title" }],
+    threads: [otherThread, { ...THREAD, title: "Old title" }],
+    updatedAt: "2026-10-01T00:30:00.000Z",
+  };
+
+  it("takes a newer chat in place of its cached copy and keeps the box's other threads", () => {
+    expect(withHostChat(Option.some(cached), chat(8))).toEqual({
+      snapshotSequence: 8,
+      projects: [PROJECT],
+      threads: [otherThread, THREAD],
+      updatedAt: "2026-10-01T01:00:00.000Z",
+    });
+  });
+
+  it("keeps a shell that already holds the chat or a newer one", () => {
+    expect([
+      withHostChat(Option.some(cached), chat(5)),
+      withHostChat(Option.some(cached), chat(4)),
+    ]).toEqual([null, null]);
+  });
+
+  it("is the chat alone when nothing is cached", () => {
+    expect(withHostChat(Option.none(), chat(3))).toEqual(chatShellSnapshot(chat(3)));
   });
 });

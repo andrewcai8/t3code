@@ -15,6 +15,7 @@ import {
   OrchestrationThreadShell,
   ProjectId,
   type ProvisionedChat,
+  ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -3239,13 +3240,20 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
   );
 
   it.effect(
-    "a host's newer read of a chat replaces an idle box's cache, never a connected one's",
+    "a host's newer read of a chat updates an idle box's cache, never a connected one's",
     () =>
       Effect.gen(function* () {
         const harness = yield* makeHarness(
           [TARGET, HOST_BOX],
           [HOST_BOX_PROFILE],
           [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+        );
+        const subagentThread = { ...CHAT_THREAD, id: ThreadId.make("thread-subagent") };
+        yield* Ref.update(harness.shellCache, (cache) =>
+          new Map(cache).set(HOST_BOX.environmentId, {
+            ...CACHED_SNAPSHOT,
+            threads: [subagentThread],
+          }),
         );
         const listChat = (sequence: number) =>
           listing(
@@ -3282,12 +3290,13 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
           yield* registry.syncHostBoxes(TARGET.environmentId, listChat(9));
           expect(yield* cachedSequence).toBe(9);
           expect(
+            (yield* Ref.get(harness.shellCache))
+              .get(HOST_BOX.environmentId)
+              ?.threads.map(({ id }) => id),
+          ).toEqual(["thread-subagent", "thread-cloud-chat"]);
+          expect(
             [...(yield* SubscriptionRef.get(registry.hostChats))].map(
-              ([environmentId, { managerId, shell }]) => [
-                environmentId,
-                managerId,
-                shell.snapshotSequence,
-              ],
+              ([environmentId, { managerId, chat }]) => [environmentId, managerId, chat.sequence],
             ),
           ).toEqual([[HOST_BOX.environmentId, TARGET.environmentId, 9]]);
         }).pipe(Effect.provide(harness.layer), Effect.scoped);

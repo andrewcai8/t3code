@@ -1013,10 +1013,8 @@ export function createServerEnvironmentAtoms<R, E>(
               ? [{ environmentId, httpBaseUrl: profile.value.httpBaseUrl }]
               : [],
           ),
-          chats: [...held].flatMap(([environmentId, chat]) =>
-            chat.managerId === managerId
-              ? [{ environmentId, sequence: chat.shell.snapshotSequence }]
-              : [],
+          chats: [...held].flatMap(([environmentId, { managerId: hostId, chat }]) =>
+            hostId === managerId ? [{ environmentId, sequence: chat.sequence }] : [],
           ),
         });
         return rows.map((row) => provisionedBox(managerId, row));
