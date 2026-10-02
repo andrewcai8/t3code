@@ -29,8 +29,21 @@ to relay registrations; they must not discard directly paired environments.
 
 ## Cloud boxes belong to their chats
 
-A cloud box is saved like any paired server, so its credential and cached chat
-survive a restart, but its target carries the host that provisioned it
+A box's host is the source of truth for which cloud chats exist. Every client
+follows each connected host's list of its boxes into its own catalog
+(`syncHostBoxes` in the
+[registry](../../packages/client-runtime/src/connection/registry.ts), planned by
+[`planHostBoxSync`](../../packages/client-runtime/src/connection/hostBoxSync.ts)).
+A chat box this device never opened is saved without a pairing, and its shell
+cache is seeded from the host's last read of the chat, so the chat lists on
+every device without dialing the box, and a paused box stays paused. Unpaired
+means the entry has no profile; it is never a separate flag, and only a box may
+be saved without a credential. A gone box this device never paired is forgotten
+with its cache; one it paired stays as a missing workspace so its history reads.
+Automation runs are not adopted from the list; they keep their own join.
+
+A box is saved like any paired server, so its credential and cached chat survive
+a restart, but its target carries the host that provisioned it
 (`BearerConnectionTarget.box`). That mark decides two things once, instead of
 each surface filtering boxes out. Environment lists, from
 [`presentationsAtom`](../../packages/client-runtime/src/state/presentation.ts) and
@@ -38,10 +51,24 @@ each surface filtering boxes out. Environment lists, from
 can offer one. The registry connects a box only while something
 [demands](../../packages/client-runtime/src/connection/registry.ts) it: its open
 chat, the draft that is provisioning it, or a turn running on it that its host
-still lists active. Read a box's own state through the point atoms.
+still lists active and this device has paired. Read a box's own state through
+the point atoms.
+
+Opening an unpaired box pairs it inside the box's own dial, not in a view. The
+registry's box driver attaches through the host,
+[redeems the pairing](../../packages/client-runtime/src/connection/boxPairing.ts)
+where this client can reach it, and saves it into the entry in place, so the same
+attempt connects with it and no replacement supervisor pairs again. A loopback
+pairing (Namespace) is redeemed through the host's gateway at the address this
+client already dials the host by. Pairing runs only while the entry has no
+pairing, so a device pairs a box at most once. Later dials, reopens and reloads
+find it saved, and a creating or automation join skips a box it already holds a
+pairing for. Every pairing opens a session on the box, so pairing again on each
+open would pile them up.
 
 A paused box's address still answers, with a gateway 404, 502 or 503 that the
-resolver reads as `not-serving`. The supervisor wakes it, not a view: after such
+resolver reads as `not-serving`, and an unpaired paused box's dial fails the same
+way when its host lists it paused. The supervisor wakes it, not a view: after such
 a dial it enters `waking`, the registry asks the box's host to resume it, and the
 supervisor dials again. `waking` means a resume is in flight to a connected
 host; while the host is down the box backs off and redials instead, and a
@@ -67,7 +94,8 @@ not keep a Mac running, so a forgotten tab lets its box idle out. The host
 never pauses a box whose agent is busy, whatever the clients do.
 
 Boxes saved before the mark existed are marked from this device's lease records
-and from the lists hosts report. A box paired from a bare link stays an ordinary
+and from their host's list, which also renames each box after its chat's
+repository and machine. A box paired from a bare link stays an ordinary
 environment until its host lists it.
 
 ## HTTP authorization

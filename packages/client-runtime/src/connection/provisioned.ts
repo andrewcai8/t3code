@@ -16,7 +16,11 @@ export function isOffDeviceReachablePairingUrl(pairingUrl: string): boolean {
 }
 
 export interface ProvisionedJoinPorts {
-  readonly isConnected: (environmentId: EnvironmentId) => boolean;
+  /**
+   * Whether this device already holds a pairing for the environment, connected or not. Pairing
+   * again would only open another session on the box.
+   */
+  readonly isPaired: (environmentId: EnvironmentId) => boolean;
   readonly attach: () => Promise<EnvironmentProvisionAttachResult>;
   readonly pair: (pairingUrl: string) => Promise<EnvironmentId>;
   /** Rewrite a manager-local pairing URL to a reachable manager-origin gateway. */
@@ -61,7 +65,7 @@ export async function joinProvisionedEnvironment(
   environment: Pick<DiscoveredProvisionedEnvironment, "environmentId" | "leaseId">,
   ports: ProvisionedJoinPorts,
 ): Promise<ProvisionedJoinOutcome> {
-  if (ports.isConnected(environment.environmentId)) return { kind: "joined" };
+  if (ports.isPaired(environment.environmentId)) return { kind: "joined" };
   const attached = await ports.attach();
   if (attached.kind === "refused") return { kind: "refused", message: attached.message };
   if (attached.environmentId !== environment.environmentId)

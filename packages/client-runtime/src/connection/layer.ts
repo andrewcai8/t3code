@@ -88,7 +88,9 @@ export function layerWithOptions(options: RpcSession.RpcSessionOptions) {
   const driverLayer = ConnectionDriver.layer.pipe(
     Layer.provide(Layer.mergeAll(ConnectionResolver.layer, RpcSession.layerWithOptions(options))),
   );
-  const registryLayer = EnvironmentRegistry.layer.pipe(Layer.provide(driverLayer));
+  const registryLayer = EnvironmentRegistry.layer.pipe(
+    Layer.provide(Layer.mergeAll(driverLayer, ConnectionOnboarding.pairingRedemptionLayer)),
+  );
   const onboardingLayer = ConnectionOnboarding.layer.pipe(Layer.provide(registryLayer));
   const connectionServicesLayer = Layer.mergeAll(
     registryLayer,

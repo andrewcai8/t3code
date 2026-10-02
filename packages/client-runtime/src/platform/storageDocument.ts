@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
-  type ConnectionRegistration,
+  type CatalogRegistration,
   ConnectionCredential,
   ConnectionProfile,
 } from "../connection/catalog.ts";
@@ -108,14 +108,22 @@ function removeConnectionMetadata(
 
 export function registerConnectionInCatalog(
   document: ConnectionCatalogDocument,
-  registration: ConnectionRegistration,
+  registration: CatalogRegistration,
 ): ConnectionCatalogDocument {
   const target = registration.target;
   const previous = document.targets.find(
     (candidate) => candidate.environmentId === target.environmentId,
   );
+  // A box's target alone keeps the profile and credential saved under its unchanged connection id,
+  // so relabeling or marking a paired box never drops its pairing.
+  const keepsPairing =
+    registration._tag === "BoxTargetRegistration" &&
+    previous?._tag === "BearerConnectionTarget" &&
+    previous.connectionId === registration.target.connectionId;
   const cleaned =
-    previous === undefined ? document : removeConnectionMetadata(document, previous, false);
+    previous === undefined || keepsPairing
+      ? document
+      : removeConnectionMetadata(document, previous, false);
   // Re-registering (for example editing a label or URL) keeps the disabled
   // flag; only `setConnectionEnabledInCatalog` or removal changes it.
   const next: ConnectionCatalogDocument = {
@@ -125,6 +133,7 @@ export function registerConnectionInCatalog(
 
   switch (registration._tag) {
     case "RelayConnectionRegistration":
+    case "BoxTargetRegistration":
       return next;
     case "BearerConnectionRegistration":
       return {

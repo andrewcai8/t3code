@@ -3,6 +3,7 @@ import {
   type CloudProvisioningProgressPhase,
 } from "@t3tools/client-runtime/cloud";
 import {
+  holdsPairing,
   isOffDeviceReachablePairingUrl,
   provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
@@ -10,10 +11,10 @@ import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useRef, useState } from "react";
 
+import { environmentCatalog } from "../../connection/catalog";
 import { connectPairing } from "../../connection/onboarding";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
-import { environmentPresentations } from "../../state/presentation";
 import { holdBoxDemand } from "../../state/box-demand";
 import { waitForEnvironmentProject } from "../../state/entities";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
@@ -127,9 +128,10 @@ export function useCreateCloudMachine(input: {
                     provisionedGatewayPairingUrl(manager.displayUrl, leaseId, pairingUrl),
                 }
               : {}),
-            isConnected: (environmentId) =>
-              appAtomRegistry.get(environmentPresentations.presentationAtom(environmentId))
-                ?.connection.phase === "connected",
+            isPaired: (environmentId) =>
+              holdsPairing(
+                appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(environmentId),
+              ),
             // A phone is never the machine that started the box, so a loopback pairing URL is
             // one it cannot reach however healthy the box is.
             canReach: isOffDeviceReachablePairingUrl,

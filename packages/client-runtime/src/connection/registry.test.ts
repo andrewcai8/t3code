@@ -1,14 +1,21 @@
 import {
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
-  type DiscoveredProvisionedEnvironment,
+  DiscoveredProvisionedEnvironment,
+  type EnvironmentProvisionAttachInput,
+  type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionResumeInput,
   type EnvironmentProvisionResumeResult,
   type EnvironmentProvisionTouchInput,
   WS_METHODS,
   ORCHESTRATION_PROTOCOL_VERSION,
   type ExecutionEnvironmentDescriptor,
+  type OrchestrationProjectShell,
   type OrchestrationShellSnapshot,
+  OrchestrationThreadShell,
+  ProjectId,
+  type ProvisionedChat,
+  ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -22,6 +29,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -35,7 +43,7 @@ import {
   BearerConnectionCredential,
   BearerConnectionProfile,
   BearerConnectionRegistration,
-  type ConnectionRegistration,
+  type CatalogRegistration,
   PrimaryConnectionRegistration,
   RelayConnectionRegistration,
   SshConnectionProfile,
@@ -59,7 +67,9 @@ import {
   type SupervisorConnectionState,
 } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
-import { newChatRunTargets } from "../cloud/provisioning.ts";
+import { newChatRunTargets, provisionedBox } from "../cloud/provisioning.ts";
+import { PairingRedemption } from "./boxPairing.ts";
+import type { PairingConnectionInput } from "./onboarding.ts";
 import {
   type EnvironmentConnectionPresentation,
   presentEnvironmentConnection,
@@ -156,6 +166,82 @@ const LISTED_HOST_BOX = {
   expiresAt: "2026-10-02T00:00:00.000Z",
 } as unknown as DiscoveredProvisionedEnvironment;
 
+const decodeListedBox = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment);
+const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
+
+/** How the host `TARGET` lists a box: a claimed chat box, active, named for its repository. */
+function listedBox(
+  environmentId: EnvironmentId,
+  overrides: {
+    readonly lifecycle?: DiscoveredProvisionedEnvironment["lifecycle"];
+    readonly label?: string;
+    readonly automationId?: string;
+    readonly chat?: ProvisionedChat;
+  } = {},
+): DiscoveredProvisionedEnvironment {
+  return decodeListedBox({
+    requestId: "22222222-2222-4222-8222-222222222222",
+    leaseId: "22222222-2222-4222-8222-222222222222",
+    sandboxId: `sandbox-${environmentId}`,
+    lifecycle: overrides.lifecycle ?? "active",
+    environmentId,
+    provider: "e2b",
+    label: overrides.label ?? "t3code · E2B",
+    repository: "pingdotgg/t3code",
+    projectDir: "/workspace/t3code",
+    threadId: "thread-cloud-chat",
+    ...(overrides.automationId === undefined ? {} : { automationId: overrides.automationId }),
+    ...(overrides.chat === undefined ? {} : { chat: overrides.chat }),
+    createdAt: "2026-10-01T00:00:00.000Z",
+    expiresAt: "2026-10-02T00:00:00.000Z",
+  });
+}
+
+const CHAT_BOX_ID = EnvironmentId.make("environment-chat-box");
+const CHAT_PROJECT: OrchestrationProjectShell = {
+  id: ProjectId.make("project-cloud"),
+  title: "t3code",
+  workspaceRoot: "/workspace/t3code",
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: "2026-10-01T00:00:00.000Z",
+  updatedAt: "2026-10-01T00:00:00.000Z",
+};
+const CHAT_THREAD = decodeThreadShell({
+  id: "thread-cloud-chat",
+  projectId: CHAT_PROJECT.id,
+  title: "Fix the flaky test",
+  modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+  runtimeMode: "full-access",
+  branch: null,
+  worktreePath: null,
+  latestTurn: null,
+  createdAt: "2026-10-01T00:00:00.000Z",
+  updatedAt: "2026-10-01T01:00:00.000Z",
+  session: null,
+  latestUserMessageAt: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+});
+function chatAt(sequence: number): ProvisionedChat {
+  return { sequence, project: CHAT_PROJECT, thread: CHAT_THREAD };
+}
+function seededShell(sequence: number): OrchestrationShellSnapshot {
+  return {
+    snapshotSequence: sequence,
+    projects: [CHAT_PROJECT],
+    threads: [CHAT_THREAD],
+    updatedAt: "2026-10-01T01:00:00.000Z",
+  };
+}
+const UNPAIRED_CHAT_BOX = new BearerConnectionTarget({
+  environmentId: CHAT_BOX_ID,
+  label: "t3code · E2B",
+  connectionId: "bearer:environment-chat-box",
+  box: { managerId: TARGET.environmentId },
+});
+
 const SSH_TARGET: DesktopSshEnvironmentTarget = {
   alias: "test",
   hostname: "test.example.test",
@@ -199,15 +285,23 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     ) => Effect.Effect<EnvironmentProvisionResumeResult>;
     /** The boxes the host lists; none unless given. */
     readonly listProvisioned?: ReadonlyArray<DiscoveredProvisionedEnvironment>;
+    /** The boxes the host lists at the time it is asked; overrides `listProvisioned`. */
+    readonly lists?: Effect.Effect<ReadonlyArray<DiscoveredProvisionedEnvironment>>;
+    /** The host's answer to an attach; by default it mints a pairing for the listed box. */
+    readonly attach?: (
+      input: EnvironmentProvisionAttachInput,
+    ) => Effect.Effect<EnvironmentProvisionAttachResult>;
     readonly touch?: (input: EnvironmentProvisionTouchInput) => Effect.Effect<void>;
     readonly beforeSessionConnect?: (environmentId: EnvironmentId) => Effect.Effect<void>;
     readonly beforeRegistrationRegister?: (
-      registration: ConnectionRegistration,
+      registration: CatalogRegistration,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly beforeRegistrationRemove?: (
       target: ConnectionTarget,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly initialDisabled?: ReadonlyArray<EnvironmentId>;
+    /** Runs as the cache is read, holding whoever reads it. */
+    readonly beforeLoadShell?: (environmentId: EnvironmentId) => Effect.Effect<void>;
   },
 ) {
   const storedTargets = yield* Ref.make(
@@ -218,6 +312,11 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   const ownedDataClears = yield* Ref.make<ReadonlyArray<EnvironmentId>>([]);
   const sessions = yield* Ref.make<ReadonlyArray<SessionControl>>([]);
   const preparations = yield* Ref.make(0);
+  const dialed = yield* Ref.make<ReadonlyArray<EnvironmentId>>([]);
+  const attaches = yield* Ref.make<ReadonlyArray<string>>([]);
+  const redemptions = yield* Ref.make<ReadonlyArray<PairingConnectionInput>>([]);
+  const registrationWrites = yield* Ref.make(0);
+  const listed = options?.lists ?? Effect.succeed(options?.listProvisioned ?? []);
   const releasedSessions = yield* Ref.make(0);
   const storedProfiles = yield* Ref.make(
     new Map(initialProfiles.map((profile) => [profile.connectionId, profile])),
@@ -256,6 +355,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     register: (registration) =>
       Effect.gen(function* () {
         yield* options?.beforeRegistrationRegister?.(registration) ?? Effect.void;
+        yield* Ref.update(registrationWrites, (count) => count + 1);
         yield* Ref.update(storedTargets, (current) => {
           const next = new Map(current);
           next.set(registration.target.environmentId, registration.target);
@@ -323,7 +423,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   });
   const cacheStore = Persistence.EnvironmentCacheStore.of({
     loadShell: (environmentId) =>
-      Ref.get(shellCache).pipe(
+      (options?.beforeLoadShell?.(environmentId) ?? Effect.void).pipe(
+        Effect.andThen(Ref.get(shellCache)),
         Effect.map((cache) => Option.fromUndefinedOr(cache.get(environmentId))),
       ),
     saveShell: (environmentId, snapshot) =>
@@ -426,6 +527,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       prepare: (entry) =>
         Effect.gen(function* () {
           yield* Ref.update(preparations, (count) => count + 1);
+          yield* Ref.update(dialed, (current) => [...current, entry.target.environmentId]);
           if (options?.prepareError) return yield* options.prepareError;
           yield* options?.prepare?.(entry.target.environmentId) ?? Effect.void;
           return {
@@ -448,8 +550,25 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
                 [WS_METHODS.environmentControlResume]: (input: EnvironmentProvisionResumeInput) =>
                   options?.resume?.(input) ??
                   Effect.die(new Error("Resume is not used by this test.")),
-                [WS_METHODS.environmentControlListProvisioned]: () =>
-                  Effect.succeed(options?.listProvisioned ?? []),
+                [WS_METHODS.environmentControlListProvisioned]: () => listed,
+                [WS_METHODS.environmentControlAttach]: (input: EnvironmentProvisionAttachInput) =>
+                  Ref.update(attaches, (current) => [...current, input.requestId]).pipe(
+                    Effect.andThen(
+                      options?.attach?.(input) ??
+                        listed.pipe(
+                          Effect.map((rows): EnvironmentProvisionAttachResult => {
+                            const row = rows.find(({ requestId }) => requestId === input.requestId);
+                            return row === undefined
+                              ? { kind: "refused", message: "The host has no such request." }
+                              : {
+                                  kind: "attached",
+                                  environmentId: row.environmentId,
+                                  pairingUrl: `https://${row.environmentId}.example.test/pair#token=minted`,
+                                };
+                          }),
+                        ),
+                    ),
+                  ),
                 [WS_METHODS.environmentControlTouch]: (input: EnvironmentProvisionTouchInput) =>
                   (options?.touch?.(input) ?? Effect.void).pipe(
                     Effect.as({ kind: "touched" as const }),
@@ -484,6 +603,38 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
           ConnectionWakeups.ConnectionWakeups.of({ changes: Stream.never }),
         ),
         Layer.succeed(ConnectionDriver.ConnectionDriver, driver),
+        Layer.succeed(
+          PairingRedemption,
+          PairingRedemption.of({
+            redeem: (input) =>
+              Ref.modify(
+                redemptions,
+                (current) => [current.length + 1, [...current, input]] as const,
+              ).pipe(
+                Effect.map((count) => {
+                  const environmentId =
+                    input.expectedEnvironmentId ?? EnvironmentId.make("unexpected-box");
+                  const connectionId = `bearer:${environmentId}`;
+                  return new BearerConnectionRegistration({
+                    target: new BearerConnectionTarget({
+                      environmentId,
+                      label: "e2b.local",
+                      connectionId,
+                      ...(input.box === undefined ? {} : { box: input.box }),
+                    }),
+                    profile: new BearerConnectionProfile({
+                      connectionId,
+                      environmentId,
+                      label: "e2b.local",
+                      httpBaseUrl: `https://${environmentId}.example.test`,
+                      wsBaseUrl: `wss://${environmentId}.example.test`,
+                    }),
+                    credential: new BearerConnectionCredential({ token: `box-token-${count}` }),
+                  });
+                }),
+              ),
+          }),
+        ),
         cacheLayer,
         Layer.succeed(Persistence.EnvironmentOwnedDataCleanup, ownedDataCleanup),
       ),
@@ -492,6 +643,10 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
 
   return {
     layer,
+    dialed,
+    attaches,
+    redemptions,
+    registrationWrites,
     storedTargets,
     shellCache,
     cacheClears,
@@ -1653,22 +1808,34 @@ describe("EnvironmentRegistry", () => {
           redirect: null,
         });
 
-        yield* EnvironmentRegistry.markGoneWorkspacesMissing([
-          { environmentId: BEARER_TARGET.environmentId, lifecycle: "disposed" },
-          { environmentId: pausedBox.environmentId, lifecycle: "paused" },
-          { environmentId: EnvironmentId.make("environment-not-saved"), lifecycle: "disposed" },
+        yield* registry.syncHostBoxes(TARGET.environmentId, [
+          provisionedBox(
+            TARGET.environmentId,
+            listedBox(BEARER_TARGET.environmentId, { lifecycle: "disposed" }),
+          ),
+          provisionedBox(
+            TARGET.environmentId,
+            listedBox(EnvironmentId.make("environment-not-saved"), { lifecycle: "disposed" }),
+          ),
         ]);
 
+        // Marked the box it was, it stops dialing, and its history reads as a missing workspace.
         const disposed = yield* awaitConnectionState(
           registry,
           BEARER_TARGET.environmentId,
-          (state) => state.phase === "blocked",
+          (state) => state.phase === "available",
         );
         expect(disposed.retryAt).toBeNull();
         const entries = yield* SubscriptionRef.get(registry.entries);
         expect(entries.get(BEARER_TARGET.environmentId)?.target).toEqual(
-          new BearerConnectionTarget({ ...BEARER_TARGET, workspaceStatus: "missing" }),
+          new BearerConnectionTarget({
+            ...BEARER_TARGET,
+            label: "t3code · E2B",
+            box: { managerId: TARGET.environmentId },
+            workspaceStatus: "missing",
+          }),
         );
+        expect(entries.has(EnvironmentId.make("environment-not-saved"))).toBe(false);
         expect(
           presentEnvironmentConnection(disposed, entries.get(BEARER_TARGET.environmentId)!.target),
         ).toEqual({
@@ -2826,6 +2993,461 @@ describe("EnvironmentRegistry", () => {
         );
         expect(yield* Ref.get(harness.disconnectedSshTargets)).toEqual([SSH_TARGET]);
       }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+});
+
+describe("EnvironmentRegistry.syncHostBoxes", () => {
+  const listing = (...rows: ReadonlyArray<DiscoveredProvisionedEnvironment>) =>
+    rows.map((row) => provisionedBox(TARGET.environmentId, row));
+
+  it.effect("a paused chat box its host lists appears with its chat and is never dialed", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(
+            listedBox(CHAT_BOX_ID, { lifecycle: "paused", chat: chatAt(4) }),
+            listedBox(EnvironmentId.make("environment-automation-run"), {
+              automationId: "nightly",
+              chat: chatAt(2),
+            }),
+          ),
+        );
+        yield* TestClock.adjust("1 hour");
+
+        const entries = yield* SubscriptionRef.get(registry.entries);
+        expect([...entries.keys()]).toEqual([TARGET.environmentId, CHAT_BOX_ID]);
+        expect(entries.get(CHAT_BOX_ID)).toEqual({
+          target: UNPAIRED_CHAT_BOX,
+          profile: Option.none(),
+          enabled: true,
+        });
+        expect((yield* Ref.get(harness.storedTargets)).get(CHAT_BOX_ID)).toEqual(UNPAIRED_CHAT_BOX);
+        expect((yield* Ref.get(harness.shellCache)).get(CHAT_BOX_ID)).toEqual(seededShell(4));
+        expect((yield* registry.state(CHAT_BOX_ID)).phase).toBe("available");
+        expect(yield* Ref.get(harness.dialed)).toEqual([TARGET.environmentId]);
+        expect(yield* Ref.get(harness.attaches)).toEqual([]);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "opening an unpaired box pairs once through its host and connects; reopening and a reload reuse that pairing",
+    () =>
+      Effect.gen(function* () {
+        const row = listedBox(CHAT_BOX_ID, { chat: chatAt(4) });
+        const harness = yield* makeHarness([TARGET], [], [], { listProvisioned: [row] });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* registry.syncHostBoxes(TARGET.environmentId, listing(row));
+
+          const chat = yield* Scope.make();
+          yield* registry.demand(CHAT_BOX_ID).pipe(Scope.provide(chat));
+          yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+          expect(yield* Ref.get(harness.attaches)).toEqual([row.requestId]);
+          expect((yield* Ref.get(harness.redemptions)).map(({ pairingUrl }) => pairingUrl)).toEqual(
+            ["https://environment-chat-box.example.test/pair#token=minted"],
+          );
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
+          ).toEqual(new BearerConnectionCredential({ token: "box-token-1" }));
+          expect((yield* Ref.get(harness.storedTargets)).get(CHAT_BOX_ID)).toEqual(
+            UNPAIRED_CHAT_BOX,
+          );
+
+          yield* Scope.close(chat, Exit.void);
+          yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "available");
+          yield* registry.demand(CHAT_BOX_ID);
+          yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+          expect(yield* Ref.get(harness.attaches)).toEqual([row.requestId]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+
+        yield* Effect.gen(function* () {
+          const reloaded = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* reloaded.start;
+          yield* awaitConnectionState(
+            reloaded,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* reloaded.demand(CHAT_BOX_ID);
+          yield* awaitConnectionState(reloaded, CHAT_BOX_ID, (s) => s.phase === "connected");
+          expect(yield* Ref.get(harness.attaches)).toEqual([row.requestId]);
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
+          ).toEqual(new BearerConnectionCredential({ token: "box-token-1" }));
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("an unpaired paused box is woken through its host before it pairs", () =>
+    Effect.gen(function* () {
+      const lifecycle = yield* Ref.make<DiscoveredProvisionedEnvironment["lifecycle"]>("paused");
+      const resumes = yield* Ref.make(0);
+      const harness = yield* makeHarness([TARGET], [], [], {
+        lists: Ref.get(lifecycle).pipe(
+          Effect.map((current) => [listedBox(CHAT_BOX_ID, { lifecycle: current })]),
+        ),
+        resume: () =>
+          Ref.update(resumes, (count) => count + 1).pipe(
+            Effect.andThen(Ref.set(lifecycle, "active")),
+            Effect.as({ kind: "resumed" as const }),
+          ),
+      });
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(listedBox(CHAT_BOX_ID, { lifecycle: "paused" })),
+        );
+        // The box's own supervisor, which pairing keeps, sees every phase of the one dial.
+        const supervisor = yield* registry.run(
+          CHAT_BOX_ID,
+          EnvironmentSupervisor.EnvironmentSupervisor,
+        );
+        const phases = yield* Ref.make<ReadonlyArray<SupervisorConnectionState["phase"]>>([]);
+        const following = yield* Deferred.make<void>();
+        yield* SubscriptionRef.changes(supervisor.state).pipe(
+          Stream.runForEach((state) =>
+            Ref.update(phases, (current) => [...current, state.phase]).pipe(
+              Effect.andThen(Deferred.succeed(following, undefined)),
+            ),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(following);
+
+        yield* registry.demand(CHAT_BOX_ID);
+        yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+        expect(yield* registry.run(CHAT_BOX_ID, EnvironmentSupervisor.EnvironmentSupervisor)).toBe(
+          supervisor,
+        );
+
+        expect([...new Set(yield* Ref.get(phases))]).toEqual([
+          "available",
+          "connecting",
+          "waking",
+          "connected",
+        ]);
+        expect(yield* Ref.get(resumes)).toBe(1);
+        expect((yield* Ref.get(harness.attaches)).length).toBe(1);
+        expect(yield* Ref.get(harness.dialed)).toEqual([TARGET.environmentId, CHAT_BOX_ID]);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a disposed box this device never opened disappears; one it opened keeps its history",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [TARGET, HOST_BOX],
+          [HOST_BOX_PROFILE],
+          [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+        );
+        yield* Ref.update(harness.shellCache, (cache) =>
+          new Map(cache).set(HOST_BOX.environmentId, CACHED_SNAPSHOT),
+        );
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.syncHostBoxes(
+            TARGET.environmentId,
+            listing(listedBox(CHAT_BOX_ID, { chat: chatAt(4) }), listedBox(HOST_BOX.environmentId)),
+          );
+          yield* registry.syncHostBoxes(
+            TARGET.environmentId,
+            listing(
+              listedBox(CHAT_BOX_ID, { lifecycle: "disposed" }),
+              listedBox(HOST_BOX.environmentId, { lifecycle: "disposed" }),
+            ),
+          );
+
+          const entries = yield* SubscriptionRef.get(registry.entries);
+          expect(entries.has(CHAT_BOX_ID)).toBe(false);
+          expect((yield* Ref.get(harness.storedTargets)).has(CHAT_BOX_ID)).toBe(false);
+          expect((yield* Ref.get(harness.shellCache)).has(CHAT_BOX_ID)).toBe(false);
+          expect(entries.get(HOST_BOX.environmentId)?.target).toEqual(
+            new BearerConnectionTarget({
+              ...HOST_BOX,
+              label: "t3code · E2B",
+              workspaceStatus: "missing",
+            }),
+          );
+          expect((yield* Ref.get(harness.shellCache)).get(HOST_BOX.environmentId)).toEqual(
+            CACHED_SNAPSHOT,
+          );
+          expect((yield* Ref.get(harness.storedCredentials)).get(HOST_BOX.connectionId)).toEqual(
+            BEARER_CREDENTIAL,
+          );
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
+  it.effect("a box's label follows its host without replacing its connection", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [TARGET, HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.demand(HOST_BOX.environmentId);
+        yield* awaitConnectionState(
+          registry,
+          HOST_BOX.environmentId,
+          (s) => s.phase === "connected",
+        );
+        const supervisor = registry.run(
+          HOST_BOX.environmentId,
+          EnvironmentSupervisor.EnvironmentSupervisor,
+        );
+        const before = yield* supervisor;
+
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(listedBox(HOST_BOX.environmentId)),
+        );
+
+        expect(yield* supervisor).toBe(before);
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(HOST_BOX.environmentId)?.target.label,
+        ).toBe("t3code · E2B");
+        expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)?.label).toBe(
+          "t3code · E2B",
+        );
+        expect((yield* Ref.get(harness.storedCredentials)).get(HOST_BOX.connectionId)).toEqual(
+          BEARER_CREDENTIAL,
+        );
+        expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(0);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a host's newer read of a chat updates an idle box's cache, never a connected one's",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [TARGET, HOST_BOX],
+          [HOST_BOX_PROFILE],
+          [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+        );
+        const subagentThread = { ...CHAT_THREAD, id: ThreadId.make("thread-subagent") };
+        yield* Ref.update(harness.shellCache, (cache) =>
+          new Map(cache).set(HOST_BOX.environmentId, {
+            ...CACHED_SNAPSHOT,
+            threads: [subagentThread],
+          }),
+        );
+        const listChat = (sequence: number) =>
+          listing(
+            listedBox(HOST_BOX.environmentId, { label: "e2b.local", chat: chatAt(sequence) }),
+          );
+        const cachedSequence = Ref.get(harness.shellCache).pipe(
+          Effect.map((cache) => cache.get(HOST_BOX.environmentId)?.snapshotSequence),
+        );
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.syncHostBoxes(TARGET.environmentId, listChat(5));
+          expect(yield* cachedSequence).toBe(5);
+          yield* registry.syncHostBoxes(TARGET.environmentId, listChat(3));
+          expect(yield* cachedSequence).toBe(5);
+
+          const chat = yield* Scope.make();
+          yield* registry.demand(HOST_BOX.environmentId).pipe(Scope.provide(chat));
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* registry.syncHostBoxes(TARGET.environmentId, listChat(9));
+          expect(yield* cachedSequence).toBe(5);
+
+          yield* Scope.close(chat, Exit.void);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (s) => s.phase === "available",
+          );
+          yield* registry.syncHostBoxes(TARGET.environmentId, listChat(9));
+          expect(yield* cachedSequence).toBe(9);
+          expect(
+            (yield* Ref.get(harness.shellCache))
+              .get(HOST_BOX.environmentId)
+              ?.threads.map(({ id }) => id),
+          ).toEqual(["thread-subagent", "thread-cloud-chat"]);
+          expect(
+            [...(yield* SubscriptionRef.get(registry.hostChats))].map(
+              ([environmentId, { managerId, chat }]) => [environmentId, managerId, chat.sequence],
+            ),
+          ).toEqual([[HOST_BOX.environmentId, TARGET.environmentId, 9]]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("pairing a box its host already listed keeps the host's name for it", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.syncHostBoxes(TARGET.environmentId, listing(listedBox(CHAT_BOX_ID)));
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: new BearerConnectionTarget({
+              ...UNPAIRED_CHAT_BOX,
+              label: "e2b.local",
+            }),
+            profile: new BearerConnectionProfile({
+              connectionId: UNPAIRED_CHAT_BOX.connectionId,
+              environmentId: CHAT_BOX_ID,
+              label: "e2b.local",
+              httpBaseUrl: "https://environment-chat-box.example.test",
+              wsBaseUrl: "wss://environment-chat-box.example.test",
+            }),
+            credential: BEARER_CREDENTIAL,
+          }),
+        );
+
+        expect((yield* Ref.get(harness.storedTargets)).get(CHAT_BOX_ID)).toEqual(UNPAIRED_CHAT_BOX);
+        expect(
+          (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
+        ).toEqual(BEARER_CREDENTIAL);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect(
+    "a box that pairs while its host's list is applied keeps its pairing, as missing once disposed",
+    () =>
+      Effect.gen(function* () {
+        const planning = yield* Deferred.make<void>();
+        const paired = yield* Deferred.make<void>();
+        const harness = yield* makeHarness([TARGET], [], [], {
+          listProvisioned: [listedBox(CHAT_BOX_ID)],
+          // The sync reads the box's cache after it took its snapshot of the catalog.
+          beforeLoadShell: (environmentId) =>
+            environmentId === CHAT_BOX_ID
+              ? Deferred.succeed(planning, undefined).pipe(Effect.andThen(Deferred.await(paired)))
+              : Effect.void,
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* registry.syncHostBoxes(TARGET.environmentId, listing(listedBox(CHAT_BOX_ID)));
+          const sync = yield* registry
+            .syncHostBoxes(
+              TARGET.environmentId,
+              listing(listedBox(CHAT_BOX_ID, { lifecycle: "disposed", chat: chatAt(4) })),
+            )
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(planning);
+          yield* registry.demand(CHAT_BOX_ID);
+          yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+          yield* Deferred.succeed(paired, undefined);
+          yield* Fiber.join(sync);
+
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
+          ).toEqual(new BearerConnectionCredential({ token: "box-token-1" }));
+          const entry = (yield* SubscriptionRef.get(registry.entries)).get(CHAT_BOX_ID);
+          expect(entry === undefined ? null : Option.getOrNull(entry.profile)?.connectionId).toBe(
+            UNPAIRED_CHAT_BOX.connectionId,
+          );
+          // The host listed it disposed, so the pairing it kept reads as a missing workspace.
+          expect(entry?.target).toEqual(
+            new BearerConnectionTarget({ ...UNPAIRED_CHAT_BOX, workspaceStatus: "missing" }),
+          );
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("the same list twice writes nothing", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [TARGET, HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+      const list = listing(
+        listedBox(CHAT_BOX_ID, { chat: chatAt(4) }),
+        listedBox(HOST_BOX.environmentId, { lifecycle: "missing", chat: chatAt(7) }),
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.syncHostBoxes(TARGET.environmentId, list);
+        const writes = yield* Ref.get(harness.registrationWrites);
+        const cache = yield* Ref.get(harness.shellCache);
+        const entries = yield* SubscriptionRef.get(registry.entries);
+        expect(writes).toBe(3);
+
+        yield* registry.syncHostBoxes(TARGET.environmentId, list);
+        expect(yield* Ref.get(harness.registrationWrites)).toBe(3);
+        expect(yield* Ref.get(harness.shellCache)).toBe(cache);
+        expect(yield* SubscriptionRef.get(registry.entries)).toBe(entries);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("removing a host forgets the unpaired boxes it lists and keeps the paired ones", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [TARGET, HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(listedBox(CHAT_BOX_ID, { chat: chatAt(4) }), listedBox(HOST_BOX.environmentId)),
+        );
+        yield* registry.remove(TARGET.environmentId);
+
+        expect([...(yield* SubscriptionRef.get(registry.entries)).keys()]).toEqual([
+          HOST_BOX.environmentId,
+        ]);
+        expect([...(yield* Ref.get(harness.storedTargets)).keys()]).toEqual([
+          HOST_BOX.environmentId,
+        ]);
+        expect((yield* Ref.get(harness.shellCache)).has(CHAT_BOX_ID)).toBe(false);
+        expect(yield* SubscriptionRef.get(registry.hostChats)).toEqual(new Map());
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );
 });

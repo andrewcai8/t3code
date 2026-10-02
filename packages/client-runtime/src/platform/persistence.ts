@@ -12,7 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import type { ConnectionRegistration } from "../connection/catalog.ts";
+import type { CatalogRegistration } from "../connection/catalog.ts";
 import type { ConnectionTarget } from "../connection/model.ts";
 
 export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPersistenceError>()(
@@ -54,7 +54,7 @@ export class ConnectionRegistrationStore extends Context.Service<
   ConnectionRegistrationStore,
   {
     readonly register: (
-      registration: ConnectionRegistration,
+      registration: CatalogRegistration,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
     readonly remove: (target: ConnectionTarget) => Effect.Effect<void, ConnectionPersistenceError>;
     readonly setEnabled: (

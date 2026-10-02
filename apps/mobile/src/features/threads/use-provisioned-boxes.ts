@@ -52,17 +52,16 @@ const runningBoxDemandAtom = createRunningBoxDemandAtom({
 });
 
 /**
- * Keeps the saved catalog's boxes marked as boxes, marks those their hosts report lost or
- * disposed as missing, and keeps a box connected while a turn runs on it. A box saved before boxes
- * were marked is found in this phone's leases, then in the lists its host reports. Mount once,
- * app-wide. It reads the lists without refetching them.
+ * Keeps this phone's boxes in line with the lists its hosts report, so every cloud chat a host
+ * knows lists here and gone ones stop dialing, and keeps a box connected while a turn runs on it.
+ * A box saved before boxes were marked is also found in this phone's leases. Mount once, app-wide.
  */
 export function useCloudBoxes(): void {
   const hostIds = useProvisioningHostIds(useServerConfigs());
-  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const lists = useAtomValue(serverEnvironment.hostBoxLists(hostIds));
   const catalogReady = useAtomValue(environmentCatalog.catalogValueAtom).isReady;
   const markBoxes = useAtomCommand(environmentCatalog.markBoxes);
-  const markGone = useAtomCommand(environmentCatalog.markGoneWorkspacesMissing);
+  const syncHostBoxes = useAtomCommand(environmentCatalog.syncHostBoxes);
   useEffect(() => {
     if (!catalogReady) return;
     // The lease store was made before the phone's provisioning file was read.
@@ -72,8 +71,7 @@ export function useCloudBoxes(): void {
     });
   }, [catalogReady, markBoxes]);
   useEffect(() => {
-    void markBoxes(boxes.map(({ environmentId, managerId }) => ({ environmentId, managerId })));
-    void markGone(boxes);
-  }, [boxes, markBoxes, markGone]);
+    void syncHostBoxes(lists);
+  }, [lists, syncHostBoxes]);
   useAtomMount(runningBoxDemandAtom);
 }

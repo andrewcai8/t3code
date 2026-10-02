@@ -6,6 +6,7 @@ import {
   type EnvironmentProvisionInput,
   type EnvironmentProvisionResult,
   type ProjectId,
+  type ProvisionedChat,
   ProvisionProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -74,6 +75,35 @@ export interface ProvisionedBox {
   /** The chat the box was claimed for; null until one claims it. */
   readonly threadId: ThreadId | null;
   readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
+  /** The host's name for the box. A saved box's label follows it. */
+  readonly label: string;
+  /** Set when the host started the box for an automation run rather than a chat. */
+  readonly automationId: string | null;
+  /** The host's last read of the box's chat, sent only when newer than this runtime holds. */
+  readonly chat: ProvisionedChat | null;
+}
+
+/** One host's list of its boxes, as it last answered. */
+export interface HostBoxList {
+  readonly managerId: EnvironmentId;
+  readonly boxes: ReadonlyArray<ProvisionedBox>;
+}
+
+/** A host's list row as the runtime reconciles it. */
+export function provisionedBox(
+  managerId: EnvironmentId,
+  row: DiscoveredProvisionedEnvironment,
+): ProvisionedBox {
+  return {
+    managerId,
+    environmentId: row.environmentId,
+    leaseId: row.leaseId,
+    threadId: row.threadId,
+    lifecycle: row.lifecycle,
+    label: row.label,
+    automationId: row.automationId ?? null,
+    chat: row.chat ?? null,
+  };
 }
 
 export function sameProvisionedBoxes(
@@ -89,7 +119,10 @@ export function sameProvisionedBoxes(
         box.environmentId === other.environmentId &&
         box.leaseId === other.leaseId &&
         box.threadId === other.threadId &&
-        box.lifecycle === other.lifecycle
+        box.lifecycle === other.lifecycle &&
+        box.label === other.label &&
+        box.automationId === other.automationId &&
+        box.chat?.sequence === other.chat?.sequence
       );
     })
   );
@@ -347,7 +380,8 @@ export interface CloudProvisionPorts {
   /** Registers the pairing URL; resolves with the paired environment's id, or null on failure. */
   readonly pair: (pairingUrl: string) => Promise<EnvironmentId | null>;
   readonly rewritePairingUrl?: (pairingUrl: string, leaseId: string) => string;
-  readonly isConnected: (environmentId: EnvironmentId) => boolean;
+  /** See `ProvisionedJoinPorts.isPaired`. */
+  readonly isPaired: (environmentId: EnvironmentId) => boolean;
   /** See `ProvisionedJoinPorts.canReach`. */
   readonly canReach: (pairingUrl: string) => boolean;
   /** Resolves with the project the paired environment publishes, or null once `timeoutMs` passes. */
@@ -417,7 +451,7 @@ export async function provisionCloudEnvironment(
     if (!stillThisRequest()) return { kind: "cancelled" };
     ports.onPhase("pairing");
     const joined = await joinProvisionedEnvironment(environment, {
-      isConnected: ports.isConnected,
+      isPaired: ports.isPaired,
       attach: async () => {
         const attached = await ports.attach(request);
         return attached === null || attached.kind === "refused"

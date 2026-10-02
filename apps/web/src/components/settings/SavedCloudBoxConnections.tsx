@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { connectionBox } from "@t3tools/client-runtime/connection";
+import { connectionBox, isUnpairedBox } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useState } from "react";
 
@@ -20,7 +20,8 @@ export function SavedCloudBoxConnections() {
   const [busy, setBusy] = useState<EnvironmentId | null>(null);
   const boxes = [...catalog.entries].flatMap(([environmentId, entry]) => {
     const box = connectionBox(entry.target);
-    return box === null
+    // A box only listed from its host is the host's to show, and has no pairing here to fix.
+    return box === null || isUnpairedBox(entry)
       ? []
       : [{ environmentId, label: entry.target.label, managerId: box.managerId }];
   });

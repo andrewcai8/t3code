@@ -4,7 +4,7 @@ import {
   createCloudSendDriver,
   createTabExclusive,
 } from "@t3tools/client-runtime/cloud";
-import { provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
+import { holdsPairing, provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/unstable/reactivity";
 
@@ -14,10 +14,10 @@ import {
   type PendingCloudEnvironmentSend,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { waitForProjectMatch } from "../state/entities";
-import { environmentPresentations } from "../state/presentation";
 import { serverEnvironment } from "../state/server";
 import { readPreparedConnection } from "../state/session";
 import { holdBoxDemand } from "./CloudBoxes";
@@ -120,9 +120,10 @@ const hostPorts: CloudSendDriverPorts["host"] = (request) => {
         ? provisionedGatewayPairingUrl(managerBaseUrl, leaseId, pairingUrl)
         : pairingUrl;
     },
-    isConnected: (environmentId) =>
-      appAtomRegistry.get(environmentPresentations.presentationAtom(environmentId))?.connection
-        .phase === "connected",
+    isPaired: (environmentId) =>
+      holdsPairing(
+        appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(environmentId),
+      ),
     // The browser may be running on the manager itself, where even a loopback link works.
     canReach: () => true,
     waitForProject: (environmentId, timeoutMs) => {

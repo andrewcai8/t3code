@@ -1,6 +1,7 @@
 import {
-  type DiscoveredProvisionedEnvironment,
   EnvironmentId,
+  type OrchestrationShellSnapshot,
+  type ProvisionedChat,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -19,15 +20,26 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
+import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import {
   BearerConnectionRegistration,
+  BoxTargetRegistration,
   type ConnectionCatalogEntry,
   type ConnectionRegistration,
   type PlatformConnectionRegistration,
   type PrimaryConnectionRegistration,
   SshConnectionProfile,
   connectionRegistrationCatalogEntry,
+  isUnpairedBox,
 } from "./catalog.ts";
+import { type BoxPairingPorts, PairingRedemption, pairBoxThroughHost } from "./boxPairing.ts";
+import {
+  type HostBoxSyncStep,
+  type HostChat,
+  chatShellSnapshot,
+  planHostBoxSync,
+  withHostChat,
+} from "./hostBoxSync.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as Connectivity from "./connectivity.ts";
@@ -147,6 +159,21 @@ export class EnvironmentRegistry extends Context.Service<
       | EnvironmentNotRegisteredError
     >;
     /**
+     * Brings this device's boxes of `managerId` in line with the host's list, the source of truth
+     * for which cloud chats exist. A chat box this device never saw is saved unpaired with its
+     * chat cached, so it lists without a dial; opening it pairs it once. It never dials, pairs or
+     * wakes a box, and the same list twice writes nothing.
+     */
+    readonly syncHostBoxes: (
+      managerId: EnvironmentId,
+      boxes: ReadonlyArray<ProvisionedBox>,
+    ) => Effect.Effect<void>;
+    /**
+     * The chat each box's host last listed, as this runtime received it. A host list asks only for
+     * chats newer than these, and a box's shell that is not live takes a newer one.
+     */
+    readonly hostChats: SubscriptionRef.SubscriptionRef<ReadonlyMap<EnvironmentId, HostChat>>;
+    /**
      * Switches a saved environment on or off. Off drops the socket, stops the
      * retry ladder, and persists so the next launch stays off. Registration,
      * credentials, and cache are untouched.
@@ -213,6 +240,7 @@ export const make = Effect.gen(function* () {
   const driver = yield* ConnectionDriver.ConnectionDriver;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
   const presence = yield* UserPresence;
+  const pairing = yield* PairingRedemption;
   // A box is kept awake and woken only while its user is here.
   const userHere = presence.present.pipe(
     Stream.runHead,
@@ -270,6 +298,7 @@ export const make = Effect.gen(function* () {
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   const demandCounts = yield* Ref.make<ReadonlyMap<EnvironmentId, number>>(new Map());
   const demanded = yield* SubscriptionRef.make<ReadonlySet<EnvironmentId>>(new Set());
+  const hostChats = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, HostChat>>(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
 
@@ -329,6 +358,21 @@ export const make = Effect.gen(function* () {
       });
     }
     return entry;
+  });
+
+  // Swaps a changed entry in without replacing its supervisor, so its socket and durable streams
+  // stay; `installEntryLocked` would tear them down. Run under the entry's lease lock.
+  const replaceEntryInPlace = Effect.fn("EnvironmentRegistry.replaceEntryInPlace")(function* (
+    environmentId: EnvironmentId,
+    next: ConnectionCatalogEntry,
+  ) {
+    const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+    if (lease !== undefined)
+      yield* SubscriptionRef.update(serviceScopes, (current) =>
+        new Map(current).set(environmentId, { ...lease, entry: next }),
+      );
+    yield* SubscriptionRef.update(entries, (current) => new Map(current).set(environmentId, next));
+    return lease;
   });
 
   // A box connects only while demanded; everything else whenever it is enabled.
@@ -517,6 +561,131 @@ export const make = Effect.gen(function* () {
     Effect.forkIn(registryScope),
   );
 
+  const hostFailure = (error: {
+    readonly _tag: string;
+    readonly message: string;
+  }): ConnectionAttemptError => {
+    switch (error._tag) {
+      case "EnvironmentNotRegisteredError":
+        return new ConnectionBlockedError({
+          reason: "configuration",
+          detail: "This chat's cloud host is not saved on this device.",
+        });
+      case "EnvironmentAuthorizationError":
+        return new ConnectionBlockedError({ reason: "permission", detail: error.message });
+      default:
+        return new ConnectionTransientError({
+          reason: "remote-unavailable",
+          detail: error.message,
+        });
+    }
+  };
+
+  // The host's side of pairing one of its boxes: its list and attach, and the address this
+  // client reaches it by.
+  const hostPairingPorts = (
+    environmentId: EnvironmentId,
+    managerId: EnvironmentId,
+  ): BoxPairingPorts => ({
+    lookUp: Effect.gen(function* () {
+      if (!(yield* hostConnected(managerId)))
+        return yield* new ConnectionTransientError({
+          reason: "remote-unavailable",
+          detail: "This chat's cloud host is not connected.",
+        });
+      const listed = yield* runOnHost(
+        managerId,
+        EnvironmentRpc.request(WS_METHODS.environmentControlListProvisioned, {
+          environmentIds: [environmentId],
+        }),
+      ).pipe(Effect.mapError(hostFailure));
+      return Option.fromUndefinedOr(listed.find((row) => row.environmentId === environmentId));
+    }),
+    attach: (requestId) =>
+      runOnHost(
+        managerId,
+        EnvironmentRpc.request(WS_METHODS.environmentControlAttach, { requestId }),
+      ).pipe(Effect.mapError(hostFailure)),
+    hostHttpBaseUrl: run(
+      managerId,
+      EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+        Effect.flatMap((supervisor) => SubscriptionRef.get(supervisor.prepared)),
+      ),
+    ).pipe(
+      Effect.map(Option.map((prepared) => prepared.httpBaseUrl)),
+      Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.succeedNone),
+    ),
+    redeem: pairing.redeem,
+  });
+
+  // Saves the pairing a box's dial obtained into its entry in place, keeping the host's label
+  // for it, so the same attempt dials with it and no replacement supervisor pairs again.
+  const savePairing = (environmentId: EnvironmentId, registration: BearerConnectionRegistration) =>
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const current = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (current === undefined) return yield* workspaceMissingError();
+        if (current.target._tag !== "BearerConnectionTarget" || !isUnpairedBox(current))
+          return current;
+        const target = new BearerConnectionTarget({
+          ...current.target,
+          connectionId: registration.target.connectionId,
+        });
+        yield* registrations.register(
+          new BearerConnectionRegistration({
+            target,
+            profile: registration.profile,
+            credential: registration.credential,
+          }),
+        );
+        yield* Ref.update(persistedTargetsByEnvironment, (persisted) =>
+          new Map(persisted).set(environmentId, target),
+        );
+        const next: ConnectionCatalogEntry = {
+          ...current,
+          target,
+          profile: Option.some(registration.profile),
+        };
+        yield* replaceEntryInPlace(environmentId, next);
+        return next;
+      }),
+    ).pipe(
+      Effect.catchTag("ConnectionPersistenceError", (error) =>
+        Effect.fail(
+          new ConnectionBlockedError({
+            reason: "configuration",
+            detail: `This device could not save its pairing with this chat's cloud machine: ${error.message}`,
+          }),
+        ),
+      ),
+    );
+
+  // A box this device never paired pairs through its host inside its dial, so a paused one wakes
+  // first and the pairing happens at most once per device: every later dial finds it saved.
+  const boxDriver = (environmentId: EnvironmentId, managerId: EnvironmentId) =>
+    ConnectionDriver.ConnectionDriver.of({
+      connect: (captured, reportProgress) =>
+        Effect.gen(function* () {
+          const entry = (yield* SubscriptionRef.get(entries)).get(environmentId) ?? captured;
+          if (
+            !isUnpairedBox(entry) ||
+            (entry.target._tag === "BearerConnectionTarget" &&
+              entry.target.workspaceStatus === "missing")
+          )
+            return yield* driver.connect(entry, reportProgress);
+          yield* reportProgress({ stage: "preparing" });
+          const registration = yield* pairBoxThroughHost(
+            { environmentId, managerId },
+            hostPairingPorts(environmentId, managerId),
+          );
+          return yield* driver.connect(
+            yield* savePairing(environmentId, registration),
+            reportProgress,
+          );
+        }),
+    });
+
   const createServiceScope = Effect.fn("EnvironmentRegistry.createServiceScope")(
     (entry: ConnectionCatalogEntry) =>
       Effect.uninterruptible(
@@ -538,7 +707,10 @@ export const make = Effect.gen(function* () {
                 }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
-            Effect.provideService(ConnectionDriver.ConnectionDriver, driver),
+            Effect.provideService(
+              ConnectionDriver.ConnectionDriver,
+              box === null ? driver : boxDriver(environmentId, box.managerId),
+            ),
             Effect.provideService(ConnectionWakeups.ConnectionWakeups, wakeups),
             Scope.provide(scope),
             Effect.onError(() => Scope.close(scope, Exit.void)),
@@ -714,13 +886,18 @@ export const make = Effect.gen(function* () {
         // however it is paired again.
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
         const previousBox = previous === undefined ? null : connectionBox(previous.target);
+        // A pairing names a box for itself (`e2b.local`), so the saved name its host gave it stays.
         const registration =
+          previous !== undefined &&
           previousBox !== null &&
-          requested._tag === "BearerConnectionRegistration" &&
-          requested.target.box === undefined
+          requested._tag === "BearerConnectionRegistration"
             ? new BearerConnectionRegistration({
                 ...requested,
-                target: new BearerConnectionTarget({ ...requested.target, box: previousBox }),
+                target: new BearerConnectionTarget({
+                  ...requested.target,
+                  label: previous.target.label,
+                  box: requested.target.box ?? previousBox,
+                }),
               })
             : requested;
         const registered = connectionRegistrationCatalogEntry(registration);
@@ -783,23 +960,28 @@ export const make = Effect.gen(function* () {
         if (target === null) {
           return;
         }
-        if (
-          Option.isNone(entry.profile) ||
-          entry.profile.value._tag !== "BearerConnectionProfile"
-        ) {
-          return yield* profileMissingError(entry.target.connectionId);
+        if (target.box !== undefined) {
+          // A box's target is saved alone, keeping its pairing, or its lack of one.
+          yield* registrations.register(new BoxTargetRegistration({ target }));
+        } else {
+          if (
+            Option.isNone(entry.profile) ||
+            entry.profile.value._tag !== "BearerConnectionProfile"
+          ) {
+            return yield* profileMissingError(entry.target.connectionId);
+          }
+          const credential = yield* credentials.get(entry.target.connectionId);
+          if (Option.isNone(credential)) {
+            return yield* credentialMissingError(entry.target.connectionId);
+          }
+          yield* registrations.register(
+            new BearerConnectionRegistration({
+              target,
+              profile: entry.profile.value,
+              credential: credential.value,
+            }),
+          );
         }
-        const credential = yield* credentials.get(entry.target.connectionId);
-        if (Option.isNone(credential)) {
-          return yield* credentialMissingError(entry.target.connectionId);
-        }
-        yield* registrations.register(
-          new BearerConnectionRegistration({
-            target,
-            profile: entry.profile.value,
-            credential: credential.value,
-          }),
-        );
         yield* Ref.update(persistedTargetsByEnvironment, (current) =>
           new Map(current).set(environmentId, target),
         );
@@ -1066,7 +1248,14 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(platformRegistrations, installPlatformRegistration, { discard: true });
   });
 
-  const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
+  /**
+   * Removes an entry and everything saved for it, unless `keep` holds for it under its lock.
+   * Succeeds with whether it removed the entry.
+   */
+  const forgetEntry = Effect.fn("EnvironmentRegistry.forgetEntry")(function* (
+    environmentId: EnvironmentId,
+    keep?: (entry: ConnectionCatalogEntry) => boolean,
+  ) {
     return yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
@@ -1075,7 +1264,9 @@ export const make = Effect.gen(function* () {
             environmentId,
           });
         }
-        const target = (yield* getEntry(environmentId)).target;
+        const entry = yield* getEntry(environmentId);
+        if (keep?.(entry) === true) return false;
+        const target = entry.target;
         const profile =
           target._tag === "BearerConnectionTarget" || target._tag === "SshConnectionTarget"
             ? yield* profiles.get(target.connectionId)
@@ -1094,6 +1285,16 @@ export const make = Effect.gen(function* () {
           next.delete(environmentId);
           return next;
         });
+        // Its chat, or a host's chats, are asked for afresh if it comes back.
+        yield* SubscriptionRef.update(
+          hostChats,
+          (held) =>
+            new Map(
+              [...held].filter(
+                ([boxId, chat]) => boxId !== environmentId && chat.managerId !== environmentId,
+              ),
+            ),
+        );
         yield* Effect.all(
           [
             cache.clear(environmentId).pipe(
@@ -1124,9 +1325,174 @@ export const make = Effect.gen(function* () {
             Effect.ignore,
           );
         }
+        return true;
       }),
     );
   });
+
+  // A host's list is read from a snapshot of the catalog, and the box's dial may pair it before
+  // the list is applied. A box this device paired is its own to keep.
+  const forgetUnpairedBox = (environmentId: EnvironmentId) =>
+    forgetEntry(environmentId, (current) => !isUnpairedBox(current));
+
+  const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
+    yield* forgetEntry(environmentId);
+    // A host's unpaired boxes exist on this device only because it listed them, so they go too.
+    for (const entry of (yield* SubscriptionRef.get(entries)).values()) {
+      if (!isUnpairedBox(entry) || connectionBox(entry.target)?.managerId !== environmentId)
+        continue;
+      yield* forgetUnpairedBox(entry.target.environmentId).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Could not forget a removed host's unpaired box.", {
+            environmentId: entry.target.environmentId,
+            error,
+          }),
+        ),
+      );
+    }
+  });
+
+  const adoptBox = Effect.fn("EnvironmentRegistry.adoptBox")(function* (
+    target: BearerConnectionTarget,
+    chat: ProvisionedChat | null,
+  ) {
+    yield* withLeaseLock(
+      target.environmentId,
+      Effect.gen(function* () {
+        if ((yield* SubscriptionRef.get(entries)).has(target.environmentId)) return;
+        // Seeded before the entry exists, so the shell its chat lists from starts with the chat.
+        if (chat !== null) yield* cache.saveShell(target.environmentId, chatShellSnapshot(chat));
+        yield* registrations.register(new BoxTargetRegistration({ target }));
+        yield* Ref.update(persistedTargetsByEnvironment, (persisted) =>
+          new Map(persisted).set(target.environmentId, target),
+        );
+        yield* installEntryLocked({ target, profile: Option.none(), enabled: true });
+      }),
+    );
+  });
+
+  const relabelBox = Effect.fn("EnvironmentRegistry.relabelBox")(function* (
+    environmentId: EnvironmentId,
+    label: string,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (
+          entry === undefined ||
+          entry.target._tag !== "BearerConnectionTarget" ||
+          entry.target.box === undefined ||
+          entry.target.label === label
+        )
+          return;
+        const target = new BearerConnectionTarget({ ...entry.target, label });
+        yield* registrations.register(new BoxTargetRegistration({ target }));
+        yield* Ref.update(persistedTargetsByEnvironment, (persisted) =>
+          new Map(persisted).set(environmentId, target),
+        );
+        yield* replaceEntryInPlace(environmentId, { ...entry, target });
+      }),
+    );
+  });
+
+  const applyHostBoxStep = (
+    step: HostBoxSyncStep,
+  ): Effect.Effect<
+    void,
+    | Persistence.ConnectionPersistenceError
+    | ConnectionAttemptError
+    | EnvironmentNotRegisteredError
+    | PlatformEnvironmentRemovalError
+  > => {
+    switch (step._tag) {
+      case "Adopt":
+        return adoptBox(step.target, step.chat);
+      case "Relabel":
+        return relabelBox(step.environmentId, step.label);
+      case "Reseed":
+        return cache.loadShell(step.environmentId).pipe(
+          Effect.flatMap((cached) => {
+            const reseeded = withHostChat(cached, step.chat);
+            return reseeded === null ? Effect.void : cache.saveShell(step.environmentId, reseeded);
+          }),
+        );
+      case "MarkBox":
+        return rewriteBearerTarget(step.environmentId, (target) =>
+          target.box?.managerId === step.box.managerId
+            ? null
+            : new BearerConnectionTarget({ ...target, box: step.box, label: step.label }),
+        );
+      case "MarkMissing":
+        return markWorkspaceMissing(step.environmentId);
+      case "Forget":
+        // A box that paired since the list was read is kept, and one its host disposed is missing.
+        return forgetUnpairedBox(step.environmentId).pipe(
+          Effect.flatMap((forgotten) =>
+            !forgotten && step.disposed ? markWorkspaceMissing(step.environmentId) : Effect.void,
+          ),
+        );
+    }
+  };
+
+  const syncHostBoxes: EnvironmentRegistry["Service"]["syncHostBoxes"] = (managerId, boxes) =>
+    Effect.gen(function* () {
+      const current = yield* SubscriptionRef.get(entries);
+      const chats = boxes.flatMap((box) =>
+        box.managerId === managerId && box.chat !== null
+          ? [{ environmentId: box.environmentId, chat: box.chat }]
+          : [],
+      );
+      const cachedSequences = new Map<EnvironmentId, number>();
+      for (const { environmentId } of chats) {
+        if (!current.has(environmentId)) continue;
+        const cached = yield* cache
+          .loadShell(environmentId)
+          .pipe(Effect.orElseSucceed(() => Option.none<OrchestrationShellSnapshot>()));
+        if (Option.isSome(cached))
+          cachedSequences.set(environmentId, cached.value.snapshotSequence);
+      }
+      const connected = new Set<EnvironmentId>();
+      for (const [environmentId, lease] of yield* SubscriptionRef.get(serviceScopes)) {
+        if ((yield* SubscriptionRef.get(lease.supervisor.state)).phase === "connected")
+          connected.add(environmentId);
+      }
+      if (chats.length > 0)
+        yield* SubscriptionRef.update(hostChats, (held) => {
+          const next = new Map(held);
+          for (const { environmentId, chat } of chats) next.set(environmentId, { managerId, chat });
+          return next;
+        });
+      const steps = planHostBoxSync({
+        managerId,
+        entries: current,
+        boxes,
+        cachedSequences,
+        connected,
+      });
+      for (const step of steps) {
+        const environmentId =
+          step._tag === "Adopt" ? step.target.environmentId : step.environmentId;
+        yield* applyHostBoxStep(step).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Could not follow a cloud host's list of its boxes.", {
+              environmentId,
+              step: step._tag,
+              error,
+            }).pipe(
+              // Asked for again on the next list, so a chat that failed to land is not lost.
+              Effect.andThen(
+                SubscriptionRef.update(hostChats, (held) => {
+                  const next = new Map(held);
+                  next.delete(environmentId);
+                  return next;
+                }),
+              ),
+            ),
+          ),
+        );
+      }
+    }).pipe(Effect.withSpan("EnvironmentRegistry.syncHostBoxes"));
 
   const removeRelayEnvironments = Effect.fn("EnvironmentRegistry.removeRelayEnvironments")(
     function* () {
@@ -1177,21 +1543,7 @@ export const make = Effect.gen(function* () {
           yield* registrations.setEnabled(environmentId, enabled);
         }
         const next: ConnectionCatalogEntry = { ...entry, enabled };
-        // Update the lease in place so the supervisor keeps its generation and
-        // durable streams; `installEntryLocked` would tear it down instead.
-        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
-        if (lease !== undefined) {
-          yield* SubscriptionRef.update(serviceScopes, (current) => {
-            const nextScopes = new Map(current);
-            nextScopes.set(environmentId, { ...lease, entry: next });
-            return nextScopes;
-          });
-        }
-        yield* SubscriptionRef.update(entries, (current) => {
-          const nextEntries = new Map(current);
-          nextEntries.set(environmentId, next);
-          return nextEntries;
-        });
+        const lease = yield* replaceEntryInPlace(environmentId, next);
         if (lease !== undefined) {
           yield* (yield* wantsConnection(next))
             ? lease.supervisor.connect
@@ -1270,16 +1622,8 @@ export const make = Effect.gen(function* () {
         ) {
           yield* registrations.setEnabled(environmentId, false);
         }
-        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
-        if (lease !== undefined) {
-          yield* SubscriptionRef.update(serviceScopes, (current) =>
-            new Map(current).set(environmentId, { ...lease, entry: next }),
-          );
-          if (error !== null) yield* lease.supervisor.disconnect;
-        }
-        yield* SubscriptionRef.update(entries, (current) =>
-          new Map(current).set(environmentId, next),
-        );
+        const lease = yield* replaceEntryInPlace(environmentId, next);
+        if (lease !== undefined && error !== null) yield* lease.supervisor.disconnect;
       }),
     );
   });
@@ -1299,6 +1643,8 @@ export const make = Effect.gen(function* () {
     markBoxes,
     unmarkBox,
     markWorkspaceMissing,
+    syncHostBoxes,
+    hostChats,
     setEnabled,
     setCompatibility,
     state,
@@ -1308,34 +1654,5 @@ export const make = Effect.gen(function* () {
     followStream,
   });
 });
-
-/**
- * Marks the saved workspaces their cloud host reports lost or disposed as missing, so they stop
- * reconnecting and their saved history stays readable. Anything not saved is skipped.
- */
-export const markGoneWorkspacesMissing = Effect.fn("EnvironmentRegistry.markGoneWorkspacesMissing")(
-  function* (
-    boxes: ReadonlyArray<Pick<DiscoveredProvisionedEnvironment, "environmentId" | "lifecycle">>,
-  ) {
-    const registry = yield* EnvironmentRegistry;
-    const entries = yield* SubscriptionRef.get(registry.entries);
-    for (const { environmentId, lifecycle } of boxes) {
-      const target = entries.get(environmentId)?.target;
-      if (
-        (lifecycle !== "missing" && lifecycle !== "disposed") ||
-        target?._tag !== "BearerConnectionTarget" ||
-        target.workspaceStatus === "missing"
-      )
-        continue;
-      yield* registry
-        .markWorkspaceMissing(environmentId)
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Could not mark a gone workspace missing.", { environmentId, error }),
-          ),
-        );
-    }
-  },
-);
 
 export const layer = Layer.effect(EnvironmentRegistry, make);

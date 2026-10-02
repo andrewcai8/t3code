@@ -34,7 +34,12 @@ import {
   createRuntimeCommand,
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
-import { type ProvisionedBox, sameProvisionedBoxes } from "../cloud/provisioning.ts";
+import {
+  type HostBoxList,
+  type ProvisionedBox,
+  provisionedBox,
+  sameProvisionedBoxes,
+} from "../cloud/provisioning.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -987,47 +992,65 @@ export function createServerEnvironmentAtoms<R, E>(
   });
   // Asks about every saved environment, by id and by the address it is dialed at, so a host also
   // lists the saved ones that were its boxes and are gone, even one it disposed before it kept the
-  // box's id. The key stays `{}` so every reader shares one fetch per host; the ids are read when
-  // it runs. Settings and Automations use `provisionedEnvironments`, which never lists gone boxes.
+  // box's id. It also asks for each box's chat, naming the ones this runtime already holds so only
+  // newer chats come back. The key stays `{}` so every reader shares one fetch per host; the ids are
+  // read when it runs. Settings and Automations use `provisionedEnvironments`, which never lists
+  // gone boxes or chats.
   const provisionedBoxLists = createEnvironmentQueryAtomFamily(runtime, {
     label: "environment-data:cloud:provisioned-box-lists",
     staleTimeMs: 5_000,
+    refreshIntervalMs: 60_000,
     execute: (_input: Record<string, never>) =>
-      EnvironmentRegistry.pipe(
-        Effect.flatMap((registry) => SubscriptionRef.get(registry.entries)),
-        Effect.flatMap((entries) =>
-          request(WS_METHODS.environmentControlListProvisioned, {
-            environmentIds: [...entries.keys()],
-            addresses: [...entries].flatMap(([environmentId, { profile }]) =>
-              Option.isSome(profile) && profile.value._tag === "BearerConnectionProfile"
-                ? [{ environmentId, httpBaseUrl: profile.value.httpBaseUrl }]
-                : [],
-            ),
-          }),
-        ),
-        Effect.timeout("20 seconds"),
-      ),
+      Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry;
+        const managerId = (yield* EnvironmentSupervisor).target.environmentId;
+        const entries = yield* SubscriptionRef.get(registry.entries);
+        const held = yield* SubscriptionRef.get(registry.hostChats);
+        const rows = yield* request(WS_METHODS.environmentControlListProvisioned, {
+          environmentIds: [...entries.keys()],
+          addresses: [...entries].flatMap(([environmentId, { profile }]) =>
+            Option.isSome(profile) && profile.value._tag === "BearerConnectionProfile"
+              ? [{ environmentId, httpBaseUrl: profile.value.httpBaseUrl }]
+              : [],
+          ),
+          chats: [...held].flatMap(([environmentId, { managerId: hostId, chat }]) =>
+            hostId === managerId ? [{ environmentId, sequence: chat.sequence }] : [],
+          ),
+        });
+        return rows.map((row) => provisionedBox(managerId, row));
+      }).pipe(Effect.timeout("20 seconds")),
   });
-  const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
-    Atom.make((get): ReadonlyArray<ProvisionedBox> => {
-      const boxes = (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
+  const hostBoxListsFamily = Atom.family((hostsKey: string) =>
+    Atom.make((get): ReadonlyArray<HostBoxList> => {
+      const lists = (JSON.parse(hostsKey) as ReadonlyArray<string>).flatMap((hostId) => {
         const managerId = EnvironmentId.make(hostId);
         const listed = get(provisionedBoxLists({ environmentId: managerId, input: {} }));
-        return Option.getOrElse(AsyncResult.value(listed), () => []).map(
-          ({ environmentId, leaseId, threadId, lifecycle }) => ({
-            managerId,
-            environmentId,
-            leaseId,
-            threadId,
-            lifecycle,
-          }),
-        );
+        return Option.match(AsyncResult.value(listed), {
+          onNone: () => [],
+          onSome: (boxes) => [{ managerId, boxes }],
+        });
       });
       // Every refetch decodes a fresh list; keep the previous one while nothing in it changed so
       // views reading it do not re-render on each poll.
-      const previous = Option.getOrNull(get.self<ReadonlyArray<ProvisionedBox>>());
-      return previous !== null && sameProvisionedBoxes(previous, boxes) ? previous : boxes;
-    }).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
+      const previous = Option.getOrNull(get.self<ReadonlyArray<HostBoxList>>());
+      return previous !== null &&
+        previous.length === lists.length &&
+        previous.every(
+          (list, index) =>
+            list.managerId === lists[index]!.managerId &&
+            sameProvisionedBoxes(list.boxes, lists[index]!.boxes),
+        )
+        ? previous
+        : lists;
+    }).pipe(Atom.withLabel(`environment-data:cloud:host-box-lists:${hostsKey}`)),
+  );
+  /** Each given host's list of its cloud boxes, for the hosts that have answered. */
+  const hostBoxLists = (hostIds: ReadonlyArray<EnvironmentId>) =>
+    hostBoxListsFamily(JSON.stringify([...hostIds].sort()));
+  const provisionedBoxesFamily = Atom.family((hostsKey: string) =>
+    Atom.make((get): ReadonlyArray<ProvisionedBox> =>
+      get(hostBoxListsFamily(hostsKey)).flatMap(({ boxes }) => boxes),
+    ).pipe(Atom.withLabel(`environment-data:cloud:provisioned-boxes:${hostsKey}`)),
   );
   /** Every cloud box the given hosts report, as far as each host has answered. */
   const provisionedBoxes = (hostIds: ReadonlyArray<EnvironmentId>) =>
@@ -1081,6 +1104,7 @@ export function createServerEnvironmentAtoms<R, E>(
   return {
     managedEnvironments,
     provisionedEnvironments,
+    hostBoxLists,
     provisionedBoxes,
     refreshProvisionedBoxes,
     automations,
