@@ -6807,6 +6807,35 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("a box list passes the chats a client holds through to the host", () =>
+    Effect.gen(function* () {
+      const asked: Array<unknown> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          environmentControl: {
+            listProvisioned: (_known, _addresses, chats) =>
+              Effect.sync(() => {
+                asked.push(chats);
+                return [];
+              }),
+          },
+        },
+      });
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            yield* client[WS_METHODS.environmentControlListProvisioned]({});
+            yield* client[WS_METHODS.environmentControlListProvisioned]({ chats: [] });
+            yield* client[WS_METHODS.environmentControlListProvisioned]({
+              chats: [{ environmentId: EnvironmentId.make("box-1"), sequence: 42 }],
+            });
+          }),
+        ),
+      );
+      assert.deepEqual(asked, [undefined, [], [{ environmentId: "box-1", sequence: 42 }]]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("cloud compute RPCs list and command the selected existing environment", () =>
     Effect.gen(function* () {
       const environmentId = EnvironmentId.make("managed-cloud");
