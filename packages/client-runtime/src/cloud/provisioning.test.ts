@@ -86,7 +86,7 @@ function harness(answers: {
   ) => EnvironmentProvisionResult | null;
   readonly attach?: () => EnvironmentProvisionAttachResult | null;
   readonly pair?: () => EnvironmentId | null;
-  readonly isConnected?: () => boolean;
+  readonly isPaired?: () => boolean;
   readonly canReach?: () => boolean;
   readonly waitForProject?: () => ProjectId | null;
 }) {
@@ -121,7 +121,7 @@ function harness(answers: {
       calls.push(`pair:${pairingUrl}`);
       return answers.pair ? answers.pair() : preparedEnvironmentId;
     },
-    isConnected: answers.isConnected ?? (() => false),
+    isPaired: answers.isPaired ?? (() => false),
     canReach: answers.canReach ?? (() => true),
     waitForProject: async (environmentId, timeoutMs) => {
       calls.push(`waitForProject:${environmentId}:${timeoutMs}`);
@@ -268,8 +268,8 @@ describe("provisionCloudEnvironment", () => {
     expect(leases.leaseFor("draft")?.sandboxId).toBe("sandbox");
   });
 
-  it("does not mint a pairing link for a machine this client is already connected to", async () => {
-    const { calls, ports } = harness({ isConnected: () => true });
+  it("does not mint a pairing link for a machine this device already holds a pairing for", async () => {
+    const { calls, ports } = harness({ isPaired: () => true });
 
     expect((await provisionCloudEnvironment(draft, ports)).kind).toBe("ready");
     expect(calls).toEqual([

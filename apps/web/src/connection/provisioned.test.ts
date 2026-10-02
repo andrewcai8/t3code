@@ -21,9 +21,9 @@ const environment = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
 describe("opening a discovered provisioned environment", () => {
   it("pairs once and returns the exact existing thread on subsequent opens", async () => {
     const calls: string[] = [];
-    let connected = false;
+    let paired = false;
     const ports = {
-      isConnected: () => connected,
+      isPaired: () => paired,
       attach: async () => {
         calls.push(`attach:${environment.requestId}`);
         return {
@@ -34,7 +34,7 @@ describe("opening a discovered provisioned environment", () => {
       },
       pair: async (url: string) => {
         calls.push(url);
-        connected = true;
+        paired = true;
         return environment.environmentId;
       },
       waitForThread: async (ref: { environmentId: EnvironmentId; threadId: string }) => {
@@ -68,7 +68,7 @@ describe("opening a discovered provisioned environment", () => {
   it("refetches the host's box list once joined, so a turn running on the box keeps it connected", async () => {
     const calls: string[] = [];
     await openProvisionedEnvironment(environment, {
-      isConnected: () => false,
+      isPaired: () => false,
       attach: async () => ({
         kind: "attached" as const,
         environmentId: environment.environmentId,
@@ -92,7 +92,7 @@ describe("opening a discovered provisioned environment", () => {
     let pairs = 0;
     let waits = 0;
     const ports = {
-      isConnected: () => false,
+      isPaired: () => false,
       attach: async () => ({
         kind: "attached" as const,
         environmentId: EnvironmentId.make("other"),
@@ -129,7 +129,7 @@ describe("opening a discovered provisioned environment", () => {
   });
   it("keeps a missing existing thread explicit", async () => {
     const ports = {
-      isConnected: () => true,
+      isPaired: () => true,
       attach: async () => {
         throw new Error("unexpected attach");
       },
@@ -144,9 +144,9 @@ describe("opening a discovered provisioned environment", () => {
   });
   it("records the lease against the environment when it has no thread yet", async () => {
     const calls: string[] = [];
-    let connected = false;
+    let paired = false;
     const ports = {
-      isConnected: () => connected,
+      isPaired: () => paired,
       attach: async () => ({
         kind: "attached" as const,
         environmentId: environment.environmentId,
@@ -154,7 +154,7 @@ describe("opening a discovered provisioned environment", () => {
       }),
       pair: async (url: string) => {
         calls.push(url);
-        connected = true;
+        paired = true;
         return environment.environmentId;
       },
       waitForThread: async () => {

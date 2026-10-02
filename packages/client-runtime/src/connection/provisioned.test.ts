@@ -1,7 +1,10 @@
 import { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { BearerConnectionProfile, type ConnectionCatalogEntry, holdsPairing } from "./catalog.ts";
+import { BearerConnectionTarget } from "./model.ts";
 import {
   isOffDeviceReachablePairingUrl,
   joinProvisionedEnvironment,
@@ -32,7 +35,7 @@ function ports(options: {
   return {
     calls,
     ports: {
-      isConnected: () => false,
+      isPaired: () => false,
       attach: async () => {
         mints += 1;
         calls.push(`attach:${mints}`);
@@ -146,16 +149,40 @@ describe("joinProvisionedEnvironment", () => {
     ]);
   });
 
-  it("does not mint anything for an environment this client is already connected to", async () => {
-    const { calls, ports: joinPorts } = ports({
-      pairingUrl: () => "https://3001-sandbox.e2b.app/pair#token=fresh",
-      canReach: () => true,
+  it("pairs a box this device saved only from its host's list, but never one it holds a pairing for", async () => {
+    const target = new BearerConnectionTarget({
+      environmentId: environment.environmentId,
+      label: "proof/repo · Namespace",
+      connectionId: `bearer:${environment.environmentId}`,
+      box: { managerId: EnvironmentId.make("host") },
     });
-
-    expect(
-      await joinProvisionedEnvironment(environment, { ...joinPorts, isConnected: () => true }),
-    ).toEqual({ kind: "joined" });
-    expect(calls).toEqual([]);
+    const profile = new BearerConnectionProfile({
+      connectionId: target.connectionId,
+      environmentId: target.environmentId,
+      label: target.label,
+      httpBaseUrl: "https://3001-sandbox.e2b.app",
+      wsBaseUrl: "wss://3001-sandbox.e2b.app",
+    });
+    const outcomes = [];
+    const minted = [];
+    for (const entry of [
+      { target, profile: Option.none(), enabled: true },
+      { target, profile: Option.some(profile), enabled: true },
+    ] satisfies ReadonlyArray<ConnectionCatalogEntry>) {
+      const { calls, ports: joinPorts } = ports({
+        pairingUrl: () => "https://3001-sandbox.e2b.app/pair#token=fresh",
+        canReach: () => true,
+      });
+      outcomes.push(
+        await joinProvisionedEnvironment(environment, {
+          ...joinPorts,
+          isPaired: () => holdsPairing(entry),
+        }),
+      );
+      minted.push(calls.filter((call) => call.startsWith("attach")).length);
+    }
+    expect(outcomes).toEqual([{ kind: "joined" }, { kind: "joined" }]);
+    expect(minted).toEqual([1, 0]);
   });
 
   it("passes a refusal from the manager through with its message", async () => {

@@ -1,5 +1,5 @@
 import type { ProvisionedSandboxLease } from "@t3tools/client-runtime/cloud";
-import { provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
+import { holdsPairing, provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
 import type {
   DiscoveredProvisionedEnvironment,
   EnvironmentId,
@@ -14,10 +14,10 @@ import {
 import { holdBoxDemand } from "../cloud/CloudBoxes";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironmentHttpBaseUrl } from "../state/environments";
-import { environmentPresentations } from "../state/presentation";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import { waitForThreadShell } from "../state/waitForThreadShell";
+import { environmentCatalog } from "./catalog";
 import { connectPairing } from "./onboarding";
 import { openProvisionedEnvironment } from "./provisioned";
 
@@ -90,9 +90,8 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
 
   function joinEnvironment(environment: DiscoveredProvisionedEnvironment, remember: RememberLease) {
     return openProvisionedEnvironment(environment, {
-      isConnected: (id) =>
-        appAtomRegistry.get(environmentPresentations.presentationAtom(id))?.connection.phase ===
-        "connected",
+      isPaired: (id) =>
+        holdsPairing(appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(id)),
       attach: () => attachForClient(environment),
       pair: async (pairingUrl) => {
         const result = await pair({

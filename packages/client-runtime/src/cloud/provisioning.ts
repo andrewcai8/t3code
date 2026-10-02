@@ -380,7 +380,8 @@ export interface CloudProvisionPorts {
   /** Registers the pairing URL; resolves with the paired environment's id, or null on failure. */
   readonly pair: (pairingUrl: string) => Promise<EnvironmentId | null>;
   readonly rewritePairingUrl?: (pairingUrl: string, leaseId: string) => string;
-  readonly isConnected: (environmentId: EnvironmentId) => boolean;
+  /** See `ProvisionedJoinPorts.isPaired`. */
+  readonly isPaired: (environmentId: EnvironmentId) => boolean;
   /** See `ProvisionedJoinPorts.canReach`. */
   readonly canReach: (pairingUrl: string) => boolean;
   /** Resolves with the project the paired environment publishes, or null once `timeoutMs` passes. */
@@ -450,7 +451,7 @@ export async function provisionCloudEnvironment(
     if (!stillThisRequest()) return { kind: "cancelled" };
     ports.onPhase("pairing");
     const joined = await joinProvisionedEnvironment(environment, {
-      isConnected: ports.isConnected,
+      isPaired: ports.isPaired,
       attach: async () => {
         const attached = await ports.attach(request);
         return attached === null || attached.kind === "refused"

@@ -126,7 +126,7 @@ function device(answers: ReadonlyArray<EnvironmentProvisionResult>) {
           hostCalls.push(`${name} pair ${pairingUrl}`);
           return boxEnvironmentId;
         },
-        isConnected: () => false,
+        isPaired: () => false,
         canReach: () => true,
         waitForProject: async () => ProjectId.make("box-project"),
       }),
