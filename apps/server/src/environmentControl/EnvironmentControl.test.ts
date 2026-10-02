@@ -1000,6 +1000,7 @@ describe("a cloud box's chat", () => {
           if (store.broken) throw new Error("database is locked");
           return new Map(carded);
         },
+        read: async () => null,
       };
       const driver = setup().driver;
       driver.pause = async ({ sandboxId }) => {
