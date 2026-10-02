@@ -65,8 +65,8 @@ applies when the project and environment are both on **Inherit**.
 ## Storage cleanup
 
 Open **Settings → Storage** to enable automatic cleanup on one machine or all connected
-environments. Policies are off by default and run on the server at startup, when changed, and
-hourly. Offline machines keep their existing policies.
+environments. Policies other than cloud machine cleanup are off by default and run on the server
+at startup, when changed, and hourly. Offline machines keep their existing policies.
 
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
 Inherit follows each machine's rules; Off keeps that project's worktrees until you remove them
@@ -87,6 +87,13 @@ Existing prompts for deleting a worktree manually remain available when this pol
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
+
+A paused Namespace Mac keeps costing storage, so the host that runs it removes it after seven
+unused days, or an hour after it pauses once its chat is settled. Change the days or turn this
+off with **Remove unused cloud machines**. Before removal, unpushed work is pushed to a
+`t3-backup/<id>` branch of the repository; a machine whose work cannot be backed up is kept. Select
+**Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
+while paused, such as E2B sandboxes, are not removed this way.
 
 ## Project icons
 
