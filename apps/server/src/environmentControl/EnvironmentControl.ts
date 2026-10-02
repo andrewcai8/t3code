@@ -684,11 +684,13 @@ export class EnvironmentControl extends Context.Service<
     readonly provisionedSkills: Effect.Effect<ServerProvisionedSkills | undefined>;
     /**
      * Also reports those of `knownEnvironmentIds` that were this host's boxes and are gone, and
-     * those of `addresses` that dial such a box.
+     * those of `addresses` that dial such a box. With `chats`, each box carries the chat the host
+     * last read from it, when newer than the one the client holds.
      */
     readonly listProvisioned: (
       knownEnvironmentIds?: ReadonlyArray<EnvironmentId>,
       addresses?: ReadonlyArray<SavedEnvironmentAddress>,
+      chats?: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly sequence: number }>,
     ) => Effect.Effect<ReadonlyArray<DiscoveredProvisionedEnvironment>, EnvironmentControlError>;
     readonly start: (
       id: EnvironmentId,
@@ -1693,8 +1695,20 @@ export const layer = Layer.effect(
               scannedSkills = { service, mtimes, skills: readProvisionedSkills(bundles) };
             return scannedSkills.skills;
           }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
-      listProvisioned: (knownEnvironmentIds, addresses) =>
-        listProvisionedEnvironments(sql, knownEnvironmentIds, addresses),
+      listProvisioned: (knownEnvironmentIds, addresses, chats) =>
+        listProvisionedEnvironments(sql, knownEnvironmentIds, addresses, chats).pipe(
+          // A chat started since the last sweep has no card yet, so it is read in the background
+          // and the client's next list carries it.
+          Effect.tap(() =>
+            chats === undefined
+              ? Effect.void
+              : Effect.sync(() => {
+                  void resolve()
+                    .then((service) => service?.readNewChats())
+                    .catch(() => undefined);
+                }),
+          ),
+        ),
       provision: provisionControl.provision,
       attach: provisionControl.attach,
       dispose: Effect.fn("EnvironmentControl.dispose")(function* (

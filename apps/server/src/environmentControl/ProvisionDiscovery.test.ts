@@ -17,6 +17,8 @@ import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { boxLabel, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import { createProvisionedChatStore, ownerChat } from "./provisionedChats.ts";
+import { boxShell, boxThread } from "./shellTestFixture.ts";
 import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 
 const expiredAt = new Date("1960-01-01T00:00:00.000Z");
@@ -436,6 +438,124 @@ it.effect("a box disposed before the host kept its id is named by the address a 
       Effect.scoped,
     );
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "a list that asks for chats gets each box's owner chat the client does not hold yet",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const database = path.join(yield* fs.makeTempDirectoryScoped(), "manager.sqlite");
+      yield* Effect.gen(function* () {
+        const provisioning = yield* Provisioning;
+        const sql = yield* SqlClient.SqlClient;
+        const registry = createProvisionedLeaseRegistry(sql);
+        const chats = createProvisionedChatStore(sql);
+        const provision = Effect.fn(function* (index: number) {
+          const operation = yield* provisioning.ensure(
+            decodeRequest({
+              requestId: id(index),
+              provider: "e2b",
+              providerInstanceId: "account",
+              sourceRevision: null,
+              repository: "proof/repository",
+              preparationHash: "a".repeat(64),
+              strategy: "direct",
+              templateId: "fixture",
+            }),
+          );
+          yield* Effect.promise(() =>
+            registry.register({
+              leaseId: id(index),
+              sandboxId: sandboxOf(operation),
+              provider: "e2b",
+              providerInstanceId: "account",
+            }),
+          );
+          yield* Effect.promise(() =>
+            registry.claim({
+              leaseId: id(index),
+              owner: { environmentId: boxEnvironment(operation), threadId: `thread-${index}` },
+            }),
+          );
+        });
+        const keepChat = (index: number, threadId: string, title: string) =>
+          Effect.promise(() => {
+            const chat = ownerChat(boxShell([boxThread(threadId, "project-app", title)]), threadId);
+            if (!chat) throw new Error("the fixture shell holds the thread");
+            return chats.record(id(index), chat);
+          });
+
+        yield* provision(1);
+        yield* keepChat(1, "thread-1", "Fix the login redirect");
+        // A card whose thread is no longer the lease's owner is never sent.
+        yield* provision(2);
+        yield* keepChat(2, "thread-other", "Someone else's chat");
+        yield* provision(3);
+        yield* keepChat(3, "thread-3", "Paused chat");
+        yield* Effect.promise(() => registry.markPaused(id(3)));
+        yield* provision(4);
+        yield* keepChat(4, "thread-4", "Gone chat");
+        expect((yield* provisioning.cancel(id(4))).state.kind).toBe("disposed");
+        yield* Effect.promise(() => registry.markDisposed(id(4)));
+
+        const listedChats = (
+          chatsHeld?: ReadonlyArray<{ readonly environmentId: string; readonly sequence: number }>,
+        ) =>
+          listProvisionedEnvironments(
+            sql,
+            [EnvironmentId.make("box-4")],
+            [],
+            chatsHeld?.map((held) => ({
+              ...held,
+              environmentId: EnvironmentId.make(held.environmentId),
+            })),
+          ).pipe(
+            Effect.map((rows) =>
+              rows.map((row) => [
+                row.environmentId,
+                row.lifecycle,
+                row.chat
+                  ? `${row.chat.sequence} ${row.chat.project.id} ${row.chat.thread.title}`
+                  : null,
+              ]),
+            ),
+          );
+        expect(yield* listedChats()).toEqual([
+          ["box-1", "active", null],
+          ["box-2", "active", null],
+          ["box-3", "paused", null],
+          ["box-4", "disposed", null],
+        ]);
+        expect(yield* listedChats([])).toEqual([
+          ["box-1", "active", "42 project-app Fix the login redirect"],
+          ["box-2", "active", null],
+          ["box-3", "paused", "42 project-app Paused chat"],
+          ["box-4", "disposed", null],
+        ]);
+        expect(
+          yield* listedChats([
+            { environmentId: "box-1", sequence: 41 },
+            { environmentId: "box-3", sequence: 42 },
+          ]),
+        ).toEqual([
+          ["box-1", "active", "42 project-app Fix the login redirect"],
+          ["box-2", "active", null],
+          ["box-3", "paused", null],
+          ["box-4", "disposed", null],
+        ]);
+      }).pipe(
+        Effect.provide(
+          Provisioning.layer.pipe(
+            Layer.provideMerge(ProvisionOperationStore.layer),
+            Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
+            Layer.provideMerge(makeSqlitePersistenceLive(database)),
+          ),
+        ),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
 it("labels a box by its repository's name and where it runs", () => {
