@@ -21,6 +21,8 @@ import {
   EnvironmentProvisionClaimResult,
   EnvironmentProvisionTouchInput,
   EnvironmentProvisionTouchResult,
+  EnvironmentProvisionKeepInput,
+  EnvironmentProvisionKeepResult,
 } from "./environmentControl.ts";
 import {
   Automation,
@@ -447,6 +449,7 @@ export const WS_METHODS = {
   environmentControlUpgrade: "environmentControl.upgrade",
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
+  environmentControlKeep: "environmentControl.keep",
   automationsList: "automations.list",
   automationsCreate: "automations.create",
   automationsUpdate: "automations.update",
@@ -817,6 +820,11 @@ const EnvironmentControlUpgradeRpc = Rpc.make(WS_METHODS.environmentControlUpgra
 const EnvironmentControlTouchRpc = Rpc.make(WS_METHODS.environmentControlTouch, {
   payload: EnvironmentProvisionTouchInput,
   success: EnvironmentProvisionTouchResult,
+  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+});
+const EnvironmentControlKeepRpc = Rpc.make(WS_METHODS.environmentControlKeep, {
+  payload: EnvironmentProvisionKeepInput,
+  success: EnvironmentProvisionKeepResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
@@ -1674,6 +1682,7 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlUpgradeRpc,
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
+  EnvironmentControlKeepRpc,
   AutomationsListRpc,
   AutomationsCreateRpc,
   AutomationsUpdateRpc,

@@ -72,6 +72,7 @@ export interface CleanupPorts {
   /** Removes the machine and its lease; false when the removal is still pending. */
   readonly dispose: (leaseId: string) => Promise<boolean>;
   readonly log: (message: string, fields: Record<string, unknown>) => void;
+  readonly warn: (message: string, fields: Record<string, unknown>) => void;
 }
 
 /**
@@ -104,7 +105,7 @@ export async function cleanUpBoxes(ports: CleanupPorts): Promise<void> {
       if (backup.kind === "unsaved") {
         await ports.setKeep(leaseId, "unsaved-work");
         await ports.sleep(current.lease);
-        ports.log("cloud box kept: its work could not be backed up", {
+        ports.warn("cloud box kept: its work could not be backed up", {
           leaseId,
           reason: backup.reason,
         });
@@ -116,7 +117,7 @@ export async function cleanUpBoxes(ports: CleanupPorts): Promise<void> {
         continue;
       }
       if (!(await ports.dispose(leaseId))) {
-        ports.log("cloud box cleanup is still pending", { leaseId });
+        ports.warn("cloud box cleanup is still pending", { leaseId });
         continue;
       }
       ports.log("cloud box cleaned up", {
@@ -125,7 +126,7 @@ export async function cleanUpBoxes(ports: CleanupPorts): Promise<void> {
         branches: backup.kind === "saved" ? backup.branches : [],
       });
     } catch (cause) {
-      ports.log("cloud box could not be cleaned up", { leaseId, cause });
+      ports.warn("cloud box could not be cleaned up", { leaseId, cause });
     } finally {
       release();
     }

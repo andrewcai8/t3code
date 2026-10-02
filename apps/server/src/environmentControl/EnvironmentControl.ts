@@ -27,6 +27,8 @@ import {
   type EnvironmentProvisionClaimResult,
   type EnvironmentProvisionTouchInput,
   type EnvironmentProvisionTouchResult,
+  type EnvironmentProvisionKeepInput,
+  type EnvironmentProvisionKeepResult,
   type EnvironmentProvisionUpgradeInput,
   type EnvironmentProvisionUpgradeResult,
   type ManagedEnvironment,
@@ -106,6 +108,7 @@ import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProx
 import { observeLease, pullLeaseUsage, type LeaseObservation } from "./leaseActivity.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
+import { cleanUpBoxes, type CleanupCandidate } from "./cloudCleanup.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
@@ -574,6 +577,13 @@ export function createEnvironmentControl(
       }
     },
     reapExpiredLeases,
+    /** Puts a paused box back to sleep after work outside this service woke it. */
+    sleepBox: async (lease: ProvisionedLease): Promise<void> => {
+      await driver.pause({
+        sandboxId: lease.sandboxId,
+        ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+      });
+    },
     /** Takes a box's per-box lock for work outside this service, or null while it is held. */
     holdBox: (sandboxId: string) => {
       if (leaseOperations.has(sandboxId)) return null;
@@ -733,6 +743,13 @@ export class EnvironmentControl extends Context.Service<
     readonly touch: (
       input: EnvironmentProvisionTouchInput,
     ) => Effect.Effect<EnvironmentProvisionTouchResult, EnvironmentControlError>;
+    /**
+     * Keeps a cloud box from automatic cleanup, or allows it again. A box kept because its work
+     * could not be backed up stays kept until it is next woken.
+     */
+    readonly keep: (
+      input: EnvironmentProvisionKeepInput,
+    ) => Effect.Effect<EnvironmentProvisionKeepResult, EnvironmentControlError>;
     readonly upgrade: (
       input: EnvironmentProvisionUpgradeInput,
     ) => Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>;
@@ -1643,6 +1660,72 @@ export const layer = Layer.effect(
       });
       return { kind: "disposed" };
     });
+    const cloudMachinesAfterDays = settings.getSettings.pipe(
+      Effect.map((current) => current.storageCleanup.cloudMachinesAfterDays),
+    );
+    const cleanupCandidate = async (lease: ProvisionedLease): Promise<CleanupCandidate> => ({
+      lease,
+      thread: (await chatStore.read(lease.leaseId))?.thread ?? null,
+    });
+    /** The Devbox a provisioned lease runs on, while its provision is ready; null otherwise. */
+    const readyDevbox = async (leaseId: string) => {
+      if (!isProvisionRequestId(leaseId) || importedLeases.has(leaseId)) return null;
+      const operation = await Effect.runPromise(store.get(leaseId)).catch(() => null);
+      const resource =
+        operation?.state.kind === "ready" ? operation.state.allocation.resource : null;
+      if (!operation || resource?.provider !== "namespace" || "engine" in resource) return null;
+      return { operation, resource };
+    };
+    /**
+     * Removes paused Devboxes past their cleanup time, through the same cancel a user's delete
+     * takes. Their work is pushed with the configured GitHub token, which reaches the guest only
+     * on the backup script's stdin.
+     */
+    const cleanUpPausedBoxes = async () => {
+      const service = await resolve();
+      if (!service) return;
+      const token = service.config.provisioning?.githubToken;
+      const log = (level: "info" | "warn") => (message: string, fields: Record<string, unknown>) =>
+        void runLogged(
+          (level === "info" ? Effect.logInfo(message) : Effect.logWarning(message)).pipe(
+            Effect.annotateLogs(fields),
+          ),
+        );
+      await cleanUpBoxes({
+        now: () => Date.now(),
+        afterDays: () => runLogged(cloudMachinesAfterDays),
+        candidates: async () => {
+          const candidates: Array<CleanupCandidate> = [];
+          for (const lease of await leaseRegistry.paused())
+            if (lease.namespaceResource && (await readyDevbox(lease.leaseId)))
+              candidates.push(await cleanupCandidate(lease));
+          return candidates;
+        },
+        read: async (leaseId) => {
+          const lease = await leaseRegistry.findById(leaseId);
+          return lease ? cleanupCandidate(lease) : null;
+        },
+        holdBox: async (sandboxId) => service.holdBox(sandboxId),
+        backUpWork: async (lease) => {
+          const devbox = await readyDevbox(lease.leaseId);
+          if (!devbox) throw new Error("The cloud box has no ready Devbox.");
+          const manifest = await manifests.load(devbox.operation.request.requestId);
+          return (await resolveNamespace()).runtime.backUpWork(
+            devbox.operation,
+            devbox.resource,
+            manifest,
+            { branch: lease.leaseId, push: token !== undefined, ...(token ? { token } : {}) },
+          );
+        },
+        setKeep: (leaseId, keep) => leaseRegistry.setKeep(leaseId, keep),
+        sleep: (lease) => service.sleepBox(lease),
+        dispose: async (leaseId) =>
+          isProvisionRequestId(leaseId) &&
+          (await runLogged(cancelProvision(leaseId))).kind === "disposed",
+        log: log("info"),
+        warn: log("warn"),
+      });
+    };
     yield* Effect.gen(function* () {
       const service = yield* Effect.promise(resolve);
       if (!service) return;
@@ -1650,6 +1733,7 @@ export const layer = Layer.effect(
         reapExpiredLeases: () => service.reapExpiredLeases(),
         syncLeaseUsage: () => service.syncLeaseUsage(),
         upkeepCloudChats: () => service.upkeepCloudChats(),
+        cleanUpBoxes: cleanUpPausedBoxes,
         reconcileProvisions: provisioning.reconcile,
         settleChats: provisionControl.settleChats,
         boxUsage,
@@ -1710,7 +1794,11 @@ export const layer = Layer.effect(
             return scannedSkills.skills;
           }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
       listProvisioned: (knownEnvironmentIds, addresses, chats) =>
-        listProvisionedEnvironments(sql, knownEnvironmentIds, addresses, chats).pipe(
+        cloudMachinesAfterDays.pipe(
+          Effect.orElseSucceed(() => null),
+          Effect.flatMap((afterDays) =>
+            listProvisionedEnvironments(sql, knownEnvironmentIds, addresses, chats, afterDays),
+          ),
           // A chat started since the last sweep has no card yet, so it is read in the background
           // and the client's next list carries it.
           Effect.tap(() =>
@@ -1825,6 +1913,23 @@ export const layer = Layer.effect(
               },
             )
           : provisionControl.touch(input),
+      keep: (input) =>
+        Effect.tryPromise({
+          try: async (): Promise<EnvironmentProvisionKeepResult> => {
+            const lease = await leaseRegistry.findById(input.requestId);
+            if (!lease || lease.state === "disposed")
+              return {
+                kind: "refused",
+                reason: "unknown",
+                message: "This cloud machine could not be found.",
+              };
+            if (input.keep) await leaseRegistry.setKeep(lease.leaseId, "user");
+            else if (lease.keep === "user") await leaseRegistry.setKeep(lease.leaseId, null);
+            return { kind: "updated" };
+          },
+          catch: () =>
+            new EnvironmentControlError({ message: "Cloud lease could not be updated." }),
+        }),
       start: (id) => run((service) => service.start(id), refused("unknown")),
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };

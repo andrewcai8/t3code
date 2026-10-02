@@ -113,6 +113,7 @@ function fakeHost(
   );
   const candidate = (box: FakeBox): CleanupCandidate => ({ lease: box.lease, thread: null });
   const logs: Array<{ message: string; fields: Record<string, unknown> }> = [];
+  const warnings: Array<{ message: string; fields: Record<string, unknown> }> = [];
   const ports = {
     now: () => Date.parse("2026-03-09T00:00:00.000Z"),
     afterDays: async () => 7,
@@ -149,6 +150,7 @@ function fakeHost(
       return true;
     },
     log: (message: string, fields: Record<string, unknown>) => logs.push({ message, fields }),
+    warn: (message: string, fields: Record<string, unknown>) => warnings.push({ message, fields }),
   };
   const state = (leaseId: string) => {
     const box = boxes.get(leaseId)!;
@@ -159,7 +161,7 @@ function fakeHost(
       locked: box.locked,
     };
   };
-  return { ports, boxes, state, logs };
+  return { ports, boxes, state, logs, warnings };
 }
 
 describe("cleanUpBoxes", () => {
@@ -189,6 +191,12 @@ describe("cleanUpBoxes", () => {
       awake: false,
       locked: false,
     });
+    expect(host.warnings).toEqual([
+      {
+        message: "cloud box kept: its work could not be backed up",
+        fields: { leaseId: "lease-1", reason: "no origin remote" },
+      },
+    ]);
   });
 
   it("keeps and sleeps a due box whose backup failed outright", async () => {

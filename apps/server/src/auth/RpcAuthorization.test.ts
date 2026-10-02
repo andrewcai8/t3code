@@ -79,6 +79,7 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.environmentControlAttach,
       WS_METHODS.environmentControlClaim,
       WS_METHODS.environmentControlTouch,
+      WS_METHODS.environmentControlKeep,
       WS_METHODS.environmentControlDispose,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);

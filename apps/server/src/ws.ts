@@ -2996,6 +2996,8 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.environmentControlClaim, environmentControl.claim(input)),
         [WS_METHODS.environmentControlTouch]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlTouch, environmentControl.touch(input)),
+        [WS_METHODS.environmentControlKeep]: (input) =>
+          observeRpcEffect(WS_METHODS.environmentControlKeep, environmentControl.keep(input)),
         [WS_METHODS.automationsList]: () =>
           observeRpcEffect(WS_METHODS.automationsList, automations.list),
         [WS_METHODS.automationsCreate]: (input) =>

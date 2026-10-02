@@ -1128,6 +1128,7 @@ const buildAppUnderTest = (options?: {
               reason: "unknown",
               message: "Not configured",
             }),
+          keep: () => Effect.die("Unused in server routing proof"),
           touch: () =>
             Effect.succeed({
               kind: "refused",
