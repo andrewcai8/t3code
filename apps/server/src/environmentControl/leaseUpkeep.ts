@@ -25,6 +25,11 @@ export const runLeaseUpkeep = (input: {
   readonly syncLeaseUsage: () => Promise<void>;
   /** Periodic saves and deadline releases of instance-engine chats. */
   readonly upkeepCloudChats?: () => Promise<void>;
+  /**
+   * Removes paused machines past their cleanup time. Its own loop: waking a machine to back it up
+   * can take twenty minutes, which must never delay a pause.
+   */
+  readonly cleanUpBoxes?: () => Promise<void>;
   readonly reconcileProvisions: Effect.Effect<void, ProvisionStoreError>;
   /** Starts each awake box's pending first turn. Never fails. */
   readonly settleChats: Effect.Effect<void>;
@@ -64,8 +69,11 @@ export const runLeaseUpkeep = (input: {
   const upkeepChats = Effect.sync(() => {
     void input.upkeepCloudChats?.().catch(() => undefined);
   }).pipe(Effect.repeat(Schedule.spaced(CHAT_UPKEEP_INTERVAL)));
-  return Effect.all([repeat(reap), repeat(collectUsage), upkeepChats], {
-    concurrency: 3,
+  const cleanUp = Effect.tryPromise(async () => input.cleanUpBoxes?.()).pipe(
+    Effect.ignore({ log: "Warn", message: "paused cloud boxes could not be cleaned up" }),
+  );
+  return Effect.all([repeat(reap), repeat(collectUsage), upkeepChats, repeat(cleanUp)], {
+    concurrency: 4,
     discard: true,
   });
 };
