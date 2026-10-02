@@ -857,7 +857,7 @@ it("installs a Claude sign-in where that CLI reads it", async () => {
   }
 });
 
-it("gives a Claude account with a setup-token that token instead of a credential file", async () => {
+it.each([false, true])("exports a usable Claude setup-token (%s)", async (valueRedacted) => {
   const f = await fixture();
   try {
     const manifest = await f.store.freeze(
@@ -869,7 +869,12 @@ it("gives a Claude account with a setup-token that token instead of a credential
           kind: "claudeAgent",
           instanceId: ProviderInstanceId.make("claude_personal"),
           environment: [
-            { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "sk-ant-oat01-cloud-only", sensitive: true },
+            {
+              name: "CLAUDE_CODE_OAUTH_TOKEN",
+              value: "sk-ant-oat01-cloud-only",
+              sensitive: true,
+              ...(valueRedacted ? { valueRedacted: true } : {}),
+            },
           ],
           credential: { kind: "environment" },
         },
