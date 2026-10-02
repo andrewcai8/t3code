@@ -2,6 +2,7 @@ import type { EnvironmentId, OrchestrationThreadShell } from "@t3tools/contracts
 import { Atom } from "effect/unstable/reactivity";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
+import { isUnpairedBox } from "../connection/catalog.ts";
 import { connectionBox } from "../connection/model.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import { isThreadSessionRunning } from "./threads.ts";
@@ -10,7 +11,8 @@ import { isThreadSessionRunning } from "./threads.ts";
  * Keeps a cloud box connected while a turn runs on it, so its chat's status stays live with the
  * chat closed. A turn counts while the box's last known threads show one running and its host
  * lists the box active; a box the host paused or lost cannot be running one, whatever this client
- * last saw. Mount the result; its value lists the boxes it holds.
+ * last saw. A box this device never opened is left alone, so listing running chats pairs nothing.
+ * Mount the result; its value lists the boxes it holds.
  */
 export function createRunningBoxDemandAtom(input: {
   readonly catalogValueAtom: Atom.Atom<EnvironmentCatalogState>;
@@ -26,7 +28,7 @@ export function createRunningBoxDemandAtom(input: {
     const running = new Map<EnvironmentId, EnvironmentId>();
     for (const [environmentId, entry] of get(input.catalogValueAtom).entries) {
       const box = connectionBox(entry.target);
-      if (box === null || !entry.enabled) continue;
+      if (box === null || !entry.enabled || isUnpairedBox(entry)) continue;
       if (
         get(input.threadsAtom(environmentId)).some(({ session }) => isThreadSessionRunning(session))
       )

@@ -5,6 +5,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
+import type { HostBoxList } from "../cloud/provisioning.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import {
@@ -294,11 +295,23 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.unmarkBox(environmentId)),
       ),
   });
-  const markGoneWorkspacesMissing = createRuntimeCommand(runtime, {
-    label: "environment-catalog:mark-gone-workspaces-missing",
+  /** Follows each host's list of its boxes: see `EnvironmentRegistry.syncHostBoxes`. */
+  const syncHostBoxes = createRuntimeCommand(runtime, {
+    label: "environment-catalog:sync-host-boxes",
     scheduler: commandScheduler,
     concurrency: serial,
-    execute: EnvironmentRegistry.markGoneWorkspacesMissing,
+    execute: (lists: ReadonlyArray<HostBoxList>) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) =>
+          Effect.forEach(
+            lists,
+            ({ managerId, boxes }) => registry.syncHostBoxes(managerId, boxes),
+            {
+              discard: true,
+            },
+          ),
+        ),
+      ),
   });
   const awaitConnected = createRuntimeCommand(runtime, {
     label: "environment-catalog:await-connected",
@@ -322,7 +335,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
     removeRelayEnvironments,
     retryNow,
     markWorkspaceMissing,
-    markGoneWorkspacesMissing,
+    syncHostBoxes,
     markBoxes,
     unmarkBox,
     demandAtom,

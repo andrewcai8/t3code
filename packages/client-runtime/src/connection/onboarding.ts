@@ -21,6 +21,7 @@ import {
   SshConnectionProfile,
   SshConnectionRegistration,
 } from "./catalog.ts";
+import { PairingRedemption } from "./boxPairing.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import { mapRemoteEnvironmentError } from "./errors.ts";
 import {
@@ -287,3 +288,19 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(ConnectionOnboarding, make);
+
+/** Redeems a box's pairing the way `registerPairing` does, leaving the registry to save it. */
+export const pairingRedemptionLayer = Layer.effect(
+  PairingRedemption,
+  Effect.gen(function* () {
+    const presentation = yield* ClientCapabilities.ClientPresentation;
+    const httpClient = yield* HttpClient.HttpClient;
+    return PairingRedemption.of({
+      redeem: (input) =>
+        preparePairingRegistration(input).pipe(
+          Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+        ),
+    });
+  }),
+);

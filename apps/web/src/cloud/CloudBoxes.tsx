@@ -32,14 +32,15 @@ const runningBoxDemandAtom = createRunningBoxDemandAtom({
 });
 
 /**
- * Keeps the saved catalog's boxes marked as boxes, and keeps a box connected while a turn runs
- * on it. Boxes saved before they were marked are found in this device's leases and automation
- * joins, then in the lists the connected hosts report, which also name the boxes that are gone.
+ * Keeps this device's boxes in line with the lists the connected hosts report, so every cloud
+ * chat a host knows lists here and gone ones stop dialing, and keeps a box connected while a turn
+ * runs on it. Boxes saved before they were marked are also found in this device's leases and
+ * automation joins.
  */
 export function CloudBoxes() {
   const catalogReady = useAtomValue(environmentCatalog.catalogValueAtom).isReady;
   const markBoxes = useAtomCommand(environmentCatalog.markBoxes);
-  const markGone = useAtomCommand(environmentCatalog.markGoneWorkspacesMissing);
+  const syncHostBoxes = useAtomCommand(environmentCatalog.syncHostBoxes);
   useEffect(() => {
     if (!catalogReady) return;
     void markBoxes([
@@ -53,11 +54,10 @@ export function CloudBoxes() {
 
   const hosts = useAutomationHosts();
   const hostIds = useMemo(() => hosts.map((host) => host.environmentId), [hosts]);
-  const boxes = useAtomValue(serverEnvironment.provisionedBoxes(hostIds));
+  const lists = useAtomValue(serverEnvironment.hostBoxLists(hostIds));
   useEffect(() => {
-    void markBoxes(boxes.map(({ environmentId, managerId }) => ({ environmentId, managerId })));
-    void markGone(boxes);
-  }, [boxes, markBoxes, markGone]);
+    void syncHostBoxes(lists);
+  }, [lists, syncHostBoxes]);
 
   useAtomMount(runningBoxDemandAtom);
   return null;

@@ -5,7 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
-import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import { BearerConnectionProfile, type ConnectionCatalogEntry } from "../connection/catalog.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
   BearerConnectionTarget,
@@ -29,17 +29,28 @@ const BOX = new BearerConnectionTarget({
   box: { managerId: HOST.environmentId },
 });
 
+const BOX_PROFILE = new BearerConnectionProfile({
+  connectionId: BOX.connectionId,
+  environmentId: BOX.environmentId,
+  label: BOX.label,
+  httpBaseUrl: "https://e2b-box.example.test",
+  wsBaseUrl: "wss://e2b-box.example.test",
+});
+
 function entry(target: ConnectionTarget): ConnectionCatalogEntry {
   return { target, profile: Option.none(), enabled: true };
 }
 
-const catalog: EnvironmentCatalogState = {
-  isReady: true,
-  entries: new Map([
-    [HOST.environmentId, entry(HOST)],
-    [BOX.environmentId, entry(BOX)],
-  ]),
-};
+function catalogWith(boxEntry: ConnectionCatalogEntry): EnvironmentCatalogState {
+  return {
+    isReady: true,
+    entries: new Map([
+      [HOST.environmentId, entry(HOST)],
+      [BOX.environmentId, boxEntry],
+    ]),
+  };
+}
+const catalog = catalogWith({ ...entry(BOX), profile: Option.some(BOX_PROFILE) });
 
 describe("environment presentations", () => {
   it("list the host but not the cloud box, which its chat still reads", () => {
@@ -58,6 +69,7 @@ describe("running box demand", () => {
   function harness(input: {
     readonly session: OrchestrationThreadShell["session"];
     readonly lifecycle: ProvisionedBox["lifecycle"];
+    readonly catalog?: EnvironmentCatalogState;
   }) {
     const registry = AtomRegistry.make();
     const threads = Atom.make<ReadonlyArray<Pick<OrchestrationThreadShell, "session">>>([
@@ -72,7 +84,7 @@ describe("running box demand", () => {
       }),
     );
     const atom = createRunningBoxDemandAtom({
-      catalogValueAtom: Atom.make(catalog),
+      catalogValueAtom: Atom.make(input.catalog ?? catalog),
       threadsAtom: (environmentId) =>
         environmentId === BOX.environmentId ? threads : Atom.make([]),
       provisionedBoxes: () =>
@@ -83,6 +95,9 @@ describe("running box demand", () => {
             leaseId: "lease",
             threadId: null,
             lifecycle: get(lifecycle),
+            label: "t3code · E2B",
+            automationId: null,
+            chat: null,
           },
         ]),
       demandAtom,
@@ -124,6 +139,16 @@ describe("running box demand", () => {
     expect([...held]).toEqual([]);
     registry.set(lifecycle, "active");
     expect([...held]).toEqual([BOX.environmentId]);
+  });
+
+  it("does not pair a box this device never opened just because its listed chat is running", () => {
+    expect([
+      [
+        ...harness({ session: running, lifecycle: "active", catalog: catalogWith(entry(BOX)) })
+          .held,
+      ],
+      [...harness({ session: running, lifecycle: "active" }).held],
+    ]).toEqual([[], [BOX.environmentId]]);
   });
 
   it("does not hold a box with no running turn", () => {
