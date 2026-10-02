@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - fixed timestamps exercise cleanup times.
 import { describe, expect, it } from "vite-plus/test";
 
 import { cleanUpBoxes, cleanupPlan, type CleanupCandidate } from "./cloudCleanup.ts";

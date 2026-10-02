@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - cleanup times are ISO timestamps compared with the caller's clock.
 import type { ProvisionedCleanup } from "@t3tools/contracts";
 
 const MINUTE_MS = 60_000;
