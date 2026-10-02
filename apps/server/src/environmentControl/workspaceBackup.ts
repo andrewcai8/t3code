@@ -23,6 +23,8 @@ env.update({
     'GIT_COMMITTER_NAME': 'T3', 'GIT_COMMITTER_EMAIL': 'agent@t3.local',
     'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': os.devnull, 'SSH_ASKPASS': os.devnull,
     'GCM_INTERACTIVE': 'never',
+    # Keeps git status from refreshing, and so rewriting, a real index.
+    'GIT_OPTIONAL_LOCKS': '0',
 })
 if request.get('token'):
     env.update({'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader', 'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + request['token']).encode()).decode()})
@@ -58,6 +60,8 @@ def list_trees():
                 trees.insert(0, path)
             elif root in path.parents:
                 trees.append(path)
+            else:
+                finish({'kind': 'unsaved', 'reason': "A worktree lives outside the chat's root."})
         entry = {}
     return trees
 
@@ -87,8 +91,16 @@ pending = []
 for index, tree in enumerate(list_trees()):
     commit = head(tree)
     dirty = out(tree, 'status', '--porcelain=v1', '-z', '--untracked-files=all') != ''
+    if dirty and (tree / '.gitmodules').exists():
+        finish({'kind': 'unsaved', 'reason': "A submodule's changes cannot be backed up."})
     if dirty or unpushed(commit):
         pending.append((name if index == 0 else name + '-' + str(index), tree, commit, dirty))
+# A branch an agent committed on and then left is in no tree. Named by position, never by the
+# branch's own name, so two branches can never land on one backup.
+heads = out(main, 'for-each-ref', '--format=%(objectname)', 'refs/heads/').splitlines()
+for index, commit in enumerate(heads):
+    if unpushed(commit):
+        pending.append((name + '-branch-' + str(index), None, commit, False))
 stashes = out(main, 'stash', 'list', '--format=%H').splitlines()
 
 if not pending and not stashes:
@@ -127,9 +139,11 @@ const decodeBackup = Schema.decodeUnknownExit(Schema.fromJsonString(WorkspaceBac
 /**
  * Whether the chat under `root` has git work only its machine holds, and pushes it when it does
  * and `push` allows. Every tree with changes or unpushed commits goes to `t3-backup/<branch>`
- * (`-<n>` for the n-th worktree) and every stash entry to `t3-backup/<branch>-stash-<n>`. `saved`
- * means each branch was read back from origin at the pushed commit. A rerun pushes the same
- * commits to the same branches.
+ * (`-<n>` for the n-th worktree), every local branch with unpushed commits to
+ * `t3-backup/<branch>-branch-<n>` (its position among the sorted branches), and every stash entry to
+ * `t3-backup/<branch>-stash-<n>`. A worktree outside `root`, or a changed tree with submodules,
+ * is `unsaved`. `saved` means each branch was read back from origin at the pushed commit. A rerun
+ * pushes the same commits to the same branches.
  */
 export async function backUpWorkspace(
   port: RemotePreparationPort,

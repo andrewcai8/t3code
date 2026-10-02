@@ -65,7 +65,12 @@ describe("backUpWorkspace", () => {
 
     expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
       kind: "saved",
-      branches: ["t3-backup/lease-1", "t3-backup/lease-1-1"],
+      branches: [
+        "t3-backup/lease-1",
+        "t3-backup/lease-1-1",
+        "t3-backup/lease-1-branch-0",
+        "t3-backup/lease-1-branch-1",
+      ],
     });
     expect(git(origin, "show", "t3-backup/lease-1:README.md")).toBe("edited");
     expect(git(origin, "show", "t3-backup/lease-1:untracked.txt")).toBe("new");
@@ -73,6 +78,60 @@ describe("backUpWorkspace", () => {
     expect(git(origin, "show", "t3-backup/lease-1-1:feature.txt")).toBe("feature work");
     expect(git(workspace, "status", "--porcelain")).toBe("M README.md\n?? untracked.txt");
     expect(await NodeFSP.readFile(NodePath.join(workspace, ".git", "index"))).toEqual(realIndex);
+  });
+
+  it("pushes the unpushed tip of a branch no tree has checked out", async () => {
+    const { root, workspace, origin } = await chatRoot();
+    git(workspace, "switch", "-qc", "feature-x");
+    await NodeFSP.writeFile(NodePath.join(workspace, "feature.txt"), "feature work\n");
+    git(workspace, "add", ".");
+    git(workspace, "commit", "-qm", "feature work");
+    const tip = git(workspace, "rev-parse", "HEAD");
+    git(workspace, "switch", "-q", "main");
+
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
+      kind: "saved",
+      branches: ["t3-backup/lease-1-branch-0"],
+    });
+    expect(backupRefs(origin)).toBe(`refs/heads/t3-backup/lease-1-branch-0 ${tip}`);
+  });
+
+  it("leaves a real index alone even when its file times are stale", async () => {
+    const { root, workspace } = await chatRoot();
+    await NodeFSP.writeFile(NodePath.join(workspace, "README.md"), "base\n");
+    await NodeFSP.utimes(
+      NodePath.join(workspace, "README.md"),
+      new Date(),
+      new Date(Date.now() + 60_000),
+    );
+    await NodeFSP.writeFile(NodePath.join(workspace, "untracked.txt"), "new\n");
+    const realIndex = await NodeFSP.readFile(NodePath.join(workspace, ".git", "index"));
+    await backUpWorkspace(localPort, { root, branch: "lease-1", push: true });
+    expect(await NodeFSP.readFile(NodePath.join(workspace, ".git", "index"))).toEqual(realIndex);
+  });
+
+  it("reports a worktree that lives outside the chat's root", async () => {
+    const { root, workspace, origin } = await chatRoot();
+    const outside = NodePath.join(NodePath.dirname(root), "outside");
+    git(workspace, "worktree", "add", "-q", "-b", "outside", outside);
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
+      kind: "unsaved",
+      reason: "A worktree lives outside the chat's root.",
+    });
+    expect(backupRefs(origin)).toBe("");
+  });
+
+  it("reports changes in a tree with submodules", async () => {
+    const { root, workspace, origin } = await chatRoot();
+    await NodeFSP.writeFile(
+      NodePath.join(workspace, ".gitmodules"),
+      '[submodule "lib"]\n\tpath = lib\n\turl = ../lib.git\n',
+    );
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
+      kind: "unsaved",
+      reason: "A submodule's changes cannot be backed up.",
+    });
+    expect(backupRefs(origin)).toBe("");
   });
 
   it("pushes each stash entry", async () => {
