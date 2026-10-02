@@ -15,15 +15,16 @@ import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
   type PreparedConnection,
+  type SupervisorConnectionState,
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
@@ -80,6 +81,14 @@ const CHAT_THREAD = decodeThreadShell({
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
 });
+
+const CONNECTED_STATE: SupervisorConnectionState = {
+  ...AVAILABLE_CONNECTION_STATE,
+  desired: true,
+  network: "online",
+  phase: "connected",
+  generation: 1,
+};
 
 const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   snapshotSequence: 1,
@@ -503,7 +512,9 @@ describe("environment shell synchronization", () => {
         const client = {
           [ORCHESTRATION_WS_METHODS.subscribeShell]: () => Stream.fromQueue(events),
         } as unknown as WsRpcProtocolClient;
-        const supervisorState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+        const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>(
+          AVAILABLE_CONNECTION_STATE,
+        );
         const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
           Option.none(),
         );
@@ -562,13 +573,7 @@ describe("environment shell synchronization", () => {
         ]);
 
         yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
-        yield* SubscriptionRef.set(supervisorState, {
-          ...AVAILABLE_CONNECTION_STATE,
-          desired: true,
-          network: "online",
-          phase: "connected",
-          generation: 1,
-        });
+        yield* SubscriptionRef.set(supervisorState, CONNECTED_STATE);
         yield* Queue.offerAll(events, [
           { kind: "snapshot", snapshot: { ...LIVE_SHELL_SNAPSHOT, snapshotSequence: 10 } },
           { kind: "synchronized" },
@@ -587,12 +592,13 @@ describe("environment shell synchronization", () => {
       }),
   );
 
-  it.live(
+  it.effect(
     "a host chat taken after a failed subscription makes the retry reload instead of resuming past it",
     () =>
       Effect.gen(function* () {
         const chats = yield* Queue.unbounded<ProvisionedChat>();
         const failNow = yield* Deferred.make<void>();
+        const resubscribed = yield* Deferred.make<void>();
         const afterSequences = yield* Ref.make<ReadonlyArray<number | undefined>>([]);
         const client = {
           [ORCHESTRATION_WS_METHODS.subscribeShell]: (input: { readonly afterSequence?: number }) =>
@@ -601,27 +607,23 @@ describe("environment shell synchronization", () => {
                 afterSequences,
                 (seen) => [seen.length, [...seen, input.afterSequence]] as const,
               ).pipe(
-                Effect.map((call) =>
+                Effect.flatMap((call): Effect.Effect<Stream.Stream<never, Error>> =>
                   call === 0
-                    ? Stream.fromEffect(Deferred.await(failNow)).pipe(
-                        Stream.flatMap(() =>
-                          Stream.fail(new Error("The shell projection failed.")),
+                    ? Effect.succeed(
+                        Stream.fromEffect(Deferred.await(failNow)).pipe(
+                          Stream.flatMap(() =>
+                            Stream.fail(new Error("The shell projection failed.")),
+                          ),
                         ),
                       )
-                    : Stream.never,
+                    : Deferred.succeed(resubscribed, undefined).pipe(Effect.as(Stream.never)),
                 ),
               ),
             ),
         } as unknown as WsRpcProtocolClient;
         const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
           target: TARGET,
-          state: yield* SubscriptionRef.make({
-            ...AVAILABLE_CONNECTION_STATE,
-            desired: true,
-            network: "online" as const,
-            phase: "connected" as const,
-            generation: 1,
-          }),
+          state: yield* SubscriptionRef.make<SupervisorConnectionState>(CONNECTED_STATE),
           session: yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
             Option.some(session(client)),
           ),
@@ -677,13 +679,8 @@ describe("environment shell synchronization", () => {
           Option.exists(state.snapshot, (shell) => shell.snapshotSequence === 50),
         );
         // The retry runs 250 ms after the failure, on the same session.
-        yield* Ref.get(afterSequences).pipe(
-          Effect.repeat({
-            until: (seen) => seen.length >= 2,
-            schedule: Schedule.spaced("25 millis"),
-          }),
-          Effect.timeout("5 seconds"),
-        );
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(resubscribed);
 
         expect(yield* Ref.get(afterSequences)).toEqual([10, 20]);
       }),

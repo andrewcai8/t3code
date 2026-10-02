@@ -26,6 +26,7 @@ import { RpcClientError } from "effect/unstable/rpc";
 import { Socket } from "effect/unstable/socket";
 
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import type { HostChat } from "../connection/hostBoxSync.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -181,6 +182,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     remove: () => Effect.die("Unexpected environment removal"),
     removeRelayEnvironments: () => Effect.die("Unexpected environment removal"),
     markWorkspaceMissing: () => Effect.die("Unexpected missing workspace"),
+    syncHostBoxes: () => Effect.die("Unexpected host box sync"),
+    hostChats: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, HostChat>>(new Map()),
     markBoxes: () => Effect.die("Unexpected box marking"),
     unmarkBox: () => Effect.die("Unexpected box unmarking"),
     demand: () => Effect.void,
