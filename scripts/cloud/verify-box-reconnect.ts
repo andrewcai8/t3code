@@ -653,7 +653,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     readonly title: string;
   }) {
     const { managerId, boxId, threadId } = input;
-    const storage = Layer.succeedContext(yield* Layer.build(memoryStorageLayer));
+    // Built fresh, and provided `local`, or the memo map hands client B client A's storage and
+    // registry, with the box A paired.
+    const storage = Layer.succeedContext(yield* Layer.build(Layer.fresh(memoryStorageLayer)));
     const visibleB = yield* Queue.unbounded<boolean>();
     const inputsB = yield* Queue.unbounded<void>();
     yield* Queue.offer(visibleB, true);
@@ -744,7 +746,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       const token = yield* credentialToken;
       yield* check(token !== null, "client B: no pairing saved for the box");
       return token;
-    }).pipe(Effect.scoped, Effect.provide(clientB));
+    }).pipe(Effect.scoped, Effect.provide(clientB, { local: true }));
 
     yield* Effect.gen(function* () {
       const registry = yield* EnvironmentRegistry;
@@ -780,7 +782,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
             entry.target.workspaceStatus === "missing"),
         "client B still dials the disposed box",
       );
-    }).pipe(Effect.scoped, Effect.provide(clientB));
+    }).pipe(Effect.scoped, Effect.provide(clientB, { local: true }));
   }, Effect.scoped);
 
   const run = Effect.gen(function* () {
