@@ -14,6 +14,12 @@
  * box first connects. The box is disposed on every path, and the exit code is nonzero unless the
  * box came back.
  *
+ * Presence comes from the same signals the web reports: the app's visibility, and an input when
+ * the user opens the chat. `--reopen` closes the chat before the pause and opens it again after,
+ * the way a user comes back to a paused chat, and fails unless a resume reaches the host within
+ * 30 seconds of opening it. `--cut-host-mid-wake` reconnects the manager while the box's resume
+ * is in flight, closing the session under it, and fails unless the box still comes back.
+ *
  * The manager bearer is cached beside the pairing token (0600), shared with smoke-cloud-chat.ts.
  * Tokens and pairing URLs never reach stdout or the report; URLs in failure details lose their
  * query and fragment.
@@ -76,6 +82,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -85,6 +92,7 @@ import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Command, Flag } from "effect/unstable/cli";
@@ -94,6 +102,7 @@ const PROVISION_TIMEOUT = "20 minutes";
 const BOX_CONNECT_TIMEOUT = "3 minutes";
 const CALL_TIMEOUT = "2 minutes";
 const DISPOSE_TIMEOUT = "3 minutes";
+const WAKE_AFTER_OPEN_TIMEOUT = "30 seconds";
 const CLIENT_METADATA = { label: "box reconnect verifier", deviceType: "bot" } as const;
 
 class VerifyFailure extends Schema.TaggedError<VerifyFailure>()("VerifyFailure", {
@@ -131,6 +140,9 @@ const encodeReport = Schema.encodeEffect(
       timeoutMinutes: Schema.Finite,
       awaySeconds: Schema.Finite,
       wokeWhileAway: Schema.Boolean,
+      reopen: Schema.Boolean,
+      cutHostMidWake: Schema.Boolean,
+      cutInFlight: Schema.NullOr(Schema.Boolean),
       box: Schema.NullOr(
         Schema.Struct({
           requestId: Schema.String,
@@ -190,6 +202,8 @@ interface Options {
   readonly report: string;
   readonly dryRun: boolean;
   readonly awaySeconds: number;
+  readonly reopen: boolean;
+  readonly cutHostMidWake: boolean;
 }
 
 const managerBearer = Effect.fn("managerBearer")(function* (options: Options) {
@@ -343,17 +357,18 @@ const unavailable = (detail: string) =>
 const notSignedIn = () => Effect.die("This verifier is not signed in to T3 Connect.");
 
 /**
- * Not signed in to T3 Connect, no SSH, always online, never backgrounded. The user is on screen
- * while `visible` says so, and touches the app whenever they come back.
+ * Not signed in to T3 Connect, no SSH, always online, never backgrounded. Presence is fed what
+ * the web feeds it: `visible` is the document's visibility, and `inputs` the user's clicks.
  */
 const platformLayer = (
   manager: PrimaryConnectionRegistration,
   bearer: string,
   visible: Queue.Queue<boolean>,
+  inputs: Queue.Queue<void>,
 ) =>
   Layer.mergeAll(
     memoryStorageLayer,
-    Presence.layer({ visible: Stream.fromQueue(visible), inputs: Stream.never }),
+    Presence.layer({ visible: Stream.fromQueue(visible), inputs: Stream.fromQueue(inputs) }),
     NodeSocket.layerWebSocketConstructor,
     Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
     Wakeups.layer({ changes: Stream.never }),
@@ -421,12 +436,13 @@ const clientLayer = (
   manager: PrimaryConnectionRegistration,
   bearer: string,
   visible: Queue.Queue<boolean>,
+  inputs: Queue.Queue<void>,
 ) =>
   Connection.layerWithOptions({
     environmentThemes: true,
     usageLimitSources: true,
     usageLimitsCommand: true,
-  }).pipe(Layer.provideMerge(platformLayer(manager, bearer, visible)));
+  }).pipe(Layer.provideMerge(platformLayer(manager, bearer, visible, inputs)));
 
 const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const fs = yield* FileSystem.FileSystem;
@@ -441,8 +457,11 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
 
   const log = yield* SubscriptionRef.make<ReadonlyArray<Transition>>([]);
   const visible = yield* Queue.unbounded<boolean>();
+  const inputs = yield* Queue.unbounded<void>();
   yield* Queue.offer(visible, true);
   let wokeWhileAway = false;
+  // Whether --cut-host-mid-wake closed the manager's session while the resume was in flight.
+  let cutInFlight: boolean | null = null;
   const pausedAt = yield* Ref.make<number | null>(null);
   const created: {
     requestId: ProvisionRequestId | null;
@@ -648,7 +667,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       );
 
       yield* Effect.gen(function* () {
-        yield* registry.demand(boxId);
+        const chat = yield* Scope.make();
+        yield* registry.demand(boxId).pipe(Scope.provide(chat));
         yield* follow("box", boxId);
         yield* waitFor(
           "box connected",
@@ -664,6 +684,34 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           yield* Queue.offer(visible, false);
           yield* Console.log(`[${yield* elapsed}s] user leaves: the app is hidden`);
         }
+        if (options.reopen) {
+          yield* Scope.close(chat, Exit.void);
+          yield* Console.log(`[${yield* elapsed}s] user closes the chat`);
+        }
+        if (options.cutHostMidWake)
+          yield* SubscriptionRef.changes(log).pipe(
+            Stream.filter((entries) =>
+              entries.some(
+                (entry) =>
+                  entry.environment === "box" && entry.afterPause && entry.phase === "waking",
+              ),
+            ),
+            Stream.runHead,
+            // Long enough for the resume to be on the wire, short of the quickest resume (E2B, ~2.5 s).
+            Effect.andThen(Effect.sleep("500 millis")),
+            Effect.andThen(
+              Effect.gen(function* () {
+                cutInFlight = (yield* registry.state(boxId)).phase === "waking";
+                if (cutInFlight) yield* registry.retryNow(managerId);
+                yield* Console.log(
+                  cutInFlight
+                    ? `[${yield* elapsed}s] manager reconnected under the box's in-flight resume`
+                    : `[${yield* elapsed}s] the resume finished before the manager could be cut`,
+                );
+              }),
+            ),
+            Effect.forkScoped,
+          );
         const paused = yield* onManager(
           "environmentControl.pause",
           request(WS_METHODS.environmentControlPause, {
@@ -694,6 +742,21 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
             });
           yield* Queue.offer(visible, true);
         }
+        if (options.reopen) {
+          yield* Effect.sleep("10 seconds");
+          const openedAt = (yield* SubscriptionRef.get(log)).length;
+          yield* Queue.offer(inputs, undefined);
+          yield* registry.demand(boxId);
+          yield* Console.log(`[${yield* elapsed}s] user opens the chat`);
+          yield* waitFor(
+            "a resume sent after the chat was opened",
+            WAKE_AFTER_OPEN_TIMEOUT,
+            (entries) =>
+              entries
+                .slice(openedAt)
+                .some((entry) => entry.environment === "box" && entry.phase === "waking"),
+          );
+        }
         const timeout = Duration.minutes(options.timeoutMinutes);
         const came = yield* waitFor("box reconnected after pause", timeout, (entries) => {
           const after = entries.filter((entry) => entry.environment === "box" && entry.afterPause);
@@ -709,7 +772,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         );
         outcome = came ? "reconnected" : "not-reconnected";
       }).pipe(Effect.scoped);
-    }).pipe(Effect.scoped, Effect.provide(clientLayer(manager, bearer, visible)));
+    }).pipe(Effect.scoped, Effect.provide(clientLayer(manager, bearer, visible, inputs)));
   });
 
   /** Disposes the box on the manager, retrying while another lease operation holds it. */
@@ -746,7 +809,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const afterPause = entries.filter((entry) => entry.environment === "box" && entry.afterPause);
   const pausedAtSeconds = pause === null ? null : Math.round((pause - runStart) / 100) / 10;
   const reconnect = outcome === "reconnected" ? afterPause.at(-1) : undefined;
-  const ok = outcome === "reconnected" || (options.dryRun && outcome === "connected-dry-run");
+  const ok =
+    (outcome === "reconnected" && (!options.cutHostMidWake || cutInFlight === true)) ||
+    (options.dryRun && outcome === "connected-dry-run");
   const report = yield* encodeReport({
     harness: "verify-box-reconnect",
     startedAt,
@@ -757,6 +822,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     timeoutMinutes: options.timeoutMinutes,
     awaySeconds: options.awaySeconds,
     wokeWhileAway,
+    reopen: options.reopen,
+    cutHostMidWake: options.cutHostMidWake,
+    cutInFlight,
     box:
       created.box && created.requestId
         ? {
@@ -812,6 +880,18 @@ const command = Command.make(
       ),
       Flag.withDefault(0),
     ),
+    reopen: Flag.Boolean("reopen").pipe(
+      Flag.withDescription(
+        "Close the chat before the pause and open it 10 s after, requiring a resume within 30 s of opening.",
+      ),
+      Flag.withDefault(false),
+    ),
+    cutHostMidWake: Flag.Boolean("cut-host-mid-wake").pipe(
+      Flag.withDescription(
+        "Reconnect the manager while the box's resume is in flight, closing the session under it.",
+      ),
+      Flag.withDefault(false),
+    ),
   },
   (flags) =>
     Effect.gen(function* () {
@@ -824,6 +904,8 @@ const command = Command.make(
         report: path.resolve(flags.report),
         dryRun: flags.dryRun,
         awaySeconds: flags.awaySeconds,
+        reopen: flags.reopen,
+        cutHostMidWake: flags.cutHostMidWake,
       });
     }),
 ).pipe(

@@ -530,20 +530,32 @@ const BOX_NOT_SERVING = new ConnectionTransientError({
     "Remote environment endpoint https://e2b-box.example.test/ returned undeclared status 502.",
 });
 
+const HOST_UNREACHABLE = new ConnectionTransientError({
+  reason: "network",
+  detail: "https://environment.example.test/ could not be reached.",
+});
+
 /**
  * The host `TARGET` and its box `HOST_BOX`. The box's dial says not serving until a resume the
  * host answers `resumed` wakes it. The host answers resumes with `answers` in order, repeating the
- * last; `"never"` never answers.
+ * last; `"never"` never answers, `"cut-off"` ends the call the way the RPC client ends a call
+ * whose session is closed under it: interrupted, and `"defect"` ends it as a crashed handler does. The host's dial fails while `hostUp` is false.
  */
 const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness")(function* (
-  answers: ReadonlyArray<EnvironmentProvisionResumeResult | "never">,
+  answers: ReadonlyArray<EnvironmentProvisionResumeResult | "never" | "cut-off" | "defect">,
   options?: {
     readonly serving?: boolean;
+    readonly hostUp?: boolean;
     readonly listProvisioned?: ReadonlyArray<DiscoveredProvisionedEnvironment>;
+    /** Touches the host cuts off, in order, before it answers the rest. */
+    readonly cutOffTouches?: number;
+    /** Holds the host's session until it is opened. */
+    readonly hostGate?: Deferred.Deferred<void>;
   },
 ) {
   const touches = yield* Ref.make<ReadonlyArray<EnvironmentProvisionTouchInput>>([]);
   const serving = yield* Ref.make(options?.serving ?? false);
+  const hostUp = yield* Ref.make(options?.hostUp ?? true);
   const resumes = yield* Ref.make<ReadonlyArray<EnvironmentProvisionResumeInput>>([]);
   const harness = yield* makeHarness(
     [TARGET, HOST_BOX],
@@ -552,7 +564,9 @@ const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness
     {
       prepare: (environmentId) =>
         environmentId !== HOST_BOX.environmentId
-          ? Effect.void
+          ? Ref.get(hostUp).pipe(
+              Effect.flatMap((up) => (up ? Effect.void : Effect.fail(HOST_UNREACHABLE))),
+            )
           : Ref.get(serving).pipe(
               Effect.flatMap((isServing) =>
                 isServing ? Effect.void : Effect.fail(BOX_NOT_SERVING),
@@ -563,16 +577,32 @@ const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness
           Effect.flatMap((index): Effect.Effect<EnvironmentProvisionResumeResult> => {
             const answer = answers[Math.min(index, answers.length - 1)] ?? "never";
             if (answer === "never") return Effect.never;
+            if (answer === "cut-off") return Effect.interrupt;
+            if (answer === "defect")
+              return Effect.die(new Error("The host's resume handler crashed."));
             return answer.kind === "resumed"
               ? Ref.set(serving, true).pipe(Effect.as(answer))
               : Effect.succeed(answer);
           }),
         ),
       ...(options?.listProvisioned ? { listProvisioned: options.listProvisioned } : {}),
-      touch: (input) => Ref.update(touches, (current) => [...current, input]),
+      ...(options?.hostGate
+        ? {
+            beforeSessionConnect: (environmentId: EnvironmentId) =>
+              environmentId === TARGET.environmentId
+                ? Deferred.await(options.hostGate!)
+                : Effect.void,
+          }
+        : {}),
+      touch: (input) =>
+        Ref.modify(touches, (current) => [current.length, [...current, input]] as const).pipe(
+          Effect.flatMap((index) =>
+            index < (options?.cutOffTouches ?? 0) ? Effect.interrupt : Effect.void,
+          ),
+        ),
     },
   );
-  return { harness, serving, resumes, touches };
+  return { harness, serving, hostUp, resumes, touches };
 });
 
 const recordPhases = Effect.fn("TestEnvironmentRegistry.recordPhases")(function* (
@@ -580,10 +610,16 @@ const recordPhases = Effect.fn("TestEnvironmentRegistry.recordPhases")(function*
   environmentId: EnvironmentId,
 ) {
   const phases = yield* Ref.make<ReadonlyArray<SupervisorConnectionState["phase"]>>([]);
+  const following = yield* Deferred.make<void>();
   yield* registry.stateChanges(environmentId).pipe(
-    Stream.runForEach((state) => Ref.update(phases, (current) => [...current, state.phase])),
+    Stream.runForEach((state) =>
+      Ref.update(phases, (current) => [...current, state.phase]).pipe(
+        Effect.andThen(Deferred.succeed(following, undefined)),
+      ),
+    ),
     Effect.forkScoped,
   );
+  yield* Deferred.await(following);
   return phases;
 });
 
@@ -807,12 +843,6 @@ describe("EnvironmentRegistry", () => {
           const phases = yield* recordPhases(registry, HOST_BOX.environmentId);
 
           yield* registry.demand(HOST_BOX.environmentId);
-          const firstAfterDial = yield* awaitConnectionState(
-            registry,
-            HOST_BOX.environmentId,
-            (state) => state.phase === "waking" || state.phase === "backoff",
-          );
-          expect(firstAfterDial.phase).toBe("waking");
           yield* awaitConnectionState(
             registry,
             HOST_BOX.environmentId,
@@ -927,12 +957,6 @@ describe("EnvironmentRegistry", () => {
         yield* registry.start;
         yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
         yield* registry.demand(HOST_BOX.environmentId);
-        const firstAfterDial = yield* awaitConnectionState(
-          registry,
-          HOST_BOX.environmentId,
-          (state) => state.phase === "waking" || state.phase === "backoff",
-        );
-        expect(firstAfterDial.phase).toBe("waking");
 
         const blocked = yield* awaitConnectionState(
           registry,
@@ -985,6 +1009,213 @@ describe("EnvironmentRegistry", () => {
         expect(yield* resumesAt("200 seconds")).toBe(3);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a box whose wake is cut off by its host's session closing wakes again and connects, instead of staying waking",
+    () =>
+      Effect.gen(function* () {
+        const { harness, resumes } = yield* makeBoxWakeHarness(["cut-off", { kind: "resumed" }]);
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* TestClock.adjust("5 seconds");
+
+          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+          expect(yield* Ref.get(resumes)).toEqual([
+            { environmentId: HOST_BOX.environmentId },
+            { environmentId: HOST_BOX.environmentId },
+          ]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("a box whose wake ends in a defect is not left waking, and wakes again", () =>
+    Effect.gen(function* () {
+      const { harness, resumes } = yield* makeBoxWakeHarness(["defect", { kind: "resumed" }]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
+        yield* registry.demand(HOST_BOX.environmentId);
+        yield* TestClock.adjust("5 seconds");
+
+        expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+        expect(yield* Ref.get(resumes)).toHaveLength(2);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "retrying a box while its host has not answered the wake dials and wakes it again",
+    () =>
+      Effect.gen(function* () {
+        const { harness, resumes } = yield* makeBoxWakeHarness(["never", { kind: "resumed" }]);
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "waking",
+          );
+
+          yield* registry.retryNow(HOST_BOX.environmentId);
+          yield* TestClock.adjust("1 second");
+
+          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+          expect(yield* Ref.get(resumes)).toHaveLength(2);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "reopening a paused box's chat wakes it at once, however often it was woken before",
+    () =>
+      Effect.gen(function* () {
+        const { harness, resumes } = yield* makeBoxWakeHarness([
+          { kind: "refused", reason: "unknown", message: "Namespace could not start the Mac." },
+        ]);
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          const chat = yield* Scope.make();
+          yield* registry.demand(HOST_BOX.environmentId).pipe(Scope.provide(chat));
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "backoff",
+          );
+          yield* TestClock.setTime(45_000);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "backoff" && (state.retryAt ?? 0) > 45_000,
+          );
+          expect(yield* Ref.get(resumes)).toHaveLength(2);
+          yield* Scope.close(chat, Exit.void);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "available",
+          );
+
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* TestClock.adjust("1 second");
+
+          expect(yield* Ref.get(resumes)).toHaveLength(3);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a box whose host is down does not claim to be waking, and is woken on its next dial once its host is back",
+    () =>
+      Effect.gen(function* () {
+        const { harness, hostUp, resumes } = yield* makeBoxWakeHarness([{ kind: "resumed" }], {
+          hostUp: false,
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const phases = yield* recordPhases(registry, HOST_BOX.environmentId);
+          yield* registry.start;
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* TestClock.adjust("3 minutes");
+          expect(yield* Ref.get(phases)).not.toContain("waking");
+          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("backoff");
+
+          yield* Ref.set(hostUp, true);
+          yield* TestClock.adjust("32 seconds");
+
+          expect(yield* Ref.get(resumes)).toEqual([{ environmentId: HOST_BOX.environmentId }]);
+          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a box opened while its host is still connecting is woken as soon as the host connects",
+    () =>
+      Effect.gen(function* () {
+        const hostGate = yield* Deferred.make<void>();
+        const { harness, resumes } = yield* makeBoxWakeHarness([{ kind: "resumed" }], { hostGate });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (state) => state.phase === "connecting",
+          );
+
+          yield* Deferred.succeed(hostGate, undefined);
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "connected" || state.phase === "backoff",
+          );
+
+          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+          expect(yield* Ref.get(resumes)).toEqual([{ environmentId: HOST_BOX.environmentId }]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a box's lease is still renewed after one renewal is cut off by its host's session",
+    () =>
+      Effect.gen(function* () {
+        const { harness, touches } = yield* makeBoxWakeHarness([{ kind: "resumed" }], {
+          serving: true,
+          listProvisioned: [LISTED_HOST_BOX],
+          cutOffTouches: 1,
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "connected",
+          );
+          yield* TestClock.adjust("1 second");
+          expect(yield* Ref.get(touches)).toHaveLength(1);
+
+          yield* TestClock.adjust("4 minutes");
+          expect(yield* Ref.get(touches)).toHaveLength(2);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("an environment that is not a box is never woken, whatever its dial says", () =>

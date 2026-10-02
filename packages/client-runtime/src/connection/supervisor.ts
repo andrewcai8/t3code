@@ -105,7 +105,9 @@ function exitUnlessInterrupted<A, E, R>(
 export type BoxWakeOutcome =
   | { readonly _tag: "Resumed" }
   | { readonly _tag: "RetryLater"; readonly error: ConnectionTransientError }
-  | { readonly _tag: "Refused"; readonly error: ConnectionBlockedError };
+  | { readonly _tag: "Refused"; readonly error: ConnectionBlockedError }
+  /** The host never answered: it was not connected, or its session closed first. */
+  | { readonly _tag: "Undelivered"; readonly error: ConnectionTransientError };
 
 export interface EnvironmentSupervisorOptions {
   readonly initiallyDesired?: boolean;
@@ -113,7 +115,7 @@ export interface EnvironmentSupervisorOptions {
   readonly wake?: Effect.Effect<BoxWakeOutcome>;
   /** Runs while the connection is up, as a box's lease heartbeat does. */
   readonly keepAlive?: Effect.Effect<void>;
-  /** Whether a wake may start now; a box is woken only while its user is here. */
+  /** Whether a wake may start now: its user is here and its host is connected to hear it. */
   readonly mayWake?: Effect.Effect<boolean>;
 }
 
@@ -652,6 +654,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const next = yield* Queue.take(signals);
       if (
         next._tag === "DisconnectRequested" ||
+        next._tag === "RetryRequested" ||
         (next._tag === "NetworkChanged" && next.network === "offline")
       ) {
         return { _tag: "Interrupted" } as const;
@@ -679,7 +682,20 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       lastFailure,
       retryAt: null,
     });
-    return yield* Effect.raceFirst(wake, waitForWakeInterrupt());
+    // However a wake ends, the loop goes on: a wake that fails instead of answering is treated as
+    // one the host never heard, so the box cannot be left waking with nothing running.
+    const settledWake = wake.pipe(
+      Effect.catchCause(() =>
+        Effect.succeed<BoxWakeOutcome>({
+          _tag: "Undelivered",
+          error: new ConnectionTransientError({
+            reason: "not-serving",
+            detail: "This chat's cloud host did not answer the wake.",
+          }),
+        }),
+      ),
+    );
+    return yield* Effect.raceFirst(settledWake, waitForWakeInterrupt());
   });
 
   const waitForSignal = Queue.take(signals).pipe(
@@ -713,6 +729,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       if (!currentIntent.desired) {
         resetRetryLadder();
         latestFailure = null;
+        // Opening the chat again is a fresh ask, so its wake does not wait out an old interval.
+        wakes = 0;
+        nextWakeAt = 0;
         yield* clearLease;
         yield* setState(availableState(currentIntent, generation));
         yield* waitForSignal;
@@ -767,11 +786,14 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           generation,
           error,
         );
-        wakes += 1;
-        nextWakeAt = (yield* Clock.currentTimeMillis) + wakeIntervalMs(wakes);
-        if (woken._tag === "Interrupted" || woken._tag === "Resumed") {
-          continue;
+        if (woken._tag === "Interrupted") continue;
+        // Only a wake the host answered counts toward the interval; one it never heard is not a
+        // wake, and is sent again on the next dial.
+        if (woken._tag !== "Undelivered") {
+          wakes += 1;
+          nextWakeAt = (yield* Clock.currentTimeMillis) + wakeIntervalMs(wakes);
         }
+        if (woken._tag === "Resumed") continue;
         error = woken.error;
         latestFailure = error;
       }
