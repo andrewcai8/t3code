@@ -83,8 +83,10 @@ import {
 } from "../../state/use-thread-outbox";
 import {
   setPendingConnectionError,
+  useRemoteConnectionStatus,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
+import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
@@ -194,6 +196,8 @@ type NewTaskFlowContextValue = {
   /** How to leave another chat's box the flow was pointed at; null when it is on none. */
   readonly boxStart: NewThreadStart | null;
   readonly selectedProject: EnvironmentProject | null;
+  /** True when the draft is a thread without a project (its machine's Scratch project). */
+  readonly isScratchDraft: boolean;
   readonly modelOptions: ReadonlyArray<ModelOption>;
   readonly selectedModel: ModelSelection | null;
   readonly selectedModelOption: ModelOption | null;
@@ -372,20 +376,46 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       ? editingPendingProject
       : (projectsForEnvironment[0] ?? null));
 
-  const environments = useMemo(
-    () =>
-      newTaskEnvironments({
-        projects,
-        selectedProject,
-        savedConnectionsById,
-        serverConfigs,
-      }),
-    [projects, selectedProject, savedConnectionsById, serverConfigs],
-  );
-
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
   );
+  const isScratchDraft =
+    selectedProject !== null &&
+    isScratchProject(selectedProject, selectedEnvironmentServerConfig?.scratchWorkspaceRoot);
+  const { connectedEnvironments } = useRemoteConnectionStatus();
+  // A thread without a project can move to any connected user machine that offers
+  // one; its Scratch project there is created on the switch if it is missing.
+  const environments = useMemo(
+    () =>
+      isScratchDraft
+        ? connectedEnvironments.flatMap((environment) =>
+            savedConnectionsById[environment.environmentId] &&
+            canCreateProjectInEnvironment(environment.connectionState) &&
+            serverConfigs.get(environment.environmentId)?.scratchWorkspaceRoot !== undefined
+              ? [
+                  {
+                    environmentId: environment.environmentId,
+                    environmentLabel: environment.environmentLabel,
+                  },
+                ]
+              : [],
+          )
+        : newTaskEnvironments({
+            projects,
+            selectedProject,
+            savedConnectionsById,
+            serverConfigs,
+          }),
+    [
+      isScratchDraft,
+      connectedEnvironments,
+      projects,
+      selectedProject,
+      savedConnectionsById,
+      serverConfigs,
+    ],
+  );
+
   // While a queued pending task is being edited its draft lives under a key
   // scoped to the queued message, so new-task drafts stay intact.
   const selectedProjectDraftKey = editingPendingTask
@@ -446,10 +476,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   );
   // A thread without a project runs in a plain folder, so worktree mode
   // would leave it unsendable: it is always local and offers no choice.
-  const canChooseWorkspace = !(
-    selectedProject !== null &&
-    isScratchProject(selectedProject, selectedEnvironmentServerConfig?.scratchWorkspaceRoot)
-  );
+  const canChooseWorkspace = !isScratchDraft;
   const defaultWorkspaceMode: WorkspaceMode = canChooseWorkspace
     ? projectSettings.settings.defaultThreadEnvMode
     : "local";
@@ -1225,6 +1252,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       placement,
       boxStart,
       selectedProject,
+      isScratchDraft,
       modelOptions,
       selectedModel,
       selectedModelOption,
@@ -1277,6 +1305,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       filteredBranches,
       finishEditingPendingTask,
       interactionMode,
+      isScratchDraft,
       planModeEnabled,
       loadBranches,
       loadMoreBranches,
