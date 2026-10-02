@@ -798,8 +798,9 @@ export const layer = Layer.effect(
       void runLogged(
         Effect.logWarning("E2B could not resume a cloud workspace yet; retrying", retry),
       );
-    const pullUsage = (lease: ProvisionedLease) =>
-      runLogged(
+    const pullUsage = async (lease: ProvisionedLease) => {
+      await serveProxy(lease);
+      return runLogged(
         pullLeaseUsage(boxUsage, lease).pipe(
           Effect.tapError((cause) =>
             Effect.logWarning("cloud box usage could not be pulled", {
@@ -809,6 +810,7 @@ export const layer = Layer.effect(
           ),
         ),
       );
+    };
     const logRefresh = (leaseId: string, refreshError: string | null | undefined) =>
       refreshError
         ? Effect.logWarning("cloud checkout could not fetch its branch", {
@@ -922,7 +924,13 @@ export const layer = Layer.effect(
               },
             },
             leaseRegistry,
-            observeLease,
+            // A Namespace box is read through this process's proxy, which a restart drops. Serve
+            // it again first, or the reaper and a Mac's deadline upkeep read a working box as
+            // unknown and pause it.
+            async (lease) => {
+              await serveProxy(lease);
+              return observeLease(lease);
+            },
             pullUsage,
             (message, fields) => void runLogged(Effect.logError(message, fields)),
             chatStore,
@@ -1007,8 +1015,9 @@ export const layer = Layer.effect(
     };
     /**
      * Proxies live in this process, so a restart leaves every active lease's recorded origin
-     * unserved until something publishes it again. The gateway does, on the first request that
-     * needs one, once per lease at a time and at most every RECONNECT_RETRY_MS after a failure.
+     * unserved until something publishes it again. `serveProxy` does, on the first read that needs
+     * it, from the gateway or this manager. It runs once per lease at a time, and at most every
+     * RECONNECT_RETRY_MS after a failure.
      */
     const reconnecting = new Map<string, Promise<void>>();
     const reconnectFailedAt = new Map<string, number>();
@@ -1054,6 +1063,14 @@ export const layer = Layer.effect(
           .finally(() => reconnecting.delete(requestId));
       reconnecting.set(requestId, pending);
       return pending;
+    };
+    /** Serves an active lease's recorded proxy again, if a restart left it unserved. */
+    const serveProxy = async (lease: ProvisionedLease) => {
+      if (lease.state !== "active" || !lease.namespaceProxy) return;
+      // A proxy being restored is registered before it listens, so a read waits for the restore.
+      await reconnecting.get(lease.leaseId);
+      if (!namespaceProxies.has(lease.namespaceProxy.proxyId))
+        await reconnectProxy(lease, lease.namespaceProxy);
     };
     /** The chat behind a lease, when it runs on the Namespace instance engine. */
     const instanceChat = async (sandboxId: string) => {
@@ -1679,8 +1696,7 @@ export const layer = Layer.effect(
               !lease.namespaceProxy
             )
               return null;
-            if (lease.state === "active" && !namespaceProxies.has(lease.namespaceProxy.proxyId))
-              await reconnectProxy(lease, lease.namespaceProxy);
+            await serveProxy(lease);
             return lease.namespaceProxy.proxyOrigin;
           },
           catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
