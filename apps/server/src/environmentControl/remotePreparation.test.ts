@@ -61,20 +61,27 @@ if (args[0] === 'auth') {
     process.exit(1);
   }
   fs.appendFileSync(path.join(root, 'issued'), 'issue\n');
-  process.stdout.write('test-private-broker');
+  const ttl = args[args.indexOf('--ttl') + 1];
+  const iat = Date.now();
+  const exp = iat + Number(ttl.slice(0, -1)) * { m: 60000, h: 3600000, d: 86400000 }[ttl.slice(-1)];
+  process.stdout.write(Buffer.from(JSON.stringify({ iat, exp })).toString('base64url') + '.test-private-broker');
 } else if (args[0] === 'project') {
   fs.writeFileSync(path.join(root, 'project-add-args'), JSON.stringify(args));
   process.exit(0);
 } else {
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
   fs.writeFileSync(path.join(root, 'usage-host-id'), process.env.T3CODE_USAGE_HOST_ID ?? '');
+  const unexpired = (authorization) => {
+    const match = /^Bearer ([\w-]+)\.test-private-broker$/.exec(authorization ?? '');
+    return match !== null && JSON.parse(Buffer.from(match[1], 'base64url').toString()).exp > Date.now();
+  };
   fs.writeFileSync(path.join(root, 'auto-bootstrap'), JSON.stringify({ flag: args.includes('--auto-bootstrap-project-from-cwd'), env: process.env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD ?? null }));
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url === '/.well-known/t3/environment') {
       response.end(JSON.stringify({ environmentId: fs.existsSync(path.join(root, 'wrong-environment')) ? 'another-environment' : fs.readFileSync(path.join(home, 'userdata/environment-id'), 'utf8').trim() }));
     } else if (request.url === '/api/auth/session') {
-      response.end(JSON.stringify({ authenticated: request.headers.authorization === 'Bearer test-private-broker' && !fs.existsSync(path.join(root, 'deny-auth')), sessionMethod: 'bearer-access-token', scopes: ['access:write'] }));
+      response.end(JSON.stringify({ authenticated: unexpired(request.headers.authorization) && !fs.existsSync(path.join(root, 'deny-auth')), sessionMethod: 'bearer-access-token', scopes: ['access:write'] }));
     } else if (request.url === '/stop') {
       response.end('stopped');
       server.close();
@@ -424,6 +431,37 @@ describe("remote preparation subprocess", () => {
     await NodeFSP.writeFile(NodePath.join(input.root, "deny-auth"), "1");
     await expect(prepareRemoteHost(localPort, input)).rejects.toThrow();
     expect(await NodeFSP.readFile(NodePath.join(input.root, "started"), "utf8")).toBe("start\n");
+  });
+
+  it("renews an expired broker token instead of failing readiness", async () => {
+    const input = await fixture();
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const now = Date.now();
+    const expired = `${Buffer.from(JSON.stringify({ iat: now - 7_200_000, exp: now - 3_600_000 })).toString("base64url")}.test-private-broker`;
+    await NodeFSP.writeFile(first.brokerCredentialPath, expired);
+
+    const renewed = await prepareRemoteHost(localPort, input);
+    const token = await NodeFSP.readFile(renewed.brokerCredentialPath, "utf8");
+    const claims = JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString());
+    const session = await fetch(`http://127.0.0.1:${input.port}/api/auth/session`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect({
+      serverPid: renewed.serverPid,
+      issued: await NodeFSP.readFile(NodePath.join(input.root, "issued"), "utf8"),
+      lifetimeMs: claims.exp - claims.iat,
+      replaced: token !== expired,
+      mode: (await NodeFSP.stat(renewed.brokerCredentialPath)).mode & 0o777,
+      authenticated: (await session.json()).authenticated,
+    }).toEqual({
+      serverPid: first.serverPid,
+      issued: "issue\nissue\n",
+      lifetimeMs: 3_600_000,
+      replaced: true,
+      mode: 0o600,
+      authenticated: true,
+    });
   });
 
   it("recovers a lost readiness response and restarts an exited owned server", async () => {
