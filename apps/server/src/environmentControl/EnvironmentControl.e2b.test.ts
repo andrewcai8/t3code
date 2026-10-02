@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - this test writes private manager config and drives a local guest.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalFetchInEffect:off - this test writes private manager config and drives a local guest.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
