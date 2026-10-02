@@ -103,7 +103,8 @@ import {
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
-import { observeLease, pullLeaseUsage, type LeaseActivity } from "./leaseActivity.ts";
+import { observeLease, pullLeaseUsage, type LeaseObservation } from "./leaseActivity.ts";
+import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
@@ -158,14 +159,15 @@ export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
   driver: CloudDriver & { readonly upkeepChat?: UpkeepChat },
   leaseRegistry?: ProvisionedLeaseRegistry,
-  activity: (lease: ProvisionedLease) => Promise<LeaseActivity> = async (lease) =>
-    (await observeLease(lease)).activity,
+  observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
   pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
   /** Where a failure this service retries later, rather than returns, is reported. */
   reportFailure: (
     message: string,
     fields: { readonly chatId: string; readonly cause: unknown },
   ) => void = () => {},
+  /** Where each read of a box's chat is kept, so clients can list it while the box sleeps. */
+  chats?: ProvisionedChatStore,
 ) {
   const pending = new Map<
     EnvironmentId,
@@ -177,6 +179,19 @@ export function createEnvironmentControl(
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
+  let readingNewChats: Promise<void> | undefined;
+  // Every read of a box's shell also keeps its chat, so the chat a paused box shows is the one it
+  // held when last read: at the latest, right before its pause.
+  const activity = async (lease: ProvisionedLease) => {
+    const observation = await observe(lease);
+    if (observation.chat && chats)
+      await chats
+        .record(lease.leaseId, observation.chat)
+        .catch((cause: unknown) =>
+          reportFailure("cloud box chat could not be kept", { chatId: lease.leaseId, cause }),
+        );
+    return observation.activity;
+  };
   /** The last activity each awake lease settled on, so a finished turn pulls once. */
   const settledActivity = new Map<string, "busy" | "idle">();
   // A stopped box's transcripts are unreachable, so its usage is pulled first.
@@ -597,6 +612,28 @@ export function createEnvironmentControl(
       await Promise.all(passes);
     },
     /**
+     * Reads the chat of each awake claimed box the host holds none for, so a new chat lists on
+     * other clients before the next usage sweep. One pass at a time; a box with a chat and a
+     * paused box are never read.
+     */
+    readNewChats: (): Promise<void> =>
+      (readingNewChats ??= (async () => {
+        if (!leaseRegistry || !chats) return;
+        const held = await chats.leaseIds();
+        const queue = (await leaseRegistry.awake()).filter(
+          (lease) => lease.owner !== null && !held.has(lease.leaseId),
+        );
+        const read = async () => {
+          for (let lease = queue.shift(); lease; lease = queue.shift()) await activity(lease);
+        };
+        await Promise.all(Array.from({ length: USAGE_SYNC_CONCURRENCY }, read));
+      })()
+        // The next list that asks for chats reads them again.
+        .catch(() => undefined)
+        .finally(() => {
+          readingNewChats = undefined;
+        })),
+    /**
      * Pulls each awake box's usage when its agent settles from busy to idle,
      * or the first time it is seen idle. A failed pull retries next sweep.
      */
@@ -706,6 +743,7 @@ export const layer = Layer.effect(
         new EnvironmentControlError({ message: "Existing cloud leases could not be loaded." }),
     });
     const leaseRegistry = createProvisionedLeaseRegistry(sql, legacyLeases);
+    const chatStore = createProvisionedChatStore(sql);
     const namespaceProxies = new NamespaceProxyManager();
     const importedLeases = new Map(
       decodeLegacyLeases(legacyLeases).map((lease) => [lease.leaseId, lease]),
@@ -868,9 +906,10 @@ export const layer = Layer.effect(
               },
             },
             leaseRegistry,
-            async (lease) => (await observeLease(lease)).activity,
+            observeLease,
             pullUsage,
             (message, fields) => void runLogged(Effect.logError(message, fields)),
+            chatStore,
           );
           return { ...control, config };
         })();
