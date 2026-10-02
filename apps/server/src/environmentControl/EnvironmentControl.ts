@@ -834,9 +834,9 @@ export const layer = Layer.effect(
                 return chat ? chat.mac.upkeep(chat.operation, chat.manifest, busy) : null;
               },
               // A box this manager provisioned resumes through the runtime that
-              // prepared it, and fetches its followed branch so the thread sees
-              // what was pushed while it slept. Imported leases keep the legacy
-              // runner.
+              // prepared it, which starts its T3 server again if it died and
+              // fetches its followed branch so the thread sees what was pushed
+              // while it slept. Imported leases keep the legacy runner.
               resume: async (input) => {
                 try {
                   if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
@@ -844,11 +844,8 @@ export const layer = Layer.effect(
                   if (input.namespaceResource || (await instanceChat(input.sandboxId)))
                     return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
                   const resumed = await cloud.resume(input);
-                  // Best effort: the sandbox is awake and resumed either way.
-                  await refreshProvisionedE2b(input.leaseId, config.e2bApiKey).then(
-                    ({ refreshError }) => runLogged(logRefresh(input.leaseId, refreshError)),
-                    (cause) => runLogged(logRefresh(input.leaseId, String(cause))),
-                  );
+                  // An awake sandbox is not a resumed chat until its T3 server answers.
+                  await resumeProvisionedE2b(input.leaseId, config.e2bApiKey);
                   return resumed;
                 } catch (cause) {
                   if (!(cause instanceof ProvisionedSandboxMissing))
@@ -1010,18 +1007,29 @@ export const layer = Layer.effect(
         mac: (await resolveNamespace()).mac,
       };
     };
-    const refreshProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
+    const resumeProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
       const operation = await Effect.runPromise(store.get(requestId));
       if (
         operation.state.kind !== "ready" ||
         operation.state.allocation.resource.provider !== "e2b"
       )
         throw new Error("No ready E2B runtime");
-      return makeE2bProvisionRuntime({ apiKey }, logE2bResumeRetry).refresh(
+      const { refreshError, restarted } = await makeE2bProvisionRuntime(
+        { apiKey },
+        logE2bResumeRetry,
+      ).resume(
         operation,
         operation.state.allocation.resource.sandboxId,
         await manifests.load(requestId),
+        await manifests.readRuntime(requestId),
       );
+      if (restarted)
+        await runLogged(
+          Effect.logWarning("cloud workspace server was down; prepared it again", {
+            leaseId: requestId,
+          }),
+        );
+      await runLogged(logRefresh(requestId, refreshError));
     };
     const provider = (operation: ProvisionOperation) =>
       Effect.tryPromise(async () => {

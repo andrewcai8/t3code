@@ -18,7 +18,7 @@ import * as Schema from "effect/Schema";
 import {
   brokerTokenScript,
   prepareRemoteHost,
-  refreshRemoteCheckout,
+  checkRemoteHost,
   sealWarmBase,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
@@ -341,18 +341,26 @@ export function makeE2bProvisionRuntime(
       }
     },
     prepare,
-    /** Fetches the followed branch into a prepared, running box and nothing else. */
-    refresh: async (
+    /**
+     * Converges a woken box on its preparation. A box whose T3 server still
+     * answers only fetches its followed branch. One whose server died while
+     * the sandbox stayed up is prepared again, which restarts the server under
+     * the same environment identity.
+     */
+    resume: async (
       operation: ProvisionOperation,
       sandboxId: string,
       manifest: ProvisionPreparationManifest,
-    ) =>
-      followedBranch(manifest)
-        ? refreshRemoteCheckout(
-            e2bPythonPort(await connect(operation, sandboxId)),
-            guestInput(operation, sandboxId, manifest),
-          )
-        : { refreshError: null },
+      runtime: ProvisionRuntimeArtifact | null,
+    ) => {
+      const checked = await checkRemoteHost(
+        e2bPythonPort(await connect(operation, sandboxId)),
+        guestInput(operation, sandboxId, manifest),
+      );
+      if (checked.serverReady) return { refreshError: checked.refreshError, restarted: false };
+      const ready = await prepare(operation, sandboxId, manifest, undefined, runtime);
+      return { refreshError: ready.refreshError ?? null, restarted: true };
+    },
     attach: async (
       operation: ProvisionOperation,
       sandboxId: string,

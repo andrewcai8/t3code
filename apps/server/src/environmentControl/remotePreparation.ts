@@ -152,28 +152,31 @@ export async function prepareRemoteHost(
   return ready;
 }
 
-const decodeRefreshed = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ refreshError: Schema.NullOr(Schema.String) })),
+const decodeChecked = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({ refreshError: Schema.NullOr(Schema.String), serverReady: Schema.Boolean }),
+  ),
 );
 
 /**
- * Fetches the followed branch into an already prepared box, and nothing else:
- * the step a resume runs so the thread can see what was pushed while it slept.
+ * What a resume asks an already prepared box: fetches the followed branch, so
+ * the thread can see what was pushed while it slept, and reports whether the
+ * box's T3 server still answers as its environment. Changes nothing else.
  * Takes the same input as preparation, whose intent it verifies.
  */
-export async function refreshRemoteCheckout(
+export async function checkRemoteHost(
   port: RemotePreparationPort,
   input: RemotePreparationInput,
-): Promise<{ readonly refreshError: string | null }> {
+): Promise<{ readonly refreshError: string | null; readonly serverReady: boolean }> {
   const result = await port.executePython({
     script: remotePreparationScript,
-    stdin: JSON.stringify({ ...input, refreshOnly: true }),
+    stdin: JSON.stringify({ ...input, checkOnly: true }),
   });
   if (result.exitCode !== 0) {
     const detail = result.stderr?.trim();
-    throw new Error(detail && detail.length > 0 ? detail : "Remote refresh failed.");
+    throw new Error(detail && detail.length > 0 ? detail : "Remote check failed.");
   }
-  return decodeRefreshed(result.stdout);
+  return decodeChecked(result.stdout);
 }
 
 /** Journal entries a sealed warm base carries to the box that adopts it: the runtime it verified. */
@@ -498,7 +501,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'refreshOnly', 'toolInstall')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         adopted = False
         if journal_path.exists():
@@ -618,10 +621,29 @@ def prepare(spec):
                 # A deleted branch, usually a merged pull request's, has
                 # nothing new to show and is not worth a warning.
                 return None if "couldn't find remote ref" in str(error) else str(error)
-        if spec.get('refreshOnly'):
+        credential_path = root / 'broker-token'
+        origin = 'http://127.0.0.1:' + str(spec['port'])
+        def probe():
+            try:
+                with urllib.request.urlopen(origin + '/.well-known/t3/environment', timeout=2) as response:
+                    descriptor = json.load(response)
+            except (OSError, ValueError):
+                return False
+            if descriptor.get('environmentId') != journal['environmentId']:
+                raise RuntimeError('Port belongs to another environment')
+            request = urllib.request.Request(origin + '/api/auth/session', headers={'Authorization': 'Bearer ' + token})
+            try:
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    session = json.load(response)
+                return session.get('authenticated') is True and session.get('sessionMethod') == 'bearer-access-token' and ${JSON.stringify(AuthAccessWriteScope)} in session.get('scopes', [])
+            except (OSError, ValueError):
+                return False
+        if spec.get('checkOnly'):
             if not project.exists():
                 raise RuntimeError('The workspace has not been prepared')
-            return {'refreshError': fetch_followed()}
+            # A box asleep past half its broker TTL renews with the build that served it.
+            token = renew_broker_token(root, run, serving_broker_issue(root, '/proc'))
+            return {'refreshError': fetch_followed(), 'serverReady': probe()}
         with step('homeFiles'):
             install_files('home')
         # Agent CLIs install into the isolated home, independent of the runtime
@@ -864,24 +886,7 @@ def prepare(spec):
                         raise RuntimeError('Invalid prepare command')
                     with step('prepareCommand.' + str(index)):
                         run(['sh', '-lc', command_line], project, env, timeout=1800)
-        credential_path = root / 'broker-token'
         broker_issue = {'argv': broker_issue_argv(command, t3home, spec['brokerTtl']), 'cwd': str(project), 'env': env}
-        origin = 'http://127.0.0.1:' + str(spec['port'])
-        def probe():
-            try:
-                with urllib.request.urlopen(origin + '/.well-known/t3/environment', timeout=2) as response:
-                    descriptor = json.load(response)
-            except (OSError, ValueError):
-                return False
-            if descriptor.get('environmentId') != journal['environmentId']:
-                raise RuntimeError('Port belongs to another environment')
-            request = urllib.request.Request(origin + '/api/auth/session', headers={'Authorization': 'Bearer ' + token})
-            try:
-                with urllib.request.urlopen(request, timeout=2) as response:
-                    session = json.load(response)
-                return session.get('authenticated') is True and session.get('sessionMethod') == 'bearer-access-token' and ${JSON.stringify(AuthAccessWriteScope)} in session.get('scopes', [])
-            except (OSError, ValueError):
-                return False
         server_path = root / 'server.json'
         def server_process():
             try:
