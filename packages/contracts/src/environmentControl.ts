@@ -1,4 +1,5 @@
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
@@ -84,8 +85,11 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   threadId: Schema.NullOr(ThreadId),
   /** Set when the host started this environment for an automation run rather than a client. */
   automationId: Schema.optional(TrimmedNonEmptyString),
-  /** Only when the request asked for chats and the client does not hold this one already. */
-  chat: Schema.optional(ProvisionedChat),
+  /**
+   * Only when the request asked for chats and the client does not hold this one already. A chat
+   * this client cannot read, as from a newer host, is dropped rather than failing the list.
+   */
+  chat: Schema.optional(ProvisionedChat).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
   createdAt: Schema.String,
   expiresAt: Schema.String,
 });
