@@ -1248,7 +1248,10 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(platformRegistrations, installPlatformRegistration, { discard: true });
   });
 
-  /** Removes an entry and everything saved for it, unless `keep` holds for it under its lock. */
+  /**
+   * Removes an entry and everything saved for it, unless `keep` holds for it under its lock.
+   * Succeeds with whether it removed the entry.
+   */
   const forgetEntry = Effect.fn("EnvironmentRegistry.forgetEntry")(function* (
     environmentId: EnvironmentId,
     keep?: (entry: ConnectionCatalogEntry) => boolean,
@@ -1262,7 +1265,7 @@ export const make = Effect.gen(function* () {
           });
         }
         const entry = yield* getEntry(environmentId);
-        if (keep?.(entry) === true) return;
+        if (keep?.(entry) === true) return false;
         const target = entry.target;
         const profile =
           target._tag === "BearerConnectionTarget" || target._tag === "SshConnectionTarget"
@@ -1322,6 +1325,7 @@ export const make = Effect.gen(function* () {
             Effect.ignore,
           );
         }
+        return true;
       }),
     );
   });
@@ -1422,7 +1426,12 @@ export const make = Effect.gen(function* () {
       case "MarkMissing":
         return markWorkspaceMissing(step.environmentId);
       case "Forget":
-        return forgetUnpairedBox(step.environmentId);
+        // A box that paired since the list was read is kept, and one its host disposed is missing.
+        return forgetUnpairedBox(step.environmentId).pipe(
+          Effect.flatMap((forgotten) =>
+            !forgotten && step.disposed ? markWorkspaceMissing(step.environmentId) : Effect.void,
+          ),
+        );
     }
   };
 

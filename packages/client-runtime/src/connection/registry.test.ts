@@ -43,7 +43,7 @@ import {
   BearerConnectionCredential,
   BearerConnectionProfile,
   BearerConnectionRegistration,
-  type ConnectionRegistration,
+  type CatalogRegistration,
   PrimaryConnectionRegistration,
   RelayConnectionRegistration,
   SshConnectionProfile,
@@ -294,7 +294,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     readonly touch?: (input: EnvironmentProvisionTouchInput) => Effect.Effect<void>;
     readonly beforeSessionConnect?: (environmentId: EnvironmentId) => Effect.Effect<void>;
     readonly beforeRegistrationRegister?: (
-      registration: ConnectionRegistration,
+      registration: CatalogRegistration,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly beforeRegistrationRemove?: (
       target: ConnectionTarget,
@@ -3342,46 +3342,55 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
     }),
   );
 
-  it.effect("a box that pairs while its host's list is applied keeps its pairing", () =>
-    Effect.gen(function* () {
-      const planning = yield* Deferred.make<void>();
-      const paired = yield* Deferred.make<void>();
-      const harness = yield* makeHarness([TARGET], [], [], {
-        listProvisioned: [listedBox(CHAT_BOX_ID)],
-        // The sync reads the box's cache after it took its snapshot of the catalog.
-        beforeLoadShell: (environmentId) =>
-          environmentId === CHAT_BOX_ID
-            ? Deferred.succeed(planning, undefined).pipe(Effect.andThen(Deferred.await(paired)))
-            : Effect.void,
-      });
+  it.effect(
+    "a box that pairs while its host's list is applied keeps its pairing, as missing once disposed",
+    () =>
+      Effect.gen(function* () {
+        const planning = yield* Deferred.make<void>();
+        const paired = yield* Deferred.make<void>();
+        const harness = yield* makeHarness([TARGET], [], [], {
+          listProvisioned: [listedBox(CHAT_BOX_ID)],
+          // The sync reads the box's cache after it took its snapshot of the catalog.
+          beforeLoadShell: (environmentId) =>
+            environmentId === CHAT_BOX_ID
+              ? Deferred.succeed(planning, undefined).pipe(Effect.andThen(Deferred.await(paired)))
+              : Effect.void,
+        });
 
-      yield* Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        yield* registry.start;
-        yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
-        yield* registry.syncHostBoxes(TARGET.environmentId, listing(listedBox(CHAT_BOX_ID)));
-        const sync = yield* registry
-          .syncHostBoxes(
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
             TARGET.environmentId,
-            listing(listedBox(CHAT_BOX_ID, { lifecycle: "disposed", chat: chatAt(4) })),
-          )
-          .pipe(Effect.forkScoped);
-        yield* Deferred.await(planning);
-        yield* registry.demand(CHAT_BOX_ID);
-        yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
-        yield* Deferred.succeed(paired, undefined);
-        yield* Fiber.join(sync);
+            (s) => s.phase === "connected",
+          );
+          yield* registry.syncHostBoxes(TARGET.environmentId, listing(listedBox(CHAT_BOX_ID)));
+          const sync = yield* registry
+            .syncHostBoxes(
+              TARGET.environmentId,
+              listing(listedBox(CHAT_BOX_ID, { lifecycle: "disposed", chat: chatAt(4) })),
+            )
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(planning);
+          yield* registry.demand(CHAT_BOX_ID);
+          yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+          yield* Deferred.succeed(paired, undefined);
+          yield* Fiber.join(sync);
 
-        expect(
-          (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
-        ).toEqual(new BearerConnectionCredential({ token: "box-token-1" }));
-        const entry = (yield* SubscriptionRef.get(registry.entries)).get(CHAT_BOX_ID);
-        expect(entry === undefined ? null : Option.getOrNull(entry.profile)?.connectionId).toBe(
-          UNPAIRED_CHAT_BOX.connectionId,
-        );
-        expect((yield* registry.state(CHAT_BOX_ID)).phase).toBe("connected");
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }).pipe(Effect.provide(TestClock.layer())),
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(UNPAIRED_CHAT_BOX.connectionId),
+          ).toEqual(new BearerConnectionCredential({ token: "box-token-1" }));
+          const entry = (yield* SubscriptionRef.get(registry.entries)).get(CHAT_BOX_ID);
+          expect(entry === undefined ? null : Option.getOrNull(entry.profile)?.connectionId).toBe(
+            UNPAIRED_CHAT_BOX.connectionId,
+          );
+          // The host listed it disposed, so the pairing it kept reads as a missing workspace.
+          expect(entry?.target).toEqual(
+            new BearerConnectionTarget({ ...UNPAIRED_CHAT_BOX, workspaceStatus: "missing" }),
+          );
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("the same list twice writes nothing", () =>

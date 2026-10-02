@@ -34,8 +34,11 @@ export type HostBoxSyncStep =
     }
   /** Stop dialing a box the host lost, keeping its history readable. */
   | { readonly _tag: "MarkMissing"; readonly environmentId: EnvironmentId }
-  /** Drop an unpaired box that is gone, with its seeded cache. */
-  | { readonly _tag: "Forget"; readonly environmentId: EnvironmentId };
+  /**
+   * Drop an unpaired box that is gone, with its seeded cache. `disposed` when the host listed it
+   * disposed, false when the host no longer lists it.
+   */
+  | { readonly _tag: "Forget"; readonly environmentId: EnvironmentId; readonly disposed: boolean };
 
 export interface HostBoxSyncInput {
   readonly managerId: EnvironmentId;
@@ -93,7 +96,7 @@ export function planHostBoxSync(input: HostBoxSyncInput): ReadonlyArray<HostBoxS
     } else if (target.box.managerId !== managerId) {
       continue;
     } else if (row.lifecycle === "disposed" && isUnpairedBox(entry)) {
-      steps.push({ _tag: "Forget", environmentId: row.environmentId });
+      steps.push({ _tag: "Forget", environmentId: row.environmentId, disposed: true });
       continue;
     } else if (target.label !== row.label) {
       steps.push({ _tag: "Relabel", environmentId: row.environmentId, label: row.label });
@@ -114,7 +117,7 @@ export function planHostBoxSync(input: HostBoxSyncInput): ReadonlyArray<HostBoxS
       isUnpairedBox(entry) &&
       connectionBox(entry.target)?.managerId === managerId
     )
-      steps.push({ _tag: "Forget", environmentId });
+      steps.push({ _tag: "Forget", environmentId, disposed: false });
   }
   return steps;
 }

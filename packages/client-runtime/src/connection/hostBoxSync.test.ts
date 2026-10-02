@@ -202,10 +202,10 @@ describe("planHostBoxSync", () => {
         ],
       }),
     ).toEqual([
-      { _tag: "Forget", environmentId: "disposed-unpaired" },
+      { _tag: "Forget", environmentId: "disposed-unpaired", disposed: true },
       { _tag: "MarkMissing", environmentId: "disposed-paired" },
       { _tag: "MarkMissing", environmentId: "missing-unpaired" },
-      { _tag: "Forget", environmentId: "unlisted-unpaired" },
+      { _tag: "Forget", environmentId: "unlisted-unpaired", disposed: false },
     ]);
   });
 
