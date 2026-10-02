@@ -853,8 +853,10 @@ const ROUTING_HORIZON_MS = 5 * HOUR;
  * How much an account has for a chat over `ROUTING_HORIZON_MS` before any of
  * its windows stops it, in percent of a full window: the tightest window's.
  * A window that refills within the horizon is full for the part of it left
- * after the reset, so 5% left with a reset in ten minutes counts as nearly
- * 100, and 40% left with a reset in six days as 40. A window spent right now
+ * after the reset, as far as its room lasts until then at the window's own
+ * pace. So 5% left with a reset in ten minutes counts as nearly 100, 1% left
+ * with a reset in half an hour as about 10, and 40% left with a reset in six
+ * days as 40. A window spent right now
  * counts as 0 however soon it refills, since the chat's first turn would
  * fail. A window past its reset counts as full, and an account with no
  * subscription limits (an API key) as 100.
@@ -898,6 +900,14 @@ function headroomWindows(
   return roomiest ? [roomiest] : [];
 }
 
+/**
+ * The share of a window used at its own pace between now and its reset: what
+ * the room left must cover for a chat to run until the window refills.
+ */
+const percentNeededUntil = (window: ServerProviderUsageWindow, resetsAt: number, now: number) =>
+  (100 * (resetsAt - now)) /
+  (window.windowDurationMins ? window.windowDurationMins * MINUTE : ROUTING_HORIZON_MS);
+
 function accountHeadroom(
   driver: ServerProvider["driver"],
   limits: ServerProviderUsageLimits | undefined,
@@ -922,7 +932,9 @@ function accountHeadroom(
     const refilled =
       remaining <= 0 || resetsAt === null
         ? 0
-        : Math.max(0, 1 - (resetsAt - now) / ROUTING_HORIZON_MS) * (100 - remaining);
+        : Math.max(0, 1 - (resetsAt - now) / ROUTING_HORIZON_MS) *
+          (100 - remaining) *
+          Math.min(1, remaining / percentNeededUntil(window, resetsAt, now));
     const available = remaining + refilled;
     if (
       available < tightest.remainingPercent ||
