@@ -977,20 +977,29 @@ describe("a cloud box's chat", () => {
       registry: ReturnType<typeof createProvisionedLeaseRegistry>;
       events: string[];
       recorded: Array<readonly [string, string]>;
-      carded: Set<string>;
+      carded: Map<string, string>;
+      chatless: Set<string>;
+      failures: Array<{ message: string; cause: string }>;
+      store: { broken: boolean };
       manager: ReturnType<typeof createEnvironmentControl>;
     }) => Promise<void>,
   ) {
     await withSqlRegistry(async (registry) => {
       const events: string[] = [];
       const recorded: Array<readonly [string, string]> = [];
-      const carded = new Set<string>();
+      const carded = new Map<string, string>();
+      const chatless = new Set<string>();
+      const failures: Array<{ message: string; cause: string }> = [];
+      const store = { broken: false };
       const chats: ProvisionedChatStore = {
         record: async (leaseId, chat) => {
           recorded.push([leaseId, chat.thread.title]);
-          carded.add(leaseId);
+          carded.set(leaseId, chat.thread.id);
         },
-        leaseIds: async () => new Set(carded),
+        heldThreads: async () => {
+          if (store.broken) throw new Error("database is locked");
+          return new Map(carded);
+        },
       };
       const driver = setup().driver;
       driver.pause = async ({ sandboxId }) => {
@@ -1002,13 +1011,17 @@ describe("a cloud box's chat", () => {
         registry,
         async (lease) => {
           events.push(`observe:${lease.leaseId}`);
-          return { activity: "idle", chat: chatTitled(`Chat on ${lease.leaseId}`) };
+          return {
+            activity: "idle",
+            chat: chatless.has(lease.leaseId) ? null : chatTitled(`Chat on ${lease.leaseId}`),
+          };
         },
         async () => {},
-        () => {},
+        (message, { cause }) =>
+          failures.push({ message, cause: cause instanceof Error ? cause.message : String(cause) }),
         chats,
       );
-      await test({ registry, events, recorded, carded, manager });
+      await test({ registry, events, recorded, carded, chatless, failures, store, manager });
     });
   }
   const claimedBox = async (
@@ -1054,7 +1067,7 @@ describe("a cloud box's chat", () => {
   it("reads a new chat once, only from awake claimed boxes the host holds no chat for", async () => {
     await withChats(async ({ registry, events, recorded, carded, manager }) => {
       await claimedBox(registry, "carded");
-      carded.add("carded");
+      carded.set("carded", "thread");
       await claimedBox(registry, "new");
       await claimedBox(registry, "paused");
       await registry.markPaused("paused");
@@ -1068,6 +1081,48 @@ describe("a cloud box's chat", () => {
       expect(recorded).toEqual([["new", "Chat on new"]]);
       await manager.readNewChats();
       expect(events).toEqual(["observe:new"]);
+    });
+  });
+
+  it("reads again a box whose kept chat is another thread's", async () => {
+    await withChats(async ({ registry, events, recorded, carded, manager }) => {
+      await claimedBox(registry, "reclaimed");
+      carded.set("reclaimed", "thread-before");
+      await manager.readNewChats();
+      expect(events).toEqual(["observe:reclaimed"]);
+      expect(recorded).toEqual([["reclaimed", "Chat on reclaimed"]]);
+    });
+  });
+
+  it("waits a minute before reading again a box that showed no chat", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+      await withChats(async ({ registry, events, chatless, manager }) => {
+        await claimedBox(registry, "early");
+        chatless.add("early");
+        await manager.readNewChats();
+        vi.setSystemTime(new Date("2026-10-01T00:00:59.000Z"));
+        await manager.readNewChats();
+        expect(events).toEqual(["observe:early"]);
+        vi.setSystemTime(new Date("2026-10-01T00:01:01.000Z"));
+        await manager.readNewChats();
+        expect(events).toEqual(["observe:early", "observe:early"]);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a pass that could not read the kept chats", async () => {
+    await withChats(async ({ registry, events, failures, store, manager }) => {
+      await claimedBox(registry, "new");
+      store.broken = true;
+      await manager.readNewChats();
+      expect(events).toEqual([]);
+      expect(failures).toEqual([
+        { message: "new cloud box chats could not be read", cause: "database is locked" },
+      ]);
     });
   });
 });

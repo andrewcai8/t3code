@@ -56,8 +56,8 @@ export interface ProvisionedChatStore {
    * A claim can hand the box to another thread at the same sequence.
    */
   readonly record: (leaseId: string, chat: ProvisionedChat, now?: Date) => Promise<void>;
-  /** The leases the host holds a chat for. */
-  readonly leaseIds: () => Promise<ReadonlySet<string>>;
+  /** The thread of the chat the host holds for each lease. */
+  readonly heldThreads: () => Promise<ReadonlyMap<string, string>>;
 }
 
 export function createProvisionedChatStore(sql: SqlClient.SqlClient): ProvisionedChatStore {
@@ -71,15 +71,19 @@ export function createProvisionedChatStore(sql: SqlClient.SqlClient): Provisione
           chat_json = excluded.chat_json,
           read_at = excluded.read_at
         WHERE excluded.sequence > provisioned_chats.sequence
-          OR json_extract(excluded.chat_json, '$.thread.id')
-            IS NOT json_extract(provisioned_chats.chat_json, '$.thread.id')
+          OR (excluded.sequence = provisioned_chats.sequence
+            AND json_extract(excluded.chat_json, '$.thread.id')
+              IS NOT json_extract(provisioned_chats.chat_json, '$.thread.id'))
       `);
     },
-    leaseIds: async () => {
+    heldThreads: async () => {
       const rows = await Effect.runPromise(
-        sql<{ readonly lease_id: string }>`SELECT lease_id FROM provisioned_chats`,
+        sql<{
+          readonly lease_id: string;
+          readonly thread_id: string;
+        }>`SELECT lease_id, json_extract(chat_json, '$.thread.id') AS thread_id FROM provisioned_chats`,
       );
-      return new Set(rows.map((row) => row.lease_id));
+      return new Map(rows.map((row) => [row.lease_id, row.thread_id]));
     },
   };
 }

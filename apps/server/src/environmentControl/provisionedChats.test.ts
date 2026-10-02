@@ -85,9 +85,9 @@ describe("ProvisionedChatStore", () => {
         { leaseId: "lease-a", sequence: 9, title: "Renamed", readAt: "2026-10-01T00:15:00.000Z" },
         { leaseId: "lease-b", sequence: 1, title: "Other box", readAt: "2026-10-01T00:20:00.000Z" },
       ]);
-      expect([...(yield* Effect.promise(() => store.leaseIds()))].toSorted()).toEqual([
-        "lease-a",
-        "lease-b",
+      expect([...(yield* Effect.promise(() => store.heldThreads()))].toSorted()).toEqual([
+        ["lease-a", "thread-owner"],
+        ["lease-b", "thread-owner"],
       ]);
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
@@ -105,6 +105,18 @@ describe("ProvisionedChatStore", () => {
       );
       if (!claimed) throw new Error("fixture shell holds the claimed thread");
       yield* Effect.promise(() => store.record("lease-a", claimed));
+      expect((yield* storedRows()).map(({ sequence, title }) => ({ sequence, title }))).toEqual([
+        { sequence: 9, title: "Second owner" },
+      ]);
+      const olderClaim = ownerChat(
+        {
+          ...shellBody([thread("thread-stale", "project-app", "Stale owner")]),
+          snapshotSequence: 8,
+        },
+        "thread-stale",
+      );
+      if (!olderClaim) throw new Error("fixture shell holds the stale thread");
+      yield* Effect.promise(() => store.record("lease-a", olderClaim));
       expect((yield* storedRows()).map(({ sequence, title }) => ({ sequence, title }))).toEqual([
         { sequence: 9, title: "Second owner" },
       ]);

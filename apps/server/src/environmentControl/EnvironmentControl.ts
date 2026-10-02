@@ -131,6 +131,8 @@ const isProvisionRefused = Schema.is(ProvisionRefused);
 
 /** Boxes read at once per usage sweep, so a few stuck boxes cannot stall the rest. */
 const USAGE_SYNC_CONCURRENCY = 4;
+/** How long a box that showed no chat waits before a list reads it again. */
+const NEW_CHAT_RETRY_MS = 60_000;
 
 const refusalMessages = {
   busy: "Work is active. Stop was refused.",
@@ -164,7 +166,7 @@ export function createEnvironmentControl(
   /** Where a failure this service retries later, rather than returns, is reported. */
   reportFailure: (
     message: string,
-    fields: { readonly chatId: string; readonly cause: unknown },
+    fields: { readonly chatId?: string; readonly cause: unknown },
   ) => void = () => {},
   /** Where each read of a box's chat is kept, so clients can list it while the box sleeps. */
   chats?: ProvisionedChatStore,
@@ -180,6 +182,8 @@ export function createEnvironmentControl(
   >();
   let bootstrapping: Promise<void> | undefined;
   let readingNewChats: Promise<void> | undefined;
+  /** When each box was last read for a new chat, so one that never shows one is not read per list. */
+  const newChatReadAt = new Map<string, number>();
   // Every read of a box's shell also keeps its chat, so the chat a paused box shows is the one it
   // held when last read: at the latest, right before its pause.
   const activity = async (lease: ProvisionedLease) => {
@@ -612,24 +616,34 @@ export function createEnvironmentControl(
       await Promise.all(passes);
     },
     /**
-     * Reads the chat of each awake claimed box the host holds none for, so a new chat lists on
-     * other clients before the next usage sweep. One pass at a time; a box with a chat and a
-     * paused box are never read.
+     * Reads the chat of each awake claimed box the host holds none for, or holds another
+     * thread's, so a new chat lists on other clients before the next usage sweep. One pass at a
+     * time; a box read in the last minute, a box with its owner's chat and a paused box are never
+     * read.
      */
     readNewChats: (): Promise<void> =>
       (readingNewChats ??= (async () => {
         if (!leaseRegistry || !chats) return;
-        const held = await chats.leaseIds();
-        const queue = (await leaseRegistry.awake()).filter(
-          (lease) => lease.owner !== null && !held.has(lease.leaseId),
+        const held = await chats.heldThreads();
+        const awake = await leaseRegistry.awake();
+        const now = Date.now();
+        for (const leaseId of newChatReadAt.keys())
+          if (!awake.some((lease) => lease.leaseId === leaseId)) newChatReadAt.delete(leaseId);
+        const queue = awake.filter(
+          (lease) =>
+            lease.owner !== null &&
+            held.get(lease.leaseId) !== lease.owner.threadId &&
+            now - (newChatReadAt.get(lease.leaseId) ?? -Infinity) >= NEW_CHAT_RETRY_MS,
         );
+        for (const lease of queue) newChatReadAt.set(lease.leaseId, now);
         const read = async () => {
           for (let lease = queue.shift(); lease; lease = queue.shift()) await activity(lease);
         };
         await Promise.all(Array.from({ length: USAGE_SYNC_CONCURRENCY }, read));
       })()
-        // The next list that asks for chats reads them again.
-        .catch(() => undefined)
+        .catch((cause: unknown) =>
+          reportFailure("new cloud box chats could not be read", { cause }),
+        )
         .finally(() => {
           readingNewChats = undefined;
         })),
