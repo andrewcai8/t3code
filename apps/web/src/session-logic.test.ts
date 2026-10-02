@@ -629,6 +629,33 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["warning-signal"]);
   });
 
+  it("carries a usage-limit warning's reset instant, ignoring an unparseable one", () => {
+    const summary =
+      "Claude usage limit reached. This turn is paused until the 5-hour limit resets.";
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "limit",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "runtime.warning",
+        summary,
+        tone: "info",
+        payload: { message: summary, resetsAt: "2026-02-23T05:00:00.000Z" },
+      }),
+      makeActivity({
+        id: "limit-garbled",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "runtime.warning",
+        summary,
+        tone: "info",
+        payload: { message: summary, resetsAt: "7:10pm (America/Los_Angeles)" },
+      }),
+    ]);
+    expect(entries.map((entry) => [entry.id, entry.resetsAt])).toEqual([
+      ["limit", "2026-02-23T05:00:00.000Z"],
+      ["limit-garbled", undefined],
+    ]);
+  });
+
   it("omits task.started but shows task.progress and task.completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

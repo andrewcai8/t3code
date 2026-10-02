@@ -2758,6 +2758,77 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("shows the usage-limit reset as an instant instead of the CLI's local time", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      const rateLimitInfo = {
+        status: "rejected",
+        rateLimitType: "five_hour",
+        resetsAt: Math.floor(nowMs / 1000) + 2 * 60 * 60,
+      };
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: rateLimitInfo,
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected",
+      } as unknown as SDKMessage);
+      // The CLI formats this time in the host's zone, which is wrong for a
+      // viewer anywhere else.
+      harness.query.emit({
+        ...rateLimitAssistant,
+        message: {
+          ...rateLimitAssistant.message,
+          content: [
+            {
+              type: "text",
+              text: "You've hit your session limit · resets 7:10pm (America/Los_Angeles)",
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.flatMap((event) =>
+          event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+            ? [event.payload.delta]
+            : [],
+        ),
+        [],
+      );
+      assert.deepEqual(
+        events.flatMap((event) => (event.type === "runtime.warning" ? [event.payload] : [])),
+        [
+          {
+            message:
+              "Claude usage limit reached. This turn is paused until the 5-hour limit resets.",
+            detail: rateLimitInfo,
+            resetsAt: "1970-01-01T02:00:00.000Z",
+          },
+        ],
+      );
+      assert.equal(completedTurn(events).errorMessage, usageLimitMessage);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("names repeated usage limits without carrying them into a later turn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4751,8 +4822,7 @@ describe("ClaudeAdapterLive", () => {
       // line can arrive more than once inside one turn.
       harness.query.emit(rejected as unknown as SDKMessage);
       yield* drainSdkMessages;
-      // The repeat lands minutes later, so the remaining wait has visibly
-      // shrunk. Deduping on the rendered row would let that drift through.
+      // The same window repeats minutes later and stays one row.
       yield* TestClock.adjust("5 minutes");
       harness.query.emit(rejected as unknown as SDKMessage);
       yield* drainSdkMessages;
@@ -4762,18 +4832,13 @@ describe("ClaudeAdapterLive", () => {
           .filter((event) => event.type === "runtime.warning")
           .map((event) => (event.type === "runtime.warning" ? event.payload.message : ""));
       assert.equal(usageLimitRows().length, 1);
-      // A wait, not a wall clock: the server renders this row but clients read
-      // it from other timezones. Reading resetsAt as milliseconds would put the
-      // window minutes out instead of hours, so the hour also pins the scale.
-      assert.match(
-        usageLimitRows()[0] ?? "",
-        /^Claude usage limit reached\. This turn is paused until the 5-hour limit resets in 4h( \d{1,2}m)?\.$/,
-      );
-      // The exact instant still rides along for clients that want to render it.
-      assert.deepEqual(
-        runtimeEvents.find((event) => event.type === "runtime.warning")?.payload.detail,
-        rateLimitInfo,
-      );
+      // The instant rides as data so each client renders it in its viewer's
+      // zone. resetsAt is epoch seconds; the hour in the instant pins that scale.
+      assert.deepEqual(runtimeEvents.find((event) => event.type === "runtime.warning")?.payload, {
+        message: "Claude usage limit reached. This turn is paused until the 5-hour limit resets.",
+        detail: rateLimitInfo,
+        resetsAt: "1970-01-01T04:01:30.000Z",
+      });
       // The raw telemetry event still flows for every copy.
       assert.equal(
         runtimeEvents.filter((event) => event.type === "account.rate-limits.updated").length,
@@ -5011,8 +5076,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(
         runtimeEvents
           .filter((event) => event.type === "runtime.warning")
-          .map((event) => (event.type === "runtime.warning" ? event.payload.message : ""))
-          .map((message) => message.replace(/ in \d+h( \d{1,2}m)?/, "")),
+          .map((event) => (event.type === "runtime.warning" ? event.payload.message : "")),
         [
           "Claude usage limit reached. This turn is paused until the 5-hour limit resets.",
           "Claude usage limit reached. This turn is paused until the 7-day limit resets.",
@@ -5192,7 +5256,7 @@ describe("ClaudeAdapterLive", () => {
         [
           "Claude usage limit reached. This turn is paused until the 7-day model limit resets.",
           "Claude usage limit reached. This turn is paused until the limit resets.",
-          "Claude usage limit reached. This turn is paused until the 7-day Model A limit resets in 1h.",
+          "Claude usage limit reached. This turn is paused until the 7-day Model A limit resets.",
         ],
       );
       assert.equal(

@@ -700,6 +700,39 @@ describe("buildThreadFeed", () => {
     },
   );
 
+  it("carries a usage-limit warning's reset instant, ignoring an unparseable one", () => {
+    const message =
+      "Claude usage limit reached. This turn is paused until the 5-hour limit resets.";
+    const thread = makeThread({
+      id: ThreadId.make("usage-limit-reset"),
+      projectId: ProjectId.make("project-1"),
+      title: "Usage limit",
+      activities: [
+        makeActivity({
+          id: EventId.make("limit"),
+          createdAt: "2026-09-01T00:00:00.000Z",
+          kind: "runtime.warning",
+          summary: message,
+          payload: { message, resetsAt: "2026-09-01T05:00:00.000Z" },
+        }),
+        makeActivity({
+          id: EventId.make("limit-garbled"),
+          createdAt: "2026-09-01T00:00:01.000Z",
+          kind: "runtime.warning",
+          summary: message,
+          payload: { message, resetsAt: "7:10pm (America/Los_Angeles)" },
+        }),
+      ],
+    });
+    const [group] = buildThreadFeed(thread);
+    expect(group?.type).toBe("activity-group");
+    if (group?.type !== "activity-group") return;
+    expect(group.activities.map((row) => [row.id, row.workEntry.resetsAt])).toEqual([
+      ["limit", "2026-09-01T05:00:00.000Z"],
+      ["limit-garbled", undefined],
+    ]);
+  });
+
   it.each([
     {
       message: "fallback message",

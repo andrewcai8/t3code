@@ -248,7 +248,11 @@ import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
-import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
+import {
+  formatChatTimestampTooltip,
+  formatDayAwareTimestamp,
+  formatUpcomingTimestamp,
+} from "../../timestampFormat";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import { deriveAgentSpawnSummary } from "./agentSpawnSummary";
@@ -4789,8 +4793,12 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const questionHeading = workEntry.questionAnswer
     ? getQuestionTextPreview(workEntry.questionAnswer)
     : "";
+  const resetsLabel = workEntry.resetsAt
+    ? ` Resets ${formatUpcomingTimestamp(workEntry.resetsAt, timestampFormat)}.`
+    : "";
   const previewText =
-    displayLabel ?? (questionHeading || workEntryDisplayLabel(workEntry, workspaceRoot));
+    (displayLabel ?? (questionHeading || workEntryDisplayLabel(workEntry, workspaceRoot))) +
+    resetsLabel;
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)

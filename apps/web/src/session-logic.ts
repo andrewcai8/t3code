@@ -62,6 +62,8 @@ export interface WorkLogEntry {
   toolCallId?: string;
   label: string;
   detail?: string;
+  /** When a usage-limit pause lifts, rendered in the viewer's timezone. */
+  resetsAt?: string;
   viewedImagePath?: string;
   command?: string;
   rawCommand?: string;
@@ -607,6 +609,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     ) {
       entry.detail = message;
     }
+  }
+  if (activity.kind === "runtime.warning") {
+    const resetsAt = asTrimmedString(payload?.resetsAt);
+    if (resetsAt && !Number.isNaN(Date.parse(resetsAt))) entry.resetsAt = resetsAt;
   }
   if (viewedImagePath) {
     entry.viewedImagePath = viewedImagePath;
