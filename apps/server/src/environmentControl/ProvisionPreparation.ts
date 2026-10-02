@@ -38,6 +38,7 @@ import {
   type ProvisioningProviderProfiles,
 } from "./ProvisioningProviderProfile.ts";
 import { guestProviderInstallCommand } from "./guestProviderInstall.ts";
+import { brokerTokenTtl } from "./remotePreparation.ts";
 
 export const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
 export const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
@@ -1095,7 +1096,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
         runtimeExecutable: artifact.runtimeExecutable,
         port: 3773,
         readinessTimeoutSeconds: 180,
-        brokerTtl: "7d",
+        brokerTtl: brokerTokenTtl,
         // Part of `build`: a checkout nobody prepared is a different machine
         // from one that was, so two requests only match when these match.
         ...(prepareCommands.length ? { prepareCommands } : {}),
