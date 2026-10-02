@@ -666,7 +666,7 @@ function describeClaudeUsageLimit(
     }limit resets.`,
     resetsAt:
       waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
-        ? new Date(resetsAtMs).toISOString()
+        ? DateTime.formatIso(DateTime.makeUnsafe(resetsAtMs))
         : undefined,
   };
 }
