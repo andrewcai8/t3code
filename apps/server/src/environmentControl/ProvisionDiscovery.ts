@@ -88,7 +88,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
     LEFT JOIN provisioned_chats AS chats ON chats.lease_id = leases.lease_id
     WHERE (json_extract(operations.state_json, '$.kind') = 'ready'
-        AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing')
+        AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing', 'releasing')
           OR ${
             known.length === 0
               ? sql`1 = 0`
@@ -132,14 +132,18 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
       if (state.kind === "ready") {
         const resource = state.allocation.resource;
         const expired = request.retentionDeadline !== undefined && request.retentionDeadline <= now;
+        // A lease is `releasing` for as long as a pause takes. Its box stays listed as paused, so
+        // a client does not take a pause for a deletion and forget the chat.
         const lifecycle =
           !expired &&
           (lease.state === "active" || lease.state === "paused" || lease.state === "missing")
             ? lease.state
-            : saved.has(state.readiness.environmentId) &&
-                (lease.state === "disposed" || (expired && lease.state !== "releasing"))
-              ? "disposed"
-              : null;
+            : !expired && lease.state === "releasing"
+              ? "paused"
+              : saved.has(state.readiness.environmentId) &&
+                  (lease.state === "disposed" || (expired && lease.state !== "releasing"))
+                ? "disposed"
+                : null;
         box =
           lifecycle === null || lease.sandboxId !== provisionSandboxId(resource)
             ? null

@@ -41,7 +41,7 @@ it.effect(
       yield* Effect.gen(function* () {
         const store = yield* ProvisionOperationStore;
         const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-        for (let index = 1; index <= 11; index++) {
+        for (let index = 1; index <= 12; index++) {
           const operation = yield* store.accept(
             decodeRequest({
               requestId: id(index),
@@ -103,6 +103,10 @@ it.effect(
           if (index === 7) yield* Effect.promise(() => registry.markDisposed(id(index)));
           if (index === 10) yield* Effect.promise(() => registry.markPaused(id(index)));
           if (index === 11) yield* Effect.promise(() => registry.markMissing(id(index)));
+          if (index === 12)
+            yield* Effect.promise(() =>
+              registry.beginRelease({ leaseId: id(index), sandboxId: `sandbox-${index}` }),
+            );
         }
       }).pipe(Effect.provide(layer), Effect.scoped);
       yield* Effect.gen(function* () {
@@ -122,6 +126,7 @@ it.effect(
           id(9),
           id(10),
           id(11),
+          id(12),
         ]);
         expect(listed.find((row) => row.requestId === id(1))).toEqual({
           requestId: id(1),
@@ -157,6 +162,12 @@ it.effect(
           sandboxId: "sandbox-10",
           lifecycle: "paused",
           threadId: "thread-10",
+        });
+        // A box being paused stays listed, so clients do not take a pause for a deletion.
+        expect(listed.find((row) => row.requestId === id(12))).toMatchObject({
+          leaseId: id(12),
+          lifecycle: "paused",
+          threadId: "thread-12",
         });
         expect(listed.find((row) => row.requestId === id(11))).toMatchObject({
           leaseId: id(11),
