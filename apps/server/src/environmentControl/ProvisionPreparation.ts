@@ -965,10 +965,13 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const accounts = profiles.map((profile) => {
         const credentials =
           profile.credential.kind === "environment"
-            ? profile.environment.filter(
-                ({ name, value }) =>
-                  credentialVariables[profile.kind].includes(name) && value.trim(),
-              )
+            ? profile.environment
+                .filter(
+                  ({ name, value }) =>
+                    credentialVariables[profile.kind].includes(name) && value.trim(),
+                )
+                // The guest cannot resolve references to the manager's secret store.
+                .map(({ name, value, sensitive }) => ({ name, value, sensitive }))
             : [];
         const instanceId = guestInstanceId(profile.kind);
         return [
