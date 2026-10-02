@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off - these tests pin read times.
+// @effect-diagnostics globalDate:off globalDateInEffect:off - these tests pin read times.
 import type { ProvisionedChat } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
