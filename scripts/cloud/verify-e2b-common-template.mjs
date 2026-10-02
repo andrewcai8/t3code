@@ -27,7 +27,7 @@ if (values.help) {
     "Usage: node scripts/cloud/verify-e2b-common-template.mjs --template ID --output FILE [--config FILE]",
   );
   console.log(
-    "Creates one owned sandbox, verifies the clean tool baseline, 8 GiB swap and process retention, then deletes that sandbox.",
+    "Creates one owned sandbox, verifies the clean tool baseline, 8 GiB swap, 50 GiB free disk and process retention, then deletes that sandbox.",
   );
   process.exit(0);
 }
@@ -95,6 +95,9 @@ try {
     "the 8 GiB swapfile, less its 4 KiB header, must be active",
   );
   await record("8 GiB swap active", { swapKiB: Number(swapKiB) });
+  const freeMiB = Number(await run("df -BM --output=avail / | tail -1 | tr -dc 0-9"));
+  NodeAssert.ok(freeMiB >= 50 * 1024, `the root disk must have 50 GiB free, found ${freeMiB} MiB`);
+  await record("50 GiB free disk", { freeMiB });
   const tools = await run(
     "bash /opt/t3-common-tools.sh verify && git --version && gh --version && rg --version && python3 --version && redis-server --version && go version && ruby --version",
   );
