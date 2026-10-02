@@ -57,7 +57,7 @@ const SHELL_SYNCHRONIZATION_ERROR_MESSAGE = "Could not synchronize environment d
  * own. Only a shell whose own stream is not running takes one; a live or synchronizing stream is
  * the box itself and outranks any copy.
  */
-export function adoptHostChat(
+function adoptHostChat(
   current: EnvironmentShellState,
   chat: ProvisionedChat,
 ): EnvironmentShellState | null {
