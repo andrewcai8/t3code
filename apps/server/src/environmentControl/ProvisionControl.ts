@@ -23,6 +23,7 @@ import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import { ProvisionRefused } from "./ProvisioningProviderProfile.ts";
 
 const isProvisionRefused = Schema.is(ProvisionRefused);
@@ -226,6 +227,12 @@ export function makeProvisionControl(
       .pipe(logCause, Effect.mapError(safeError));
     return true;
   });
+  /**
+   * Routing counts the accounts of every saved request, so each launch saves
+   * its request before the next one routes. Otherwise two launches a moment
+   * apart see the same load and pick the same account.
+   */
+  const routing = Semaphore.makeUnsafe(1);
   /** Leases with an upgrade in flight. A second request for the same lease is refused, not queued. */
   const upgrading = new Set<string>();
   const remote = <A>(operation: ProvisionOperation, run: () => Promise<A>) =>
@@ -396,6 +403,16 @@ export function makeProvisionControl(
             : new UnexpectedCause(error),
       }).pipe(
         timeProvisionPhase("freeze", { requestId: input.requestId, provider: input.provider }),
+        Effect.tap((manifest) =>
+          store
+            .accept(manifest.request)
+            .pipe(
+              Effect.catchTag("ProvisionStoreError", (cause) =>
+                Effect.fail(new UnexpectedCause(cause)),
+              ),
+            ),
+        ),
+        routing.withPermits(1),
         reportUnexpected,
         Effect.result,
       );

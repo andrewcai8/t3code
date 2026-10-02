@@ -829,14 +829,17 @@ export function collectProviderUsageLimits(
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
 }
 
-/** Older than this, a snapshot no longer says how much an account has left. */
+/** Older than this, a snapshot cannot say a window with no reset is still spent. */
 const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
 
 /**
  * How much an account has left before any of its windows stops it: the
  * tightest window's remaining percent. A window past its reset counts as
  * full, and an account with no subscription limits (an API key) as 100.
- * `null` means unknown, a failed probe, stale data, or no report at all.
+ * A window's usage only rises until it resets, so an old reading still
+ * counts as the best the host knows. `null` means unknown: a failed probe,
+ * no report at all, or an old reading of a spent window that never reports
+ * when it resets.
  * Ranking divides it among the account's active sessions plus the new one.
  */
 export interface AccountHeadroom {
@@ -882,12 +885,14 @@ function accountHeadroom(
   if (limits.unavailable?.reason === "unsupported")
     return { remainingPercent: 100, resetsAt: null };
   const checkedAt = Date.parse(limits.checkedAt);
-  if (!Number.isFinite(checkedAt) || now - checkedAt > USAGE_LIMITS_STALE_MS) return null;
+  if (!Number.isFinite(checkedAt)) return null;
+  const stale = now - checkedAt > USAGE_LIMITS_STALE_MS;
   let tightest: AccountHeadroom = { remainingPercent: 100, resetsAt: null };
   for (const window of headroomWindows(driver, limits.windows, now)) {
     const resetsAt = resetMillis(window);
     if (resetsAt !== null && resetsAt <= now) continue;
     const remaining = remainingPercent(window);
+    if (stale && resetsAt === null && remaining <= 0) return null;
     if (
       remaining < tightest.remainingPercent ||
       (remaining === tightest.remainingPercent && earlier(resetsAt, tightest.resetsAt))
