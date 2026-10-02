@@ -8,6 +8,7 @@ import { BearerConnectionTarget } from "./model.ts";
 import {
   isOffDeviceReachablePairingUrl,
   joinProvisionedEnvironment,
+  type ProvisionedJoinOutcome,
   provisionedGatewayPairingUrl,
 } from "./provisioned.ts";
 
@@ -163,8 +164,8 @@ describe("joinProvisionedEnvironment", () => {
       httpBaseUrl: "https://3001-sandbox.e2b.app",
       wsBaseUrl: "wss://3001-sandbox.e2b.app",
     });
-    const outcomes = [];
-    const minted = [];
+    const outcomes: Array<ProvisionedJoinOutcome> = [];
+    const minted: Array<number> = [];
     for (const entry of [
       { target, profile: Option.none(), enabled: true },
       { target, profile: Option.some(profile), enabled: true },

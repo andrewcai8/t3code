@@ -604,7 +604,10 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
           PairingRedemption,
           PairingRedemption.of({
             redeem: (input) =>
-              Ref.modify(redemptions, (current) => [current.length + 1, [...current, input]]).pipe(
+              Ref.modify(
+                redemptions,
+                (current) => [current.length + 1, [...current, input]] as const,
+              ).pipe(
                 Effect.map((count) => {
                   const environmentId =
                     input.expectedEnvironmentId ?? EnvironmentId.make("unexpected-box");

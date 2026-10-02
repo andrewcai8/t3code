@@ -67,13 +67,12 @@ function pairing(input: {
     attach: (requestId) =>
       Effect.sync(() => {
         attaches.push(requestId);
-        return (
-          input.attached ?? {
-            kind: "attached",
-            environmentId: BOX_ID,
-            pairingUrl: "https://3773-sandbox.e2b.app/pair#token=minted",
-          }
-        );
+        const minted: EnvironmentProvisionAttachResult = input.attached ?? {
+          kind: "attached",
+          environmentId: BOX_ID,
+          pairingUrl: "https://3773-sandbox.e2b.app/pair#token=minted",
+        };
+        return minted;
       }),
     hostHttpBaseUrl: Effect.succeed(Option.fromUndefinedOr(input.hostHttpBaseUrl)),
     redeem: (pairingInput) =>
