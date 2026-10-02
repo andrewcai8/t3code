@@ -5,6 +5,7 @@ import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
+import type { PlatformConnectionRegistration } from "./catalog.ts";
 
 import * as ConnectionResolver from "./resolver.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -14,6 +15,12 @@ import * as PlatformConnectionSource from "../platform/source.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as RpcSession from "../rpc/session.ts";
+
+/** Applies each set of platform registrations the platform reports to the registry. */
+export const followPlatformRegistrations = (
+  registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
+  registrations: Stream.Stream<ReadonlyArray<PlatformConnectionRegistration>>,
+) => registrations.pipe(Stream.runForEach(registry.reconcilePlatform));
 
 export const watchDiscoveredCompatibility = Effect.fn("connection.watchDiscoveredCompatibility")(
   function* () {
@@ -82,8 +89,7 @@ export function layerWithOptions(options: RpcSession.RpcSessionOptions) {
       const platformSource = yield* PlatformConnectionSource.PlatformConnectionSource;
       yield* watchDiscoveredCompatibility().pipe(Effect.forkScoped);
       yield* registry.start;
-      yield* platformSource.registrations.pipe(
-        Stream.runForEach(registry.reconcilePlatform),
+      yield* followPlatformRegistrations(registry, platformSource.registrations).pipe(
         Effect.forkScoped,
       );
     }).pipe(Effect.withSpan("clientRuntime.connection.application.start")),
