@@ -13,7 +13,10 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../persistence/Layers/Sqlite.ts";
 import { boxLabel, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
@@ -578,6 +581,105 @@ it.effect(
         Effect.scoped,
       );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("a paused Devbox lists when it will be removed, or that it is kept", () =>
+  Effect.gen(function* () {
+    const store = yield* ProvisionOperationStore;
+    const sql = yield* SqlClient.SqlClient;
+    const registry = createProvisionedLeaseRegistry(sql);
+    const chats = createProvisionedChatStore(sql);
+    const pausedAt = new Date("2026-03-01T12:00:00.000Z");
+    const provision = Effect.fn(function* (index: number) {
+      const operation = yield* store.accept(
+        decodeRequest({
+          requestId: id(index),
+          provider: "namespace",
+          providerInstanceId: "codex",
+          sourceRevision: null,
+          preparationHash: "a".repeat(64),
+          creator: "user",
+          tenantId: "tenant",
+          size: "m",
+          image: "tahoe",
+          region: "iad",
+          idleTimeoutMinutes: 30,
+        }),
+      );
+      const resource = {
+        provider: "namespace" as const,
+        devboxId: `devbox-${index}`,
+        devboxName: `t3-${id(index)}`,
+        instanceId: "instance",
+        region: "iad",
+        workspaceDir: "/Users/runner/workspaces",
+      };
+      yield* store.advance(operation, {
+        kind: "ready",
+        allocation: { kind: "direct", resource },
+        readiness: {
+          environmentId: EnvironmentId.make(`box-${index}`),
+          projectDir: "/Users/runner/workspaces/app",
+          sourceRevision: null,
+          t3Revision: "b".repeat(40),
+          artifactSha256: "c".repeat(64),
+          preparationHash: "a".repeat(64),
+        },
+      });
+      yield* Effect.promise(async () => {
+        await registry.register({
+          leaseId: id(index),
+          sandboxId: resource.devboxId,
+          provider: "namespace",
+          providerInstanceId: "codex",
+          namespaceResource: resource,
+          owner: { environmentId: `box-${index}`, threadId: `thread-${index}` },
+          now: pausedAt,
+        });
+        await registry.markPaused(id(index), pausedAt);
+      });
+    });
+    yield* provision(1);
+    yield* provision(2);
+    yield* Effect.promise(async () => {
+      const chat = ownerChat(boxShell([boxThread("thread-2", "project-app", "Done")]), "thread-2");
+      if (!chat) throw new Error("the fixture shell holds the thread");
+      await chats.record(id(2), {
+        ...chat,
+        thread: {
+          ...chat.thread,
+          settledOverride: "settled",
+          settledAt: "2026-03-01T11:00:00.000Z",
+        },
+      });
+    });
+    yield* provision(3);
+    yield* Effect.promise(() => registry.setKeep(id(3), "user"));
+
+    const cleanups = (afterDays: number | null) =>
+      listProvisionedEnvironments(sql, [], [], undefined, afterDays).pipe(
+        Effect.map((rows) =>
+          rows.map((row) => [row.environmentId, row.cleanup ?? null, row.chat ?? null]),
+        ),
+      );
+    expect(yield* cleanups(7)).toEqual([
+      ["box-1", { kind: "scheduled", at: "2026-03-08T12:00:00.000Z", reason: "idle" }, null],
+      ["box-2", { kind: "scheduled", at: "2026-03-01T13:00:00.000Z", reason: "settled" }, null],
+      ["box-3", { kind: "kept", reason: "user" }, null],
+    ]);
+    expect(yield* cleanups(null)).toEqual([
+      ["box-1", null, null],
+      ["box-2", null, null],
+      ["box-3", { kind: "kept", reason: "user" }, null],
+    ]);
+  }).pipe(
+    Effect.provide(
+      ProvisionOperationStore.layer.pipe(
+        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+  ),
 );
 
 it("labels a box by its repository's name and where it runs", () => {
