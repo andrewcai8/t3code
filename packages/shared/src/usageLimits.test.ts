@@ -1315,12 +1315,17 @@ describe("rankAccounts", () => {
         account("refills-late", { checkedAt, windows: [session(95, "2026-09-03T16:00:00.000Z")] }),
         account("half-left-all-week", { checkedAt, windows: [weekly(50)] }),
         account("refills-soon", { checkedAt, windows: [session(95, "2026-09-03T12:10:00.000Z")] }),
+        account("runs-dry-first", {
+          checkedAt,
+          windows: [session(99, "2026-09-03T12:30:00.000Z")],
+        }),
       ],
       now,
     );
     expect(ids(ranked)).toEqual([
       "refills-soon",
       "half-left-all-week",
+      "runs-dry-first",
       "refills-late",
       "spent-until-soon",
     ]);
