@@ -97,6 +97,8 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     status: shellStatusForSnapshot(cachedSnapshot),
     error: Option.none(),
   });
+  const awaitingCompletion = yield* Ref.make(false);
+  const lastAuthoritativeSession = yield* Ref.make<RpcSession | null>(null);
   if (options?.hostChat !== undefined)
     // Re-checked as the status settles, so a chat that arrives while the shell starts is kept.
     yield* options.hostChat.pipe(
@@ -107,12 +109,20 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         ),
       ),
       Stream.runForEach(([chat]) =>
-        SubscriptionRef.update(state, (current) => adoptHostChat(current, chat) ?? current),
+        Effect.gen(function* () {
+          if (adoptHostChat(yield* SubscriptionRef.get(state), chat) === null) return;
+          // The copy's sequence is no cursor. Resuming from it on the same session would skip the
+          // box's other events, so the next subscription reloads the snapshot. Cleared first, so
+          // no subscription can read the copy's sequence as its own.
+          yield* Ref.set(lastAuthoritativeSession, null);
+          yield* SubscriptionRef.update(
+            state,
+            (current) => adoptHostChat(current, chat) ?? current,
+          );
+        }),
       ),
       Effect.forkScoped,
     );
-  const awaitingCompletion = yield* Ref.make(false);
-  const lastAuthoritativeSession = yield* Ref.make<RpcSession | null>(null);
   const activeSubscriptionSession = yield* Ref.make<RpcSession | null>(null);
   const persistence = yield* Queue.sliding<OrchestrationShellSnapshot>(1);
 
