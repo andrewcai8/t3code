@@ -9,6 +9,7 @@ import {
   BearerConnectionCredential,
   BearerConnectionProfile,
   BearerConnectionRegistration,
+  BoxTargetRegistration,
   RelayConnectionRegistration,
   SshConnectionProfile,
   SshConnectionRegistration,
@@ -37,6 +38,8 @@ const decodeConnectionCatalogDocument = Schema.decodeUnknownEffect(ConnectionCat
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
 const decodeCatalogDocument = Schema.decodeUnknownSync(ConnectionCatalogDocument);
+const decodeBoxTargetRegistration = Schema.decodeUnknownSync(BoxTargetRegistration);
+const encodeBearerTarget = Schema.encodeSync(BearerConnectionTarget);
 
 const RELAY_TARGET = new RelayConnectionTarget({
   environmentId: ENVIRONMENT_ID,
@@ -97,6 +100,52 @@ describe("ConnectionCatalogDocument", () => {
     expect(reloaded.profiles).toEqual(original.profiles);
     expect(reloaded.credentials).toEqual(original.credentials);
     expect(reloaded.remoteDpopTokens).toEqual(original.remoteDpopTokens);
+  });
+
+  it("saves a box its host listed without a credential, and relabeling it keeps its pairing", () => {
+    const box = new BearerConnectionTarget({
+      ...BEARER_TARGET,
+      label: "t3code · E2B",
+      box: { managerId: EnvironmentId.make("host") },
+    });
+    const listed = registerConnectionInCatalog(
+      EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      new BoxTargetRegistration({ target: box }),
+    );
+    expect([listed.targets, listed.profiles, listed.credentials]).toEqual([[box], [], []]);
+
+    const paired = registerConnectionInCatalog(
+      listed,
+      new BearerConnectionRegistration({
+        target: box,
+        profile: BEARER_PROFILE,
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+    const relabeled = registerConnectionInCatalog(
+      paired,
+      new BoxTargetRegistration({
+        target: new BearerConnectionTarget({ ...box, label: "app · E2B" }),
+      }),
+    );
+    expect(relabeled.targets.map((target) => target.label)).toEqual(["app · E2B"]);
+    expect(relabeled.profiles).toEqual([BEARER_PROFILE]);
+    expect(relabeled.credentials).toEqual([
+      { connectionId: BEARER_TARGET.connectionId, credential: BEARER_CREDENTIAL },
+    ]);
+  });
+
+  it("refuses to save a target without a credential unless it is a box", () => {
+    const encoded = { ...encodeBearerTarget(BEARER_TARGET) };
+    expect(() =>
+      decodeBoxTargetRegistration({ _tag: "BoxTargetRegistration", target: encoded }),
+    ).toThrow("A box target names its host.");
+    expect(
+      decodeBoxTargetRegistration({
+        _tag: "BoxTargetRegistration",
+        target: { ...encoded, box: { managerId: "host" } },
+      }).target.box,
+    ).toEqual({ managerId: "host" });
   });
 
   it.effect("persists explicit GitHub trust and forgets it when a connection is removed", () =>
