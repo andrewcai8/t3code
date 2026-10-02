@@ -1,5 +1,5 @@
 import { ProvisionRetentionError } from "./retention.ts";
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - these tests execute the uploaded Python files, SDK HTTP requests and loopback proxy probes locally.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalDate:off - these tests execute the uploaded Python files, SDK HTTP requests and loopback proxy probes locally, and broker tokens expire against the guest wall clock.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";

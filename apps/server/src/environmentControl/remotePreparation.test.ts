@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - these tests drive disposable Python, Git and HTTP processes.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalDate:off - these tests drive disposable Python, Git and HTTP processes, and broker tokens expire against the guest wall clock.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
@@ -466,7 +466,7 @@ describe("remote preparation subprocess", () => {
       lifetimeMs: claims.exp - claims.iat,
       replaced: token !== expired,
       mode: (await NodeFSP.stat(renewed.brokerCredentialPath)).mode & 0o777,
-      authenticated: (await session.json()).authenticated,
+      authenticated: ((await session.json()) as { authenticated: boolean }).authenticated,
     }).toEqual({
       serverPid: first.serverPid,
       issued: "issue\nissue\n",
