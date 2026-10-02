@@ -4336,6 +4336,7 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         message: "Provider got slow",
         detail: { latencyMs: 1500 },
+        resetsAt: "2026-01-01T05:00:00.000Z",
       },
     });
 
@@ -4402,7 +4403,11 @@ describe("ProviderRuntimeIngestion", () => {
         ? (warning.payload as Record<string, unknown>)
         : undefined;
     expect(warning?.kind).toBe("runtime.warning");
-    expect(warningPayload?.message).toBe("Provider got slow");
+    expect(warningPayload).toEqual({
+      message: "Provider got slow",
+      detail: { latencyMs: 1500 },
+      resetsAt: "2026-01-01T05:00:00.000Z",
+    });
 
     const checkpoint = thread.checkpoints.find(
       (entry: ProviderRuntimeTestCheckpoint) => entry.turnId === "turn-p1",
