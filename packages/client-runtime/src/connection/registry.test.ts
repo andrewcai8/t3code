@@ -549,6 +549,8 @@ const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness
     readonly listProvisioned?: ReadonlyArray<DiscoveredProvisionedEnvironment>;
     /** Touches the host cuts off, in order, before it answers the rest. */
     readonly cutOffTouches?: number;
+    /** Holds the host's session until it is opened. */
+    readonly hostGate?: Deferred.Deferred<void>;
   },
 ) {
   const touches = yield* Ref.make<ReadonlyArray<EnvironmentProvisionTouchInput>>([]);
@@ -582,6 +584,14 @@ const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness
           }),
         ),
       ...(options?.listProvisioned ? { listProvisioned: options.listProvisioned } : {}),
+      ...(options?.hostGate
+        ? {
+            beforeSessionConnect: (environmentId: EnvironmentId) =>
+              environmentId === TARGET.environmentId
+                ? Deferred.await(options.hostGate!)
+                : Effect.void,
+          }
+        : {}),
       touch: (input) =>
         Ref.modify(touches, (current) => [current.length, [...current, input]] as const).pipe(
           Effect.flatMap((index) =>
@@ -1122,6 +1132,41 @@ describe("EnvironmentRegistry", () => {
 
           expect(yield* Ref.get(resumes)).toEqual([{ environmentId: HOST_BOX.environmentId }]);
           expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "a box opened while its host is still connecting is woken as soon as the host connects",
+    () =>
+      Effect.gen(function* () {
+        const hostGate = yield* Deferred.make<void>();
+        const { harness, resumes } = yield* makeBoxWakeHarness([{ kind: "resumed" }], { hostGate });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.demand(HOST_BOX.environmentId);
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (state) => state.phase === "connecting",
+          );
+
+          yield* Deferred.succeed(hostGate, undefined);
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "connected" || state.phase === "backoff",
+          );
+
+          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
+          expect(yield* Ref.get(resumes)).toEqual([{ environmentId: HOST_BOX.environmentId }]);
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }).pipe(Effect.provide(TestClock.layer())),
   );

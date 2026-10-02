@@ -57,6 +57,8 @@ const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 
 /** Under a third of the host's 15-minute lease, so one missed beat never lets it lapse. */
 const BOX_LEASE_HEARTBEAT_INTERVAL = "4 minutes";
+/** Past a host's 15-second connection attempt. */
+const HOST_SETTLE_TIMEOUT = "20 seconds";
 
 export class EnvironmentNotRegisteredError extends Schema.TaggedError<EnvironmentNotRegisteredError>()(
   "EnvironmentNotRegisteredError",
@@ -363,18 +365,21 @@ export const make = Effect.gen(function* () {
     error: new ConnectionTransientError({ reason: "not-serving", detail }),
   });
 
-  const hostConnected = (managerId: EnvironmentId) =>
-    SubscriptionRef.get(serviceScopes).pipe(
-      Effect.flatMap((current) => {
-        const host = current.get(managerId);
-        return host === undefined
-          ? Effect.succeed(false)
-          : Effect.map(
-              SubscriptionRef.get(host.supervisor.state),
-              (state) => state.phase === "connected",
-            );
-      }),
+  // Whether a box's host can hear a wake now. A host still connecting is waited for, as a page load
+  // dials both at once. A host this client does not know lets the wake run, which refuses it.
+  const hostConnected = Effect.fn("EnvironmentRegistry.hostConnected")(function* (
+    managerId: EnvironmentId,
+  ) {
+    if (!(yield* SubscriptionRef.get(entries)).has(managerId)) return true;
+    const host = (yield* SubscriptionRef.get(serviceScopes)).get(managerId);
+    if (host === undefined) return false;
+    const settled = yield* SubscriptionRef.changes(host.supervisor.state).pipe(
+      Stream.filter((state) => state.phase !== "connecting"),
+      Stream.runHead,
+      Effect.timeoutOption(HOST_SETTLE_TIMEOUT),
     );
+    return Option.flatten(settled).pipe(Option.exists((state) => state.phase === "connected"));
+  });
 
   // The RPC client ends a call whose session is closed under it as interrupted rather than failed,
   // which would end the background loop that made it. A box's calls to its host fail instead.
