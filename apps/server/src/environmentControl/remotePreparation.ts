@@ -276,6 +276,87 @@ def contained(root, relative):
     return target
 `;
 
+/** How long a box's broker token lives. Every box prepares with it, so a renewal outside preparation reuses it. */
+export const brokerTokenTtl = "7d";
+
+/**
+ * Keeps a root's broker token usable for as long as its box lives, which has
+ * no deadline by default. It renews with the CLI of the build that is serving,
+ * which its supervisor records in server.json, or, for a server started before
+ * that, reads off the running process. Needs `atomic`, `run_bounded`,
+ * `base64`, `fcntl`, `json`, `os`, `pathlib` and `time`.
+ */
+const brokerTokenFunctions = String.raw`
+BROKER_TTL = ${JSON.stringify(brokerTokenTtl)}
+
+def broker_token_usable(token):
+    # A session token is base64url(claims).signature. Renewing at half its
+    # lifetime leaves days of slack on the 7 day broker TTL.
+    try:
+        payload = token.split('.', 1)[0]
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        return time.time() * 1000 < (claims['iat'] + claims['exp']) / 2
+    except (ValueError, KeyError, TypeError):
+        return False
+
+def broker_issue_argv(command, t3home, ttl):
+    return command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', ttl, '--subject', 'provision-broker', '--token-only']
+
+def serving_broker_issue(root, proc):
+    try:
+        server = json.loads((root / 'server.json').read_text())
+        if 'brokerIssue' in server:
+            return server['brokerIssue']
+        # A server launched with serve (before 085959dbaa) has no start token and is never renewed here.
+        process = pathlib.Path(proc) / str(server['pid'])
+        argv = (process / 'cmdline').read_bytes().decode().split('\0')
+        t3home = root / 'home' / '.t3'
+        # A recycled pid is some other process; only this root's server runs start against its home.
+        if argv[argv.index('--base-dir') + 1] != str(t3home):
+            return None
+        env = dict(entry.split('=', 1) for entry in (process / 'environ').read_bytes().decode().split('\0') if '=' in entry)
+        return {'argv': broker_issue_argv(argv[:argv.index('start')], t3home, BROKER_TTL), 'cwd': os.readlink(process / 'cwd'), 'env': env}
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+def renew_broker_token(root, run, issue):
+    # The caller holds prepare.lock, so renewals replace the file one at a time.
+    path = root / 'broker-token'
+    token = path.read_text() if path.exists() else None
+    if token is not None and broker_token_usable(token):
+        return token
+    if issue is None:
+        if token is None:
+            raise RuntimeError('The environment has no broker credential')
+        return token
+    token = run(issue['argv'], issue['cwd'], issue['env'])
+    if not token or any(c.isspace() for c in token):
+        raise RuntimeError('Invalid broker credential output')
+    atomic(path, token)
+    return token
+
+def broker_token(root, proc='/proc'):
+    path = root / 'broker-token'
+    if path.exists():
+        token = path.read_text()
+        if broker_token_usable(token):
+            return token
+    with open(root / 'prepare.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return renew_broker_token(root, lambda args, cwd, env: run_bounded(args, cwd, env, 120, (lock.fileno(),)), serving_broker_issue(root, proc))
+`;
+
+/**
+ * `broker_token(root)` for scripts that run outside preparation. Needs
+ * `base64`, `contextlib`, `fcntl`, `json`, `os`, `pathlib`, `subprocess` and `time`.
+ */
+export const brokerTokenScript = String.raw`
+os.umask(0o077)
+${guestPathScript}
+${boundedRunScript}
+${brokerTokenFunctions}
+`;
+
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
 import time
@@ -317,6 +398,7 @@ def artifact_snapshot(root):
     return files, links
 
 ${boundedRunScript}
+${brokerTokenFunctions}
 def prepare(spec):
     phases = []
     entered = time.monotonic()
@@ -783,13 +865,7 @@ def prepare(spec):
                     with step('prepareCommand.' + str(index)):
                         run(['sh', '-lc', command_line], project, env, timeout=1800)
         credential_path = root / 'broker-token'
-        if not credential_path.exists():
-            with step('brokerToken'):
-                token = run(command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', spec['brokerTtl'], '--subject', 'provision-broker', '--token-only'], project, env)
-                if not token or any(c.isspace() for c in token):
-                    raise RuntimeError('Invalid broker credential output')
-                atomic(credential_path, token)
-        token = credential_path.read_text()
+        broker_issue = {'argv': broker_issue_argv(command, t3home, spec['brokerTtl']), 'cwd': str(project), 'env': env}
         origin = 'http://127.0.0.1:' + str(spec['port'])
         def probe():
             try:
@@ -835,6 +911,11 @@ def prepare(spec):
                 else:
                     return
             raise RuntimeError('Running server did not stop for the upgrade')
+        with step('brokerToken'):
+            # A new build's CLI migrates the database, so it waits until no older build's server has it open.
+            serving = server_process()
+            current = server_lock_free() or (serving is not None and serving['sha256'] == runtime['sha256'])
+            token = renew_broker_token(root, run, broker_issue if current else serving_broker_issue(root, '/proc'))
         healthy = probe()
         process = server_process()
         if not (healthy and process is not None and process['sha256'] == runtime['sha256']):
@@ -843,7 +924,7 @@ def prepare(spec):
                     stop_server(process['pid'])
                 # start --no-browser keeps the same bind as serve, and the cwd
                 # argument is the path we report as projectDir.
-                config = {'root': str(root), 'build': {'sha256': runtime['sha256'], 'revision': runtime['revision']}, 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
+                config = {'root': str(root), 'build': {'sha256': runtime['sha256'], 'revision': runtime['revision']}, 'brokerIssue': broker_issue, 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
                 with open(root / 'server.log', 'a') as log:
                     subprocess.Popen([sys.executable, '-c', SUPERVISOR, json.dumps(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
                 deadline = time.monotonic() + spec['readinessTimeoutSeconds']
@@ -910,7 +991,7 @@ with open(root / 'server.lock', 'a') as lock:
     except BlockingIOError:
         sys.exit(0)
     with open(root / 'server.json.tmp', 'w') as output:
-        json.dump({'pid': os.getpid(), **config['build']}, output)
+        json.dump({'pid': os.getpid(), **config['build'], 'brokerIssue': config['brokerIssue']}, output)
         output.flush()
         os.fsync(output.fileno())
     os.replace(root / 'server.json.tmp', root / 'server.json')

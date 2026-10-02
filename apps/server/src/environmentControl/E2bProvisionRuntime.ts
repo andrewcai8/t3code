@@ -16,6 +16,7 @@ import {
 import type { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import {
+  brokerTokenScript,
   prepareRemoteHost,
   refreshRemoteCheckout,
   sealWarmBase,
@@ -362,9 +363,10 @@ export function makeE2bProvisionRuntime(
       const stopPairing = startProvisionPhase(record);
       const result = await e2bPythonPort(sandbox).executePython({
         script: String.raw`
-import json, pathlib, sys, urllib.request
+import base64, contextlib, fcntl, json, os, pathlib, subprocess, sys, time, urllib.request
+${brokerTokenScript}
 spec = json.load(sys.stdin)
-token = pathlib.Path(spec['root'], 'broker-token').read_text()
+token = broker_token(pathlib.Path(spec['root']))
 request = urllib.request.Request('http://127.0.0.1:' + str(spec['port']) + '/api/auth/pairing-token', data=json.dumps({'label':'Cloud environment client'}).encode(), headers={'Authorization':'Bearer ' + token, 'Content-Type':'application/json'})
 with urllib.request.urlopen(request, timeout=30) as response:
     print(json.dumps({'credential': json.load(response)['credential'], 'brokerToken': token}))

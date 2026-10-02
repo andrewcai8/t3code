@@ -1,5 +1,5 @@
 import { ProvisionRetentionError } from "./retention.ts";
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - these tests execute the uploaded Python files, SDK HTTP requests and loopback proxy probes locally.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalDate:off - these tests execute the uploaded Python files, SDK HTTP requests and loopback proxy probes locally, and broker tokens expire against the guest wall clock.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
@@ -16,8 +16,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   makeNamespaceAccountSession,
   makeNamespaceProvisionRuntime,
+  mintNamespacePairing,
   namespacePythonPort,
 } from "./NamespaceProvisionRuntime.ts";
+import { localPort } from "./guestTestFixture.ts";
+import { prepareRemoteHost } from "./remotePreparation.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import { namespaceMacImage } from "./namespaceAllocation.ts";
 import { ProvisionPreparationManifest, provisionDigest } from "./ProvisionPreparation.ts";
@@ -325,10 +328,17 @@ const args = process.argv.slice(2);
 const home = args[args.indexOf('--base-dir') + 1];
 const root = path.dirname(path.dirname(home));
 if (args[0] === 'auth') {
-  process.stdout.write('fixture-broker');
+  fs.appendFileSync(path.join(root, 'issued'), 'issue\n');
+  const iat = Date.now();
+  const exp = iat + Number(args[args.indexOf('--ttl') + 1].replace('h', '')) * 3600000;
+  process.stdout.write(Buffer.from(JSON.stringify({ iat, exp })).toString('base64url') + '.fixture-broker');
 } else if (args[0] === 'project') {
   process.exit(0);
 } else {
+  const unexpired = (authorization) => {
+    const match = /^Bearer ([\w-]+)\.fixture-broker$/.exec(authorization ?? '');
+    return match !== null && JSON.parse(Buffer.from(match[1], 'base64url').toString()).exp > Date.now();
+  };
   fs.appendFileSync(path.join(root, 'started'), 'start\n');
   fs.writeFileSync(path.join(root, 'developer-directory'), process.env.DEVELOPER_DIR ?? '');
   const server = http.createServer((request, response) => {
@@ -336,8 +346,14 @@ if (args[0] === 'auth') {
     if (request.url === '/.well-known/t3/environment') {
       response.end(JSON.stringify({ environmentId: fs.readFileSync(path.join(home, 'userdata/environment-id'), 'utf8').trim() }));
     } else if (request.url === '/api/auth/session') {
-      response.end(JSON.stringify({ authenticated: request.headers.authorization === 'Bearer fixture-broker', sessionMethod: 'bearer-access-token', scopes: ['access:write'] }));
+      response.end(JSON.stringify({ authenticated: unexpired(request.headers.authorization), sessionMethod: 'bearer-access-token', scopes: ['access:write'] }));
     } else if (request.url === '/api/auth/pairing-token') {
+      if (!unexpired(request.headers.authorization)) {
+        response.writeHead(401);
+        response.end('{}');
+        return;
+      }
+      fs.writeFileSync(path.join(root, 'paired-with'), request.headers.authorization.slice('Bearer '.length));
       response.end(JSON.stringify({ credential: 'grant' }));
     } else if (request.url === '/stop') {
       response.end('stopped');
@@ -554,6 +570,76 @@ describe("Namespace runtime transport", () => {
     expect(await NodeFSP.readFile(NodePath.join(f.root, "broker-token"), "utf8")).toBe(
       "private-broker",
     );
+  });
+
+  it("mints with a renewed broker token once the prepared one has expired", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-broker-"));
+    cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));
+    const bundle = NodePath.join(directory, "bundle");
+    await NodeFSP.mkdir(bundle);
+    await NodeFSP.writeFile(NodePath.join(bundle, "cli.mjs"), fixtureCli);
+    const archivePath = NodePath.join(directory, "runtime.tar");
+    NodeChildProcess.execFileSync("tar", ["-cf", archivePath, "-C", bundle, "cli.mjs"]);
+    const root = NodePath.join(directory, "root");
+    const port = await freePort();
+    const ready = await prepareRemoteHost(localPort, {
+      requestId,
+      resourceIdentity: "namespace:owned-box",
+      requestHash: "a".repeat(64),
+      preparationHash: "b".repeat(64),
+      root,
+      repository: null,
+      artifact: {
+        archivePath,
+        sha256: provisionDigest(await NodeFSP.readFile(archivePath)),
+        revision: "c".repeat(40),
+        entrypoint: "cli.mjs",
+      },
+      runtimeExecutable: process.execPath,
+      port,
+      readinessTimeoutSeconds: 10,
+      brokerTtl: "1h",
+      files: [],
+    });
+    cleanups.push(async () => {
+      try {
+        process.kill(ready.serverPid, "SIGTERM");
+      } catch {
+        /* The server already stopped. */
+      }
+    });
+    const read = (name: string) => NodeFSP.readFile(NodePath.join(root, name), "utf8");
+    const mint = () =>
+      mintNamespacePairing(localPort, { root, port, environmentId: ready.environmentId });
+
+    const prepared = await read("broker-token");
+    expect([await mint(), await read("paired-with"), await read("issued")]).toEqual([
+      { credential: "grant", brokerToken: prepared },
+      prepared,
+      "issue\n",
+    ]);
+
+    const now = Date.now();
+    const expired = `${Buffer.from(encodeJson({ iat: now - 7_200_000, exp: now - 3_600_000 })).toString("base64url")}.fixture-broker`;
+    await NodeFSP.writeFile(NodePath.join(root, "broker-token"), expired);
+    const renewed = await mint();
+    const stored = await read("broker-token");
+    const claims = JSON.parse(Buffer.from(stored.split(".")[0]!, "base64url").toString());
+    expect({
+      renewed,
+      pairedWith: await read("paired-with"),
+      issued: await read("issued"),
+      replaced: stored !== expired,
+      lifetimeMs: claims.exp - claims.iat,
+      mode: (await NodeFSP.stat(NodePath.join(root, "broker-token"))).mode & 0o777,
+    }).toEqual({
+      renewed: { credential: "grant", brokerToken: stored },
+      pairedWith: stored,
+      issued: "issue\nissue\n",
+      replaced: true,
+      lifetimeMs: 3_600_000,
+      mode: 0o600,
+    });
   });
 
   it("extends and reads back the captured instance deadline using the same account", async () => {
