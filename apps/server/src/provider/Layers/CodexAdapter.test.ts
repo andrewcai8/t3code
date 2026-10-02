@@ -2941,7 +2941,7 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
 
       const events = Array.from(yield* Fiber.join(eventsFiber));
       const expected =
-        "Codex usage limit reached. The weekly limit resets in 5d 5h. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.";
+        "Codex weekly usage limit reached. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.";
       NodeAssert.deepStrictEqual(
         events.map((event) => event.type),
         [
@@ -2956,6 +2956,7 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
         if (event.type === "runtime.error") {
           NodeAssert.equal(event.payload.message, expected);
           NodeAssert.equal(event.payload.detail, CODEX_OUT_OF_CREDITS);
+          NodeAssert.equal(event.payload.resetsAt, "2026-01-06T05:00:00.000Z");
         }
         if (event.type === "turn.completed") {
           NodeAssert.equal(event.payload.errorMessage, expected);
@@ -2993,7 +2994,7 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
       const completed = events.find((event) => event.type === "turn.completed");
       NodeAssert.equal(
         completed?.payload.errorMessage,
-        "Codex usage limit reached. The session limit resets in 3h 20m. Send the message again once the limit resets.",
+        "Codex session usage limit reached. Send the message again once the limit resets.",
       );
     }),
   );
@@ -3027,7 +3028,7 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
       const completed = events.find((event) => event.type === "turn.completed");
       NodeAssert.equal(
         completed?.payload.errorMessage,
-        "Codex usage limit reached. The session limit resets in 3h 20m. Send the message again once the limit resets.",
+        "Codex session usage limit reached. Send the message again once the limit resets.",
       );
     }),
   );
@@ -3058,6 +3059,7 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
       );
       const runtimeError = events.find((event) => event.type === "runtime.error");
       NodeAssert.equal(runtimeError?.payload.message, expected);
+      NodeAssert.equal(runtimeError?.payload.resetsAt, undefined);
       const completed = events.find((event) => event.type === "turn.completed");
       NodeAssert.equal(completed?.payload.errorMessage, expected);
     }),

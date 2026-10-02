@@ -629,7 +629,7 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["warning-signal"]);
   });
 
-  it("carries a usage-limit warning's reset instant, ignoring an unparseable one", () => {
+  it("carries a usage limit's reset instant, ignoring an unparseable one", () => {
     const summary =
       "Claude usage limit reached. This turn is paused until the 5-hour limit resets.";
     const entries = deriveWorkLogEntries([
@@ -649,10 +649,23 @@ describe("deriveWorkLogEntries", () => {
         tone: "info",
         payload: { message: summary, resetsAt: "7:10pm (America/Los_Angeles)" },
       }),
+      makeActivity({
+        id: "codex-limit",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "runtime.error",
+        summary: "Runtime error",
+        tone: "error",
+        payload: {
+          message:
+            "Codex session usage limit reached. Send the message again once the limit resets.",
+          resetsAt: "2026-02-23T03:20:00.000Z",
+        },
+      }),
     ]);
     expect(entries.map((entry) => [entry.id, entry.resetsAt])).toEqual([
       ["limit", "2026-02-23T05:00:00.000Z"],
       ["limit-garbled", undefined],
+      ["codex-limit", "2026-02-23T03:20:00.000Z"],
     ]);
   });
 

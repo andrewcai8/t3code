@@ -1,3 +1,4 @@
+import { EventId, type OrchestrationThreadActivity } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -7,6 +8,7 @@ import {
   isThreadErrorBannerDismissedForSession,
   shouldShowThreadErrorBanner,
   ThreadErrorBanner,
+  threadErrorResetsAt,
 } from "./ThreadErrorBanner";
 
 describe("ThreadErrorBanner", () => {
@@ -68,6 +70,29 @@ describe("ThreadErrorBanner", () => {
 
   it("never shows a null error", () => {
     expect(shouldShowThreadErrorBanner("env:thread-e", null, false)).toBe(false);
+  });
+
+  it("finds the reset of the usage limit the banner shows, not an older one", () => {
+    const limitMessage =
+      "Codex session usage limit reached. Send the message again once the limit resets.";
+    const runtimeError = (id: string, payload: unknown): OrchestrationThreadActivity => ({
+      id: EventId.make(id),
+      tone: "error",
+      kind: "runtime.error",
+      summary: "Runtime error",
+      turnId: null,
+      createdAt: "2026-09-03T12:00:00.000Z",
+      payload,
+    });
+    const limit = runtimeError("limit", {
+      message: limitMessage,
+      resetsAt: "2026-09-03T15:20:00.000Z",
+    });
+    const later = runtimeError("later", { message: "Provider crashed" });
+
+    expect(threadErrorResetsAt([limit], limitMessage)).toBe("2026-09-03T15:20:00.000Z");
+    expect(threadErrorResetsAt([limit], "Provider crashed")).toBeUndefined();
+    expect(threadErrorResetsAt([limit, later], limitMessage)).toBeUndefined();
   });
   it("aligns the warning and dismiss icons with the first line of a multi-line error", () => {
     const markup = renderToStaticMarkup(
