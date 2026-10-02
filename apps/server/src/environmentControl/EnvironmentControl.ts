@@ -845,7 +845,14 @@ export const layer = Layer.effect(
                     return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
                   const resumed = await cloud.resume(input);
                   // An awake sandbox is not a resumed chat until its T3 server answers.
-                  await resumeProvisionedE2b(input.leaseId, config.e2bApiKey);
+                  // A refused one is still awake, so its lease says so and the reaper
+                  // pauses it, rather than leaving it running out E2B's six-hour timeout.
+                  await resumeProvisionedE2b(input.leaseId, config.e2bApiKey).catch(
+                    async (cause: unknown) => {
+                      await leaseRegistry.markActive({ leaseId: input.leaseId });
+                      throw cause;
+                    },
+                  );
                   return resumed;
                 } catch (cause) {
                   if (!(cause instanceof ProvisionedSandboxMissing))

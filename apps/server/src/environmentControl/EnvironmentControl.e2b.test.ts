@@ -293,7 +293,7 @@ it.effect("keeps a woken box resumed when its followed branch cannot be fetched"
   ),
 );
 
-it.effect("refuses to call a box resumed when its T3 server cannot be started again", () =>
+it.effect("refuses a box whose T3 server cannot start again, and leaves it to the reaper", () =>
   withManager(
     Effect.gen(function* () {
       const box = yield* pausedPreparedBox({ follow: false });
@@ -306,6 +306,7 @@ it.effect("refuses to call a box resumed when its T3 server cannot be started ag
         reason: "unknown",
         message: "The workspace could not be reconnected. Retry shortly.",
       });
+      expect(yield* box.leaseState()).toBe("active");
     }),
   ),
 );
