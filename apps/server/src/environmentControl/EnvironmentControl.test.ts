@@ -193,7 +193,7 @@ describe("managed cloud commands", () => {
 
   it("reports a failed upkeep with its chat and cause instead of swallowing it", async () => {
     await withLease(async ({ registry, driver }) => {
-      const reported: Array<{ message: string; chatId: string; cause: string }> = [];
+      const reported: Array<{ message: string; chatId: string | undefined; cause: string }> = [];
       const manager = createEnvironmentControl(
         [],
         {
