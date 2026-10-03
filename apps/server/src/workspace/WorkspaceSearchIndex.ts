@@ -31,7 +31,8 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 //
 // `createRequire` cannot load it either. The package publishes `exports` with
 // an `import` condition and no `require` one, so every CJS resolution of it
-// fails with ERR_PACKAGE_PATH_NOT_EXPORTED, including subpaths. A dynamic
+// fails with ERR_PACKAGE_PATH_NOT_EXPORTED, including subpaths. The repo's pnpm patch adds one,
+// but a cloud box's runtime installs the package with npm, unpatched. A dynamic
 // import is the only form that resolves, and it still reads from the real
 // filesystem at runtime rather than being inlined.
 let fffNode: Promise<typeof import("@ff-labs/fff-node")> | undefined;

@@ -14,7 +14,8 @@ import {
   makeUnavailableUsageLimits,
   makeUsageLimits,
 } from "../providerUsageLimits.ts";
-import { readMacCursorAccessToken } from "../cursorCredentialStore.ts";
+import { readMacCursorAccessToken } from "../cursorKeychainToken.ts";
+import { withCursorBillingCycle } from "./cursorBillingCycle.ts";
 
 const CursorCredentials = Schema.Struct({ accessToken: Schema.optional(Schema.String) });
 const DEFAULT_CURSOR_API_ENDPOINT = "https://api2.cursor.sh";
@@ -36,12 +37,11 @@ export function cursorUsageResponseToLimits(
   response: typeof CursorUsageResponse.Type,
   checkedAt: string,
 ) {
-  const start = Number(response.billingCycleStart);
-  const end = Number(response.billingCycleEnd);
-  const reset = DateTime.make(end);
-  const resetsAt = end > 0 && Option.isSome(reset) ? DateTime.formatIso(reset.value) : undefined;
-  // The billing cycle's length gives each pool its pace marker.
-  const windowDurationMins = start > 0 && end > start ? Math.round((end - start) / 60_000) : 0;
+  const reset = DateTime.make(Number(response.billingCycleEnd));
+  const resetsAt =
+    Number(response.billingCycleEnd) > 0 && Option.isSome(reset)
+      ? DateTime.formatIso(reset.value)
+      : undefined;
   const windows: ServerProviderUsageWindow[] = [];
   if (response.planUsage) {
     for (const { id, label } of CURSOR_USAGE_WINDOWS) {
@@ -53,7 +53,6 @@ export function cursorUsageResponseToLimits(
         label,
         usedPercent: clampPercent(usedPercent),
         ...(resetsAt ? { resetsAt } : {}),
-        ...(windowDurationMins > 0 ? { windowDurationMins } : {}),
       });
     }
   }
@@ -74,7 +73,7 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
     const path = yield* Path.Path;
     const platform = yield* HostProcessPlatform;
     const endpoint = (
-      settings.apiEndpoint.trim() ||
+      settings.apiEndpoint?.trim() ||
       environment.CURSOR_API_ENDPOINT?.trim() ||
       DEFAULT_CURSOR_API_ENDPOINT
     ).replace(/\/$/, "");
@@ -140,22 +139,15 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
     const body = yield* HttpClientResponse.schemaBodyJson(CursorUsageResponse)(
       yield* HttpClientResponse.filterStatusOk(response),
     );
-    return cursorUsageResponseToLimits(body, checkedAt);
+    return withCursorBillingCycle(cursorUsageResponseToLimits(body, checkedAt), body);
   }).pipe(
     Effect.timeout("10 seconds"),
-    Effect.catch((error) =>
-      Effect.logWarning("Cursor usage read failed.", {
-        // A schema failure can echo the input it rejected, and one input is auth.json.
-        cause: error._tag === "SchemaError" ? error._tag : error.message,
-      }).pipe(
-        Effect.as(
-          makeUnavailableUsageLimits({
-            checkedAt,
-            reason: "probeFailed",
-            message: "Cursor could not read usage limits.",
-          }),
-        ),
-      ),
+    Effect.orElseSucceed(() =>
+      makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message: "Cursor could not read usage limits.",
+      }),
     ),
   );
 });

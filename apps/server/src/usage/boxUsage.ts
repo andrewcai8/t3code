@@ -10,28 +10,58 @@
  *
  * @module boxUsage
  */
+import * as NodeOS from "node:os";
+
 import {
   ForwardCompatibleArray,
   UsageBucket,
+  UsageDay,
+  UsageReadError,
   UsageSource,
+  type UsageHistoryInput,
   type UsageImportInput,
   type UsageImportResult,
   type UsageProviderKind,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { usageSourcePath } from "@t3tools/shared/usageMerge";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { compareUsageBuckets, makeDayFormatter } from "./usageAggregation.ts";
+import * as ServerConfig from "../config.ts";
+import { makeDayFormatter } from "./usageAggregation.ts";
 import { addTotals } from "./usageTranscripts.ts";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Box usage kept on the host, as long as the longest window Usage offers plus slack. */
+export const BOX_USAGE_RETENTION_DAYS = 90;
+
+const isoAt = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+
+/**
+ * The host id usage sources carry. Cloud boxes are cloned from one template
+ * and share a hostname, so the provisioner names each one.
+ */
+export const usageHostId = (environment: { readonly T3CODE_USAGE_HOST_ID?: string | undefined }) =>
+  environment.T3CODE_USAGE_HOST_ID?.trim() || NodeOS.hostname();
+
+/** The order `UsageAggregator` sorts a summary's buckets in. */
+const compareUsageBuckets = (a: UsageBucket, b: UsageBucket) =>
+  a.day.localeCompare(b.day) ||
+  (a.hourStart ?? "").localeCompare(b.hourStart ?? "") ||
+  a.provider.localeCompare(b.provider) ||
+  a.model.localeCompare(b.model);
 
 /** A box's history exactly as the box reported it. */
 export interface BoxUsage {
@@ -283,7 +313,7 @@ export const importMachineUsage = Effect.fn("importMachineUsage")(function* (
  * reads the Cursor account itself, and missing or empty sources and buckets
  * without a kept source are dropped because the host has nothing to show for them.
  */
-export function historyForHost(summary: UsageSummary): UsageSummary {
+function historyForHost(summary: UsageSummary): UsageSummary {
   const bucketSources = new Set(
     summary.buckets.flatMap((bucket) =>
       bucket.provider === "cursor" || bucket.sourcePath === undefined
@@ -447,3 +477,86 @@ export function foldBoxUsage(
     sources: [...summary.sources, ...liveSources, ...retiredSources.values()],
   };
 }
+
+/**
+ * `UsageService`'s reads around its own scan: summaries with stored box
+ * usage folded in, and the hourly UTC history a host pulls from this machine
+ * when it is a cloud box. `scan` is the service's summary read, which takes
+ * a longer hourly window cap for history.
+ */
+export const makeBoxUsageReads = Effect.fn("makeBoxUsageReads")(function* (
+  scan: (
+    input: UsageSummaryInput,
+    maxHourlyWindowMs?: number,
+  ) => Effect.Effect<UsageSummary, UsageReadError>,
+) {
+  // Absent where the service is built without storage, as its unit suites do.
+  const boxUsage = yield* Effect.serviceOption(BoxUsageStore);
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  const hostId = usageHostId(yield* HostProcessEnvironment);
+
+  const readSummary = Effect.fn("UsageService.readSummaryWithBoxUsage")(function* (
+    input: UsageSummaryInput,
+  ) {
+    const summary = yield* scan(input);
+    if (Option.isNone(boxUsage)) return summary;
+    const nowMs = yield* Clock.currentTimeMillis;
+    // A box a client may still hold a summary for keeps its own identity so
+    // the merge can deduplicate it. Clients cache summaries for up to an hour.
+    const window = boxUsageListWindow(input);
+    // Box usage is an addition to this host's own usage, so an unreadable
+    // store drops the boxes rather than the whole summary.
+    const rows = yield* boxUsage.value
+      .list(window.sinceIso, window.untilIso, isoAt(nowMs - DAY_MS))
+      .pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("stored cloud box usage could not be read", { cause }).pipe(
+            Effect.as([]),
+          ),
+        ),
+      );
+    return foldBoxUsage(summary, input, rows, {
+      hostId,
+      path: path.join(config.stateDir, "cloud-box-usage"),
+    });
+  });
+
+  /**
+   * This environment's hourly UTC usage since `sinceTime`, for a host that
+   * keeps a cloud box's usage. Excludes Cursor, which the host reads itself.
+   */
+  const readHistory = Effect.fn("UsageService.readHistory")(function* (input: UsageHistoryInput) {
+    const since = DateTime.make(input.sinceTime);
+    if (Option.isNone(since)) {
+      return yield* new UsageReadError({
+        reason: "invalidWindow",
+        detail: `sinceTime '${input.sinceTime}' is not a valid instant`,
+      });
+    }
+    const nowMs = yield* Clock.currentTimeMillis;
+    const floorHour = (ms: number) => Math.floor(ms / HOUR_MS) * HOUR_MS;
+    const untilMs = floorHour(nowMs) + HOUR_MS;
+    const sinceMs = Math.min(
+      floorHour(
+        Math.max(DateTime.toEpochMillis(since.value), nowMs - BOX_USAGE_RETENTION_DAYS * DAY_MS),
+      ),
+      untilMs - HOUR_MS,
+    );
+    const summary = yield* scan(
+      {
+        timeZone: "UTC",
+        sinceDay: UsageDay.make(isoAt(sinceMs).slice(0, 10)),
+        untilDay: UsageDay.make(isoAt(untilMs - 1).slice(0, 10)),
+        resolution: "hour",
+        sinceTime: isoAt(sinceMs),
+        untilTime: isoAt(untilMs),
+      },
+      // The window is built here and already bounded by retention.
+      Number.POSITIVE_INFINITY,
+    );
+    return historyForHost(summary);
+  });
+
+  return { readSummary, readHistory };
+});

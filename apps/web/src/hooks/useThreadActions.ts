@@ -4,25 +4,10 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import {
-  isAtomCommandInterrupted,
-  settlePromise,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
-import { threadKey } from "@t3tools/client-runtime/state/entities";
-import {
-  isOfflineThreadLifecycleDispatchResult,
-  setThreadLifecycleOverlay,
-  threadLifecycleOverlayAtom,
-} from "@t3tools/client-runtime/state/threads";
-import {
-  EnvironmentId,
-  type EnvironmentProvisionDisposeResult,
-  type EnvironmentProvisionPauseResult,
-  type ScopedThreadRef,
-  ThreadId,
-} from "@t3tools/contracts";
+import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
@@ -37,7 +22,6 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentServerConfigsAtom } from "../state/server";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { threadEnvironment } from "../state/threads";
-import { serverEnvironment } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
@@ -50,13 +34,14 @@ import {
   readEnvironmentSupportsActiveReorder,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsVisitedTracking,
   readEnvironmentThreadRefs,
   readProject,
   readThreadShell,
   readThreadShells,
 } from "../state/entities";
-import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useUiStateStore } from "../uiStateStore";
+import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -64,9 +49,7 @@ import { useClientSettings } from "./useSettings";
 import * as ThreadUndo from "./threadUndo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
-import { forgetProvisionedSandbox, provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
-import { environmentCatalog } from "../connection/catalog";
-import { environmentPresentations } from "../state/presentation";
+import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -76,14 +59,9 @@ export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveB
   },
 ) {
   override get message(): string {
-    return "Cannot archive a running thread.";
+    return "Cannot archive while the provider is active.";
   }
 }
-
-type ProvisionedSandboxDisposeOutcome =
-  | { readonly kind: "absent" }
-  | EnvironmentProvisionDisposeResult;
-type ProvisionedSandboxPauseOutcome = { readonly kind: "absent" } | EnvironmentProvisionPauseResult;
 
 export class ThreadSettlementUnsupportedError extends Schema.TaggedError<ThreadSettlementUnsupportedError>()(
   "ThreadSettlementUnsupportedError",
@@ -216,8 +194,58 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
   }
 }
 
+/**
+ * Marks a thread unread. Servers with visited tracking own the unread marker
+ * (thread.mark-unread rewinds the server-side visited watermark, syncing the
+ * marker to every device); older servers keep the browser-local marker.
+ */
+function useMarkThreadUnread() {
+  const markThreadUnreadMutation = useAtomCommand(threadEnvironment.markUnread, {
+    reportFailure: false,
+  });
+  const markThreadUnreadLocal = useUiStateStore((state) => state.markThreadUnread);
+  return useCallback(
+    (target: ScopedThreadRef) => {
+      if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
+        void markThreadUnreadMutation({
+          environmentId: target.environmentId,
+          input: { threadId: target.threadId },
+        });
+        return;
+      }
+      const thread = readThreadShell(target);
+      markThreadUnreadLocal(scopedThreadKey(target), thread?.latestRun?.completedAt);
+    },
+    [markThreadUnreadLocal, markThreadUnreadMutation],
+  );
+}
+
+/**
+ * Clears a thread's Woke marker by recording a visit at the wake time.
+ * Servers with visited tracking own the watermark (thread.visit keeps the
+ * later of the stored and supplied values, so this syncs to every device);
+ * older servers keep the browser-local watermark.
+ */
+export function useAcknowledgeThreadWoke() {
+  const visitThreadMutation = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
+  const markThreadVisited = useUiStateStore((state) => state.markThreadVisited);
+  return useCallback(
+    (target: ScopedThreadRef, wokeAt: string) => {
+      if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
+        void visitThreadMutation({
+          environmentId: target.environmentId,
+          input: { threadId: target.threadId, visitedAt: wokeAt },
+        });
+        return;
+      }
+      markThreadVisited(scopedThreadKey(target), wokeAt);
+    },
+    [markThreadVisited, visitThreadMutation],
+  );
+}
+
 export function useThreadActions() {
-  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
+  const cloudThreads = useCloudThreadActions();
   const closeTerminal = useAtomCommand(terminalEnvironment.close);
   const archiveThreadMutation = useAtomCommand(threadEnvironment.archive, {
     reportFailure: false,
@@ -228,14 +256,6 @@ export function useThreadActions() {
   const deleteThreadMutation = useAtomCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
-  const disposeProvisionedEnvironment = useAtomCommand(
-    serverEnvironment.disposeProvisionedEnvironment,
-    { reportFailure: false },
-  );
-  const pauseProvisionedEnvironment = useAtomCommand(
-    serverEnvironment.pauseProvisionedEnvironment,
-    { reportFailure: false },
-  );
   const settleThreadMutation = useAtomCommand(threadEnvironment.settle, {
     reportFailure: false,
   });
@@ -263,6 +283,7 @@ export function useThreadActions() {
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
+  const markThreadUnread = useMarkThreadUnread();
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession);
   const removeWorktree = useAtomCommand(vcsEnvironment.removeWorktree, {
     reportFailure: false,
@@ -298,107 +319,6 @@ export function useThreadActions() {
       threadRef: target,
     };
   }, []);
-
-  const disposeProvisionedSandboxForThread = useCallback(
-    async (target: ScopedThreadRef) => {
-      const lease = provisionedSandboxFor(target);
-      if (!lease) return AsyncResult.success<ProvisionedSandboxDisposeOutcome>({ kind: "absent" });
-      const result = await disposeProvisionedEnvironment({
-        environmentId: lease.managerEnvironmentId,
-        input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId },
-      });
-      if (result._tag === "Success" && result.value.kind === "disposed") {
-        forgetProvisionedSandbox(target);
-      }
-      return result;
-    },
-    [disposeProvisionedEnvironment],
-  );
-
-  const pauseProvisionedSandboxForThread = useCallback(
-    async (target: ScopedThreadRef) => {
-      const lease = provisionedSandboxFor(target);
-      if (!lease) return AsyncResult.success<ProvisionedSandboxPauseOutcome>({ kind: "absent" });
-      const result = await pauseProvisionedEnvironment({
-        environmentId: lease.managerEnvironmentId,
-        input: { leaseId: lease.leaseId, sandboxId: lease.sandboxId },
-      });
-      if (result._tag === "Success" && result.value.kind === "refused") {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Cloud workspace remains running",
-            description: result.value.message,
-          }),
-        );
-      } else if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Could not pause cloud workspace",
-            description: "Retry when the cloud manager is reachable.",
-          }),
-        );
-      }
-      return result;
-    },
-    [pauseProvisionedEnvironment],
-  );
-
-  const stopProvisionedCloudMachine = useCallback(
-    async (target: ScopedThreadRef) => {
-      const lease = provisionedSandboxFor(target);
-      if (!lease) return;
-      const api = readLocalApi();
-      if (!api) return;
-      const thread = readThreadShell(target);
-      const confirmed = await settlePromise(() =>
-        api.dialogs.confirm(
-          [
-            `Stop the cloud machine for "${thread?.title ?? "this thread"}"?`,
-            "This permanently stops the cloud machine and ends any running work.",
-            "The thread and conversation will remain.",
-          ].join("\n"),
-          { variant: "destructive" },
-        ),
-      );
-      if (confirmed._tag === "Failure") {
-        const error = squashAtomCommandFailure(confirmed);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not confirm cloud machine stop",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-        return;
-      }
-      if (!confirmed.value) return;
-
-      const result = await disposeProvisionedSandboxForThread(target);
-      if (result._tag === "Success" && result.value.kind === "absent") return;
-      if (result._tag === "Success" && result.value.kind === "disposed") {
-        toastManager.add({
-          type: "success",
-          title: "Cloud machine stopped",
-          description: "The thread remains, but its cloud workspace has been released.",
-        });
-        return;
-      }
-      const description =
-        result._tag === "Success" && result.value.kind === "refused"
-          ? result.value.message
-          : "Retry after the cloud manager is reachable.";
-      toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: "Could not stop cloud machine",
-          description,
-        }),
-      );
-    },
-    [disposeProvisionedSandboxForThread],
-  );
   const getCurrentRouteThreadRef = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
     return resolveThreadRouteRef(currentRouteParams);
@@ -433,7 +353,7 @@ export function useThreadActions() {
       const resolved = resolveThreadTarget(target);
       if (!resolved) return AsyncResult.success(undefined);
       const { thread, threadRef } = resolved;
-      if (thread.session?.status === "running" && thread.session.activeTurnId != null) {
+      if (!threadRuntimeCanArchive(thread.runtime)) {
         return AsyncResult.failure(
           Cause.fail(
             new ThreadArchiveBlockedError({
@@ -457,7 +377,7 @@ export function useThreadActions() {
         action.finish();
         return archiveResult;
       }
-      await pauseProvisionedSandboxForThread(threadRef);
+      await cloudThreads.pauseBox(threadRef);
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -486,9 +406,9 @@ export function useThreadActions() {
     },
     [
       archiveThreadMutation,
+      cloudThreads,
       getCurrentRouteThreadRef,
       markThreadVisited,
-      pauseProvisionedSandboxForThread,
       resolveThreadTarget,
       unarchiveThread,
     ],
@@ -496,52 +416,7 @@ export function useThreadActions() {
 
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
-      const disposeSandboxForThread = async (threadRef: ScopedThreadRef) => {
-        const result = await disposeProvisionedSandboxForThread(threadRef);
-        if (result._tag === "Success") {
-          const value = result.value;
-          if (value.kind === "absent" || value.kind === "disposed") return;
-          toastManager.add(
-            stackedThreadToast({
-              type: "warning",
-              title: "Thread deleted, but its cloud machine is still running.",
-              description: value.message,
-            }),
-          );
-          return;
-        }
-        if (!isAtomCommandInterrupted(result)) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "warning",
-              title: "Thread deleted, but its cloud machine is still running.",
-              description: "Retry deleting the thread after the cloud manager is reachable.",
-            }),
-          );
-        }
-      };
-      const connection = appAtomRegistry.get(
-        environmentPresentations.presentationAtom(target.environmentId),
-      )?.connection;
-      const connected = connection?.phase === "connected";
-      const workspaceMissing = connection?.blockedReason === "workspace-missing";
-      const pendingOverlay = appAtomRegistry.get(threadLifecycleOverlayAtom).get(threadKey(target));
-      // An offline delete only hides the thread here and replays on reconnect,
-      // so drafts stay for Undo. A machine that is gone can release its lease now.
-      const finishOfflineDelete = async () => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "success",
-            title: "Deleted on this device",
-            description: "It will be removed from the machine if it reconnects.",
-            actionProps: {
-              children: "Undo",
-              onClick: () => setThreadLifecycleOverlay(appAtomRegistry, target, pendingOverlay),
-            },
-          }),
-        );
-        if (workspaceMissing) await disposeSandboxForThread(target);
-      };
+      const cloud = cloudThreads.beginDelete(target);
       const resolved = resolveThreadTarget(target);
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
@@ -549,23 +424,13 @@ export function useThreadActions() {
           environmentId: target.environmentId,
           input: { threadId: target.threadId },
         });
-        if (result._tag === "Success" && isOfflineThreadLifecycleDispatchResult(result.value)) {
-          await finishOfflineDelete();
-        } else if (result._tag === "Success") {
+        if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
-          await disposeSandboxForThread(target);
+          await cloud.afterDelete(result.value, target);
         }
         return result;
       }
       const { thread, threadRef } = resolved;
-      if (thread.handoff && !workspaceMissing) {
-        toastManager.add({
-          type: "warning",
-          title: "Thread changes are paused for handoff",
-          description: "Resume this thread before deleting it.",
-        });
-        return AsyncResult.success(undefined);
-      }
       const threads = readEnvironmentThreadRefs(threadRef.environmentId).flatMap((ref) => {
         const shell = readThreadShell(ref);
         return shell === null ? [] : [shell];
@@ -600,7 +465,7 @@ export function useThreadActions() {
       // A Scratch thread's folder is not a git worktree, and deleting the
       // thread keeps its files.
       const canDeleteWorktree =
-        connected &&
+        cloud.connected &&
         orphanedWorktreePath !== null &&
         threadProject !== null &&
         !isScratchProject(threadProject, environmentConfig?.scratchWorkspaceRoot);
@@ -628,14 +493,14 @@ export function useThreadActions() {
         shouldDeleteWorktree = confirmationResult.value;
       }
 
-      if (connected && thread.session && thread.session.status !== "stopped") {
+      if (cloud.connected && thread.runtime !== null) {
         await stopThreadSession({
           environmentId: threadRef.environmentId,
           input: { threadId: threadRef.threadId },
         });
       }
 
-      if (connected) {
+      if (cloud.connected) {
         await closeTerminal({
           environmentId: threadRef.environmentId,
           input: { threadId: threadRef.threadId, deleteHistory: true },
@@ -660,19 +525,15 @@ export function useThreadActions() {
       if (deleteResult._tag === "Failure") {
         return deleteResult;
       }
-      if (isOfflineThreadLifecycleDispatchResult(deleteResult.value)) {
-        await finishOfflineDelete();
-      } else {
-        refreshArchivedThreadsForEnvironment(threadRef.environmentId);
-        await disposeSandboxForThread(threadRef);
-        releaseComposerDraftUploads(threadRef);
-        clearComposerDraftForThread(threadRef);
-        clearProjectDraftThreadById(
-          scopeProjectRef(threadRef.environmentId, thread.projectId),
-          threadRef,
-        );
-        clearTerminalUiState(threadRef);
-      }
+      await cloud.afterDelete(deleteResult.value, threadRef);
+      refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      releaseComposerDraftUploads(threadRef);
+      clearComposerDraftForThread(threadRef);
+      clearProjectDraftThreadById(
+        scopeProjectRef(threadRef.environmentId, thread.projectId),
+        threadRef,
+      );
+      clearTerminalUiState(threadRef);
 
       if (shouldNavigateToFallback) {
         const fallbackThread = fallbackThreadId
@@ -747,8 +608,8 @@ export function useThreadActions() {
       clearProjectDraftThreadById,
       clearTerminalUiState,
       closeTerminal,
+      cloudThreads,
       deleteThreadMutation,
-      disposeProvisionedSandboxForThread,
       getCurrentRouteThreadRef,
       refreshVcsStatus,
       removeWorktree,
@@ -761,9 +622,7 @@ export function useThreadActions() {
 
   const unsettleThread = useCallback(
     async (target: ScopedThreadRef) => {
-      const pendingLocalSettle =
-        appAtomRegistry.get(threadLifecycleOverlayAtom).get(threadKey(target))?.kind === "settled";
-      if (!pendingLocalSettle) await retryEnvironment(target.environmentId);
+      await cloudThreads.wakeForUnsettle(target);
       if (!readEnvironmentSupportsSettlement(target.environmentId)) {
         return AsyncResult.failure(
           Cause.fail(
@@ -782,7 +641,7 @@ export function useThreadActions() {
         input: { threadId: target.threadId, reason: "user" },
       });
     },
-    [retryEnvironment, unsettleThreadMutation],
+    [cloudThreads, unsettleThreadMutation],
   );
 
   /** Turns automatic settlement (inactivity, merged PR) on or off for one thread. */
@@ -1115,7 +974,6 @@ export function useThreadActions() {
       archiveThread,
       unarchiveThread,
       deleteThread,
-      stopProvisionedCloudMachine,
       confirmAndDeleteThread,
       settleThread,
       unsettleThread,
@@ -1126,6 +984,7 @@ export function useThreadActions() {
       confirmAndUnpinThread,
       reorderPinnedThread,
       reorderActiveThread,
+      markThreadUnread,
       setThreadAutoSettle,
     }),
     [
@@ -1133,7 +992,7 @@ export function useThreadActions() {
       confirmAndDeleteThread,
       confirmAndUnpinThread,
       deleteThread,
-      stopProvisionedCloudMachine,
+      markThreadUnread,
       pinThread,
       reorderPinnedThread,
       reorderActiveThread,

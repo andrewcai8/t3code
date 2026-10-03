@@ -43,7 +43,6 @@ describe("buildPendingNewTasks", () => {
   it("surfaces every new-task draft with content alongside queued creations", () => {
     const tasks = buildPendingNewTasks({
       queuedMessages: [queuedCreation("a", "2026-09-05T10:00:00.000Z")],
-      knownThreadKeys: new Set(),
       drafts: {
         "new-task:draft-old": draft("first idea", "2026-09-05T09:00:00.000Z", {
           workspaceSelection: { mode: "worktree", branch: "main", worktreePath: null },
@@ -69,7 +68,6 @@ describe("buildPendingNewTasks", () => {
   it("hides settings-only drafts, unstamped drafts, and drafts for other surfaces", () => {
     const tasks = buildPendingNewTasks({
       queuedMessages: [],
-      knownThreadKeys: new Set(),
       drafts: {
         "new-task:settings-only": draft("", "2026-09-05T09:00:00.000Z", {
           modelSelection: { instanceId: "codex" as never, model: "gpt" },
@@ -97,7 +95,6 @@ describe("buildPendingNewTasks", () => {
     } as unknown as ComposerDraft["attachments"][number];
     const tasks = buildPendingNewTasks({
       queuedMessages: [],
-      knownThreadKeys: new Set(),
       drafts: {
         "new-task:with-image": draft("", "2026-09-05T09:00:00.000Z", {
           attachments: [attachment],
@@ -116,20 +113,8 @@ describe("buildPendingNewTasks", () => {
         queuedCreation("new", "2026-09-05T10:00:00.000Z"),
       ],
       drafts: {},
-      knownThreadKeys: new Set(),
     });
 
     expect(tasks.map((task) => task.title)).toEqual(["queued new", "queued old"]);
-  });
-
-  it("drops a queued creation once its thread exists", () => {
-    const queuedMessages = [queuedCreation("a", "2026-09-05T10:00:00.000Z")];
-    const listed = (knownThreadKeys: ReadonlySet<string>) =>
-      buildPendingNewTasks({ queuedMessages, drafts: {}, knownThreadKeys }).map(
-        (task) => task.title,
-      );
-
-    expect(listed(new Set())).toEqual(["queued a"]);
-    expect(listed(new Set([`${environmentId}:thread-a`]))).toEqual([]);
   });
 });

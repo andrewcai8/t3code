@@ -1,21 +1,27 @@
 // @effect-diagnostics globalFetch:off - the manager calls a remote T3 server over private HTTP.
 import {
-  ClientOrchestrationCommand,
   CommandId,
+  defaultInstanceIdForDriver,
+  OrchestrationV2ThreadLaunchInput,
+  type ProviderDriverKind,
+  type ProviderInstanceId,
   type ProvisionFirstTurn,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { boxOrchestrationHeaders } from "./leaseActivity.ts";
 import type { RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 
 /** `pending` is worth retrying; `refused` means the box turned the turn away for good. */
 export type FirstTurnDelivery = "delivered" | "pending" | "refused";
 
-const encodeCommand = Schema.encodeSync(ClientOrchestrationCommand);
+const encodeLaunch = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2ThreadLaunchInput));
 const decodeThread = Schema.decodeUnknownExit(
   Schema.Struct({
-    thread: Schema.Struct({ messages: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+    projection: Schema.Struct({
+      messages: Schema.Array(Schema.Struct({ id: Schema.String })),
+    }),
   }),
 );
 const decodeShell = Schema.decodeUnknownExit(
@@ -29,10 +35,13 @@ const classify = (status: number): FirstTurnDelivery =>
   status >= 400 && status < 500 && status !== 408 && status !== 429 ? "refused" : "pending";
 
 /**
- * Starts a chat's first turn on its box, at most once. The box's HTTP dispatch takes no
- * bootstrap, so the thread is created first and the turn started second, each under a fixed
- * command id: the box keeps a receipt per command, so a retry after any crash replays the
- * earlier result instead of starting a second turn.
+ * Starts a chat's first turn on its box, at most once. One launch creates the thread and sends its
+ * first message under a fixed command id: the box keeps a receipt per command, so a retry after any
+ * crash replays the earlier launch instead of starting a second turn.
+ *
+ * The box runs each driver's one account under the driver's default instance id, so a turn naming
+ * a host account launches there. The driver is the one the box was provisioned for; `driverOf`
+ * resolves a host instance id to its driver for a request that recorded none.
  */
 export async function deliverFirstTurn(
   remote: RemoteAccess,
@@ -41,20 +50,11 @@ export async function deliverFirstTurn(
     readonly threadId: string;
     readonly projectDir: string;
     readonly turn: ProvisionFirstTurn;
+    readonly agentDriver?: ProviderDriverKind | undefined;
   },
+  driverOf: (instanceId: ProviderInstanceId) => ProviderDriverKind | undefined,
 ): Promise<FirstTurnDelivery> {
-  const headers = { authorization: `Bearer ${remote.brokerToken}` };
-  const dispatch = async (command: ClientOrchestrationCommand) => {
-    const response = await fetch(`${remote.origin}/api/orchestration/dispatch`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify(encodeCommand(command)),
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
-    await response.body?.cancel();
-    return response.ok ? "delivered" : classify(response.status);
-  };
+  const headers = boxOrchestrationHeaders(remote);
   const shellResponse = await fetch(`${remote.origin}/api/orchestration/shell`, {
     headers,
     redirect: "error",
@@ -80,38 +80,39 @@ export async function deliverFirstTurn(
     }
     const thread = decodeThread(await detail.json());
     if (thread._tag === "Failure") return "pending";
-    if (thread.value.thread.messages.some((message) => message.id === turn.messageId))
+    if (thread.value.projection.messages.some((message) => message.id === turn.messageId))
       return "delivered";
-  } else {
-    const projects = shell.value.projects;
-    const project =
-      projects.find((candidate) => candidate.workspaceRoot === chat.projectDir) ??
-      (projects.length === 1 ? projects[0] : undefined);
-    if (!project) return "pending";
-    const created = await dispatch({
-      type: "thread.create",
-      commandId: CommandId.make(`first-turn-thread:${chat.requestId}`),
-      threadId,
-      projectId: project.id,
-      title: turn.title,
-      modelSelection: turn.modelSelection,
-      runtimeMode: turn.runtimeMode,
-      interactionMode: turn.interactionMode,
-      branch: null,
-      worktreePath: null,
-      createdAt: turn.createdAt,
-    });
-    if (created !== "delivered") return created;
   }
-  return dispatch({
-    type: "thread.turn.start",
-    commandId: CommandId.make(`first-turn:${chat.requestId}`),
-    threadId,
-    message: { messageId: turn.messageId, role: "user", text: turn.text, attachments: [] },
-    modelSelection: turn.modelSelection,
-    ...(turn.titleSeed ? { titleSeed: turn.titleSeed } : {}),
-    runtimeMode: turn.runtimeMode,
-    interactionMode: turn.interactionMode,
-    createdAt: turn.createdAt,
+  const projects = shell.value.projects;
+  const project =
+    projects.find((candidate) => candidate.workspaceRoot === chat.projectDir) ??
+    (projects.length === 1 ? projects[0] : undefined);
+  if (!project) return "pending";
+  const driver = chat.agentDriver ?? driverOf(turn.modelSelection.instanceId);
+  const response = await fetch(`${remote.origin}/api/orchestration/launch-thread`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify(
+      encodeLaunch({
+        commandId: CommandId.make(`first-turn:${chat.requestId}`),
+        creationSource: "server",
+        threadId,
+        projectId: project.id,
+        title: turn.title,
+        ...(turn.titleSeed ? { generateTitle: true } : {}),
+        modelSelection:
+          driver === undefined
+            ? turn.modelSelection
+            : { ...turn.modelSelection, instanceId: defaultInstanceIdForDriver(driver) },
+        runtimeMode: turn.runtimeMode,
+        interactionMode: turn.interactionMode,
+        workspaceStrategy: { type: "root" },
+        initialMessage: { messageId: turn.messageId, text: turn.text, attachments: [] },
+      }),
+    ),
+    redirect: "error",
+    signal: AbortSignal.timeout(30_000),
   });
+  await response.body?.cancel();
+  return response.ok ? "delivered" : classify(response.status);
 }

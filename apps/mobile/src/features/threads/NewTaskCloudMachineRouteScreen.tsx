@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { readProject } from "../../state/entities";
+import { readProject } from "../../state/cloud-entities";
 import {
   useRemoteConnectionStatus,
   useSavedRemoteConnection,

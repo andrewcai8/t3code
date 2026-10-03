@@ -1,9 +1,17 @@
+import { ThreadDetailsSelectControl } from "./chat/ThreadDetailsControl";
+import { ComposerContextLabel } from "./ComposerContextLabel";
+import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { CloudIcon, ScaleIcon } from "lucide-react";
+import { ScaleIcon } from "lucide-react";
 import { memo, useMemo } from "react";
 
 import type { EnvironmentOption } from "./BranchToolbar.logic";
-
+import * as RunOnCloud from "./CloudRunOn";
+import { cn } from "../lib/utils";
+import {
+  THREAD_DETAILS_PANEL_ICON_CLASS,
+  THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS,
+} from "./chat/threadDetailsPanelStyles";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import {
@@ -12,19 +20,8 @@ import {
   SelectGroupLabel,
   SelectItem,
   SelectPopup,
-  SelectTrigger,
   SelectValue,
 } from "./ui/select";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-
-export const CREATE_CLOUD_VALUE = "create-cloud-environment";
-export const CREATE_NAMESPACE_VALUE = "create-namespace-environment";
-
-export type CloudEnvironmentProvider = "e2b" | "namespace";
-export const CLOUD_ENVIRONMENT_OPTIONS = {
-  e2b: { value: CREATE_CLOUD_VALUE, label: "E2B" },
-  namespace: { value: CREATE_NAMESPACE_VALUE, label: "Namespace Mac" },
-} satisfies Record<CloudEnvironmentProvider, { value: string; label: string }>;
 
 interface BranchToolbarEnvironmentSelectorProps {
   autoEnvironmentLabel?: string | undefined;
@@ -32,15 +29,9 @@ interface BranchToolbarEnvironmentSelectorProps {
   envLocked: boolean;
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
-  // Absent when there is only one environment to show: the indicator still
-  // renders (as a static label) so remote projects are always identifiable.
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
-  // Absent where an environment cannot be created, which is any install
-  // without a configured cloud manager.
-  onCreateCloudEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
-  onCreateNamespaceEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
-  creatingCloudEnvironment?: boolean;
-  pendingCloudProvider?: CloudEnvironmentProvider | null;
+  cloudRunOn?: RunOnCloud.CloudRunOn | undefined;
+  displayMode?: "toolbar" | "panel";
 }
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -48,12 +39,10 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   onAutoEnvironment,
   envLocked,
   environmentId,
-  onCreateCloudEnvironment,
-  onCreateNamespaceEnvironment,
-  creatingCloudEnvironment,
-  pendingCloudProvider,
   availableEnvironments,
   onEnvironmentChange,
+  cloudRunOn,
+  displayMode = "toolbar",
 }: BranchToolbarEnvironmentSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(() => {
@@ -69,18 +58,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         value: env.environmentId,
         label: env.label,
       })),
-      ...(onCreateCloudEnvironment ? [{ value: CREATE_CLOUD_VALUE, label: "E2B" }] : []),
-      ...(onCreateNamespaceEnvironment
-        ? [{ value: CREATE_NAMESPACE_VALUE, label: "Namespace Mac" }]
-        : []),
+      ...RunOnCloud.cloudRunOnItems(cloudRunOn),
     ],
-    [
-      availableEnvironments,
-      autoEnvironmentLabel,
-      onAutoEnvironment,
-      onCreateCloudEnvironment,
-      onCreateNamespaceEnvironment,
-    ],
+    [availableEnvironments, autoEnvironmentLabel, onAutoEnvironment, cloudRunOn],
   );
 
   // The static label carries the xs control's height (h-7 sm:h-6) as well as
@@ -89,29 +69,26 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   // a shorter label would drag the seam out of line whenever this label is the
   // only thing in the strip.
   if (envLocked || onEnvironmentChange === undefined) {
+    const lockedRow = (
+      <span
+        className={cn(
+          "inline-flex h-7 min-w-0 max-w-full items-center gap-1 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6",
+          displayMode === "panel" && THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS,
+        )}
+        data-composer-context-control
+      >
+        <EnvironmentMachineIcon
+          kind={activeEnvironment?.machine ?? "server"}
+          className={displayMode === "panel" ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"}
+        />
+        <ComposerContextLabel displayMode={displayMode}>
+          {activeEnvironment?.label ?? "Run on"}
+        </ComposerContextLabel>
+      </span>
+    );
     return (
       <Tooltip>
-        <TooltipTrigger
-          render={<span />}
-          className="inline-flex h-7 min-w-0 max-w-full items-center gap-1 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6"
-          data-composer-context-control
-        >
-          <EnvironmentMachineIcon
-            kind={activeEnvironment?.machine ?? "server"}
-            className="size-3 shrink-0"
-          />
-          <span
-            data-composer-label
-            className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
-          >
-            <span
-              data-composer-label-motion
-              className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
-            >
-              {activeEnvironment?.label ?? "Run on"}
-            </span>
-          </span>
-        </TooltipTrigger>
+        <TooltipTrigger render={lockedRow} />
         <TooltipPopup>{activeEnvironment?.label ?? "Run on"}</TooltipPopup>
       </Tooltip>
     );
@@ -121,37 +98,19 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     <Select
       modal={false}
       value={
-        pendingCloudProvider
-          ? CLOUD_ENVIRONMENT_OPTIONS[pendingCloudProvider].value
-          : autoEnvironmentLabel
-            ? "auto"
-            : environmentId
+        RunOnCloud.cloudRunOnValue(cloudRunOn) ?? (autoEnvironmentLabel ? "auto" : environmentId)
       }
-      onValueChange={(value) => {
-        // A sentinel rather than an environment id: the machine this names
-        // does not exist yet, which is the whole point of choosing it.
-        if (value === CREATE_CLOUD_VALUE) {
-          onCreateCloudEnvironment?.("e2b");
-          return;
-        }
-        if (value === CREATE_NAMESPACE_VALUE) {
-          onCreateNamespaceEnvironment?.("namespace");
-          return;
-        }
-        if (value === "auto") {
-          onAutoEnvironment?.();
-          return;
-        }
-        onEnvironmentChange(value as EnvironmentId);
-      }}
+      onValueChange={(value) =>
+        RunOnCloud.selectCloudRunOn(cloudRunOn, value) ||
+        (value === "auto" ? onAutoEnvironment?.() : onEnvironmentChange(value as EnvironmentId))
+      }
       items={environmentItems}
     >
       <Tooltip>
         <TooltipTrigger
           render={
-            <SelectTrigger
-              variant="ghost"
-              size="xs"
+            <ThreadDetailsSelectControl
+              panel={displayMode === "panel"}
               className="min-w-0 max-w-full"
               aria-label="Run on"
               data-composer-shortcut="composer.host"
@@ -160,28 +119,35 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
           }
         >
           {autoEnvironmentLabel ? (
-            <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
+            <ScaleIcon
+              className={
+                displayMode === "panel" ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"
+              }
+              aria-hidden="true"
+            />
           ) : (
             <EnvironmentMachineIcon
               kind={activeEnvironment?.machine ?? "server"}
-              className="size-3 shrink-0"
+              className={
+                displayMode === "panel" ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"
+              }
             />
           )}
-          <span
-            data-composer-label
-            className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
-          >
-            <span
-              data-composer-label-motion
-              className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
-            >
-              <SelectValue />
-            </span>
-          </span>
+          <ComposerContextLabel displayMode={displayMode}>
+            <SelectValue />
+          </ComposerContextLabel>
         </TooltipTrigger>
         <TooltipPopup>{autoEnvironmentLabel ?? activeEnvironment?.label ?? "Run on"}</TooltipPopup>
       </Tooltip>
-      <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
+      <SelectPopup
+        alignItemWithTrigger={false}
+        {...(displayMode === "toolbar" ? composerFloatingLayerProps : {})}
+        {...(displayMode === "panel"
+          ? {
+              className: "w-(--anchor-width)",
+            }
+          : {})}
+      >
         <SelectGroup>
           <SelectGroupLabel>Run on</SelectGroupLabel>
           {onAutoEnvironment && (
@@ -205,26 +171,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               </span>
             </SelectItem>
           ))}
-          {onCreateCloudEnvironment ? (
-            <SelectItem value={CREATE_CLOUD_VALUE} disabled={creatingCloudEnvironment === true}>
-              <span className="inline-flex items-center gap-1.5">
-                <CloudIcon className="size-3" aria-hidden="true" />
-                {creatingCloudEnvironment && pendingCloudProvider === "e2b"
-                  ? "Preparing E2B…"
-                  : "E2B"}
-              </span>
-            </SelectItem>
-          ) : null}
-          {onCreateNamespaceEnvironment ? (
-            <SelectItem value={CREATE_NAMESPACE_VALUE} disabled={creatingCloudEnvironment === true}>
-              <span className="inline-flex items-center gap-1.5">
-                <CloudIcon className="size-3" aria-hidden="true" />
-                {creatingCloudEnvironment && pendingCloudProvider === "namespace"
-                  ? "Preparing Namespace Mac…"
-                  : "Namespace Mac"}
-              </span>
-            </SelectItem>
-          ) : null}
+          <RunOnCloud.CloudRunOnSelectItems cloudRunOn={cloudRunOn} />
         </SelectGroup>
       </SelectPopup>
     </Select>

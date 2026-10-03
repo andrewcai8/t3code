@@ -6,6 +6,7 @@ import {
   type CatalogRegistration,
   ConnectionCredential,
   ConnectionProfile,
+  keepsBoxPairing,
 } from "../connection/catalog.ts";
 import { type ConnectionTarget, PersistedConnectionTarget } from "../connection/model.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
@@ -114,14 +115,8 @@ export function registerConnectionInCatalog(
   const previous = document.targets.find(
     (candidate) => candidate.environmentId === target.environmentId,
   );
-  // A box's target alone keeps the profile and credential saved under its unchanged connection id,
-  // so relabeling or marking a paired box never drops its pairing.
-  const keepsPairing =
-    registration._tag === "BoxTargetRegistration" &&
-    previous?._tag === "BearerConnectionTarget" &&
-    previous.connectionId === registration.target.connectionId;
   const cleaned =
-    previous === undefined || keepsPairing
+    previous === undefined || keepsBoxPairing(registration, previous)
       ? document
       : removeConnectionMetadata(document, previous, false);
   // Re-registering (for example editing a label or URL) keeps the disabled

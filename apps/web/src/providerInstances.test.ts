@@ -2,15 +2,14 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
 import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
-  cloudProviderEntries,
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
   resolveDefaultProviderModelSelection,
+  resolveProviderCatalogAvailability,
   resolveSelectableProviderInstance,
-  selectProviderInstanceByUsage,
 } from "./providerInstances";
 
 function provider(input: {
@@ -21,14 +20,15 @@ function provider(input: {
   displayName?: string;
   accentColor?: string;
   status?: ServerProvider["status"];
-  auth?: ServerProvider["auth"];
-  message?: string;
   models?: ServerProvider["models"];
-  usageLimits?: ServerProvider["usageLimits"];
+  supportsTextGeneration?: boolean;
 }): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make(input.instanceId),
     driver: input.provider,
+    ...(input.supportsTextGeneration === undefined
+      ? {}
+      : { supportsTextGeneration: input.supportsTextGeneration }),
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     enabled: input.enabled ?? true,
@@ -36,11 +36,9 @@ function provider(input: {
     version: null,
     status: input.status ?? "ready",
     ...(input.availability ? { availability: input.availability } : {}),
-    auth: input.auth ?? { status: "authenticated" },
+    auth: { status: "authenticated" },
     checkedAt: "2026-01-01T00:00:00.000Z",
-    ...(input.message ? { message: input.message } : {}),
     models: input.models ?? [],
-    ...(input.usageLimits ? { usageLimits: input.usageLimits } : {}),
     slashCommands: [],
     skills: [],
   };
@@ -52,198 +50,6 @@ const model = (slug: string, isCustom = false, isDefault = false) => ({
   isCustom,
   ...(isDefault ? { isDefault: true } : {}),
   capabilities: {},
-});
-
-const usage = (usedPercents: number[], unavailable = false): ServerProvider["usageLimits"] => ({
-  checkedAt: "2026-01-01T00:00:00.000Z",
-  windows: usedPercents.map((usedPercent, index) => ({
-    id: `window-${index}`,
-    kind: "weekly",
-    label: `Window ${index}`,
-    usedPercent,
-  })),
-  ...(unavailable ? { unavailable: { reason: "probeFailed" as const } } : {}),
-});
-
-describe("cloudProviderEntries", () => {
-  it("offers one driver-labeled row per cloud driver, hinting a ready account", () => {
-    const entries = deriveProviderInstanceEntries([
-      provider({
-        provider: ProviderDriverKind.make("claudeAgent"),
-        instanceId: "claude_work",
-        displayName: "Work",
-        accentColor: "#ff0000",
-        models: [model("claude-work-model")],
-      }),
-      provider({
-        provider: ProviderDriverKind.make("claudeAgent"),
-        instanceId: "claudeAgent",
-        models: [model("claude-default-model")],
-      }),
-      provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex",
-        status: "error",
-      }),
-      provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex_personal",
-      }),
-      provider({
-        provider: ProviderDriverKind.make("cursor"),
-        instanceId: "cursor",
-        enabled: false,
-      }),
-      provider({ provider: ProviderDriverKind.make("opencode"), instanceId: "opencode" }),
-    ]);
-
-    expect(
-      cloudProviderEntries(entries).map((entry) => ({
-        instanceId: entry.instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        models: entry.models.map((option) => option.slug),
-      })),
-    ).toEqual([
-      {
-        instanceId: "claudeAgent",
-        displayName: "Claude",
-        accentColor: undefined,
-        models: ["claude-default-model"],
-      },
-      { instanceId: "codex_personal", displayName: "Codex", accentColor: undefined, models: [] },
-    ]);
-  });
-
-  it("offers a driver whose every account's host probe timed out", () => {
-    const cursor = ProviderDriverKind.make("cursor");
-    const discoveryTimedOut = "Cursor ACP model discovery timed out after 15000ms.";
-    const entries = deriveProviderInstanceEntries([
-      provider({
-        provider: cursor,
-        instanceId: "cursor",
-        status: "warning",
-        message: discoveryTimedOut,
-        models: [model("default", false, true), model("gpt-5.5")],
-      }),
-      provider({
-        provider: cursor,
-        instanceId: "cursor_acai13",
-        status: "warning",
-        message: discoveryTimedOut,
-        models: [model("default", false, true), model("gpt-5.5")],
-      }),
-      provider({
-        provider: cursor,
-        instanceId: "cursor_andrewcai083",
-        status: "error",
-        auth: { status: "unknown" },
-        message: "Cursor Agent CLI is installed but timed out while running `agent about`.",
-        models: [model("default", false, true), model("gpt-5.5")],
-      }),
-    ]);
-
-    expect(
-      cloudProviderEntries(entries).map((entry) => ({
-        instanceId: entry.instanceId,
-        displayName: entry.displayName,
-        pickerReady: isProviderInstancePickerReady(entry),
-        models: entry.models.map((option) => option.slug),
-      })),
-    ).toEqual([
-      {
-        instanceId: "cursor",
-        displayName: "Cursor",
-        pickerReady: true,
-        models: ["default", "gpt-5.5"],
-      },
-    ]);
-  });
-
-  it("hints a ready account over a default whose probe timed out", () => {
-    const cursor = ProviderDriverKind.make("cursor");
-    const entries = deriveProviderInstanceEntries([
-      provider({ provider: cursor, instanceId: "cursor", status: "warning" }),
-      provider({ provider: cursor, instanceId: "cursor_work" }),
-    ]);
-
-    expect(cloudProviderEntries(entries).map((entry) => entry.instanceId)).toEqual(["cursor_work"]);
-  });
-
-  it("keeps a driver whose every account is signed out unready, with its reason", () => {
-    const entries = deriveProviderInstanceEntries([
-      provider({
-        provider: ProviderDriverKind.make("claudeAgent"),
-        instanceId: "claudeAgent",
-        status: "error",
-        auth: { status: "unauthenticated" },
-        message: "Claude is not signed in.",
-      }),
-    ]);
-
-    expect(
-      cloudProviderEntries(entries).map((entry) => ({
-        pickerReady: isProviderInstancePickerReady(entry),
-        message: entry.snapshot.message,
-      })),
-    ).toEqual([{ pickerReady: false, message: "Claude is not signed in." }]);
-  });
-});
-
-describe("selectProviderInstanceByUsage", () => {
-  it("chooses the ready account with the lowest fullest usage window", () => {
-    const entries = deriveProviderInstanceEntries([
-      provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex_a",
-        usageLimits: usage([20, 70]),
-      }),
-      provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex_b",
-        usageLimits: usage([30, 40]),
-      }),
-    ]);
-
-    expect(
-      selectProviderInstanceByUsage(entries, ProviderDriverKind.make("codex"))?.instanceId,
-    ).toBe("codex_b");
-  });
-
-  it("ignores unavailable usage and falls back by instance id", () => {
-    const entries = deriveProviderInstanceEntries([
-      provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex_z",
-        usageLimits: usage([], true),
-      }),
-      provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex_a" }),
-    ]);
-
-    expect(
-      selectProviderInstanceByUsage(entries, ProviderDriverKind.make("codex"))?.instanceId,
-    ).toBe("codex_a");
-  });
-
-  it("only considers enabled, available, ready instances for the selected driver", () => {
-    const entries = deriveProviderInstanceEntries([
-      provider({
-        provider: ProviderDriverKind.make("claude"),
-        instanceId: "claude",
-        usageLimits: usage([1]),
-      }),
-      provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex",
-        status: "error",
-        usageLimits: usage([1]),
-      }),
-    ]);
-
-    expect(
-      selectProviderInstanceByUsage(entries, ProviderDriverKind.make("codex")),
-    ).toBeUndefined();
-  });
 });
 
 describe("isProviderInstancePickerReady", () => {
@@ -266,6 +72,46 @@ describe("isProviderInstancePickerReady", () => {
     ]);
 
     expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
+  });
+});
+
+describe("resolveProviderCatalogAvailability", () => {
+  const [entry] = deriveProviderInstanceEntries([
+    provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex" }),
+  ]);
+
+  it("keeps the initial reactive config state distinct from an empty catalogue", () => {
+    expect(
+      resolveProviderCatalogAvailability({
+        catalogLoaded: false,
+        entries: [],
+        selectedEntry: undefined,
+      }),
+    ).toBe("loading");
+    expect(
+      resolveProviderCatalogAvailability({
+        catalogLoaded: true,
+        entries: [],
+        selectedEntry: undefined,
+      }),
+    ).toBe("unconfigured");
+  });
+
+  it("distinguishes a selected provider from configured but unusable providers", () => {
+    expect(
+      resolveProviderCatalogAvailability({
+        catalogLoaded: true,
+        entries: entry ? [entry] : [],
+        selectedEntry: entry,
+      }),
+    ).toBe("ready");
+    expect(
+      resolveProviderCatalogAvailability({
+        catalogLoaded: true,
+        entries: entry ? [entry] : [],
+        selectedEntry: undefined,
+      }),
+    ).toBe("unavailable");
   });
 });
 
@@ -405,6 +251,37 @@ describe("deriveProviderInstanceEntries", () => {
 });
 
 describe("deriveProviderEntriesByEnvironment", () => {
+  it("resolves registry branding from each environment's settings", () => {
+    const instanceId = "custom-acp";
+    const snapshot = provider({ provider: ProviderDriverKind.make("acpRegistry"), instanceId });
+    const byEnvironment = deriveProviderEntriesByEnvironment(
+      ["devin", "other-agent"].map(
+        (agentId) =>
+          [
+            agentId,
+            [snapshot],
+            {
+              providers: {} as never,
+              providerInstances: {
+                [instanceId]: {
+                  driver: ProviderDriverKind.make("acpRegistry"),
+                  enabled: true,
+                  config: { agentId, registryIconUrl: `https://example.com/${agentId}.svg` },
+                },
+              },
+            },
+          ] as const,
+      ),
+    );
+    expect(byEnvironment.get("devin")?.get(instanceId)?.acpRegistryAgentId).toBe("devin");
+    expect(byEnvironment.get("devin")?.get(instanceId)?.acpRegistryIconUrl).toBe(
+      "https://example.com/devin.svg",
+    );
+    expect(byEnvironment.get("other-agent")?.get(instanceId)?.acpRegistryAgentId).toBe(
+      "other-agent",
+    );
+  });
+
   it("keeps same-id default instances distinct per environment", () => {
     const byEnvironment = deriveProviderEntriesByEnvironment([
       [
@@ -738,5 +615,19 @@ describe("resolveDefaultProviderModelSelection", () => {
         null,
       ),
     ).toBeNull();
+  });
+});
+
+describe("provider icon metadata", () => {
+  it("retains server-published registry icons without local settings", () => {
+    const iconUrl = "https://cdn.agentclientprotocol.com/registry/icons/swe-agent.svg";
+    const [entry] = deriveProviderInstanceEntries([
+      {
+        ...provider({ provider: ProviderDriverKind.make("acpRegistry"), instanceId: "swe-remote" }),
+        iconUrl,
+      },
+    ]);
+    expect(entry?.acpRegistryIconUrl).toBe(iconUrl);
+    expect(entry?.driverKind).toBe("acpRegistry");
   });
 });

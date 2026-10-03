@@ -1,8 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
+import { deriveReportedModelSelection } from "@t3tools/client-runtime/state/thread-execution";
 
 import { appAtomRegistry } from "./atom-registry";
 import type {
   EnvironmentProject,
+  EnvironmentThread,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type {
@@ -15,7 +17,7 @@ import { Atom } from "effect/unstable/reactivity";
 
 import { environmentProjects } from "./projects";
 import { environmentServerConfigsAtom, serverEnvironment } from "./server";
-import { environmentThreadShells } from "./threads";
+import { environmentThreadDetails, environmentThreadShells } from "./threads";
 
 const EMPTY_PROJECT_ATOM = Atom.make<EnvironmentProject | null>(null).pipe(
   Atom.withLabel("mobile-project:empty"),
@@ -52,21 +54,6 @@ export function waitForProject(
   });
 }
 
-/** The project as the live client store holds it now. */
-export function readProject(ref: ScopedProjectRef): EnvironmentProject | null {
-  return appAtomRegistry.get(environmentProjects.projectAtom(ref));
-}
-
-/** Every project as the live client store holds them now. */
-export function readProjects(): ReadonlyArray<EnvironmentProject> {
-  return appAtomRegistry.get(environmentProjects.projectsAtom);
-}
-
-/** The environment's server config as the live client store holds it now. */
-export function readServerConfig(environmentId: EnvironmentId): ServerConfig | null {
-  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId) ?? null;
-}
-
 export function useProjects(): ReadonlyArray<EnvironmentProject> {
   return useAtomValue(environmentProjects.projectsAtom);
 }
@@ -75,8 +62,8 @@ export function useThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return useAtomValue(environmentThreadShells.threadShellsAtom);
 }
 
-export function useThreadRefs(): ReadonlyArray<ScopedThreadRef> {
-  return useAtomValue(environmentThreadShells.threadRefsAtom);
+export function useNavigationThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
+  return useAtomValue(environmentThreadShells.navigationThreadShellsAtom);
 }
 
 export function useProject(ref: ScopedProjectRef | null): EnvironmentProject | null {
@@ -103,35 +90,9 @@ export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useAtomValue(environmentServerConfigsAtom);
 }
 
-/**
- * Resolves with the first project on `environmentId`, or null once `timeoutMs` passes. A newly
- * paired cloud machine publishes its cloned project some moments after the connection opens;
- * this is how a caller waits for that without polling.
- */
-export function waitForEnvironmentProject(
-  environmentId: EnvironmentId,
-  timeoutMs: number,
-): Promise<EnvironmentProject | null> {
-  const find = () =>
-    appAtomRegistry
-      .get(environmentProjects.projectsAtom)
-      .find((project) => project.environmentId === environmentId) ?? null;
-  const current = find();
-  if (current !== null) return Promise.resolve(current);
-  return new Promise((resolve) => {
-    let unsubscribe: (() => void) | null = null;
-    const timer = setTimeout(() => {
-      unsubscribe?.();
-      resolve(null);
-    }, timeoutMs);
-    const settle = () => {
-      const project = find();
-      if (project === null) return;
-      clearTimeout(timer);
-      unsubscribe?.();
-      resolve(project);
-    };
-    unsubscribe = appAtomRegistry.subscribe(environmentProjects.projectsAtom, settle);
-    settle();
-  });
+const selectReportedModelSelection = (thread: EnvironmentThread | null) =>
+  thread === null ? null : deriveReportedModelSelection(thread.projection);
+
+export function useThreadReportedModelSelection(ref: ScopedThreadRef) {
+  return useAtomValue(environmentThreadDetails.threadAtom(ref), selectReportedModelSelection);
 }

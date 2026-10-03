@@ -18,6 +18,7 @@ import {
   resolveProvisioningProfiles,
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
+import { credentialSecretName } from "../provider/providerCredentialName.ts";
 
 const decodeSettings = Schema.decodeSync(ServerSettings);
 let directory: string;
@@ -173,20 +174,36 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
     }),
   );
 
-  it.effect("reads Cursor credentials independently of its selected CLI config directory", () =>
+  it.effect("sends a Cursor account the sign-in this server keeps in its secret store", () =>
     Effect.gen(function* () {
-      const source = yield* file(cursorAuthRelative);
-      yield* file("other-config/auth.json", "generic-account");
+      yield* file(cursorAuthRelative, "cursor-agent-login");
+      const source = yield* file(
+        `secrets/${credentialSecretName("cursor", "selected")}.bin`,
+        '{"version":1,"backendUrl":"https://api2.cursor.sh","apiKey":"key","createdAtMs":1}',
+      );
       const settings = decodeSettings({
         providerInstances: {
           selected: { driver: "cursor", enabled: true, environment: cursorEnvironment() },
         },
       });
-      expect((yield* resolve(settings)).credential).toEqual({
+      const profile = yield* resolveProvisioningProviderProfile(
+        settings,
+        { providerInstanceId: "selected" },
+        undefined,
+        {
+          localAgentRuns: false,
+          secretsDir: NodePath.join(directory, "secrets"),
+          refresh: () => Effect.void,
+        },
+      );
+      expect(profile.credential).toEqual({
         kind: "file",
         source,
-        destination: ".cursor/auth.json",
+        destination: ".t3/userdata/provider-auth/cursor/cursor.json",
       });
+      expect((yield* Effect.flip(resolve(settings, "selected", "cursor"))).message).toBe(
+        "The selected account credentials could not be found on this machine.",
+      );
     }),
   );
 
@@ -650,6 +667,7 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
           undefined,
           {
             localAgentRuns: false,
+            secretsDir: NodePath.join(directory, "secrets"),
             refresh: (instanceId) => Effect.sync(() => void refreshed.push(instanceId)),
           },
         ),

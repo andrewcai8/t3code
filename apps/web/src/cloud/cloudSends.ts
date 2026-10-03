@@ -6,34 +6,52 @@ import {
 } from "@t3tools/client-runtime/cloud";
 import { holdsPairing, provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { AsyncResult } from "effect/unstable/reactivity";
 
 import { toastManager } from "../components/ui/toast";
-import {
-  DraftId,
-  type PendingCloudEnvironmentSend,
-  useComposerDraftStore,
-} from "../composerDraftStore";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { waitForProjectMatch } from "../state/entities";
+import { readProjects } from "../state/entities";
+import { environmentProjects } from "../state/projects";
 import { serverEnvironment } from "../state/server";
 import { readPreparedConnection } from "../state/session";
 import { holdBoxDemand } from "./CloudBoxes";
+import {
+  patchDraftPendingEnvironmentSend,
+  setDraftPendingEnvironmentSend,
+} from "./pendingCloudSend";
 import { provisionRequests } from "./provisionRequests";
 import { provisionedSandboxLeases } from "./provisionedSandboxLeases";
 
 const quietly = { reportFailure: false };
 
-export function patchDraftPendingEnvironmentSend(
-  draftId: DraftId,
-  patch: Partial<PendingCloudEnvironmentSend>,
-): void {
-  const store = useComposerDraftStore.getState();
-  const current = store.getDraftSession(draftId)?.pendingEnvironmentSend;
-  if (!current) return;
-  store.setDraftPendingEnvironmentSend(draftId, { ...current, ...patch });
+/** Resolves when a newly paired environment publishes a matching project. */
+function waitForProjectMatch(
+  predicate: (project: EnvironmentProject) => boolean,
+  timeoutMs: number,
+): Promise<EnvironmentProject> {
+  const find = () => readProjects().find(predicate) ?? null;
+  const current = find();
+  if (current !== null) return Promise.resolve(current);
+  return new Promise((resolve, reject) => {
+    let unsubscribe: (() => void) | null = null;
+    const timeout = setTimeout(() => {
+      unsubscribe?.();
+      reject(new Error("The paired environment did not publish its project."));
+    }, timeoutMs);
+    const finish = () => {
+      const project = find();
+      if (project === null) return;
+      clearTimeout(timeout);
+      unsubscribe?.();
+      resolve(project);
+    };
+    unsubscribe = appAtomRegistry.subscribe(environmentProjects.projectsAtom, finish);
+    finish();
+  });
 }
 
 /** Writes a step onto the draft; its view, wherever it is open, follows the draft. */
@@ -55,7 +73,7 @@ export function recordCloudSendStep(id: string, step: CloudSendStep): void {
       toastManager.add({ type: "error", title: step.message });
       return;
     case "cancelled":
-      store.setDraftPendingEnvironmentSend(draftId, null);
+      setDraftPendingEnvironmentSend(draftId, null);
       return;
     case "ready":
       if (!pending) return;

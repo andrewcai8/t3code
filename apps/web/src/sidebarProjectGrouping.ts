@@ -1,5 +1,5 @@
-import { newChatProject, type NewChatEnvironmentState } from "@t3tools/client-runtime/cloud";
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import type { NewChatEnvironmentState } from "@t3tools/client-runtime/cloud";
+import { placeNewChatProject } from "./cloud/newChatPlacement.logic";
 import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 import { buildProjectGroups, type ProjectGroupingSettings } from "./logicalProject";
 import type { Project } from "./types";
@@ -135,14 +135,11 @@ export function buildSidebarProjectSnapshots(input: {
   });
 }
 
-/**
- * One entry per project group a new chat can start in, each targeting the member `newChatProject`
- * places it on, asked for the preferred project, else the group's own.
- */
 export function buildSidebarProjectPickerEntries(input: {
   groups: ReadonlyArray<SidebarProjectSnapshot>;
   preferredProjectRef: ScopedProjectRef | null;
-  environmentState: (environmentId: EnvironmentId) => NewChatEnvironmentState | null | undefined;
+  /** Places each entry like a new chat; see `placeNewChatProject`. */
+  environmentState?: (environmentId: EnvironmentId) => NewChatEnvironmentState | null | undefined;
 }) {
   const preferredProjectRef = input.preferredProjectRef;
   const entries = input.groups.flatMap((group): SidebarProjectPickerEntry[] => {
@@ -163,13 +160,13 @@ export function buildSidebarProjectPickerEntries(input: {
           (project) => project.environmentId === preferredProjectRef.environmentId,
         ))
       : null;
-    const requested = preferredProject ?? group;
-    const targetProject = newChatProject({
-      requested: scopeProjectRef(requested.environmentId, requested.id),
-      projects: group.memberProjects,
-      logicalProjectKey: () => group.projectKey,
-      environmentState: input.environmentState,
-    });
+    const requestedProject =
+      preferredProject ??
+      group.memberProjects.find(
+        (project) => project.environmentId === group.environmentId && project.id === group.id,
+      ) ??
+      group.memberProjects[0];
+    const targetProject = placeNewChatProject(requestedProject, group, input.environmentState);
     if (!targetProject) return [];
 
     return [{ group, targetProject, isPreferred }];

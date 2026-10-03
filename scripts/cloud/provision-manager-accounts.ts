@@ -5,16 +5,14 @@
  * `resolveProvisioningProviderProfile`, running on the manager, resolves each
  * account to the same credential the laptop would.
  *
- * The manager is a Linux box, and that function resolves credential paths from
- * the platform it runs on. So sources are resolved here with the host's
- * platform, and every destination is the path a Linux process reads. Cursor
- * is the one that differs: macOS reads `.cursor/auth.json`, Linux reads
- * `$XDG_CONFIG_HOME/cursor/auth.json`.
+ * Sources are this machine's files, and every destination is the path the
+ * manager, a Linux box, reads. A Cursor sign-in lives in T3's secret store, so
+ * it travels from this machine's store into the manager's under the same name.
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import { cursorFileCredentialPath } from "../../apps/server/src/provider/cursorCredentialPath.ts";
+import { credentialSecretName } from "../../apps/server/src/provider/providerCredentialName.ts";
 
 const SLUG = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -49,8 +47,8 @@ export interface PlanInput {
   readonly accounts?: ReadonlyArray<string> | undefined;
   readonly host: {
     readonly homedir: string;
-    readonly platform: NodeJS.Platform;
-    readonly environment: Record<string, string | undefined>;
+    /** This machine's T3 state directory, the one holding its `settings.json` and `secrets`. */
+    readonly stateDir: string;
   };
   /** The manager's `--base-dir`; its state directory is `userdata` below it. */
   readonly managerBaseDir: string;
@@ -242,12 +240,10 @@ export function planManagerAccounts(input: PlanInput): ManagerPlan {
       }
       case "cursor": {
         const home = posix.join(base, "cursor-homes", id);
-        const environment = { ...input.host.environment };
-        for (const variable of instance.environment ?? [])
-          environment[variable.name] = variable.value ?? "";
+        const secret = `${credentialSecretName("cursor", id)}.bin`;
         files.push({
-          source: cursorFileCredentialPath(environment, input.host.platform, input.host.homedir),
-          destination: posix.join(home, ".config", "cursor", "auth.json"),
+          source: NodePath.join(input.host.stateDir, "secrets", secret),
+          destination: posix.join(base, "userdata", "secrets", secret),
         });
         providerInstances[id] = {
           driver: "cursor",

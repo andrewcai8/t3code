@@ -14,7 +14,6 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   UsageDay,
-  type UsageBucket,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
@@ -28,13 +27,9 @@ import * as Scheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
-import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { BoxUsageStore, BoxUsageStoreError } from "./boxUsage.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -81,9 +76,6 @@ const setup = Effect.gen(function* () {
   };
 });
 
-const token = (subject: string) =>
-  `h.${Buffer.from(JSON.stringify({ sub: subject })).toString("base64url")}.s`;
-
 const serviceLayers = (input: {
   readonly prefix: string;
   readonly home: string;
@@ -93,22 +85,9 @@ const serviceLayers = (input: {
   readonly ratesDocument?: unknown;
   readonly environment?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
-  /** Defaults to a store with no cloud box usage. */
-  readonly boxUsage?: Layer.Layer<BoxUsageStore>;
 }) =>
   ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
-    Layer.provideMerge(
-      input.boxUsage ??
-        Layer.succeed(
-          BoxUsageStore,
-          BoxUsageStore.of({
-            replace: () => Effect.void,
-            list: () => Effect.succeed([]),
-            prune: () => Effect.void,
-          }),
-        ),
-    ),
     Layer.provideMerge(Layer.succeed(HostProcessPlatform, input.platform ?? "linux")),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
@@ -142,95 +121,96 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
-  for (const explicitDefault of [true, false]) {
-    it.live(
-      `reads shared managed ${explicitDefault ? "explicit" : "legacy"} default and disabled extra account history once`,
-      () =>
-        Effect.gen(function* () {
-          const { home, settings } = yield* setup;
-          const summary = yield* Effect.gen(function* () {
-            for (const [id, output] of [
-              ["codex", 17],
-              ["codex-personal", 23],
-            ] as const) {
-              const sessions = NodePath.join(home, "shared-codex", "sessions");
-              yield* Effect.promise(async () => {
-                await NodeFSP.mkdir(sessions, { recursive: true });
-                await NodeFSP.writeFile(
-                  NodePath.join(sessions, `${id}-rollout.jsonl`),
-                  [
-                    { type: "session_meta", payload: { id } },
-                    { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
-                    {
-                      type: "event_msg",
-                      timestamp: "2026-08-01T10:00:00Z",
-                      payload: {
-                        type: "token_count",
-                        info: { last_token_usage: { input_tokens: 10, output_tokens: output } },
-                      },
+  it.live.each([
+    { explicitDefault: true, label: "explicit" },
+    { explicitDefault: false, label: "legacy" },
+  ])(
+    "reads shared managed $label default and disabled extra account history once",
+    ({ explicitDefault }) =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const summary = yield* Effect.gen(function* () {
+          for (const [id, output] of [
+            ["codex", 17],
+            ["codex-personal", 23],
+          ] as const) {
+            const sessions = NodePath.join(home, "shared-codex", "sessions");
+            yield* Effect.promise(async () => {
+              await NodeFSP.mkdir(sessions, { recursive: true });
+              await NodeFSP.writeFile(
+                NodePath.join(sessions, `${id}-rollout.jsonl`),
+                [
+                  { type: "session_meta", payload: { id } },
+                  { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+                  {
+                    type: "event_msg",
+                    timestamp: "2026-08-01T10:00:00Z",
+                    payload: {
+                      type: "token_count",
+                      info: { last_token_usage: { input_tokens: 10, output_tokens: output } },
                     },
-                  ]
-                    .map((line) => encodeUnknownJsonString(line))
-                    .join("\n") + "\n",
-                );
-              });
-            }
-            const service = yield* UsageService.make;
-            return yield* service.readSummary(WINDOW);
-          }).pipe(
-            Effect.provide(
-              serviceLayers({
-                prefix: "usage-managed-accounts",
-                home,
-                settings: {
-                  ...settings,
-                  providers: {
-                    ...settings.providers,
-                    codex: { setupMode: "managed", homePath: NodePath.join(home, "shared-codex") },
                   },
-                  providerInstances: {
-                    ...(explicitDefault
-                      ? {
-                          [ProviderInstanceId.make("codex")]: {
-                            driver: ProviderDriverKind.make("codex"),
-                            config: {
-                              setupMode: "managed",
-                              homePath: NodePath.join(home, "shared-codex"),
-                            },
+                ]
+                  .map((line) => encodeUnknownJsonString(line))
+                  .join("\n") + "\n",
+              );
+            });
+          }
+          const service = yield* UsageService.make;
+          return yield* service.readSummary(WINDOW);
+        }).pipe(
+          Effect.provide(
+            serviceLayers({
+              prefix: "usage-managed-accounts",
+              home,
+              settings: {
+                ...settings,
+                providers: {
+                  ...settings.providers,
+                  codex: { setupMode: "managed", homePath: NodePath.join(home, "shared-codex") },
+                },
+                providerInstances: {
+                  ...(explicitDefault
+                    ? {
+                        [ProviderInstanceId.make("codex")]: {
+                          driver: ProviderDriverKind.make("codex"),
+                          config: {
+                            setupMode: "managed",
+                            homePath: NodePath.join(home, "shared-codex"),
                           },
-                        }
-                      : {}),
-                    [ProviderInstanceId.make("codex-personal")]: {
-                      driver: ProviderDriverKind.make("codex"),
-                      enabled: false,
-                      config: {
-                        setupMode: "managed",
-                        homePath: NodePath.join(home, "shared-codex"),
-                        shadowHomePath: NodePath.join(home, "personal-shadow"),
-                      },
-                      environment: [
-                        {
-                          name: "CODEX_HOME",
-                          value: NodePath.join(home, "ignored-environment"),
-                          sensitive: false,
                         },
-                      ],
+                      }
+                    : {}),
+                  [ProviderInstanceId.make("codex-personal")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    enabled: false,
+                    config: {
+                      setupMode: "managed",
+                      homePath: NodePath.join(home, "shared-codex"),
+                      shadowHomePath: NodePath.join(home, "personal-shadow"),
                     },
+                    environment: [
+                      {
+                        name: "CODEX_HOME",
+                        value: NodePath.join(home, "ignored-environment"),
+                        sensitive: false,
+                      },
+                    ],
                   },
                 },
-              }),
-            ),
-          );
-          assert.strictEqual(totalOutputTokens(summary), 40);
-          assert.strictEqual(
-            summary.sources.filter(
-              (source) => source.fingerprint.provider === "codex" && source.status === "ok",
-            ).length,
-            1,
-          );
-        }).pipe(Effect.scoped),
-    );
-  }
+              },
+            }),
+          ),
+        );
+        assert.strictEqual(totalOutputTokens(summary), 40);
+        assert.strictEqual(
+          summary.sources.filter(
+            (source) => source.fingerprint.provider === "codex" && source.status === "ok",
+          ).length,
+          1,
+        );
+      }).pipe(Effect.scoped),
+  );
   it.live("omits Cursor account usage when no file login is saved", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
@@ -271,45 +251,6 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.live("reports only the Cursor instance whose saved login cannot be read", () =>
-    Effect.gen(function* () {
-      const { settings, home } = yield* setup;
-      const invalidAuthPath = NodePath.join(home, "config-invalid", "cursor", "auth.json");
-      yield* Effect.promise(async () => {
-        await NodeFSP.mkdir(NodePath.dirname(invalidAuthPath), { recursive: true });
-        await NodeFSP.writeFile(invalidAuthPath, "invalid json");
-      });
-      const cursorInstance = (config: string) => ({
-        driver: ProviderDriverKind.make("cursor"),
-        environment: [
-          { name: "XDG_CONFIG_HOME", value: NodePath.join(home, config), sensitive: false },
-        ],
-      });
-      const service = yield* UsageService.make.pipe(
-        Effect.provide(
-          serviceLayers({
-            prefix: "usage-service-cursor-invalid-and-missing",
-            home,
-            settings: {
-              ...settings,
-              providerInstances: {
-                [ProviderInstanceId.make("cursor")]: cursorInstance("config-invalid"),
-                [ProviderInstanceId.make("cursor-empty")]: cursorInstance("config-empty"),
-              },
-            },
-          }),
-        ),
-      );
-      const summary = yield* service.readSummary(WINDOW);
-      assert.deepStrictEqual(
-        summary.sources
-          .filter((source) => source.fingerprint.provider === "cursor")
-          .map((source) => source.message),
-        ["Cursor credentials could not be read."],
-      );
-    }).pipe(Effect.scoped),
-  );
-
   it.live("does not read the macOS Cursor Keychain before account usage is enabled", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
@@ -328,97 +269,6 @@ describe("UsageService", () => {
       const cursor = summary.sources.find((source) => source.fingerprint.provider === "cursor");
       assert.strictEqual(cursor?.status, "missing");
       assert.strictEqual(cursor?.action, "enableCursorKeychain");
-    }).pipe(Effect.scoped),
-  );
-
-  it.live("reads every Cursor instance's login and counts each account once", () =>
-    Effect.gen(function* () {
-      const { settings, home } = yield* setup;
-      const logins = [
-        { id: "cursor", config: "config-a", subject: "auth0|user_a" },
-        { id: "cursor-work", config: "config-b", subject: "auth0|user_b" },
-        // A second instance on the first account's login.
-        { id: "cursor-alias", config: "config-c", subject: "auth0|user_a" },
-      ];
-      yield* Effect.promise(() =>
-        Promise.all(
-          logins.map(async ({ config, subject }) => {
-            const directory = NodePath.join(home, config, "cursor");
-            await NodeFSP.mkdir(directory, { recursive: true });
-            await NodeFSP.writeFile(
-              NodePath.join(directory, "auth.json"),
-              encodeUnknownJsonString({ accessToken: token(subject) }),
-            );
-          }),
-        ),
-      );
-      const outputByUser: Record<string, number> = { user_a: 3, user_b: 5 };
-      const realFetch = globalThis.fetch;
-      yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          globalThis.fetch = (async (_url: string, init: RequestInit) => {
-            const cookie = new Headers(init.headers).get("Cookie") ?? "";
-            const user = decodeURIComponent(cookie).split("=")[1]?.split("::")[0] ?? "";
-            return Response.json({
-              totalUsageEventsCount: 1,
-              usageEventsDisplay: [
-                {
-                  timestamp: String(Date.parse("2026-08-01T10:00:00Z")),
-                  model: "auto",
-                  tokenUsage: { inputTokens: 1, outputTokens: outputByUser[user] ?? 0 },
-                },
-              ],
-            });
-          }) as typeof fetch;
-        }),
-        () =>
-          Effect.sync(() => {
-            globalThis.fetch = realFetch;
-          }),
-      );
-      const service = yield* UsageService.make.pipe(
-        Effect.provide(
-          serviceLayers({
-            prefix: "usage-service-cursor-instances",
-            home,
-            settings: {
-              ...settings,
-              providerInstances: Object.fromEntries(
-                logins.map(({ id, config }) => [
-                  ProviderInstanceId.make(id),
-                  {
-                    driver: ProviderDriverKind.make("cursor"),
-                    environment: [
-                      {
-                        name: "XDG_CONFIG_HOME",
-                        value: NodePath.join(home, config),
-                        sensitive: false,
-                      },
-                    ],
-                  },
-                ]),
-              ),
-            },
-          }),
-        ),
-      );
-      const summary = yield* service.readSummary(WINDOW);
-      const cursorSources = summary.sources.filter(
-        (source) => source.fingerprint.provider === "cursor",
-      );
-      assert.deepStrictEqual(
-        cursorSources.map((source) => [source.fingerprint.hostId, source.status]),
-        [
-          ["cursor.com", "ok"],
-          ["cursor.com", "ok"],
-        ],
-      );
-      assert.strictEqual(
-        summary.buckets
-          .filter((bucket) => bucket.provider === "cursor")
-          .reduce((sum, bucket) => sum + bucket.totals.outputTokens, 0),
-        8,
-      );
     }).pipe(Effect.scoped),
   );
 
@@ -578,51 +428,6 @@ describe("UsageService", () => {
         sourcesFor("antigravity")[0]?.fingerprint.resolvedHomePath,
         yield* Effect.promise(() => NodeFSP.realpath(conversations)),
       );
-    }).pipe(Effect.scoped),
-  );
-
-  it.live("counts archived Codex rollouts once, including one archived after a scan", () =>
-    Effect.gen(function* () {
-      const { settings, home } = yield* setup;
-      const codexHome = NodePath.join(home, "codex");
-      const rollout = (sessionId: string, outputTokens: number) =>
-        [
-          { type: "session_meta", payload: { id: sessionId } },
-          { type: "turn_context", payload: { model: "gpt-6-astra" } },
-          {
-            type: "event_msg",
-            timestamp: "2026-08-01T10:00:00Z",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: { input_tokens: 10, output_tokens: outputTokens },
-                last_token_usage: { input_tokens: 10, output_tokens: outputTokens },
-              },
-            },
-          },
-        ]
-          .map((line) => encodeUnknownJsonString(line))
-          .join("\n") + "\n";
-      const live = NodePath.join(codexHome, "sessions", "2026", "08", "01", "rollout-live.jsonl");
-      yield* Effect.promise(async () => {
-        await NodeFSP.mkdir(NodePath.dirname(live), { recursive: true });
-        await NodeFSP.mkdir(NodePath.join(codexHome, "archived_sessions"), { recursive: true });
-        await NodeFSP.writeFile(live, rollout("live-session", 7));
-        await NodeFSP.writeFile(
-          NodePath.join(codexHome, "archived_sessions", "rollout-old.jsonl"),
-          rollout("archived-session", 40),
-        );
-      });
-      const service = yield* UsageService.make.pipe(
-        Effect.provide(serviceLayers({ prefix: "usage-service-codex-archived", home, settings })),
-      );
-
-      assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 47);
-      // Codex moves a rollout it archives; the scan cache still holds its old path.
-      yield* Effect.promise(() =>
-        NodeFSP.rename(live, NodePath.join(codexHome, "archived_sessions", "rollout-live.jsonl")),
-      );
-      assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 47);
     }).pipe(Effect.scoped),
   );
 
@@ -1206,237 +1011,6 @@ describe("UsageService", () => {
       assert.strictEqual(ratesFetches, 2);
       assert.strictEqual(refreshed.status, "fresh");
       assert.strictEqual(refreshed.knownModels, 1);
-    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
-  );
-
-  it.live("names its sources by the host id a cloud box was given", () =>
-    Effect.gen(function* () {
-      const { transcript, settings, home } = yield* setup;
-      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
-      const service = yield* UsageService.make.pipe(
-        Effect.provide(
-          serviceLayers({
-            prefix: "usage-service-usage-host-id",
-            home,
-            settings,
-            environment: { T3CODE_USAGE_HOST_ID: " lease-a " },
-          }),
-        ),
-      );
-      const summary = yield* service.readSummary(WINDOW);
-      assert.deepStrictEqual(
-        summary.sources
-          .filter((source) => source.fingerprint.provider === "claude")
-          .map((source) => source.fingerprint.hostId),
-        ["lease-a"],
-      );
-    }).pipe(Effect.scoped),
-  );
-
-  it.live("includes stored cloud box usage in the host summary", () =>
-    Effect.gen(function* () {
-      const { settings, home } = yield* setup;
-      const boxHome = "/home/user/.claude/projects";
-      const storage = yield* Layer.build(
-        BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
-      );
-      yield* Effect.gen(function* () {
-        const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-        yield* Effect.promise(() =>
-          registry.register({
-            leaseId: "lease-a",
-            sandboxId: "sandbox-a",
-            providerInstanceId: "claude",
-          }),
-        );
-        const store = yield* BoxUsageStore;
-        yield* store.replace({
-          leaseId: "lease-a",
-          origin: "box",
-          accountIds: ["claude"],
-          usage: {
-            sources: [
-              {
-                fingerprint: {
-                  hostId: "box-a",
-                  provider: "claude",
-                  resolvedHomePath: boxHome,
-                  volumeId: "2049:7",
-                },
-                status: "ok",
-                scannedFiles: 1,
-                skippedFiles: 0,
-                malformedRecords: 0,
-                distinctSessions: 1,
-                message: null,
-              },
-            ],
-            buckets: [
-              {
-                day: UsageDay.make("2026-09-01"),
-                hourStart: "2026-09-01T03:00:00.000Z",
-                provider: "claude",
-                model: "claude-fable-5",
-                sourcePath: boxHome,
-                totals: {
-                  uncachedInputTokens: 10,
-                  cachedInputTokens: 0,
-                  cacheCreationTokens: 0,
-                  outputTokens: 9,
-                  reasoningTokens: 0,
-                },
-                costUsd: 0.5,
-                cacheSavingsUsd: 0,
-                costSource: "modelPriced",
-                records: 1,
-                unpricedRecords: 0,
-                sessions: 1,
-              },
-            ],
-          },
-          pulledAt: "2026-09-01T04:00:00.000Z",
-        });
-        const service = yield* UsageService.make;
-        const boxCells = (summary: { buckets: readonly UsageBucket[] }) =>
-          summary.buckets
-            .filter((bucket) => bucket.sourcePath?.startsWith("lease-a:"))
-            .map((bucket) => [
-              bucket.day,
-              bucket.hourStart,
-              bucket.sourcePath,
-              bucket.totals.outputTokens,
-            ]);
-
-        const daily = yield* service.readSummary({
-          timeZone: "America/Los_Angeles",
-          sinceDay: UsageDay.make("2026-08-31"),
-          untilDay: UsageDay.make("2026-08-31"),
-        });
-        assert.deepStrictEqual(boxCells(daily), [
-          ["2026-08-31", undefined, `lease-a:${boxHome}`, 9],
-        ]);
-        assert.deepStrictEqual(
-          daily.sources
-            .filter((source) => source.fingerprint.hostId === "box-a")
-            .map((source) => [source.fingerprint.resolvedHomePath, source.sourcePath]),
-          [[boxHome, `lease-a:${boxHome}`]],
-        );
-
-        const hourly = yield* service.readSummary({
-          timeZone: "America/Los_Angeles",
-          sinceDay: UsageDay.make("2026-08-31"),
-          untilDay: UsageDay.make("2026-08-31"),
-          resolution: "hour",
-          sinceTime: "2026-09-01T00:00:00.000Z",
-          untilTime: "2026-09-01T12:00:00.000Z",
-        });
-        assert.deepStrictEqual(boxCells(hourly), [
-          ["2026-08-31", "2026-09-01T03:00:00.000Z", `lease-a:${boxHome}`, 9],
-        ]);
-      }).pipe(
-        Effect.provide(
-          serviceLayers({
-            prefix: "usage-service-box-usage",
-            home,
-            settings,
-            boxUsage: Layer.succeedContext(storage),
-          }),
-        ),
-        Effect.provideContext(storage),
-      );
-    }).pipe(Effect.scoped),
-  );
-
-  it.live("still returns this host's usage when stored cloud box usage cannot be read", () =>
-    Effect.gen(function* () {
-      const { transcript, settings, home } = yield* setup;
-      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
-      const service = yield* UsageService.make.pipe(
-        Effect.provide(
-          serviceLayers({
-            prefix: "usage-service-box-usage-unreadable",
-            home,
-            settings,
-            boxUsage: Layer.succeed(
-              BoxUsageStore,
-              BoxUsageStore.of({
-                replace: () => Effect.void,
-                list: () =>
-                  new BoxUsageStoreError({
-                    operation: "list",
-                    cause: new Error("no such table: box_usage_hours"),
-                  }),
-                prune: () => Effect.void,
-              }),
-            ),
-          }),
-        ),
-      );
-      const summary = yield* service.readSummary(WINDOW);
-      assert.strictEqual(totalOutputTokens(summary), 5);
-    }).pipe(Effect.scoped),
-  );
-
-  it.live("reads hourly history for a host without Cursor or missing sources", () =>
-    Effect.gen(function* () {
-      const { transcript, settings, home } = yield* setup;
-      yield* Effect.promise(async () => {
-        await NodeFSP.writeFile(transcript, claudeLine(1, 5));
-        const authPath = NodePath.join(home, "config", "cursor", "auth.json");
-        await NodeFSP.mkdir(NodePath.dirname(authPath), { recursive: true });
-        await NodeFSP.writeFile(
-          authPath,
-          encodeUnknownJsonString({
-            accessToken: token("auth0|user_a"),
-          }),
-        );
-      });
-      const realFetch = globalThis.fetch;
-      yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          globalThis.fetch = (async () =>
-            Response.json({
-              totalUsageEventsCount: 1,
-              usageEventsDisplay: [
-                {
-                  timestamp: String(Date.parse("2026-08-01T10:00:00Z")),
-                  model: "auto",
-                  tokenUsage: { inputTokens: 1, outputTokens: 3 },
-                },
-              ],
-            })) as typeof fetch;
-        }),
-        () =>
-          Effect.sync(() => {
-            globalThis.fetch = realFetch;
-          }),
-      );
-      yield* TestClock.setTime(Date.parse("2026-08-01T12:30:00Z"));
-      const service = yield* UsageService.make.pipe(
-        Effect.provide(serviceLayers({ prefix: "usage-service-history", home, settings })),
-      );
-      const history = yield* service.readHistory({ sinceTime: "2026-08-01T09:30:00Z" });
-      const claudeDir = yield* Effect.promise(() =>
-        NodeFSP.realpath(NodePath.join(home, "claude", "projects")),
-      );
-      assert.deepStrictEqual(
-        history.sources.map((source) => [
-          source.fingerprint.provider,
-          source.fingerprint.resolvedHomePath,
-          source.status,
-        ]),
-        [["claude", claudeDir, "ok"]],
-      );
-      assert.deepStrictEqual(
-        history.buckets.map((bucket) => [
-          bucket.day,
-          bucket.hourStart,
-          bucket.provider,
-          bucket.sourcePath,
-          bucket.totals.outputTokens,
-        ]),
-        [["2026-08-01", "2026-08-01T10:00:00.000Z", "claude", claudeDir, 5]],
-      );
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 

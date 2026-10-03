@@ -61,11 +61,7 @@ describe("scan cache round trip", () => {
       [
         "/a.jsonl",
         100,
-        [
-          record(),
-          record({ dedupeKey: "msg_2:", model: "claude-opus-5-5", fast: true }),
-          record({ dedupeKey: "msg_3:", oneHourCacheWriteTokens: 4 }),
-        ],
+        [record(), record({ dedupeKey: "msg_2:", model: "claude-opus-5-5", fast: true })],
       ],
       ["/b.jsonl", 200, [record({ sessionId: "session-b", reportedCostUsd: 1.5 })]],
     ]);
@@ -230,25 +226,15 @@ describe("pruneScanCache", () => {
 });
 
 describe("dedupeWithinFile", () => {
-  it("keeps a streamed message's final usage, however its blocks were split across parses", () => {
-    // Claude Code 2.1 writes each streamed block of a subagent reply with the
-    // usage so far: the thinking block carries 8 output tokens, the tool call 187.
-    const thinking = record({ totals: { ...record().totals, outputTokens: 8 } });
-    const toolUse = record({ totals: { ...record().totals, outputTokens: 187 } });
-    const next = record({ dedupeKey: "msg_2:", totals: { ...record().totals, outputTokens: 20 } });
-
-    expect(
-      dedupeWithinFile([thinking, toolUse, next]).map(({ totals }) => totals.outputTokens),
-    ).toEqual([187, 20]);
-    // A resumed parse passes the cached records ahead of the appended ones.
-    const cached = dedupeWithinFile([thinking]);
-    expect(
-      dedupeWithinFile([...cached, toolUse, next]).map(({ totals }) => totals.outputTokens),
-    ).toEqual([187, 20]);
-    // Main transcripts repeat the full usage on every block, which stays one record.
-    expect(dedupeWithinFile([toolUse, toolUse]).map(({ totals }) => totals.outputTokens)).toEqual([
-      187,
+  it("keeps the first record per dedupe key", () => {
+    const kept = dedupeWithinFile([
+      record({ totals: { ...record().totals, outputTokens: 1 } }),
+      record({ totals: { ...record().totals, outputTokens: 999 } }),
+      record({ dedupeKey: "msg_2:" }),
     ]);
+
+    expect(kept).toHaveLength(2);
+    expect(kept[0]?.totals.outputTokens).toBe(1);
   });
 
   it("keeps every record that has no dedupe key", () => {

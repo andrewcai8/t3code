@@ -66,20 +66,11 @@ export function getProviderSkillsForSlashMenu(
     : [];
 }
 
-/**
- * Provider commands not already shown as a skill. Claude Code lists a skill's
- * command under its frontmatter `name`, which is the skill's `displayName`
- * when it differs from the folder name that actually runs it.
- */
 export function getProviderSlashCommandsForSlashMenu(
   slashCommands: ReadonlyArray<ServerProviderSlashCommand>,
   visibleSkills: ReadonlyArray<ServerProviderSkill>,
 ): ServerProviderSlashCommand[] {
-  const skillNames = new Set(
-    visibleSkills.flatMap((skill) =>
-      [skill.name, skill.displayName ?? skill.name].map((name) => name.trim().toLowerCase()),
-    ),
-  );
+  const skillNames = new Set(visibleSkills.map((skill) => skill.name.trim().toLowerCase()));
   return slashCommands.filter((command) => !skillNames.has(command.name.trim().toLowerCase()));
 }
 
@@ -122,21 +113,19 @@ function resolveProviderWorkspaceSnapshot(
 }
 
 /**
- * The skills a chat with this provider can start. On a host that runs chats
- * in provisioned environments, `provisionedSkills` from its server config
- * lists what those environments hold, and it wins a name clash because that
- * copy is the one that runs. Then workspace skills, then the provider's own.
+ * A host's `provisionedSkills` join the result and win a name clash, since that copy is the one
+ * its chats run.
  */
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
   provisionedSkills?: ServerProvisionedSkills,
 ): ServerProvider["skills"] {
+  const skills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? provider.skills;
   const provisioned = provisionedSkills?.[provider.driver as keyof ServerProvisionedSkills] ?? [];
-  const workspaceSkills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? [];
-  return provisioned.length === 0 && workspaceSkills.length === 0
-    ? provider.skills
-    : dedupeProviderSkillsByName([...provisioned, ...workspaceSkills, ...provider.skills]);
+  return provisioned.length === 0
+    ? skills
+    : dedupeProviderSkillsByName([...provisioned, ...skills]);
 }
 
 export function resolveProviderSlashCommandsForCwd(

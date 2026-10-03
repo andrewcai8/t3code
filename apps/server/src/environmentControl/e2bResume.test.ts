@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { AuthenticationError, SandboxError, SandboxNotFoundError } from "e2b";
-import { connectResumingE2b, e2bResumeDecision, type E2bResumeRetry } from "./e2bResume.ts";
+import { AuthenticationError, SandboxError, SandboxNotFoundError, ServiceBusyError } from "e2b";
+import {
+  connectResumingE2b,
+  E2bPlacementUnavailable,
+  e2bResumeDecision,
+  type E2bResumeRetry,
+} from "./e2bResume.ts";
 
 describe("e2bResumeDecision", () => {
   it("retries E2B's placement timeout", () => {
@@ -63,16 +68,39 @@ describe("connectResumingE2b", () => {
         (retry) => retries.push(retry),
       ).then(
         () => "connected",
-        (error: Error) => error.message,
+        (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
       );
       const [outcome] = await Promise.all([connected, vi.runAllTimersAsync()]);
-      expect(outcome).toBe(
+      expect(outcome).toEqual([
+        true,
         "E2B could not resume sandbox retained after 3 attempts: 504: Failed to place sandbox: placement timed out after 2 attempt(s)",
-      );
+      ]);
       expect(attempts).toBe(3);
       expect(retries.map((retry) => retry.attempt)).toEqual([1, 2]);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("gives up at once when E2B has no capacity to place the sandbox", async () => {
+    let attempts = 0;
+    const outcome = await connectResumingE2b("retained", async () => {
+      attempts++;
+      throw new ServiceBusyError("503: no capacity");
+    }).then(
+      () => "connected",
+      (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
+    );
+    expect(outcome).toEqual([true, "E2B could not place sandbox retained: 503: no capacity"]);
+    expect(attempts).toBe(1);
+  });
+
+  it("rethrows a sandbox E2B no longer has as it is", async () => {
+    const gone = new SandboxNotFoundError("Paused sandbox retained not found");
+    await expect(
+      connectResumingE2b("retained", async () => {
+        throw gone;
+      }),
+    ).rejects.toBe(gone);
   });
 });

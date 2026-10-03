@@ -104,7 +104,7 @@ const fixture = async (
         claude_work: { driver: "claudeAgent", displayName: "Claude · work" },
       },
     },
-    host: { homedir: home, platform: "linux", environment: {} },
+    host: { homedir: home, stateDir: NodePath.join(home, ".t3/userdata") },
     baseDir: "/data/t3",
     skillsDir: "/data/t3/skills",
     namespaceSession:
@@ -399,7 +399,7 @@ describe("packHostState", () => {
             codex_uci: { driver: "codex", config: { homePath: "~/.codex_uci" } },
           },
         },
-        host: { homedir: home, platform: "linux", environment: {} },
+        host: { homedir: home, stateDir: NodePath.join(home, ".t3/userdata") },
         baseDir: "/data/t3",
         skillsDir: "/data/t3/skills",
         codexHostLogins: NodePath.join(home, "host-codex"),
@@ -446,7 +446,7 @@ describe("packHostState", () => {
       const packing = packHostState({
         config: { e2bApiKey: "e2b-key", provisioning: { templateId: "t3-common" } },
         settings: { providerInstances: { codex: { driver: "codex" } } },
-        host: { homedir: home, platform: "linux", environment: {} },
+        host: { homedir: home, stateDir: NodePath.join(home, ".t3/userdata") },
         baseDir: "/data/t3",
         skillsDir: "/data/t3/skills",
       });
@@ -476,7 +476,7 @@ describe("packHostState", () => {
       const packing = packHostState({
         config: { e2bApiKey: "e2b-key", provisioning: { templateId: "t3-common" } },
         settings: { providerInstances: { codex: { driver: "codex" } } },
-        host: { homedir: home, platform: "linux", environment: {} },
+        host: { homedir: home, stateDir: NodePath.join(home, ".t3/userdata") },
         baseDir: "/data/t3",
         skillsDir: "/data/t3/skills",
         codexHostLogins: NodePath.join(home, "host-codex"),

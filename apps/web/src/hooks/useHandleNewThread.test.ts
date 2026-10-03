@@ -10,26 +10,6 @@ const testState = vi.hoisted(() => {
     defaultModelSelection: null,
     defaultRuntimeMode: "full-access" as RuntimeMode,
   };
-  const defaultProjects = [
-    {
-      id: "project-remote",
-      environmentId: "environment-ssh",
-      workspaceRoot: "/remote/project",
-      defaultThreadEnvMode: null,
-      defaultModelSelection: null,
-    },
-  ];
-  let projects: ReadonlyArray<Record<string, unknown>> = defaultProjects;
-  // The user environments. A cloud box is never one.
-  type Environments = ReadonlyArray<{
-    readonly environmentId: string;
-    readonly connection: { readonly phase: string; readonly blockedReason?: string };
-  }>;
-  const defaultEnvironments: Environments = defaultProjects.map(({ environmentId }) => ({
-    environmentId,
-    connection: { phase: "connected" },
-  }));
-  let environments = defaultEnvironments;
   let storedDraft: {
     readonly draftId: string;
     readonly environmentId: string;
@@ -65,17 +45,6 @@ const testState = vi.hoisted(() => {
     get targetSettings() {
       return targetSettings;
     },
-    get projects() {
-      return projects;
-    },
-    get environments() {
-      return environments;
-    },
-    // What the client knows when a new chat starts: its projects and the user environments.
-    setWorld(world: { readonly projects: typeof projects; readonly environments: Environments }) {
-      projects = world.projects;
-      environments = world.environments;
-    },
     reset(
       nextStoredDraft: typeof storedDraft,
       workspaceDefaults = {
@@ -84,8 +53,6 @@ const testState = vi.hoisted(() => {
       },
     ) {
       storedDraft = nextStoredDraft;
-      projects = defaultProjects;
-      environments = defaultEnvironments;
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
@@ -126,8 +93,7 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
   scopeProjectRef: (environmentId: string, projectId: string) => ({ environmentId, projectId }),
   scopeThreadRef: (environmentId: string, threadId: string) => ({ environmentId, threadId }),
 }));
-vi.mock("@t3tools/contracts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/contracts")>()),
+vi.mock("@t3tools/contracts", () => ({
   DEFAULT_RUNTIME_MODE: "default",
   DEFAULT_SERVER_SETTINGS: {},
 }));
@@ -161,12 +127,7 @@ vi.mock("react", () => ({
   useCallback: <T>(callback: T) => callback,
   useMemo: <T>(factory: () => T) => factory(),
 }));
-vi.mock("../cloud/automationHosts", () => ({
-  useNewChatPlacement: () => ({
-    environmentState: (environmentId: string) =>
-      testState.environments.find((environment) => environment.environmentId === environmentId),
-  }),
-}));
+vi.mock("../cloud/newChatPlacement", () => ({ placeNewChat: (projectRef: unknown) => projectRef }));
 vi.mock("../components/Sidebar.logic", () => ({ orderItemsByPreferredIds: () => [] }));
 vi.mock("../composerDraftStore", () => {
   const useComposerDraftStore = Object.assign(() => null, {
@@ -174,7 +135,6 @@ vi.mock("../composerDraftStore", () => {
   });
   return {
     composerDraftHasUserContent: () => false,
-    draftSessionHasInvestedWork: () => false,
     markPromotedDraftThreadByRef: vi.fn(),
     useComposerDraftStore,
   };
@@ -192,13 +152,20 @@ vi.mock("../lib/utils", () => ({
   newThreadId: () => "thread-delayed",
 }));
 vi.mock("../logicalProject", () => ({
-  deriveLogicalProjectKeyFromSettings: (project: { readonly repository?: string }) =>
-    project.repository ?? "remote-project",
+  deriveLogicalProjectKeyFromSettings: () => "remote-project",
   getProjectOrderKey: () => "remote-project",
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => ({
-  readProjects: () => testState.projects,
+  readProjects: () => [
+    {
+      id: "project-remote",
+      environmentId: "environment-ssh",
+      workspaceRoot: "/remote/project",
+      defaultThreadEnvMode: null,
+      defaultModelSelection: null,
+    },
+  ],
   readThreadShell: () => null,
   useProjects: () => [],
   useThread: () => null,
@@ -214,7 +181,6 @@ vi.mock("../uiStateStore", () => ({
 }));
 vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
 
-import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useNewThreadHandler } from "./useHandleNewThread";
 
 describe.each([
@@ -321,58 +287,4 @@ describe.each([
       );
     },
   );
-});
-
-describe("a new chat started from a page with no chat in view", () => {
-  // The host runs no agents itself; every chat runs on a fresh cloud box it provisions, and each
-  // box holds its own copy of the repository, grouped with the host's.
-  const host = "environment-host";
-  const megptOn = (environmentId: string) => ({
-    id: `megpt-mono-${environmentId}`,
-    environmentId,
-    workspaceRoot: "/data/repos/megpt-mono",
-    repository: "megpt-mono",
-    defaultThreadEnvMode: null,
-    defaultModelSelection: null,
-  });
-  const hostProjectRef = { environmentId: host, projectId: `megpt-mono-${host}` };
-
-  // Without a chat in view, the new chat is placed from the first project in sidebar order,
-  // which here is a box's copy of megpt-mono.
-  const startFromAutomations = (hintEnvironmentId: string) => {
-    testState.router.state.location.href = "/automations";
-    return startNewThreadFromContext({
-      activeDraftThread: null,
-      activeThread: undefined,
-      defaultProjectRef: {
-        environmentId: hintEnvironmentId,
-        projectId: `megpt-mono-${hintEnvironmentId}`,
-      } as never,
-      handleNewThread: useNewThreadHandler(),
-    });
-  };
-
-  it("opens a draft on the host's project, never a box's copy", async () => {
-    testState.reset(null);
-    testState.completeProjectFileRead(null);
-    const boxId = "environment-box";
-    testState.setWorld({
-      projects: [megptOn(boxId), megptOn(host)],
-      environments: [{ environmentId: host, connection: { phase: "connected" } }],
-    });
-
-    await startFromAutomations(boxId);
-
-    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-      "megpt-mono",
-      hostProjectRef,
-      "draft-delayed",
-      expect.anything(),
-    );
-    expect(testState.router.navigate).toHaveBeenCalledWith({
-      to: "/draft/$draftId",
-      params: { draftId: "draft-delayed" },
-      replace: false,
-    });
-  });
 });

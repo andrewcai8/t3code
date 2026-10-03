@@ -1,9 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import type {
-  EnvironmentConnectionPhase,
-  EnvironmentPresentation,
-} from "@t3tools/client-runtime/connection";
-import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
+import type { EnvironmentPresentation } from "@t3tools/client-runtime/connection";
 import { createEnvironmentPresentationAtoms } from "@t3tools/client-runtime/state/presentation";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
@@ -16,28 +12,6 @@ export const environmentPresentations = createEnvironmentPresentationAtoms({
   stateAtom: environmentCatalog.stateAtom,
   serverConfigValueAtom: serverEnvironment.configValueAtom,
 });
-
-let previousConnectionPhases: ReadonlyMap<EnvironmentId, EnvironmentConnectionPhase> = new Map();
-/**
- * Each enabled environment's connection phase, cloud boxes included. What sends to a chat reads,
- * since a chat's machine may be a box, which no environment list shows.
- */
-export const connectionPhasesAtom = Atom.make((get) => {
-  const next = new Map<EnvironmentId, EnvironmentConnectionPhase>();
-  for (const environmentId of enabledEnvironmentIds(get(environmentCatalog.catalogValueAtom))) {
-    const presentation = get(environmentPresentations.presentationAtom(environmentId));
-    if (presentation !== null) next.set(environmentId, presentation.connection.phase);
-  }
-  if (
-    next.size !== previousConnectionPhases.size ||
-    [...next].some(
-      ([environmentId, phase]) => previousConnectionPhases.get(environmentId) !== phase,
-    )
-  ) {
-    previousConnectionPhases = next;
-  }
-  return previousConnectionPhases;
-}).pipe(Atom.withLabel("mobile-environment-connection-phases"));
 
 const EMPTY_ENVIRONMENT_PRESENTATION_ATOM = Atom.make<EnvironmentPresentation | null>(null).pipe(
   Atom.withLabel("mobile-environment-presentation:empty"),

@@ -20,15 +20,28 @@ import {
 import type { PairingConnectionInput } from "./onboarding.ts";
 import { provisionedGatewayPairingUrl } from "./provisioned.ts";
 
-/** Turns a minted pairing URL into this device's registration for the server behind it. */
-export class PairingRedemption extends Context.Service<
-  PairingRedemption,
+type RedeemPairing = (
+  input: PairingConnectionInput,
+) => Effect.Effect<BearerConnectionRegistration, ConnectionAttemptError>;
+
+/**
+ * Turns a minted pairing URL into this device's registration for the server behind it. The
+ * connection layer provides it; a registry built without it cannot pair a box.
+ */
+export class PairingRedemption extends Context.Reference<{ readonly redeem: RedeemPairing }>(
+  "@t3tools/client-runtime/connection/boxPairing/PairingRedemption",
   {
-    readonly redeem: (
-      input: PairingConnectionInput,
-    ) => Effect.Effect<BearerConnectionRegistration, ConnectionAttemptError>;
-  }
->()("@t3tools/client-runtime/connection/boxPairing/PairingRedemption") {}
+    defaultValue: () => ({
+      redeem: () =>
+        Effect.fail(
+          new ConnectionBlockedError({
+            reason: "configuration",
+            detail: "This client cannot pair with a cloud chat's machine.",
+          }),
+        ),
+    }),
+  },
+) {}
 
 export interface BoxPairingPorts {
   /** How the box's host lists it now; none when the host does not list it. */
@@ -41,7 +54,7 @@ export interface BoxPairingPorts {
   ) => Effect.Effect<EnvironmentProvisionAttachResult, ConnectionAttemptError>;
   /** The address this client reaches the host by; none until the host connection is prepared. */
   readonly hostHttpBaseUrl: Effect.Effect<Option.Option<string>>;
-  readonly redeem: PairingRedemption["Service"]["redeem"];
+  readonly redeem: RedeemPairing;
 }
 
 /**
@@ -70,9 +83,9 @@ export function reachablePairingUrl(
 }
 
 /**
- * Obtains this device's pairing for a box through the host that provisioned it. A paused box
- * fails `not-serving`, so the dial wakes it and pairs on its next attempt. A box the host no
- * longer has is a missing workspace.
+ * Obtains this device's pairing for a box through the host that provisioned it. A box the host
+ * lists paused, or whose attach the host refuses as not serving, fails `not-serving`, so the dial
+ * wakes it and pairs on its next attempt. A box the host no longer has is a missing workspace.
  */
 export const pairBoxThroughHost = Effect.fn("BoxPairing.pairBoxThroughHost")(function* (
   box: { readonly environmentId: EnvironmentId } & BoxAttachment,
@@ -89,7 +102,7 @@ export const pairBoxThroughHost = Effect.fn("BoxPairing.pairBoxThroughHost")(fun
   const attached = yield* ports.attach(row.requestId);
   if (attached.kind === "refused")
     return yield* new ConnectionTransientError({
-      reason: "remote-unavailable",
+      reason: attached.reason === "not-serving" ? "not-serving" : "remote-unavailable",
       detail: attached.message,
     });
   if (attached.environmentId !== box.environmentId)

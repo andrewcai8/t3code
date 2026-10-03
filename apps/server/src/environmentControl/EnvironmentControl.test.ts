@@ -6,6 +6,7 @@ import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import { createCleanupSweep } from "./cloudCleanup.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
+import { E2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -497,6 +498,20 @@ describe("managed cloud commands", () => {
       });
       expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "paused" });
       expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
+    });
+  });
+  it("says E2B cannot place a box it could not resume for lack of room, and leaves it paused", async () => {
+    await withLease(async ({ registry, driver, manager }) => {
+      await registry.markPaused("lease");
+      driver.resume = vi
+        .fn()
+        .mockRejectedValue(new E2bPlacementUnavailable("E2B could not place sandbox sandbox"));
+      expect(await manager.resume(resumeInput)).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "E2B can't place this machine right now. Retrying.",
+      });
+      expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "paused" });
     });
   });
   it("refuses an unknown lease or wrong owner without contacting the provider", async () => {

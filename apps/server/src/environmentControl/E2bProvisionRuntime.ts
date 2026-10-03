@@ -34,8 +34,8 @@ import {
 
 import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
-import { guestCredentialDestination } from "./ProvisioningProviderProfile.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
+import { GuestNotServing } from "./ProvisionControl.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -55,7 +55,16 @@ export async function e2bPythonResult(
   }
 }
 const pairingResponse = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ credential: Schema.String, brokerToken: Schema.String })),
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Struct({ serving: Schema.Literal(false) }),
+      Schema.Struct({
+        serving: Schema.Literal(true),
+        credential: Schema.String,
+        brokerToken: Schema.String,
+      }),
+    ]),
+  ),
 );
 const templateResponse = Schema.decodeUnknownSync(Schema.Struct({ templateID: Schema.String }));
 const revisionResponse = Schema.decodeUnknownSync(
@@ -102,16 +111,10 @@ export function makeProvisionResolution(config: {
  * record. A prepare command can write these too, and a base must never hand
  * one account's login to the next chat.
  */
-export function warmSealHomePaths(provider: "e2b" | "namespace" = "e2b"): string[] {
-  const drivers = Object.keys(credentialDestinations) as Array<keyof typeof credentialDestinations>;
+export function warmSealHomePaths(): string[] {
   return [
     ...new Set([
-      ...drivers.flatMap((kind) =>
-        credentialDestinations[kind].flatMap((path) => [
-          path,
-          guestCredentialDestination(kind, path, provider),
-        ]),
-      ),
+      ...Object.values(credentialDestinations).flat(),
       // What a configured `githubToken` becomes.
       ".git-credentials",
       ".gitconfig",
@@ -374,15 +377,24 @@ export function makeE2bProvisionRuntime(
 import base64, contextlib, fcntl, json, os, pathlib, subprocess, sys, time, urllib.request
 ${brokerTokenScript}
 spec = json.load(sys.stdin)
+origin = 'http://127.0.0.1:' + str(spec['port'])
+try:
+    urllib.request.urlopen(origin + '/.well-known/t3/environment', timeout=5).close()
+except OSError:
+    print(json.dumps({'serving': False}))
+    sys.exit(0)
 token = broker_token(pathlib.Path(spec['root']))
-request = urllib.request.Request('http://127.0.0.1:' + str(spec['port']) + '/api/auth/pairing-token', data=json.dumps({'label':'Cloud environment client'}).encode(), headers={'Authorization':'Bearer ' + token, 'Content-Type':'application/json'})
+request = urllib.request.Request(origin + '/api/auth/pairing-token', data=json.dumps({'label':'Cloud environment client'}).encode(), headers={'Authorization':'Bearer ' + token, 'Content-Type':'application/json'})
 with urllib.request.urlopen(request, timeout=30) as response:
-    print(json.dumps({'credential': json.load(response)['credential'], 'brokerToken': token}))
+    print(json.dumps({'serving': True, 'credential': json.load(response)['credential'], 'brokerToken': token}))
 `,
         stdin: JSON.stringify({ root: manifest.preparation.root, port: manifest.preparation.port }),
       });
       stopPairing("attach.pairing");
-      const { credential, brokerToken } = pairingResponse(result.stdout);
+      if (result.exitCode !== 0) throw new Error(result.stderr || "E2B pairing failed");
+      const pairing = pairingResponse(result.stdout);
+      if (!pairing.serving) throw new GuestNotServing();
+      const { credential, brokerToken } = pairing;
       const origin = `https://${sandbox.getHost(manifest.preparation.port)}`;
       return {
         pairingUrl: `${origin}/pair#token=${encodeURIComponent(credential)}`,

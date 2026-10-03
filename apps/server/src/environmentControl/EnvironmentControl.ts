@@ -77,15 +77,14 @@ import {
 import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
-import type { E2bResumeRetry } from "./e2bResume.ts";
+import { E2bPlacementUnavailable, type E2bResumeRetry } from "./e2bResume.ts";
 import { provisionFailureMessage } from "./provisionFailure.ts";
 import { logProvisionPhases, type ProvisionPhase } from "./provisionTiming.ts";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
-import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/ProjectionThreadSessions.ts";
-import { ProjectionThreadSessionRepository } from "../persistence/Services/ProjectionThreadSessions.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
 import { ProvisionRefused, resolveProvisioningProfiles } from "./ProvisioningProviderProfile.ts";
@@ -515,7 +514,9 @@ export function createEnvironmentControl(
             message:
               cause instanceof ProvisionedSandboxMissing
                 ? cause.message
-                : "The workspace could not be reconnected. Retry shortly.",
+                : cause instanceof E2bPlacementUnavailable
+                  ? "E2B can't place this machine right now. Retrying."
+                  : "The workspace could not be reconnected. Retry shortly.",
           };
         })
         .finally(() => leaseOperations.delete(input.sandboxId));
@@ -782,10 +783,60 @@ export class EnvironmentControl extends Context.Service<
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
+/**
+ * Moves a woken box onto the pinned build before anyone connects, since a client refuses a server
+ * on an older orchestration protocol. It is a no-op for a box already on it, and a paused box ran
+ * no turn to cut. Another caller's upgrade in flight is waited out; a box left behind is refused.
+ */
+export const upgradeAfterResume = (
+  upgrade: Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>,
+): Effect.Effect<EnvironmentProvisionResumeResult> =>
+  upgrade.pipe(
+    Effect.repeat({
+      schedule: Schedule.spaced("2 seconds").pipe(Schedule.upTo({ duration: "10 minutes" })),
+      while: (upgraded) => upgraded.kind === "refused" && upgraded.reason === "busy",
+    }),
+    Effect.map((upgraded): EnvironmentProvisionResumeResult => {
+      if (upgraded.kind !== "refused" || upgraded.reason === "unconfigured") {
+        return { kind: "resumed" };
+      }
+      return {
+        kind: "refused",
+        reason: upgraded.reason === "missing" ? "missing" : "unknown",
+        message: upgraded.message,
+      };
+    }),
+    Effect.catch((error) =>
+      Effect.succeed({
+        kind: "refused" as const,
+        reason: "unknown" as const,
+        message: error.message,
+      }),
+    ),
+  );
+
+/**
+ * A resume whose guest could not be brought up may be stuck on a build that cannot start, such as
+ * one an earlier upgrade installed. Upgrading onto the pinned build is safe there, since a guest
+ * that is not serving runs no turn, so the box recovers once the host pins a working build.
+ */
+export const recoverRefusedResume = (
+  refused: EnvironmentProvisionResumeResult,
+  upgrade: Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>,
+): Effect.Effect<EnvironmentProvisionResumeResult> =>
+  refused.kind === "refused" && refused.reason === "unknown"
+    ? upgrade.pipe(
+        Effect.map((upgraded): EnvironmentProvisionResumeResult =>
+          upgraded.kind === "upgraded" ? { kind: "resumed" } : refused,
+        ),
+        Effect.catch(() => Effect.succeed(refused)),
+      )
+    : Effect.succeed(refused);
+
 export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
-    const { stateDir, localAgentRuns } = yield* ServerConfig.ServerConfig;
+    const { stateDir, localAgentRuns, secretsDir } = yield* ServerConfig.ServerConfig;
     const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
     const boxUsage = yield* BoxUsageStore;
@@ -833,7 +884,6 @@ export const layer = Layer.effect(
       | undefined;
     const settings = yield* ServerSettingsService;
     const providerRegistry = yield* ProviderRegistry;
-    const threadSessions = yield* ProjectionThreadSessionRepository;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
     // Promise-side provider code logs through the server's logger, not the default one.
     const runLogged = Effect.runPromiseWith(yield* Effect.context<never>());
@@ -1395,7 +1445,7 @@ export const layer = Layer.effect(
             Effect.all({
               providers: providerRegistry.getProviders,
               now: Clock.currentTimeMillis,
-              load: readAccountLoad(leaseRegistry, threadSessions, store),
+              load: readAccountLoad(leaseRegistry, sql, store),
             }).pipe(
               Effect.flatMap((usage) =>
                 resolveProvisioningProfiles(
@@ -1409,6 +1459,7 @@ export const layer = Layer.effect(
                   usage,
                   {
                     localAgentRuns,
+                    secretsDir,
                     // The instance's status probe refreshes a host's own
                     // login, serialized with its usage probes.
                     refresh: (instanceId) =>
@@ -1650,7 +1701,10 @@ export const layer = Layer.effect(
           const manager = await resolve();
           return manager ? manager.holdBox(sandboxId) : () => {};
         },
-        deliverFirstTurn,
+        deliverFirstTurn: async (remote, chat) => {
+          const instances = deriveProviderInstanceConfigMap(await runLogged(settings.getSettings));
+          return deliverFirstTurn(remote, chat, (instanceId) => instances[instanceId]?.driver);
+        },
         readFirstTurn: manifests.readFirstTurn,
         forgetFirstTurn: manifests.forgetFirstTurn,
         listFirstTurns: manifests.listFirstTurns,
@@ -1926,6 +1980,37 @@ export const layer = Layer.effect(
           result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
           durationMs: (yield* Clock.currentTimeMillis) - startedAt,
         });
+        if (result.kind === "resumed" && workspace.lifecycle === "paused") {
+          return yield* upgradeAfterResume(
+            provisionControl.upgrade({
+              leaseId: workspace.leaseId,
+              sandboxId: workspace.sandboxId,
+              environmentId: input.environmentId,
+            }),
+          ).pipe(
+            Effect.tap((upgraded) =>
+              Effect.logInfo("cloud workspace upgrade on resume answered", {
+                leaseId: workspace.leaseId,
+                result: upgraded.kind === "refused" ? `refused: ${upgraded.message}` : "resumed",
+              }),
+            ),
+          );
+        }
+        if (result.kind === "refused") {
+          const recovered = yield* recoverRefusedResume(
+            result,
+            provisionControl.upgrade({
+              leaseId: workspace.leaseId,
+              sandboxId: workspace.sandboxId,
+              environmentId: input.environmentId,
+            }),
+          );
+          if (recovered.kind === "resumed")
+            yield* Effect.logInfo("cloud workspace recovered by upgrade", {
+              leaseId: workspace.leaseId,
+            });
+          return recovered;
+        }
         return result;
       }),
       upgrade: provisionControl.upgrade,
@@ -1979,8 +2064,4 @@ export const layer = Layer.effect(
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };
   }),
-).pipe(
-  Layer.provide(ProvisionOperationStore.layer),
-  Layer.provide(BoxUsageStore.layer),
-  Layer.provide(ProjectionThreadSessionRepositoryLive),
-);
+).pipe(Layer.provide(ProvisionOperationStore.layer), Layer.provide(BoxUsageStore.layer));

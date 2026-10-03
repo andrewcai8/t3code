@@ -115,9 +115,6 @@ const toHttpBaseUrl = (url: URL): string => {
   } else if (next.protocol === "wss:") {
     next.protocol = "https:";
   }
-  // A manager-origin gateway prefixes the guest server with an opaque route.
-  // Pairing URLs end in `/pair`; retain everything before that segment so all
-  // subsequent descriptor, auth, and RPC requests stay inside the gateway.
   next.pathname = next.pathname.replace(/\/pair\/?$/, "/") || "/";
   next.search = "";
   next.hash = "";

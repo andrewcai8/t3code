@@ -30,11 +30,8 @@ import { useWorkspaceState } from "../../state/workspace";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { useNewTaskFlow } from "./new-task-flow-provider";
-import {
-  filterProjectScopes,
-  getProjectScopeSelectionTarget,
-  resolveNewThreadStart,
-} from "./new-task-project-selection";
+import { newChatScopeTarget, resolveNewThreadStart } from "./new-task-cloud-placement";
+import { filterProjectScopes } from "./new-task-project-selection";
 
 type NewTaskRouteParams = {
   readonly incomingShareId?: string | string[];
@@ -138,9 +135,8 @@ function NewTaskHeader(props: {
 
 export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRouteParams | undefined>) {
   const projects = useProjects();
-  const serverConfigs = useServerConfigs();
   const [searchText, setSearchText] = useState("");
-  const { projectScopes, selectedEnvironmentId, setProject, boxes, placement } = useNewTaskFlow();
+  const { projectScopes, selectedEnvironmentId, setProject, cloud } = useNewTaskFlow();
   const { state: catalogState } = useWorkspaceState();
   const navigation = useNavigation();
   const isFocused = useIsFocused();
@@ -159,6 +155,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
     : null;
   const screenTitle = incomingShare ? "Start a task" : "Choose project";
   const projectEmptyState = deriveProjectEmptyState(catalogState);
+  const serverConfigs = useServerConfigs();
   // Scratch projects are reached through the No project row, never as rows
   // of their own.
   const listScopes = projectScopes.filter(
@@ -168,7 +165,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
       ),
   );
   const visibleScopes = filterProjectScopes(listScopes, searchText).flatMap((scope) => {
-    const selectionTarget = getProjectScopeSelectionTarget(scope, selectedEnvironmentId, placement);
+    const selectionTarget = newChatScopeTarget(scope, selectedEnvironmentId, cloud.placement);
     return selectionTarget ? [{ scope, selectionTarget }] : [];
   });
   const resumedDestinationKeyRef = useRef<string | null>(null);
@@ -188,7 +185,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   // first that does; the draft page's machine picker moves it from there.
   const scratchEnvironments = connectedEnvironments.filter(
     (environment) =>
-      !boxes.has(environment.environmentId) &&
+      !cloud.boxes.has(environment.environmentId) &&
       canCreateProjectInEnvironment(environment.connectionState) &&
       serverConfigs.get(environment.environmentId)?.scratchWorkspaceRoot !== undefined,
   );
@@ -223,10 +220,9 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
       return;
     }
 
-    // A host that runs no agents refuses a draft on itself, and a new task never joins another
-    // chat's box; start a cloud machine for the project instead. Shared content stays on the
-    // draft path, which owns its reservation.
-    const start = resolveNewThreadStart({ project, serverConfigs, boxes });
+    // A host that runs no agents, or another chat's box, starts a cloud machine instead. Shared
+    // content stays on the draft path, which owns its reservation.
+    const start = resolveNewThreadStart({ project, serverConfigs, boxes: cloud.boxes });
     if (start.kind === "cloud-machine" && !incomingShare) {
       navigation.dispatch(
         StackActions.push("NewTaskCloudMachine", {
@@ -336,8 +332,9 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         >
           {canStartScratch && listScopes.length > 0 ? (
             Platform.OS === "android" ? (
-              <View collapsable={false} className="overflow-hidden rounded-[28px] bg-card">
+              <View collapsable={false} className="overflow-hidden rounded-[28px] bg-grouped-card">
                 <MaterialListRow
+                  className="bg-grouped-card"
                   title="No project"
                   subtitle="Start a task without a project"
                   onPress={() => void startScratch()}
@@ -352,12 +349,12 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 />
               </View>
             ) : (
-              <View collapsable={false} className="overflow-hidden rounded-[24px] bg-card">
+              <View collapsable={false} className="overflow-hidden rounded-[24px] bg-grouped-card">
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="No project"
                   onPress={() => void startScratch()}
-                  className="flex-row items-center gap-3 bg-card px-4 py-3.5"
+                  className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
                 >
                   <View className="h-7 w-7 items-center justify-center">
                     <SymbolView
@@ -388,7 +385,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               collapsable={false}
               className={cn(
                 "items-center gap-3 px-6 py-8",
-                Platform.OS !== "android" && "rounded-[24px] bg-card",
+                Platform.OS !== "android" && "rounded-[24px] bg-grouped-card",
               )}
             >
               {projectEmptyState.loading ? (
@@ -465,8 +462,8 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               collapsable={false}
               className={
                 Platform.OS === "android"
-                  ? "overflow-hidden rounded-[28px] bg-card"
-                  : "overflow-hidden rounded-[24px] bg-card"
+                  ? "overflow-hidden rounded-[28px] bg-grouped-card"
+                  : "overflow-hidden rounded-[24px] bg-grouped-card"
               }
             >
               {visibleScopes.map(({ scope, selectionTarget }, scopeIndex) => {
@@ -474,6 +471,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 if (Platform.OS === "android") {
                   return (
                     <MaterialListRow
+                      className="bg-grouped-card"
                       key={scope.key}
                       title={scope.title}
                       subtitle={
@@ -506,7 +504,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                       accessibilityLabel={scope.title}
                       disabled={reservedDestinationProject !== null}
                       onPress={() => void selectProject(selectionTarget)}
-                      className="flex-row items-center gap-3 bg-card px-4 py-3.5"
+                      className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
                     >
                       <View className="h-7 w-7 items-center justify-center">
                         <ProjectFavicon

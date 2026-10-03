@@ -74,6 +74,9 @@ try {
       workspace.catalog ?? {},
       "apps/server",
     ),
+    // @opencode/client pins an older effect as an optional peer. As the lockfile's root this
+    // package would fail to resolve; the server runs one effect, so every dependent gets ours.
+    overrides: { effect: "$effect" },
   };
   await NodeFSP.writeFile(
     NodePath.join(stage, "package.json"),

@@ -5,8 +5,6 @@ import { localProvisionStorage } from "./provisionStorage";
 export const provisionedSandboxLeases = createProvisionedSandboxLeaseStore(localProvisionStorage);
 
 export const {
-  remember: rememberProvisionedSandbox,
-  rememberForEnvironment: rememberProvisionedSandboxForEnvironment,
   transfer: transferProvisionedSandboxLease,
   leaseFor: provisionedSandboxFor,
   leaseOwnedByEnvironment: provisionedSandboxOwnedByEnvironment,

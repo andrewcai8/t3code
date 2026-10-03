@@ -1,14 +1,39 @@
+import { ChartNetworkIcon, CodeXmlIcon } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import {
+  isMermaidLanguage,
   type MermaidImage,
   type MermaidTheme,
   readCachedMermaidImage,
   renderMermaidImage,
 } from "../lib/mermaidRendering";
-import { codeFenceFor } from "../markdown-clipboard";
+import { Button } from "./ui/button";
 
-export function MarkdownMermaidBlock({
+function codeFenceFor(code: string): string {
+  const longestRun = [...(code.match(/`{3,}/g) ?? [])].reduce(
+    (max, run) => Math.max(max, run.length),
+    0,
+  );
+  return "`".repeat(Math.max(3, longestRun + 1));
+}
+
+/**
+ * How a chat code block shows a closed `mermaid` fence: as its diagram, with a toggle back to the
+ * source. Undefined for any other block, and for a fence still streaming.
+ */
+export function mermaidPreview(
+  language: string,
+  code: string,
+  theme: MermaidTheme,
+  closed: boolean,
+): ((source: ReactNode) => ReactNode) | undefined {
+  return isMermaidLanguage(language) && closed
+    ? (source) => <MarkdownMermaidBlock code={code} theme={theme} source={source} />
+    : undefined;
+}
+
+function MarkdownMermaidBlock({
   code,
   theme,
   source,
@@ -18,6 +43,7 @@ export function MarkdownMermaidBlock({
   source: ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [showSource, setShowSource] = useState(false);
   const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
   const [rendered, setRendered] = useState<{
     code: string;
@@ -52,10 +78,36 @@ export function MarkdownMermaidBlock({
     };
   }, [code, settled, theme, visible]);
 
+  const toggleLabel = showSource ? "Show diagram" : "Show source";
+  const toggle = (
+    <Button
+      type="button"
+      variant="ghost-muted"
+      size="icon-xs"
+      className="absolute top-1 right-1 z-1"
+      onClick={() => setShowSource((value) => !value)}
+      aria-label={toggleLabel}
+      title={toggleLabel}
+    >
+      {showSource ? <ChartNetworkIcon className="size-3" /> : <CodeXmlIcon className="size-3" />}
+    </Button>
+  );
+  if (image?.ok && showSource) {
+    return (
+      <div ref={containerRef} className="relative">
+        {toggle}
+        {source}
+      </div>
+    );
+  }
   if (image?.ok) {
     const fence = codeFenceFor(code);
     return (
-      <div ref={containerRef} className="flex justify-center overflow-x-auto px-3 pt-2 pb-3">
+      <div
+        ref={containerRef}
+        className="relative flex justify-center overflow-x-auto px-3 pt-2 pb-3"
+      >
+        {toggle}
         <img
           src={image.src}
           alt="Mermaid diagram"

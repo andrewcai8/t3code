@@ -18,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
+import { E2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
@@ -88,6 +89,7 @@ export interface ProvisionControlPorts {
       readonly threadId: string;
       readonly projectDir: string;
       readonly turn: ProvisionFirstTurn;
+      readonly agentDriver: ProvisionOperation["request"]["agentDriver"];
     },
   ) => Promise<FirstTurnDelivery>;
   /** The chat's first message while it is still owed, or null once it is gone. */
@@ -168,6 +170,17 @@ const reportUnexpected = <A, E, R>(effect: Effect.Effect<A, E | UnexpectedCause,
   );
 const promise = <A>(run: () => Promise<A>) =>
   logCause(Effect.tryPromise({ try: run, catch: safeError }));
+/** A box's T3 server did not answer, so it cannot be paired until a resume brings it back. */
+export class GuestNotServing extends Error {
+  constructor() {
+    super("The box's T3 server is not serving.");
+  }
+}
+const notServing: EnvironmentProvisionAttachResult = {
+  kind: "refused",
+  reason: "not-serving",
+  message: "This chat's cloud machine is not serving. Wake it first.",
+};
 const missing: EnvironmentProvisionTouchResult = {
   kind: "refused",
   reason: "missing",
@@ -252,7 +265,7 @@ export function makeProvisionControl(
         }),
       ),
     );
-  /** Publishes a ready box and records where the manager reaches it. */
+  /** Publishes a ready box and records where the manager reaches it; null when it is not serving. */
   const publish = Effect.fn("EnvironmentControl.publish")(function* (
     operation: ProvisionOperation,
     lease: ProvisionedLease,
@@ -267,11 +280,16 @@ export function makeProvisionControl(
       phases.push(phase);
     };
     const attached = yield* remote(operation, () =>
-      ports.attach(operation, manifest, lease.namespaceProxy, record),
+      ports.attach(operation, manifest, lease.namespaceProxy, record).catch((error: unknown) => {
+        if (error instanceof GuestNotServing || error instanceof E2bPlacementUnavailable)
+          return null;
+        throw error;
+      }),
     ).pipe(
       timeProvisionPhase("attach", context),
       Effect.ensuring(logProvisionPhases(context, phases)),
     );
+    if (attached === null) return null;
     // The proxy is recorded so a resume after a manager restart can re-bind
     // the origin the paired client saved, instead of a fresh port nobody
     // knows. Remote access lets the manager ask whether the agent is working.
@@ -323,8 +341,8 @@ export function makeProvisionControl(
         return yield* settle({ status: "failed", reason: "The first message was not kept." });
       const lease = registered.remoteAccess
         ? registered
-        : (yield* publish(operation, registered)).lease;
-      const remoteAccess = lease.remoteAccess;
+        : (yield* publish(operation, registered))?.lease;
+      const remoteAccess = lease?.remoteAccess;
       if (!remoteAccess) return "pending" as const;
       const delivery = yield* promise(() =>
         ports.deliverFirstTurn(remoteAccess, {
@@ -332,6 +350,7 @@ export function makeProvisionControl(
           threadId: chat.threadId,
           projectDir: state.readiness.projectDir,
           turn,
+          agentDriver: request.agentDriver,
         }),
       );
       if (delivery === "pending") return "pending" as const;
@@ -500,9 +519,11 @@ export function makeProvisionControl(
       if ((yield* expired(operation)) || operation.state.kind !== "ready")
         return { kind: "refused", message: "This environment is not ready to attach." };
       const lease = yield* activeLease(operation);
+      if (lease?.state === "paused") return notServing;
       if (lease?.state !== "active")
         return { kind: "refused", message: "This environment's lease has ended." };
       const attached = yield* publish(operation, lease);
+      if (attached === null) return notServing;
       return {
         kind: "attached",
         environmentId: operation.state.readiness.environmentId,

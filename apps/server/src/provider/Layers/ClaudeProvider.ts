@@ -1,14 +1,10 @@
 import {
   type ClaudeSettings,
   type ModelCapabilities,
-  type ServerProvider,
   type ServerProviderSlashCommand,
   type ServerProviderResetCredits,
 } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
-import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -22,13 +18,12 @@ import {
   query as claudeQuery,
   type Options as ClaudeQueryOptions,
   type SlashCommand as ClaudeSlashCommand,
-  type SDKRateLimitInfo,
+  type SDKControlGetUsageResponse,
   type SDKUserMessage,
   type SettingSource,
 } from "@anthropic-ai/claude-agent-sdk";
 
 import {
-  AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   DEFAULT_TIMEOUT_MS,
@@ -44,10 +39,10 @@ import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 import {
   type ClaudeScopedLimitNames,
-  type ClaudeUsageRead,
-  claudeUsageReadToLimits,
-  recordClaudeUsageRead,
+  claudeUsageResponseToLimits,
+  recordClaudeUsageResponse,
 } from "./claudeUsageLimits.ts";
+import { CLAUDE_USAGE_PROBE_TIMEOUT_MS } from "./claudeColdProbe.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   type ClaudeModelCatalog,
@@ -170,55 +165,6 @@ function apiProviderAuthMetadata(
   return apiProvider === "bedrock" ? { type: "bedrock", label: "Amazon Bedrock" } : undefined;
 }
 
-function readNonEmptyJsonString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-export type ClaudeCliAuthStatus = {
-  readonly loggedIn: boolean;
-  readonly email?: string;
-  readonly subscriptionType?: string;
-  readonly authMethod?: string;
-  readonly apiProvider?: string;
-};
-
-/**
- * Parse `claude auth status` JSON. Email may be top-level (current CLI) or
- * nested under `account` (older fixtures). Extra log lines around the object
- * are ignored.
- */
-export function parseClaudeAuthStatusOutput(output: string): ClaudeCliAuthStatus | undefined {
-  const trimmed = output.trim();
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start < 0 || end <= start) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed.slice(start, end + 1));
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return undefined;
-  }
-  const record = parsed as Record<string, unknown>;
-  const account =
-    typeof record.account === "object" && record.account !== null && !Array.isArray(record.account)
-      ? (record.account as Record<string, unknown>)
-      : undefined;
-  const email = readNonEmptyJsonString(record.email) ?? readNonEmptyJsonString(account?.email);
-  const subscriptionType = readNonEmptyJsonString(record.subscriptionType);
-  const authMethod = readNonEmptyJsonString(record.authMethod);
-  const apiProvider = readNonEmptyJsonString(record.apiProvider);
-  return {
-    loggedIn: record.loggedIn === true,
-    ...(email ? { email } : {}),
-    ...(subscriptionType ? { subscriptionType } : {}),
-    ...(authMethod ? { authMethod } : {}),
-    ...(apiProvider ? { apiProvider } : {}),
-  };
-}
-
 // ── SDK capability probe ────────────────────────────────────────────
 
 // Amazon Bedrock initializes far slower than first-party auth: the SDK boots the
@@ -226,12 +172,6 @@ export function parseClaudeAuthStatusOutput(output: string): ClaudeCliAuthStatus
 // account info. The previous 8s budget expired mid-init, so the probe returned
 // `undefined` and left the provider unverified and unselectable in the picker.
 const CAPABILITIES_PROBE_TIMEOUT_MS = 25_000;
-
-// `get_usage` is a network round trip on the CLI we just spawned. The generic
-// 4s CLI budget expires after cold init and the UI then shows "Could not read
-// limits." even though the account probe succeeded. Keep this below the
-// remaining process lifetime so a hang still cannot discard initialization.
-export const CLAUDE_USAGE_PROBE_TIMEOUT_MS = 15_000;
 
 /**
  * Keep workspace-scoped command discovery intact while isolating the periodic
@@ -281,55 +221,12 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
   };
 }
 
-/**
- * The `tokenSource` a `claude setup-token` login reports. Its token carries
- * inference scope only, so `get_usage` has no windows for it.
- */
-const SETUP_TOKEN_SOURCE = "CLAUDE_CODE_OAUTH_TOKEN";
-
-export const CLAUDE_USAGE_TURN_PROMPT = "Reply with the single word OK.";
-
-/**
- * Options for the throwaway turn that reads a setup-token account's windows:
- * the cheapest model, no tools, thinking, settings, hooks, MCP, or session.
- */
-function buildClaudeUsageTurnQueryOptions(input: {
-  readonly executablePath: string;
-  readonly abortController: AbortController;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly cwd: string | undefined;
-}): ClaudeQueryOptions {
-  return {
-    persistSession: false,
-    pathToClaudeCodeExecutable: input.executablePath,
-    abortController: input.abortController,
-    model: "haiku",
-    maxTurns: 1,
-    tools: [],
-    thinking: { type: "disabled" },
-    systemPrompt: "Reply tersely.",
-    settingSources: [],
-    settings: { disableAllHooks: true },
-    mcpServers: {},
-    strictMcpConfig: true,
-    env: {
-      ...input.environment,
-      ENABLE_CLAUDEAI_MCP_SERVERS: "false",
-      FORCE_CODE_TERMINAL: undefined,
-      CLAUDE_CODE_AUTO_CONNECT_IDE: "0",
-      CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL: "1",
-    },
-    ...(input.cwd ? { cwd: input.cwd } : {}),
-    stderr: () => {},
-  };
-}
-
 function nonEmptyProbeString(value: string): string | undefined {
   const candidate = value.trim();
   return candidate ? candidate : undefined;
 }
 
-export type ClaudeCapabilitiesProbe = {
+type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
@@ -341,10 +238,11 @@ export type ClaudeCapabilitiesProbe = {
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   /**
-   * Subscription windows, or `undefined` when they could not be read. Absent
-   * windows on a `get_usage` response mean the account has none (API key).
+   * Subscription windows from the SDK's `get_usage` control request, or
+   * `undefined` when the request itself failed. Absent windows on an
+   * otherwise successful response mean the account has none (API key).
    */
-  readonly usage?: ClaudeUsageRead;
+  readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
 };
 
 function parseClaudeInitializationCommands(
@@ -410,13 +308,6 @@ function dedupeSlashCommands(
   return [...commandsByName.values()];
 }
 
-/** The SDK's own rejection text, not the generic wrapper `Effect.tryPromise` puts around it. */
-function probeFailureMessage(error: Error): string {
-  return Cause.isUnknownError(error) && error.cause instanceof Error
-    ? error.cause.message
-    : error.message;
-}
-
 function waitForAbortSignal(signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.resolve();
@@ -427,7 +318,7 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Probe slash commands and usage by spawning a lightweight Claude Agent SDK
+ * Probe account information by spawning a lightweight Claude Agent SDK
  * session and reading the initialization result.
  *
  * We pass a never-yielding AsyncIterable as the prompt so that no user
@@ -436,14 +327,13 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * account info and slash commands) but never starts an API request to
  * Anthropic. We read the init data and then abort the subprocess.
  *
- * The picker ready-path uses `claude auth status` instead of this spawn.
- * Overlay the result onto a ready snapshot once it lands.
+ * This is used as a fallback when `claude auth status` does not include
+ * subscription type information.
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
-  readUsageTurn: ClaudeUsageTurnReader = readFreshClaudeUsageTurn,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -468,22 +358,22 @@ const probeClaudeCapabilities = (
         }),
       });
       const init = await q.initializationResult();
-      return { q, init, executablePath, claudeEnvironment };
+      return { q, init };
     });
   }).pipe(
     Effect.timeout(CAPABILITIES_PROBE_TIMEOUT_MS),
-    Effect.flatMap(({ q, init, executablePath, claudeEnvironment }) =>
+    Effect.flatMap(({ q, init }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         const usageResult = yield* Effect.tryPromise(() =>
           q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(),
-        ).pipe(
-          Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS),
-          Effect.tapError((error) =>
-            Effect.logWarning("Claude usage read failed.", { cause: probeFailureMessage(error) }),
-          ),
-          Effect.result,
-        );
+        ).pipe(Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS), Effect.result);
+        const usage = Result.isSuccess(usageResult)
+          ? {
+              rate_limits_available: usageResult.success.rate_limits_available,
+              rate_limits: usageResult.success.rate_limits,
+            }
+          : undefined;
         const account = init.account as
           | {
               readonly email?: string;
@@ -492,16 +382,6 @@ const probeClaudeCapabilities = (
               readonly apiProvider?: string;
             }
           | undefined;
-        let usage: ClaudeUsageRead | undefined;
-        if (Result.isSuccess(usageResult)) {
-          const { rate_limits_available, rate_limits } = usageResult.success;
-          if (rate_limits_available || account?.tokenSource !== SETUP_TOKEN_SOURCE) {
-            usage = { source: "usageEndpoint", response: { rate_limits_available, rate_limits } };
-          } else {
-            abort.abort();
-            usage = yield* readUsageTurn({ executablePath, environment: claudeEnvironment, cwd });
-          }
-        }
         return {
           email: account?.email,
           subscriptionType: account?.subscriptionType,
@@ -517,82 +397,12 @@ const probeClaudeCapabilities = (
         if (!abort.signal.aborted) abort.abort();
       }),
     ),
-    Effect.tapError((error) =>
-      Effect.logWarning("Claude capabilities probe failed; usage was not read.", {
-        cause: probeFailureMessage(error),
-      }),
-    ),
     Effect.result,
     Effect.map((result) => (Result.isSuccess(result) ? result.success : undefined)),
   );
 };
 
-interface ClaudeUsageTurnInput {
-  readonly executablePath: string;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly cwd: string | undefined;
-}
-
-export type ClaudeUsageTurnReader = (
-  input: ClaudeUsageTurnInput,
-) => Effect.Effect<Extract<ClaudeUsageRead, { source: "rateLimitEvent" | "recentTurn" }>>;
-
-/**
- * Read a setup-token account's windows from one throwaway turn. The
- * `rate_limit_event` arrives with the response headers, before the reply,
- * and the turn is aborted there.
- */
-const readClaudeUsageFromTurn = (
-  input: ClaudeUsageTurnInput,
-): Effect.Effect<SDKRateLimitInfo | undefined> => {
-  const abort = new AbortController();
-  return Effect.tryPromise(async () => {
-    const q = claudeQuery({
-      prompt: CLAUDE_USAGE_TURN_PROMPT,
-      options: buildClaudeUsageTurnQueryOptions({ ...input, abortController: abort }),
-    });
-    for await (const message of q) {
-      if (message.type === "rate_limit_event") return message.rate_limit_info;
-    }
-    throw new Error("The turn ended without a rate_limit_event.");
-  }).pipe(
-    Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS),
-    Effect.ensuring(Effect.sync(() => abort.abort())),
-    Effect.tapError((error) =>
-      Effect.logWarning("Claude usage turn failed.", { cause: probeFailureMessage(error) }),
-    ),
-    Effect.orElseSucceed(() => undefined),
-  );
-};
-
-const readFreshClaudeUsageTurn: ClaudeUsageTurnReader = (input) =>
-  readClaudeUsageFromTurn(input).pipe(Effect.map((info) => ({ source: "rateLimitEvent", info })));
-
-/**
- * How often a setup-token account spends a turn on reading its windows.
- * Routing trusts usage for 30 minutes, and real turns report in between.
- * Every turn opens the five-hour window, so a shorter cadence would keep an
- * idle account's session window open for good.
- */
-const CLAUDE_USAGE_TURN_TTL = Duration.minutes(30);
-
-/** One per instance: at most one usage turn per TTL, failed turns included. */
-export const makeClaudeUsageTurnReader = Effect.gen(function* () {
-  const lastTurnAt = yield* Ref.make<number | undefined>(undefined);
-  const reader: ClaudeUsageTurnReader = (input) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      const last = yield* Ref.get(lastTurnAt);
-      if (last !== undefined && now - last < Duration.toMillis(CLAUDE_USAGE_TURN_TTL)) {
-        return { source: "recentTurn" } as const;
-      }
-      yield* Ref.set(lastTurnAt, now);
-      return yield* readFreshClaudeUsageTurn(input);
-    });
-  return reader;
-});
-
-const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
+export const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   claudeSettings: ClaudeSettings,
   args: ReadonlyArray<string>,
   environment?: NodeJS.ProcessEnv,
@@ -608,14 +418,8 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   return yield* spawnAndCollect(claudeSettings.binaryPath, command);
 });
 
-const NO_SCOPED_NAMES: ClaudeScopedLimitNames = { overageIncluded: undefined };
-
 export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(function* (
   claudeSettings: ClaudeSettings,
-  /**
-   * Tests and the background overlay pass this. The picker-ready path omits it
-   * so `claude auth status` can mark the instance ready without an SDK spawn.
-   */
   resolveCapabilities?: (
     claudeSettings: ClaudeSettings,
   ) => Effect.Effect<ClaudeCapabilitiesProbe | undefined>,
@@ -730,38 +534,20 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   );
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
-  const [authProbe, skills] = yield* Effect.all(
-    [
-      runClaudeCommand(claudeSettings, ["auth", "status"], resolvedEnvironment).pipe(
-        Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS),
-        Effect.result,
-      ),
-      discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment),
-    ],
-    { concurrency: "unbounded" },
-  );
-  const cliAuth =
-    Result.isSuccess(authProbe) && Option.isSome(authProbe.success)
-      ? parseClaudeAuthStatusOutput(
-          `${authProbe.success.value.stdout}\n${authProbe.success.value.stderr}`,
-        )
-      : undefined;
-
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
     : undefined;
-  const slashCommands = dedupeSlashCommands([
-    COMPACT_SLASH_COMMAND,
-    ...(capabilities?.slashCommands ?? []),
-  ]);
+  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
+  const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
+  const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
-  if (!capabilities && cliAuth?.loggedIn !== true) {
+  if (!capabilities) {
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
       checkedAt,
       models,
-      slashCommands,
+      slashCommands: dedupedSlashCommands,
       skills,
       probe: {
         installed: true,
@@ -773,22 +559,22 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const email = capabilities?.email ?? cliAuth?.email ?? (claudeSettings.accountEmail || undefined);
   const authMetadata =
     claudeAuthMetadata({
-      subscriptionType: capabilities?.subscriptionType ?? cliAuth?.subscriptionType,
-      authMethod: capabilities?.tokenSource ?? cliAuth?.authMethod,
-    }) ?? apiProviderAuthMetadata(capabilities?.apiProvider ?? cliAuth?.apiProvider);
-  const usageLimits = capabilities?.usage
-    ? scopedLimitNames
-      ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
-      : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
-          .limits
-    : undefined;
+      subscriptionType: capabilities.subscriptionType,
+      authMethod: capabilities.tokenSource,
+    }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
+  const usageLimits = !capabilities.usage
+    ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
+    : scopedLimitNames
+      ? yield* recordClaudeUsageResponse(scopedLimitNames, {
+          response: capabilities.usage,
+          checkedAt,
+        })
+      : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
   const resetCredits =
     resolveResetCredits &&
-    (capabilities?.subscriptionType ?? cliAuth?.subscriptionType) &&
-    usageLimits &&
+    capabilities.subscriptionType &&
     !usageLimits.unavailable &&
     parsedVersion
       ? yield* resolveResetCredits(parsedVersion)
@@ -798,7 +584,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     enabled: claudeSettings.enabled,
     checkedAt,
     models,
-    slashCommands,
+    slashCommands: dedupedSlashCommands,
     skills,
     probe: {
       installed: true,
@@ -806,74 +592,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       status: "ready",
       auth: {
         status: "authenticated",
-        ...(email ? { email } : {}),
+        ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
-      ...(usageLimits
-        ? { usageLimits: resetCredits ? { ...usageLimits, resetCredits } : usageLimits }
-        : {}),
+      usageLimits: resetCredits ? { ...usageLimits, resetCredits } : usageLimits,
     },
   });
 });
-
-/**
- * Apply an SDK capabilities probe onto a snapshot that already became ready
- * from `claude auth status`. Usage that never arrived is `probeFailed`; the
- * picker does not wait on this overlay.
- */
-export const overlayClaudeCapabilitiesOnSnapshot = Effect.fn("overlayClaudeCapabilitiesOnSnapshot")(
-  function* (
-    snapshot: ServerProvider,
-    capabilities: ClaudeCapabilitiesProbe,
-    scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>,
-  ): Effect.fn.Return<ServerProvider> {
-    const checkedAt = DateTime.formatIso(yield* DateTime.now);
-    const previousEmail =
-      snapshot.auth.status === "authenticated" ? snapshot.auth.email : undefined;
-    const previousAuthMeta =
-      snapshot.auth.status === "authenticated" && snapshot.auth.type
-        ? { type: snapshot.auth.type, label: snapshot.auth.label }
-        : undefined;
-    const authMetadata =
-      claudeAuthMetadata({
-        subscriptionType: capabilities.subscriptionType,
-        authMethod: capabilities.tokenSource,
-      }) ??
-      apiProviderAuthMetadata(capabilities.apiProvider) ??
-      previousAuthMeta;
-    const email = capabilities.email ?? previousEmail;
-    const readLimits = !capabilities.usage
-      ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
-      : ((scopedLimitNames
-          ? yield* recordClaudeUsageRead(scopedLimitNames, { read: capabilities.usage, checkedAt })
-          : claudeUsageReadToLimits({ read: capabilities.usage, names: NO_SCOPED_NAMES, checkedAt })
-              .limits) ?? snapshot.usageLimits);
-    // The status check resolved banked resets; a fresh usage read must not drop them.
-    const resetCredits = snapshot.usageLimits?.resetCredits;
-    const usageLimits =
-      resetCredits && readLimits && !readLimits.unavailable && !readLimits.resetCredits
-        ? { ...readLimits, resetCredits }
-        : readLimits;
-
-    return {
-      ...snapshot,
-      slashCommands: dedupeSlashCommands([
-        COMPACT_SLASH_COMMAND,
-        ...snapshot.slashCommands,
-        ...capabilities.slashCommands,
-      ]),
-      auth: {
-        status: "authenticated",
-        ...(email ? { email } : {}),
-        ...(authMetadata ? authMetadata : {}),
-      },
-      status: snapshot.enabled ? "ready" : "disabled",
-      usageLimits,
-      checkedAt,
-    };
-  },
-);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 

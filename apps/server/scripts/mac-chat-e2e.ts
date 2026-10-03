@@ -34,6 +34,9 @@ import {
   defaultInstanceIdForDriver,
   EnvironmentId,
   MessageId,
+  ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  type OrchestrationV2Run,
   ProviderDriverKind,
   ProvisionRequestId,
   ThreadId,
@@ -149,6 +152,10 @@ const rpc = <A, E>(
       const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
       const wsUrl = new URL("ws", httpBaseUrl.endsWith("/") ? httpBaseUrl : `${httpBaseUrl}/`);
       wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl.searchParams.set(
+        ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+        ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+      );
       const connectUrl = http
         .execute(
           HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
@@ -360,6 +367,14 @@ async function provisionDetached(label: string) {
   return { chat, asked };
 }
 
+const SETTLED_RUN = new Set<OrchestrationV2Run["status"]>([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+
 /** Pairs a client with the chat's box after the fact and reads the host-started turn. */
 async function firstTurn(chat: Chat, asked: number) {
   const attached = await manager((client) =>
@@ -388,17 +403,19 @@ async function firstTurn(chat: Chat, asked: number) {
       return Option.none();
     });
     if (Option.isNone(snapshot) || snapshot.value.kind !== "snapshot") return null;
-    const current = snapshot.value.snapshot.thread;
+    const current = snapshot.value.projection;
+    const run = current.runs.toSorted((left, right) => left.ordinal - right.ordinal).at(-1);
+    const session = current.providerSessions.at(-1);
     seen = {
       messages: current.messages.map((message) => message.role),
-      turn: current.latestTurn?.state ?? null,
-      session: current.session?.status ?? null,
-      error: current.session?.lastError ?? null,
+      turn: run?.status ?? null,
+      session: session?.status ?? null,
+      error: session?.lastError ?? null,
     };
     const summary = JSON.stringify(seen);
     if (summary !== shown) console.log(`[${elapsed()}s] ${chat.label} thread ${(shown = summary)}`);
-    const settled = current.latestTurn !== null && current.latestTurn.state !== "running";
-    return settled || current.session?.status === "error" ? current : null;
+    const settled = run !== undefined && SETTLED_RUN.has(run.status);
+    return settled || session?.status === "error" ? { messages: current.messages, run } : null;
   }).catch((error: unknown) => {
     throw new Error(`${String(error)}; last seen ${JSON.stringify(seen)}`);
   });
@@ -411,7 +428,7 @@ async function firstTurn(chat: Chat, asked: number) {
     `${chat.label}.firstTurn`,
     thread.messages.filter((message) => message.role === "user").length === 1 &&
       /PINEAPPLE/.test(reply),
-    { turn: thread.latestTurn?.state, reply: reply.slice(-80) },
+    { turn: thread.run?.status, reply: reply.slice(-80) },
   );
 }
 

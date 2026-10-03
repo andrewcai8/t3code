@@ -12,11 +12,11 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useRef, useState } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
-import { connectPairing } from "../../connection/onboarding";
+import { connectBoxPairing } from "../../connection/box-onboarding";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { holdBoxDemand } from "../../state/box-demand";
-import { waitForEnvironmentProject } from "../../state/entities";
+import { waitForEnvironmentProject } from "../../state/cloud-entities";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -70,7 +70,7 @@ export function useCreateCloudMachine(input: {
   const attach = useAtomCommand(serverEnvironment.attachProvisionedEnvironment, {
     reportFailure: false,
   });
-  const pair = useAtomCommand(connectPairing, { reportFailure: false });
+  const pair = useAtomCommand(connectBoxPairing, { reportFailure: false });
   const [state, setState] = useState<CreateCloudMachineState>(IDLE);
   // One machine at a time from this screen: a second tap while the first is in flight would
   // allocate a sandbox nobody is waiting for.
@@ -119,7 +119,7 @@ export function useCreateCloudMachine(input: {
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
             pair: async (pairingUrl) => {
-              const result = await pair({ pairingUrl, box: { managerId } });
+              const result = await pair({ pairingUrl, managerId });
               return AsyncResult.isSuccess(result) ? result.value : null;
             },
             ...(manager?.displayUrl

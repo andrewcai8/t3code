@@ -5,10 +5,8 @@ import {
   encodeComposerContextClipboardHtml,
 } from "@t3tools/shared/composerContextClipboard";
 import {
-  ChartNetworkIcon,
   CheckIcon,
   ChevronRightIcon,
-  CodeXmlIcon,
   CopyIcon,
   FileSpreadsheetIcon,
   FileTextIcon,
@@ -91,6 +89,8 @@ import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import remarkGfm from "remark-gfm";
+import type { Processor } from "unified";
+import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import { remarkGithubAlerts } from "../markdown-github-alerts";
 import {
   artifactTemplateFromHastProperties,
@@ -141,8 +141,7 @@ import { GitHubIcon } from "./Icons";
 import { createIncrementalHighlightedDocument } from "../lib/incrementalHighlighting";
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
-import { MarkdownMermaidBlock } from "./MarkdownMermaidBlock";
-import { isMermaidLanguage } from "../lib/mermaidRendering";
+import { mermaidPreview } from "./MarkdownMermaidBlock";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
@@ -494,6 +493,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
 
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
+  remarkKeepWindowsPathDestinations,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
@@ -503,6 +503,7 @@ const CHAT_MARKDOWN_REMARK_PLUGINS = [
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
+  remarkKeepWindowsPathDestinations,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
@@ -635,6 +636,36 @@ function remarkPreserveCodeMeta() {
 
     visit(tree);
   };
+}
+
+interface DestinationCompileContext {
+  readonly stack: ReadonlyArray<{ readonly type: string; url?: string }>;
+  resume(): string;
+  sliceSerialize(token: unknown): string;
+}
+
+function keepWindowsPathDestination(this: DestinationCompileContext, token: unknown) {
+  const decoded = this.resume();
+  const authored = this.sliceSerialize(token);
+  const node = this.stack.at(-1);
+  // Character references still need decoding, so those destinations keep the parsed URL.
+  if (node)
+    node.url = isWindowsAbsolutePath(authored) && !authored.includes("&") ? authored : decoded;
+}
+
+/**
+ * CommonMark reads the `\.` in `C:\me\.t3\shot.png` as an escape, even in a link
+ * destination. Every backslash in a Windows path is a separator, so link, image, and
+ * definition destinations that are Windows paths keep the text as written.
+ */
+function remarkKeepWindowsPathDestinations(this: Processor) {
+  const data = this.data();
+  (data.fromMarkdownExtensions ??= []).push({
+    exit: {
+      resourceDestinationString: keepWindowsPathDestination,
+      definitionDestinationString: keepWindowsPathDestination,
+    },
+  });
 }
 
 /**
@@ -958,8 +989,6 @@ function MarkdownCodeBlock({
   children: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
-  const [showSource, setShowSource] = useState(false);
-  const previewLabel = showSource ? "Show diagram" : "Show source";
   const [wrapped, setWrapped] = useState(readInitialWordWrapSetting);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
@@ -1029,28 +1058,6 @@ function MarkdownCodeBlock({
           />
         </span>
         <span className="flex items-center gap-0.5" role="toolbar" aria-label="Code block actions">
-          {renderPreview ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    variant="ghost-muted"
-                    size="icon-xs"
-                    onClick={() => setShowSource((value) => !value)}
-                    aria-label={previewLabel}
-                  />
-                }
-              >
-                {showSource ? (
-                  <ChartNetworkIcon className="size-3" />
-                ) : (
-                  <CodeXmlIcon className="size-3" />
-                )}
-              </TooltipTrigger>
-              <TooltipPopup side="top">{previewLabel}</TooltipPopup>
-            </Tooltip>
-          ) : null}
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1104,7 +1111,7 @@ function MarkdownCodeBlock({
           </Tooltip>
         </span>
       </div>
-      {renderPreview && !showSource ? renderPreview(children) : children}
+      {renderPreview ? renderPreview(children) : children}
     </div>
   );
 }
@@ -3318,13 +3325,12 @@ const CHAT_MARKDOWN_COMPONENTS = {
             : undefined
         }
         isStreaming={isStreaming}
-        renderPreview={
-          isMermaidLanguage(language) && !isStreaming && isClosedCodeFence(node, text)
-            ? (source) => (
-                <MarkdownMermaidBlock code={codeBlock.code} theme={resolvedTheme} source={source} />
-              )
-            : undefined
-        }
+        renderPreview={mermaidPreview(
+          language,
+          codeBlock.code,
+          resolvedTheme,
+          !isStreaming && isClosedCodeFence(node, text),
+        )}
       >
         <RenderErrorBoundary
           resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}

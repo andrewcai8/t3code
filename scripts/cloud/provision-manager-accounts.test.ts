@@ -5,14 +5,10 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 
-import { cursorFileCredentialPath } from "../../apps/server/src/provider/cursorCredentialPath.ts";
+import { credentialSecretName } from "../../apps/server/src/provider/providerCredentialName.ts";
 import { planManagerAccounts, type PlanInput } from "./provision-manager-accounts.ts";
 
-const host: PlanInput["host"] = {
-  homedir: "/Users/op",
-  platform: "darwin",
-  environment: { HOME: "/Users/op", XDG_CONFIG_HOME: "/Users/op/Library/Config" },
-};
+const host: PlanInput["host"] = { homedir: "/Users/op", stateDir: "/Users/op/.t3/userdata" };
 const managerBaseDir = "/home/user/manager-state";
 
 const settings: PlanInput["settings"] = {
@@ -90,8 +86,10 @@ describe("planManagerAccounts", () => {
         codexLogin: { account: "codex_ac1" },
       },
       {
-        source: "/Users/op/.t3/userdata/cursor-homes/cursor_work/.cursor/auth.json",
-        destination: "/home/user/manager-state/cursor-homes/cursor_work/.config/cursor/auth.json",
+        source:
+          "/Users/op/.t3/userdata/secrets/provider-auth-1708c8c8cb8bae5421c955c9031310df41eddd9f868172bd383a19ef2fdada72.bin",
+        destination:
+          "/home/user/manager-state/userdata/secrets/provider-auth-1708c8c8cb8bae5421c955c9031310df41eddd9f868172bd383a19ef2fdada72.bin",
       },
       {
         source: "/Users/op/.t3/userdata/secrets/provider-env-cursor.bin",
@@ -151,17 +149,18 @@ describe("planManagerAccounts", () => {
     ]);
   });
 
-  it("puts the Cursor file where the manager's own resolver looks, whatever its ambient env", () => {
-    const plan = planManagerAccounts({ settings, provisioning, host, managerBaseDir });
-    const environment: Record<string, string> = {
-      HOME: "/home/user",
-      XDG_CONFIG_HOME: "/home/user/.config",
-    };
-    for (const variable of plan.providerInstances.cursor_work?.environment ?? [])
-      environment[variable.name] = variable.value;
-    const credential = plan.files.find(({ destination }) => destination.includes("cursor-homes"));
-
-    assert.equal(cursorFileCredentialPath(environment, "linux"), credential?.destination);
+  it("puts the Cursor sign-in under the secret name the manager's provisioning reads", () => {
+    const plan = planManagerAccounts({
+      settings,
+      provisioning,
+      host,
+      managerBaseDir: "/home/user/manager",
+      accounts: ["cursor_work"],
+    });
+    assert.include(
+      plan.files.map((file) => file.destination),
+      `/home/user/manager/userdata/secrets/${credentialSecretName("cursor", "cursor_work")}.bin`,
+    );
   });
 
   it("carries a Claude account as a token its instance runs on, and skips one without", () => {
@@ -243,11 +242,7 @@ describe("planManagerAccounts", () => {
       const plan = planManagerAccounts({
         settings: { providerInstances: { claudeAgent: { driver: "claudeAgent", enabled: true } } },
         provisioning: { claudeOAuthTokens: { claudeAgent: "sk-ant-oat01-default" } },
-        host: {
-          homedir,
-          platform: "darwin",
-          environment: { CLAUDE_CONFIG_DIR: NodePath.join(homedir, ".claude_work") },
-        },
+        host: { homedir, stateDir: NodePath.join(homedir, ".t3/userdata") },
         managerBaseDir,
       });
       assert.deepEqual(plan.providerInstances.claudeAgent?.config, {
@@ -289,7 +284,7 @@ describe("planManagerAccounts", () => {
             claude_home: "sk-ant-oat01-home",
           },
         },
-        host: { homedir, platform: "darwin", environment: {} },
+        host: { homedir, stateDir: NodePath.join(homedir, ".t3/userdata") },
         managerBaseDir,
       });
       assert.deepEqual(

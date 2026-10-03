@@ -1,12 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useMemo } from "react";
-
-import { scopedThreadKey } from "../lib/scopedEntities";
-import { useThreadRefs } from "./entities";
 import { buildPendingNewTasks, type PendingNewTask } from "./pending-new-tasks-model";
 import { flattenQueuedThreadMessages } from "./thread-outbox-model";
 import { composerDraftsAtom } from "./use-composer-drafts";
-import { useThreadOutboxMessages } from "./use-thread-outbox";
+import { useQueuedMessagesAwaitingThreads } from "./cloud-entities";
 
 export type {
   PendingDraftTask,
@@ -15,20 +12,14 @@ export type {
 } from "./pending-new-tasks-model";
 
 export function usePendingNewTasks(): ReadonlyArray<PendingNewTask> {
-  const queuedMessagesByThreadKey = useThreadOutboxMessages();
+  const queuedMessagesByThreadKey = useQueuedMessagesAwaitingThreads();
   const drafts = useAtomValue(composerDraftsAtom);
-  const threadRefs = useThreadRefs();
-  const knownThreadKeys = useMemo(
-    () => new Set(threadRefs.map((ref) => scopedThreadKey(ref.environmentId, ref.threadId))),
-    [threadRefs],
-  );
   return useMemo(
     () =>
       buildPendingNewTasks({
         queuedMessages: flattenQueuedThreadMessages(queuedMessagesByThreadKey),
         drafts,
-        knownThreadKeys,
       }),
-    [queuedMessagesByThreadKey, drafts, knownThreadKeys],
+    [queuedMessagesByThreadKey, drafts],
   );
 }

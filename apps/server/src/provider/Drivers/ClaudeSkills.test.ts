@@ -599,8 +599,8 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
       // The frontmatter name is not the command, so an override naming it is
       // not the override Claude Code would apply either.
       assert.deepEqual(
-        skills.map((skill) => [skill.name, skill.displayName, skill.enabled]),
-        [["probe-alias", "probe-alias-frontmatter", true]],
+        skills.map((skill) => [skill.name, skill.enabled]),
+        [["probe-alias", true]],
       );
     }),
   );

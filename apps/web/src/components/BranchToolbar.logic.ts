@@ -3,7 +3,6 @@ import type {
   EnvironmentMachineKind,
   VcsRef,
   ProjectId,
-  RepositoryIdentity,
   WorktreeSubmodules,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -56,23 +55,6 @@ export function resolveEnvironmentOptionLabel(input: {
 // A remote (non-primary) environment is always surfaced, even when it is the
 // only environment available: with a single connected machine there is nothing
 // to pick, but the user still needs to see where the project runs.
-/**
- * Whether the composer should offer a choice of machine.
- *
- * More than one machine is the obvious reason. Being able to create one is the
- * other, and it is the case that matters most: an install with a single
- * machine would otherwise hide the control that adds a second, so the first
- * cloud machine could never be created from the place machines are chosen.
- */
-export function shouldOfferEnvironmentChoice(input: {
-  environmentCount: number;
-  canChangeEnvironment: boolean;
-  canCreateEnvironment: boolean;
-}): boolean {
-  if (!input.canChangeEnvironment) return false;
-  return input.environmentCount > 1 || input.canCreateEnvironment;
-}
-
 export function shouldShowEnvironmentIndicator(input: {
   activeEnvironment: Pick<EnvironmentOption, "isPrimary"> | null;
   canPickEnvironment: boolean;
@@ -82,6 +64,8 @@ export function shouldShowEnvironmentIndicator(input: {
 }
 
 export function shouldShowComposerContextStrip(input: {
+  isDraftHeroState: boolean;
+  persistInActiveThreads: boolean;
   hasActiveProject: boolean;
   isGitRepo: boolean;
   showEnvironmentIndicator: boolean;
@@ -90,6 +74,7 @@ export function shouldShowComposerContextStrip(input: {
 }): boolean {
   return (
     input.hasActiveProject &&
+    (input.isDraftHeroState || input.persistInActiveThreads) &&
     (input.isGitRepo || input.showEnvironmentIndicator || input.hostsRestingComposerControls)
   );
 }
@@ -130,6 +115,13 @@ export function resolveLockedWorkspaceLabel(
 ): string {
   if (activeWorktreePath) return "Worktree";
   return effectiveEnvMode === "worktree" ? resolveEnvModeLabel("worktree") : "Local checkout";
+}
+
+export function resolveWorkspaceDisplayName(path: string | null): string | null {
+  if (!path) return null;
+  const normalizedPath = path.replace(/[\\/]+$/, "");
+  if (normalizedPath.length === 0) return path;
+  return normalizedPath.split(/[\\/]/).at(-1) ?? normalizedPath;
 }
 
 export interface PreviousWorktreeSeed {
@@ -252,24 +244,6 @@ export function resolveBranchTriggerLabel(input: {
     return `From ${baseRef}`;
   }
   return resolvedActiveBranch;
-}
-
-/**
- * The branches a cloud environment can start from: those on the remote it
- * clones (see `cloneRepository`), named as that remote names them. A
- * local-only branch is left out, since the cloud clones from GitHub.
- */
-export function cloudBaseRefs(
-  refs: ReadonlyArray<VcsRef>,
-  identity: RepositoryIdentity | null | undefined,
-): VcsRef[] {
-  const remote = identity?.origin ? "origin" : identity?.locator.remoteName;
-  const prefix = `${remote}/`;
-  return refs.flatMap((ref) =>
-    ref.isRemote && ref.remoteName === remote && ref.name.startsWith(prefix)
-      ? [{ ...ref, name: ref.name.slice(prefix.length) }]
-      : [],
-  );
 }
 
 export function resolveBranchToolbarPrBranch(input: {

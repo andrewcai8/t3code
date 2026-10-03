@@ -32,6 +32,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 
 import {
   ComposerEditor,
@@ -102,7 +103,7 @@ import {
   type ComposerDraft,
   waitForComposerDraftsLoaded,
 } from "../../state/use-composer-drafts";
-import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
+import { useEnvironmentServerConfig, useProjects, useThreadShells } from "../../state/entities";
 import { useProjectClone } from "../../state/projectClones";
 import { projectEnvironment } from "../../state/projects";
 import { sourceControlEnvironment } from "../../state/sourceControl";
@@ -112,12 +113,14 @@ import {
   isModelSelectionUnavailable,
   resolveSelectableModelSelection,
 } from "../../lib/modelOptions";
-import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
-import { connectionPhasesAtom } from "../../state/presentation";
-import { useSavedRemoteConnection } from "../../state/use-remote-environment-registry";
+import {
+  useRemoteConnectionStatus,
+  useSavedRemoteConnection,
+} from "../../state/use-remote-environment-registry";
 import { useNewTaskFlow } from "./new-task-flow-provider";
+import { useCloudMachineInsteadOfBox } from "./use-new-task-cloud";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
 import { resolveDraftProjectSelection } from "./new-task-project-selection";
 import {
@@ -206,12 +209,15 @@ export function NewTaskDraftScreen(props: {
   const controlsBottomPadding = Math.max(insets.bottom, 10);
   const keyboardOpenedOffset = Math.max(0, controlsBottomPadding - 8);
   const { projectScopes, selectedProject, selectedProjectKey, setProject } = flow;
-  const connectionPhases = useAtomValue(connectionPhasesAtom);
+  const { connectedEnvironments } = useRemoteConnectionStatus();
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
   );
   const environmentConnected =
-    selectedProject !== null && connectionPhases.get(selectedProject.environmentId) === "connected";
+    selectedProject !== null &&
+    connectedEnvironments.find(
+      (environment) => environment.environmentId === selectedProject.environmentId,
+    )?.connectionState === "connected";
   const modelUnavailable = environmentConnected && flow.selectedModelOption?.isUnavailable === true;
   // A project added by cloning exists before its files do: the prompt can be
   // written meanwhile, but Start waits for the clone.
@@ -455,6 +461,7 @@ export function NewTaskDraftScreen(props: {
     draftMessage: flow.prompt,
     ownerKey: flow.draftKey,
     environmentId: selectedProject?.environmentId ?? null,
+    threadShells: useThreadShells(),
     pullRequestProjectId: selectedEnvironmentServerConfig?.environment.capabilities.pullRequests
       ? (selectedProject?.id ?? null)
       : null,
@@ -656,13 +663,8 @@ export function NewTaskDraftScreen(props: {
         if (appliedInitialProjectKeyRef.current === directProjectKey) {
           return;
         }
-        if (flow.boxes.has(directProject.environmentId)) {
-          // Another chat's box: point the flow at it once and let the flow leave it.
-          appliedInitialProjectKeyRef.current = directProjectKey;
-          setProject(directProject);
-          return;
-        }
-        if (props.initialProjectRef?.branch) {
+        // The flow leaves another chat's box, so its branch is never prepared there.
+        if (props.initialProjectRef?.branch && !flow.cloud.boxes.has(directProject.environmentId)) {
           if (
             selectedProject?.environmentId !== directProject.environmentId ||
             selectedProject.id !== directProject.id
@@ -715,7 +717,7 @@ export function NewTaskDraftScreen(props: {
   }, [
     projectScopes,
     projects,
-    flow.boxes,
+    flow.cloud.boxes,
     flow.draftKey,
     props.initialProjectRef,
     props.incomingShareId,
@@ -726,21 +728,10 @@ export function NewTaskDraftScreen(props: {
     selectedProjectKey,
     setProject,
   ]);
-
-  // Shared content stays on the draft path, which owns its reservation.
-  const boxCloudMachine =
-    flow.boxStart?.kind === "cloud-machine" && !props.incomingShareId ? flow.boxStart : null;
-  const initialBranch = props.initialProjectRef?.branch ?? null;
-  useEffect(() => {
-    if (!boxCloudMachine) return;
-    navigation.dispatch(
-      StackActions.replace("NewTaskCloudMachine", {
-        environmentId: String(boxCloudMachine.managerId),
-        repository: boxCloudMachine.repository,
-        ...(initialBranch ? { branch: initialBranch } : {}),
-      }),
-    );
-  }, [boxCloudMachine, initialBranch, navigation]);
+  useCloudMachineInsteadOfBox(flow.cloud.boxStart, {
+    incomingShareId: props.incomingShareId,
+    branch: props.initialProjectRef?.branch ?? null,
+  });
 
   useEffect(() => {
     if (!selectedProject) {
@@ -1302,7 +1293,10 @@ export function NewTaskDraftScreen(props: {
       // finds no work and ends the card within seconds.
       armAgentAwarenessLiveActivityForLocalWork({
         environmentId: selectedProject.environmentId,
-        threadTitle: deriveThreadTitleFromPrompt(initialMessageText),
+        threadTitle: deriveThreadTitleSeed({
+          text: initialMessageText,
+          attachments: draft.attachments,
+        }),
         projectTitle: selectedProject.title,
       });
     }
@@ -1739,6 +1733,7 @@ export function NewTaskDraftScreen(props: {
                         emphasized
                         renderIcon={(size) => (
                           <ProviderIcon
+                            iconUrl={flow.selectedModelOption?.providerIconUrl}
                             provider={flow.selectedModelOption?.providerDriver}
                             size={size}
                           />

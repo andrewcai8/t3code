@@ -11,7 +11,6 @@ import {
 import { type VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
 import type {
   EnvironmentId,
-  OrchestrationThread,
   ProjectContentMatch,
   ProjectEntryKind,
   VcsListRefsResult,
@@ -53,14 +52,6 @@ const threadSearchResultsAtom = createThreadSearchResultsAtomFamily({
   labelPrefix: "web:thread-search",
 });
 
-export interface ThreadDetailView {
-  readonly data: OrchestrationThread | null;
-  readonly error: string | null;
-  readonly isPending: boolean;
-  readonly isDeleted: boolean;
-}
-
-/** Shared with the pull requests page, which debounces its search the same way. */
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
   const [debounced, setDebounced] = useState(value);
 
@@ -101,13 +92,11 @@ export function useThreadSearch(
   };
 }
 
-/** `remoteOnly` lists every remote branch, including those a local branch shadows. */
-export function usePaginatedBranches(target: VcsRefTarget & { readonly remoteOnly?: boolean }) {
+export function usePaginatedBranches(target: VcsRefTarget) {
   const query = target.query?.trim() ?? "";
-  const remoteOnly = target.remoteOnly === true;
   const targetKey =
     target.environmentId !== null && target.cwd !== null
-      ? JSON.stringify([target.environmentId, target.cwd, query, remoteOnly])
+      ? JSON.stringify([target.environmentId, target.cwd, query])
       : null;
   const [pagination, setPagination] = useState<{
     readonly targetKey: string | null;
@@ -127,13 +116,12 @@ export function usePaginatedBranches(target: VcsRefTarget & { readonly remoteOnl
                 cwd: target.cwd!,
                 ...(query.length > 0 ? { query } : {}),
                 ...(cursor === undefined ? {} : { cursor }),
-                ...(remoteOnly ? { refKind: "remote", includeMatchingRemoteRefs: true } : {}),
                 limit: VCS_REF_LIST_LIMIT,
               },
             }),
           )
         : [],
-    [cursors, query, remoteOnly, target.cwd, target.environmentId],
+    [cursors, query, target.cwd, target.environmentId],
   );
   const pagesAtom = useMemo(
     () =>

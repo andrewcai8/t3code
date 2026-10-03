@@ -8,7 +8,7 @@
  */
 import {
   OrchestrationProjectShell,
-  OrchestrationThreadShell,
+  OrchestrationV2ThreadShell,
   ProvisionedChat,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -22,18 +22,20 @@ const decodeShellEntries = Schema.decodeUnknownExit(
     threads: Schema.Array(Schema.Unknown),
   }),
 );
-const decodeThread = Schema.decodeUnknownExit(OrchestrationThreadShell);
+const decodeThread = Schema.decodeUnknownExit(Schema.toCodecJson(OrchestrationV2ThreadShell));
 const decodeProject = Schema.decodeUnknownExit(OrchestrationProjectShell);
-const encodeChat = Schema.encodeSync(Schema.fromJsonString(ProvisionedChat));
-const decodeChat = Schema.decodeUnknownExit(Schema.fromJsonString(ProvisionedChat));
+/** A chat as the host stores it. `fromJsonString` alone would leave its DateTimes unencoded. */
+export const ProvisionedChatJson = Schema.fromJsonString(Schema.toCodecJson(ProvisionedChat));
+const encodeChat = Schema.encodeSync(ProvisionedChatJson);
+const decodeChat = Schema.decodeUnknownExit(ProvisionedChatJson);
 
 const hasId = (id: string) => (entry: unknown) =>
   typeof entry === "object" && entry !== null && "id" in entry && entry.id === id;
 
 /**
  * The owner's chat in a box's shell body. Null when the shell holds no such thread, as before the
- * chat's first turn. Undefined when the body does not decode, as from a box on an older revision,
- * so the host keeps what it read before. Other threads are not decoded, so their shape never
+ * chat's first turn. Undefined when the body does not decode, as from a box still on V1, so the
+ * host keeps what it read before. Other threads are not decoded, so their shape never
  * matters.
  */
 export function ownerChat(

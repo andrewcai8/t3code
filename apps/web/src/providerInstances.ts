@@ -15,7 +15,6 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
-  PROVIDER_DISPLAY_NAMES,
   resolveProviderInstanceEnabled,
   type ModelSelection,
   type ProviderDriverKind,
@@ -54,6 +53,10 @@ export interface ProviderInstanceEntry {
   readonly driverKind: ProviderDriverKind;
   readonly displayName: string;
   readonly accentColor?: string | undefined;
+  /** Registry identity used to resolve the official icon for generic ACP instances. */
+  readonly acpRegistryAgentId?: string | undefined;
+  /** Catalog-advertised icon URL. The renderer still applies the official-CDN allowlist. */
+  readonly acpRegistryIconUrl?: string | undefined;
   readonly continuationGroupKey?: string | undefined;
   readonly enabled: boolean;
   readonly installed: boolean;
@@ -70,6 +73,24 @@ export interface ProviderInstanceEntry {
   readonly models: ReadonlyArray<ServerProviderModel>;
 }
 
+export type ProviderCatalogAvailability = "loading" | "ready" | "unavailable" | "unconfigured";
+
+/**
+ * Keep a provider catalogue that has not arrived yet distinct from a loaded
+ * catalogue with no usable entries. Environment config streams are reactive:
+ * treating their initial `null` as a final empty list strands otherwise
+ * recoverable threads behind a misleading "no providers" state.
+ */
+export function resolveProviderCatalogAvailability(input: {
+  readonly catalogLoaded: boolean;
+  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly selectedEntry: ProviderInstanceEntry | undefined;
+}): ProviderCatalogAvailability {
+  if (!input.catalogLoaded) return "loading";
+  if (input.selectedEntry !== undefined) return "ready";
+  return input.entries.length === 0 ? "unconfigured" : "unavailable";
+}
+
 /**
  * Whether an instance can currently contribute models to an interactive picker.
  *
@@ -83,76 +104,6 @@ export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boo
 /** Picker rails contain configured, enabled instances only. */
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
   return entry.enabled;
-}
-
-/** Drivers a provisioned cloud environment can run; mirrors the server's `credentialVariables`. */
-const CLOUD_AGENT_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent", "cursor"]);
-
-/**
- * The picker rail for a draft that starts a cloud environment: one entry per
- * cloud-capable driver, labeled as the driver rather than an account, because
- * the manager routes the provision to whichever account of that driver has the
- * most usage left. The entry is a real local instance so its id can ride along
- * as the provision hint: a usable account first, then a ready one, then the
- * driver's default. Its models are the hint's own; every account of a driver
- * serves the same catalog, and a union would offer models the hint cannot fall
- * back to.
- *
- * The row is ready whenever the hint is usable, meaning not known to be signed
- * out. The box runs the agent, not this host, so a host probe that timed out
- * says nothing about the chat, and the manager refuses with the reason when no
- * account's login can be copied.
- */
-export function cloudProviderEntries(
-  entries: ReadonlyArray<ProviderInstanceEntry>,
-): ReadonlyArray<ProviderInstanceEntry> {
-  const byDriver = new Map<ProviderDriverKind, ProviderInstanceEntry>();
-  const usable = (entry: ProviderInstanceEntry) =>
-    entry.isAvailable &&
-    entry.status !== "disabled" &&
-    entry.snapshot.auth.status !== "unauthenticated";
-  const rank = (entry: ProviderInstanceEntry) =>
-    (usable(entry) ? 4 : 0) +
-    (isProviderInstancePickerReady(entry) ? 2 : 0) +
-    (entry.isDefault ? 1 : 0);
-  for (const entry of entries) {
-    if (!CLOUD_AGENT_DRIVERS.has(entry.driverKind) || !isProviderInstancePickerVisible(entry)) {
-      continue;
-    }
-    const current = byDriver.get(entry.driverKind);
-    if (!current || rank(entry) > rank(current)) byDriver.set(entry.driverKind, entry);
-  }
-  return [...byDriver.values()].map((entry) => ({
-    ...entry,
-    displayName: PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName,
-    accentColor: undefined,
-    status: usable(entry) ? "ready" : entry.status,
-  }));
-}
-
-/**
- * Pick the healthiest account for a driver when a chat does not pin one.
- * Usage is conservative: the fullest reported window is the account's score,
- * so an account is only preferred when every reported window has room. Usage
- * that is unavailable (or has no windows) is ignored and only used as a
- * deterministic fallback when no account reports a usable score.
- */
-export function selectProviderInstanceByUsage(
-  entries: ReadonlyArray<ProviderInstanceEntry>,
-  driverKind: ProviderDriverKind,
-): ProviderInstanceEntry | undefined {
-  const candidates = entries
-    .filter((entry) => entry.driverKind === driverKind && isProviderInstancePickerReady(entry))
-    .toSorted((a, b) => String(a.instanceId).localeCompare(String(b.instanceId)));
-  if (candidates.length === 0) return undefined;
-
-  const scored = candidates.flatMap((entry) => {
-    const windows = entry.snapshot.usageLimits?.windows;
-    if (entry.snapshot.usageLimits?.unavailable || !windows || windows.length === 0) return [];
-    const score = Math.max(...windows.map((window) => window.usedPercent));
-    return Number.isFinite(score) ? [{ entry, score }] : [];
-  });
-  return scored.sort((a, b) => a.score - b.score)[0]?.entry ?? candidates[0];
 }
 
 /**
@@ -175,6 +126,9 @@ export function deriveProviderInstanceEntries(
       driverKind,
       displayName: resolveProviderInstanceDisplayName(snapshot),
       accentColor: normalizeProviderAccentColor(snapshot.accentColor),
+      ...(driverKind === "acpRegistry" && snapshot.iconUrl
+        ? { acpRegistryIconUrl: snapshot.iconUrl }
+        : {}),
       continuationGroupKey: snapshot.continuation?.groupKey,
       enabled: snapshot.enabled,
       installed: snapshot.installed,
@@ -198,17 +152,21 @@ export function deriveProviderInstanceEntries(
  * the thread's own environment.
  */
 export function deriveProviderEntriesByEnvironment(
-  providersByEnvironment: Iterable<readonly [string, ReadonlyArray<ServerProvider>]>,
+  providersByEnvironment: Iterable<
+    readonly [
+      string,
+      ReadonlyArray<ServerProvider>,
+      Pick<ServerSettings, "providerInstances" | "providers">?,
+    ]
+  >,
 ): ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>> {
   const byEnvironment = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
-  for (const [environmentId, providers] of providersByEnvironment) {
+  for (const [environmentId, providers, settings] of providersByEnvironment) {
+    const derived = deriveProviderInstanceEntries(providers);
+    const entries = settings ? applyProviderInstanceSettings(derived, settings) : derived;
     byEnvironment.set(
       environmentId,
-      new Map(
-        deriveProviderInstanceEntries(providers).map(
-          (entry) => [entry.instanceId as string, entry] as const,
-        ),
-      ),
+      new Map(entries.map((entry) => [entry.instanceId as string, entry] as const)),
     );
   }
   return byEnvironment;
@@ -245,7 +203,25 @@ export function applyProviderInstanceSettings(
       : entry.isDefault && legacyProvider
         ? (legacyProvider.enabled ?? entry.enabled)
         : false;
-    return enabled === entry.enabled ? entry : { ...entry, enabled };
+    if (entry.driverKind !== "acpRegistry" || explicitInstance === undefined) {
+      return enabled === entry.enabled ? entry : { ...entry, enabled };
+    }
+    const config =
+      explicitInstance.config !== null && typeof explicitInstance.config === "object"
+        ? (explicitInstance.config as Readonly<Record<string, unknown>>)
+        : null;
+    const agentId = config?.agentId;
+    const iconUrl = config?.registryIconUrl;
+    return {
+      ...entry,
+      enabled,
+      ...(typeof agentId === "string" && agentId.trim()
+        ? { acpRegistryAgentId: agentId.trim() }
+        : {}),
+      ...(typeof iconUrl === "string" && iconUrl.trim()
+        ? { acpRegistryIconUrl: iconUrl.trim() }
+        : {}),
+    };
   });
 }
 
@@ -285,7 +261,7 @@ export function sortProviderInstanceEntries(
  * Look up a single instance entry by exact `instanceId`. Missing snapshots
  * are not inferred from driver kind in UI routing code.
  */
-function getProviderInstanceEntry(
+export function getProviderInstanceEntry(
   providers: ReadonlyArray<ServerProvider>,
   instanceId: ProviderInstanceId,
 ): ProviderInstanceEntry | undefined {

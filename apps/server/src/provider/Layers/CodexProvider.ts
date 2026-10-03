@@ -28,10 +28,12 @@ import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/co
 import {
   codexModelFamily,
   createModelCapabilities,
+  formatCodexModelName,
   readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { CODEX_APP_SERVER_PROBE_TIMEOUT_MS } from "../codexProviderEnvironment.ts";
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
@@ -61,10 +63,6 @@ type CodexRateLimitsProbe =
   | { readonly failure: string };
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
-// Longer than other providers' auth probes: with CODEX_HOME on a network
-// filesystem (EFS), app-server startup opens its SQLite state there and can
-// take 5-10 s before it answers `initialize`.
-const CODEX_APP_SERVER_PROBE_TIMEOUT = "30 seconds" as const;
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -224,19 +222,12 @@ export function mapCodexModelCapabilities(
   });
 }
 
-const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string => {
-  // Capitalize 'gpt' to 'GPT-' and capitalize any letter following a dash
-  return model.displayName
-    .replace(/^gpt/i, "GPT") // Handle start with 'gpt' or 'GPT'
-    .replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
-};
-
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
 ): ReadonlyArray<ServerProviderModel> {
   return response.data.map((model) => ({
     slug: model.model,
-    name: toDisplayName(model),
+    name: formatCodexModelName(model.displayName),
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
     capabilities: mapCodexModelCapabilities(model),
@@ -382,7 +373,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
   // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
   // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-  // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
+  // Expand here for parity with `CodexTextGeneration`.
   const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = {
@@ -469,15 +460,15 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
               rateLimitsByLimitId: response.rateLimitsByLimitId,
               resetCredits: response.rateLimitResetCredits,
             })),
-            Effect.timeout(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
+            Effect.timeoutOption(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
+            Effect.map(
+              Option.getOrElse((): CodexRateLimitsProbe => ({
+                failure: "Codex did not answer the usage request.",
+              })),
+            ),
             Effect.catch((error) =>
-              Effect.logWarning("Codex rate-limit read failed.", { cause: error.message }).pipe(
-                Effect.as<CodexRateLimitsProbe>({
-                  failure:
-                    error._tag === "TimeoutError"
-                      ? "Codex did not answer the usage request."
-                      : codexRateLimitsFailureMessage(error),
-                }),
+              Effect.logDebug("Codex rate-limit read failed.", { cause: error }).pipe(
+                Effect.as<CodexRateLimitsProbe>({ failure: codexRateLimitsFailureMessage(error) }),
               ),
             ),
           ),
@@ -635,7 +626,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     environment: resolvedEnvironment,
     ...(managedAuth ? { skipNativeUsage: true } : {}),
     ...(refreshLogin ? { refreshLogin } : {}),
-  }).pipe(Effect.scoped, Effect.timeoutOption(CODEX_APP_SERVER_PROBE_TIMEOUT), Effect.result);
+  }).pipe(
+    Effect.scoped,
+    Effect.timeoutOption(Duration.millis(CODEX_APP_SERVER_PROBE_TIMEOUT_MS)),
+    Effect.result,
+  );
 
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;

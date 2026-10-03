@@ -6,6 +6,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
   EnvironmentProvisionInput,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ProvisionFirstTurn,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
@@ -79,36 +81,25 @@ const manifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)({
   },
   egressAllow: [],
 });
-const threadCreate = {
-  type: "thread.create",
-  commandId: `first-turn-thread:${input.requestId}`,
+const launch = {
+  commandId: `first-turn:${input.requestId}`,
+  creationSource: "server",
   threadId: "draft-thread",
   projectId: "box-project",
   title: turn.title,
+  generateTitle: true,
   modelSelection: turn.modelSelection,
   runtimeMode: "full-access",
   interactionMode: "default",
-  branch: null,
-  worktreePath: null,
-  createdAt: turn.createdAt,
-};
-const turnStart = {
-  type: "thread.turn.start",
-  commandId: `first-turn:${input.requestId}`,
-  threadId: "draft-thread",
-  message: { messageId: "message-1", role: "user", text: turn.text, attachments: [] },
-  modelSelection: turn.modelSelection,
-  titleSeed: turn.titleSeed,
-  runtimeMode: "full-access",
-  interactionMode: "default",
-  createdAt: turn.createdAt,
+  workspaceStrategy: { type: "root" },
+  initialMessage: { messageId: "message-1", text: turn.text, attachments: [] },
 };
 
 interface BoxBehavior {
   /** Requests answered 503 before the box starts answering. */
   readonly unavailableFor?: number;
-  /** The box turns away `thread.create` as an invalid command. */
-  readonly rejectCreate?: boolean;
+  /** The box turns the launch away as an invalid command. */
+  readonly rejectLaunch?: boolean;
   /** A page already started the same message on the box. */
   readonly alreadySent?: boolean;
   /** The box takes requests and never answers them. */
@@ -130,7 +121,10 @@ const fakeBox = (behavior: BoxBehavior) =>
           .writeHead(status, { "content-type": "application/json" })
           .end(JSON.stringify(body));
       const server = NodeHttp.createServer((request, response) => {
-        if (request.headers.authorization !== "Bearer private-broker") {
+        if (
+          request.headers.authorization !== "Bearer private-broker" ||
+          request.headers["x-t3-orchestration-protocol"] !== "2"
+        ) {
           response.writeHead(401).end();
           return;
         }
@@ -150,25 +144,37 @@ const fakeBox = (behavior: BoxBehavior) =>
         if (request.method === "GET" && request.url?.startsWith("/api/orchestration/threads/")) {
           const id = decodeURIComponent(request.url.split("/").pop() ?? "");
           const thread = threads.find((candidate) => candidate.id === id);
-          if (thread) json(response, 200, { snapshotSequence: 1, thread });
+          if (thread)
+            json(response, 200, { snapshotSequence: 1, projection: { messages: thread.messages } });
           else response.writeHead(404).end();
           return;
         }
         let body = "";
         request.on("data", (chunk) => (body += chunk));
         request.on("end", () => {
-          const command = JSON.parse(body) as Record<string, unknown>;
-          if (command.type === "thread.create" && behavior.rejectCreate) {
+          if (request.method !== "POST" || request.url !== "/api/orchestration/launch-thread") {
+            response.writeHead(404).end();
+            return;
+          }
+          const command = JSON.parse(body) as Record<string, unknown> & {
+            modelSelection: { instanceId: string };
+          };
+          if (behavior.rejectLaunch) {
             json(response, 400, { code: "invalid_request", reason: "invalid_command" });
             return;
           }
-          if (!commands.some((seen) => seen.commandId === command.commandId)) {
-            commands.push(command);
-            if (command.type === "thread.create")
-              threads.push({ id: String(command.threadId), messages: [] });
-            if (command.type === "thread.turn.start") Deferred.doneUnsafe(turnStarted, Effect.void);
+          // A box runs each driver's one account under the driver's default instance id only.
+          if (!["claudeAgent", "codex"].includes(command.modelSelection.instanceId)) {
+            json(response, 500, { _tag: "ThreadLaunchError" });
+            return;
           }
-          json(response, 200, { sequence: 1 });
+          const resumed = commands.some((seen) => seen.commandId === command.commandId);
+          if (!resumed) {
+            commands.push(command);
+            threads.push({ id: String(command.threadId), messages: [{ id: "message-1" }] });
+            Deferred.doneUnsafe(turnStarted, Effect.void);
+          }
+          json(response, 200, { threadId: command.threadId, resumed });
         });
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -193,6 +199,10 @@ interface HostOptions {
   readonly allocationFails?: boolean;
   /** Leaves the drive's ready hook out, holding the moment between ready and the lease. */
   readonly withoutReadyHook?: boolean;
+  /** The driver the request recorded for the box. */
+  readonly agentDriver?: ProviderDriverKind;
+  /** The first message the host keeps, in place of `turn`. */
+  readonly turn?: ProvisionFirstTurn;
 }
 
 const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.recurs(0) }) =>
@@ -203,7 +213,11 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
     const box = yield* fakeBox(behavior);
     const preparing = yield* Deferred.make<void>();
     const prepared = yield* Deferred.make<void>();
-    const kept = new Map([[input.requestId, turn]]);
+    const kept = new Map([[input.requestId, options.turn ?? turn]]);
+    const frozen =
+      options.agentDriver === undefined
+        ? manifest
+        : { ...manifest, request: { ...manifest.request, agentDriver: options.agentDriver } };
     let settle: (
       operation: Parameters<NonNullable<ProvisionProviderPorts["Service"]["ready"]>>[0],
     ) => Effect.Effect<unknown> = () => Effect.void;
@@ -245,8 +259,8 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
       store,
       provisioning,
       {
-        freeze: async () => manifest,
-        load: async () => manifest,
+        freeze: async () => frozen,
+        load: async () => frozen,
         attach: async () => ({
           pairingUrl: `${box.origin}/pair#token=grant`,
           remoteAccess: { origin: box.origin, brokerToken: "private-broker" },
@@ -257,7 +271,7 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
           throw new Error("Unexpected setRuntime");
         },
         prepare: () => Effect.die("Unexpected prepare"),
-        deliverFirstTurn,
+        deliverFirstTurn: (remote, chat) => deliverFirstTurn(remote, chat, () => undefined),
         readFirstTurn: async (frozen) => kept.get(frozen.request.requestId) ?? null,
         forgetFirstTurn: async (id) => {
           kept.delete(id);
@@ -300,7 +314,7 @@ it.live("starts a draft's first turn on its box and owns the box, with no client
       yield* control.settleChats;
 
       expect(ready).toMatchObject({ kind: "ready", environment: { firstTurn: "started" } });
-      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(box.commands).toEqual([launch]);
       expect(yield* lease()).toMatchObject({
         owner: { environmentId: "remote", threadId: "draft-thread" },
         firstTurn: { status: "started" },
@@ -326,7 +340,7 @@ it.live("retries a box that is not answering yet, then upkeep starts the turn", 
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "pending" } });
 
       yield* control.settleChats;
-      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(box.commands).toEqual([launch]);
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "started" } });
     }),
   ),
@@ -335,7 +349,7 @@ it.live("retries a box that is not answering yet, then upkeep starts the turn", 
 it.live("gives up at once on a turn the box refuses, and lets the page send it", () =>
   withHost(
     Effect.gen(function* () {
-      const { box, control, lease, kept, prepared } = yield* host({ rejectCreate: true });
+      const { box, control, lease, kept, prepared } = yield* host({ rejectLaunch: true });
       yield* Deferred.succeed(prepared, undefined);
       const ready = yield* control.provision(input);
       yield* control.settleChats;
@@ -447,11 +461,12 @@ it.live("keeps the first message of a request still being prepared", () =>
   ),
 );
 
-for (const [stopped, stop] of [
+it.live.each([
   ["disposed", "markDisposed"],
   ["paused", "markPaused"],
-] as const)
-  it.live(`gives up and deletes the first message of a box ${stopped} before its turn`, () =>
+] as const)(
+  "gives up and deletes the first message of a box %s before its turn",
+  ([stopped, stop]) =>
     withHost(
       Effect.gen(function* () {
         const { control, leases, lease, kept, prepared } = yield* host({ unavailableFor: 1 });
@@ -469,7 +484,7 @@ for (const [stopped, stop] of [
         });
       }),
     ),
-  );
+);
 
 it.live("answers ready within seconds when the box hangs, leaving later tries to upkeep", () =>
   withHost(
@@ -502,8 +517,76 @@ it.live("keeps the first message of a ready request whose lease is not registere
       expect(kept.size).toBe(1);
 
       expect(yield* control.settleChat(ready)).toBe("started");
-      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(box.commands).toEqual([launch]);
       expect(kept.size).toBe(0);
+    }),
+  ),
+);
+
+it.live("launches a turn on the box's instance for the driver of the host account it names", () =>
+  Effect.gen(function* () {
+    const box = yield* fakeBox({});
+    const hostDrivers: Record<string, ProviderDriverKind> = {
+      claude_andrewcai083: ProviderDriverKind.make("claudeAgent"),
+      codex: ProviderDriverKind.make("codex"),
+    };
+    const deliver = (threadId: string, modelSelection: ProvisionFirstTurn["modelSelection"]) =>
+      Effect.promise(() =>
+        deliverFirstTurn(
+          { origin: box.origin, brokerToken: "private-broker" },
+          {
+            requestId: threadId,
+            threadId,
+            projectDir: "/private/operation/workspace",
+            turn: { ...turn, modelSelection },
+          },
+          (instanceId) => hostDrivers[instanceId],
+        ),
+      );
+    const claude = {
+      instanceId: ProviderInstanceId.make("claude_andrewcai083"),
+      model: "claude-opus-4-6",
+      options: [{ id: "effort", value: "high" }],
+    } as ProvisionFirstTurn["modelSelection"];
+
+    expect(yield* deliver("claude-thread", claude)).toBe("delivered");
+    expect(yield* deliver("codex-thread", turn.modelSelection)).toBe("delivered");
+    expect(box.commands.map((command) => command.modelSelection)).toEqual([
+      {
+        instanceId: "claudeAgent",
+        model: "claude-opus-4-6",
+        options: [{ id: "effort", value: "high" }],
+      },
+      { instanceId: "codex", model: "gpt-5.5" },
+    ]);
+  }).pipe(Effect.scoped),
+);
+
+it.live("launches a first turn for the driver its request recorded, not the host's settings", () =>
+  withHost(
+    Effect.gen(function* () {
+      // The host no longer knows the account the turn names, as after deleting that instance.
+      const { box, control, prepared } = yield* host(
+        {},
+        {
+          retry: Schedule.recurs(0),
+          agentDriver: ProviderDriverKind.make("codex"),
+          turn: {
+            ...turn,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex_work"),
+              model: "gpt-5.5",
+            } as ProvisionFirstTurn["modelSelection"],
+          },
+        },
+      );
+      yield* Deferred.succeed(prepared, undefined);
+      yield* control.provision(input);
+      yield* control.settleChats;
+
+      expect(box.commands.map((command) => command.modelSelection)).toEqual([
+        { instanceId: "codex", model: "gpt-5.5" },
+      ]);
     }),
   ),
 );

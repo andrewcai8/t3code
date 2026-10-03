@@ -5,9 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   canSnooze,
-  collectSettlementEnvironmentIds,
   effectiveSnoozed,
-  environmentAllowsThreadSettlement,
   hasQueuedTurnStart,
   resolveSnoozePresets,
   snoozeWakeLabel,
@@ -15,7 +13,6 @@ import {
   threadWokeAt,
   type ThreadSnoozeShell,
 } from "./threadSettled.ts";
-import type { OrchestrationThreadShell } from "@t3tools/contracts";
 
 const NOW = "2026-04-10T12:00:00.000Z";
 const SNOOZED_AT = "2026-04-10T09:00:00.000Z";
@@ -65,10 +62,7 @@ function makeShell(input: {
   };
 }
 
-type QueuedTurnShell = Pick<
-  OrchestrationThreadShell,
-  "latestUserMessageAt" | "latestTurn" | "session"
->;
+type QueuedTurnShell = Parameters<typeof hasQueuedTurnStart>[0];
 
 function makeQueuedTurnShell(overrides: Partial<QueuedTurnShell> = {}): QueuedTurnShell {
   return { latestUserMessageAt: null, latestTurn: null, session: null, ...overrides };
@@ -371,30 +365,5 @@ describe("resolveSnoozePresets", () => {
     ]);
     const tomorrow = new Date(presets.find((preset) => preset.id === "tomorrow")!.snoozedUntil);
     expect(tomorrow.getDay()).toBe(1);
-  });
-});
-
-describe("environmentAllowsThreadSettlement", () => {
-  it("allows settle when the server advertised the command", () => {
-    expect(environmentAllowsThreadSettlement({ threadSettlement: true })).toBe(true);
-  });
-
-  it("allows settle when no server config is loaded yet", () => {
-    expect(environmentAllowsThreadSettlement(undefined)).toBe(true);
-  });
-
-  it("refuses settle on servers that predate the command", () => {
-    expect(environmentAllowsThreadSettlement({})).toBe(false);
-    expect(environmentAllowsThreadSettlement({ threadSettlement: false })).toBe(false);
-  });
-
-  it("includes disconnected environments that have no cached config", () => {
-    const extra = "environment-disconnected";
-    expect(
-      collectSettlementEnvironmentIds(
-        new Map([["environment-old", { environment: { capabilities: {} } }]]),
-        [extra],
-      ),
-    ).toEqual(new Set([extra]));
   });
 });

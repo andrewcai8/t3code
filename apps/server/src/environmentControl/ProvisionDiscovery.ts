@@ -3,7 +3,6 @@ import {
   DurableProvisionRequest,
   EnvironmentControlError,
   type EnvironmentId,
-  ProvisionedChat,
   ProvisionOperationState,
   provisionSandboxId,
   type SavedEnvironmentAddress,
@@ -15,6 +14,7 @@ import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { isLoopbackHostname } from "../http.ts";
 import { cleanupPlan } from "./cloudCleanup.ts";
+import { ProvisionedChatJson } from "./provisionedChats.ts";
 import { StoredProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 const decodeRows = Schema.decodeUnknownEffect(
@@ -23,14 +23,13 @@ const decodeRows = Schema.decodeUnknownEffect(
       request: Schema.fromJsonString(DurableProvisionRequest),
       state: Schema.fromJsonString(ProvisionOperationState),
       lease: Schema.fromJsonString(StoredProvisionedLease),
-      automationId: Schema.NullOr(Schema.String),
       chat: Schema.NullOr(Schema.String),
       chatSequence: Schema.NullOr(Schema.Number),
     }),
   ),
 );
 const decodeDiscovery = Schema.decodeUnknownEffect(DiscoveredProvisionedEnvironment);
-const decodeChat = Schema.decodeUnknownExit(Schema.fromJsonString(ProvisionedChat));
+const decodeChat = Schema.decodeUnknownExit(ProvisionedChatJson);
 
 const GATEWAY_LEASE = new RegExp(`${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/([^/]+)`);
 
@@ -85,7 +84,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     const now = DateTime.formatIso(yield* DateTime.now);
     const rows = yield* sql`
     SELECT operations.request_json AS request, operations.state_json AS state,
-      leases.lease_json AS lease, runs.automation_id AS "automationId",
+      leases.lease_json AS lease,
       ${
         // A paused Devbox's cleanup reads its chat's settle, so its card is read even unasked.
         heldChats
@@ -96,7 +95,6 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
       } AS chat, chats.sequence AS "chatSequence"
     FROM provision_operations AS operations
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
-    LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
     LEFT JOIN provisioned_chats AS chats ON chats.lease_id = leases.lease_id
     WHERE (json_extract(operations.state_json, '$.kind') = 'ready'
         AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing', 'releasing')
@@ -127,14 +125,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     ]);
     const result: Array<DiscoveredProvisionedEnvironment> = [];
     const gone = new Map<string, DiscoveredProvisionedEnvironment>();
-    for (const {
-      request,
-      state,
-      lease,
-      automationId,
-      chat: chatJson,
-      chatSequence,
-    } of yield* decodeRows(rows)) {
+    for (const { request, state, lease, chat: chatJson, chatSequence } of yield* decodeRows(rows)) {
       let box: {
         readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
         readonly environmentId: string;
@@ -215,7 +206,6 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         repository: request.repository ?? null,
         ...(box.projectDir === undefined ? {} : { projectDir: box.projectDir }),
         threadId: lease.owner?.threadId ?? null,
-        ...(automationId === null ? {} : { automationId }),
         createdAt: lease.createdAt,
         expiresAt:
           request.retentionDeadline !== undefined && request.retentionDeadline < lease.expiresAt

@@ -9,13 +9,10 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import {
-  ModelSelection,
-  OrchestrationProjectShell,
-  OrchestrationThreadShell,
-  ProviderInteractionMode,
-  RuntimeMode,
-} from "./orchestration.ts";
+import { ModelSelection } from "./modelSelection.ts";
+import { OrchestrationProjectShell } from "./orchestrationProject.ts";
+import { OrchestrationV2ThreadShell } from "./orchestrationV2.ts";
+import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
@@ -66,7 +63,7 @@ export type ProvisionRequestId = typeof ProvisionRequestId.Type;
 export const ProvisionedChat = Schema.Struct({
   sequence: NonNegativeInt,
   project: OrchestrationProjectShell,
-  thread: OrchestrationThreadShell,
+  thread: OrchestrationV2ThreadShell,
 });
 export type ProvisionedChat = typeof ProvisionedChat.Type;
 
@@ -101,8 +98,6 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   /** Absent on a `disposed` environment whose workspace the host no longer records. */
   projectDir: Schema.optional(TrimmedNonEmptyString),
   threadId: Schema.NullOr(ThreadId),
-  /** Set when the host started this environment for an automation run rather than a client. */
-  automationId: Schema.optional(TrimmedNonEmptyString),
   /**
    * Only when the request asked for chats and the client does not hold this one already. A chat
    * this client cannot read, as from a newer host, is dropped rather than failing the list.
@@ -262,7 +257,12 @@ export const EnvironmentProvisionAttachResult = Schema.Union([
     environmentId: EnvironmentId,
     pairingUrl: TrimmedNonEmptyString,
   }),
-  Schema.Struct({ kind: Schema.Literal("refused"), message: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    /** `not-serving`: the box is asleep or its T3 server is down; resume it, then attach again. */
+    reason: Schema.optional(Schema.Literal("not-serving")),
+    message: Schema.String,
+  }),
 ]);
 export type EnvironmentProvisionAttachResult = typeof EnvironmentProvisionAttachResult.Type;
 

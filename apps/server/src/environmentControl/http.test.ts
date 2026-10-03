@@ -1,14 +1,20 @@
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
+  CommandId,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentControlHttpApi,
   EnvironmentId,
+  ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  ProjectId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -23,6 +29,14 @@ import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { failEnvironmentAuthInvalid } from "../auth/http.ts";
+import * as ServerConfig from "../config.ts";
+import {
+  OrchestratorCommandIdConflictError,
+  OrchestratorProjectionError,
+} from "../orchestration-v2/Orchestrator.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { EnvironmentControl } from "./EnvironmentControl.ts";
 import { environmentControlBodyLimitLayer, environmentControlHttpApiLayer } from "./http.ts";
 
@@ -103,6 +117,15 @@ it.effect(
       const routes = HttpApiBuilder.layer(ProvisionHttpApi).pipe(
         Layer.provide(environmentControlHttpApiLayer),
         Layer.provide(service),
+        // The launchThread route needs these to build; this proof never calls it.
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-provision-http-" }),
+          ).pipe(Layer.provideMerge(NodeServices.layer)),
+        ),
         Layer.provide(auth),
         Layer.provide(environmentControlBodyLimitLayer),
       );
@@ -191,4 +214,110 @@ it.effect(
         expect(calls).toHaveLength(6);
       }).pipe(Effect.provide(http), Effect.scoped);
     }),
+);
+
+it.effect("the launch-thread route checks scope and tells a refused launch from a failed one", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunchService.ThreadLaunchInput> = [];
+    const threadId = ThreadId.make("thread-launched");
+    const projectId = ProjectId.make("project-1");
+    const launchFailure = (input: ThreadLaunchService.ThreadLaunchInput, cause: unknown) =>
+      new ThreadLaunchService.ThreadLaunchError({
+        operation: "create-thread",
+        commandId: input.commandId,
+        projectId: input.projectId,
+        threadId,
+        cause,
+      });
+    const launches = Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+      launch: (input) => {
+        launched.push(input);
+        if (input.commandId === "refused") {
+          return Effect.fail(
+            launchFailure(
+              input,
+              new OrchestratorCommandIdConflictError({
+                commandId: input.commandId,
+                commandType: "thread.create",
+                receiptThreadId: ThreadId.make("thread-other"),
+                commandThreadId: threadId,
+              }),
+            ),
+          );
+        }
+        if (input.commandId === "broken") {
+          return Effect.fail(launchFailure(input, new OrchestratorProjectionError({ threadId })));
+        }
+        return Effect.succeed({
+          threadId,
+          projection: {},
+          resumed: true,
+        } as unknown as ThreadLaunchService.ThreadLaunchResult);
+      },
+    });
+    const routes = HttpApiBuilder.layer(ProvisionHttpApi).pipe(
+      Layer.provide(environmentControlHttpApiLayer),
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(EnvironmentControl)({}),
+          Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+            enqueueCommand: (effect) => effect,
+          }),
+          launches,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-thread-http-" }),
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+      Layer.provide(auth),
+    );
+    const http = HttpRouter.serve(routes, { disableListenLog: true, disableLogger: true }).pipe(
+      Layer.provideMerge(NodeHttpServer.layerTest),
+    );
+    yield* Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const launch = Effect.fnUntraced(function* (commandId: string, credential = "operator") {
+        const body = {
+          commandId,
+          projectId,
+          title: "Cloud chat",
+          modelSelection: { instanceId: "codex", model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          workspaceStrategy: { type: "root" },
+          initialMessage: { text: "Fix the build", attachments: [] },
+        };
+        const request = HttpClientRequest.post("/api/orchestration/launch-thread").pipe(
+          HttpClientRequest.setHeader("authorization", `Bearer ${credential}`),
+          HttpClientRequest.setHeader(
+            ORCHESTRATION_PROTOCOL_HEADER,
+            ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+          ),
+          HttpClientRequest.bodyText(yield* encodeJson(body), "application/json"),
+        );
+        const response = yield* client.execute(request);
+        const text = yield* response.text;
+        return { status: response.status, body: text ? yield* decodeJson(text) : null };
+      });
+      expect((yield* launch("accepted", "reader")).status).toBe(403);
+      expect(launched).toEqual([]);
+      expect((yield* launch("refused")).status).toBe(400);
+      expect((yield* launch("broken")).status).toBe(500);
+      expect(yield* launch("accepted")).toEqual({
+        status: 200,
+        body: { threadId: "thread-launched", resumed: true },
+      });
+      expect(launched.at(-1)).toEqual({
+        commandId: CommandId.make("accepted"),
+        projectId,
+        title: "Cloud chat",
+        modelSelection: { instanceId: "codex", model: "gpt-5" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        workspaceStrategy: { type: "root" },
+        initialMessage: { text: "Fix the build", attachments: [] },
+        createdBy: "user",
+        creationSource: "server",
+      });
+    }).pipe(Effect.provide(http), Effect.scoped);
+  }),
 );

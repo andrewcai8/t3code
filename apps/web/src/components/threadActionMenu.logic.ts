@@ -1,5 +1,6 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import { stopProvisionedCloudMachineMenuItem } from "../cloud/cloudThreadMenu";
 
 /**
  * Ids for the per-thread action menu. Snooze presets are dispatched as
@@ -48,9 +49,9 @@ export interface ThreadActionMenuState {
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
-  readonly hasProvisionedCloudMachine: boolean;
+  readonly hasProvisionedCloudMachine?: boolean;
   readonly isRegeneratingTitle: boolean;
-  /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
+  /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly supports: {
     readonly settlement: boolean;
@@ -61,16 +62,6 @@ export interface ThreadActionMenuState {
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
-}
-
-export function stopProvisionedCloudMachineMenuItem(): ContextMenuItem<"stop-cloud-machine"> {
-  return {
-    id: "stop-cloud-machine",
-    label: "Stop cloud machine",
-    icon: "cloud",
-    destructive: true,
-    separatorBefore: true,
-  };
 }
 
 /**

@@ -72,8 +72,7 @@ const state = await packHostState({
     ?.split(",")
     .map((id) => id.trim())
     .filter(Boolean),
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- Deploy script has no Effect runtime.
-  host: { homedir: NodeOS.homedir(), platform: process.platform, environment: process.env },
+  host: { homedir: NodeOS.homedir(), stateDir: NodePath.dirname(values.settings) },
   baseDir: MANAGER_BASE_DIR,
   skillsDir: "/home/user/skills",
 });

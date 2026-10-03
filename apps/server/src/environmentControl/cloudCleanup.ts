@@ -7,7 +7,8 @@
  *
  * @module cloudCleanup
  */
-import type { OrchestrationThreadShell, ProvisionedCleanup } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadShell, ProvisionedCleanup } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 import type { LeaseKeep, ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 import type { WorkspaceBackup } from "./workspaceBackup.ts";
@@ -18,7 +19,7 @@ const SETTLED_GRACE_MS = 3_600_000;
 /** How long a lease whose cleanup failed outright waits before the sweep tries it again. */
 const BACKUP_RETRY_MS = 6 * 3_600_000;
 
-type CleanupThread = Pick<OrchestrationThreadShell, "id" | "settledOverride" | "settledAt">;
+type CleanupThread = Pick<OrchestrationV2ThreadShell, "id" | "settledOverride" | "settledAt">;
 type CleanupLease = Pick<
   ProvisionedLease,
   "namespaceResource" | "keep" | "state" | "updatedAt" | "owner"
@@ -45,7 +46,7 @@ export function cleanupPlan(input: {
     thread?.id === lease.owner?.threadId &&
     thread?.settledOverride === "settled" &&
     thread.settledAt !== null
-      ? Math.max(pausedAt, Date.parse(thread.settledAt)) + SETTLED_GRACE_MS
+      ? Math.max(pausedAt, DateTime.toEpochMillis(thread.settledAt)) + SETTLED_GRACE_MS
       : Infinity;
   return settledAt < idleAt
     ? { kind: "scheduled", at: new Date(settledAt).toISOString(), reason: "settled" }

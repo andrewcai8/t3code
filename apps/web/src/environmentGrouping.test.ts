@@ -288,7 +288,6 @@ describe("environment grouping", () => {
         environmentId: primaryEnvironmentId,
         projectId: staleWithoutRepositoryIdentity.id,
       },
-      environmentState: () => ({}),
     });
     expect(pickerEntry?.isPreferred).toBe(true);
     expect(pickerEntry?.targetProject.id).toBe(canonical.id);
@@ -347,7 +346,6 @@ describe("environment grouping", () => {
         environmentId: remoteEnvironmentId,
         projectId: remote.id,
       },
-      environmentState: () => ({}),
     });
 
     expect(entries).toHaveLength(2);
@@ -412,7 +410,6 @@ describe("environment grouping", () => {
         environmentId: remoteEnvironmentId,
         projectId: currentRemote.id,
       },
-      environmentState: () => ({}),
     });
     const destination = entries.find(
       (entry) => entry.group.projectKey === destinationRepositoryIdentity.canonicalKey,
@@ -427,47 +424,6 @@ describe("environment grouping", () => {
       environmentId: primaryEnvironmentId,
       id: fallbackPrimary.id,
     });
-  });
-
-  it("targets the host's copy of a repository and offers none that only cloud boxes hold", () => {
-    const boxEnvironmentId = EnvironmentId.make("env-box");
-    const host = makeProject({
-      id: ProjectId.make("host-megpt"),
-      title: "megpt-mono",
-      workspaceRoot: "/data/repos/megpt-mono",
-      repositoryIdentity,
-    });
-    const box = makeProject({
-      id: ProjectId.make("box-workspace"),
-      environmentId: boxEnvironmentId,
-      title: "workspace",
-      workspaceRoot: "/tmp/t3-provision/lease/workspace",
-      repositoryIdentity,
-    });
-    const boxOnly = makeProject({
-      id: ProjectId.make("box-only"),
-      environmentId: boxEnvironmentId,
-      title: "box-only",
-      workspaceRoot: "/tmp/t3-provision/lease/other",
-    });
-    const groups = buildSidebarProjectSnapshots({
-      projects: [box, host, boxOnly],
-      settings: defaultGroupingSettings,
-      primaryEnvironmentId,
-      resolveEnvironmentLabel: () => null,
-    });
-
-    const entries = buildSidebarProjectPickerEntries({
-      groups,
-      // Viewing the box's own chat, or no chat with the box's copy first in sidebar order.
-      preferredProjectRef: { environmentId: boxEnvironmentId, projectId: box.id },
-      // A cloud box is not a user environment, so it has no state.
-      environmentState: (environmentId) => (environmentId === boxEnvironmentId ? null : {}),
-    });
-
-    expect(
-      entries.map((entry) => [entry.group.displayName, entry.targetProject.workspaceRoot]),
-    ).toEqual([["megpt-mono", "/data/repos/megpt-mono"]]);
   });
 
   it("keeps manual project order when building grouped sidebar entries", () => {

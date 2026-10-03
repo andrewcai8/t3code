@@ -10,16 +10,20 @@ several views need the same environment.
 
 The [supervisor](../../packages/client-runtime/src/connection/supervisor.ts) owns
 transport retry policy; resolving an endpoint and opening an RPC session are single
-attempts. Transient failures retry with capped backoff. Offline states and
-authentication failures wait for a wakeup instead of spending attempts on
-unchanged conditions.
+attempts. Transient failures retry with jittered exponential backoff, capped at
+five minutes, that resets only after a connection stays up. Without jitter, every
+client of a restarted server reconnects in the same second; with a short cap, a
+client that can never connect retries all day. Offline states and authentication
+failures wait for a wakeup instead of spending attempts on unchanged conditions.
 
-Foregrounding needs different treatment depending on the connection's state.
-It wakes a retry immediately, leaves an ordinary in-flight attempt alone, and
-probes an established session before replacing it. A long mobile background
-suspension forces replacement because the OS can kill a socket without reporting
-closure. Treating every foreground event as a reconnect delays healthy attempts;
-treating every resume as harmless leaves suspended sockets stuck.
+Foregrounding, an explicit retry, and an offline report probe the established
+session, and only a failed probe reconnects. Offline reports are often wrong, for
+example for a loopback server. A long mobile background suspension is the one
+exception: it replaces the session at once, because the OS can kill a socket
+without reporting closure, and a probe would hold a dead socket in "Resuming"
+until it times out. That fresh attempt runs even while the network reports
+offline. Foregrounding also wakes a pending retry immediately and
+leaves an ordinary in-flight attempt alone.
 
 The [registry](../../packages/client-runtime/src/connection/registry.ts) scopes
 connections by environment. An involuntary disconnect retains the registration
@@ -40,7 +44,6 @@ every device without dialing the box, and a paused box stays paused. Unpaired
 means the entry has no profile; it is never a separate flag, and only a box may
 be saved without a credential. A gone box this device never paired is forgotten
 with its cache; one it paired stays as a missing workspace so its history reads.
-Automation runs are not adopted from the list; they keep their own join.
 
 A box is saved like any paired server, so its credential and cached chat survive
 a restart, but its target carries the host that provisioned it
@@ -62,13 +65,14 @@ attempt connects with it and no replacement supervisor pairs again. A loopback
 pairing (Namespace) is redeemed through the host's gateway at the address this
 client already dials the host by. Pairing runs only while the entry has no
 pairing, so a device pairs a box at most once. Later dials, reopens and reloads
-find it saved, and a creating or automation join skips a box it already holds a
+find it saved, and a creating join skips a box it already holds a
 pairing for. Every pairing opens a session on the box, so pairing again on each
 open would pile them up.
 
 A paused box's address still answers, with a gateway 404, 502 or 503 that the
-resolver reads as `not-serving`, and an unpaired paused box's dial fails the same
-way when its host lists it paused. The supervisor wakes it, not a view: after such
+resolver reads as `not-serving`, and an unpaired box's dial fails the same
+way when its host lists it paused or the host's attach refuses it as not serving.
+The supervisor wakes it, not a view: after such
 a dial it enters `waking`, the registry asks the box's host to resume it, and the
 supervisor dials again. `waking` means a resume is in flight to a connected
 host; while the host is down the box backs off and redials instead, and a

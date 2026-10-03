@@ -77,8 +77,6 @@ export interface ProvisionedBox {
   readonly lifecycle: DiscoveredProvisionedEnvironment["lifecycle"];
   /** The host's name for the box. A saved box's label follows it. */
   readonly label: string;
-  /** Set when the host started the box for an automation run rather than a chat. */
-  readonly automationId: string | null;
   /** The host's last read of the box's chat, sent only when newer than this runtime holds. */
   readonly chat: ProvisionedChat | null;
 }
@@ -101,7 +99,6 @@ export function provisionedBox(
     threadId: row.threadId,
     lifecycle: row.lifecycle,
     label: row.label,
-    automationId: row.automationId ?? null,
     chat: row.chat ?? null,
   };
 }
@@ -121,7 +118,6 @@ export function sameProvisionedBoxes(
         box.threadId === other.threadId &&
         box.lifecycle === other.lifecycle &&
         box.label === other.label &&
-        box.automationId === other.automationId &&
         box.chat?.sequence === other.chat?.sequence
       );
     })

@@ -1,11 +1,18 @@
-import type { EnvironmentId, OrchestrationThreadShell } from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { isUnpairedBox } from "../connection/catalog.ts";
 import { connectionBox } from "../connection/model.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
-import { isThreadSessionRunning } from "./threads.ts";
+
+type ThreadRunState = Pick<OrchestrationV2ThreadShell, "status" | "activityRunStatus">;
+
+/** A turn is starting or running. A thread waiting on the user does not hold its box awake. */
+function turnRunning({ status, activityRunStatus }: ThreadRunState): boolean {
+  const current = activityRunStatus ?? status;
+  return current === "starting" || current === "running";
+}
 
 /**
  * Keeps a cloud box connected while a turn runs on it, so its chat's status stays live with the
@@ -16,9 +23,7 @@ import { isThreadSessionRunning } from "./threads.ts";
  */
 export function createRunningBoxDemandAtom(input: {
   readonly catalogValueAtom: Atom.Atom<EnvironmentCatalogState>;
-  readonly threadsAtom: (
-    environmentId: EnvironmentId,
-  ) => Atom.Atom<ReadonlyArray<Pick<OrchestrationThreadShell, "session">>>;
+  readonly threadsAtom: (environmentId: EnvironmentId) => Atom.Atom<ReadonlyArray<ThreadRunState>>;
   readonly provisionedBoxes: (
     hostIds: ReadonlyArray<EnvironmentId>,
   ) => Atom.Atom<ReadonlyArray<ProvisionedBox>>;
@@ -29,9 +34,7 @@ export function createRunningBoxDemandAtom(input: {
     for (const [environmentId, entry] of get(input.catalogValueAtom).entries) {
       const box = connectionBox(entry.target);
       if (box === null || !entry.enabled || isUnpairedBox(entry)) continue;
-      if (
-        get(input.threadsAtom(environmentId)).some(({ session }) => isThreadSessionRunning(session))
-      )
+      if (get(input.threadsAtom(environmentId)).some(turnRunning))
         running.set(environmentId, box.managerId);
     }
     if (running.size === 0) return [];

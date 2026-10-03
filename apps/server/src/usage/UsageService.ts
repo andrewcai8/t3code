@@ -27,7 +27,6 @@ import {
   type UsageHistoryInput,
   type UsageSummary,
   type UsageSummaryInput,
-  UsageDay,
   UsageReadError,
 } from "@t3tools/contracts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -46,18 +45,18 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
-import { ServerConfig } from "../config.ts";
+import * as ServerConfig from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { resolveAntigravityInstanceDirectories } from "../provider/antigravityAuthSupport.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
-import { cursorFileCredentialPath } from "../provider/cursorCredentialPath.ts";
 import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { readAntigravityUsage } from "./antigravityUsageReader.ts";
-import { makeCursorAccountHistory, type CursorCredentialSource } from "./cursorAccountHistory.ts";
-import { addTranscript, UsageAggregator } from "./usageAggregation.ts";
-import { BoxUsageStore, boxUsageListWindow, foldBoxUsage, historyForHost } from "./boxUsage.ts";
+import { makeCursorAccountHistory } from "./cursorAccountHistory.ts";
+import { readOtherCursorLogins } from "./cursorLogins.ts";
+import { UsageAggregator } from "./usageAggregation.ts";
+import { BoxUsageStore, makeBoxUsageReads, usageHostId } from "./boxUsage.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -87,21 +86,10 @@ const RATES_REFRESH_FLOOR_MS = 60 * 1000;
  * last write lands just before local midnight on the window's first day.
  */
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-const MAX_HOURLY_WINDOW_MS = DAY_MS;
-
-/** Where each CLI keeps transcripts under its home. Codex moves a rollout it archives. */
-const TRANSCRIPT_DIRECTORIES = {
-  claude: ["projects"],
-  codex: ["sessions", "archived_sessions"],
-  grok: ["sessions"],
-} as const;
+const MAX_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Longest window the UI offers, plus slack. Older entries are pruned. */
-export const CACHE_RETENTION_DAYS = 90;
-
-const isoAt = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+const CACHE_RETENTION_DAYS = 90;
 
 const decodeCodexSettings = Schema.decodeOption(CodexSettings);
 const decodeClaudeSettings = Schema.decodeOption(ClaudeSettings);
@@ -122,6 +110,7 @@ const encodeRatesCache = Schema.encodeEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
+const encodeUsageRecordKey = Schema.encodeSync(ScanCacheJson);
 const CachedSource = Schema.Struct({ dir: Schema.String, volumeId: Schema.String });
 const decodeCachedSources = Schema.decodeUnknownOption(
   Schema.Struct({ sources: Schema.Record(Schema.String, CachedSource) }),
@@ -131,10 +120,6 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
-    /**
-     * This environment's hourly UTC usage since `sinceTime`, for a host that
-     * keeps a cloud box's usage. Excludes Cursor, which the host reads itself.
-     */
     readonly readHistory: (input: UsageHistoryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     /** Refetches the rate table ahead of its TTL. See `ensureRates`. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
@@ -148,32 +133,23 @@ const EMPTY_PRICING: UsagePricing = {
   knownModels: 0,
 };
 
-const emptySummary = (input: Pick<UsageSummaryInput, "timeZone" | "sinceDay" | "untilDay">) =>
-  ({
-    contractVersion: USAGE_CONTRACT_VERSION,
-    readAt: "1970-01-01T00:00:00.000Z",
-    timeZone: input.timeZone,
-    sinceDay: input.sinceDay,
-    untilDay: input.untilDay,
-    buckets: [],
-    sources: [],
-    pricing: EMPTY_PRICING,
-    scanDurationMs: 0,
-  }) satisfies UsageSummary;
-
 /** Empty summary, for suites that only need the RPC surface to resolve. */
-export const layerTest = Layer.succeed(
+const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
-    readSummary: (input) => Effect.succeed(emptySummary(input)),
-    readHistory: () =>
-      Effect.succeed(
-        emptySummary({
-          timeZone: "UTC",
-          sinceDay: UsageDay.make("1970-01-01"),
-          untilDay: UsageDay.make("1970-01-01"),
-        }),
-      ),
+    readSummary: (input) =>
+      Effect.succeed({
+        contractVersion: USAGE_CONTRACT_VERSION,
+        readAt: "1970-01-01T00:00:00.000Z",
+        timeZone: input.timeZone,
+        sinceDay: input.sinceDay,
+        untilDay: input.untilDay,
+        buckets: [],
+        sources: [],
+        pricing: EMPTY_PRICING,
+        scanDurationMs: 0,
+      }),
+    readHistory: () => Effect.die("UsageService.layerTest keeps no history"),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
@@ -182,16 +158,12 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const config = yield* ServerConfig;
+  const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const hostEnvironment = yield* HostProcessEnvironment;
-  const readCursorHistory = makeCursorAccountHistory();
   const platform = yield* HostProcessPlatform;
-  const boxUsage = yield* BoxUsageStore;
-  // Cloud boxes are cloned from one template and share a hostname, so the
-  // provisioner names each one.
-  const usageHostId = hostEnvironment.T3CODE_USAGE_HOST_ID?.trim() || NodeOS.hostname();
+  const readCursorAccountUsage = makeCursorAccountHistory();
 
   const fileCache: ScanCache = new Map();
   const sourceCache = new Map<string, typeof CachedSource.Type>();
@@ -290,7 +262,7 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  /** Resolves the transcript directories for each provider. */
+  /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
     settings: ServerSettingsValue,
     retentionCutoffMs: number,
@@ -346,44 +318,42 @@ export const make = Effect.gen(function* () {
             environment.GROK_HOME?.trim() || path.join(NodeOS.homedir(), ".grok"),
           );
         }
-        for (const subdirectory of TRANSCRIPT_DIRECTORIES[provider]) {
-          const directory = path.resolve(home, subdirectory);
-          const sourceKey = provider + "\0" + directory;
-          const previous = sourceCache.get(sourceKey);
-          // Keep canonical paths and source fingerprints stable after root cleanup,
-          // including aliases and clients merging pre-cleanup environment summaries.
-          const dir = yield* fileSystem
-            .realPath(directory)
-            .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
-          const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
-          const hasRetainedHistory = fileCache
-            .entries()
-            .some(
-              ([filePath, entry]) =>
-                entry.provider === provider &&
-                entry.mtimeMs >= retentionCutoffMs &&
-                entry.records.length + entry.tailRecords.length > 0 &&
-                isWithinDirectory(filePath, dir),
-            );
-          // A recreated directory still reports the retained history under its old identity.
-          const volumeId =
-            previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
-              ? previous.volumeId || currentVolumeId
-              : currentVolumeId;
-          if (previous?.dir !== dir || previous.volumeId !== volumeId) {
-            sourceCache.set(sourceKey, { dir, volumeId });
-            cacheDirty = true;
-          }
-          const key = `${provider}\0${dir}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          dirs.push({
-            provider,
-            dir,
-            volumeId,
-            ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}),
-          });
+        const directory = path.resolve(home, provider === "claude" ? "projects" : "sessions");
+        const sourceKey = provider + "\0" + directory;
+        const previous = sourceCache.get(sourceKey);
+        // Keep canonical paths and source fingerprints stable after root cleanup,
+        // including aliases and clients merging pre-cleanup environment summaries.
+        const dir = yield* fileSystem
+          .realPath(directory)
+          .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
+        const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+        const hasRetainedHistory = fileCache
+          .entries()
+          .some(
+            ([filePath, entry]) =>
+              entry.provider === provider &&
+              entry.mtimeMs >= retentionCutoffMs &&
+              entry.records.length + entry.tailRecords.length > 0 &&
+              isWithinDirectory(filePath, dir),
+          );
+        // A recreated directory still reports the retained history under its old identity.
+        const volumeId =
+          previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
+            ? previous.volumeId || currentVolumeId
+            : currentVolumeId;
+        if (previous?.dir !== dir || previous.volumeId !== volumeId) {
+          sourceCache.set(sourceKey, { dir, volumeId });
+          cacheDirty = true;
         }
+        const key = `${provider}\0${dir}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        dirs.push({
+          provider,
+          dir,
+          volumeId,
+          ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}),
+        });
       }
     }
     return dirs;
@@ -627,69 +597,72 @@ export const make = Effect.gen(function* () {
         ...(failed ? { message: "Some Antigravity history could not be read." } : {}),
       });
     }
-    // Each Cursor instance can hold its own login (a separate HOME or
-    // credential store), so every one is read. Instances on the same login or
-    // account contribute that account once.
-    const cursorInstances: Array<Pick<ProviderInstanceConfig, "environment">> = Object.values(
-      settings.providerInstances,
-    ).filter((instance) => instance.driver === "cursor");
-    if (!Object.hasOwn(settings.providerInstances, "cursor")) cursorInstances.push({});
-    const cursorLogins = new Map<
-      string,
-      { readonly dir: string; readonly credential: CursorCredentialSource | null }
-    >();
-    let keychainOff = false;
-    for (const instance of cursorInstances) {
-      const environment = mergeProviderInstanceEnvironment(instance.environment, hostEnvironment);
-      const dir = cursorFileCredentialPath(environment, platform, home);
-      const credentialStore = environment.AGENT_CLI_CREDENTIAL_STORE;
-      const loginUnavailable =
-        Boolean(environment.CURSOR_AUTH_TOKEN?.trim()) ||
-        Boolean(environment.CURSOR_API_KEY?.trim()) ||
-        credentialStore === "memory";
-      const keychain = platform === "darwin" && credentialStore !== "file";
-      if (keychain && !loginUnavailable && !settings.cursorKeychainUsageEnabled) {
-        keychainOff = true;
-        continue;
-      }
-      const credential = loginUnavailable ? null : keychain ? { kind: "keychain" as const } : dir;
-      cursorLogins.set(
-        credential === null ? `none:${dir}` : typeof credential === "string" ? dir : "keychain",
-        { dir, credential },
-      );
-    }
-    if (keychainOff) {
+    scanned.push(
+      ...(yield* readOtherCursorLogins({
+        settings,
+        hostEnvironment,
+        platform,
+        home,
+        sinceMs: windowStartMs,
+        readHistory: readCursorAccountUsage,
+      })),
+    );
+    const cursorUserHome =
+      (platform === "win32" ? hostEnvironment["USERPROFILE"] : hostEnvironment["HOME"]) || home;
+    const configHome = hostEnvironment["XDG_CONFIG_HOME"]?.trim();
+    const cursorHome =
+      platform === "darwin"
+        ? path.join(cursorUserHome, "Library", "Application Support")
+        : platform === "win32"
+          ? hostEnvironment["APPDATA"] || path.join(cursorUserHome, "AppData", "Roaming")
+          : configHome && path.isAbsolute(configHome)
+            ? configHome
+            : path.join(cursorUserHome, ".config");
+    const cursorAuthPath =
+      platform === "darwin"
+        ? path.join(cursorUserHome, ".cursor", "auth.json")
+        : path.join(cursorHome, platform === "win32" ? "Cursor" : "cursor", "auth.json");
+    const credentialStore = hostEnvironment["AGENT_CLI_CREDENTIAL_STORE"];
+    const loginUnavailable =
+      Boolean(hostEnvironment["CURSOR_AUTH_TOKEN"]?.trim()) ||
+      Boolean(hostEnvironment["CURSOR_API_KEY"]?.trim()) ||
+      credentialStore === "memory";
+    if (
+      platform === "darwin" &&
+      credentialStore !== "file" &&
+      !loginUnavailable &&
+      !settings.cursorKeychainUsageEnabled
+    ) {
       scanned.push({
         provider: "cursor",
-        dir: cursorFileCredentialPath(hostEnvironment, platform, home),
+        dir: cursorAuthPath,
         volumeId: "",
         files: null,
         message: "Cursor account usage is off on this environment.",
         action: "enableCursorKeychain",
       });
+      return scanned;
     }
     const cursorUntilMs = yield* Clock.currentTimeMillis;
-    const accounts = yield* Effect.promise(() =>
-      Promise.all(
-        [...cursorLogins.values()].map(async ({ dir, credential }) => ({
-          dir,
-          account:
-            credential === null
-              ? {
-                  accountKey: null,
-                  records: [],
-                  missing: true,
-                  error: "Cursor account history needs a Cursor CLI login on this server.",
-                }
-              : await readCursorHistory(credential, windowStartMs, cursorUntilMs),
-        })),
-      ),
-    );
-    const readAccounts = new Set<string>();
-    for (const { account } of accounts) {
-      if (account.accountKey === null || account.error !== null || account.missing) continue;
-      if (readAccounts.has(account.accountKey)) continue;
-      readAccounts.add(account.accountKey);
+    const account = loginUnavailable
+      ? {
+          accountKey: null,
+          records: [],
+          missing: true,
+          error: "Cursor account history needs a Cursor CLI login on this server.",
+        }
+      : yield* Effect.promise(() =>
+          readCursorAccountUsage(
+            platform === "darwin" && credentialStore !== "file"
+              ? { kind: "keychain" }
+              : cursorAuthPath,
+            windowStartMs,
+            cursorUntilMs,
+          ),
+        );
+    // No saved login means there is no account source to report, not a setup error.
+    if (account.missing && account.error === null) return scanned;
+    if (account.accountKey !== null && account.error === null && !account.missing) {
       // The same account includes CLI and desktop history from every machine.
       // A stable remote fingerprint prevents connected environments counting it twice.
       const source = `cursor-account:${account.accountKey}`;
@@ -701,22 +674,17 @@ export const make = Effect.gen(function* () {
         files: [{ path: source, records: account.records }],
         status: "ok",
       });
+      return scanned;
     }
-    for (const { dir, account } of accounts) {
-      // No saved login means there is no account source to report, not a setup error.
-      if (account.missing && account.error === null) continue;
-      if (account.accountKey !== null && readAccounts.has(account.accountKey)) continue;
-      if (account.accountKey !== null && account.error === null && !account.missing) continue;
-      scanned.push({
-        provider: "cursor",
-        dir,
-        volumeId: yield* Effect.promise(() => readDirectoryVolumeId(dir)),
-        // Never combine a local fallback with another server's account-wide history.
-        files: null,
-        message:
-          account.error ?? "Cursor account history needs a Cursor CLI login saved on this server.",
-      });
-    }
+    scanned.push({
+      provider: "cursor",
+      dir: cursorAuthPath,
+      volumeId: yield* Effect.promise(() => readDirectoryVolumeId(cursorAuthPath)),
+      // Never combine a local fallback with another server's account-wide history.
+      files: null,
+      message:
+        account.error ?? "Cursor account history needs a Cursor CLI login saved on this server.",
+    });
     return scanned;
   });
 
@@ -759,7 +727,7 @@ export const make = Effect.gen(function* () {
     const startedAtMs = yield* Clock.currentTimeMillis;
     yield* ensureScanCacheLoaded;
 
-    const hostId = usageHostId;
+    const hostId = usageHostId(hostEnvironment);
     const windowStart = DateTime.make(`${input.sinceDay}T00:00:00Z`);
     if (Option.isNone(windowStart)) {
       return yield* new UsageReadError({
@@ -770,7 +738,7 @@ export const make = Effect.gen(function* () {
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
 
-    const retentionCutoffMs = startedAtMs - CACHE_RETENTION_DAYS * DAY_MS;
+    const retentionCutoffMs = startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
     // Pricing only matters once records are aggregated, so the rate table
     // loads while transcripts stream instead of gating them: a cold rates
@@ -828,7 +796,29 @@ export const make = Effect.gen(function* () {
           continue;
         }
         scannedFiles += 1;
-        addTranscript(aggregator, file.records, sessionIds, dir);
+        const codexEventOccurrences = new Map<string, number>();
+        for (const record of file.records) {
+          let usageRecord = record;
+          if (record.provider === "codex" && record.sessionId.length > 0) {
+            // Match moved rollout copies without collapsing repeated equal events
+            // within one rollout (timestamps can have only second precision).
+            const key = encodeUsageRecordKey([
+              record.provider,
+              record.sessionId,
+              record.timestampMs,
+              record.model,
+              record.totals,
+            ]);
+            const occurrence = (codexEventOccurrences.get(key) ?? 0) + 1;
+            codexEventOccurrences.set(key, occurrence);
+            usageRecord = { ...record, dedupeKey: key + ":" + occurrence };
+          }
+          // Only sessions contributing in-window count; the mtime slack can
+          // admit boundary files whose records fall outside the range.
+          if (aggregator.add(usageRecord, dir) && record.sessionId.length > 0) {
+            sessionIds.add(record.sessionId);
+          }
+        }
       }
 
       sources.push({
@@ -875,28 +865,26 @@ export const make = Effect.gen(function* () {
 
   const scanKey = (
     input: UsageSummaryInput,
-    settings: ServerSettingsValue,
-    maxHourlyWindowMs: number,
+    priceOverrides: ServerSettingsValue["usagePriceOverrides"],
+    cursorKeychainUsageEnabled: boolean,
   ): string =>
     JSON.stringify([
-      maxHourlyWindowMs,
       input.timeZone,
       input.sinceDay,
       input.untilDay,
       input.resolution ?? "day",
       input.sinceTime ?? null,
       input.untilTime ?? null,
-      settings.usagePriceOverrides,
-      settings.cursorKeychainUsageEnabled,
-      settings.providerInstances,
+      priceOverrides,
+      cursorKeychainUsageEnabled,
     ]);
 
-  const sharedScan = Effect.fnUntraced(function* (
+  const readSummary = Effect.fn("UsageService.readSummary")(function* (
     input: UsageSummaryInput,
-    maxHourlyWindowMs: number,
+    maxHourlyWindowMs = MAX_HOURLY_WINDOW_MS,
   ) {
     const settings = yield* readSettings;
-    const key = scanKey(input, settings, maxHourlyWindowMs);
+    const key = `${maxHourlyWindowMs}:${scanKey(input, settings.usagePriceOverrides, settings.cursorKeychainUsageEnabled)}`;
     const deferred = yield* Effect.uninterruptible(
       Effect.gen(function* () {
         const existing = inflightScans.get(key);
@@ -924,62 +912,7 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
-    const summary = yield* sharedScan(input, MAX_HOURLY_WINDOW_MS);
-    const nowMs = yield* Clock.currentTimeMillis;
-    // A box a client may still hold a summary for keeps its own identity so
-    // the merge can deduplicate it. Clients cache summaries for up to an hour.
-    const window = boxUsageListWindow(input);
-    // Box usage is an addition to this host's own usage, so an unreadable
-    // store drops the boxes rather than the whole summary.
-    const rows = yield* boxUsage
-      .list(window.sinceIso, window.untilIso, isoAt(nowMs - DAY_MS))
-      .pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("stored cloud box usage could not be read", { cause }).pipe(
-            Effect.as([]),
-          ),
-        ),
-      );
-    return foldBoxUsage(summary, input, rows, {
-      hostId: usageHostId,
-      path: path.join(config.stateDir, "cloud-box-usage"),
-    });
-  });
-
-  const readHistory = Effect.fn("UsageService.readHistory")(function* (input: UsageHistoryInput) {
-    const since = DateTime.make(input.sinceTime);
-    if (Option.isNone(since)) {
-      return yield* new UsageReadError({
-        reason: "invalidWindow",
-        detail: `sinceTime '${input.sinceTime}' is not a valid instant`,
-      });
-    }
-    const nowMs = yield* Clock.currentTimeMillis;
-    const floorHour = (ms: number) => Math.floor(ms / HOUR_MS) * HOUR_MS;
-    const untilMs = floorHour(nowMs) + HOUR_MS;
-    const sinceMs = Math.min(
-      floorHour(
-        Math.max(DateTime.toEpochMillis(since.value), nowMs - CACHE_RETENTION_DAYS * DAY_MS),
-      ),
-      untilMs - HOUR_MS,
-    );
-    const summary = yield* sharedScan(
-      {
-        timeZone: "UTC",
-        sinceDay: UsageDay.make(isoAt(sinceMs).slice(0, 10)),
-        untilDay: UsageDay.make(isoAt(untilMs - 1).slice(0, 10)),
-        resolution: "hour",
-        sinceTime: isoAt(sinceMs),
-        untilTime: isoAt(untilMs),
-      },
-      // The window is built here and already bounded by retention.
-      Number.POSITIVE_INFINITY,
-    );
-    return historyForHost(summary);
-  });
-
-  return { readSummary, readHistory, refreshRates } as const;
+  return { ...(yield* makeBoxUsageReads(readSummary)), refreshRates } as const;
 });
 
 export const layer = Layer.effect(UsageService, make).pipe(Layer.provide(BoxUsageStore.layer));

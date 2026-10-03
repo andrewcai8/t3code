@@ -1,5 +1,4 @@
-import type { OrchestrationThreadActivity } from "@t3tools/contracts";
-import type { TimestampFormat } from "@t3tools/contracts/settings";
+import type { OrchestrationV2ProviderFailureClass } from "@t3tools/contracts";
 import { memo } from "react";
 import { Alert, AlertAction, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -7,7 +6,6 @@ import { CircleAlertIcon, XIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { OpenAI } from "../Icons";
 import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
-import { formatUpcomingTimestamp } from "../../timestampFormat";
 
 export function getThreadErrorBannerKey(threadKey: string, error: string | null): string | null {
   return error === null ? null : `${threadKey}\u0000${error}`;
@@ -19,28 +17,6 @@ export function shouldShowThreadErrorBanner(
   isDismissed: boolean,
 ): boolean {
   return getThreadErrorBannerKey(threadKey, error) !== null && !isDismissed;
-}
-
-/**
- * The reset instant of the usage limit the banner shows. Only the latest
- * runtime error counts, so an older limit cannot date an unrelated failure.
- */
-export function threadErrorResetsAt(
-  activities: readonly OrchestrationThreadActivity[],
-  error: string | null,
-): string | undefined {
-  const latest = activities.findLast((activity) => activity.kind === "runtime.error");
-  const payload =
-    latest?.payload && typeof latest.payload === "object"
-      ? (latest.payload as Record<string, unknown>)
-      : undefined;
-  const resetsAt = payload?.resetsAt;
-  return error !== null &&
-    payload?.message === error &&
-    typeof resetsAt === "string" &&
-    !Number.isNaN(Date.parse(resetsAt))
-    ? resetsAt
-    : undefined;
 }
 
 // Session-scoped (module-level so it survives ChatView remounts, e.g. route
@@ -63,23 +39,19 @@ export function isThreadErrorBannerDismissedForSession(bannerKey: string | null)
 export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   error,
   onDismiss,
+  errorClass,
   chatGptUsageLimit = false,
-  resetsAt,
-  timestampFormat = "locale",
 }: {
   error: string | null;
+  errorClass?: OrchestrationV2ProviderFailureClass | null;
   onDismiss?: () => void;
   chatGptUsageLimit?: boolean;
-  resetsAt?: string | undefined;
-  timestampFormat?: TimestampFormat;
 }) {
   if (!error) return null;
-  const message = resetsAt
-    ? `${error} Resets ${formatUpcomingTimestamp(resetsAt, timestampFormat)}.`
-    : error;
+  const variant = errorClass === "usage_limit" ? "warning" : "error";
   return (
     <div className="pointer-events-auto mx-auto w-fit max-w-[min(48rem,calc(100%-2rem))] pt-3">
-      <Alert variant="error" surface="glass" controlAlignment="first-line">
+      <Alert variant={variant} surface="glass" controlAlignment="first-line" data-variant={variant}>
         {chatGptUsageLimit ? (
           <OpenAI className="size-4 text-foreground!" aria-hidden="true" />
         ) : (
@@ -93,9 +65,9 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
             </div>
           ) : (
             <Tooltip>
-              <TooltipTrigger render={<div className="line-clamp-3" />}>{message}</TooltipTrigger>
+              <TooltipTrigger render={<div className="line-clamp-3" />}>{error}</TooltipTrigger>
               <TooltipPopup side="top" className="whitespace-pre-wrap">
-                {message}
+                {error}
               </TooltipPopup>
             </Tooltip>
           )}
@@ -105,7 +77,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
             {chatGptUsageLimit ? <ChatGptUsageButton variant="default" size="sm" /> : null}
             {onDismiss ? (
               <Button variant="ghost" size="icon-xs" aria-label="Dismiss error" onClick={onDismiss}>
-                <XIcon className="text-destructive" />
+                <XIcon />
               </Button>
             ) : null}
           </AlertAction>

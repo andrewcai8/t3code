@@ -1,6 +1,6 @@
 import type {
   EnvironmentId,
-  OrchestrationShellSnapshot,
+  OrchestrationV2ShellSnapshot,
   ProvisionedChat,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -71,7 +71,7 @@ export function planHostBoxSync(input: HostBoxSyncInput): ReadonlyArray<HostBoxS
     const gone = row.lifecycle === "missing" || row.lifecycle === "disposed";
     const entry = entries.get(row.environmentId);
     if (entry === undefined) {
-      if (!gone && row.threadId !== null && row.automationId === null)
+      if (!gone && row.threadId !== null)
         steps.push({
           _tag: "Adopt",
           target: new BearerConnectionTarget({
@@ -129,12 +129,13 @@ export interface HostChat {
 }
 
 /** A box's shell as its host last read it: the box's chat and that chat's project. */
-export function chatShellSnapshot(chat: ProvisionedChat): OrchestrationShellSnapshot {
+export function chatShellSnapshot(chat: ProvisionedChat): OrchestrationV2ShellSnapshot {
   return {
+    schemaVersion: 1,
     snapshotSequence: chat.sequence,
     projects: [chat.project],
-    threads: [chat.thread],
-    updatedAt: chat.thread.updatedAt,
+    threads: chat.thread.archivedAt === null ? [chat.thread] : [],
+    archivedThreads: [],
   };
 }
 
@@ -144,18 +145,21 @@ export function chatShellSnapshot(chat: ProvisionedChat): OrchestrationShellSnap
  * chat or a newer one.
  */
 export function withHostChat(
-  shell: Option.Option<OrchestrationShellSnapshot>,
+  shell: Option.Option<OrchestrationV2ShellSnapshot>,
   chat: ProvisionedChat,
-): OrchestrationShellSnapshot | null {
+): OrchestrationV2ShellSnapshot | null {
   if (Option.isNone(shell)) return chatShellSnapshot(chat);
   const current = shell.value;
   if (current.snapshotSequence >= chat.sequence) return null;
   return {
+    ...current,
     snapshotSequence: chat.sequence,
     projects: upsertById(current.projects, chat.project),
-    threads: upsertById(current.threads, chat.thread),
-    updatedAt:
-      chat.thread.updatedAt > current.updatedAt ? chat.thread.updatedAt : current.updatedAt,
+    threads:
+      chat.thread.archivedAt === null
+        ? upsertById(current.threads, chat.thread)
+        : current.threads.filter(({ id }) => id !== chat.thread.id),
+    archivedThreads: current.archivedThreads.filter(({ id }) => id !== chat.thread.id),
   };
 }
 

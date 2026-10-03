@@ -1,5 +1,5 @@
 // @effect-diagnostics globalTimers:off - this Promise helper backs off between E2B requests outside Effect.
-import { SandboxError } from "e2b";
+import { SandboxError, ServiceBusyError } from "e2b";
 
 /**
  * One E2B connect request. Restoring a box paused for hours took 70 s before
@@ -8,6 +8,9 @@ import { SandboxError } from "e2b";
 const E2B_RESUME_REQUEST_TIMEOUT_MS = 80_000;
 const E2B_RESUME_ATTEMPTS = 3;
 const E2B_RESUME_BACKOFF_MS = 2_000;
+
+/** E2B has no room for the sandbox now: placement kept timing out, or it had no capacity. */
+export class E2bPlacementUnavailable extends Error {}
 
 export type E2bResumeDecision =
   | {
@@ -39,8 +42,7 @@ export function e2bResumeDecision(cause: unknown): E2bResumeDecision {
 
 /**
  * Connects to (and so resumes) an E2B sandbox, retrying placement timeouts.
- * Bounded by 3 attempts of 80 s plus 6 s of backoff, about 4 minutes. The
- * automation runner's attaching step allows for this.
+ * Bounded by 3 attempts of 80 s plus 6 s of backoff, about 4 minutes.
  */
 export async function connectResumingE2b<A>(
   sandboxId: string,
@@ -51,10 +53,15 @@ export async function connectResumingE2b<A>(
     try {
       return await connect(E2B_RESUME_REQUEST_TIMEOUT_MS);
     } catch (cause) {
+      if (cause instanceof ServiceBusyError)
+        throw new E2bPlacementUnavailable(
+          `E2B could not place sandbox ${sandboxId}: ${cause.message}`,
+          { cause },
+        );
       const decision = e2bResumeDecision(cause);
       if (decision.kind === "fail") throw cause;
       if (attempt === E2B_RESUME_ATTEMPTS)
-        throw new Error(
+        throw new E2bPlacementUnavailable(
           `E2B could not resume sandbox ${sandboxId} after ${attempt} attempts: ${decision.message}`,
           { cause },
         );

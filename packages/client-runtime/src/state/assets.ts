@@ -24,6 +24,7 @@ import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { request } from "../rpc/client.ts";
 import type { ProjectFaviconCache, ProjectFaviconTarget } from "../projectFaviconCache.ts";
 import { createEnvironmentQueryAtomFamily } from "./runtime.ts";
+import { environmentUrl } from "./environmentUrl.ts";
 
 const ASSET_URL_REFRESH_INTERVAL_MS = 30 * 60_000;
 const ASSET_URL_STALE_TIME_MS = 5 * 60_000;
@@ -53,18 +54,6 @@ export function parseAssetCollectionKey(
   } catch (cause) {
     throw new InvalidAssetCollectionKeyError({ key, cause });
   }
-}
-
-/**
- * Resolve a server-relative URL (`/api/assets/...`) inside the environment's base, keeping any
- * path prefix such as a manager gateway's `/api/provisioned-environment/<leaseId>/`.
- */
-function environmentUrl(httpBaseUrl: string, relativeUrl: string): string {
-  const base = new URL(httpBaseUrl);
-  if (!base.pathname.endsWith("/")) base.pathname = `${base.pathname}/`;
-  base.search = "";
-  base.hash = "";
-  return new URL(relativeUrl.replace(/^\/(?!\/)/, ""), base).toString();
 }
 
 export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {

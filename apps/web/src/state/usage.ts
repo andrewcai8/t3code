@@ -32,39 +32,20 @@ export interface EnvironmentUsageStatus {
   readonly needsCursorKeychainAccess: boolean;
 }
 
-interface UsageQuery {
-  readonly input: UsageSummaryInput;
-  /** `null` asks every environment, including ones connected later. */
-  readonly environmentIds: readonly EnvironmentId[] | null;
-}
-
 /**
- * Lists every environment and reads the selected ones' summaries for one window.
+ * Reads every environment's summary for one window.
  *
- * Keyed by the serialised query so switching ranges does not thrash the atom
+ * Keyed by the serialised window so switching ranges does not thrash the atom
  * cache, and so each environment's query is shared with any other reader of the
- * same window. A deselected environment is listed without a summary and is not
- * asked to scan.
+ * same window.
  */
-const usageByQueryAtom = Atom.family((queryKey: string) =>
+const usageByWindowAtom = Atom.family((windowKey: string) =>
   Atom.make((get): readonly EnvironmentUsageStatus[] => {
-    const { input, environmentIds } = JSON.parse(queryKey) as UsageQuery;
-    const selected = environmentIds === null ? null : new Set(environmentIds);
+    const input = JSON.parse(windowKey) as UsageSummaryInput;
     const presentations = get(environmentPresentations.presentationsAtom);
 
     const statuses: EnvironmentUsageStatus[] = [];
     for (const [environmentId, presentation] of presentations) {
-      if (selected !== null && !selected.has(environmentId)) {
-        statuses.push({
-          environmentId,
-          label: presentation.entry.target.label,
-          isPending: false,
-          error: null,
-          summary: null,
-          needsCursorKeychainAccess: false,
-        });
-        continue;
-      }
       const result = get(serverEnvironment.usageSummary({ environmentId, input }));
       const summary = Option.getOrNull(AsyncResult.value(result));
       statuses.push({
@@ -80,7 +61,7 @@ const usageByQueryAtom = Atom.family((queryKey: string) =>
       });
     }
     return statuses;
-  }).pipe(Atom.withLabel(`web-usage:query:${queryKey}`)),
+  }).pipe(Atom.withLabel(`web-usage:window:${windowKey}`)),
 );
 
 export interface UsageView {
@@ -102,20 +83,16 @@ export function useUsage(
   input: UsageSummaryInput,
   selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null = null,
 ): UsageView {
-  const queryKey = useMemo(
+  const windowKey = useMemo(
     () =>
       JSON.stringify({
-        input: {
-          sinceDay: input.sinceDay,
-          untilDay: input.untilDay,
-          timeZone: input.timeZone,
-          resolution: input.resolution,
-          sinceTime: input.sinceTime,
-          untilTime: input.untilTime,
-        },
-        environmentIds:
-          selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds].toSorted(),
-      } satisfies UsageQuery),
+        sinceDay: input.sinceDay,
+        untilDay: input.untilDay,
+        timeZone: input.timeZone,
+        resolution: input.resolution,
+        sinceTime: input.sinceTime,
+        untilTime: input.untilTime,
+      }),
     [
       input.sinceDay,
       input.untilDay,
@@ -123,10 +100,9 @@ export function useUsage(
       input.resolution,
       input.sinceTime,
       input.untilTime,
-      selectedEnvironmentIds,
     ],
   );
-  const atom = usageByQueryAtom(queryKey);
+  const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
   const selectedEnvironments = useMemo(
     () =>
@@ -145,9 +121,9 @@ export function useUsage(
         server: serverEnvironment,
         presentations: environmentPresentations,
         environmentIds: selectedEnvironments.map(({ environmentId }) => environmentId),
-        input: nextInput ?? (JSON.parse(queryKey) as UsageQuery).input,
+        input: nextInput ?? (JSON.parse(windowKey) as UsageSummaryInput),
       }),
-    [selectedEnvironments, queryKey],
+    [selectedEnvironments, windowKey],
   );
 
   const merged = useMemo(() => {

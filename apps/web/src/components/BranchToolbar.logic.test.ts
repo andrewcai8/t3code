@@ -1,7 +1,6 @@
 import { EnvironmentId, type VcsRef } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
-  cloudBaseRefs,
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
   resolveEnvironmentOptionLabel,
@@ -14,13 +13,13 @@ import {
   resolveBranchToolbarPrBranch,
   resolveBranchToolbarValue,
   resolveLockedWorkspaceLabel,
+  resolveWorkspaceDisplayName,
   resolveLocalCheckoutBranchMismatch,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
   shouldShowComposerContextStrip,
-  shouldOfferEnvironmentChoice,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 
@@ -426,9 +425,28 @@ describe("shouldShowEnvironmentIndicator", () => {
 });
 
 describe("shouldShowComposerContextStrip", () => {
+  it.each([false, true])(
+    "honors the active-thread preference with resting controls %s",
+    (hostsRestingComposerControls) => {
+      const input = {
+        isDraftHeroState: false,
+        hasActiveProject: true,
+        isGitRepo: true,
+        showEnvironmentIndicator: true,
+        hostsRestingComposerControls,
+      };
+      expect(shouldShowComposerContextStrip({ ...input, persistInActiveThreads: false })).toBe(
+        false,
+      );
+      expect(shouldShowComposerContextStrip({ ...input, persistInActiveThreads: true })).toBe(true);
+    },
+  );
+
   it("keeps the environment indicator visible for a non-Git project", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: true,
@@ -440,6 +458,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("hides the strip when a non-Git project has nothing to show", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -451,6 +471,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("keeps the strip for visible resting composer controls in a non-Git thread", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -462,6 +484,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("shows Git controls without requiring an environment indicator", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: true,
         showEnvironmentIndicator: false,
@@ -541,6 +565,18 @@ describe("resolveLockedWorkspaceLabel", () => {
 
   it("describes a worktree that is still being created as a new worktree", () => {
     expect(resolveLockedWorkspaceLabel(null, "worktree")).toBe("New worktree");
+  });
+});
+
+describe("resolveWorkspaceDisplayName", () => {
+  it("returns the final folder for POSIX and Windows paths", () => {
+    expect(resolveWorkspaceDisplayName("/repo/.t3/worktrees/feature-a")).toBe("feature-a");
+    expect(resolveWorkspaceDisplayName("C:\\code\\project\\feature-b\\")).toBe("feature-b");
+  });
+
+  it("handles missing and root paths", () => {
+    expect(resolveWorkspaceDisplayName(null)).toBeNull();
+    expect(resolveWorkspaceDisplayName("/")).toBe("/");
   });
 });
 
@@ -858,96 +894,5 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
-  });
-});
-
-describe("shouldOfferEnvironmentChoice", () => {
-  it("offers a choice between machines that already exist", () => {
-    expect(
-      shouldOfferEnvironmentChoice({
-        environmentCount: 2,
-        canChangeEnvironment: true,
-        canCreateEnvironment: false,
-      }),
-    ).toBe(true);
-  });
-
-  it("offers a choice on a single machine when another can be created", () => {
-    // Otherwise the first cloud machine can never be created from the place
-    // machines are chosen: the control that would add one is hidden until one
-    // has already been added.
-    expect(
-      shouldOfferEnvironmentChoice({
-        environmentCount: 1,
-        canChangeEnvironment: true,
-        canCreateEnvironment: true,
-      }),
-    ).toBe(true);
-  });
-
-  it("stays quiet on a single machine with nothing to create", () => {
-    expect(
-      shouldOfferEnvironmentChoice({
-        environmentCount: 1,
-        canChangeEnvironment: true,
-        canCreateEnvironment: false,
-      }),
-    ).toBe(false);
-  });
-
-  it("never offers a choice the composer cannot act on", () => {
-    expect(
-      shouldOfferEnvironmentChoice({
-        environmentCount: 3,
-        canChangeEnvironment: false,
-        canCreateEnvironment: true,
-      }),
-    ).toBe(false);
-  });
-});
-
-describe("cloudBaseRefs", () => {
-  const ref = (name: string, remoteName?: string, isDefault = false): VcsRef => ({
-    name,
-    current: false,
-    isDefault,
-    worktreePath: null,
-    isRemote: remoteName !== undefined,
-    ...(remoteName ? { remoteName } : {}),
-  });
-  const refs = [
-    ref("main", undefined, true),
-    ref("local-only"),
-    ref("origin/main", "origin", true),
-    ref("origin/feature/x", "origin"),
-    ref("upstream/release", "upstream"),
-  ];
-  const locator = (remoteName: string) => ({
-    source: "git-remote" as const,
-    remoteName,
-    remoteUrl: `git@github.com:${remoteName}/repo.git`,
-  });
-
-  it("offers the cloned remote's branches by their remote names, never a local-only one", () => {
-    const names = (identity: Parameters<typeof cloudBaseRefs>[1]) =>
-      cloudBaseRefs(refs, identity).map((entry) => [entry.name, entry.isDefault]);
-    expect(names({ canonicalKey: "github.com/me/repo", locator: locator("origin") })).toEqual([
-      ["main", true],
-      ["feature/x", false],
-    ]);
-    // A fork's identity names its upstream, but the cloud clones its origin.
-    expect(
-      names({
-        canonicalKey: "github.com/them/repo",
-        locator: locator("upstream"),
-        origin: { owner: "me", name: "repo", remoteUrl: "git@github.com:me/repo.git" },
-      }),
-    ).toEqual([
-      ["main", true],
-      ["feature/x", false],
-    ]);
-    expect(names({ canonicalKey: "github.com/them/repo", locator: locator("upstream") })).toEqual([
-      ["release", false],
-    ]);
   });
 });

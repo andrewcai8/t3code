@@ -3,8 +3,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import type { BoxUsageStore } from "../usage/boxUsage.ts";
-import { CACHE_RETENTION_DAYS } from "../usage/UsageService.ts";
+import { BOX_USAGE_RETENTION_DAYS, type BoxUsageStore } from "../usage/boxUsage.ts";
 import type { ProvisionStoreError } from "./ProvisionOperationStore.ts";
 
 export const LEASE_UPKEEP_INTERVAL = Duration.minutes(5);
@@ -62,7 +61,7 @@ export const runLeaseUpkeep = (input: {
     );
     const now = yield* Clock.currentTimeMillis;
     yield* input.boxUsage
-      .prune(DateTime.formatIso(DateTime.makeUnsafe(now - CACHE_RETENTION_DAYS * 86_400_000)))
+      .prune(DateTime.formatIso(DateTime.makeUnsafe(now - BOX_USAGE_RETENTION_DAYS * 86_400_000)))
       .pipe(Effect.ignore({ log: "Warn", message: "old cloud box usage could not be pruned" }));
   });
   // Started, not awaited: each chat's pass runs on its own and a slow one never delays the tick.

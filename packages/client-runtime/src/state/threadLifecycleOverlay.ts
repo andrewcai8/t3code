@@ -1,19 +1,24 @@
 import {
   EnvironmentId,
   ThreadId,
-  type OrchestrationThreadShell,
+  type OrchestrationV2DispatchCommandResult,
+  type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadShell,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
 import { ConnectionBlockedError } from "../connection/model.ts";
 
 import { isTransportConnectionErrorMessage } from "../errors/transport.ts";
 import { EnvironmentRpcUnavailableError, isRpcClientError } from "../rpc/client.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
-import { environmentAllowsThreadSettlement } from "./threadSettled.ts";
+import type { AtomCommand } from "./runtime.ts";
+import { environmentAllowsThreadSettlement } from "./threadSettlement.ts";
 
 const isEnvironmentRpcUnavailable = Schema.is(EnvironmentRpcUnavailableError);
 const isConnectionBlocked = Schema.is(ConnectionBlockedError);
@@ -61,7 +66,7 @@ export function isOfflineThreadLifecycleDispatchResult(
   );
 }
 
-export function threadLifecycleOverlaysEqual(
+function threadLifecycleOverlaysEqual(
   left: ThreadLifecycleOverlay | undefined,
   right: ThreadLifecycleOverlay | undefined,
 ): boolean {
@@ -70,55 +75,91 @@ export function threadLifecycleOverlaysEqual(
   return left.kind === right.kind && left.at === right.at;
 }
 
+function sameInstant(left: DateTime.Utc | null | undefined, right: DateTime.Utc): boolean {
+  return left != null && DateTime.Equivalence(left, right);
+}
+
 export function applyThreadLifecycleOverlay<
   T extends Pick<
-    OrchestrationThreadShell,
+    OrchestrationV2ThreadShell,
     "settledOverride" | "settledAt" | "unsettledAt" | "activeOrderKey"
   >,
 >(thread: T, overlay: ThreadLifecycleOverlay | undefined): T {
-  // A deleted thread is dropped from the lists instead; see withoutDeletedThreads.
+  // A deleted thread is dropped from the snapshot instead; see withThreadLifecycleOverlays.
   if (overlay === undefined || overlay.kind === "deleted") return thread;
+  const at = DateTime.makeUnsafe(overlay.at);
   if (overlay.kind === "settled") {
     if (
       thread.settledOverride === "settled" &&
-      thread.settledAt === overlay.at &&
-      thread.unsettledAt === null &&
-      thread.activeOrderKey === null
+      sameInstant(thread.settledAt, at) &&
+      thread.unsettledAt == null &&
+      thread.activeOrderKey == null
     ) {
       return thread;
     }
     return {
       ...thread,
       settledOverride: "settled",
-      settledAt: overlay.at,
+      settledAt: at,
       unsettledAt: null,
       activeOrderKey: null,
     };
   }
   if (thread.settledOverride === "active" && thread.settledAt === null) {
-    return thread.unsettledAt === overlay.at ? thread : { ...thread, unsettledAt: overlay.at };
+    return sameInstant(thread.unsettledAt, at) ? thread : { ...thread, unsettledAt: at };
   }
   return {
     ...thread,
     settledOverride: "active",
     settledAt: null,
-    unsettledAt: overlay.at,
+    unsettledAt: at,
   };
 }
 
-/** Drop threads deleted on this device from one environment's thread list. */
-export function withoutDeletedThreads<T extends { readonly id: ThreadId }>(
-  environmentId: EnvironmentId,
-  threads: ReadonlyArray<T>,
-  overlays: ReadonlyMap<string, ThreadLifecycleOverlay>,
-): ReadonlyArray<T> {
-  let deleted: Set<ThreadId> | undefined;
-  for (const [key, overlay] of overlays) {
-    if (overlay.kind !== "deleted") continue;
-    const ref = parseThreadKey(key);
-    if (ref.environmentId === environmentId) (deleted ??= new Set()).add(ref.threadId);
-  }
-  return deleted === undefined ? threads : threads.filter((thread) => !deleted.has(thread.id));
+/**
+ * Each environment's shell snapshot with this device's pending offline settles, un-settles and
+ * deletes applied, so every thread list and point read built on it shows them.
+ */
+export function withThreadLifecycleOverlays(
+  sourceSnapshotAtom: (
+    environmentId: EnvironmentId,
+  ) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
+  overlayAtom: Atom.Atom<ReadonlyMap<string, ThreadLifecycleOverlay>> = threadLifecycleOverlayAtom,
+) {
+  // Memoized per source thread, so a recompute hands list atoms the same overlaid objects.
+  const overlaidThreads = new WeakMap<
+    OrchestrationV2ThreadShell,
+    { readonly overlay: ThreadLifecycleOverlay; readonly result: OrchestrationV2ThreadShell }
+  >();
+  const overlayThread = (thread: OrchestrationV2ThreadShell, overlay: ThreadLifecycleOverlay) => {
+    const cached = overlaidThreads.get(thread);
+    if (cached !== undefined && threadLifecycleOverlaysEqual(cached.overlay, overlay)) {
+      return cached.result;
+    }
+    const result = applyThreadLifecycleOverlay(thread, overlay);
+    overlaidThreads.set(thread, { overlay, result });
+    return result;
+  };
+  return Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get): OrchestrationV2ShellSnapshot | null => {
+      const snapshot = get(sourceSnapshotAtom(environmentId));
+      const overlays = get(overlayAtom);
+      if (snapshot === null || overlays.size === 0) return snapshot;
+      let changed = false;
+      const threads: OrchestrationV2ThreadShell[] = [];
+      for (const thread of snapshot.threads) {
+        const overlay = overlays.get(threadKey({ environmentId, threadId: thread.id }));
+        if (overlay?.kind === "deleted") {
+          changed = true;
+          continue;
+        }
+        const next = overlay === undefined ? thread : overlayThread(thread, overlay);
+        changed ||= next !== thread;
+        threads.push(next);
+      }
+      return changed ? { ...snapshot, threads } : snapshot;
+    }).pipe(Atom.withLabel(`thread-lifecycle-overlay-snapshot:${environmentId}`)),
+  );
 }
 
 export function isThreadLifecycleOfflineFailure(error: unknown): boolean {
@@ -182,6 +223,39 @@ export function queueOfflineThreadLifecycleOverlay(
   setThreadLifecycleOverlay(registry, ref, { kind, at });
 }
 
+/**
+ * Settles, un-settles and deletes made while the environment is unreachable wait as overlays: the
+ * command reports the offline result and the overlay flushes once the environment reconnects.
+ */
+export function recoverOfflineThreadLifecycle<
+  W extends {
+    readonly environmentId: EnvironmentId;
+    readonly input: { readonly threadId: ThreadId };
+  },
+  E,
+>(
+  kind: ThreadLifecycleOverlayKind,
+  command: AtomCommand<W, OrchestrationV2DispatchCommandResult, E>,
+): AtomCommand<W, OrchestrationV2DispatchCommandResult, E> {
+  return {
+    label: command.label,
+    run: async (registry, target) => {
+      const result = await command.run(registry, target);
+      if (!AsyncResult.isFailure(result)) return result;
+      const error = Cause.findErrorOption(result.cause);
+      if (Option.isNone(error) || !isThreadLifecycleOfflineFailure(error.value)) return result;
+      queueOfflineThreadLifecycleOverlay(
+        registry,
+        { environmentId: target.environmentId, threadId: target.input.threadId },
+        kind,
+      );
+      return AsyncResult.success<OrchestrationV2DispatchCommandResult, E>(
+        OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT,
+      );
+    },
+  };
+}
+
 export interface ThreadLifecycleOverlayFlushJob {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -221,7 +295,7 @@ export interface ThreadLifecycleOverlayEnvironmentState {
   readonly live: boolean;
   readonly capabilities: { readonly threadSettlement?: boolean } | undefined;
   readonly snapshot: {
-    readonly threads: ReadonlyArray<Pick<OrchestrationThreadShell, "id" | "settledOverride">>;
+    readonly threads: ReadonlyArray<Pick<OrchestrationV2ThreadShell, "id" | "settledOverride">>;
   } | null;
 }
 
@@ -236,7 +310,7 @@ export function planThreadLifecycleOverlaySync(input: {
   const liveEnvironmentIds = new Set<EnvironmentId>();
   const liveCapableEnvironmentIds = new Set<EnvironmentId>();
   const liveIncapableEnvironmentIds = new Set<EnvironmentId>();
-  const rawThreadsByKey = new Map<string, Pick<OrchestrationThreadShell, "settledOverride">>();
+  const rawThreadsByKey = new Map<string, Pick<OrchestrationV2ThreadShell, "settledOverride">>();
   for (const environment of input.environments) {
     const allows = environmentAllowsThreadSettlement(environment.capabilities);
     if (environment.live) liveEnvironmentIds.add(environment.environmentId);
@@ -279,7 +353,7 @@ export function reconcileThreadLifecycleOverlays(
   input: {
     readonly rawThreadsByKey: ReadonlyMap<
       string,
-      Pick<OrchestrationThreadShell, "settledOverride">
+      Pick<OrchestrationV2ThreadShell, "settledOverride">
     >;
     readonly liveCapableEnvironmentIds: ReadonlySet<EnvironmentId>;
     readonly liveIncapableEnvironmentIds: ReadonlySet<EnvironmentId>;

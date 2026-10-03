@@ -4,13 +4,16 @@ import {
   type EnvironmentPresentation as BaseEnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
 import { Discovery } from "@t3tools/client-runtime/relay";
-import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useMemo } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
-import { environmentPresentations, useEnvironmentPresentation } from "./presentation";
+import {
+  environmentPresentations,
+  environmentSummaries,
+  useEnvironmentPresentation,
+} from "./presentation";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { relayEnvironmentDiscovery } from "./relay";
 import { usePreparedConnection } from "./session";
@@ -56,15 +59,6 @@ export function useEnvironments() {
   };
 }
 
-/**
- * Every enabled environment, cloud boxes included. Only what follows a box's own chats, such as
- * its notifications, reads this; anything that lists places to run things reads `useEnvironments`.
- */
-export function useEnabledEnvironmentIds(): ReadonlyArray<EnvironmentId> {
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  return useMemo(() => [...enabledEnvironmentIds(catalog)], [catalog]);
-}
-
 export function usePrimaryEnvironmentId(): EnvironmentId | null {
   return useAtomValue(primaryEnvironmentIdAtom);
 }
@@ -93,4 +87,24 @@ export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): 
 
 export function useRelayEnvironmentDiscovery(): Discovery.RelayEnvironmentDiscoveryState {
   return useAtomValue(relayEnvironmentDiscovery.stateValueAtom);
+}
+
+export function useEnvironmentIds() {
+  return useAtomValue(environmentSummaries.environmentIdsAtom);
+}
+
+export function useEnvironmentIdentities() {
+  return useAtomValue(environmentSummaries.identitiesAtom);
+}
+
+export function usePullRequestsSupported() {
+  return useAtomValue(environmentSummaries.pullRequestsSupportedAtom);
+}
+
+export function useEnvironmentMachines() {
+  return useAtomValue(environmentSummaries.machineByIdAtom);
+}
+
+export function useConnectedEnvironmentIds() {
+  return useAtomValue(environmentSummaries.connectedEnvironmentIdsAtom);
 }

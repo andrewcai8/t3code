@@ -13,7 +13,7 @@ import { AndroidHeaderIconButton } from "../../components/AndroidScreenHeader";
 import { CloudEnvironmentRows } from "../connection/CloudEnvironmentRows";
 import { LocalEnvironmentList } from "../connection/LocalEnvironmentList";
 import { GitHubRoutingSettings } from "../connection/GitHubRoutingSettings";
-import { ProvisionedEnvironmentRows } from "../connection/ProvisionedEnvironmentRows";
+import { HostCloudBoxSections } from "../connection/HostCloudBoxSections";
 import { splitEnvironmentSections } from "../connection/environmentSections";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
@@ -174,15 +174,7 @@ export function SettingsEnvironmentsRouteScreen() {
           onUpdate={handleUpdateEnvironment}
         />
 
-        {connectedEnvironments
-          .filter((environment) => environment.connectionState === "connected")
-          .map((environment) => (
-            <ProvisionedEnvironmentRows
-              key={environment.environmentId}
-              managerId={environment.environmentId}
-              managerLabel={environment.environmentLabel}
-            />
-          ))}
+        <HostCloudBoxSections />
 
         {/* Always mounted: already-connected relay environments must stay
             visible (and removable) even when cloud config is missing or the

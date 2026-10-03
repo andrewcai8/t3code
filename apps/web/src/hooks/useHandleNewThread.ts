@@ -1,5 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import { newChatProject } from "@t3tools/client-runtime/cloud";
 import {
   scopedProjectKey,
   scopeProjectRef,
@@ -9,7 +8,6 @@ import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
-  draftSessionHasInvestedWork,
   markPromotedDraftThreadByRef,
   type DraftId,
   type DraftThreadEnvMode,
@@ -24,7 +22,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { readProjects, readThreadShell, useProjects, useThread } from "../state/entities";
+import { readProjects, readThreadShell, useProjects, useThreadShell } from "../state/entities";
 import {
   hasExplicitComposerModelSelection,
   resolveNewDraftStartFromOrigin,
@@ -34,8 +32,9 @@ import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { useNewChatPlacement } from "../cloud/automationHosts";
 import { useClientSettings } from "./useSettings";
+import { placeNewChat } from "../cloud/newChatPlacement";
+import { draftSessionHasInvestedWork } from "../cloud/draftInvestedWork";
 
 interface NewThreadWorkspaceOptions {
   branch?: string | null;
@@ -59,7 +58,6 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const newChatPlacement = useNewChatPlacement();
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -81,23 +79,8 @@ export function useNewThreadHandler() {
       // up again and finding whichever draft it happens to hold.
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
-      const target = newChatProject({
-        requested: requestedProjectRef,
-        projects,
-        logicalProjectKey: (project) =>
-          deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
-        ...newChatPlacement,
-      });
-      // A project whose create event has not landed yet opens as asked.
-      const isKnownProject = projects.some(
-        (project) =>
-          project.environmentId === requestedProjectRef.environmentId &&
-          project.id === requestedProjectRef.projectId,
-      );
-      if (!target && isKnownProject) return Promise.resolve(null);
-      const projectRef = target
-        ? scopeProjectRef(target.environmentId, target.id)
-        : requestedProjectRef;
+      const projectRef = placeNewChat(requestedProjectRef, projects, projectGroupingSettings);
+      if (projectRef === null) return Promise.resolve(null);
       const targetServerSettings =
         environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
       const {
@@ -203,8 +186,8 @@ export function useNewThreadHandler() {
         markPromotedDraftThreadByRef(storedDraftThreadRef);
       }
       // New-thread surfaces (button, hotkeys, "/" landing, palette) only
-      // ever reuse a draft the user has NOT invested in. Typed content,
-      // attachments, or an in-flight first-send stay alive where they are
+      // ever reuse a draft the user has NOT invested in. A draft with typed
+      // text or attachments is work in progress: it stays alive where it is
       // (reachable from the sidebar draft rows) and this request mints a
       // fresh draft instead — the remap in the store preserves invested
       // drafts rather than deleting them.
@@ -457,13 +440,7 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [
-      environmentServerConfigs,
-      getCurrentRouteTarget,
-      newChatPlacement,
-      projectGroupingSettings,
-      router,
-    ],
+    [environmentServerConfigs, getCurrentRouteTarget, projectGroupingSettings, router],
   );
 }
 
@@ -475,7 +452,7 @@ export function useHandleNewThread() {
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const routeDraftId = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
-  const activeThread = useThread(routeThreadRef);
+  const activeThread = useThreadShell(routeThreadRef);
   const getDraftThread = useComposerDraftStore((store) => store.getDraftThread);
   const activeDraftThread = useComposerDraftStore(() =>
     routeTarget

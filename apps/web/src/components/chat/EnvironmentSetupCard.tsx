@@ -72,7 +72,7 @@ export function environmentSetupDescription(snapshot: CloudEnvironmentSetupSnaps
   }
 }
 
-export function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps) {
+function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps) {
   const running = snapshot.phase !== "ready" && snapshot.phase !== "failed";
   const nowMs = useNowWhile(running);
   const totalElapsed = (() => {
@@ -124,5 +124,25 @@ export function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCar
         </div>
       ) : null}
     </section>
+  );
+}
+
+/** The setup card as the timeline's footer, laid out like a timeline row. */
+export function EnvironmentSetupFooter({
+  snapshot,
+  onCancel,
+}: {
+  snapshot: CloudEnvironmentSetupSnapshot;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="messages-timeline-row-frame">
+      <div className="chat-content-lane overflow-x-clip pb-2" data-timeline-root="true">
+        <EnvironmentSetupCard
+          snapshot={snapshot}
+          onCancel={snapshot.phase === "ready" ? null : onCancel}
+        />
+      </div>
+    </div>
   );
 }

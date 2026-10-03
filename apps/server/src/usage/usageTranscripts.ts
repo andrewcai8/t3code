@@ -26,12 +26,6 @@ export interface UsageRecord {
    */
   readonly fast: boolean;
   /**
-   * The part of `totals.cacheCreationTokens` written to the one-hour cache,
-   * which bills at a higher rate than the five-minute cache. Only Claude Code
-   * records the split.
-   */
-  readonly oneHourCacheWriteTokens?: number;
-  /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.
    */
@@ -107,11 +101,10 @@ function grokCostTicksToUsd(ticks: unknown): number | null {
 /**
  * Parses one line of a Claude Code transcript.
  *
- * Claude Code writes one record per assistant *content block*, and every one
- * of them carries a `usage` object for the parent message: the complete one in
- * a main transcript, the usage so far in a subagent's. Summing them overcounts
- * by roughly 2.4x on a real workload, so the caller must keep one record per
- * `dedupeKey`, the one with the most output.
+ * T3 Code writes one record per assistant *content block*, and every one of
+ * those records repeats the same complete `usage` object for the parent
+ * message. Summing them overcounts by roughly 2.4x on a real workload, so the
+ * caller must drop repeats by `dedupeKey` and keep the first.
  */
 export function parseClaudeLine(line: string): UsageRecord | null {
   let parsed: unknown;
@@ -136,10 +129,6 @@ export function parseClaudeRecord(parsed: unknown): UsageRecord | null {
   const usage = messageRecord["usage"];
   if (typeof usage !== "object" || usage === null) return null;
   const usageRecord = usage as Record<string, unknown>;
-  const cacheCreation =
-    typeof usageRecord["cache_creation"] === "object" && usageRecord["cache_creation"] !== null
-      ? (usageRecord["cache_creation"] as Record<string, unknown>)
-      : undefined;
 
   const timestampMs = parseTimestampMs(record["timestamp"]);
   if (timestampMs === null) return null;
@@ -171,7 +160,6 @@ export function parseClaudeRecord(parsed: unknown): UsageRecord | null {
     },
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     fast: usageRecord["speed"] === "fast",
-    oneHourCacheWriteTokens: int(cacheCreation?.["ephemeral_1h_input_tokens"]),
     dedupeKey,
   };
 }

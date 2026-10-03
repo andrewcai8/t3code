@@ -22,7 +22,6 @@
  * @module provider/Drivers/CodexDriver
  */
 import { CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
-import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -33,18 +32,15 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneration.ts";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import { ServerConfig } from "../../config.ts";
+import * as ServerConfig from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
-import { ServerSettingsService } from "../../serverSettings.ts";
+import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
 import {
-  CODEX_LOGIN_REFRESH_AHEAD_MS,
-  codexLoginExpiredMessage,
-  codexLoginRefreshDue,
-  codexLoginSignedOut,
-  parseCodexLogin,
-} from "../codexLoginCopy.ts";
+  createCodexAdapterV2,
+  type CodexAdapterV2DriverEnv,
+} from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import * as ResetCreditCoordinator from "../Layers/resetCreditCoordinator.ts";
 import {
   checkCodexProviderStatus,
@@ -53,13 +49,12 @@ import {
   withCodexAppServerClient,
 } from "../Layers/CodexProvider.ts";
 import { resolveCodexLaunchArgs } from "../Layers/codexLaunchArgs.ts";
-import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import * as ModelManifest from "../ModelManifest.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { resolveCodexProviderEnvironment } from "../codexProviderEnvironment.ts";
+import { makeCodexHostLogin } from "./codexHostLogin.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeCachedProviderMaintenanceResolution,
@@ -78,9 +73,9 @@ import {
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
 import { makeManagedCodexProvider } from "./CodexManagedProvider.ts";
-import { CodexInstallation } from "../CodexInstallation.ts";
-import { ServerSecretStore } from "../../auth/ServerSecretStore.ts";
-import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.ts";
+import * as CodexInstallation from "../CodexInstallation.ts";
+import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -108,22 +103,13 @@ function makeCodexMaintenanceResolver(sharedHomePath: string) {
   });
 }
 
-export function resolveCodexProviderEnvironment(
-  environment: NodeJS.ProcessEnv,
-  homeLayout: { readonly effectiveHomePath: string | undefined; readonly sharedHomePath: string },
-): NodeJS.ProcessEnv {
-  return {
-    ...environment,
-    CODEX_HOME: homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
-  };
-}
-
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
  * driver's `R` so the registry layer aggregates these across every
  * registered driver and the runtime satisfies them once.
  */
 export type CodexDriverEnv =
+  | CodexAdapterV2DriverEnv
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | ResetCreditCoordinator.ResetCreditCoordinator
@@ -132,12 +118,12 @@ export type CodexDriverEnv =
   | HttpClient.HttpClient
   | ModelManifest.ModelManifest
   | Path.Path
-  | ProviderEventLoggers
-  | ServerConfig
-  | ServerSettingsService
-  | ServerSecretStore
-  | ServerEnvironmentIdentity
-  | CodexInstallation;
+  | ProviderEventLoggers.ProviderEventLoggers
+  | ServerConfig.ServerConfig
+  | ServerSettings.ServerSettingsService
+  | ServerSecretStore.ServerSecretStore
+  | ServerEnvironment.ServerEnvironmentIdentity
+  | CodexInstallation.CodexInstallation;
 
 export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   driverKind: DRIVER_KIND,
@@ -163,14 +149,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const fileSystem = yield* FileSystem.FileSystem;
       const pathService = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
-      const serverSettings = yield* ServerSettingsService;
-      const eventLoggers = yield* ProviderEventLoggers;
+      const serverSettings = yield* ServerSettings.ServerSettingsService;
       const modelManifest = yield* ModelManifest.ModelManifest;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(config);
-      // Do not inherit an ambient CODEX_HOME from the shell that launched the
-      // desktop server. Each instance must probe and run against its own home.
-      const providerEnvironment = resolveCodexProviderEnvironment(processEnv, homeLayout);
+      const processEnv = resolveCodexProviderEnvironment(environment, process.env, homeLayout);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -196,53 +178,46 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: expandHomePath(config.binaryPath),
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const authPath = pathService.join(
-        homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
-        "auth.json",
-      );
-      const { localAgentRuns } = yield* ServerConfig;
-      const readLogin = fileSystem.readFileString(authPath).pipe(
-        Effect.orElseSucceed(() => ""),
-        Effect.map(parseCodexLogin),
-      );
-      const readLoginAt = Effect.zipWith(readLogin, Clock.currentTimeMillis, (login, now) => ({
-        login,
-        context: { now, localAgentRuns },
-      }));
-      const refreshDue = readLoginAt.pipe(
-        Effect.map(({ login, context }) =>
-          codexLoginRefreshDue(login, CODEX_LOGIN_REFRESH_AHEAD_MS, context),
+      const hostLogin = yield* makeCodexHostLogin({
+        authPath: pathService.join(
+          homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
+          "auth.json",
         ),
-      );
-      // Codex still reports a copied login (`stripCodexRefreshToken`) as signed
-      // in after its access token dies, and no refresh will ever revive it. The
-      // same goes for a host's own login whose refresh failed.
-      const markSignedOutLogin = (draft: ServerProviderDraft) =>
-        draft.auth.status !== "authenticated"
-          ? Effect.succeed(draft)
-          : readLoginAt.pipe(
-              Effect.map(({ login, context }): ServerProviderDraft =>
-                codexLoginSignedOut(login, context)
-                  ? {
-                      ...draft,
-                      status: "error",
-                      auth: { status: "unauthenticated" },
-                      message: codexLoginExpiredMessage(displayName ?? instanceId, login, context),
-                    }
-                  : draft,
-              ),
-            );
+        instanceName: displayName ?? instanceId,
+      });
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(
           makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
           {
             binaryPath: effectiveConfig.binaryPath,
-            env: providerEnvironment,
+            env: processEnv,
           },
         ).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, pathService),
+        ),
+      );
+
+      const orchestrationAdapter = yield* createCodexAdapterV2(
+        {
+          instanceId,
+          displayName,
+          accentColor,
+          environment,
+          enabled,
+          config,
+        },
+        { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Failed to build Codex orchestration adapter.",
+              cause,
+            }),
         ),
       );
 
@@ -256,18 +231,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const checkProvider = modelManifest.refreshInBackground.pipe(
         Effect.andThen(
           Effect.zipWith(
-            refreshDue.pipe(
-              Effect.flatMap((refreshLogin) =>
-                checkCodexProviderStatus(
-                  effectiveConfig,
-                  undefined,
-                  providerEnvironment,
-                  undefined,
-                  refreshLogin,
-                ),
+            hostLogin.checkStatus((refreshLogin) =>
+              checkCodexProviderStatus(
+                effectiveConfig,
+                undefined,
+                processEnv,
+                undefined,
+                refreshLogin,
               ),
-              Effect.flatMap(markSignedOutLogin),
-              Effect.annotateLogs({ providerInstanceId: instanceId }),
             ),
             modelManifest.current,
             (draft, manifest) =>
@@ -312,38 +283,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             }),
         ),
       );
-      // On a host, the status probe refreshes the host's own login once it is
-      // due (`codexLoginRefreshDue`), but probes run on an interval only while
-      // a client is watching, and a host mostly runs unwatched. Probes for one
-      // instance never overlap, so this cannot race the usage probe.
-      if (enabled && !localAgentRuns)
-        yield* Effect.sleep("1 hour").pipe(
-          Effect.andThen(refreshDue),
-          Effect.flatMap((due) =>
-            due ? snapshot.refresh.pipe(Effect.andThen(refreshDue)) : Effect.succeed(false),
-          ),
-          Effect.flatMap((stillDue) =>
-            stillDue ? Effect.logWarning("Codex did not refresh this login.") : Effect.void,
-          ),
-          Effect.ignoreCause({ log: true }),
-          Effect.forever,
-          Effect.annotateLogs({ providerInstanceId: instanceId }),
-          Effect.forkScoped,
-        );
-      const models = snapshot.getSnapshot.pipe(Effect.map((value) => value.models));
-      // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
-      // channels at construction time — their failure modes are all on the
-      // per-operation closures they return. No `mapError` wrapper is needed
-      // here; the registry only has to worry about snapshot-build and
-      // spawner-availability failures surfaced from `checkCodexProviderStatus`
-      // above.
-      const adapter = yield* makeCodexAdapter(effectiveConfig, {
-        instanceId,
-        environment: providerEnvironment,
-        models,
-        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
-      });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv, models);
+      if (enabled) yield* hostLogin.keepRefreshed(snapshot.refresh);
+      const textGeneration = yield* makeCodexTextGeneration(
+        effectiveConfig,
+        processEnv,
+        snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
+      );
       const snapshotForCwd = (cwd: string) =>
         !effectiveConfig.enabled
           ? snapshot.getSnapshot
@@ -352,9 +297,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               probeCodexSkillsForCwd({
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, providerEnvironment),
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
                 cwd,
-                environment: providerEnvironment,
+                environment: processEnv,
               }).pipe(
                 Effect.scoped,
                 Effect.timeout("20 seconds"),
@@ -388,10 +333,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               const { client } = yield* withCodexAppServerClient({
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, providerEnvironment),
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
                 // Account-level request; any directory serves, same as the status probe.
                 cwd: process.cwd(),
-                environment: providerEnvironment,
+                environment: processEnv,
               });
               const response = yield* client.request("account/rateLimitResetCredit/consume", {
                 idempotencyKey,
@@ -448,7 +393,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         snapshot,
         snapshotForCwd,
         consumeResetCredit,
-        adapter,
+        orchestrationAdapter,
         textGeneration,
       } satisfies ProviderInstance;
     }),

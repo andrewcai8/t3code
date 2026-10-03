@@ -1,11 +1,7 @@
 import {
-  ClientPresentation,
-  CloudSession,
-  EnvironmentOwnedDataCleanup,
+  ClientCapabilities,
   PlatformConnectionSource,
-  PrimaryEnvironmentAuth,
-  RelayDeviceIdentity,
-  SshEnvironmentGateway,
+  Persistence,
 } from "@t3tools/client-runtime/platform";
 import {
   BearerConnectionCredential,
@@ -19,13 +15,13 @@ import {
   type PlatformConnectionRegistration,
   PrimaryConnectionRegistration,
   PrimaryConnectionTarget,
-  Presence,
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
 import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import { EnvironmentRpcRequestObserver } from "@t3tools/client-runtime/rpc";
+import { presenceLayer } from "./presenceLayer";
 import {
   AuthStandardClientScopes,
   type DesktopBridge,
@@ -117,48 +113,6 @@ const wakeupsLayer = Wakeups.layer({
   ),
 });
 
-// Input this often is enough: presence only asks whether the user touched the app this hour.
-const PRESENCE_INPUT_SAMPLE_MS = 30_000;
-const PRESENCE_INPUT_EVENTS = ["pointerdown", "keydown", "wheel", "scroll", "touchstart", "focus"];
-
-const presenceLayer = Presence.layer({
-  visible: Stream.callback<boolean>((queue) =>
-    Effect.acquireRelease(
-      Effect.sync(() => {
-        const listener = () => Queue.offerUnsafe(queue, document.visibilityState === "visible");
-        listener();
-        document.addEventListener("visibilitychange", listener);
-        return listener;
-      }),
-      (listener) =>
-        Effect.sync(() => {
-          document.removeEventListener("visibilitychange", listener);
-        }),
-    ).pipe(Effect.asVoid),
-  ),
-  inputs: Stream.callback<void>((queue) =>
-    Effect.acquireRelease(
-      Effect.sync(() => {
-        let sampledAt = Number.NEGATIVE_INFINITY;
-        const listener = () => {
-          const now = performance.now();
-          if (now - sampledAt < PRESENCE_INPUT_SAMPLE_MS) return;
-          sampledAt = now;
-          Queue.offerUnsafe(queue, undefined);
-        };
-        for (const event of PRESENCE_INPUT_EVENTS)
-          window.addEventListener(event, listener, { capture: true, passive: true });
-        return listener;
-      }),
-      (listener) =>
-        Effect.sync(() => {
-          for (const event of PRESENCE_INPUT_EVENTS)
-            window.removeEventListener(event, listener, { capture: true });
-        }),
-    ).pipe(Effect.asVoid),
-  ),
-});
-
 function clientMetadata() {
   return clientPresentationMetadata({
     appVersion: APP_VERSION,
@@ -221,11 +175,11 @@ export const provisionDesktopSshEnvironment = Effect.fn(
 
 const capabilitiesLayer = Layer.effectContext(
   Effect.sync(() => {
-    const presentation = ClientPresentation.of({
+    const presentation = ClientCapabilities.ClientPresentation.of({
       metadata: clientMetadata(),
       scopes: AuthStandardClientScopes,
     });
-    const cloudSession = CloudSession.of({
+    const cloudSession = ClientCapabilities.CloudSession.of({
       identity: Effect.sync(() =>
         Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)),
       ),
@@ -255,10 +209,10 @@ const capabilitiesLayer = Layer.effectContext(
         return token;
       }),
     });
-    const identity = RelayDeviceIdentity.of({
+    const identity = ClientCapabilities.RelayDeviceIdentity.of({
       deviceId: Effect.succeedNone,
     });
-    const primaryAuth = PrimaryEnvironmentAuth.of({
+    const primaryAuth = ClientCapabilities.PrimaryEnvironmentAuth.of({
       bearerToken: Effect.tryPromise({
         try: readDesktopPrimaryBearerToken,
         catch: (cause) =>
@@ -268,7 +222,7 @@ const capabilitiesLayer = Layer.effectContext(
           }),
       }).pipe(Effect.map(Option.fromNullishOr)),
     });
-    const ssh = SshEnvironmentGateway.of({
+    const ssh = ClientCapabilities.SshEnvironmentGateway.of({
       provision: Effect.fn("web.connectionPlatform.ssh.provision")(function* (target) {
         const bridge = window.desktopBridge;
         if (bridge === undefined) {
@@ -326,11 +280,11 @@ const capabilitiesLayer = Layer.effectContext(
       }),
     });
 
-    return Context.make(CloudSession, cloudSession).pipe(
-      Context.add(PrimaryEnvironmentAuth, primaryAuth),
-      Context.add(RelayDeviceIdentity, identity),
-      Context.add(ClientPresentation, presentation),
-      Context.add(SshEnvironmentGateway, ssh),
+    return Context.make(ClientCapabilities.CloudSession, cloudSession).pipe(
+      Context.add(ClientCapabilities.PrimaryEnvironmentAuth, primaryAuth),
+      Context.add(ClientCapabilities.RelayDeviceIdentity, identity),
+      Context.add(ClientCapabilities.ClientPresentation, presentation),
+      Context.add(ClientCapabilities.SshEnvironmentGateway, ssh),
     );
   }),
 );
@@ -506,10 +460,10 @@ export function secondaryRegistrationsToRetainAfterTopologyRead(
 }
 
 const platformConnectionSourceLayer = Layer.effect(
-  PlatformConnectionSource,
+  PlatformConnectionSource.PlatformConnectionSource,
   Effect.gen(function* () {
     if (isHostedStaticApp() || isLocalEnvironmentDisabled()) {
-      return PlatformConnectionSource.of({
+      return PlatformConnectionSource.PlatformConnectionSource.of({
         registrations: Stream.empty,
       });
     }
@@ -617,7 +571,7 @@ const platformConnectionSourceLayer = Layer.effect(
       return registrations as ReadonlyArray<PlatformConnectionRegistration>;
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
-    return PlatformConnectionSource.of({
+    return PlatformConnectionSource.PlatformConnectionSource.of({
       registrations: Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
         Stream.mapEffect(() => buildPlatformRegistrations),
       ),
@@ -626,8 +580,8 @@ const platformConnectionSourceLayer = Layer.effect(
 );
 
 const environmentOwnedDataCleanupLayer = Layer.succeed(
-  EnvironmentOwnedDataCleanup,
-  EnvironmentOwnedDataCleanup.of({
+  Persistence.EnvironmentOwnedDataCleanup,
+  Persistence.EnvironmentOwnedDataCleanup.of({
     clear: (environmentId) =>
       Effect.sync(() => {
         clearComposerDraftsEnvironment(environmentId);
@@ -642,10 +596,10 @@ const rpcRequestObserverLayer = Layer.succeed(
       Effect.sync(() => {
         nextObservedRpcRequestId += 1;
         const requestId = `${environmentId}:${nextObservedRpcRequestId}`;
-        trackRpcRequestSent(requestId, method, {
-          tag: `${method} · ${environmentId}`,
-          showsOwnProgress,
-        });
+        // A caller that shows its own progress, such as a cloud machine's setup, is never slow.
+        if (!showsOwnProgress) {
+          trackRpcRequestSent(requestId, method, `${method} · ${environmentId}`);
+        }
         return Effect.sync(() => {
           acknowledgeRpcRequest(requestId);
         });
