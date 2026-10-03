@@ -1,4 +1,4 @@
-import { EnvironmentId, type OrchestrationThreadShell } from "@t3tools/contracts";
+import { EnvironmentId, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 import { describe, expect, it } from "@effect/vitest";
@@ -66,15 +66,14 @@ describe("environment presentations", () => {
 });
 
 describe("running box demand", () => {
+  type RunState = Pick<OrchestrationV2ThreadShell, "status" | "activityRunStatus">;
   function harness(input: {
-    readonly session: OrchestrationThreadShell["session"];
+    readonly thread: RunState;
     readonly lifecycle: ProvisionedBox["lifecycle"];
     readonly catalog?: EnvironmentCatalogState;
   }) {
     const registry = AtomRegistry.make();
-    const threads = Atom.make<ReadonlyArray<Pick<OrchestrationThreadShell, "session">>>([
-      { session: input.session },
-    ]);
+    const threads = Atom.make<ReadonlyArray<RunState>>([input.thread]);
     const lifecycle = Atom.make(input.lifecycle);
     const held = new Set<EnvironmentId>();
     const demandAtom = Atom.family((environmentId: EnvironmentId) =>
@@ -105,21 +104,14 @@ describe("running box demand", () => {
     registry.mount(atom);
     return { registry, threads, lifecycle, held };
   }
-  const running = {
-    threadId: "thread",
-    status: "running",
-    providerName: null,
-    runtimeMode: "full-access",
-    activeTurnId: null,
-    lastError: null,
-    updatedAt: "2026-09-28T00:00:00.000Z",
-  } as unknown as OrchestrationThreadShell["session"];
+  const running: RunState = { status: "running", activityRunStatus: "running" };
+  const idle: RunState = { status: "idle", activityRunStatus: null };
 
   it.live("holds a box connected while a turn runs on it, and lets go when it ends", () =>
     Effect.gen(function* () {
-      const { registry, threads, held } = harness({ session: running, lifecycle: "active" });
+      const { registry, threads, held } = harness({ thread: running, lifecycle: "active" });
       expect([...held]).toEqual([BOX.environmentId]);
-      registry.set(threads, [{ session: null }]);
+      registry.set(threads, [idle]);
       // The registry drops an atom nothing mounts on its next task.
       yield* Effect.sleep("1 millis");
       expect([...held]).toEqual([]);
@@ -127,14 +119,14 @@ describe("running box demand", () => {
   );
 
   it("does not dial a box its host paused, whatever the cache last saw", () => {
-    const { registry, lifecycle, held } = harness({ session: running, lifecycle: "paused" });
+    const { registry, lifecycle, held } = harness({ thread: running, lifecycle: "paused" });
     expect([...held]).toEqual([]);
     registry.set(lifecycle, "active");
     expect([...held]).toEqual([BOX.environmentId]);
   });
 
   it("holds a box that joined after its host's list was read once the list is fetched again", () => {
-    const { registry, lifecycle, held } = harness({ session: running, lifecycle: "missing" });
+    const { registry, lifecycle, held } = harness({ thread: running, lifecycle: "missing" });
     // Stands in for the list read before the automation run's box existed.
     expect([...held]).toEqual([]);
     registry.set(lifecycle, "active");
@@ -143,15 +135,22 @@ describe("running box demand", () => {
 
   it("does not pair a box this device never opened just because its listed chat is running", () => {
     expect([
-      [
-        ...harness({ session: running, lifecycle: "active", catalog: catalogWith(entry(BOX)) })
-          .held,
-      ],
-      [...harness({ session: running, lifecycle: "active" }).held],
+      [...harness({ thread: running, lifecycle: "active", catalog: catalogWith(entry(BOX)) }).held],
+      [...harness({ thread: running, lifecycle: "active" }).held],
     ]).toEqual([[], [BOX.environmentId]]);
   });
 
-  it("does not hold a box with no running turn", () => {
-    expect([...harness({ session: null, lifecycle: "active" }).held]).toEqual([]);
+  it("holds a box while its turn starts, and not while it waits on the user or sits idle", () => {
+    expect(
+      (
+        [
+          { status: "starting", activityRunStatus: "starting" },
+          { status: "running", activityRunStatus: "waiting" },
+          { status: "waiting" },
+          { status: "preparing", activityRunStatus: "preparing" },
+          idle,
+        ] satisfies ReadonlyArray<RunState>
+      ).map((thread) => [...harness({ thread, lifecycle: "active" }).held]),
+    ).toEqual([[BOX.environmentId], [], [], [], []]);
   });
 });
