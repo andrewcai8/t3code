@@ -36,25 +36,13 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import {
-  EnvironmentProvisionAttachInput,
-  EnvironmentProvisionAttachResult,
-  EnvironmentProvisionClaimInput,
-  EnvironmentProvisionClaimResult,
-  EnvironmentProvisionDisposeInput,
-  EnvironmentProvisionDisposeResult,
-  EnvironmentProvisionInput,
-  EnvironmentProvisionResult,
-  EnvironmentProvisionTouchInput,
-  EnvironmentProvisionTouchResult,
-  ProvisionedEnvironmentList,
-} from "./environmentControl.ts";
-import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ThreadBoundedSnapshot,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
-  OrchestrationV2ThreadLaunchInput,
 } from "./orchestrationV2.ts";
+import { makeEnvironmentCloudHttpApis } from "./environmentHttpCloud.ts";
+export { EnvironmentOrchestrationLaunchThreadResult } from "./environmentHttpCloud.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
   PullRequestDiffInput,
@@ -62,8 +50,6 @@ import {
   PullRequestOperationError,
   PullRequestUnavailableError,
 } from "./pullRequest.ts";
-import { UsageSummary } from "./usage.ts";
-import { UsageHistoryInput, UsageImportInput, UsageImportResult } from "./usageHistory.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,
@@ -590,81 +576,6 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-const EnvironmentOrchestrationLaunchThreadErrors = [
-  EnvironmentRequestInvalidError,
-  EnvironmentScopeRequiredError,
-  EnvironmentInternalError,
-] as const;
-
-/**
- * What a host learns from starting a chat on one of its cloud boxes. The box replays a repeated
- * `commandId`, so `resumed` is true when an earlier attempt already launched the thread.
- */
-export const EnvironmentOrchestrationLaunchThreadResult = Schema.Struct({
-  threadId: ThreadId,
-  resumed: Schema.Boolean,
-});
-export type EnvironmentOrchestrationLaunchThreadResult =
-  typeof EnvironmentOrchestrationLaunchThreadResult.Type;
-
-export class EnvironmentControlHttpApi extends HttpApiGroup.make("environmentControl")
-  .add(
-    HttpApiEndpoint.post("listProvisioned", "/api/environment-control/list-provisioned", {
-      headers: OptionalBearerHeaders,
-      payload: Schema.Struct({}),
-      success: ProvisionedEnvironmentList,
-      error: EnvironmentScopedOperationErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("provision", "/api/environment-control/provision", {
-      headers: OptionalBearerHeaders,
-      payload: EnvironmentProvisionInput,
-      success: EnvironmentProvisionResult,
-      error: EnvironmentScopedOperationErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("attach", "/api/environment-control/attach", {
-      headers: OptionalBearerHeaders,
-      payload: EnvironmentProvisionAttachInput,
-      success: EnvironmentProvisionAttachResult,
-      error: EnvironmentScopedOperationErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("claim", "/api/environment-control/claim", {
-      headers: OptionalBearerHeaders,
-      payload: EnvironmentProvisionClaimInput,
-      success: EnvironmentProvisionClaimResult,
-      error: EnvironmentScopedOperationErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("touch", "/api/environment-control/touch", {
-      headers: OptionalBearerHeaders,
-      payload: EnvironmentProvisionTouchInput,
-      success: EnvironmentProvisionTouchResult,
-      error: EnvironmentScopedOperationErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("dispose", "/api/environment-control/dispose", {
-      headers: OptionalBearerHeaders,
-      payload: EnvironmentProvisionDisposeInput,
-      success: EnvironmentProvisionDisposeResult,
-      error: EnvironmentScopedOperationErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("launchThread", "/api/orchestration/launch-thread", {
-      headers: OrchestrationProtocolHeaders,
-      payload: OrchestrationV2ThreadLaunchInput,
-      success: EnvironmentOrchestrationLaunchThreadResult,
-      error: EnvironmentOrchestrationLaunchThreadErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  ) {}
-
 /** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
 class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
   HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {
@@ -680,28 +591,6 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
     ],
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
-
-/**
- * A host pulls each cloud box's usage history with the box's broker token, and
- * a machine no client connects to pushes its own.
- */
-export class EnvironmentUsageHttpApi extends HttpApiGroup.make("usage")
-  .add(
-    HttpApiEndpoint.post("history", "/api/usage/history", {
-      headers: OptionalBearerHeaders,
-      payload: UsageHistoryInput,
-      success: UsageSummary,
-      error: EnvironmentOrchestrationSnapshotErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("import", "/api/usage/import", {
-      headers: OptionalBearerHeaders,
-      payload: UsageImportInput,
-      success: UsageImportResult,
-      error: EnvironmentOrchestrationSnapshotErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
-  ) {}
 
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
@@ -763,6 +652,15 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
       error: EnvironmentHttpCloudErrors,
     }),
   ) {}
+
+export const { EnvironmentControlHttpApi, EnvironmentUsageHttpApi } = makeEnvironmentCloudHttpApis({
+  bearerHeaders: OptionalBearerHeaders,
+  protocolHeaders: OrchestrationProtocolHeaders,
+  auth: EnvironmentAuthenticatedAuth,
+  requestInvalid: EnvironmentRequestInvalidError,
+  scopeRequired: EnvironmentScopeRequiredError,
+  internal: EnvironmentInternalError,
+});
 
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
