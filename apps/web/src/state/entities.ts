@@ -157,32 +157,6 @@ export function readProjects(): ReadonlyArray<EnvironmentProject> {
   return appAtomRegistry.get(environmentProjects.projectsAtom);
 }
 
-/** Resolves when a newly paired environment publishes a matching project. */
-export function waitForProjectMatch(
-  predicate: (project: EnvironmentProject) => boolean,
-  timeoutMs = 10_000,
-): Promise<EnvironmentProject> {
-  const find = () => readProjects().find(predicate) ?? null;
-  const current = find();
-  if (current !== null) return Promise.resolve(current);
-  return new Promise((resolve, reject) => {
-    let unsubscribe: (() => void) | null = null;
-    const timeout = setTimeout(() => {
-      unsubscribe?.();
-      reject(new Error("The paired environment did not publish its project."));
-    }, timeoutMs);
-    const finish = () => {
-      const project = find();
-      if (project === null) return;
-      clearTimeout(timeout);
-      unsubscribe?.();
-      resolve(project);
-    };
-    unsubscribe = appAtomRegistry.subscribe(environmentProjects.projectsAtom, finish);
-    finish();
-  });
-}
-
 /** Resolves when the project event reaches the live client store. */
 export function waitForProject(
   ref: ScopedProjectRef,
@@ -263,9 +237,8 @@ export function readEnvironmentSupportsActiveReorder(environmentId: EnvironmentI
 }
 
 /** Whether the environment's server understands thread.settle/unsettle.
-    Missing config (disconnected, not yet loaded) still allows a local settle.
-    False for pre-settlement servers so clients under version skew fall back
-    instead of erroring. */
+    False for pre-settlement servers (capability defaults false on decode),
+    so clients under version skew fall back instead of erroring. */
 export function readEnvironmentSupportsSettlement(environmentId: EnvironmentId): boolean {
   return environmentAllowsThreadSettlement(
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities,

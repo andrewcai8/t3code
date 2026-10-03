@@ -15,13 +15,13 @@ import {
   type PlatformConnectionRegistration,
   PrimaryConnectionRegistration,
   PrimaryConnectionTarget,
-  Presence,
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
 import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import { EnvironmentRpcRequestObserver } from "@t3tools/client-runtime/rpc";
+import { presenceLayer } from "./presenceLayer";
 import {
   AuthStandardClientScopes,
   type DesktopBridge,
@@ -110,48 +110,6 @@ const wakeupsLayer = Wakeups.layer({
     managedRelayAccountChanges(appAtomRegistry).pipe(
       Stream.map(() => "credentials-changed" as const),
     ),
-  ),
-});
-
-// Input this often is enough: presence only asks whether the user touched the app this hour.
-const PRESENCE_INPUT_SAMPLE_MS = 30_000;
-const PRESENCE_INPUT_EVENTS = ["pointerdown", "keydown", "wheel", "scroll", "touchstart", "focus"];
-
-const presenceLayer = Presence.layer({
-  visible: Stream.callback<boolean>((queue) =>
-    Effect.acquireRelease(
-      Effect.sync(() => {
-        const listener = () => Queue.offerUnsafe(queue, document.visibilityState === "visible");
-        listener();
-        document.addEventListener("visibilitychange", listener);
-        return listener;
-      }),
-      (listener) =>
-        Effect.sync(() => {
-          document.removeEventListener("visibilitychange", listener);
-        }),
-    ).pipe(Effect.asVoid),
-  ),
-  inputs: Stream.callback<void>((queue) =>
-    Effect.acquireRelease(
-      Effect.sync(() => {
-        let sampledAt = Number.NEGATIVE_INFINITY;
-        const listener = () => {
-          const now = performance.now();
-          if (now - sampledAt < PRESENCE_INPUT_SAMPLE_MS) return;
-          sampledAt = now;
-          Queue.offerUnsafe(queue, undefined);
-        };
-        for (const event of PRESENCE_INPUT_EVENTS)
-          window.addEventListener(event, listener, { capture: true, passive: true });
-        return listener;
-      }),
-      (listener) =>
-        Effect.sync(() => {
-          for (const event of PRESENCE_INPUT_EVENTS)
-            window.removeEventListener(event, listener, { capture: true });
-        }),
-    ).pipe(Effect.asVoid),
   ),
 });
 
@@ -638,10 +596,10 @@ const rpcRequestObserverLayer = Layer.succeed(
       Effect.sync(() => {
         nextObservedRpcRequestId += 1;
         const requestId = `${environmentId}:${nextObservedRpcRequestId}`;
-        trackRpcRequestSent(requestId, method, {
-          tag: `${method} · ${environmentId}`,
-          showsOwnProgress,
-        });
+        // A caller that shows its own progress, such as a cloud machine's setup, is never slow.
+        if (!showsOwnProgress) {
+          trackRpcRequestSent(requestId, method, `${method} · ${environmentId}`);
+        }
         return Effect.sync(() => {
           acknowledgeRpcRequest(requestId);
         });

@@ -31,8 +31,7 @@ import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLa
 import { LegacyThreadMigrationToast } from "../components/LegacyThreadMigrationToast";
 import { ThreadNotificationCoordinator } from "../components/ThreadNotificationCoordinator";
 import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoordinator";
-import { resumeCloudSends } from "../cloud/cloudSends";
-import { ThreadLifecycleOverlayCoordinator } from "../components/ThreadLifecycleOverlayCoordinator";
+import { CloudCoordinators } from "../cloud/CloudCoordinators";
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
 import { ChatGptWelcomeCoordinator } from "../components/settings/ChatGptWelcomeCoordinator";
 import { ProviderAuthCallbackCoordinator } from "../components/settings/ProviderAuthCallbackCoordinator";
@@ -146,10 +145,6 @@ function RootRouteView() {
   const returningFromWelcomeRef = useRef(pathname === "/welcome");
 
   useEffect(() => {
-    if (primaryEnvironmentAuthenticated) resumeCloudSends();
-  }, [primaryEnvironmentAuthenticated]);
-
-  useEffect(() => {
     if (pathname === "/welcome") {
       returningFromWelcomeRef.current = true;
     }
@@ -239,7 +234,7 @@ function RootRouteView() {
           <SshPasswordPromptDialog />
           <SnapShotCoordinator />
           <ThreadNotificationCoordinator />
-          <ThreadLifecycleOverlayCoordinator />
+          <CloudCoordinators authenticated={primaryEnvironmentAuthenticated} />
           <ConfirmDialogHost />
           <CustomSnoozeDialogHost />
           <SlowRpcRequestToastCoordinator />

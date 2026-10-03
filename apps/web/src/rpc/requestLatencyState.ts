@@ -6,9 +6,9 @@ import { appAtomRegistry } from "./atomRegistry";
 
 export const SLOW_RPC_ACK_THRESHOLD_MS = 15_000;
 /**
- * Some requests are slow by design: installs respond once the package manager
- * finishes, and resuming a paused cloud workspace can wait minutes on E2B.
- * Warning about those after 15s is noise, so they get a much longer leash.
+ * Some requests are slow by design — they shell out to a package manager on the
+ * server and only respond once the install finishes. Warning about those after
+ * 15s is noise, so they get a much longer leash.
  */
 export const LONG_RUNNING_RPC_ACK_THRESHOLD_MS = 120_000;
 export const MAX_TRACKED_RPC_ACK_REQUESTS = 256;
@@ -74,14 +74,9 @@ export function getSlowRpcAckRequests(): ReadonlyArray<SlowRpcAckRequest> {
  * Starts the slow-request timer for one in-flight unary RPC. `method` is the
  * bare WS method (used to decide whether and how long to wait); `tag` is the
  * human-readable label shown in the toast, which defaults to the method.
- * Requests whose caller `showsOwnProgress` are never flagged.
  */
-export function trackRpcRequestSent(
-  requestId: string,
-  method: string,
-  { tag = method, showsOwnProgress = false }: { tag?: string; showsOwnProgress?: boolean } = {},
-): void {
-  if (showsOwnProgress || !shouldTrackRpcAck(method)) {
+export function trackRpcRequestSent(requestId: string, method: string, tag = method): void {
+  if (!shouldTrackRpcAck(method)) {
     return;
   }
 
