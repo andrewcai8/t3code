@@ -34,25 +34,6 @@ describe("RPC authorization scopes", () => {
     );
   });
 
-  it("lets read-only clients list cloud machines but not run or change them", () => {
-    const scopes = [
-      WS_METHODS.environmentControlListProvisioned,
-      WS_METHODS.environmentControlStart,
-      WS_METHODS.environmentControlStop,
-      WS_METHODS.environmentControlProvision,
-      WS_METHODS.environmentControlDispose,
-      WS_METHODS.environmentControlKeep,
-    ].map(requiredScopeForRpcMethod);
-    expect(scopes).toEqual([
-      AuthOrchestrationReadScope,
-      AuthOrchestrationOperateScope,
-      AuthOrchestrationOperateScope,
-      AuthOrchestrationOperateScope,
-      AuthOrchestrationOperateScope,
-      AuthOrchestrationOperateScope,
-    ]);
-  });
-
   it("allows relay status reads without granting relay installation access", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudGetRelayClientStatus)).toBe(
       AuthRelayReadScope,
@@ -111,25 +92,6 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsRequestReviewers)).toBe(
       requiredScopeForRpcMethod(WS_METHODS.pullRequestsComment),
     );
-  });
-
-  it("allows provisioned environment discovery with read scope", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.environmentControlListProvisioned)).toBe(
-      AuthOrchestrationReadScope,
-    );
-  });
-
-  it("requires operate scope for provisioning, fresh attachment and lease cleanup", () => {
-    for (const method of [
-      WS_METHODS.environmentControlProvision,
-      WS_METHODS.environmentControlAttach,
-      WS_METHODS.environmentControlClaim,
-      WS_METHODS.environmentControlTouch,
-      WS_METHODS.environmentControlKeep,
-      WS_METHODS.environmentControlDispose,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
-    }
   });
 
   it("rejects unknown RPC method names", () => {

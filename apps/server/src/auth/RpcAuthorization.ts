@@ -14,6 +14,8 @@ import {
 } from "@t3tools/contracts";
 import type * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
+import { ENVIRONMENT_CONTROL_REQUIRED_SCOPES } from "./environmentControlScopes.ts";
+
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 /**
@@ -78,19 +80,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverGetProcessResourceHistory]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetResourceTelemetryHistory]: AuthOrchestrationReadScope,
   [WS_METHODS.serverRetryResourceTelemetry]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlListProvisioned]: AuthOrchestrationReadScope,
-  [WS_METHODS.environmentControlList]: AuthOrchestrationReadScope,
-  [WS_METHODS.environmentControlStart]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlStop]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlProvision]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlAttach]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlDispose]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlPause]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlResume]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlUpgrade]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlClaim]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlTouch]: AuthOrchestrationOperateScope,
-  [WS_METHODS.environmentControlKeep]: AuthOrchestrationOperateScope,
+  ...ENVIRONMENT_CONTROL_REQUIRED_SCOPES,
   [WS_METHODS.serverGetUsageSummary]: AuthOrchestrationReadScope,
   [WS_METHODS.serverRefreshUsageRates]: AuthOrchestrationReadScope,
   [WS_METHODS.serverSignalProcess]: AuthOrchestrationOperateScope,
