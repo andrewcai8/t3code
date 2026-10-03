@@ -635,6 +635,9 @@ async function preserveUploadedAttachmentsForEditor(
 
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const claimBox = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
+    reportFailure: false,
+  });
   const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
   });
@@ -1196,9 +1199,8 @@ export function useThreadOutboxDrain(): void {
       const deliveryAction = resolveThreadOutboxDeliveryAction({
         isCreation: creation !== undefined,
         threadExists: thread !== undefined,
-        threadHandoff: thread?.handoff != null,
         shellStatus,
-        environmentConnected: environment?.connectionState === "connected",
+        environmentConnected,
         threadBusy: threadRuntimeIsActive(thread?.runtime),
       });
       // The delivery action resolves first; capability checks apply only to
