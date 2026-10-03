@@ -3,13 +3,11 @@ import {
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
-  type ProvisionedChat,
   type ServerConfig,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Predicate from "effect/Predicate";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
@@ -17,7 +15,6 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
-import { withHostChat } from "../connection/hostBoxSync.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import { connectionProjectionPhase } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -31,6 +28,7 @@ import * as ShellSnapshotLoader from "./shellSnapshotHttp.ts";
 import { applyShellStreamEvent, mergeShellSnapshotProjects } from "./shellReducer.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import { followHostChat } from "./shellHostChat.ts";
 
 export type EnvironmentShellStatus = "empty" | "cached" | "synchronizing" | "live";
 
@@ -54,30 +52,7 @@ function shellStatusForSnapshot(
 
 const SHELL_SYNCHRONIZATION_ERROR_MESSAGE = "Could not synchronize environment data.";
 
-/**
- * The state a box's shell takes from its host's newer read of the box's chat, or null to keep its
- * own. Only a shell whose own stream is not running takes one; a live or synchronizing stream is
- * the box itself and outranks any copy.
- */
-function adoptHostChat(
-  current: EnvironmentShellState,
-  chat: ProvisionedChat,
-): EnvironmentShellState | null {
-  if (current.status === "live" || current.status === "synchronizing") return null;
-  const snapshot = withHostChat(current.snapshot, chat);
-  return snapshot === null
-    ? null
-    : { snapshot: Option.some(snapshot), status: "cached", error: current.error };
-}
-
-export interface EnvironmentShellStateOptions {
-  /** A box's chat as its host lists it; the shell takes each newer one while it is not live. */
-  readonly hostChat?: Stream.Stream<ProvisionedChat>;
-}
-
-export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* (
-  options?: EnvironmentShellStateOptions,
-) {
+export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* () {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   const cache = yield* Persistence.EnvironmentCacheStore;
   const snapshotLoader = yield* ShellSnapshotLoader.ShellSnapshotLoader;
@@ -101,30 +76,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   });
   const awaitingCompletion = yield* Ref.make(false);
   const lastAuthoritativeSession = yield* Ref.make<RpcSession | null>(null);
-  if (options?.hostChat !== undefined)
-    // Re-checked as the status settles, so a chat that arrives while the shell starts is kept.
-    yield* options.hostChat.pipe(
-      Stream.zipLatest(
-        SubscriptionRef.changes(state).pipe(
-          Stream.map(({ status }) => status),
-          Stream.changes,
-        ),
-      ),
-      Stream.runForEach(([chat]) =>
-        Effect.gen(function* () {
-          if (adoptHostChat(yield* SubscriptionRef.get(state), chat) === null) return;
-          // The copy's sequence is no cursor. Resuming from it on the same session would skip the
-          // box's other events, so the next subscription reloads the snapshot. Cleared first, so
-          // no subscription can read the copy's sequence as its own.
-          yield* Ref.set(lastAuthoritativeSession, null);
-          yield* SubscriptionRef.update(
-            state,
-            (current) => adoptHostChat(current, chat) ?? current,
-          );
-        }),
-      ),
-      Effect.forkScoped,
-    );
+  yield* followHostChat(state, lastAuthoritativeSession);
   const activeSubscriptionSession = yield* Ref.make<RpcSession | null>(null);
   const latestLiveSnapshot = yield* Ref.make<Option.Option<OrchestrationV2ShellSnapshot>>(
     Option.none(),
@@ -360,20 +312,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
 function shellStateChanges(environmentId: EnvironmentId) {
   return followStreamInEnvironment(
     environmentId,
-    Stream.unwrap(
-      EnvironmentRegistry.EnvironmentRegistry.pipe(
-        Effect.flatMap((registry) =>
-          makeEnvironmentShellState({
-            hostChat: SubscriptionRef.changes(registry.hostChats).pipe(
-              Stream.map((held) => held.get(environmentId)?.chat),
-              Stream.filter(Predicate.isNotUndefined),
-              Stream.changesWith((left, right) => left.sequence === right.sequence),
-            ),
-          }),
-        ),
-        Effect.map(SubscriptionRef.changes),
-      ),
-    ),
+    Stream.unwrap(makeEnvironmentShellState().pipe(Effect.map(SubscriptionRef.changes))),
   );
 }
 
