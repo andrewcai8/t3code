@@ -11,6 +11,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "../processRunner.ts";
+import { repositoryOrigin } from "./repositoryOrigin.ts";
 
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 // Background sweeps resolve every project each minute. A long TTL keeps them
@@ -44,8 +45,7 @@ function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    // Git annotates a partial clone's fetch remote with its filter, as in
-    // `origin <url> (fetch) [blob:none]`, so the direction cannot end the line.
+    // A partial clone's fetch remote ends with its filter: `origin <url> (fetch) [blob:none]`.
     const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)(?:\s.*)?$/.exec(trimmed);
     if (!match) continue;
     const [, remoteName = "", remoteUrl = "", direction = ""] = match;
@@ -72,22 +72,10 @@ function pickPrimaryRemote(
   return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
 }
 
-/** `owner/name` for a remote, when its URL names both. */
-function remoteRepository(remoteUrl: string) {
-  const segments = normalizeGitRemoteUrl(remoteUrl)
-    .split("/")
-    .slice(1)
-    .filter((segment) => segment.length > 0);
-  const owner = segments[0];
-  const name = segments.at(-1);
-  return owner && name ? { owner, name, remoteUrl } : undefined;
-}
-
 function buildRepositoryIdentity(input: {
   readonly remoteName: string;
   readonly remoteUrl: string;
   readonly rootPath: string;
-  readonly originRemoteUrl?: string | undefined;
 }): RepositoryIdentity {
   const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
@@ -95,8 +83,6 @@ function buildRepositoryIdentity(input: {
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
-  const origin =
-    input.originRemoteUrl === undefined ? undefined : remoteRepository(input.originRemoteUrl);
 
   return {
     canonicalKey,
@@ -110,7 +96,6 @@ function buildRepositoryIdentity(input: {
     ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
     ...(owner ? { owner } : {}),
     ...(repositoryName ? { name: repositoryName } : {}),
-    ...(origin ? { origin } : {}),
   };
 }
 
@@ -155,13 +140,13 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
 
   const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
   const remote = pickPrimaryRemote(remotes);
-  if (!remote) return null;
-  const originRemoteUrl = remote.remoteName === "origin" ? undefined : remotes.get("origin");
-  return buildRepositoryIdentity({
-    ...remote,
-    rootPath: cacheKey,
-    ...(originRemoteUrl === undefined ? {} : { originRemoteUrl }),
-  });
+  const origin = remote && repositoryOrigin(remotes, remote.remoteName);
+  return remote
+    ? {
+        ...buildRepositoryIdentity({ ...remote, rootPath: cacheKey }),
+        ...(origin ? { origin } : {}),
+      }
+    : null;
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
