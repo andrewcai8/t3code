@@ -991,7 +991,7 @@ export function useThreadComposerState() {
 
   const onUpdateModelSelection = useCallback(
     (value: ModelSelection) => {
-      if (!selectedThreadKey || selectedThreadShell?.handoff) {
+      if (!selectedThreadKey) {
         return;
       }
       const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
@@ -1004,22 +1004,22 @@ export function useThreadComposerState() {
           : {}),
       });
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey, selectedThreadShell?.handoff],
+    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey],
   );
 
   const onUpdateRuntimeMode = useCallback(
     (value: RuntimeMode) => {
-      if (!selectedThreadKey || selectedThreadShell?.handoff) {
+      if (!selectedThreadKey) {
         return;
       }
       updateComposerDraftSettings(selectedThreadKey, { runtimeMode: value });
     },
-    [selectedThreadKey, selectedThreadShell?.handoff],
+    [selectedThreadKey],
   );
 
   const onUpdateInteractionMode = useCallback(
     (value: ProviderInteractionMode) => {
-      if (!selectedThreadKey || selectedThreadShell?.handoff) {
+      if (!selectedThreadKey) {
         return;
       }
       const modelSelection =
@@ -1032,12 +1032,7 @@ export function useThreadComposerState() {
         interactionMode: resolveProviderInteractionMode(provider, value),
       });
     },
-    [
-      selectedEnvironmentRuntime?.serverConfig,
-      selectedThread?.modelSelection,
-      selectedThreadKey,
-      selectedThreadShell?.handoff,
-    ],
+    [selectedEnvironmentRuntime?.serverConfig, selectedThread?.modelSelection, selectedThreadKey],
   );
 
   return {
