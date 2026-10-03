@@ -172,6 +172,10 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
+import {
+  environmentControlServerConfig,
+  environmentControlWsHandlers,
+} from "./environmentControl/wsHandlers.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
@@ -1620,10 +1624,8 @@ const makeWsRpcLayer = (
             yield* serverSettings.getSettings,
           );
           const environment = yield* serverEnvironment.getDescriptor;
-          const provisionedSkills = yield* environmentControl.provisionedSkills;
           const auth = yield* serverAuth.getDescriptor();
-          // A host that runs no agents sends every chat to a cloud box cloned from
-          // the project's repository, and Scratch has none, so it offers no Scratch.
+          // A cloud-only host runs every chat on a box cloned from a repository; Scratch has none.
           const scratchWorkspaceRoot = config.localAgentRuns
             ? yield* managedFolders.scratchRoot
             : Option.none<string>();
@@ -1641,13 +1643,7 @@ const makeWsRpcLayer = (
             auth,
             cwd: config.cwd,
             keybindingsConfigPath: config.keybindingsConfigPath,
-            environmentControl: true,
-            localAgentRuns: config.localAgentRuns,
-            // A config this server cannot read offers nothing rather than failing getConfig.
-            provisionProviders: yield* environmentControl.provisionProviders.pipe(
-              Effect.orElseSucceed(() => []),
-            ),
-            ...(provisionedSkills ? { provisionedSkills } : {}),
+            ...(yield* environmentControlServerConfig(environmentControl, config.localAgentRuns)),
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
@@ -1901,9 +1897,38 @@ const makeWsRpcLayer = (
             ORCHESTRATION_V2_WS_METHODS.launchThread,
             startup
               .enqueueCommand(
-                ThreadMessageIntake.launchThread(
-                  ThreadMessageIntake.clientLaunchInput(input, "web"),
-                ).pipe(Effect.provide(intakeContext)),
+                ThreadMessageIntake.launchThread({
+                  commandId: input.commandId,
+                  ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                  ...(input.reuseExistingThread === undefined
+                    ? {}
+                    : { reuseExistingThread: input.reuseExistingThread }),
+                  projectId: input.projectId,
+                  title: input.title,
+                  ...(input.generateTitle === undefined
+                    ? {}
+                    : { generateTitle: input.generateTitle }),
+                  modelSelection: input.modelSelection,
+                  runtimeMode: input.runtimeMode,
+                  interactionMode: input.interactionMode,
+                  workspaceStrategy: input.workspaceStrategy,
+                  ...(input.initialMessage === undefined
+                    ? {}
+                    : {
+                        initialMessage: {
+                          ...(input.initialMessage.messageId === undefined
+                            ? {}
+                            : { messageId: input.initialMessage.messageId }),
+                          text: input.initialMessage.text,
+                          attachments: input.initialMessage.attachments,
+                          ...(input.initialMessage.context === undefined
+                            ? {}
+                            : { context: input.initialMessage.context }),
+                        },
+                      }),
+                  createdBy: "user",
+                  creationSource: input.creationSource ?? "web",
+                }).pipe(Effect.provide(intakeContext)),
               )
               .pipe(
                 Effect.tap(() =>
@@ -2546,44 +2571,7 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
-        [WS_METHODS.environmentControlListProvisioned]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.environmentControlListProvisioned,
-            environmentControl.listProvisioned(input.environmentIds, input.addresses, input.chats),
-          ),
-        [WS_METHODS.environmentControlList]: () =>
-          observeRpcEffect(WS_METHODS.environmentControlList, environmentControl.list),
-        [WS_METHODS.environmentControlStart]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.environmentControlStart,
-            environmentControl.start(input.environmentId),
-          ),
-        [WS_METHODS.environmentControlStop]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.environmentControlStop,
-            environmentControl.stop(input.environmentId),
-          ),
-        [WS_METHODS.environmentControlProvision]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.environmentControlProvision,
-            environmentControl.provision(input),
-          ),
-        [WS_METHODS.environmentControlDispose]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlDispose, environmentControl.dispose(input)),
-        [WS_METHODS.environmentControlPause]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlPause, environmentControl.pause(input)),
-        [WS_METHODS.environmentControlResume]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlResume, environmentControl.resume(input)),
-        [WS_METHODS.environmentControlUpgrade]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlUpgrade, environmentControl.upgrade(input)),
-        [WS_METHODS.environmentControlAttach]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlAttach, environmentControl.attach(input)),
-        [WS_METHODS.environmentControlClaim]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlClaim, environmentControl.claim(input)),
-        [WS_METHODS.environmentControlTouch]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlTouch, environmentControl.touch(input)),
-        [WS_METHODS.environmentControlKeep]: (input) =>
-          observeRpcEffect(WS_METHODS.environmentControlKeep, environmentControl.keep(input)),
+        ...environmentControlWsHandlers(environmentControl, observeRpcEffect),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",
