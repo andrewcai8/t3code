@@ -231,20 +231,16 @@ export function makeWindow(
   }
   const untilDay = format.format(now);
   if (resolution === "hour") {
-    // Twenty-four hour buckets ending with the one still in progress. Hour
-    // alignment keeps the request identical for the whole hour, so reopening
-    // the page reuses the cached summary. Servers cap hourly windows at 24
-    // hours, which is why the window cannot also reach back to the partial
-    // hour exactly 24 hours ago. Fixed-duration buckets stay correct across
-    // offset changes and daylight-saving transitions.
-    const untilTimeMs = (Math.floor(now.getTime() / HOUR_MS) + 1) * HOUR_MS;
+    // Minute-aligned bounds keep labels readable while still representing an
+    // exact rolling 24-hour duration. Fixed-duration buckets remain correct
+    // across offset changes and daylight-saving transitions.
+    const untilTimeMs = Math.floor(now.getTime() / 60_000) * 60_000;
     const sinceTimeMs = untilTimeMs - 24 * HOUR_MS;
     const sinceTime = new Date(sinceTimeMs);
     const untilTime = new Date(untilTimeMs);
     return {
       sinceDay: UsageDay.make(format.format(sinceTime)),
-      // The end is exclusive, so its day is the day of the last covered instant.
-      untilDay: UsageDay.make(format.format(new Date(untilTimeMs - 1))),
+      untilDay: UsageDay.make(format.format(untilTime)),
       timeZone,
       resolution,
       sinceTime: sinceTime.toISOString(),
