@@ -16,7 +16,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import {
   CODEX_LOGIN_COPY_MIN_LIFETIME_MS,
@@ -28,7 +27,7 @@ import {
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
-import { cursorFileCredentialPath } from "../provider/cursorCredentialPath.ts";
+import { credentialSecretName } from "../provider/ProviderCredentialStore.ts";
 import type { Provisioning } from "./config.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
 
@@ -56,20 +55,6 @@ export const credentialVariables = {
 };
 
 /**
- * Where the selected account's credential file belongs inside a guest home.
- *
- * Cursor's file credential store is platform-specific: a Linux guest reads
- * `.config/cursor/auth.json` while a macOS one reads `.cursor/auth.json`. The
- * manager resolves the source path from its own platform, so the destination
- * has to be restated for the machine the credential is going to.
- */
-export const guestCredentialDestination = (
-  kind: keyof typeof credentialDestinations,
-  destination: string,
-  provider: "e2b" | "namespace",
-) => (kind === "cursor" && provider === "e2b" ? ".config/cursor/auth.json" : destination);
-
-/**
  * Whether a variable is the login of a driver outside `kinds`.
  *
  * An operator's `shellEnvironment` holds a key per account they provision
@@ -89,9 +74,11 @@ const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
 const decodeCursorSettings = Schema.decodeUnknownEffect(CursorSettings);
 
-/** How this server holds its Codex logins (`CodexLoginContext`). */
-export interface CodexLoginOwner {
+/** How this server holds its provider logins. */
+export interface HostLogins {
   readonly localAgentRuns: boolean;
+  /** Where this server's secret store keeps the logins it signed in itself, as Cursor's. */
+  readonly secretsDir: string;
   /** Has Codex refresh an account's login here, one refresh or probe at a time. */
   readonly refresh: (instanceId: ProviderInstanceId) => Effect.Effect<void>;
 }
@@ -101,7 +88,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
     settings: ServerSettings,
     input: { readonly providerInstanceId: string; readonly agentDriver?: string | undefined },
     claudeOAuthTokens?: Provisioning["claudeOAuthTokens"],
-    codexLogins?: CodexLoginOwner,
+    hostLogins?: HostLogins,
   ) {
     const instanceId = ProviderInstanceId.make(input.providerInstanceId);
     const instance = deriveProviderInstanceConfigMap(settings)[instanceId];
@@ -151,8 +138,14 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
           Effect.mapError(invalidConfig),
         );
         enabled = instance.enabled ?? config.enabled;
-        source = cursorFileCredentialPath(effectiveEnvironment, yield* HostProcessPlatform);
-        destination = ".cursor/auth.json";
+        // V2 Cursor signs in through T3's secret store, never the cursor-agent CLI's files.
+        source = hostLogins
+          ? NodePath.join(
+              hostLogins.secretsDir,
+              `${credentialSecretName("cursor", instanceId)}.bin`,
+            )
+          : "";
+        destination = credentialDestinations.cursor[0];
         break;
       }
       case "claudeAgent": {
@@ -235,12 +228,12 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
       );
       const context = {
         now: yield* Clock.currentTimeMillis,
-        localAgentRuns: codexLogins?.localAgentRuns ?? true,
+        localAgentRuns: hostLogins?.localAgentRuns ?? true,
       };
       const current = yield* readLogin;
       const login =
-        codexLogins && codexLoginRefreshDue(current, CODEX_LOGIN_COPY_MIN_LIFETIME_MS, context)
-          ? yield* codexLogins.refresh(instanceId).pipe(Effect.andThen(readLogin))
+        hostLogins && codexLoginRefreshDue(current, CODEX_LOGIN_COPY_MIN_LIFETIME_MS, context)
+          ? yield* hostLogins.refresh(instanceId).pipe(Effect.andThen(readLogin))
           : current;
       if (codexLoginExpiring(login, context.now))
         return yield* new ProvisionRefused({
@@ -291,7 +284,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
     readonly now: number;
     readonly load?: AccountLoad;
   },
-  codexLogins?: CodexLoginOwner,
+  hostLogins?: HostLogins,
 ) {
   const instances = deriveProviderInstanceConfigMap(settings);
   const hint = ProviderInstanceId.make(input.providerInstanceId);
@@ -322,7 +315,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
           settings,
           { providerInstanceId: instanceId, agentDriver: driver },
           claudeOAuthTokens,
-          codexLogins,
+          hostLogins,
         ),
       );
       if (profile._tag === "Success") return Option.some(profile.success);
@@ -354,7 +347,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
         settings,
         { providerInstanceId: input.providerInstanceId, agentDriver: input.agentDriver },
         claudeOAuthTokens,
-        codexLogins,
+        hostLogins,
       );
   const companions: ProvisioningProviderProfile[] = [];
   for (const companionDriver of Object.keys(credentialVariables)) {

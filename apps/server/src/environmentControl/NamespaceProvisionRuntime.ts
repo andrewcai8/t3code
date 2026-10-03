@@ -752,7 +752,7 @@ except FileExistsError:
       await sealWarmBase(port(resource, manifest), {
         root: manifest.preparation.root,
         files: manifest.preparation.files.map(({ scope, destination }) => ({ scope, destination })),
-        homePaths: warmSealHomePaths("namespace"),
+        homePaths: warmSealHomePaths(),
       });
       await successful(config.session, [
         "exec",

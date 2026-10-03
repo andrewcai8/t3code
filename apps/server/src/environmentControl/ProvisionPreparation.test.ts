@@ -494,6 +494,7 @@ const hostOwnedCopy = (localAgentRuns: boolean) =>
         { providers: [], now },
         {
           localAgentRuns,
+          secretsDir: NodePath.join(f.root, "secrets"),
           refresh: (instanceId) =>
             Effect.promise(async () => {
               refreshedAccounts.push(instanceId);
@@ -754,7 +755,7 @@ it("follows the selected agent when the same bundle is provisioned for Cursor", 
       credential: {
         kind: "file",
         source: NodePath.join(f.root, ".t3/userdata/cursor-homes/cursor/.cursor/auth.json"),
-        destination: ".cursor/auth.json",
+        destination: ".t3/userdata/provider-auth/cursor/cursor.json",
       },
     };
     const manifest = await f.store.freeze(inputFor("cursor", "cursor"), config, f.resolver, [
@@ -762,7 +763,7 @@ it("follows the selected agent when the same bundle is provisioned for Cursor", 
     ]);
     expect(homeFile(manifest, ".cursor/skills/pstack/SKILL.md")).toBeDefined();
     expect(homeFile(manifest, ".codex/skills/pstack/SKILL.md")).toBeUndefined();
-    expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
+    expect(homeFile(manifest, ".t3/userdata/provider-auth/cursor/cursor.json")?.sha256).toBe(
       provisionDigest("cursor-fixture-credential"),
     );
   } finally {
@@ -800,16 +801,15 @@ it("runs a Cursor guest on the selected account, not a copied credential", async
         credential: {
           kind: "file",
           source: NodePath.join(selected, "auth.json"),
-          // The manager resolves its own platform's path; the guest is Linux.
-          destination: ".cursor/auth.json",
+          destination: ".t3/userdata/provider-auth/cursor/cursor.json",
         },
       },
     ]);
-    expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
+    expect(homeFile(manifest, ".t3/userdata/provider-auth/cursor/cursor.json")?.sha256).toBe(
       provisionDigest("selected-account"),
     );
-    // A file at the macOS path is one the Linux CLI never reads, and one more
-    // copy of a live login on the machine.
+    // A cursor-agent login left in the configured files is one more copy of a live login.
+    expect(homeFile(manifest, ".config/cursor/auth.json")).toBeUndefined();
     expect(homeFile(manifest, ".cursor/auth.json")).toBeUndefined();
   } finally {
     await f.cleanup();
@@ -1078,7 +1078,7 @@ it("lands a skill bundle only in the skill roots of the drivers it names", async
         credential: {
           kind: "file",
           source: NodePath.join(f.root, "cursor/auth.json"),
-          destination: ".cursor/auth.json",
+          destination: ".t3/userdata/provider-auth/cursor/cursor.json",
         },
       },
       {
@@ -1195,6 +1195,8 @@ it("roots a Namespace preparation on the retained Devbox volume and every E2B bo
     expect(Object.prototype.hasOwnProperty.call(parsedE2bSettings, "enableAgentDeviceAccess")).toBe(
       false,
     );
+    // An upgrade restarts a guest's server mid-run, with nobody there to resume it.
+    expect(parsedE2bSettings.continueThreadsAfterServerUpdate).toBe(true);
   } finally {
     await f.cleanup();
   }
@@ -1373,7 +1375,7 @@ it("runs every provisioned driver on its own account and login, with skills for 
           credential: {
             kind: "file",
             source: NodePath.join(f.root, "cursor/auth.json"),
-            destination: ".cursor/auth.json",
+            destination: ".t3/userdata/provider-auth/cursor/cursor.json",
           },
         },
       ],
@@ -1393,7 +1395,7 @@ it("runs every provisioned driver on its own account and login, with skills for 
       },
     ]);
     expect(guestAccounts(manifest, "codex")).toEqual([]);
-    expect(homeFile(manifest, ".config/cursor/auth.json")?.sha256).toBe(
+    expect(homeFile(manifest, ".t3/userdata/provider-auth/cursor/cursor.json")?.sha256).toBe(
       provisionDigest("cursor-login"),
     );
     expect(homeFile(manifest, ".claude/.credentials.json")).toBeUndefined();

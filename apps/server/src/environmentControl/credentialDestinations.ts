@@ -8,6 +8,12 @@
  */
 export const credentialDestinations = {
   codex: [".codex/auth.json"],
-  cursor: [".cursor/auth.json", ".config/cursor/auth.json"],
+  // The guest's Cursor instance (id `cursor`) moves this file into its secret store on start.
+  // The cursor-agent CLI's files stay listed so no stale copy survives.
+  cursor: [
+    ".t3/userdata/provider-auth/cursor/cursor.json",
+    ".cursor/auth.json",
+    ".config/cursor/auth.json",
+  ],
   claudeAgent: [".claude/.credentials.json"],
 };

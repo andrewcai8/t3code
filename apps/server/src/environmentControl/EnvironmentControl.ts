@@ -783,7 +783,7 @@ export class EnvironmentControl extends Context.Service<
 export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
-    const { stateDir, localAgentRuns } = yield* ServerConfig.ServerConfig;
+    const { stateDir, localAgentRuns, secretsDir } = yield* ServerConfig.ServerConfig;
     const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
     const boxUsage = yield* BoxUsageStore;
@@ -1406,6 +1406,7 @@ export const layer = Layer.effect(
                   usage,
                   {
                     localAgentRuns,
+                    secretsDir,
                     // The instance's status probe refreshes a host's own
                     // login, serialized with its usage probes.
                     refresh: (instanceId) =>

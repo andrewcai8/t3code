@@ -31,7 +31,6 @@ import { credentialDestinations } from "./credentialDestinations.ts";
 import { stripCodexRefreshToken } from "../provider/codexLoginCopy.ts";
 import {
   credentialVariables,
-  guestCredentialDestination,
   isForeignCredentialVariable,
   ProvisionRefused,
   type ProvisioningProviderProfile,
@@ -368,6 +367,8 @@ function enableChildProvider(
     // Namespace children are macOS Macs used for iOS work; nobody opens
     // settings on a cloud Mac to flip device access on by hand.
     ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
+    // An upgrade restarts the guest's server; nobody is there to resume its runs by hand.
+    continueThreadsAfterServerUpdate: true,
     providers: {
       ...providers,
       // Only the provisioned drivers' CLIs are installed here, so every other
@@ -916,11 +917,7 @@ export function makeProvisionPreparationStore(stateDir: string) {
       for (const profile of profiles) {
         if (profile.credential.kind !== "file") continue;
         const { source } = profile.credential;
-        const destination = guestCredentialDestination(
-          profile.kind,
-          profile.credential.destination,
-          input.provider,
-        );
+        const destination = profile.credential.destination;
         const credential = await homeFileData(destination, () =>
           NodeFSP.readFile(source).catch(() => {
             throw new ProvisionRefused({

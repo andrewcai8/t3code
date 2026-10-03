@@ -34,7 +34,6 @@ import {
 
 import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
-import { guestCredentialDestination } from "./ProvisioningProviderProfile.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
@@ -102,16 +101,10 @@ export function makeProvisionResolution(config: {
  * record. A prepare command can write these too, and a base must never hand
  * one account's login to the next chat.
  */
-export function warmSealHomePaths(provider: "e2b" | "namespace" = "e2b"): string[] {
-  const drivers = Object.keys(credentialDestinations) as Array<keyof typeof credentialDestinations>;
+export function warmSealHomePaths(): string[] {
   return [
     ...new Set([
-      ...drivers.flatMap((kind) =>
-        credentialDestinations[kind].flatMap((path) => [
-          path,
-          guestCredentialDestination(kind, path, provider),
-        ]),
-      ),
+      ...Object.values(credentialDestinations).flat(),
       // What a configured `githubToken` becomes.
       ".git-credentials",
       ".gitconfig",
