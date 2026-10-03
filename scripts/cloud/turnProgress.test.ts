@@ -16,7 +16,7 @@ import {
   v2Projection,
   v2ThreadId,
 } from "../../packages/client-runtime/src/state/orchestrationV2TestFixtures.ts";
-import { advanceTurn, initialProgress, type TurnProgress } from "./smoke-cloud-chat.ts";
+import { advanceTurn, initialProgress, type TurnProgress } from "./turnProgress.ts";
 
 const sent = MessageId.make("sent");
 const instanceId = ProviderInstanceId.make("codex");
