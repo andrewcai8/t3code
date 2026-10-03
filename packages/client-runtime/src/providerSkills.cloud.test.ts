@@ -1,10 +1,7 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  getProviderSlashCommandsForSlashMenu,
-  resolveProviderSkillsForCwd,
-} from "./providerSkills.ts";
+import { resolveProviderSkillsForCwd } from "./providerSkills.ts";
 
 const provider = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -28,27 +25,6 @@ const provider = {
   ],
 } satisfies ServerProvider;
 
-describe("getProviderSlashCommandsForSlashMenu", () => {
-  it("drops the command Claude Code publishes under a skill's frontmatter name", () => {
-    const potetoMode = {
-      name: "poteto-mode",
-      displayName: "Poteto Mode",
-      path: "/Users/matt/.claude/skills/poteto-mode/SKILL.md",
-      enabled: true,
-    };
-
-    expect(
-      getProviderSlashCommandsForSlashMenu(
-        [
-          { name: "Poteto Mode", description: "poteto's agent style." },
-          { name: "compact", description: "Compact the conversation." },
-        ],
-        [potetoMode],
-      ).map((command) => command.name),
-    ).toEqual(["compact"]);
-  });
-});
-
 describe("provisioned skills", () => {
   it("lists the provider driver's provisioned skills first, winning a name clash", () => {
     expect(
@@ -62,7 +38,6 @@ describe("provisioned skills", () => {
     ).toEqual([
       { name: "project", description: "Provisioned copy.", enabled: true, scope: "user" },
       { name: "how", enabled: true, scope: "user" },
-      { name: "global", path: "/global/SKILL.md", enabled: true },
     ]);
   });
 

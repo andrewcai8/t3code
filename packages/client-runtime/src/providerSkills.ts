@@ -70,12 +70,7 @@ export function getProviderSlashCommandsForSlashMenu(
   slashCommands: ReadonlyArray<ServerProviderSlashCommand>,
   visibleSkills: ReadonlyArray<ServerProviderSkill>,
 ): ServerProviderSlashCommand[] {
-  // Claude Code lists a skill's command under its frontmatter name, the skill's `displayName`.
-  const skillNames = new Set(
-    visibleSkills.flatMap((skill) =>
-      [skill.name, skill.displayName ?? skill.name].map((name) => name.trim().toLowerCase()),
-    ),
-  );
+  const skillNames = new Set(visibleSkills.map((skill) => skill.name.trim().toLowerCase()));
   return slashCommands.filter((command) => !skillNames.has(command.name.trim().toLowerCase()));
 }
 
@@ -118,19 +113,19 @@ function resolveProviderWorkspaceSnapshot(
 }
 
 /**
- * Workspace skills join the user's own. A host's `provisionedSkills` win a name clash, since that
- * copy is the one its chats run.
+ * A host's `provisionedSkills` join the result and win a name clash, since that copy is the one
+ * its chats run.
  */
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
   provisionedSkills?: ServerProvisionedSkills,
 ): ServerProvider["skills"] {
+  const skills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? provider.skills;
   const provisioned = provisionedSkills?.[provider.driver as keyof ServerProvisionedSkills] ?? [];
-  const workspaceSkills = resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? [];
-  return provisioned.length === 0 && workspaceSkills.length === 0
-    ? provider.skills
-    : dedupeProviderSkillsByName([...provisioned, ...workspaceSkills, ...provider.skills]);
+  return provisioned.length === 0
+    ? skills
+    : dedupeProviderSkillsByName([...provisioned, ...skills]);
 }
 
 export function resolveProviderSlashCommandsForCwd(
