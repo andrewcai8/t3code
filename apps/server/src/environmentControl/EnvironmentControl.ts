@@ -457,15 +457,20 @@ export function createEnvironmentControl(
       const ownerKey = JSON.stringify([input.leaseId, input.environmentId]);
       const existing = leaseOperations.get(input.sandboxId);
       // A box is only checked before cleanup while due, and moving its clock makes it no longer
-      // due, so the sweep puts it back to sleep instead of removing it.
+      // due, so the sweep puts it back to sleep instead of removing it. Once its removal has begun
+      // the touch cannot stop it, so only a hold still checking promises a postponed cleanup.
       if (existing?.action === "clean")
-        return (async (): Promise<EnvironmentProvisionResumeResult> => ({
-          kind: "refused",
-          reason: "unknown",
-          message: (await leaseRegistry?.touch(input.leaseId).catch(() => null))
-            ? "This machine is being checked before cleanup. Cleanup is cancelled; open it again in a few minutes."
-            : "Another workspace operation is in progress. Retry shortly.",
-        }))();
+        return (async (): Promise<EnvironmentProvisionResumeResult> => {
+          const touched = await leaseRegistry?.touch(input.leaseId).catch(() => null);
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message:
+              touched && leaseOperations.get(input.sandboxId)?.action === "clean"
+                ? "This machine is being checked before cleanup. Cleanup is postponed; open it again in a few minutes."
+                : "Another workspace operation is in progress. Retry shortly.",
+          };
+        })();
       if (existing)
         return existing.action === "resume" && existing.ownerKey === ownerKey
           ? existing.promise
@@ -595,8 +600,16 @@ export function createEnvironmentControl(
       });
     },
     /**
+     * Marks a box held for cleanup as being removed, so a resume from here on no longer postpones
+     * it. Called before the sweep's last check of the lease.
+     */
+    beginRemoval: (sandboxId: string) => {
+      if (leaseOperations.get(sandboxId)?.action === "clean")
+        leaseOperations.set(sandboxId, { action: "dispose" });
+    },
+    /**
      * Takes a box's per-box lock for work outside this service, or null while it is held. A resume
-     * that meets a "clean" hold cancels that box's cleanup.
+     * that meets a "clean" hold postpones that box's cleanup.
      */
     holdBox: (sandboxId: string, action: "hold" | "clean" = "hold") => {
       if (leaseOperations.has(sandboxId)) return null;
@@ -1717,6 +1730,7 @@ export const layer = Layer.effect(
         return lease ? cleanupCandidate(lease) : null;
       },
       holdBox: async (sandboxId) => (await resolve())?.holdBox(sandboxId, "clean") ?? null,
+      beginRemoval: async (sandboxId) => (await resolve())?.beginRemoval(sandboxId),
       backUpWork: async (lease) => {
         const token = (await resolve())?.config.provisioning?.githubToken;
         const devbox = await readyDevbox(lease.leaseId);

@@ -15,7 +15,7 @@ import type { WorkspaceBackup } from "./workspaceBackup.ts";
 const DAY_MS = 86_400_000;
 /** How long a settled chat's machine outlives its pause or its settle, whichever is later. */
 const SETTLED_GRACE_MS = 3_600_000;
-/** How long a lease whose backup failed outright waits before the sweep tries it again. */
+/** How long a lease whose cleanup failed outright waits before the sweep tries it again. */
 const BACKUP_RETRY_MS = 6 * 3_600_000;
 
 type CleanupThread = Pick<OrchestrationThreadShell, "id" | "settledOverride" | "settledAt">;
@@ -66,6 +66,8 @@ export interface CleanupPorts {
   readonly read: (leaseId: string) => Promise<CleanupCandidate | null>;
   /** The per-box lock pause and resume take; null while another operation holds it. */
   readonly holdBox: (sandboxId: string) => Promise<(() => void) | null>;
+  /** Marks the held box as being removed, so a resume no longer postpones its cleanup. */
+  readonly beginRemoval: (sandboxId: string) => Promise<void> | void;
   /** Wakes the box and pushes its unsaved work. */
   readonly backUpWork: (lease: ProvisionedLease) => Promise<WorkspaceBackup>;
   readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<unknown>;
@@ -128,10 +130,7 @@ export function createCleanupSweep(ports: CleanupPorts): () => Promise<void> {
         const plan = due(current, afterDays);
         if (!current || !plan) continue;
         woken = current.lease;
-        const backup = await ports.backUpWork(current.lease).catch((cause: unknown) => {
-          retryAt.set(leaseId, ports.now() + BACKUP_RETRY_MS);
-          throw cause;
-        });
+        const backup = await ports.backUpWork(current.lease);
         retryAt.delete(leaseId);
         if (backup.kind === "unsaved") {
           await ports.setKeep(leaseId, "unsaved-work");
@@ -142,6 +141,7 @@ export function createCleanupSweep(ports: CleanupPorts): () => Promise<void> {
           continue;
         }
         // Opening the chat or turning cleanup off while the backup ran makes it no longer due.
+        await ports.beginRemoval(sandboxId);
         if (!due(await ports.read(leaseId), await ports.afterDays())) continue;
         if (!(await ports.dispose(leaseId))) {
           ports.warn("cloud box cleanup is still pending", { leaseId });
@@ -154,6 +154,7 @@ export function createCleanupSweep(ports: CleanupPorts): () => Promise<void> {
           branches: backup.kind === "saved" ? backup.branches : [],
         });
       } catch (cause) {
+        retryAt.set(leaseId, ports.now() + BACKUP_RETRY_MS);
         ports.warn("cloud box could not be cleaned up", { leaseId, cause });
       } finally {
         if (woken) await sleep(woken);

@@ -138,6 +138,7 @@ function fakeHost(
         box.locked = false;
       };
     },
+    beginRemoval: () => {},
     backUpWork: async (target: ProvisionedLease) => {
       const box = boxes.get(target.leaseId)!;
       box.awake = true;
