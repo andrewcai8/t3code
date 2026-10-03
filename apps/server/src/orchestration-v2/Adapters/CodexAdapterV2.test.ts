@@ -801,6 +801,67 @@ describe("CodexAdapterV2 process spawning", () => {
       Effect.provideService(HostProcessPlatform, "linux"),
     ),
   );
+
+  it.effect("runs a shared-home instance against the shared home, not an ambient CODEX_HOME", () =>
+    Effect.gen(function* () {
+      const spawnedCodexHomes: Array<string | undefined> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (ChildProcess.isStandardCommand(command))
+          spawnedCodexHomes.push(command.options.env?.CODEX_HOME);
+        return Effect.fail(
+          PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
+        );
+      });
+      const path = yield* Path.Path;
+      const adapter = yield* CodexAdapterV2.createCodexAdapterV2({
+        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+        displayName: undefined,
+        environment: [],
+        enabled: true,
+        config: DEFAULT_CODEX_SETTINGS,
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            CodexAdapterV2.codexAppServerClientFactoryFromSettingsLayer,
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-codex-shared-home-" }),
+          ),
+        ),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      );
+
+      yield* adapter
+        .openSession({
+          threadId: ThreadId.make("thread-shared-home"),
+          providerSessionId: ProviderSessionId.make("provider-session-shared-home"),
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        })
+        .pipe(Effect.scoped, Effect.exit);
+
+      assert.deepEqual(spawnedCodexHomes, [path.join(NodeOS.homedir(), ".codex")]);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer)),
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(HostProcessEnvironment, {
+        CODEX_HOME: "/ambient/.codex_other",
+        PATH: "/usr/bin",
+      }),
+    ),
+  );
+
+  it("pins the effective home over an ambient CODEX_HOME", () => {
+    assert.equal(
+      CodexAdapterV2.resolveCodexProviderEnvironment(
+        { CODEX_HOME: "/Users/andrew/.codex_ac3" },
+        { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: "/Users/andrew/.codex_ac2" },
+      ).CODEX_HOME,
+      "/Users/andrew/.codex_ac2",
+    );
+  });
 });
 
 describe("CodexAdapterV2 dynamic tool projection", () => {

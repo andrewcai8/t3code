@@ -21,7 +21,7 @@ import { TestClock } from "effect/testing";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { makeManagedServerProvider } from "./makeManagedServerProvider.ts";
+import { makeManagedServerProvider, ProviderCheckPermits } from "./makeManagedServerProvider.ts";
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");

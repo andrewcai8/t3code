@@ -208,7 +208,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           }
         | undefined
       >(undefined);
-      const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(effectiveConfig, cwd);
+      const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(
+        effectiveConfig,
+        cwd,
+        processEnv,
+      );
       const readUsageTurn = yield* makeClaudeUsageTurnReader;
       const resolveCapabilities = () =>
         Effect.gen(function* () {
@@ -384,7 +388,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
+        invalidateCaches: Ref.set(completeCapabilitiesCache, undefined),
         snapshotForCwd: (cwd: string) =>
           !effectiveConfig.enabled
             ? snapshot.getSnapshot

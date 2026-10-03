@@ -1434,6 +1434,18 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
   }),
 );
 
+// An ambient CODEX_HOME from the shell that launched the server must not
+// leak into an instance that uses the shared home.
+export function resolveCodexProviderEnvironment(
+  environment: NodeJS.ProcessEnv,
+  homeLayout: { readonly effectiveHomePath: string | undefined; readonly sharedHomePath: string },
+): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    CODEX_HOME: homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
+  };
+}
+
 export type CodexAdapterV2DriverEnv =
   | CodexAppServerClientFactory
   | FileSystem.FileSystem
@@ -1476,7 +1488,10 @@ export const createCodexAdapterV2 = (
     return makeCodexAdapterV2({
       instanceId,
       settings,
-      environment: mergeProviderInstanceEnvironment(environment, hostEnvironment),
+      environment: resolveCodexProviderEnvironment(
+        mergeProviderInstanceEnvironment(environment, hostEnvironment),
+        homeLayout,
+      ),
       clientFactory,
       fileSystem,
       idAllocator,

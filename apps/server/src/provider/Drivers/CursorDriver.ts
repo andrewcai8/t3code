@@ -43,7 +43,7 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { probeCursorSkills } from "./CursorSkills.ts";
+import { discoverCursorSkills, probeCursorSkills } from "./CursorSkills.ts";
 import { makeCursorAuth } from "../CursorAuth.ts";
 import * as CursorCredentialStore from "../CursorCredentialStore.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
@@ -198,6 +198,17 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         auth.withAccess,
       );
 
+      // The composer can open before a project cwd exists, so the machine
+      // snapshot carries user skills or the slash menu starts empty.
+      const withUserSkills = <A extends object>(provider: A) =>
+        effectiveConfig.enabled
+          ? discoverCursorSkills(undefined, processEnv).pipe(
+              Effect.map((skills) => ({ ...provider, skills })),
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+            )
+          : Effect.succeed(provider);
+
       const checkProvider = auth.readApiKey.pipe(
         Effect.orElseSucceed(() => undefined),
         Effect.flatMap((apiKey) =>
@@ -227,6 +238,8 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
             ),
           ),
         ),
+        Effect.flatMap(withUserSkills),
+        Effect.annotateLogs({ providerInstanceId: instanceId }),
         Effect.provideService(HttpClient.HttpClient, httpClient),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
@@ -241,7 +254,10 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
-          buildInitialCursorProviderSnapshot(settings.provider).pipe(Effect.map(stampSnapshot)),
+          buildInitialCursorProviderSnapshot(settings.provider).pipe(
+            Effect.flatMap(withUserSkills),
+            Effect.map(stampSnapshot),
+          ),
         checkProvider,
       }).pipe(
         Effect.mapError(

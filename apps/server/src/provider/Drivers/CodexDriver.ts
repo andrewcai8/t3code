@@ -38,9 +38,17 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
 import {
   createCodexAdapterV2,
+  resolveCodexProviderEnvironment,
   type CodexAdapterV2DriverEnv,
 } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import {
+  CODEX_LOGIN_REFRESH_AHEAD_MS,
+  codexLoginExpiredMessage,
+  codexLoginRefreshDue,
+  codexLoginSignedOut,
+  parseCodexLogin,
+} from "../codexLoginCopy.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import * as ResetCreditCoordinator from "../Layers/resetCreditCoordinator.ts";
 import {
@@ -104,16 +112,6 @@ function makeCodexMaintenanceResolver(sharedHomePath: string) {
   });
 }
 
-export function resolveCodexProviderEnvironment(
-  environment: NodeJS.ProcessEnv,
-  homeLayout: { readonly effectiveHomePath: string | undefined; readonly sharedHomePath: string },
-): NodeJS.ProcessEnv {
-  return {
-    ...environment,
-    CODEX_HOME: homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
-  };
-}
-
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
  * driver's `R` so the registry layer aggregates these across every
@@ -164,8 +162,6 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const modelManifest = yield* ModelManifest.ModelManifest;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(config);
-      // Do not inherit an ambient CODEX_HOME from the shell that launched the
-      // desktop server. Each instance must probe and run against its own home.
       const providerEnvironment = resolveCodexProviderEnvironment(processEnv, homeLayout);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
@@ -196,7 +192,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
         "auth.json",
       );
-      const { localAgentRuns } = yield* ServerConfig;
+      const { localAgentRuns } = yield* ServerConfig.ServerConfig;
       const readLogin = fileSystem.readFileString(authPath).pipe(
         Effect.orElseSucceed(() => ""),
         Effect.map(parseCodexLogin),
@@ -330,9 +326,27 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             }),
         ),
       );
+      // On a host, the status probe refreshes the host's own login once it is
+      // due (`codexLoginRefreshDue`), but probes run on an interval only while
+      // a client is watching, and a host mostly runs unwatched. Probes for one
+      // instance never overlap, so this cannot race the usage probe.
+      if (enabled && !localAgentRuns)
+        yield* Effect.sleep("1 hour").pipe(
+          Effect.andThen(refreshDue),
+          Effect.flatMap((due) =>
+            due ? snapshot.refresh.pipe(Effect.andThen(refreshDue)) : Effect.succeed(false),
+          ),
+          Effect.flatMap((stillDue) =>
+            stillDue ? Effect.logWarning("Codex did not refresh this login.") : Effect.void,
+          ),
+          Effect.ignoreCause({ log: true }),
+          Effect.forever,
+          Effect.annotateLogs({ providerInstanceId: instanceId }),
+          Effect.forkScoped,
+        );
       const textGeneration = yield* makeCodexTextGeneration(
         effectiveConfig,
-        processEnv,
+        providerEnvironment,
         snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
       );
       const snapshotForCwd = (cwd: string) =>

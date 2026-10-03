@@ -223,11 +223,9 @@ describe("codexUsageLimitMessage", () => {
         },
         at,
       ),
-    ).toEqual({
-      message:
-        "Codex weekly usage limit reached. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.",
-      resetsAt: "2026-01-06T05:00:00.000Z",
-    });
+    ).toBe(
+      "Codex usage limit reached. The weekly limit resets in 5d 5h. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.",
+    );
   });
 
   it("points a reached spend cap at the workspace owner", () => {
@@ -244,11 +242,9 @@ describe("codexUsageLimitMessage", () => {
         },
         at,
       ),
-    ).toEqual({
-      message:
-        "Codex session usage limit reached. The workspace spend limit is reached: ask your workspace owner to raise it, or send the message again once the limit resets.",
-      resetsAt: "2026-01-01T03:20:00.000Z",
-    });
+    ).toBe(
+      "Codex usage limit reached. The session limit resets in 3h 20m. The workspace spend limit is reached: ask your workspace owner to raise it, or send the message again once the limit resets.",
+    );
   });
 
   it("names no window when credits run out without one", () => {
@@ -257,18 +253,15 @@ describe("codexUsageLimitMessage", () => {
         { limitId: "codex", rateLimitReachedType: "workspace_member_credits_depleted" },
         at,
       ),
-    ).toEqual({
-      message:
-        "Codex usage limit reached. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.",
-      resetsAt: undefined,
-    });
+    ).toBe(
+      "Codex usage limit reached. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.",
+    );
   });
 
   it("says only what it knows without a snapshot", () => {
-    expect(codexUsageLimitMessage(undefined, at)).toEqual({
-      message: "Codex usage limit reached. Send the message again once the limit resets.",
-      resetsAt: undefined,
-    });
+    expect(codexUsageLimitMessage(undefined, at)).toBe(
+      "Codex usage limit reached. Send the message again once the limit resets.",
+    );
   });
 });
 

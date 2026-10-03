@@ -39,22 +39,6 @@ import * as IdAllocator from "../../orchestration-v2/IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../../orchestration-v2/ProviderAdapter.ts";
 import * as ProviderCredentialStore from "../ProviderCredentialStore.ts";
 
-it("pins Codex probes to the resolved instance home", () => {
-  expect(
-    resolveCodexProviderEnvironment(
-      { CODEX_HOME: "/Users/andrew/.codex_ac3", PATH: "/usr/bin" },
-      { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: undefined },
-    ),
-  ).toMatchObject({ CODEX_HOME: "/Users/andrew/.codex", PATH: "/usr/bin" });
-
-  expect(
-    resolveCodexProviderEnvironment(
-      { CODEX_HOME: "/Users/andrew/.codex_ac3" },
-      { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: "/Users/andrew/.codex_ac2" },
-    ).CODEX_HOME,
-  ).toBe("/Users/andrew/.codex_ac2");
-});
-
 const testLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-codex-driver-maintenance-",
 }).pipe(

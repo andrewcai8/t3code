@@ -1,10 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { limitsNotice } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import cursorPeriod from "../testFixtures/cursor/period.json" with { type: "json" };
 import { cursorUsageResponseToLimits, readCursorUsageLimits } from "./cursorUsageLimits.ts";
 
 const withNodeServices = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
@@ -174,6 +177,79 @@ describe("Cursor usage limits", () => {
         reason: "probeFailed",
         message: "Cursor could not read usage limits.",
       });
+    }),
+  );
+
+  it.effect("logs why a usage read failed without echoing the credential", () =>
+    Effect.gen(function* () {
+      const messages: unknown[] = [];
+      const logger = Logger.make<unknown, void>(({ message }) => {
+        messages.push(message);
+      });
+      const read = (environment: NodeJS.ProcessEnv, readFileString: () => Effect.Effect<string>) =>
+        readCursorUsageLimits({ apiEndpoint: "https://cursor.example" }, environment).pipe(
+          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({ readFileString })),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response("", { status: 401 })),
+              ),
+            ),
+          ),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+          withNodeServices,
+        );
+
+      const rejected = yield* read({ CURSOR_AUTH_TOKEN: "secret-token" }, () =>
+        Effect.die("unused"),
+      );
+      const malformed = yield* read({ AGENT_CLI_CREDENTIAL_STORE: "file", HOME: "/home/u" }, () =>
+        Effect.succeed('{"accessToken": 42, "note": "secret-token"}'),
+      );
+
+      expect(rejected.unavailable?.reason).toBe("probeFailed");
+      expect(malformed.unavailable?.reason).toBe("probeFailed");
+      expect(messages).toEqual([
+        [
+          "Cursor usage read failed.",
+          {
+            cause:
+              "StatusCode: non 2xx status code (401 POST https://cursor.example/aiserver.v1.DashboardService/GetCurrentPeriodUsage)",
+          },
+        ],
+        ["Cursor usage read failed.", { cause: "SchemaError" }],
+      ]);
+    }),
+  );
+
+  it.effect("gives each pool the billing cycle's pace marker", () =>
+    Effect.gen(function* () {
+      const limits = yield* withNodeServices(
+        readCursorUsageLimits({ apiEndpoint: "" }, { CURSOR_AUTH_TOKEN: "token" }).pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(cursorPeriod))),
+            ),
+          ),
+        ),
+      );
+      expect(
+        limits.windows.map(({ id, usedPercent, windowDurationMins }) => ({
+          id,
+          usedPercent,
+          windowDurationMins,
+        })),
+      ).toEqual(
+        expect.arrayContaining([
+          { id: "totalPercentUsed", usedPercent: 78.14571428571429, windowDurationMins: 44640 },
+          { id: "autoPercentUsed", usedPercent: 74.42733333333334, windowDurationMins: 44640 },
+          { id: "apiPercentUsed", usedPercent: 100, windowDurationMins: 44640 },
+        ]),
+      );
+      expect(limitsNotice(limits)).toBeNull();
     }),
   );
 
