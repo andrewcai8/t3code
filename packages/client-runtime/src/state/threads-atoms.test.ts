@@ -22,6 +22,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom, AtomRegistry } from "effect/unstable/reactivity";
 
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import type { HostChat } from "../connection/hostBoxSync.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import {
   AVAILABLE_CONNECTION_STATE,

@@ -2,7 +2,7 @@ import type { ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
 import {
   WS_METHODS,
   type EnvironmentId,
@@ -90,6 +90,33 @@ import {
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
+import {
+  isThreadLifecycleOfflineFailure,
+  OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT,
+  queueOfflineThreadLifecycleOverlay,
+  type ThreadLifecycleOverlayKind,
+  withThreadLifecycleOverlays,
+} from "./threadLifecycleOverlay.ts";
+
+/** Settles, un-settles and deletes made while the environment is unreachable wait as overlays. */
+function recoverOfflineThreadLifecycle(kind: ThreadLifecycleOverlayKind) {
+  return (
+    error: unknown,
+    context: {
+      readonly input: { readonly threadId: ThreadId };
+      readonly environmentId: EnvironmentId;
+      readonly registry: AtomRegistry.AtomRegistry;
+    },
+  ) => {
+    if (!isThreadLifecycleOfflineFailure(error)) return undefined;
+    queueOfflineThreadLifecycleOverlay(
+      context.registry,
+      { environmentId: context.environmentId, threadId: context.input.threadId },
+      kind,
+    );
+    return Effect.succeed(OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT);
+  };
+}
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
@@ -391,7 +418,7 @@ export function createThreadEnvironmentAtoms<R, E>(
   const optimistic = createOptimisticThreadLifecycle(snapshotAtom);
   return {
     ...commands,
-    snapshotAtom: optimistic.snapshotAtom,
+    snapshotAtom: withThreadLifecycleOverlays(optimistic.snapshotAtom),
     settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>
       !accepted &&
       (thread.pendingRuntimeRequest !== null ||

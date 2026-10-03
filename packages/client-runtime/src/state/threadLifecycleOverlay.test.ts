@@ -1,11 +1,13 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { AtomRegistry } from "effect/unstable/reactivity";
+import * as DateTime from "effect/DateTime";
+import { Atom, AtomRegistry } from "effect/unstable/reactivity";
 
 import { workspaceMissingError } from "../connection/errors.ts";
 import { EnvironmentNotRegisteredError } from "../connection/registry.ts";
 import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import { threadKey } from "./entities.ts";
+import { v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import {
   applyThreadLifecycleOverlay,
   decodeThreadLifecycleOverlays,
@@ -18,6 +20,8 @@ import {
   queueOfflineThreadLifecycleOverlay,
   reconcileThreadLifecycleOverlays,
   threadLifecycleOverlayAtom,
+  type ThreadLifecycleOverlay,
+  withThreadLifecycleOverlays,
 } from "./threadLifecycleOverlay.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
@@ -25,11 +29,12 @@ const THREAD_ID = ThreadId.make("thread-1");
 const REF = { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID };
 const KEY = threadKey(REF);
 const SETTLED_AT = "2026-09-15T12:00:00.000Z";
+const SETTLED_AT_TIME = DateTime.makeUnsafe(SETTLED_AT);
 
 const SHELL = {
   settledOverride: null as "settled" | "active" | null,
-  settledAt: null as string | null,
-  unsettledAt: null as string | null,
+  settledAt: null as DateTime.Utc | null,
+  unsettledAt: null as DateTime.Utc | null,
   activeOrderKey: "a" as string | null,
 };
 
@@ -38,7 +43,7 @@ describe("applyThreadLifecycleOverlay", () => {
     const overlay = { kind: "settled" as const, at: SETTLED_AT };
     expect(applyThreadLifecycleOverlay(SHELL, overlay)).toEqual({
       settledOverride: "settled",
-      settledAt: SETTLED_AT,
+      settledAt: SETTLED_AT_TIME,
       unsettledAt: null,
       activeOrderKey: null,
     });
@@ -48,13 +53,13 @@ describe("applyThreadLifecycleOverlay", () => {
     const overlay = { kind: "unsettled" as const, at: SETTLED_AT };
     expect(
       applyThreadLifecycleOverlay(
-        { ...SHELL, settledOverride: "settled", settledAt: SETTLED_AT },
+        { ...SHELL, settledOverride: "settled", settledAt: SETTLED_AT_TIME },
         overlay,
       ),
     ).toEqual({
       settledOverride: "active",
       settledAt: null,
-      unsettledAt: SETTLED_AT,
+      unsettledAt: SETTLED_AT_TIME,
       activeOrderKey: "a",
     });
   });
@@ -63,6 +68,52 @@ describe("applyThreadLifecycleOverlay", () => {
     const overlay = { kind: "settled" as const, at: SETTLED_AT };
     const settled = applyThreadLifecycleOverlay(SHELL, overlay);
     expect(applyThreadLifecycleOverlay(settled, overlay)).toBe(settled);
+  });
+});
+
+describe("withThreadLifecycleOverlays", () => {
+  const OTHER_THREAD_ID = ThreadId.make("thread-2");
+  const source = Atom.make({
+    ...v2ShellSnapshot,
+    threads: [
+      { ...v2ThreadShell, id: THREAD_ID },
+      { ...v2ThreadShell, id: OTHER_THREAD_ID },
+    ],
+  });
+  function harness() {
+    const registry = AtomRegistry.make();
+    const overlays = Atom.make<ReadonlyMap<string, ThreadLifecycleOverlay>>(new Map());
+    const snapshotAtom = withThreadLifecycleOverlays(() => source, overlays)(ENVIRONMENT_ID);
+    registry.mount(snapshotAtom);
+    return { registry, overlays, snapshot: () => registry.get(snapshotAtom) };
+  }
+
+  it("hides a thread deleted on this device until the delete is undone", () => {
+    const { registry, overlays, snapshot } = harness();
+    registry.set(overlays, new Map([[KEY, { kind: "deleted", at: SETTLED_AT }]]));
+    expect(snapshot()?.threads.map(({ id }) => id)).toEqual([OTHER_THREAD_ID]);
+    registry.set(overlays, new Map());
+    expect(snapshot()?.threads.map(({ id }) => id)).toEqual([THREAD_ID, OTHER_THREAD_ID]);
+  });
+
+  it("settles a thread in the snapshot and keeps its identity across recomputes", () => {
+    const { registry, overlays, snapshot } = harness();
+    expect(snapshot()).toBe(registry.get(source));
+    registry.set(overlays, new Map([[KEY, { kind: "settled", at: SETTLED_AT }]]));
+    const settled = snapshot()?.threads[0];
+    expect([settled?.settledOverride, settled?.settledAt]).toEqual(["settled", SETTLED_AT_TIME]);
+    expect(snapshot()?.threads[1]).toBe(registry.get(source).threads[1]);
+    registry.set(
+      overlays,
+      new Map([
+        [KEY, { kind: "settled", at: SETTLED_AT }],
+        [
+          threadKey({ environmentId: EnvironmentId.make("elsewhere"), threadId: THREAD_ID }),
+          { kind: "deleted", at: SETTLED_AT },
+        ],
+      ]),
+    );
+    expect(snapshot()?.threads[0]).toBe(settled);
   });
 });
 

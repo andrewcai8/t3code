@@ -22,10 +22,23 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 
+import { workspaceMissingError } from "../connection/errors.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  PrimaryConnectionTarget,
+  type PreparedConnection,
+} from "../connection/model.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
-import type { RpcSession } from "../rpc/session.ts";
+import * as RpcSession from "../rpc/session.ts";
+import { threadKey } from "./entities.ts";
+import { v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
+import { runAtomCommand } from "./runtime.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
+import {
+  isOfflineThreadLifecycleDispatchResult,
+  threadLifecycleOverlayAtom,
+} from "./threadLifecycleOverlay.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
@@ -404,10 +417,10 @@ class ThreadStillWorkingError extends Schema.TaggedError<ThreadStillWorkingError
 
 const makeOfflineHarness = Effect.fn("makeOfflineHarness")(function* (
   input: {
-    readonly run?: EnvironmentRegistryModule.EnvironmentRegistry["Service"]["run"];
+    readonly run?: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"];
   } = {},
 ) {
-  const supervisor = EnvironmentSupervisorModule.EnvironmentSupervisor.of({
+  const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: OFFLINE_TARGET,
     state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
     session: yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(Option.none()),
@@ -415,36 +428,43 @@ const makeOfflineHarness = Effect.fn("makeOfflineHarness")(function* (
     connect: Effect.void,
     disconnect: Effect.void,
     retryNow: Effect.void,
-  } satisfies EnvironmentSupervisorModule.EnvironmentSupervisor["Service"]);
-  const run: EnvironmentRegistryModule.EnvironmentRegistry["Service"]["run"] =
+  } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+  const run: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] =
     input.run ??
     ((_environmentId, effect) =>
-      Effect.provideService(effect, EnvironmentSupervisorModule.EnvironmentSupervisor, supervisor));
-  const environmentRegistry = EnvironmentRegistryModule.EnvironmentRegistry.of({
+      Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+  const environmentRegistry = EnvironmentRegistry.EnvironmentRegistry.of({
     run,
     followStream: (
       _environmentId: typeof OFFLINE_ENVIRONMENT_ID,
       stream: Stream.Stream<unknown, unknown, unknown>,
-    ) =>
-      Stream.provideService(stream, EnvironmentSupervisorModule.EnvironmentSupervisor, supervisor),
-  } as unknown as EnvironmentRegistryModule.EnvironmentRegistry["Service"]);
+    ) => Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+  } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]);
   const runtime = Atom.runtime(
     Layer.mergeAll(
-      Layer.succeed(EnvironmentRegistryModule.EnvironmentRegistry, environmentRegistry),
+      Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
       TEST_CRYPTO_LAYER,
     ),
   );
   const snapshotAtom = Atom.family((_environmentId: EnvironmentId) =>
-    Atom.make<OrchestrationShellSnapshot | null>(null),
+    Atom.make<OrchestrationV2ShellSnapshot | null>({
+      ...v2ShellSnapshot,
+      threads: [{ ...v2ThreadShell, id: OFFLINE_THREAD_ID, activeOrderKey: "a" }],
+    }),
   );
+  const commands = createThreadEnvironmentAtoms(runtime, snapshotAtom);
+  const registry = AtomRegistry.make();
+  registry.mount(commands.snapshotAtom(OFFLINE_ENVIRONMENT_ID));
   return {
-    commands: createThreadEnvironmentAtoms(runtime, snapshotAtom),
-    registry: AtomRegistry.make(),
+    commands,
+    registry,
+    visibleThreads: () =>
+      registry.get(commands.snapshotAtom(OFFLINE_ENVIRONMENT_ID))?.threads ?? [],
   };
 });
 
-const failingRun = <E>(error: E): EnvironmentRegistryModule.EnvironmentRegistry["Service"]["run"] =>
-  (() => Effect.fail(error)) as EnvironmentRegistryModule.EnvironmentRegistry["Service"]["run"];
+const failingRun = <E>(error: E): EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] =>
+  (() => Effect.fail(error)) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"];
 
 describe("offline thread.settle", () => {
   it.effect("parks the thread locally when the environment has no RPC session", () =>
@@ -460,12 +480,16 @@ describe("offline thread.settle", () => {
       expect(result._tag).toBe("Success");
       if (result._tag !== "Success") return;
       expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
-      expect(
-        harness.registry
-          .get(threadLifecycleOverlayAtom)
-          .get(threadKey({ environmentId: OFFLINE_ENVIRONMENT_ID, threadId: OFFLINE_THREAD_ID }))
-          ?.kind,
-      ).toBe("settled");
+      const overlay = harness.registry
+        .get(threadLifecycleOverlayAtom)
+        .get(threadKey({ environmentId: OFFLINE_ENVIRONMENT_ID, threadId: OFFLINE_THREAD_ID }));
+      expect(overlay?.kind).toBe("settled");
+      const [thread] = harness.visibleThreads();
+      expect({
+        settledOverride: thread?.settledOverride,
+        settledAt: thread?.settledAt == null ? null : DateTime.formatIso(thread.settledAt),
+        activeOrderKey: thread?.activeOrderKey,
+      }).toEqual({ settledOverride: "settled", settledAt: overlay?.at, activeOrderKey: null });
     }),
   );
 
@@ -473,7 +497,7 @@ describe("offline thread.settle", () => {
     Effect.gen(function* () {
       const harness = yield* makeOfflineHarness({
         run: failingRun(
-          new EnvironmentRegistryModule.EnvironmentNotRegisteredError({
+          new EnvironmentRegistry.EnvironmentNotRegisteredError({
             environmentId: OFFLINE_ENVIRONMENT_ID,
           }),
         ),
@@ -532,6 +556,7 @@ describe("offline thread.delete", () => {
       if (result._tag !== "Success") return;
       expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
       expect(harness.registry.get(threadLifecycleOverlayAtom).get(key)?.kind).toBe("deleted");
+      expect(harness.visibleThreads()).toEqual([]);
     }),
   );
 

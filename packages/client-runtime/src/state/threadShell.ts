@@ -20,13 +20,6 @@ import {
   threadKey,
   threadRefsEqual,
 } from "./entities.ts";
-import {
-  applyThreadLifecycleOverlay,
-  threadLifecycleOverlayAtom,
-  threadLifecycleOverlaysEqual,
-  type ThreadLifecycleOverlay,
-  withoutDeletedThreads,
-} from "./threadLifecycleOverlay.ts";
 
 const EMPTY_THREADS: ReadonlyArray<OrchestrationV2ThreadShell> = Object.freeze([]);
 const EMPTY_SCOPED_THREAD_REFS: ReadonlyArray<ScopedThreadRef> = Object.freeze([]);
@@ -42,7 +35,6 @@ export function createEnvironmentThreadShellAtoms(input: {
     environmentId: EnvironmentId,
   ) => Atom.Atom<OrchestrationV2ShellSnapshot | null>;
 }) {
-  const overlayAtom = input.overlayAtom ?? threadLifecycleOverlayAtom;
   // Point reads and aggregate lists share values without keeping an atom alive
   // for every listed thread. Replaced source objects can be collected.
   const scopedThreads = new WeakMap<
@@ -62,38 +54,11 @@ export function createEnvironmentThreadShellAtoms(input: {
     }
     return value;
   };
-  const overlaidThreads = new WeakMap<
-    OrchestrationThreadShell,
-    Map<
-      EnvironmentId,
-      { overlay: ThreadLifecycleOverlay | undefined; result: EnvironmentThreadShell }
-    >
-  >();
-  const overlayScopedThread = (
-    environmentId: EnvironmentId,
-    thread: OrchestrationThreadShell,
-    overlay: ThreadLifecycleOverlay | undefined,
-  ) => {
-    let byEnvironment = overlaidThreads.get(thread);
-    if (byEnvironment === undefined) {
-      byEnvironment = new Map();
-      overlaidThreads.set(thread, byEnvironment);
-    }
-    const cached = byEnvironment.get(environmentId);
-    if (cached !== undefined && threadLifecycleOverlaysEqual(cached.overlay, overlay)) {
-      return cached.result;
-    }
-    const result = applyThreadLifecycleOverlay(scopedThread(environmentId, thread), overlay);
-    byEnvironment.set(environmentId, { overlay, result });
-    return result;
-  };
 
   const environmentThreadsAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make(
       (get): ReadonlyArray<OrchestrationV2ThreadShell> =>
         get(input.snapshotAtom(environmentId))?.threads ?? EMPTY_THREADS,
-        get(overlayAtom),
-      ),
     ).pipe(Atom.withLabel(`environment-threads:${environmentId}`)),
   );
 
@@ -169,8 +134,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     const ref = parseThreadKey(key);
     return Atom.make((get) => {
       const source = get(environmentThreadIndexAtom(ref.environmentId)).get(ref.threadId) ?? null;
-      if (source === null) return null;
-      return overlayScopedThread(ref.environmentId, source, get(overlayAtom).get(key));
+      return source === null ? null : scopedThread(ref.environmentId, source);
     }).pipe(Atom.withLabel(`environment-thread-shell:${key}`));
   });
 
@@ -195,7 +159,7 @@ export function createEnvironmentThreadShellAtoms(input: {
           seen.add(key);
           const thread = threads.get(ref.threadId);
           if (thread !== undefined) {
-            next.push(overlayScopedThread(ref.environmentId, thread, get(overlayAtom).get(key)));
+            next.push(scopedThread(ref.environmentId, thread));
           }
         }
       }
@@ -222,17 +186,10 @@ export function createEnvironmentThreadShellAtoms(input: {
 
   let previousThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
   const threadShellsAtom = Atom.make((get) => {
-    const overlays = get(overlayAtom);
     const next: EnvironmentThreadShell[] = [];
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
-        next.push(
-          overlayScopedThread(
-            environmentId,
-            thread,
-            overlays.get(threadKey({ environmentId, threadId: thread.id })),
-          ),
-        );
+        next.push(scopedThread(environmentId, thread));
       }
     }
     if (arrayElementsEqual(previousThreadShells, next)) {

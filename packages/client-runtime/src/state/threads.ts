@@ -1005,5 +1005,6 @@ export * from "./composerPathSearch.ts";
 export * from "./threadCommands.ts";
 export * from "./threadFeedback.ts";
 export * from "./threadDetail.ts";
+export * from "./threadLifecycleOverlay.ts";
 export * from "./threadShell.ts";
 export * from "./threadState.ts";
