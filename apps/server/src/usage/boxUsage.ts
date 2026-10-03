@@ -313,7 +313,7 @@ export const importMachineUsage = Effect.fn("importMachineUsage")(function* (
  * reads the Cursor account itself, and missing or empty sources and buckets
  * without a kept source are dropped because the host has nothing to show for them.
  */
-export function historyForHost(summary: UsageSummary): UsageSummary {
+function historyForHost(summary: UsageSummary): UsageSummary {
   const bucketSources = new Set(
     summary.buckets.flatMap((bucket) =>
       bucket.provider === "cursor" || bucket.sourcePath === undefined

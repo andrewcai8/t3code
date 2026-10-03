@@ -53,7 +53,7 @@ export function launchRefusedForGood(error: unknown): boolean {
  * The launch a client asked for; `creationSource` fills in when it named none.
  * Keep in step with the WS `launchThread` handler in `ws.ts`.
  */
-export const clientLaunchInput = (
+const clientLaunchInput = (
   input: OrchestrationV2ThreadLaunchInput,
   creationSource: OrchestrationV2CreationSource,
 ): ThreadLaunchService.ThreadLaunchInput => ({
