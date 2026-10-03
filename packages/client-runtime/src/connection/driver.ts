@@ -9,7 +9,6 @@ import type {
   ConnectionAttemptStage,
   PreparedConnection,
 } from "./model.ts";
-import { workspaceMissingError } from "./errors.ts";
 import * as ConnectionResolver from "./resolver.ts";
 import * as RpcSession from "../rpc/session.ts";
 
@@ -47,9 +46,6 @@ export const make = Effect.gen(function* () {
     reportProgress: (progress: ConnectionDriverProgress) => Effect.Effect<void>,
   ) {
     const target = entry.target;
-    if (target._tag === "BearerConnectionTarget" && target.workspaceStatus === "missing") {
-      return yield* workspaceMissingError();
-    }
     yield* Effect.annotateCurrentSpan({
       "connection.environment.id": target.environmentId,
       "connection.target.kind": target._tag,

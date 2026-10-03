@@ -185,7 +185,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     registrations,
     credentials,
     cache,
-    driver,
+    driver: dialer,
     withLeaseLock,
     getEntry,
     installEntryLocked,
@@ -193,6 +193,13 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     remove: removeEntry,
     run,
   } = internals;
+  // A saved connection whose workspace is gone is not dialed again until it is paired anew.
+  const driver = ConnectionDriver.ConnectionDriver.of({
+    connect: (entry, reportProgress) =>
+      entry.target._tag === "BearerConnectionTarget" && entry.target.workspaceStatus === "missing"
+        ? Effect.fail(workspaceMissingError())
+        : dialer.connect(entry, reportProgress),
+  });
   const presence = yield* UserPresence;
   const pairing = yield* PairingRedemption;
   // A box is kept awake and woken only while its user is here.
