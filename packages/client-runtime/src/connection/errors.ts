@@ -9,6 +9,9 @@ import {
   type ConnectionAttemptError,
   ConnectionTransientError,
 } from "./model.ts";
+import { isBoxNotServing } from "./boxErrors.ts";
+
+export { workspaceMissingError } from "./boxErrors.ts";
 
 export function profileMissingError(connectionId: string): ConnectionBlockedError {
   return new ConnectionBlockedError({
@@ -21,13 +24,6 @@ export function credentialMissingError(connectionId: string): ConnectionBlockedE
   return new ConnectionBlockedError({
     reason: "authentication",
     detail: `Connection credential ${connectionId} is unavailable.`,
-  });
-}
-
-export function workspaceMissingError(): ConnectionBlockedError {
-  return new ConnectionBlockedError({
-    reason: "workspace-missing",
-    detail: "This workspace no longer exists. Its saved conversation is still available.",
   });
 }
 
@@ -119,8 +115,6 @@ export function mapManagedRelayError(error: ManagedRelayClientError): Connection
   }
 }
 
-const NOT_SERVING_STATUSES: ReadonlySet<number> = new Set([404, 502, 503]);
-
 export function mapRemoteEnvironmentError(
   error: RemoteEnvironmentAuthError,
   connectionMethod: ClientConnectionMethod = "direct",
@@ -171,15 +165,10 @@ export function mapRemoteEnvironmentError(
         detail: "The environment could not authorize the connection.",
         traceId: error.traceId,
       });
+    case "RemoteEnvironmentAuthInvalidJsonError":
     case "RemoteEnvironmentAuthUndeclaredStatusError":
       return new ConnectionTransientError({
-        // A paused box's gateway answers 404 (Namespace), 502 (E2B) or 503 (nothing listening).
-        reason: NOT_SERVING_STATUSES.has(error.status) ? "not-serving" : "remote-unavailable",
-        detail: error.message,
-      });
-    case "RemoteEnvironmentAuthInvalidJsonError":
-      return new ConnectionTransientError({
-        reason: "remote-unavailable",
+        reason: isBoxNotServing(error) ? "not-serving" : "remote-unavailable",
         detail: error.message,
       });
   }

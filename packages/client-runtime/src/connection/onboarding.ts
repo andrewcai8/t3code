@@ -21,9 +21,9 @@ import {
   SshConnectionProfile,
   SshConnectionRegistration,
 } from "./catalog.ts";
-import { PairingRedemption } from "./boxPairing.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import { mapRemoteEnvironmentError } from "./errors.ts";
+import { pairedEnvironmentMismatch } from "./boxErrors.ts";
 import {
   BearerConnectionTarget,
   type BoxAttachment,
@@ -99,14 +99,8 @@ export const preparePairingRegistration = Effect.fn(
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
   if (compatibilityError !== null) return yield* compatibilityError;
-  if (
-    input.expectedEnvironmentId !== undefined &&
-    descriptor.environmentId !== input.expectedEnvironmentId
-  )
-    return yield* new ConnectionBlockedError({
-      reason: "configuration",
-      detail: "The paired server does not match the expected environment.",
-    });
+  const mismatch = pairedEnvironmentMismatch(input.expectedEnvironmentId, descriptor.environmentId);
+  if (mismatch !== null) return yield* mismatch;
   const access = yield* bootstrapRemoteBearerSession({
     httpBaseUrl: target.httpBaseUrl,
     credential: target.credential,
@@ -288,19 +282,3 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(ConnectionOnboarding, make);
-
-/** Redeems a box's pairing the way `registerPairing` does, leaving the registry to save it. */
-export const pairingRedemptionLayer = Layer.effect(
-  PairingRedemption,
-  Effect.gen(function* () {
-    const presentation = yield* ClientCapabilities.ClientPresentation;
-    const httpClient = yield* HttpClient.HttpClient;
-    return PairingRedemption.of({
-      redeem: (input) =>
-        preparePairingRegistration(input).pipe(
-          Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
-          Effect.provideService(HttpClient.HttpClient, httpClient),
-        ),
-    });
-  }),
-);

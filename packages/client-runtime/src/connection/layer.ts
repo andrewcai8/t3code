@@ -15,6 +15,7 @@ import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as RpcSession from "../rpc/session.ts";
 import { followPlatformRegistrations } from "./platformRegistrations.ts";
+import { pairingRedemptionLayer } from "./boxPairingLayer.ts";
 
 export const watchDiscoveredCompatibility = Effect.fn("connection.watchDiscoveredCompatibility")(
   function* () {
@@ -71,7 +72,7 @@ export function layerWithOptions(options: RpcSession.RpcSessionOptions) {
     Layer.provide(Layer.mergeAll(ConnectionResolver.layer, RpcSession.layer(options))),
   );
   const registryLayer = EnvironmentRegistry.layer.pipe(
-    Layer.provide(Layer.mergeAll(driverLayer, ConnectionOnboarding.pairingRedemptionLayer)),
+    Layer.provide(Layer.mergeAll(driverLayer, pairingRedemptionLayer)),
   );
   const onboardingLayer = ConnectionOnboarding.layer.pipe(Layer.provide(registryLayer));
   const connectionServicesLayer = Layer.mergeAll(
