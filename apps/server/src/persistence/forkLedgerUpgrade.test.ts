@@ -178,4 +178,34 @@ it.layer(NodeServices.layer)("fork database upgrade", (it) => {
         }).pipe(Effect.provide(upgradedLayer(v2Path)));
       }).pipe(Effect.scoped),
   );
+
+  it.effect("refuses a statev2 database whose ledger came from an upstream V2 build", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const stateDir = yield* fs.realPath(
+        yield* fs.makeTempDirectoryScoped({ prefix: "t3-upstream-ledger-" }),
+      );
+      const v2Path = path.join(stateDir, "statev2.sqlite");
+
+      const failure = yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 51 });
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name) VALUES
+            (52, 'ProjectionThreadTitleState'),
+            (53, 'PullRequestFilesViewed'),
+            (54, 'ProjectionThreadsAutoSettleDisabledAt'),
+            (55, 'OrchestrationV2'),
+            (56, 'RemoveRedundantProjectionIndexes')
+        `;
+        return yield* Effect.flip(runMigrations());
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: v2Path })), Effect.scoped);
+
+      assert.strictEqual(
+        failure.message,
+        `${v2Path} was created by an upstream T3 Code build (OrchestrationV2 is migration 55, this build expects 62). Move that file aside and restart; this build recreates it from state.sqlite.`,
+      );
+    }).pipe(Effect.scoped),
+  );
 });

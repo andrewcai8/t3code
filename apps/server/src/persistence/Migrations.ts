@@ -196,6 +196,26 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  const sql = yield* SqlClient.SqlClient;
+  // Upstream numbers OrchestrationV2 lower than this fork does. Running on its
+  // ledger would skip the fork migrations below the recorded maximum.
+  const ledgerTables = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (ledgerTables.length > 0) {
+    const [foreignV2] = yield* sql<{ readonly migration_id: number; readonly file: string }>`
+      SELECT ledger.migration_id, databases.file
+      FROM effect_sql_migrations AS ledger, pragma_database_list AS databases
+      WHERE ledger.name = 'OrchestrationV2' AND ledger.migration_id != 62
+        AND databases.name = 'main'
+    `;
+    if (foreignV2) {
+      return yield* new Migrator.MigrationError({
+        kind: "BadState",
+        message: `${foreignV2.file} was created by an upstream T3 Code build (OrchestrationV2 is migration ${foreignV2.migration_id}, this build expects 62). Move that file aside and restart; this build recreates it from state.sqlite.`,
+      });
+    }
+  }
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
@@ -206,7 +226,6 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   // migration under a shared id (local or fork builds) keeps that id and
   // silently skips this build's migration at it. Surface the divergence so the
   // skipped schema change is diagnosable.
-  const sql = yield* SqlClient.SqlClient;
   const recorded = yield* sql<{
     readonly migration_id: number;
     readonly name: string;
