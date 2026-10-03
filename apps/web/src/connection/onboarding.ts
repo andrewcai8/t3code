@@ -20,8 +20,14 @@ export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
     mode: "singleFlight",
     key: (input: PairingConnectionInput) => JSON.stringify(input),
   },
-  execute: (input: PairingConnectionInput) =>
-    ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.registerPairing(input))),
+  execute: (input: {
+    readonly pairingUrl?: string;
+    readonly host?: string;
+    readonly pairingCode?: string;
+  }) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
+    ),
 });
 
 export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime, {
@@ -32,5 +38,7 @@ export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime,
     key: (input: { readonly target: DesktopSshEnvironmentTarget }) => JSON.stringify(input.target),
   },
   execute: (input: { readonly target: DesktopSshEnvironmentTarget; readonly label?: string }) =>
-    ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.registerSsh(input))),
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerSsh(input)),
+    ),
 });

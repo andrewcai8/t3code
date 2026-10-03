@@ -1,9 +1,8 @@
 import {
-  ORCHESTRATION_WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
-  type OrchestrationShellSnapshot,
-  type OrchestrationShellStreamItem,
-  type ProvisionedChat,
+  type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ShellStreamItem,
   type ServerConfig,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -12,28 +11,29 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
-import { withHostChat } from "../connection/hostBoxSync.ts";
-import { EnvironmentRegistry } from "../connection/registry.ts";
+import * as EnvironmentRegistry from "../connection/registry.ts";
 import { connectionProjectionPhase } from "../connection/model.ts";
-import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
-import { EnvironmentCacheStore } from "../platform/persistence.ts";
+import * as Persistence from "../platform/persistence.ts";
+import { runCachePersistence } from "./cachePersistence.ts";
 import { subscribeDynamic } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
-import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
-import { applyShellStreamEvent } from "./shellReducer.ts";
+import * as ShellSnapshotLoader from "./shellSnapshotHttp.ts";
+import { applyShellStreamEvent, mergeShellSnapshotProjects } from "./shellReducer.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 
 export type EnvironmentShellStatus = "empty" | "cached" | "synchronizing" | "live";
 
 export interface EnvironmentShellState {
-  readonly snapshot: Option.Option<OrchestrationShellSnapshot>;
+  readonly snapshot: Option.Option<OrchestrationV2ShellSnapshot>;
   readonly status: EnvironmentShellStatus;
   readonly error: Option.Option<string>;
 }
@@ -45,40 +45,17 @@ const EMPTY_SHELL_STATE: EnvironmentShellState = {
 };
 
 function shellStatusForSnapshot(
-  snapshot: Option.Option<OrchestrationShellSnapshot>,
+  snapshot: Option.Option<OrchestrationV2ShellSnapshot>,
 ): EnvironmentShellStatus {
   return Option.isSome(snapshot) ? "cached" : "empty";
 }
 
 const SHELL_SYNCHRONIZATION_ERROR_MESSAGE = "Could not synchronize environment data.";
 
-/**
- * The state a box's shell takes from its host's newer read of the box's chat, or null to keep its
- * own. Only a shell whose own stream is not running takes one; a live or synchronizing stream is
- * the box itself and outranks any copy.
- */
-function adoptHostChat(
-  current: EnvironmentShellState,
-  chat: ProvisionedChat,
-): EnvironmentShellState | null {
-  if (current.status === "live" || current.status === "synchronizing") return null;
-  const snapshot = withHostChat(current.snapshot, chat);
-  return snapshot === null
-    ? null
-    : { snapshot: Option.some(snapshot), status: "cached", error: current.error };
-}
-
-export interface EnvironmentShellStateOptions {
-  /** A box's chat as its host lists it; the shell takes each newer one while it is not live. */
-  readonly hostChat?: Stream.Stream<ProvisionedChat>;
-}
-
-export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* (
-  options?: EnvironmentShellStateOptions,
-) {
-  const supervisor = yield* EnvironmentSupervisor;
-  const cache = yield* EnvironmentCacheStore;
-  const snapshotLoader = yield* ShellSnapshotLoader;
+export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* () {
+  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  const cache = yield* Persistence.EnvironmentCacheStore;
+  const snapshotLoader = yield* ShellSnapshotLoader.ShellSnapshotLoader;
   const wakeups = yield* Effect.serviceOption(ConnectionWakeups.ConnectionWakeups);
   const environmentId = supervisor.target.environmentId;
   const cachedSnapshot = yield* cache.loadShell(environmentId).pipe(
@@ -88,7 +65,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           environmentId,
           ...safeErrorLogAttributes(error),
         }),
-        Effect.as(Option.none<OrchestrationShellSnapshot>()),
+        Effect.as(Option.none<OrchestrationV2ShellSnapshot>()),
       ),
     ),
   );
@@ -124,28 +101,44 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       Effect.forkScoped,
     );
   const activeSubscriptionSession = yield* Ref.make<RpcSession | null>(null);
-  const persistence = yield* Queue.sliding<OrchestrationShellSnapshot>(1);
-
-  const persist = Effect.fn("EnvironmentShellState.persist")(function* (
-    snapshot: OrchestrationShellSnapshot,
-  ) {
-    yield* cache.saveShell(environmentId, snapshot).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("Could not persist environment shell cache.").pipe(
-          Effect.annotateLogs({
-            environmentId,
-            ...safeErrorLogAttributes(error),
-          }),
-        ),
-      ),
-    );
-  });
-
-  yield* Stream.fromQueue(persistence).pipe(
-    Stream.debounce("500 millis"),
-    Stream.runForEach(persist),
-    Effect.forkScoped,
+  const latestLiveSnapshot = yield* Ref.make<Option.Option<OrchestrationV2ShellSnapshot>>(
+    Option.none(),
   );
+  const persistence = yield* Queue.sliding<OrchestrationV2ShellSnapshot>(1);
+
+  const persistenceLock = yield* Semaphore.make(1);
+  let lastPersisted: OrchestrationV2ShellSnapshot | undefined;
+  const persistLatest = Effect.fn("EnvironmentShellState.persistLatest")(function* (
+    flush: boolean,
+  ) {
+    while (true) {
+      const latest = yield* Ref.get(latestLiveSnapshot);
+      if (Option.isNone(latest) || latest.value === lastPersisted) return;
+      const snapshot = latest.value;
+      const saved = yield* cache.saveShell(environmentId, snapshot).pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning("Could not persist environment shell cache.").pipe(
+            Effect.annotateLogs({ environmentId, ...safeErrorLogAttributes(error) }),
+            Effect.as(false),
+          ),
+        ),
+      );
+      if (!saved) return;
+      lastPersisted = snapshot;
+      // Only lifecycle flushes chase updates that arrived during an in-flight save.
+      // The regular worker leaves those updates for the next write window.
+      if (!flush) return;
+    }
+  }, persistenceLock.withPermit);
+  const persist = () => persistLatest(false);
+  const flushLiveShellSnapshot = persistLatest(true);
+
+  // Register before scoped worker fibers so reverse finalizer order interrupts
+  // those fibers first and this flush sees a stable latestLiveSnapshot.
+  yield* Effect.addFinalizer(() => flushLiveShellSnapshot);
+
+  yield* runCachePersistence(persistence, persist).pipe(Effect.forkScoped);
 
   const setDisconnected = Ref.set(awaitingCompletion, false).pipe(
     Effect.andThen(
@@ -154,6 +147,8 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         status: shellStatusForSnapshot(current.snapshot),
       })),
     ),
+    Effect.andThen(flushLiveShellSnapshot.pipe(Effect.forkScoped)),
+    Effect.asVoid,
   );
   const setSynchronizing = SubscriptionRef.update(state, (current) => ({
     ...current,
@@ -189,7 +184,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   // buffer can split a server chunk, so a bulk action can still need several
   // writes, but each write includes every event in that batch.
   const applyItems = Effect.fn("EnvironmentShellState.applyItems")(function* (
-    items: ReadonlyArray<OrchestrationShellStreamItem>,
+    items: ReadonlyArray<OrchestrationV2ShellStreamItem>,
   ) {
     const initial = yield* SubscriptionRef.get(state);
     let waiting = yield* Ref.get(awaitingCompletion);
@@ -205,7 +200,15 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       }
       const nextSnapshot =
         item.kind === "snapshot"
-          ? item.snapshot
+          ? mergeShellSnapshotProjects(
+              Option.getOrNull(next.snapshot),
+              item.snapshot,
+              item.resolvedRepositoryIdentityRoots === undefined
+                ? undefined
+                : {
+                    resolvedRepositoryIdentityRoots: item.resolvedRepositoryIdentityRoots,
+                  },
+            )
           : Option.match(next.snapshot, {
               onNone: () => null,
               onSome: (snapshot) =>
@@ -223,6 +226,9 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     }
     yield* Ref.set(awaitingCompletion, waiting);
     if (next === initial) return;
+    if (Option.isSome(next.snapshot)) {
+      yield* Ref.set(latestLiveSnapshot, next.snapshot);
+    }
     yield* SubscriptionRef.set(state, next);
     if (receivedSnapshot) {
       const session = yield* Ref.get(activeSubscriptionSession);
@@ -244,7 +250,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   yield* setSynchronizing;
   yield* Effect.forkScoped(
     subscribeDynamic(
-      ORCHESTRATION_WS_METHODS.subscribeShell,
+      ORCHESTRATION_V2_WS_METHODS.subscribeShell,
       Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
         yield* Ref.set(activeSubscriptionSession, session);
         const supportsCompletionMarker = yield* session.initialConfig.pipe(
@@ -352,7 +358,6 @@ export interface EnvironmentShellSummary {
   readonly hasCachedShell: boolean;
   readonly hasLiveShell: boolean;
   readonly firstError: string | null;
-  readonly latestSnapshotUpdatedAt: string | null;
 }
 
 const EMPTY_ENVIRONMENT_SHELL_SUMMARY: EnvironmentShellSummary = Object.freeze({
@@ -361,7 +366,6 @@ const EMPTY_ENVIRONMENT_SHELL_SUMMARY: EnvironmentShellSummary = Object.freeze({
   hasCachedShell: false,
   hasLiveShell: false,
   firstError: null,
-  latestSnapshotUpdatedAt: null,
 });
 
 const EMPTY_SERVER_CONFIGS: ReadonlyMap<EnvironmentId, ServerConfig> = new Map();
@@ -375,8 +379,7 @@ function shellSummariesEqual(
     left.hasSynchronizingShell === right.hasSynchronizingShell &&
     left.hasCachedShell === right.hasCachedShell &&
     left.hasLiveShell === right.hasLiveShell &&
-    left.firstError === right.firstError &&
-    left.latestSnapshotUpdatedAt === right.latestSnapshotUpdatedAt
+    left.firstError === right.firstError
   );
 }
 
@@ -403,7 +406,6 @@ export function createEnvironmentShellSummaryAtom(input: {
     let hasCachedShell = false;
     let hasLiveShell = false;
     let firstError: string | null = null;
-    let latestSnapshotUpdatedAt: string | null = null;
 
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const state = get(input.shellStateValueAtom(environmentId));
@@ -417,10 +419,6 @@ export function createEnvironmentShellSummaryAtom(input: {
         continue;
       }
       hasSnapshot = true;
-      const updatedAt = state.snapshot.value.updatedAt;
-      if (latestSnapshotUpdatedAt === null || updatedAt > latestSnapshotUpdatedAt) {
-        latestSnapshotUpdatedAt = updatedAt;
-      }
     }
 
     const next: EnvironmentShellSummary = {
@@ -429,7 +427,6 @@ export function createEnvironmentShellSummaryAtom(input: {
       hasCachedShell,
       hasLiveShell,
       firstError,
-      latestSnapshotUpdatedAt,
     };
     if (shellSummariesEqual(previousSummary, next)) {
       return previousSummary;
@@ -462,7 +459,10 @@ export function createEnvironmentServerConfigsAtom(input: {
 
 export function createEnvironmentShellAtoms<R, E>(
   runtime: Atom.AtomRuntime<
-    EnvironmentRegistry | EnvironmentCacheStore | ShellSnapshotLoader | R,
+    | EnvironmentRegistry.EnvironmentRegistry
+    | Persistence.EnvironmentCacheStore
+    | ShellSnapshotLoader.ShellSnapshotLoader
+    | R,
     E
   >,
 ) {
@@ -487,5 +487,5 @@ export function createEnvironmentShellAtoms<R, E>(
 export * from "./models.ts";
 export * from "./shellCommands.ts";
 export * from "./shellReducer.ts";
-export * from "./shellSnapshotHttp.ts";
+export * as ShellSnapshotLoader from "./shellSnapshotHttp.ts";
 export * from "./snapshots.ts";

@@ -336,8 +336,9 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         >
           {canStartScratch && listScopes.length > 0 ? (
             Platform.OS === "android" ? (
-              <View collapsable={false} className="overflow-hidden rounded-[28px] bg-card">
+              <View collapsable={false} className="overflow-hidden rounded-[28px] bg-grouped-card">
                 <MaterialListRow
+                  className="bg-grouped-card"
                   title="No project"
                   subtitle="Start a task without a project"
                   onPress={() => void startScratch()}
@@ -352,12 +353,12 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 />
               </View>
             ) : (
-              <View collapsable={false} className="overflow-hidden rounded-[24px] bg-card">
+              <View collapsable={false} className="overflow-hidden rounded-[24px] bg-grouped-card">
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="No project"
                   onPress={() => void startScratch()}
-                  className="flex-row items-center gap-3 bg-card px-4 py-3.5"
+                  className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
                 >
                   <View className="h-7 w-7 items-center justify-center">
                     <SymbolView
@@ -388,7 +389,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               collapsable={false}
               className={cn(
                 "items-center gap-3 px-6 py-8",
-                Platform.OS !== "android" && "rounded-[24px] bg-card",
+                Platform.OS !== "android" && "rounded-[24px] bg-grouped-card",
               )}
             >
               {projectEmptyState.loading ? (
@@ -465,8 +466,8 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               collapsable={false}
               className={
                 Platform.OS === "android"
-                  ? "overflow-hidden rounded-[28px] bg-card"
-                  : "overflow-hidden rounded-[24px] bg-card"
+                  ? "overflow-hidden rounded-[28px] bg-grouped-card"
+                  : "overflow-hidden rounded-[24px] bg-grouped-card"
               }
             >
               {visibleScopes.map(({ scope, selectionTarget }, scopeIndex) => {
@@ -474,6 +475,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 if (Platform.OS === "android") {
                   return (
                     <MaterialListRow
+                      className="bg-grouped-card"
                       key={scope.key}
                       title={scope.title}
                       subtitle={
@@ -506,7 +508,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                       accessibilityLabel={scope.title}
                       disabled={reservedDestinationProject !== null}
                       onPress={() => void selectProject(selectionTarget)}
-                      className="flex-row items-center gap-3 bg-card px-4 py-3.5"
+                      className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
                     >
                       <View className="h-7 w-7 items-center justify-center">
                         <ProjectFavicon

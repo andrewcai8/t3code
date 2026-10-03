@@ -1,21 +1,9 @@
 import {
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
-  DiscoveredProvisionedEnvironment,
-  type EnvironmentProvisionAttachInput,
-  type EnvironmentProvisionAttachResult,
-  type EnvironmentProvisionResumeInput,
-  type EnvironmentProvisionResumeResult,
-  type EnvironmentProvisionTouchInput,
-  WS_METHODS,
+  type OrchestrationV2ShellSnapshot,
   ORCHESTRATION_PROTOCOL_VERSION,
   type ExecutionEnvironmentDescriptor,
-  type OrchestrationProjectShell,
-  type OrchestrationShellSnapshot,
-  OrchestrationThreadShell,
-  ProjectId,
-  type ProvisionedChat,
-  ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -88,6 +76,7 @@ import { followPlatformRegistrations, watchDiscoveredCompatibility } from "./lay
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import { runDesktopCommitWithReconnectObserver } from "../state/server.ts";
+import { v2ShellSnapshot } from "../state/orchestrationV2TestFixtures.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -260,11 +249,9 @@ const SSH_PROFILE = new SshConnectionProfile({
   target: SSH_TARGET,
 });
 
-const CACHED_SNAPSHOT: OrchestrationShellSnapshot = {
+const CACHED_SNAPSHOT: OrchestrationV2ShellSnapshot = {
+  ...v2ShellSnapshot,
   snapshotSequence: 1,
-  projects: [],
-  threads: [],
-  updatedAt: "2026-06-06T00:00:00.000Z",
 };
 
 interface SessionControl {
