@@ -7,7 +7,6 @@ import {
   ConnectionBlockedError,
   ConnectionTransientError,
   Connectivity,
-  Presence,
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
@@ -30,7 +29,7 @@ import { clearThreadOutboxEnvironment } from "../state/thread-outbox-removal";
 import { clearComposerDraftsEnvironment } from "../state/use-composer-drafts";
 import { mobileApplicationActiveWakeup } from "./app-state-wakeups";
 import { connectionStorageLayer } from "./storage";
-import { userInputs } from "./user-input";
+import { presenceLayer } from "./user-input";
 
 function networkStatus(state: Network.NetworkState): "unknown" | "offline" | "online" {
   if (state.isConnected === false) {
@@ -232,21 +231,6 @@ const environmentOwnedDataCleanupLayer = Layer.succeed(
       ),
   }),
 );
-
-const presenceLayer = Presence.layer({
-  visible: Stream.callback<boolean>((queue) =>
-    Effect.acquireRelease(
-      Effect.sync(() => {
-        Queue.offerUnsafe(queue, AppState.currentState === "active");
-        return AppState.addEventListener("change", (state) => {
-          Queue.offerUnsafe(queue, state === "active");
-        });
-      }),
-      (subscription) => Effect.sync(() => subscription.remove()),
-    ).pipe(Effect.asVoid),
-  ),
-  inputs: userInputs(30_000),
-});
 
 type ConnectionPlatformLayerSource =
   | typeof providedConnectionStorageLayer

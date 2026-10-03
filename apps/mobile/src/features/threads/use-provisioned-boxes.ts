@@ -12,6 +12,7 @@ import { hydrateProvisionStorage } from "../../state/provision-storage";
 import { provisionedSandboxLeases } from "../../state/provision-stores";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import { useThreadLifecycleOverlaySync } from "../../state/use-thread-lifecycle-overlay-sync";
 import { provisioningHostIds } from "./new-task-cloud-placement";
 
 function useProvisioningHostIds(serverConfigs: ReadonlyMap<EnvironmentId, ServerConfig>) {
@@ -74,4 +75,14 @@ export function useCloudBoxes(): void {
     void syncHostBoxes(lists);
   }, [lists, syncHostBoxes]);
   useAtomMount(runningBoxDemandAtom);
+}
+
+/**
+ * App-wide cloud box upkeep: keeps this phone's boxes in line with their hosts, and persists and
+ * flushes settle and delete commands made while a box was offline. Mount once.
+ */
+export function CloudBoxesWorker(): null {
+  useCloudBoxes();
+  useThreadLifecycleOverlaySync();
+  return null;
 }

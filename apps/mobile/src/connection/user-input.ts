@@ -1,6 +1,8 @@
+import { Presence } from "@t3tools/client-runtime/connection";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import { AppState } from "react-native";
 
 const listeners = new Set<() => void>();
 
@@ -27,3 +29,19 @@ export const userInputs = (sampleMs: number): Stream.Stream<void> =>
       (listener) => Effect.sync(() => listeners.delete(listener)),
     ).pipe(Effect.asVoid),
   );
+
+/** Presence for this phone: visible while the app is active, and each sampled touch. */
+export const presenceLayer = Presence.layer({
+  visible: Stream.callback<boolean>((queue) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        Queue.offerUnsafe(queue, AppState.currentState === "active");
+        return AppState.addEventListener("change", (state) => {
+          Queue.offerUnsafe(queue, state === "active");
+        });
+      }),
+      (subscription) => Effect.sync(() => subscription.remove()),
+    ).pipe(Effect.asVoid),
+  ),
+  inputs: userInputs(30_000),
+});

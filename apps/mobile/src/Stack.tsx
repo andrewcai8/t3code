@@ -50,7 +50,7 @@ import { GitOverviewSheet } from "./features/threads/git/GitOverviewSheet";
 import { ThreadAgentsSheet } from "./features/threads/ThreadAgentsSheet";
 import { ThreadQueueSheet } from "./features/threads/ThreadQueueControl";
 import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
-import { useCloudBoxes } from "./features/threads/use-provisioned-boxes";
+import { CloudBoxesWorker } from "./features/threads/use-provisioned-boxes";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
@@ -127,7 +127,6 @@ import { deriveLayout } from "./lib/layout";
 import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
 import { FORM_SHEET_PRESENTATION_OPTIONS } from "./native/sheet-surface";
 import { useThreadOutboxDrain } from "./state/use-thread-outbox-drain";
-import { useThreadLifecycleOverlaySync } from "./state/use-thread-lifecycle-overlay-sync";
 import { useComposerAttachmentUploadWorker } from "./state/composer-attachment-uploads";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
@@ -585,12 +584,6 @@ function workspaceLocationFromState(state: NavigationState) {
 function ThreadOutboxDrainWorker() {
   useThreadOutboxDrain();
   useComposerAttachmentUploadWorker();
-  useThreadLifecycleOverlaySync();
-  return null;
-}
-
-function CloudBoxesWorker() {
-  useCloudBoxes();
   return null;
 }
 
