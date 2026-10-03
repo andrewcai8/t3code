@@ -1,6 +1,6 @@
 import {
   EnvironmentId,
-  type OrchestrationShellSnapshot,
+  type OrchestrationV2ShellSnapshot,
   type ProvisionedChat,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -1448,7 +1448,7 @@ export const make = Effect.gen(function* () {
         if (!current.has(environmentId)) continue;
         const cached = yield* cache
           .loadShell(environmentId)
-          .pipe(Effect.orElseSucceed(() => Option.none<OrchestrationShellSnapshot>()));
+          .pipe(Effect.orElseSucceed(() => Option.none<OrchestrationV2ShellSnapshot>()));
         if (Option.isSome(cached))
           cachedSequences.set(environmentId, cached.value.snapshotSequence);
       }

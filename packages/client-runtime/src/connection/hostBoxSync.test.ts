@@ -1,19 +1,20 @@
 import {
   EnvironmentId,
   type OrchestrationProjectShell,
-  OrchestrationThreadShell,
+  type OrchestrationV2ThreadShell,
   ProjectId,
   type ProvisionedChat,
   ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./catalog.ts";
 import { chatShellSnapshot, planHostBoxSync, withHostChat } from "./hostBoxSync.ts";
 import { BearerConnectionTarget } from "./model.ts";
+import { v2ShellSnapshot, v2ThreadShell } from "../state/orchestrationV2TestFixtures.ts";
 
 const HOST = EnvironmentId.make("host");
 const OTHER_HOST = EnvironmentId.make("other-host");
@@ -27,23 +28,12 @@ const PROJECT: OrchestrationProjectShell = {
   createdAt: "2026-10-01T00:00:00.000Z",
   updatedAt: "2026-10-01T00:00:00.000Z",
 };
-const THREAD = Schema.decodeUnknownSync(OrchestrationThreadShell)({
-  id: "thread-1",
+const THREAD: OrchestrationV2ThreadShell = {
+  ...v2ThreadShell,
+  id: ThreadId.make("thread-1"),
   projectId: PROJECT.id,
   title: "Fix the flaky test",
-  modelSelection: { instanceId: "codex", model: "gpt-5.4" },
-  runtimeMode: "full-access",
-  branch: null,
-  worktreePath: null,
-  latestTurn: null,
-  createdAt: "2026-10-01T00:00:00.000Z",
-  updatedAt: "2026-10-01T01:00:00.000Z",
-  session: null,
-  latestUserMessageAt: null,
-  hasPendingApprovals: false,
-  hasPendingUserInput: false,
-  hasActionableProposedPlan: false,
-});
+};
 
 function chat(sequence: number): ProvisionedChat {
   return { sequence, project: PROJECT, thread: THREAD };
@@ -236,10 +226,11 @@ describe("planHostBoxSync", () => {
 describe("chatShellSnapshot", () => {
   it("is the box's shell as its host last read it", () => {
     expect(chatShellSnapshot(chat(12))).toEqual({
+      schemaVersion: 1,
       snapshotSequence: 12,
       projects: [PROJECT],
       threads: [THREAD],
-      updatedAt: "2026-10-01T01:00:00.000Z",
+      archivedThreads: [],
     });
   });
 });
@@ -247,18 +238,30 @@ describe("chatShellSnapshot", () => {
 describe("withHostChat", () => {
   const otherThread = { ...THREAD, id: ThreadId.make("thread-subagent"), title: "Subagent" };
   const cached = {
+    ...v2ShellSnapshot,
     snapshotSequence: 5,
     projects: [{ ...PROJECT, title: "old title" }],
     threads: [otherThread, { ...THREAD, title: "Old title" }],
-    updatedAt: "2026-10-01T00:30:00.000Z",
   };
 
   it("takes a newer chat in place of its cached copy and keeps the box's other threads", () => {
     expect(withHostChat(Option.some(cached), chat(8))).toEqual({
+      ...v2ShellSnapshot,
       snapshotSequence: 8,
       projects: [PROJECT],
       threads: [otherThread, THREAD],
-      updatedAt: "2026-10-01T01:00:00.000Z",
+    });
+  });
+
+  it("drops a chat the host lists as archived from the active threads", () => {
+    const archived = { ...THREAD, archivedAt: DateTime.makeUnsafe("2026-10-01T02:00:00.000Z") };
+    expect(
+      withHostChat(Option.some(cached), { sequence: 9, project: PROJECT, thread: archived }),
+    ).toEqual({
+      ...v2ShellSnapshot,
+      snapshotSequence: 9,
+      projects: [PROJECT],
+      threads: [otherThread],
     });
   });
 

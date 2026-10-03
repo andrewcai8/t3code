@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
+  type ProvisionedChat,
   type ServerConfig,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -16,6 +17,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
+import { withHostChat } from "../connection/hostBoxSync.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import { connectionProjectionPhase } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -52,7 +54,30 @@ function shellStatusForSnapshot(
 
 const SHELL_SYNCHRONIZATION_ERROR_MESSAGE = "Could not synchronize environment data.";
 
-export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* () {
+/**
+ * The state a box's shell takes from its host's newer read of the box's chat, or null to keep its
+ * own. Only a shell whose own stream is not running takes one; a live or synchronizing stream is
+ * the box itself and outranks any copy.
+ */
+function adoptHostChat(
+  current: EnvironmentShellState,
+  chat: ProvisionedChat,
+): EnvironmentShellState | null {
+  if (current.status === "live" || current.status === "synchronizing") return null;
+  const snapshot = withHostChat(current.snapshot, chat);
+  return snapshot === null
+    ? null
+    : { snapshot: Option.some(snapshot), status: "cached", error: current.error };
+}
+
+export interface EnvironmentShellStateOptions {
+  /** A box's chat as its host lists it; the shell takes each newer one while it is not live. */
+  readonly hostChat?: Stream.Stream<ProvisionedChat>;
+}
+
+export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* (
+  options?: EnvironmentShellStateOptions,
+) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   const cache = yield* Persistence.EnvironmentCacheStore;
   const snapshotLoader = yield* ShellSnapshotLoader.ShellSnapshotLoader;
@@ -336,7 +361,7 @@ function shellStateChanges(environmentId: EnvironmentId) {
   return followStreamInEnvironment(
     environmentId,
     Stream.unwrap(
-      EnvironmentRegistry.pipe(
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
         Effect.flatMap((registry) =>
           makeEnvironmentShellState({
             hostChat: SubscriptionRef.changes(registry.hostChats).pipe(

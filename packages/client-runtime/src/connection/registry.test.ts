@@ -1,9 +1,21 @@
 import {
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
-  type OrchestrationV2ShellSnapshot,
+  DiscoveredProvisionedEnvironment,
+  type EnvironmentProvisionAttachInput,
+  type EnvironmentProvisionAttachResult,
+  type EnvironmentProvisionResumeInput,
+  type EnvironmentProvisionResumeResult,
+  type EnvironmentProvisionTouchInput,
+  WS_METHODS,
   ORCHESTRATION_PROTOCOL_VERSION,
   type ExecutionEnvironmentDescriptor,
+  type OrchestrationProjectShell,
+  type OrchestrationV2ShellSnapshot,
+  OrchestrationV2ThreadShell,
+  ProjectId,
+  type ProvisionedChat,
+  ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -76,7 +88,7 @@ import { followPlatformRegistrations, watchDiscoveredCompatibility } from "./lay
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import { runDesktopCommitWithReconnectObserver } from "../state/server.ts";
-import { v2ShellSnapshot } from "../state/orchestrationV2TestFixtures.ts";
+import { v2ShellSnapshot, v2ThreadShell } from "../state/orchestrationV2TestFixtures.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -156,7 +168,6 @@ const LISTED_HOST_BOX = {
 } as unknown as DiscoveredProvisionedEnvironment;
 
 const decodeListedBox = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment);
-const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
 
 /** How the host `TARGET` lists a box: a claimed chat box, active, named for its repository. */
 function listedBox(
@@ -196,32 +207,22 @@ const CHAT_PROJECT: OrchestrationProjectShell = {
   createdAt: "2026-10-01T00:00:00.000Z",
   updatedAt: "2026-10-01T00:00:00.000Z",
 };
-const CHAT_THREAD = decodeThreadShell({
-  id: "thread-cloud-chat",
+// Decoded, as the host's listing is, so its defaulted fields match the listed copy.
+const CHAT_THREAD = Schema.decodeUnknownSync(OrchestrationV2ThreadShell)({
+  ...v2ThreadShell,
+  id: ThreadId.make("thread-cloud-chat"),
   projectId: CHAT_PROJECT.id,
   title: "Fix the flaky test",
-  modelSelection: { instanceId: "codex", model: "gpt-5.4" },
-  runtimeMode: "full-access",
-  branch: null,
-  worktreePath: null,
-  latestTurn: null,
-  createdAt: "2026-10-01T00:00:00.000Z",
-  updatedAt: "2026-10-01T01:00:00.000Z",
-  session: null,
-  latestUserMessageAt: null,
-  hasPendingApprovals: false,
-  hasPendingUserInput: false,
-  hasActionableProposedPlan: false,
 });
 function chatAt(sequence: number): ProvisionedChat {
   return { sequence, project: CHAT_PROJECT, thread: CHAT_THREAD };
 }
-function seededShell(sequence: number): OrchestrationShellSnapshot {
+function seededShell(sequence: number): OrchestrationV2ShellSnapshot {
   return {
+    ...v2ShellSnapshot,
     snapshotSequence: sequence,
     projects: [CHAT_PROJECT],
     threads: [CHAT_THREAD],
-    updatedAt: "2026-10-01T01:00:00.000Z",
   };
 }
 const UNPAIRED_CHAT_BOX = new BearerConnectionTarget({
