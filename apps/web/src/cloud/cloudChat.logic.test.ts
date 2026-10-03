@@ -21,6 +21,7 @@ import {
   buildCloudHandoff,
   cloudCloneSource,
   isDraftOnAnotherChatsBox,
+  knownRunOnEnvironments,
   needsLoadBalancedPick,
 } from "./cloudChat.logic";
 
@@ -35,6 +36,10 @@ const hostProject = {
 };
 const boxProject = { environmentId: BOX, id: ProjectId.make("megpt-mono-box"), key: "megpt-mono" };
 const projects = [boxProject, hostProject];
+const runOnOptions = [
+  { environmentId: HOST, projectId: hostProject.id, label: "andrew.megpt.app" },
+  { environmentId: BOX, projectId: boxProject.id, label: "e2b.local" },
+];
 
 /**
  * The reported state: a new chat's draft for megpt-mono whose project is the copy on `e2b.local`,
@@ -58,10 +63,18 @@ describe("a draft on the megpt-mono copy of a legacy e2b.local box", () => {
     });
     expect(moveTo).toEqual(hostProject);
   });
+
+  it("never offers the box in Run on", () => {
+    // The user environments; the box is not one, and it is not the draft's own.
+    const known = new Map([[HOST, {}]]);
+    expect(knownRunOnEnvironments(runOnOptions, known).map(({ label }) => label)).toEqual([
+      "andrew.megpt.app",
+    ]);
+  });
 });
 
 describe("a draft on the box its own cloud send started", () => {
-  it("keeps the box", () => {
+  it("keeps the box, which Run on names", () => {
     expect(
       isDraftOnAnotherChatsBox({
         draftId: "c3bea36c",
@@ -70,6 +83,14 @@ describe("a draft on the box its own cloud send started", () => {
         boxIds: new Set([BOX]),
       }),
     ).toBe(false);
+    const known = new Map([
+      [HOST, {}],
+      [BOX, {}],
+    ]);
+    expect(knownRunOnEnvironments(runOnOptions, known).map(({ label }) => label)).toEqual([
+      "andrew.megpt.app",
+      "e2b.local",
+    ]);
   });
 });
 

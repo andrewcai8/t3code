@@ -2640,9 +2640,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeProject) return [];
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
     const memberProjects = allProjects.filter(
-      (p) =>
-        deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey &&
-        environmentById.has(p.environmentId),
+      (p) => deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey,
     );
     const seen = new Set<string>();
     const envs: EnvironmentOption[] = [];

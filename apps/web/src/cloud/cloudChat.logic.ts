@@ -79,6 +79,17 @@ export function isDraftOnAnotherChatsBox(input: {
   );
 }
 
+/**
+ * The machines "Run on" can name for a chat's project: those `environmentById` knows. It holds
+ * the user environments and the chat's own box, so another chat's box never shows.
+ */
+export function knownRunOnEnvironments<Option extends { readonly environmentId: EnvironmentId }>(
+  options: ReadonlyArray<Option>,
+  environmentById: Pick<ReadonlyMap<EnvironmentId, unknown>, "has">,
+): ReadonlyArray<Option> {
+  return options.filter(({ environmentId }) => environmentById.has(environmentId));
+}
+
 export function isInProgressCloudProvisioningPhase(
   phase: PendingCloudEnvironmentSend["phase"] | null,
 ): boolean {

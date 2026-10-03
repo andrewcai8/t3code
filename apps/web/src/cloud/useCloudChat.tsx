@@ -94,6 +94,7 @@ import {
   cloudCloneSource,
   isDraftOnAnotherChatsBox,
   isInProgressCloudProvisioningPhase,
+  knownRunOnEnvironments,
   pendingCloudSendPreview,
 } from "./cloudChat.logic";
 import { refreshProvisionedEnvironments } from "./cloudHosts";
@@ -280,7 +281,11 @@ export function useNewChatRunTargets(input: {
   readonly draftId: DraftId | null;
   readonly managerConfig: ServerConfig | null | undefined;
 }) {
-  const { projectEnvironments, environmentById, environmentId, draftId, managerConfig } = input;
+  const { environmentById, environmentId, draftId, managerConfig } = input;
+  const projectEnvironments = useMemo(
+    () => knownRunOnEnvironments(input.projectEnvironments, environmentById),
+    [input.projectEnvironments, environmentById],
+  );
   const runTargets = useMemo(
     () =>
       newChatRunTargets({
