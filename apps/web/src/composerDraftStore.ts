@@ -449,18 +449,6 @@ export function composerDraftHasUserContent(
 }
 
 /**
- * A first send can clear the composer while the sandbox is still preparing.
- * That draft is still invested work: it belongs in the sidebar, must survive
- * remap, and must not be reused as an empty new-thread target.
- */
-export function draftSessionHasInvestedWork(
-  session: DraftSessionState | null | undefined,
-  composer?: ComposerThreadDraftState | null,
-): boolean {
-  return session?.pendingEnvironmentSend != null || composerDraftHasUserContent(composer);
-}
-
-/**
  * Mutable routing and execution context for a pre-thread draft session.
  *
  * Unlike a real server thread, a draft session can still change target
@@ -2215,7 +2203,8 @@ export function partializeComposerDraftStoreState(
         ([threadKey, draftThread]) =>
           mappedDraftKeys.has(threadKey) ||
           isDraftThreadPromoting(draftThread) ||
-          draftSessionHasInvestedWork(draftThread, state.draftsByThreadKey[threadKey]),
+          draftThread.pendingEnvironmentSend != null ||
+          composerDraftHasUserContent(state.draftsByThreadKey[threadKey]),
       )
       .map(([threadKey]) => threadKey),
   );
@@ -2819,8 +2808,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 previousThreadKeyForLogicalProject,
               ) &&
               !isDraftThreadPromoting(previousDraftThread) &&
-              !draftSessionHasInvestedWork(
-                previousDraftThread,
+              previousDraftThread?.pendingEnvironmentSend == null &&
+              !composerDraftHasUserContent(
                 state.draftsByThreadKey[previousThreadKeyForLogicalProject],
               )
             ) {

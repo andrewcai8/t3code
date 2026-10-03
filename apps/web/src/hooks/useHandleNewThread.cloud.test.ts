@@ -10,6 +10,13 @@ const testState = vi.hoisted(() => {
     defaultModelSelection: null,
     defaultRuntimeMode: "full-access" as RuntimeMode,
   };
+  // What the client knows when a new chat starts: its projects and the user environments. A
+  // cloud box is never a user environment.
+  let projects: ReadonlyArray<Record<string, unknown>> = [];
+  let environments: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly connection: { readonly phase: string };
+  }> = [];
   let storedDraft: {
     readonly draftId: string;
     readonly environmentId: string;
@@ -44,6 +51,19 @@ const testState = vi.hoisted(() => {
     },
     get targetSettings() {
       return targetSettings;
+    },
+    get projects() {
+      return projects;
+    },
+    get environments() {
+      return environments;
+    },
+    setWorld(world: {
+      readonly projects: typeof projects;
+      readonly environments: typeof environments;
+    }) {
+      projects = world.projects;
+      environments = world.environments;
     },
     reset(
       nextStoredDraft: typeof storedDraft,
@@ -93,7 +113,8 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
   scopeProjectRef: (environmentId: string, projectId: string) => ({ environmentId, projectId }),
   scopeThreadRef: (environmentId: string, threadId: string) => ({ environmentId, threadId }),
 }));
-vi.mock("@t3tools/contracts", () => ({
+vi.mock("@t3tools/contracts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/contracts")>()),
   DEFAULT_RUNTIME_MODE: "default",
   DEFAULT_SERVER_SETTINGS: {},
 }));
@@ -127,7 +148,17 @@ vi.mock("react", () => ({
   useCallback: <T>(callback: T) => callback,
   useMemo: <T>(factory: () => T) => factory(),
 }));
-vi.mock("../cloud/newChatPlacement", () => ({ placeNewChat: (projectRef: unknown) => projectRef }));
+vi.mock("../rpc/atomRegistry", () => ({
+  appAtomRegistry: {
+    get: () =>
+      new Map(
+        testState.environments.map((environment) => [environment.environmentId, environment]),
+      ),
+  },
+}));
+vi.mock("../state/presentation", () => ({
+  environmentPresentations: { presentationsAtom: "presentations" },
+}));
 vi.mock("../components/Sidebar.logic", () => ({ orderItemsByPreferredIds: () => [] }));
 vi.mock("../composerDraftStore", () => {
   const useComposerDraftStore = Object.assign(() => null, {
@@ -152,20 +183,13 @@ vi.mock("../lib/utils", () => ({
   newThreadId: () => "thread-delayed",
 }));
 vi.mock("../logicalProject", () => ({
-  deriveLogicalProjectKeyFromSettings: () => "remote-project",
+  deriveLogicalProjectKeyFromSettings: (project: { readonly repository?: string }) =>
+    project.repository ?? "remote-project",
   getProjectOrderKey: () => "remote-project",
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => ({
-  readProjects: () => [
-    {
-      id: "project-remote",
-      environmentId: "environment-ssh",
-      workspaceRoot: "/remote/project",
-      defaultThreadEnvMode: null,
-      defaultModelSelection: null,
-    },
-  ],
+  readProjects: () => testState.projects,
   readThreadShell: () => null,
   useProjects: () => [],
   useThread: () => null,
@@ -181,110 +205,52 @@ vi.mock("../uiStateStore", () => ({
 }));
 vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
 
+import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useNewThreadHandler } from "./useHandleNewThread";
 
-describe.each([
-  ["new", null],
-  [
-    "reusable",
-    {
-      draftId: "draft-existing",
-      environmentId: "environment-ssh",
-      promotedTo: null,
-      threadId: "thread-existing",
-    },
-  ],
-])("useNewThreadHandler with a %s draft", (_, draft) => {
-  it.each(["approval-required", "auto-accept-edits", "auto", "full-access"] as const)(
-    "uses the target environment's %s permissions for new threads",
-    async (runtimeMode) => {
-      testState.reset(draft);
-      testState.targetSettings.defaultRuntimeMode = runtimeMode;
-      const projectRef = {
-        environmentId: "environment-ssh",
-        projectId: "project-remote",
-      } as never;
-      const pendingOpen = useNewThreadHandler()(projectRef);
-      testState.completeProjectFileRead(null);
-      const opened = await pendingOpen;
-
-      expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-        "remote-project",
-        projectRef,
-        opened!.draftId,
-        expect.objectContaining({ runtimeMode }),
-      );
-    },
-  );
-
-  it("abandons a delayed draft open when the user navigates elsewhere", async () => {
-    testState.reset(draft);
-    const openThread = useNewThreadHandler();
-    const pendingOpen = openThread(
-      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
-      { replace: true },
-    );
-
-    testState.router.state.location.href = "/usage";
-    testState.completeProjectFileRead(null);
-    await pendingOpen;
-
-    expect(testState.router.state.location.href).toBe("/usage");
-    expect(testState.router.navigate).not.toHaveBeenCalled();
-    expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+describe("a new chat started from a page with no chat in view", () => {
+  // The host runs no agents itself; every chat runs on a fresh cloud box it provisions, and each
+  // box holds its own copy of the repository, grouped with the host's.
+  const host = "environment-host";
+  const megptOn = (environmentId: string) => ({
+    id: `megpt-mono-${environmentId}`,
+    environmentId,
+    workspaceRoot: "/data/repos/megpt-mono",
+    repository: "megpt-mono",
+    defaultThreadEnvMode: null,
+    defaultModelSelection: null,
   });
+  const hostProjectRef = { environmentId: host, projectId: `megpt-mono-${host}` };
 
-  it.each([true, false])(
-    "uses the target environment's start-from-origin default of %s",
-    async (startFromOrigin) => {
-      testState.reset(draft, { envMode: "worktree", startFromOrigin });
-      const openThread = useNewThreadHandler();
-      const projectRef = {
-        environmentId: "environment-ssh",
-        projectId: "project-remote",
-      } as never;
-      const pendingOpen = openThread(projectRef);
+  it("opens a draft on the host's project, never a box's copy", async () => {
+    testState.reset(null);
+    testState.completeProjectFileRead(null);
+    const boxId = "environment-box";
+    testState.setWorld({
+      projects: [megptOn(boxId), megptOn(host)],
+      environments: [{ environmentId: host, connection: { phase: "connected" } }],
+    });
+    // Without a chat in view, the new chat is placed from the first project in sidebar order,
+    // which here is a box's copy of megpt-mono.
+    testState.router.state.location.href = "/usage";
 
-      testState.completeProjectFileRead(null);
-      const opened = await pendingOpen;
+    await startNewThreadFromContext({
+      activeDraftThread: null,
+      activeThread: undefined,
+      defaultProjectRef: { environmentId: boxId, projectId: `megpt-mono-${boxId}` } as never,
+      handleNewThread: useNewThreadHandler(),
+    });
 
-      expect(opened).toEqual({
-        draftId: draft?.draftId ?? "draft-delayed",
-        threadId: draft?.threadId ?? "thread-delayed",
-      });
-      expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-        "remote-project",
-        projectRef,
-        opened!.draftId,
-        expect.objectContaining({ envMode: "worktree", startFromOrigin }),
-      );
-      if (draft) {
-        expect(testState.draftStore.setDraftThreadContext).toHaveBeenCalledWith(
-          draft.draftId,
-          expect.objectContaining({ envMode: "worktree", startFromOrigin }),
-        );
-      }
-    },
-  );
-
-  it.each([true, false])(
-    "preserves an explicit start-from-origin choice of %s",
-    async (startFromOrigin) => {
-      testState.reset(draft, { envMode: "worktree", startFromOrigin: !startFromOrigin });
-      const openThread = useNewThreadHandler();
-      const projectRef = {
-        environmentId: "environment-ssh",
-        projectId: "project-remote",
-      } as never;
-
-      const opened = await openThread(projectRef, { envMode: "worktree", startFromOrigin });
-
-      expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-        "remote-project",
-        projectRef,
-        opened!.draftId,
-        expect.objectContaining({ envMode: "worktree", startFromOrigin }),
-      );
-    },
-  );
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "megpt-mono",
+      hostProjectRef,
+      "draft-delayed",
+      expect.anything(),
+    );
+    expect(testState.router.navigate).toHaveBeenCalledWith({
+      to: "/draft/$draftId",
+      params: { draftId: "draft-delayed" },
+      replace: false,
+    });
+  });
 });

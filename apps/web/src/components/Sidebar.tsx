@@ -179,6 +179,7 @@ import {
   sidebarDraftStatusLabel,
 } from "../cloud/sidebarCloud";
 import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
+import { draftSessionHasInvestedWork } from "../cloud/draftInvestedWork";
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
@@ -275,7 +276,6 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } f
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
-  draftSessionHasInvestedWork,
   DraftId,
   useComposerDraftStore,
   useThreadHasUnsentDraft,

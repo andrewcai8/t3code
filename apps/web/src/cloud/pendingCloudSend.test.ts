@@ -5,10 +5,10 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   composerDraftHasUserContent,
   DraftId,
-  draftSessionHasInvestedWork,
   partializeComposerDraftStoreState,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { draftSessionHasInvestedWork } from "./draftInvestedWork";
 import { setDraftPendingEnvironmentSend } from "./pendingCloudSend";
 import type { PendingCloudEnvironmentSend } from "./pendingCloudSendSchema";
 

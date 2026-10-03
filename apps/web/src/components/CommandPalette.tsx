@@ -1340,7 +1340,19 @@ function OpenCommandPaletteDialog(props: {
           },
           icon: projectFaviconIcon,
           runProject: async (project) => {
-            await handleNewThread(scopeProjectRef(project.environmentId, project.id));
+            const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
+            const contextualRefBelongsToGroup =
+              contextualProjectRef !== null &&
+              group?.memberProjectRefs.some(
+                (projectRef) =>
+                  projectRef.environmentId === contextualProjectRef.environmentId &&
+                  projectRef.projectId === contextualProjectRef.projectId,
+              );
+            await handleNewThread(
+              contextualRefBelongsToGroup
+                ? contextualProjectRef
+                : scopeProjectRef(project.environmentId, project.id),
+            );
           },
         }),
         ...(scratchTargetEnvironmentId === null
@@ -1358,6 +1370,7 @@ function OpenCommandPaletteDialog(props: {
             ]),
       ]),
     [
+      contextualProjectRef,
       handleNewThread,
       pickerProjects,
       projectEnvironmentLocationById,
