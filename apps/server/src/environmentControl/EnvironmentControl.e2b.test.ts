@@ -72,6 +72,7 @@ vi.mock("e2b", async (importOriginal) => {
       },
     },
     setTimeout: async () => {},
+    getHost: (port: number) => `${port}-sandbox-1.e2b.app`,
     // envd's upload endpoint, writing where the guest reads since the guest is this machine.
     uploadUrl: async (path: string) => {
       const NodeHttp = await import("node:http");
@@ -270,6 +271,7 @@ const pausedPreparedBox = (input: {
     mocks.wake.mockResolvedValue({});
     return {
       w,
+      port,
       environmentId: readiness.environmentId,
       leaseState: () =>
         Effect.promise(() => registry.findById(requestId)).pipe(
@@ -327,6 +329,33 @@ it.effect("brings back a woken box whose T3 server died while its sandbox stayed
       });
       expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
       expect(yield* box.leaseState()).toBe("active");
+    }),
+  ),
+);
+
+it.effect("asks to wake a box whose T3 server died under an active lease, then pairs it", () =>
+  withManager(
+    Effect.gen(function* () {
+      const box = yield* pausedPreparedBox({ follow: false });
+      const manager = yield* EnvironmentControl;
+      expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+        kind: "resumed",
+      });
+      yield* box.killServer();
+
+      expect(yield* manager.attach({ requestId })).toEqual({
+        kind: "refused",
+        reason: "not-serving",
+        message: "This chat's cloud machine is not serving. Wake it first.",
+      });
+      expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+        kind: "resumed",
+      });
+      expect(yield* manager.attach({ requestId })).toEqual({
+        kind: "attached",
+        environmentId: box.environmentId,
+        pairingUrl: `https://${box.port}-sandbox-1.e2b.app/pair#token=pair-credential`,
+      });
     }),
   ),
 );

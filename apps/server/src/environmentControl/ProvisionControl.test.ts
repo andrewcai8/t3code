@@ -7,7 +7,11 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { makeProvisionControl, type ProvisionControlPorts } from "./ProvisionControl.ts";
+import {
+  GuestNotServing,
+  makeProvisionControl,
+  type ProvisionControlPorts,
+} from "./ProvisionControl.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
@@ -354,6 +358,73 @@ it.effect(
       expect(yield* Effect.promise(() => leases.findById(namespaceInput.requestId))).toMatchObject({
         remoteAccess: { origin: "http://127.0.0.1:50766", brokerToken: "broker-2" },
       });
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "asks the caller to wake a box that is not serving, and fails any other attach error",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      let attachError: Error = new GuestNotServing();
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, {
+          create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
+          recoverCreate: () => Effect.succeed([]),
+          fork: () => Effect.die("unexpected fork"),
+          recoverFork: () => Effect.succeed([]),
+          dispose: () => Effect.void,
+          prepare: () =>
+            Effect.succeed({
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/private/operation/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: "c".repeat(40),
+              artifactSha256: "b".repeat(64),
+            }),
+        }),
+      );
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          ...noRuntimePorts,
+          freeze: async () => manifest,
+          load: async () => manifest,
+          attach: async () => {
+            throw attachError;
+          },
+          touch: async () => "running" as const,
+        },
+        leases,
+      );
+      expect(yield* control.provision(input)).toMatchObject({ kind: "ready" });
+      const notServing = {
+        kind: "refused",
+        reason: "not-serving",
+        message: "This chat's cloud machine is not serving. Wake it first.",
+      };
+      expect(yield* control.attach({ requestId: input.requestId })).toEqual(notServing);
+
+      attachError = new Error("pairing endpoint answered 500");
+      const failure = yield* Effect.flip(control.attach({ requestId: input.requestId }));
+      expect([failure._tag, failure.message]).toEqual([
+        "EnvironmentControlError",
+        "Cloud provisioning could not be reconciled. Retry the same request.",
+      ]);
+
+      yield* Effect.promise(() => leases.markPaused(input.requestId));
+      expect(yield* control.attach({ requestId: input.requestId })).toEqual(notServing);
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(

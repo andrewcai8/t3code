@@ -170,6 +170,28 @@ describe("pairBoxThroughHost", () => {
     }),
   );
 
+  it.effect(
+    "says a listed box whose attach finds it not serving is not serving, so the dial wakes it",
+    () =>
+      Effect.gen(function* () {
+        const { redeemed, run } = pairing({
+          row: listed("active"),
+          attached: {
+            kind: "refused",
+            reason: "not-serving",
+            message: "This chat's cloud machine is not serving. Wake it first.",
+          },
+        });
+        const error = yield* Effect.flip(run);
+        expect([error._tag, error.reason, error.detail]).toEqual([
+          "ConnectionTransientError",
+          "not-serving",
+          "This chat's cloud machine is not serving. Wake it first.",
+        ]);
+        expect(redeemed).toEqual([]);
+      }),
+  );
+
   it.effect("blocks a box its host no longer has as a missing workspace", () =>
     Effect.gen(function* () {
       for (const row of [null, listed("missing"), listed("disposed")]) {

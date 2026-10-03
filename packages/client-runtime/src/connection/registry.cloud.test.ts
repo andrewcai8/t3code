@@ -2022,6 +2022,56 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
   );
 
   it.effect(
+    "an unpaired box its host lists active but finds not serving is woken, then pairs",
+    () =>
+      Effect.gen(function* () {
+        const row = listedBox(CHAT_BOX_ID);
+        const serving = yield* Ref.make(false);
+        const resumes = yield* Ref.make(0);
+        const harness = yield* makeHarness([TARGET], [], [], {
+          listProvisioned: [row],
+          attach: () =>
+            Ref.get(serving).pipe(
+              Effect.map((up): EnvironmentProvisionAttachResult =>
+                up
+                  ? {
+                      kind: "attached",
+                      environmentId: CHAT_BOX_ID,
+                      pairingUrl: "https://environment-chat-box.example.test/pair#token=minted",
+                    }
+                  : {
+                      kind: "refused",
+                      reason: "not-serving",
+                      message: "This chat's cloud machine is not serving. Wake it first.",
+                    },
+              ),
+            ),
+          resume: () =>
+            Ref.update(resumes, (count) => count + 1).pipe(
+              Effect.andThen(Ref.set(serving, true)),
+              Effect.as({ kind: "resumed" as const }),
+            ),
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* registry.syncHostBoxes(TARGET.environmentId, listing(row));
+
+          yield* registry.demand(CHAT_BOX_ID);
+          yield* awaitConnectionState(registry, CHAT_BOX_ID, (s) => s.phase === "connected");
+          expect(yield* Ref.get(resumes)).toBe(1);
+          expect(yield* Ref.get(harness.attaches)).toEqual([row.requestId, row.requestId]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
     "a disposed box this device never opened disappears; one it opened keeps its history",
     () =>
       Effect.gen(function* () {
