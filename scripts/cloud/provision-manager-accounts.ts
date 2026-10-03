@@ -12,7 +12,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import { credentialSecretName } from "../../apps/server/src/provider/ProviderCredentialStore.ts";
+import { credentialSecretName } from "../../apps/server/src/provider/providerCredentialName.ts";
 
 const SLUG = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;

@@ -1,12 +1,8 @@
-import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { credentialSecretName } from "./providerCredentialName.ts";
 
-/** The secret a binding's credentials live under; hashed so no binding escapes a filename. */
-export const credentialSecretName = (driver: string, bindingId: string) =>
-  `provider-auth-${NodeCrypto.createHash("sha256")
-    .update(`${driver.length}:${driver}${bindingId}`)
-    .digest("hex")}`;
+export { credentialSecretName };
 
 /** A provider binding stores opaque bytes; only its adapter decodes or refreshes them. */
 export const make = Effect.fn("ProviderCredentialStore.make")(function* (

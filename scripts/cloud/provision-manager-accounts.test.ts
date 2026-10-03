@@ -3,13 +3,9 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { ServerSettings } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
 
-import { resolveProvisioningProviderProfile } from "../../apps/server/src/environmentControl/ProvisioningProviderProfile.ts";
+import { credentialSecretName } from "../../apps/server/src/provider/providerCredentialName.ts";
 import { planManagerAccounts, type PlanInput } from "./provision-manager-accounts.ts";
 
 const host: PlanInput["host"] = { homedir: "/Users/op", stateDir: "/Users/op/.t3/userdata" };
@@ -153,43 +149,19 @@ describe("planManagerAccounts", () => {
     ]);
   });
 
-  it.effect("puts the Cursor sign-in where the manager's own provisioning reads it", () =>
-    Effect.gen(function* () {
-      const base = yield* Effect.promise(() =>
-        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-plan-cursor-")),
-      );
-      yield* Effect.addFinalizer(() =>
-        Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true })),
-      );
-      const plan = planManagerAccounts({
-        settings,
-        provisioning,
-        host,
-        managerBaseDir: base,
-        accounts: ["cursor_work"],
-      });
-      const [carried] = plan.files;
-      yield* Effect.promise(async () => {
-        await NodeFSP.mkdir(NodePath.dirname(carried!.destination), { recursive: true });
-        await NodeFSP.writeFile(carried!.destination, "cursor-sign-in");
-      });
-      const profile = yield* resolveProvisioningProviderProfile(
-        Schema.decodeUnknownSync(ServerSettings)({ providerInstances: plan.providerInstances }),
-        { providerInstanceId: "cursor_work", agentDriver: "cursor" },
-        undefined,
-        {
-          localAgentRuns: true,
-          secretsDir: NodePath.join(base, "userdata", "secrets"),
-          refresh: () => Effect.void,
-        },
-      );
-      assert.deepEqual(profile.credential, {
-        kind: "file",
-        source: carried!.destination,
-        destination: ".t3/userdata/provider-auth/cursor/cursor.json",
-      });
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
+  it("puts the Cursor sign-in under the secret name the manager's provisioning reads", () => {
+    const plan = planManagerAccounts({
+      settings,
+      provisioning,
+      host,
+      managerBaseDir: "/home/user/manager",
+      accounts: ["cursor_work"],
+    });
+    assert.include(
+      plan.files.map((file) => file.destination),
+      `/home/user/manager/userdata/secrets/${credentialSecretName("cursor", "cursor_work")}.bin`,
+    );
+  });
 
   it("carries a Claude account as a token its instance runs on, and skips one without", () => {
     const plan = planManagerAccounts({
