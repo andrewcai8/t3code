@@ -61,3 +61,28 @@ it.effect("starts owed first turns before every pause check", () =>
     ]);
   }).pipe(Effect.scoped),
 );
+
+it.effect("keeps pausing boxes while a cleanup waits on a booting machine", () =>
+  Effect.gen(function* () {
+    const calls = yield* Queue.unbounded<"reap" | "cleanup">();
+    yield* runLeaseUpkeep({
+      reapExpiredLeases: async () => {
+        Queue.offerUnsafe(calls, "reap");
+      },
+      syncLeaseUsage: async () => {},
+      cleanUpBoxes: () => {
+        Queue.offerUnsafe(calls, "cleanup");
+        return new Promise<void>(() => {});
+      },
+      reconcileProvisions: Effect.void,
+      settleChats: Effect.void,
+      boxUsage: { prune: () => Effect.void },
+    }).pipe(Effect.forkScoped);
+    const ticks = [(yield* Queue.takeN(calls, 2)).toSorted()];
+    for (const _ of [1, 2]) {
+      yield* TestClock.adjust(LEASE_UPKEEP_INTERVAL);
+      ticks.push(yield* Queue.takeN(calls, 1));
+    }
+    assert.deepStrictEqual(ticks, [["cleanup", "reap"], ["reap"], ["reap"]]);
+  }).pipe(Effect.scoped),
+);

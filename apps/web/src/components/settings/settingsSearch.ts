@@ -146,6 +146,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["disk storage browser screenshots captures rotated logs cleanup retention"],
   },
   {
+    id: "storage-cloud-machines",
+    title: "Cloud machines",
+    to: "/settings/storage",
+    scope: "environment-defaults",
+    searchTerms: ["remove delete paused namespace mac devbox cloud chat cleanup backup keep days"],
+  },
+  {
     id: "project-defaults",
     title: "Project defaults and overrides",
     to: "/settings/general",

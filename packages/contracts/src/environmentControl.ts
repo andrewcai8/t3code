@@ -70,6 +70,24 @@ export const ProvisionedChat = Schema.Struct({
 });
 export type ProvisionedChat = typeof ProvisionedChat.Type;
 
+/**
+ * What happens to a paused cloud machine that costs money while it sleeps: it is removed at `at`,
+ * after its work is backed up, or it is kept. `settled` is a settled chat's machine, removed soon
+ * after it pauses; `idle` one unused for the host's cleanup days.
+ */
+export const ProvisionedCleanup = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("scheduled"),
+    at: IsoDateTime,
+    reason: Schema.Literals(["settled", "idle"]),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("kept"),
+    reason: Schema.Literals(["user", "unsaved-work"]),
+  }),
+]);
+export type ProvisionedCleanup = typeof ProvisionedCleanup.Type;
+
 export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
   leaseId: TrimmedNonEmptyString,
@@ -90,6 +108,8 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
    * this client cannot read, as from a newer host, is dropped rather than failing the list.
    */
   chat: Schema.optional(ProvisionedChat).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
+  /** Absent when the machine is never cleaned up, as one that costs nothing while paused. */
+  cleanup: Schema.optional(ProvisionedCleanup).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
   createdAt: Schema.String,
   expiresAt: Schema.String,
 });
@@ -351,3 +371,20 @@ export const EnvironmentProvisionTouchResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionTouchResult = typeof EnvironmentProvisionTouchResult.Type;
+
+/** Keeps a cloud machine from automatic cleanup, or allows it again. */
+export const EnvironmentProvisionKeepInput = Schema.Struct({
+  requestId: ProvisionRequestId,
+  keep: Schema.Boolean,
+});
+export type EnvironmentProvisionKeepInput = typeof EnvironmentProvisionKeepInput.Type;
+
+export const EnvironmentProvisionKeepResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("updated") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literal("unknown"),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionKeepResult = typeof EnvironmentProvisionKeepResult.Type;

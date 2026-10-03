@@ -25,6 +25,7 @@ const decodeShellEntries = Schema.decodeUnknownExit(
 const decodeThread = Schema.decodeUnknownExit(OrchestrationThreadShell);
 const decodeProject = Schema.decodeUnknownExit(OrchestrationProjectShell);
 const encodeChat = Schema.encodeSync(Schema.fromJsonString(ProvisionedChat));
+const decodeChat = Schema.decodeUnknownExit(Schema.fromJsonString(ProvisionedChat));
 
 const hasId = (id: string) => (entry: unknown) =>
   typeof entry === "object" && entry !== null && "id" in entry && entry.id === id;
@@ -58,6 +59,8 @@ export interface ProvisionedChatStore {
   readonly record: (leaseId: string, chat: ProvisionedChat, now?: Date) => Promise<void>;
   /** The thread of the chat the host holds for each lease. */
   readonly heldThreads: () => Promise<ReadonlyMap<string, string>>;
+  /** The chat the host holds for a lease; null when none, or one that no longer decodes. */
+  readonly read: (leaseId: string) => Promise<ProvisionedChat | null>;
 }
 
 export function createProvisionedChatStore(sql: SqlClient.SqlClient): ProvisionedChatStore {
@@ -84,6 +87,15 @@ export function createProvisionedChatStore(sql: SqlClient.SqlClient): Provisione
         }>`SELECT lease_id, json_extract(chat_json, '$.thread.id') AS thread_id FROM provisioned_chats`,
       );
       return new Map(rows.map((row) => [row.lease_id, row.thread_id]));
+    },
+    read: async (leaseId) => {
+      const rows = await Effect.runPromise(
+        sql<{
+          readonly chat_json: string;
+        }>`SELECT chat_json FROM provisioned_chats WHERE lease_id = ${leaseId}`,
+      );
+      const chat = rows[0] === undefined ? null : decodeChat(rows[0].chat_json);
+      return chat?._tag === "Success" ? chat.value : null;
     },
   };
 }

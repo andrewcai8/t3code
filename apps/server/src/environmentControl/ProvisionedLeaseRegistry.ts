@@ -27,6 +27,13 @@ export const firstTurnOverdue = (lease: ProvisionedLease, now: number) =>
   lease.firstTurn?.status === "pending" &&
   now - Date.parse(lease.createdAt) > FIRST_TURN_DEADLINE_MS;
 
+/**
+ * Why a paused box is exempt from cleanup: its owner asked to keep it, or its work could not be
+ * backed up before removal. Waking clears `unsaved-work`, since the box may have changed.
+ */
+export const LeaseKeep = Schema.Literals(["user", "unsaved-work"]);
+export type LeaseKeep = typeof LeaseKeep.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -64,6 +71,7 @@ export const StoredProvisionedLease = Schema.Struct({
    * since nothing has run on it yet, until FIRST_TURN_DEADLINE_MS after it began.
    */
   firstTurn: Schema.optional(FirstTurnState),
+  keep: Schema.optional(LeaseKeep),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
@@ -131,6 +139,9 @@ export interface ProvisionedLeaseRegistry {
   readonly expired: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
   /** Leases whose machine is running, paused and released ones excluded. */
   readonly awake: () => Promise<ReadonlyArray<ProvisionedLease>>;
+  readonly paused: () => Promise<ReadonlyArray<ProvisionedLease>>;
+  /** Null when the lease is unknown. */
+  readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<ProvisionedLease | null>;
 }
 
 function nowIso(now?: Date): string {
@@ -382,8 +393,10 @@ export function createProvisionedLeaseRegistry(
         )
           throw new Error("Provisioned lease identity conflict");
         const now = input.now ?? new Date();
+        const { keep, ...rest } = current;
         const updated: ProvisionedLease = {
-          ...current,
+          ...rest,
+          ...(keep === "user" ? { keep } : {}),
           ...(input.namespaceResource ? { namespaceResource: input.namespaceResource } : {}),
           ...(input.namespaceProxy ? { namespaceProxy: input.namespaceProxy } : {}),
           ...(input.remoteAccess ? { remoteAccess: input.remoteAccess } : {}),
@@ -406,5 +419,17 @@ export function createProvisionedLeaseRegistry(
         );
       }),
     awake: () => consistentRead((leases) => leases.filter((lease) => lease.state === "active")),
+    paused: () => consistentRead((leases) => leases.filter((lease) => lease.state === "paused")),
+    setKeep: (leaseId, keep) =>
+      mutate((leases) => {
+        const current = leases.find((lease) => lease.leaseId === leaseId);
+        if (!current) return { leases, value: null };
+        const { keep: _previous, ...rest } = current;
+        const updated: ProvisionedLease = keep === null ? rest : { ...rest, keep };
+        return {
+          leases: leases.map((lease) => (lease.leaseId === leaseId ? updated : lease)),
+          value: updated,
+        };
+      }),
   };
 }

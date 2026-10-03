@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { isLoopbackHostname } from "../http.ts";
+import { cleanupPlan } from "./cloudCleanup.ts";
 import { StoredProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 const decodeRows = Schema.decodeUnknownEffect(
@@ -64,6 +65,8 @@ export function boxLabel(request: DurableProvisionRequest): string {
  *
  * With `chats`, a box that is not disposed also carries its owner's chat, unless the client holds
  * it at that sequence or a newer one. Without, no chat is sent.
+ *
+ * Each box also carries its cleanup under `afterDays`, the host's cloud machine cleanup setting.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
   function* (
@@ -71,6 +74,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     known: ReadonlyArray<EnvironmentId> = [],
     addresses: ReadonlyArray<SavedEnvironmentAddress> = [],
     chats?: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly sequence: number }>,
+    afterDays: number | null = null,
   ) {
     const { byLease, byOrigin } = savedBoxAddresses(addresses);
     const heldChats =
@@ -82,7 +86,14 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     const rows = yield* sql`
     SELECT operations.request_json AS request, operations.state_json AS state,
       leases.lease_json AS lease, runs.automation_id AS "automationId",
-      ${heldChats ? sql`chats.chat_json` : sql`NULL`} AS chat, chats.sequence AS "chatSequence"
+      ${
+        // A paused Devbox's cleanup reads its chat's settle, so its card is read even unasked.
+        heldChats
+          ? sql`chats.chat_json`
+          : sql`CASE WHEN json_extract(leases.lease_json, '$.state') = 'paused'
+              AND json_extract(leases.lease_json, '$.namespaceResource') IS NOT NULL
+              THEN chats.chat_json END`
+      } AS chat, chats.sequence AS "chatSequence"
     FROM provision_operations AS operations
     JOIN provisioned_leases AS leases ON leases.lease_id = operations.request_id
     LEFT JOIN automation_runs AS runs ON runs.request_id = operations.request_id
@@ -172,20 +183,27 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         (lease.owner !== null && lease.owner.environmentId !== box.environmentId)
       )
         continue;
-      // Only a chat newer than the client's is decoded. One that no longer decodes is left out
-      // rather than failing the list.
-      const stored =
-        heldChats &&
-        chatJson !== null &&
+      // Only a chat newer than the client's, or one a paused Devbox's cleanup reads, is decoded.
+      // One that no longer decodes is left out rather than failing the list.
+      const sendChat =
+        heldChats !== undefined &&
         chatSequence !== null &&
         box.lifecycle !== "disposed" &&
-        (heldChats.get(box.environmentId) ?? -1) < chatSequence
+        (heldChats.get(box.environmentId) ?? -1) < chatSequence;
+      const stored =
+        chatJson !== null &&
+        (sendChat || (lease.state === "paused" && lease.namespaceResource !== undefined))
           ? decodeChat(chatJson)
           : undefined;
-      const chat =
+      const owned =
         stored?._tag === "Success" && stored.value.thread.id === lease.owner?.threadId
           ? stored.value
           : undefined;
+      const chat = sendChat ? owned : undefined;
+      const cleanup =
+        box.lifecycle === "disposed"
+          ? null
+          : cleanupPlan({ lease, thread: owned?.thread ?? null, afterDays });
       const discovered = yield* decodeDiscovery({
         requestId: request.requestId,
         leaseId: lease.leaseId,
@@ -204,7 +222,11 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
             ? request.retentionDeadline
             : lease.expiresAt,
       });
-      const environment = chat === undefined ? discovered : { ...discovered, chat };
+      const environment = {
+        ...discovered,
+        ...(chat === undefined ? {} : { chat }),
+        ...(cleanup === null ? {} : { cleanup }),
+      };
       if (box.lifecycle !== "disposed") result.push(environment);
       else if (!gone.has(environment.environmentId))
         gone.set(environment.environmentId, environment);

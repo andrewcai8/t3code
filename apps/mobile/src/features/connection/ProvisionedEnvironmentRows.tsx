@@ -24,8 +24,9 @@ const IDLE: ProvisionedRowAction = { kind: "idle" };
 
 /**
  * "Cloud machines" section: every machine a connected manager runs for a chat. A machine belongs
- * to its chat, so it is opened through that chat; here it can be woken or deleted, and the "+"
- * starts a new cloud chat. Renders nothing for an environment that is not a manager.
+ * to its chat, so it is opened through that chat; here it can be woken, kept from automatic
+ * cleanup or deleted, and the "+" starts a new cloud chat. Renders nothing for an environment
+ * that is not a manager.
  */
 export function ProvisionedEnvironmentRows(props: {
   readonly managerId: EnvironmentId;
@@ -43,6 +44,9 @@ export function ProvisionedEnvironmentRows(props: {
     reportFailure: false,
   });
   const dispose = useAtomCommand(serverEnvironment.disposeProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const keep = useAtomCommand(serverEnvironment.keepProvisionedEnvironment, {
     reportFailure: false,
   });
   const navigation = useNavigation();
@@ -70,6 +74,15 @@ export function ProvisionedEnvironmentRows(props: {
       });
       if (result._tag === "Failure") return "The host could not resume this machine. Try again.";
       return result.value.kind === "resumed" ? null : result.value.message;
+    });
+  const keepEnvironment = (environment: DiscoveredProvisionedEnvironment, kept: boolean) =>
+    act(environment, kept ? "Keeping…" : "Allowing cleanup…", async () => {
+      const result = await keep({
+        environmentId: managerId,
+        input: { requestId: environment.requestId, keep: kept },
+      });
+      if (result._tag === "Failure") return "The host could not update this machine. Try again.";
+      return result.value.kind === "updated" ? null : result.value.message;
     });
   const deleteEnvironment = (environment: DiscoveredProvisionedEnvironment, title: string) =>
     Alert.alert(
@@ -171,6 +184,7 @@ export function ProvisionedEnvironmentRows(props: {
               action={actions[environment.requestId] ?? IDLE}
               borderTop={index !== 0}
               onResume={() => void resumeEnvironment(environment)}
+              onKeep={(kept) => void keepEnvironment(environment, kept)}
               onDelete={(title) => deleteEnvironment(environment, title)}
             />
           ))}
@@ -185,6 +199,7 @@ function ProvisionedEnvironmentRowView(props: {
   readonly action: ProvisionedRowAction;
   readonly borderTop: boolean;
   readonly onResume: () => void;
+  readonly onKeep: (keep: boolean) => void;
   readonly onDelete: (title: string) => void;
 }) {
   const { environment } = props;
@@ -195,14 +210,25 @@ function ProvisionedEnvironmentRowView(props: {
   // Only a chat this device has is readable here, and only that one can be opened.
   const thread = useThreadShell(threadRef);
   const navigation = useNavigation();
+  // Read once per row: the countdown is coarse, and the list refreshes after every action.
+  const [now] = useState(Date.now);
   const presentation = presentProvisionedEnvironment({
     environment,
     threadTitle: thread?.title ?? null,
     action: props.action,
+    now,
   });
   const working = props.action.kind === "working";
   const buttons = [
     ...(environment.lifecycle === "paused" ? [{ label: "Resume", onPress: props.onResume }] : []),
+    ...(presentation.cleanupAction === null
+      ? []
+      : [
+          {
+            label: presentation.cleanupAction === "keep" ? "Keep" : "Allow cleanup",
+            onPress: () => props.onKeep(presentation.cleanupAction === "keep"),
+          },
+        ]),
     ...(thread !== null && threadRef !== null
       ? [
           {

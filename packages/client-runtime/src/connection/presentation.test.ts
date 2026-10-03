@@ -96,7 +96,7 @@ describe("connection presentation", () => {
   });
 
   it.each(["available", "offline", "connected"] as const)(
-    "keeps a persisted missing workspace expired while the supervisor is %s",
+    "keeps a persisted missing workspace removed while the supervisor is %s",
     (phase) => {
       const connection = presentEnvironmentConnection(
         supervisorState({ phase, network: "offline" }),
@@ -108,7 +108,7 @@ describe("connection presentation", () => {
         traceId: null,
         blockedReason: "workspace-missing",
       });
-      expect(connectionStatusTitle(connection)).toBe("Workspace expired");
+      expect(connectionStatusTitle(connection)).toBe("Machine removed");
     },
   );
 
@@ -129,8 +129,8 @@ describe("connection presentation", () => {
       traceId: null,
       blockedReason: "workspace-missing",
     });
-    expect(connectionStatusText(connection)).toBe("Workspace expired");
-    expect(connectionStatusTitle(connection)).toBe("Workspace expired");
+    expect(connectionStatusText(connection)).toBe("Machine removed");
+    expect(connectionStatusTitle(connection)).toBe("Machine removed");
   });
 
   it("preserves profile display information without exposing credentials", () => {

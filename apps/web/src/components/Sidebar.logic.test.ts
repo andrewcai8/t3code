@@ -834,7 +834,7 @@ describe("resolveSidebarThreadStatus", () => {
         { ...idle, session, hasPendingApprovals: true, backgroundLiveness: "working" },
         {
           phase: "error",
-          error: "Workspace expired",
+          error: "Machine removed",
           traceId: null,
           blockedReason: "workspace-missing",
         },

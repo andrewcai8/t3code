@@ -29,6 +29,7 @@ import {
   sealWarmBase,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
+import { backUpWorkspace } from "./workspaceBackup.ts";
 import { warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
@@ -815,6 +816,22 @@ except FileExistsError:
         namespaceProxy: await publish(operation, resource, manifest, recordedProxy),
         refreshError: ready.refreshError ?? null,
       };
+    },
+    /**
+     * Pushes the chat's unsaved git work before its machine is removed. Wakes the Devbox first:
+     * a shut-down one answers only once booted, and staging the backup allows no boot time.
+     */
+    backUpWork: async (
+      operation: ProvisionOperation,
+      resource: NamespaceResource,
+      manifest: ProvisionPreparationManifest,
+      input: { readonly branch: string; readonly push: boolean; readonly token?: string },
+    ) => {
+      await wake(operation, resource);
+      return backUpWorkspace(port(resource, manifest), {
+        root: manifest.preparation.root,
+        ...input,
+      });
     },
     touch: async (operation: ProvisionOperation, resource: NamespaceResource) => {
       // Only a vanished Devbox record is "missing". A record with no instance

@@ -21,7 +21,7 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
 describe("storage cleanup settings", () => {
-  it("keeps cleanup disabled for existing installations", () => {
+  it("keeps local cleanup disabled and removes unused cloud machines after a week", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({
       worktreeAfterDays: null,
@@ -30,6 +30,17 @@ describe("storage cleanup settings", () => {
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
+      cloudMachinesAfterDays: 1,
+    });
+  });
+
+  it("lets cloud machine cleanup be turned off or lengthened", () => {
+    expect(
+      decodeServerSettings({ storageCleanup: { cloudMachinesAfterDays: null } }).storageCleanup
+        .cloudMachinesAfterDays,
+    ).toBeNull();
+    expect(decodeServerSettingsPatch({ storageCleanup: { cloudMachinesAfterDays: 30 } })).toEqual({
+      storageCleanup: { cloudMachinesAfterDays: 30 },
     });
   });
 

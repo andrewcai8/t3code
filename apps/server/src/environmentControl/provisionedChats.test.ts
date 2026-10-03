@@ -122,4 +122,18 @@ describe("ProvisionedChatStore", () => {
       ]);
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
+
+  effectIt.effect("reads back the chat it keeps for a box, and none for an unknown one", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = createProvisionedChatStore(sql);
+      yield* Effect.promise(() => store.record("lease-a", chatAt(4, "Kept")));
+      yield* sql`INSERT INTO provisioned_chats (lease_id, sequence, chat_json, read_at)
+        VALUES ('lease-b', 1, '{"thread":{}}', '2026-10-01T00:00:00.000Z')`;
+      const kept = yield* Effect.promise(() => store.read("lease-a"));
+      expect([kept?.sequence, kept?.thread.title]).toEqual([4, "Kept"]);
+      expect(yield* Effect.promise(() => store.read("lease-b"))).toBeNull();
+      expect(yield* Effect.promise(() => store.read("lease-c"))).toBeNull();
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
 });

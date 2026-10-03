@@ -178,3 +178,39 @@ it.effect(
       });
     }),
 );
+it.effect("keeps a box by request, lists paused boxes, and rechecks unsaved work on wake", () =>
+  withRegistry(async (first, second) => {
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    for (const leaseId of ["kept", "unsaved"])
+      await first.register({
+        leaseId,
+        sandboxId: `${leaseId}-box`,
+        providerInstanceId: "codex",
+        now,
+      });
+    await first.register({
+      leaseId: "awake",
+      sandboxId: "awake-box",
+      providerInstanceId: "codex",
+      now,
+    });
+    await first.markPaused("kept", now);
+    await first.markPaused("unsaved", now);
+    expect((await second.paused()).map((lease) => lease.leaseId).sort()).toEqual([
+      "kept",
+      "unsaved",
+    ]);
+
+    expect(await first.setKeep("kept", "user")).toMatchObject({ keep: "user" });
+    expect(await first.setKeep("unsaved", "unsaved-work")).toMatchObject({ keep: "unsaved-work" });
+    expect(await first.setKeep("nobody", "user")).toBeNull();
+
+    await second.markActive({ leaseId: "kept" });
+    await second.markActive({ leaseId: "unsaved" });
+    expect((await first.findById("kept"))?.keep).toBe("user");
+    expect((await first.findById("unsaved"))?.keep).toBeUndefined();
+
+    await first.setKeep("kept", null);
+    expect((await second.findById("kept"))?.keep).toBeUndefined();
+  }),
+);
