@@ -667,6 +667,7 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
           undefined,
           {
             localAgentRuns: false,
+            secretsDir: NodePath.join(directory, "secrets"),
             refresh: (instanceId) => Effect.sync(() => void refreshed.push(instanceId)),
           },
         ),

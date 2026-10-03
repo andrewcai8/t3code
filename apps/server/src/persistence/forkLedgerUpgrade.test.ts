@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ownerChat, createProvisionedChatStore } from "../environmentControl/provisionedChats.ts";
@@ -91,7 +92,7 @@ const seedForkDatabase = (statePath: string) =>
     `;
     yield* sql`
       INSERT INTO provisioned_chats (lease_id, sequence, chat_json, read_at)
-      VALUES ('lease-1', 17, ${JSON.stringify(v1Card)}, '2026-09-30T10:06:00.000Z')
+      VALUES ('lease-1', 17, ${Schema.encodeSync(Schema.UnknownFromJsonString)(v1Card)}, '2026-09-30T10:06:00.000Z')
     `;
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: statePath })), Effect.scoped);
 

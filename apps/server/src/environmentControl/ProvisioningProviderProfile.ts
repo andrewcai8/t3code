@@ -29,7 +29,7 @@ import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInst
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { credentialSecretName } from "../provider/ProviderCredentialStore.ts";
 import type { Provisioning } from "./config.ts";
-import { credentialDestinations } from "./credentialDestinations.ts";
+import { cursorGuestLoginDestination } from "./credentialDestinations.ts";
 
 export class ProvisionRefused extends Schema.TaggedError<ProvisionRefused>()("ProvisionRefused", {
   reason: Schema.Literals(["unconfigured", "credentials", "unsupported"]),
@@ -145,7 +145,7 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
               `${credentialSecretName("cursor", instanceId)}.bin`,
             )
           : "";
-        destination = credentialDestinations.cursor[0];
+        destination = cursorGuestLoginDestination;
         break;
       }
       case "claudeAgent": {
