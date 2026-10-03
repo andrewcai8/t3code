@@ -158,13 +158,7 @@ export const UsageSource = Schema.Struct({
    */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
-  /**
-   * The `sourcePath` its buckets carry when it differs from
-   * `fingerprint.resolvedHomePath`. A host keeps each cloud box's usage under
-   * the box's own fingerprint, so a connected box still deduplicates against
-   * it, but several boxes share one home path, so their buckets need per-box
-   * paths to stay apart.
-   */
+  /** Its buckets' `sourcePath` when not the home path: cloud boxes a host keeps share one. */
   sourcePath: Schema.optionalKey(TrimmedNonEmptyString),
   /** An action the client can offer to make this source available. */
   action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
@@ -205,12 +199,6 @@ export const UsageSummaryInput = Schema.Struct({
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
 
-/** Asks an environment for its hourly UTC usage since an instant, for a host to keep. */
-export const UsageHistoryInput = Schema.Struct({
-  sinceTime: TrimmedNonEmptyString,
-});
-export type UsageHistoryInput = typeof UsageHistoryInput.Type;
-
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Number,
   readAt: Schema.String,
@@ -224,25 +212,6 @@ export const UsageSummary = Schema.Struct({
   scanDurationMs: NonNegativeInt,
 });
 export type UsageSummary = typeof UsageSummary.Type;
-
-/**
- * A machine's own hourly UTC history, as a host would pull it from a cloud box,
- * pushed to a host that no client of the machine connects to. Each import
- * replaces what the host keeps for `machineId`.
- */
-export const UsageImportInput = Schema.Struct({
-  /** Stable across hostname changes, unlike the sources' `hostId`. */
-  machineId: TrimmedNonEmptyString,
-  history: UsageSummary,
-});
-export type UsageImportInput = typeof UsageImportInput.Type;
-
-/** What the host now keeps for the machine. */
-export const UsageImportResult = Schema.Struct({
-  sources: NonNegativeInt,
-  buckets: NonNegativeInt,
-});
-export type UsageImportResult = typeof UsageImportResult.Type;
 
 export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageReadError", {
   reason: Schema.Literals(["scanFailed", "invalidWindow"]),

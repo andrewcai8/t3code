@@ -224,12 +224,7 @@ export const RepositoryIdentity = Schema.Struct({
   provider: Schema.optionalKey(TrimmedNonEmptyString),
   owner: Schema.optionalKey(TrimmedNonEmptyString),
   name: Schema.optionalKey(TrimmedNonEmptyString),
-  /**
-   * The `origin` remote, when the identity came from a different one. A fork
-   * targets its upstream for pull requests but only its own remote holds its
-   * commits, so anything cloning this checkout needs this rather than the
-   * canonical repository.
-   */
+  /** The `origin` remote when the identity came from another: a fork's commits live only there. */
   origin: Schema.optionalKey(
     Schema.Struct({
       owner: TrimmedNonEmptyString,
@@ -239,14 +234,6 @@ export const RepositoryIdentity = Schema.Struct({
   ),
 });
 export type RepositoryIdentity = typeof RepositoryIdentity.Type;
-
-/** The `owner/name` a cloud environment clones for this checkout: a fork's own remote, not its upstream. */
-export function cloneRepository(
-  identity: RepositoryIdentity | null | undefined,
-): string | undefined {
-  const source = identity?.origin ?? identity;
-  return source?.owner && source.name ? `${source.owner}/${source.name}` : undefined;
-}
 
 export const ScopedProjectRef = Schema.Struct({
   environmentId: EnvironmentId,

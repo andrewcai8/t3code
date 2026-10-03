@@ -62,7 +62,8 @@ import {
   PullRequestOperationError,
   PullRequestUnavailableError,
 } from "./pullRequest.ts";
-import { UsageHistoryInput, UsageImportInput, UsageImportResult, UsageSummary } from "./usage.ts";
+import { UsageSummary } from "./usage.ts";
+import { UsageHistoryInput, UsageImportInput, UsageImportResult } from "./usageHistory.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,

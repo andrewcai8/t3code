@@ -61,5 +61,7 @@ export * from "./resourceTelemetry.ts";
 export * from "./rpc.ts";
 export * from "./environmentControl.ts";
 export * from "./environmentControlRpc.ts";
+export * from "./repositoryClone.ts";
+export * from "./usageHistory.ts";
 export * from "./worktreeSetup.ts";
 export * from "./environmentProvisioning.ts";
