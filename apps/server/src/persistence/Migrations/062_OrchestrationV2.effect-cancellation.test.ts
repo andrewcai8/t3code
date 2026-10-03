@@ -8,7 +8,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
-layer("055_OrchestrationV2 effect cancellation", (it) => {
+layer("062_OrchestrationV2 effect cancellation", (it) => {
   it.effect("creates the effect outbox with the cancelled terminal status", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

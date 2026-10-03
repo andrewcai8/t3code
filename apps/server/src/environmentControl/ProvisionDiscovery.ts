@@ -3,7 +3,6 @@ import {
   DurableProvisionRequest,
   EnvironmentControlError,
   type EnvironmentId,
-  ProvisionedChat,
   ProvisionOperationState,
   provisionSandboxId,
   type SavedEnvironmentAddress,
@@ -15,6 +14,7 @@ import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { isLoopbackHostname } from "../http.ts";
 import { cleanupPlan } from "./cloudCleanup.ts";
+import { ProvisionedChatJson } from "./provisionedChats.ts";
 import { StoredProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 const decodeRows = Schema.decodeUnknownEffect(
@@ -30,7 +30,7 @@ const decodeRows = Schema.decodeUnknownEffect(
   ),
 );
 const decodeDiscovery = Schema.decodeUnknownEffect(DiscoveredProvisionedEnvironment);
-const decodeChat = Schema.decodeUnknownExit(Schema.fromJsonString(ProvisionedChat));
+const decodeChat = Schema.decodeUnknownExit(ProvisionedChatJson);
 
 const GATEWAY_LEASE = new RegExp(`${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/([^/]+)`);
 

@@ -1,8 +1,9 @@
-import { OrchestrationShellSnapshot } from "@t3tools/contracts";
+import { OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-const decodeShell = Schema.decodeUnknownSync(OrchestrationShellSnapshot);
-const encodeShell = Schema.encodeSync(OrchestrationShellSnapshot);
+const ShellWire = Schema.toCodecJson(OrchestrationV2ShellSnapshot);
+const decodeShell = Schema.decodeUnknownSync(ShellWire);
+const encodeShell = Schema.encodeSync(ShellWire);
 
 const project = {
   id: "project-app",
@@ -21,26 +22,36 @@ export const boxThread = (
   title: string,
   fields: Record<string, unknown> = {},
 ) => ({
+  createdBy: "user",
+  creationSource: "web",
   id,
   projectId,
   title,
+  providerInstanceId: "codex",
   modelSelection: { instanceId: "codex", model: "gpt-5.5" },
   runtimeMode: "full-access",
   interactionMode: "default",
   branch: "main",
   worktreePath: null,
-  pullRequests: [],
-  latestTurn: null,
+  lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+  forkedFrom: null,
+  activeProviderThreadId: null,
+  latestRunId: null,
+  activeRunId: null,
+  status: "idle",
+  pendingRuntimeRequest: null,
+  latestVisibleMessage: null,
+  latestUserMessageAt: "2026-09-30T10:02:00.000Z",
+  hasActionableProposedPlan: false,
+  pendingBackgroundTasks: [],
+  itemCount: 2,
+  visibleItemCount: 2,
   createdAt: "2026-09-30T10:01:00.000Z",
   updatedAt: "2026-09-30T10:05:00.000Z",
   archivedAt: null,
   settledOverride: null,
   settledAt: null,
-  session: null,
-  latestUserMessageAt: "2026-09-30T10:02:00.000Z",
-  hasPendingApprovals: false,
-  hasPendingUserInput: false,
-  hasActionableProposedPlan: false,
+  deletedAt: null,
   ...fields,
 });
 
@@ -53,10 +64,11 @@ export const boxShell = (threads: ReadonlyArray<Record<string, unknown>>) =>
     JSON.stringify(
       encodeShell(
         decodeShell({
+          schemaVersion: 1,
           snapshotSequence: 42,
           projects: [project, { ...project, id: "project-other", title: "other" }],
           threads,
-          updatedAt: "2026-09-30T10:05:00.000Z",
+          archivedThreads: [],
         }),
       ),
     ),

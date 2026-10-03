@@ -11,7 +11,6 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -65,11 +64,19 @@ import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts
 import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
-import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
-import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
-import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
-import Migration0055 from "./Migrations/055_OrchestrationV2.ts";
-import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
+import Migration0052 from "./Migrations/052_ProvisionOperations.ts";
+import Migration0053 from "./Migrations/053_ProjectionThreadHandoff.ts";
+import Migration0054 from "./Migrations/054_ProjectionThreadTitleState.ts";
+import Migration0055 from "./Migrations/055_PullRequestFilesViewed.ts";
+import Migration0056 from "./Migrations/056_Automations.ts";
+import Migration0057 from "./Migrations/057_ProjectionThreadsAutoSettleDisabledAt.ts";
+import Migration0058 from "./Migrations/058_BoxUsage.ts";
+import Migration0059 from "./Migrations/059_AutomationsModel.ts";
+import Migration0060 from "./Migrations/060_BoxUsageOrigin.ts";
+import Migration0061 from "./Migrations/061_ProvisionedChats.ts";
+import Migration0062 from "./Migrations/062_OrchestrationV2.ts";
+import Migration0063 from "./Migrations/063_RemoveRedundantProjectionIndexes.ts";
+import Migration0064 from "./Migrations/064_ProvisionedChatsV2.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -82,10 +89,10 @@ import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts"
  * returns migrations sorted by ID.
  *
  * Fork numbering: 052-056 and 058-061 are this fork's own and deployed
- * databases have them applied, so their ids never change. 057 came from
- * upstream. When syncing upstream, an upstream migration takes the next free
- * id above the highest one here, and one whose contents match a fork migration
- * is matched by rename instead of added.
+ * databases have them applied, so their ids never change. 054, 055, 057, 062
+ * and 063 came from upstream, where they are 052-056. When syncing upstream, an
+ * upstream migration takes the next free id above the highest one here, and one
+ * whose contents match a fork migration is matched by rename instead of added.
  */
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -139,13 +146,20 @@ export const migrationEntries = [
   [49, "ProjectionThreadsActiveOrderKey", Migration0049],
   [50, "ProjectionThreadPullRequests", Migration0050],
   [51, "ProjectionThreadMessageContext", Migration0051],
-  [52, "ProjectionThreadTitleState", Migration0052],
-  [53, "PullRequestFilesViewed", Migration0053],
-  [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
-  // Released as 53 and 54 in V2 previews; reconcileV2PreviewMigration preserves their ledger.
+  [52, "ProvisionOperations", Migration0052],
+  [53, "ProjectionThreadHandoff", Migration0053],
+  [54, "ProjectionThreadTitleState", Migration0054],
+  [55, "PullRequestFilesViewed", Migration0055],
+  [56, "Automations", Migration0056],
+  [57, "ProjectionThreadsAutoSettleDisabledAt", Migration0057],
+  [58, "BoxUsage", Migration0058],
+  [59, "AutomationsModel", Migration0059],
+  [60, "BoxUsageOrigin", Migration0060],
+  [61, "ProvisionedChats", Migration0061],
   // Preserve this migration's schema. Future V2 schema changes need new migrations.
-  [55, "OrchestrationV2", Migration0055],
-  [56, "RemoveRedundantProjectionIndexes", Migration0056],
+  [62, "OrchestrationV2", Migration0062],
+  [63, "RemoveRedundantProjectionIndexes", Migration0063],
+  [64, "ProvisionedChatsV2", Migration0064],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -182,14 +196,7 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const previewMigrations =
-    toMigrationInclusive === undefined || toMigrationInclusive >= 55
-      ? yield* reconcileV2PreviewMigration()
-      : [];
-  const executedMigrations = [
-    ...previewMigrations,
-    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
-  ];
+  const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")

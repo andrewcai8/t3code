@@ -1,5 +1,6 @@
 // @effect-diagnostics globalDate:off - fixed timestamps exercise cleanup times.
 import { ThreadId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import { cleanupPlan, createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
@@ -36,7 +37,7 @@ const withoutDevbox = (overrides: Partial<ProvisionedLease> = {}): ProvisionedLe
 const settled = (settledAt: string) => ({
   id: ThreadId.make("thread-1"),
   settledOverride: "settled" as const,
-  settledAt,
+  settledAt: DateTime.makeUnsafe(settledAt),
 });
 
 describe("cleanupPlan", () => {

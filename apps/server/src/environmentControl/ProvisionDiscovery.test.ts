@@ -7,6 +7,7 @@ import {
   type ProvisionOperation,
   ProvisionRequestId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -649,7 +650,7 @@ it.effect("a paused Devbox lists when it will be removed, or that it is kept", (
         thread: {
           ...chat.thread,
           settledOverride: "settled",
-          settledAt: "2026-03-01T11:00:00.000Z",
+          settledAt: DateTime.makeUnsafe("2026-03-01T11:00:00.000Z"),
         },
       });
     });
