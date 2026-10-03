@@ -6,6 +6,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
   EnvironmentProvisionInput,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ProvisionFirstTurn,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
@@ -154,9 +156,16 @@ const fakeBox = (behavior: BoxBehavior) =>
             response.writeHead(404).end();
             return;
           }
-          const command = JSON.parse(body) as Record<string, unknown>;
+          const command = JSON.parse(body) as Record<string, unknown> & {
+            modelSelection: { instanceId: string };
+          };
           if (behavior.rejectLaunch) {
             json(response, 400, { code: "invalid_request", reason: "invalid_command" });
+            return;
+          }
+          // A box runs each driver's one account under the driver's default instance id only.
+          if (!["claudeAgent", "codex"].includes(command.modelSelection.instanceId)) {
+            json(response, 500, { _tag: "ThreadLaunchError" });
             return;
           }
           const resumed = commands.some((seen) => seen.commandId === command.commandId);
@@ -503,4 +512,43 @@ it.live("keeps the first message of a ready request whose lease is not registere
       expect(kept.size).toBe(0);
     }),
   ),
+);
+
+it.live("launches a turn on the box's instance for the driver of the host account it names", () =>
+  Effect.gen(function* () {
+    const box = yield* fakeBox({});
+    const hostDrivers: Record<string, ProviderDriverKind> = {
+      claude_andrewcai083: ProviderDriverKind.make("claudeAgent"),
+      codex: ProviderDriverKind.make("codex"),
+    };
+    const deliver = (threadId: string, modelSelection: ProvisionFirstTurn["modelSelection"]) =>
+      Effect.promise(() =>
+        deliverFirstTurn(
+          { origin: box.origin, brokerToken: "private-broker" },
+          {
+            requestId: threadId,
+            threadId,
+            projectDir: "/private/operation/workspace",
+            turn: { ...turn, modelSelection },
+          },
+          (instanceId) => hostDrivers[instanceId],
+        ),
+      );
+    const claude = {
+      instanceId: ProviderInstanceId.make("claude_andrewcai083"),
+      model: "claude-opus-4-6",
+      options: [{ id: "effort", value: "high" }],
+    } as ProvisionFirstTurn["modelSelection"];
+
+    expect(yield* deliver("claude-thread", claude)).toBe("delivered");
+    expect(yield* deliver("codex-thread", turn.modelSelection)).toBe("delivered");
+    expect(box.commands.map((command) => command.modelSelection)).toEqual([
+      {
+        instanceId: "claudeAgent",
+        model: "claude-opus-4-6",
+        options: [{ id: "effort", value: "high" }],
+      },
+      { instanceId: "codex", model: "gpt-5.5" },
+    ]);
+  }).pipe(Effect.scoped),
 );
