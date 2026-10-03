@@ -11,6 +11,8 @@
     "**/*.ts",
     "../apps/server/src/provider/cursorCredentialPath.ts",
     "../apps/server/src/environmentControl/credentialDestinations.ts",
-    "../apps/server/src/provider/codexLoginCopy.ts"
+    "../apps/server/src/provider/codexLoginCopy.ts",
+    // The cloud smoke's turn fold tests against the client's V2 projection fixtures.
+    "../packages/client-runtime/src/state/orchestrationV2TestFixtures.ts"
   ]
 }

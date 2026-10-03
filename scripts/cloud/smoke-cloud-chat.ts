@@ -25,9 +25,12 @@ import {
   AUTOMATION_WEBHOOK_PATH_PREFIX,
   type AutomationId,
   CommandId,
+  type EnvironmentAuthorizationError,
   MessageId,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  type OrchestrationV2DispatchCommandError,
+  type OrchestrationV2ThreadLaunchError,
   type ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -59,7 +62,7 @@ import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import { RpcClient, type RpcClientError, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import { advanceTurn, initialProgress } from "./turnProgress.ts";
@@ -639,7 +642,13 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     const sentAt = yield* Clock.currentTimeMillis;
     // Sent the way the web composer sends: a new chat launches its thread with the message, and a
     // follow-up lets the server choose how to deliver it.
-    const dispatch = thread
+    const dispatch: Effect.Effect<
+      unknown,
+      | EnvironmentAuthorizationError
+      | OrchestrationV2DispatchCommandError
+      | OrchestrationV2ThreadLaunchError
+      | RpcClientError.RpcClientError
+    > = thread
       ? client["orchestration.dispatchCommand"]({
           type: "message.dispatch",
           commandId,

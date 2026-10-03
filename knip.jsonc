@@ -42,7 +42,12 @@
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
-      "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web"],
+      // The bundled e2b SDK imports connect-web, which stays external for Cursor.
+      "ignoreDependencies": [
+        "@effect/platform-node-shared",
+        "@t3tools/web",
+        "@connectrpc/connect-web",
+      ],
     },
     "apps/desktop": {
       // Electron loads these bundles by filename rather than importing them.
