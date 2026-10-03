@@ -1,6 +1,3 @@
-import { ProvisionedEnvironmentConnections } from "./ProvisionedEnvironmentConnections";
-import { SavedCloudBoxConnections } from "./SavedCloudBoxConnections";
-import { CloudComputeControls } from "./CloudComputeControls";
 import {
   ChevronsLeftRightEllipsisIcon,
   EllipsisIcon,
@@ -44,7 +41,6 @@ import {
   type EnvironmentId,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
-import { runsLocalAgents } from "@t3tools/client-runtime/cloud";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import {
   isAtomCommandInterrupted,
@@ -127,8 +123,11 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { AnimatedHeight } from "../AnimatedHeight";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Textarea } from "../ui/textarea";
-import { setPairingTokenOnUrl } from "../../pairingUrl";
-import { parsePairingUrlFields } from "./pairingFields";
+import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
+import { readHostedPairingRequest } from "../../hostedPairing";
+import { pairingUrlHost } from "./pairingFields";
+import { CloudConnectionsSettings, useAgentRunningEnvironments } from "./CloudConnectionsSettings";
+import { isRemoteServerUpdate } from "../../cloud/guestServerUpdate";
 import {
   createServerPairingCredential,
   revokeOtherServerClientSessions,
@@ -174,7 +173,6 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import {
-  isRemoteServerUpdate,
   ServerUpdateAction,
   ServerUpdateProgress,
   ServerUpdatesAction,
@@ -359,6 +357,37 @@ function parseManualDesktopSshTarget(input: {
     username,
     port,
   };
+}
+
+function parsePairingUrlFields(
+  input: string,
+): { readonly host: string; readonly pairingCode: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  try {
+    const urlLikeInput =
+      /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) || trimmed.startsWith("//")
+        ? trimmed
+        : `https://${trimmed}`;
+    const url = new URL(urlLikeInput, window.location.origin);
+    const hostedPairingRequest = readHostedPairingRequest(url);
+    if (hostedPairingRequest) {
+      return {
+        host: hostedPairingRequest.host,
+        pairingCode: hostedPairingRequest.token,
+      };
+    }
+
+    const pairingCode = getPairingTokenFromUrl(url);
+    if (!pairingCode) return null;
+    return {
+      host: pairingUrlHost(url),
+      pairingCode,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
@@ -1459,7 +1488,6 @@ function SavedBackendListRow({
 }: SavedBackendListRowProps) {
   const environmentId = environment.environmentId;
   const unsupported = environment.connection.phase === "unsupported";
-  const workspaceMissing = environment.connection.blockedReason === "workspace-missing";
   const enabled = environment.entry.enabled && !unsupported;
   const isConnected = environment.connection.phase === "connected";
   const isRemoving = removingEnvironmentId === environmentId;
@@ -1489,9 +1517,7 @@ function SavedBackendListRow({
     },
     [copyTraceIdToClipboard],
   );
-  const versionMismatch = workspaceMissing
-    ? null
-    : resolveServerConfigVersionMismatch(environment.serverConfig);
+  const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
@@ -1860,27 +1886,35 @@ export function ConnectionsSettings() {
     () =>
       savedServerUpdateStates.flatMap(({ environment, updateStatus }): ServerUpdateTarget[] => {
         const mismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
+        const selfUpdate = resolveServerSelfUpdateCapability(environment.serverConfig);
+        const desktopAppUpdate = supportsDesktopAppUpdate(environment.serverConfig);
         if (
           !mismatch ||
           updateStatus === "running" ||
           !environment.entry.enabled ||
           environment.connection.phase !== "connected" ||
-          isDesktopLocalConnectionTarget(environment.entry.target)
+          isDesktopLocalConnectionTarget(environment.entry.target) ||
+          // Manual-update machines only offer a copy command on their row.
+          !isRemoteServerUpdate({
+            environmentId: environment.environmentId,
+            selfUpdate,
+            desktopAppUpdate,
+          })
         ) {
           return [];
         }
-        const target: ServerUpdateTarget = {
-          environmentId: environment.environmentId,
-          serverLabel: environment.label,
-          selfUpdate: resolveServerSelfUpdateCapability(environment.serverConfig),
-          desktopAppUpdate: supportsDesktopAppUpdate(environment.serverConfig),
-          threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
-          continueThreadsAfterServerUpdate:
-            environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
-          targetVersion: mismatch.clientVersion,
-        };
-        // Manual-update machines only offer a copy command on their row.
-        return isRemoteServerUpdate(target) ? [target] : [];
+        return [
+          {
+            environmentId: environment.environmentId,
+            serverLabel: environment.label,
+            selfUpdate,
+            desktopAppUpdate,
+            threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
+            continueThreadsAfterServerUpdate:
+              environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
+            targetVersion: mismatch.clientVersion,
+          },
+        ];
       }),
     [savedServerUpdateStates],
   );
@@ -1895,12 +1929,7 @@ export function ConnectionsSettings() {
     ],
     [primaryEnvironment, savedEnvironments],
   );
-  // A host that runs no agents never receives a balanced thread.
-  const balancedEnvironments = useMemo(
-    () =>
-      loadBalancingEnvironments.filter((environment) => runsLocalAgents(environment.serverConfig)),
-    [loadBalancingEnvironments],
-  );
+  const balancedEnvironments = useAgentRunningEnvironments(loadBalancingEnvironments);
   const savedDesktopSshEnvironmentKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const environment of savedEnvironments) {
@@ -3756,26 +3785,10 @@ export function ConnectionsSettings() {
           savedEnvironments={savedEnvironments}
         />
       </SettingsSection>
-      {environments
-        .filter((environment) => environment.connection.phase === "connected")
-        .map((environment) => (
-          <div key={environment.environmentId}>
-            <ProvisionedEnvironmentConnections
-              managerId={environment.environmentId}
-              managerLabel={environment.label}
-            />
-            <CloudComputeControls
-              managerId={environment.environmentId}
-              managerLabel={environment.label}
-              onStarted={(id) => {
-                if (!environments.some((entry) => entry.environmentId === id)) return false;
-                void handleSetSavedBackendEnabled(id, true);
-                return true;
-              }}
-            />
-          </div>
-        ))}
-      <SavedCloudBoxConnections />
+      <CloudConnectionsSettings
+        environments={environments}
+        onSetEnabled={handleSetSavedBackendEnabled}
+      />
       {hasCloudPublicConfig() ? (
         <RemoveT3ConnectEnvironmentDialog
           environmentLabel={pendingT3ConnectRemoval?.label ?? null}

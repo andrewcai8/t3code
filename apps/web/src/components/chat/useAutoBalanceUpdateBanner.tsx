@@ -16,8 +16,8 @@ import {
   supportsDesktopAppUpdate,
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
+import { isRemoteServerUpdate } from "~/cloud/guestServerUpdate";
 import {
-  isRemoteServerUpdate,
   ServerUpdateAction,
   ServerUpdateProgress,
   ServerUpdatesAction,
@@ -58,21 +58,24 @@ export function useAutoBalanceUpdateBanner(
         : dismissedNotices.has(state) || isServerUpdateFailureDismissed(state)
     )
       return [];
-    const target = {
-      environmentId: environment.environmentId,
-      serverLabel: environment.label,
-      selfUpdate: resolveServerSelfUpdateCapability(environment.serverConfig),
-      desktopAppUpdate: supportsDesktopAppUpdate(environment.serverConfig),
-      threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
-      continueThreadsAfterServerUpdate:
-        environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
-      targetVersion: state.status === "idle" ? mismatch!.clientVersion : state.targetVersion,
-    };
+    const selfUpdate = resolveServerSelfUpdateCapability(environment.serverConfig);
+    const desktopAppUpdate = supportsDesktopAppUpdate(environment.serverConfig);
     return [
       {
-        ...target,
+        environmentId: environment.environmentId,
+        serverLabel: environment.label,
+        selfUpdate,
+        desktopAppUpdate,
+        threadContinuation: supportsServerUpdateThreadContinuation(environment.serverConfig),
+        continueThreadsAfterServerUpdate:
+          environment.serverConfig?.settings.continueThreadsAfterServerUpdate ?? false,
+        targetVersion: state.status === "idle" ? mismatch!.clientVersion : state.targetVersion,
         connected: environment.connection.phase === "connected",
-        remoteUpdate: isRemoteServerUpdate(target),
+        remoteUpdate: isRemoteServerUpdate({
+          environmentId: environment.environmentId,
+          selfUpdate,
+          desktopAppUpdate,
+        }),
         state,
         dismissKey,
       },

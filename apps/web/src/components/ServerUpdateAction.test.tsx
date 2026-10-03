@@ -8,18 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 const testState = vi.hoisted(() => ({
   updateServer: vi.fn(),
-  upgradeThroughManager: vi.fn(),
   toast: vi.fn(),
   continueThreadsAfterServerUpdate: false,
-  lease: null as {
-    readonly leaseId: string;
-    readonly sandboxId: string;
-    readonly managerEnvironmentId: string;
-  } | null,
-  commands: {
-    updateServer: Symbol("updateServer"),
-    upgradeProvisionedEnvironment: Symbol("upgradeProvisionedEnvironment"),
-  },
 }));
 
 vi.mock("~/hooks/useCopyToClipboard", () => ({
@@ -32,20 +22,10 @@ vi.mock("~/hooks/useSettings", () => ({
   ) => selector({ continueThreadsAfterServerUpdate: testState.continueThreadsAfterServerUpdate }),
 }));
 vi.mock("~/state/server", () => ({
-  serverEnvironment: testState.commands,
+  serverEnvironment: { updateServer: Symbol("updateServer") },
 }));
 vi.mock("~/state/use-atom-command", () => ({
-  useAtomCommand: (command: symbol) =>
-    command === testState.commands.upgradeProvisionedEnvironment
-      ? testState.upgradeThroughManager
-      : testState.updateServer,
-}));
-vi.mock("~/state/environments", () => ({
-  useEnvironment: (environmentId: EnvironmentId | null) =>
-    environmentId === null ? null : { label: "Manager" },
-}));
-vi.mock("~/cloud/provisionedSandboxLeases", () => ({
-  provisionedSandboxOwnedByEnvironment: () => testState.lease,
+  useAtomCommand: () => testState.updateServer,
 }));
 vi.mock("./ui/toast", () => ({
   toastManager: { add: testState.toast },
@@ -66,16 +46,14 @@ import {
 
 type ActionElement = ReactElement<{
   readonly onClick?: () => void;
-  readonly children?: unknown;
 }>;
 
-function renderAction(overrides: Partial<ServerUpdateTarget> = {}): ActionElement {
+function renderAction(): ActionElement {
   return ServerUpdateAction({
     environmentId: "env-test" as EnvironmentId,
     serverLabel: "Test server",
     selfUpdate: "boot-service",
     targetVersion: "0.0.31",
-    ...overrides,
   }) as ActionElement;
 }
 
@@ -87,37 +65,8 @@ async function flushPromises(): Promise<void> {
 describe("ServerUpdateAction", () => {
   beforeEach(() => {
     testState.updateServer.mockReset();
-    testState.upgradeThroughManager.mockReset();
     testState.toast.mockReset();
     testState.continueThreadsAfterServerUpdate = false;
-    testState.lease = null;
-  });
-
-  it("upgrades a leased guest through its manager instead of copying the public command", async () => {
-    testState.lease = {
-      leaseId: "lease-1",
-      sandboxId: "sandbox-1",
-      managerEnvironmentId: "manager",
-    };
-    testState.upgradeThroughManager.mockResolvedValue(
-      AsyncResult.success({ kind: "upgraded" as const, t3Revision: "abcdef0123456789" }),
-    );
-
-    const action = renderAction({ selfUpdate: null });
-    expect(action.props.children).toBe("Update from Manager");
-    action.props.onClick?.();
-    await flushPromises();
-
-    expect(testState.upgradeThroughManager).toHaveBeenCalledWith({
-      environmentId: "manager",
-      input: { leaseId: "lease-1", sandboxId: "sandbox-1", environmentId: "env-test" },
-    });
-    expect(testState.updateServer).not.toHaveBeenCalled();
-    expect(testState.toast).toHaveBeenCalledWith({
-      type: "success",
-      title: "Test server updated",
-      description: "Now on abcdef0",
-    });
   });
 
   it("reports success only after the shared update flow reconnects", async () => {
