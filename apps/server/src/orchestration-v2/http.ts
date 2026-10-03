@@ -2,6 +2,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  type EnvironmentInternalError,
+  type EnvironmentRequestInvalidError,
   ThreadId,
   TurnItemId,
   type OrchestrationProjectShell,
@@ -336,10 +338,16 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
               }).pipe(Effect.provide(intakeContext)),
             )
             .pipe(
-              Effect.catch((cause) =>
-                launchRefusedForGood(cause)
-                  ? failEnvironmentInvalidRequest("invalid_command")
-                  : failEnvironmentInternal("orchestration_launch_thread_failed", cause),
+              Effect.catch(
+                (
+                  cause,
+                ): Effect.Effect<
+                  never,
+                  EnvironmentRequestInvalidError | EnvironmentInternalError
+                > =>
+                  launchRefusedForGood(cause)
+                    ? failEnvironmentInvalidRequest("invalid_command")
+                    : failEnvironmentInternal("orchestration_launch_thread_failed", cause),
               ),
             );
           return { threadId: result.threadId, resumed: result.resumed };
