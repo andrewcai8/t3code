@@ -103,15 +103,6 @@ function readingSignature(
   ].join("|");
 }
 
-/** Names of one machine's instances that read identical limits, a list per suspected shared account. */
-export function identicalProviderReadings(providers: readonly ServerProvider[]): string[][] {
-  return findIdenticalReadings(
-    providersWithLimits(providers).map((provider) =>
-      providerReading(provider, provider.instanceId),
-    ),
-  );
-}
-
 /** Older than this, a snapshot cannot say a window with no reset is still spent. */
 const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
 

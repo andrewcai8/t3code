@@ -10,7 +10,6 @@ import {
   collectLimitAccounts,
   collectLimitNotices,
   collectLimitPools,
-  identicalProviderReadings,
   isAccountSpent,
   rankAccounts,
 } from "./usageLimits.ts";
@@ -556,6 +555,11 @@ describe("identical readings", () => {
         { entry: { target: { label: "Host" } }, serverConfig: { providers } },
       ],
     ]);
+
+  const identicalProviderReadings = (providers: ServerProvider[]) =>
+    collectLimitNotices(host(providers)).map((notice) =>
+      notice.replace(" report identical limits, so they may be one account.", "").split(", "),
+    );
 
   it("flags four accounts reading the same numbers, and not two that differ", () => {
     const providers = [

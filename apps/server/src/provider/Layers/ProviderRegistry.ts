@@ -29,7 +29,6 @@ import {
   type ServerProvider,
   type ServerProviderUpdateState,
 } from "@t3tools/contracts";
-import { identicalProviderReadings } from "@t3tools/shared/usageLimits";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -127,26 +126,19 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   }
 
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
-  // Codex discovers its models and Claude filters its catalog by CLI version.
-  const probeOwnsModels =
-    provider.driver === ProviderDriverKind.make("codex") ||
-    provider.driver === ProviderDriverKind.make("claudeAgent");
-  if (
-    !isAntigravity &&
-    !probeOwnsModels &&
-    provider.driver !== ProviderDriverKind.make("opencode")
-  ) {
+  const isCodex = provider.driver === ProviderDriverKind.make("codex");
+  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
     return true;
   }
 
   if (
-    (isAntigravity || probeOwnsModels) &&
+    (isAntigravity || isCodex) &&
     (!provider.enabled || provider.auth.status === "unauthenticated")
   ) {
     return false;
   }
 
-  // A successful probe replaces these inventories so retired or version-gated models disappear.
+  // Successful discovery replaces these inventories so cached retired models disappear.
   // Antigravity's local health check does not authenticate or discover models.
   const isPendingAntigravityAuthentication =
     isAntigravity && provider.status === "warning" && provider.auth.status === "unknown";
@@ -542,18 +534,6 @@ export const ProviderRegistryLive = Layer.effect(
         }
         if (options?.publish !== false) {
           yield* PubSub.publish(changesPubSub, providers);
-        }
-        // Logged when the suspects change, not on every refresh.
-        const suspectsOf = (snapshots: ReadonlyArray<ServerProvider>) =>
-          identicalProviderReadings(snapshots)
-            .map((names) => names.join(", "))
-            .join("; ");
-        const suspects = suspectsOf(providers);
-        if (suspects && suspects !== suspectsOf(previousProviders)) {
-          yield* Effect.logWarning(
-            "Provider accounts report identical usage limits and may be one account; remake their logins.",
-            { suspects },
-          );
         }
       }
 

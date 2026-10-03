@@ -4,8 +4,6 @@ import {
   ServerSettingsError,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
-import * as NodeOS from "node:os";
-import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -19,24 +17,8 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import {
-  applyUsageLimitsUpdate,
-  resolveUsageLimitsAfterEnrichment,
-  resolveUsageLimitsAfterProbe,
-} from "./providerUsageLimits.ts";
+import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./providerUsageLimits.ts";
 import type { ServerProviderShape } from "./Services/ServerProvider.ts";
-
-/**
- * Permits shared by every provider instance in the process, one per running
- * status check. Boot, interval, and manual refreshes queue here in arrival
- * order, so a host with many instances runs a few probes at a time instead of
- * all of them at once. Provider timeouts live inside `checkProvider` and start
- * only once a permit is held.
- */
-export const ProviderCheckPermits = Context.Reference<Semaphore.Semaphore>(
-  "@t3tools/server/makeManagedServerProvider/ProviderCheckPermits",
-  { defaultValue: () => Semaphore.makeUnsafe(Math.max(4, NodeOS.availableParallelism())) },
-);
 
 interface ProviderSnapshotState {
   readonly snapshot: ServerProvider;
@@ -80,7 +62,6 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const refreshSemaphore = yield* Semaphore.make(1);
-  const checkPermits = yield* ProviderCheckPermits;
   const changesPubSub = yield* Effect.acquireRelease(
     PubSub.unbounded<ServerProvider>(),
     PubSub.shutdown,
@@ -103,15 +84,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       if (state.enrichmentGeneration !== generation) {
         return [null, state] as const;
       }
-      // Enrichment derives from the snapshot it was handed. Keep live
-      // windows a turn already published; fill usage the base check omitted.
-      const merged = withUsageLimits(
-        nextSnapshot,
-        resolveUsageLimitsAfterEnrichment({
-          published: state.snapshot.usageLimits,
-          probed: nextSnapshot.usageLimits,
-        }),
-      );
+      // Enrichment derives from the snapshot it was handed; a runtime usage
+      // update that landed since must not be reverted by it.
+      const merged = withUsageLimits(nextSnapshot, state.snapshot.usageLimits);
       if (Equal.equals(state.snapshot, merged)) {
         return [null, state] as const;
       }
@@ -175,7 +150,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       return state.snapshot;
     }
 
-    const probedSnapshot = yield* checkPermits.withPermits(1)(input.checkProvider);
+    const probedSnapshot = yield* input.checkProvider;
     const { snapshot: nextSnapshot, generation: nextGeneration } = yield* Ref.modify(
       snapshotStateRef,
       (state) => {

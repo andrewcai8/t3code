@@ -175,27 +175,6 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
 const noClaudeCapabilities = () =>
   Effect.sync(() => undefined as TestClaudeCapabilities | undefined);
 
-function claudeCliHandler(
-  handler?: (
-    args: ReadonlyArray<string>,
-  ) => { stdout: string; stderr: string; code: number } | undefined,
-) {
-  return (args: ReadonlyArray<string>) => {
-    const custom = handler?.(args);
-    if (custom) return custom;
-    const joined = args.join(" ");
-    if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-    if (joined === "auth status") {
-      return {
-        stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-        stderr: "",
-        code: 0,
-      };
-    }
-    throw new Error(`Unexpected args: ${joined}`);
-  };
-}
-
 function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
@@ -605,21 +584,6 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         }),
       );
 
-      it.effect("reports ready when the app-server answers after 15 seconds", () =>
-        Effect.gen(function* () {
-          const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
-            Effect.sleep("15 seconds").pipe(Effect.as(makeCodexProbeSnapshot())),
-          ).pipe(Effect.forkChild);
-
-          yield* Effect.yieldNow;
-          yield* TestClock.adjust("15 seconds");
-
-          const status = yield* Fiber.join(statusFiber);
-          assert.strictEqual(status.status, "ready");
-          assert.strictEqual(status.version, "1.0.0");
-        }),
-      );
-
       it.effect("closes the app-server probe scope when provider status times out", () =>
         Effect.gen(function* () {
           const killCalls = yield* Ref.make(0);
@@ -629,11 +593,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           );
 
           yield* Effect.yieldNow;
-          yield* TestClock.adjust("29 seconds");
-          yield* Effect.yieldNow;
-          assert.strictEqual(statusFiber.pollUnsafe(), undefined);
-
-          yield* TestClock.adjust("1 second");
+          yield* TestClock.adjust("11 seconds");
           yield* Effect.yieldNow;
 
           const status = yield* Fiber.join(statusFiber);
@@ -1054,49 +1014,6 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         const afterFailure = mergeProviderSnapshot(afterRemoval, failedProvider);
 
         assert.deepStrictEqual(afterFailure.models, [authoritativeProvider.models[0]!]);
-      });
-
-      it("drops Claude models the installed CLI is too old for once the probe lands", () => {
-        const model = (slug: string) => ({ slug, name: slug, isCustom: false, capabilities: null });
-        const pendingProvider = {
-          instanceId: ProviderInstanceId.make("claudeAgent"),
-          driver: ProviderDriverKind.make("claudeAgent"),
-          status: "warning",
-          enabled: true,
-          installed: false,
-          auth: { status: "unknown" },
-          checkedAt: "2026-09-26T00:00:00.000Z",
-          version: null,
-          models: [model("claude-fable-5-1"), model("claude-opus-5"), model("claude-sonnet-5")],
-          slashCommands: [],
-          skills: [],
-        } satisfies ServerProvider;
-        const probedProvider = {
-          ...pendingProvider,
-          status: "ready",
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-09-26T00:01:00.000Z",
-          version: "2.1.200",
-          models: [model("claude-opus-5"), model("claude-sonnet-5")],
-        } satisfies ServerProvider;
-        const failedProvider = {
-          ...probedProvider,
-          status: "error",
-          auth: { status: "unknown" },
-          checkedAt: "2026-09-26T00:02:00.000Z",
-          models: [model("claude-sonnet-5")],
-        } satisfies ServerProvider;
-
-        const afterProbe = mergeProviderSnapshot(pendingProvider, probedProvider);
-        assert.deepStrictEqual(
-          afterProbe.models.map((entry) => entry.slug),
-          ["claude-opus-5", "claude-sonnet-5"],
-        );
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(afterProbe, failedProvider).models.map((entry) => entry.slug),
-          ["claude-sonnet-5", "claude-opus-5"],
-        );
       });
 
       describe("Codex model inventories", () => {
@@ -3044,7 +2961,15 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "bedrock");
           assert.strictEqual(status.auth.label, "Amazon Bedrock");
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
       );
 
       it.effect("returns a display label for claude subscription types", () =>
@@ -3086,10 +3011,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                   tokenSource: undefined,
                   apiProvider: undefined,
                   slashCommands: [],
-                  usage: {
-                    source: "usageEndpoint" as const,
-                    response: { rate_limits_available: true, rate_limits: {} },
-                  },
+                  usage: { rate_limits_available: true, rate_limits: {} },
                   ...overrides,
                 }),
               undefined,
@@ -3102,7 +3024,15 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           const bedrock = yield* check({ apiProvider: "bedrock" });
           assert.deepStrictEqual(subscription.usageLimits?.resetCredits, { availableCount: 2 });
           assert.strictEqual(bedrock.usageLimits?.resetCredits, undefined);
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
       );
 
       it.effect("does not duplicate Claude in full subscription labels", () =>
@@ -3116,7 +3046,15 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "Claude Max Subscription");
           assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
       );
 
       it.effect("does not duplicate Claude in provider-prefixed subscription names", () =>
@@ -3130,7 +3068,15 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "Claude Max");
           assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
       );
 
       it.effect("returns claude auth email from initialization result", () =>
@@ -3159,27 +3105,6 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         ),
       );
 
-      it.effect("reports the configured account email for a setup-token login", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            { ...defaultClaudeSettings, accountEmail: "work@example.com" },
-            claudeCapabilities({ tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" }),
-          );
-          assert.strictEqual(status.auth.status, "authenticated");
-          assert.strictEqual(status.auth.email, "work@example.com");
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
-      );
-
-      it.effect("prefers the email a login reports over the configured one", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            { ...defaultClaudeSettings, accountEmail: "stale@example.com" },
-            claudeCapabilities({ email: "claude@example.com" }),
-          );
-          assert.strictEqual(status.auth.email, "claude@example.com");
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
-      );
-
       it.effect("runs Claude status probes with the configured CLAUDE_CONFIG_DIR", () => {
         const claudeConfigDir = "/tmp/t3code-claude-home";
         const recorded = recordingMockSpawnerLayer((args) => {
@@ -3203,12 +3128,10 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             claudeCapabilities(),
           );
           assert.strictEqual(status.status, "ready");
-          const resolvedConfigDir = (yield* Path.Path).resolve(claudeConfigDir);
-          assert.ok(recorded.commands.length >= 2);
-          assert.ok(
-            recorded.commands.every(
-              (command) => command.env?.CLAUDE_CONFIG_DIR === resolvedConfigDir,
-            ),
+          // The home is resolved through the host Path before it reaches the env.
+          assert.deepStrictEqual(
+            recorded.commands.map((command) => command.env?.CLAUDE_CONFIG_DIR),
+            [(yield* Path.Path).resolve(claudeConfigDir)],
           );
         }).pipe(Effect.provide(recorded.layer));
       });
@@ -3392,44 +3315,6 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             }),
           ),
         ),
-      );
-
-      it.effect("returns ready from claude auth status without waiting on the SDK", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(defaultClaudeSettings);
-          assert.strictEqual(status.status, "ready");
-          assert.strictEqual(status.installed, true);
-          assert.strictEqual(status.auth.status, "authenticated");
-          assert.strictEqual(status.auth.email, "user@example.com");
-          assert.strictEqual(status.auth.type, "maxplan");
-          assert.strictEqual(status.auth.label, "Claude Max Subscription");
-          assert.strictEqual(status.usageLimits, undefined);
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer(
-              claudeCliHandler((args) => {
-                if (args.join(" ") !== "auth status") return undefined;
-                return {
-                  stdout:
-                    '{"loggedIn":true,"email":"user@example.com","subscriptionType":"maxplan","authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              }),
-            ),
-          ),
-        ),
-      );
-
-      it.effect("does not publish probeFailed usage when capabilities omit usage", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          assert.strictEqual(status.status, "ready");
-          assert.strictEqual(status.usageLimits, undefined);
-        }).pipe(Effect.provide(mockSpawnerLayer(claudeCliHandler()))),
       );
     });
   },
