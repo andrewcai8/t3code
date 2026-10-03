@@ -1,3 +1,4 @@
+import { useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useNavigation } from "@react-navigation/native";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
@@ -305,6 +306,10 @@ const USER_INPUT_TOGGLE_TIMING = {
 
 export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const navigation = useNavigation();
+  const reportedModelSelection = useThreadReportedModelSelection({
+    environmentId: props.environmentId,
+    threadId: props.selectedThread.id,
+  });
   const deviceState = useEnvironmentQuery(
     deviceEnvironment.state({ environmentId: props.environmentId, input: {} }),
   );
@@ -1283,6 +1288,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       effortLabel={formatModelSelectionEffort(
                         props.selectedThread.modelSelection,
                         providerSubagentProvider?.models,
+                        reportedModelSelection,
                       )}
                       status={props.providerSubagentStatus ?? null}
                       onOpenParent={
@@ -1299,6 +1305,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 ) : (
                   <>
                     <ThreadComposer
+                      reportedModelSelection={reportedModelSelection}
                       editorRef={composerEditorRef}
                       draftMessage={props.draftMessage}
                       draftAttachments={props.draftAttachments}
