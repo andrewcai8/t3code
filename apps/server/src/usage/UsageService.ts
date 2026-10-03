@@ -54,6 +54,7 @@ import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEn
 import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { readAntigravityUsage } from "./antigravityUsageReader.ts";
 import { makeCursorAccountHistory } from "./cursorAccountHistory.ts";
+import { readOtherCursorLogins } from "./cursorLogins.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { BoxUsageStore, makeBoxUsageReads, usageHostId } from "./boxUsage.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
@@ -596,6 +597,16 @@ export const make = Effect.gen(function* () {
         ...(failed ? { message: "Some Antigravity history could not be read." } : {}),
       });
     }
+    scanned.push(
+      ...(yield* readOtherCursorLogins({
+        settings,
+        hostEnvironment,
+        platform,
+        home,
+        sinceMs: windowStartMs,
+        readHistory: readCursorAccountUsage,
+      })),
+    );
     const cursorUserHome =
       (platform === "win32" ? hostEnvironment["USERPROFILE"] : hostEnvironment["HOME"]) || home;
     const configHome = hostEnvironment["XDG_CONFIG_HOME"]?.trim();
