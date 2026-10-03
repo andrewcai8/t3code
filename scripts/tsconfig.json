@@ -9,7 +9,6 @@
   // transforms so the two cannot drift; these files have no dependencies.
   "include": [
     "**/*.ts",
-    "../apps/server/src/provider/cursorCredentialPath.ts",
     "../apps/server/src/environmentControl/credentialDestinations.ts",
     "../apps/server/src/provider/codexLoginCopy.ts",
     "../apps/server/src/provider/providerCredentialName.ts",

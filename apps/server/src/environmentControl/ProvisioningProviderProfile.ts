@@ -27,7 +27,7 @@ import {
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
-import { credentialSecretName } from "../provider/ProviderCredentialStore.ts";
+import { credentialSecretName } from "../provider/providerCredentialName.ts";
 import type { Provisioning } from "./config.ts";
 import { cursorGuestLoginDestination } from "./credentialDestinations.ts";
 

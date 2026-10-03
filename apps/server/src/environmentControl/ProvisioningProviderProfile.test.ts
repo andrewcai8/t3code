@@ -18,7 +18,7 @@ import {
   resolveProvisioningProfiles,
   resolveProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
-import { credentialSecretName } from "../provider/ProviderCredentialStore.ts";
+import { credentialSecretName } from "../provider/providerCredentialName.ts";
 
 const decodeSettings = Schema.decodeSync(ServerSettings);
 let directory: string;
