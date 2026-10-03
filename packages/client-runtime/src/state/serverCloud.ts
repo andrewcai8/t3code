@@ -194,14 +194,6 @@ export function createServerCloudAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
       },
     }),
-    touchProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:cloud:touch",
-      tag: WS_METHODS.environmentControlTouch,
-      concurrency: {
-        mode: "singleFlight",
-        key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
-      },
-    }),
     stopManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:stop",
       tag: WS_METHODS.environmentControlStop,

@@ -1,9 +1,7 @@
 import type { EnvironmentId as EnvironmentIdType } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
-import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/unstable/reactivity";
 
 import type { HostBoxList } from "../cloud/provisioning.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
@@ -115,20 +113,6 @@ export function createEnvironmentCatalogCloudAtoms<R, E>(
         Atom.withLabel(`environment-demand:${environmentId}`),
       ),
   );
-  const demandedAtom = runtime.atom(
-    Stream.unwrap(
-      EnvironmentRegistry.EnvironmentRegistry.pipe(
-        Effect.map((registry) => SubscriptionRef.changes(registry.demanded)),
-      ),
-    ),
-    { initialValue: new Set<EnvironmentIdType>() as ReadonlySet<EnvironmentIdType> },
-  );
-  const demandedValueAtom = Atom.make((get) =>
-    Option.getOrElse(
-      AsyncResult.value(get(demandedAtom)),
-      (): ReadonlySet<EnvironmentIdType> => new Set(),
-    ),
-  ).pipe(Atom.withLabel("environment-demanded-value"));
   const markBoxes = createRuntimeCommand(runtime, {
     label: "environment-catalog:mark-boxes",
     scheduler: commandScheduler,
@@ -182,7 +166,6 @@ export function createEnvironmentCatalogCloudAtoms<R, E>(
     markBoxes,
     unmarkBox,
     demandAtom,
-    demandedValueAtom,
     awaitConnected,
   };
 }
