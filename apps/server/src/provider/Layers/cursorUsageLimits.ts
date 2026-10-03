@@ -15,11 +15,13 @@ import {
   makeUsageLimits,
 } from "../providerUsageLimits.ts";
 import { readMacCursorAccessToken } from "../cursorKeychainToken.ts";
+import { withCursorBillingCycle } from "./cursorBillingCycle.ts";
 
 const CursorCredentials = Schema.Struct({ accessToken: Schema.optional(Schema.String) });
 const DEFAULT_CURSOR_API_ENDPOINT = "https://api2.cursor.sh";
 const decodeCredentials = Schema.decodeEffect(Schema.fromJsonString(CursorCredentials));
 const CursorUsageResponse = Schema.Struct({
+  billingCycleStart: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
   billingCycleEnd: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
   planUsage: Schema.optional(
     Schema.Struct({
@@ -137,7 +139,7 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
     const body = yield* HttpClientResponse.schemaBodyJson(CursorUsageResponse)(
       yield* HttpClientResponse.filterStatusOk(response),
     );
-    return cursorUsageResponseToLimits(body, checkedAt);
+    return withCursorBillingCycle(cursorUsageResponseToLimits(body, checkedAt), body);
   }).pipe(
     Effect.timeout("10 seconds"),
     Effect.orElseSucceed(() =>
