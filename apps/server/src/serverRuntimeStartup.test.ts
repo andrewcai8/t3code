@@ -2,9 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
   DEFAULT_MODEL,
-  DEFAULT_MODEL_BY_PROVIDER,
   ProjectId,
-  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -18,27 +16,10 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as ServerConfig from "./config.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 
-it("uses the canonical Codex model for auto-bootstrap when Codex is enabled", () => {
-  assert.deepEqual(
-    ServerRuntimeStartup.getAutoBootstrapThreadModelSelection(DEFAULT_SERVER_SETTINGS),
-    {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: DEFAULT_MODEL,
-    },
-  );
-});
-
-it("bootstraps a provisioned box on the one provider it enabled", () => {
-  const claudeOnlySettings = {
-    ...DEFAULT_SERVER_SETTINGS,
-    providers: {
-      ...DEFAULT_SERVER_SETTINGS.providers,
-      codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
-    },
-  };
-  assert.deepEqual(ServerRuntimeStartup.getAutoBootstrapThreadModelSelection(claudeOnlySettings), {
-    instanceId: ProviderInstanceId.make("claudeAgent"),
-    model: DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")]!,
+it("uses the canonical Codex model for auto-bootstrap", () => {
+  assert.deepEqual(ServerRuntimeStartup.getAutoBootstrapThreadModelSelection(), {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: DEFAULT_MODEL,
   });
 });
 
