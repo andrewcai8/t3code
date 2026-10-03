@@ -7,6 +7,7 @@ import {
   AVAILABLE_CONNECTION_STATE,
   BearerConnectionTarget,
   PrimaryConnectionTarget,
+  type SupervisorConnectionState,
 } from "../connection/model.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import {
@@ -51,7 +52,11 @@ describe("a connected cloud box", () => {
       ]),
     });
     const connected = Atom.make(
-      AsyncResult.success({ ...AVAILABLE_CONNECTION_STATE, phase: "connected", generation: 1 }),
+      AsyncResult.success<SupervisorConnectionState>({
+        ...AVAILABLE_CONNECTION_STATE,
+        phase: "connected",
+        generation: 1,
+      }),
     );
     const full = createEnvironmentPresentationAtoms({
       catalogValueAtom: catalog,

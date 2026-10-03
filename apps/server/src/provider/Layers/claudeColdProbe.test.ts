@@ -10,7 +10,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
-import { makeClaudeHostProbe } from "../Drivers/claudeHostProbe.ts";
+import { type ClaudeCapabilities, makeClaudeHostProbe } from "../Drivers/claudeHostProbe.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import { getProbeDroppingFailedUsage, parseClaudeAuthStatusOutput } from "./claudeColdProbe.ts";
 
@@ -72,7 +72,7 @@ it("returns undefined for non-JSON claude auth status output", () => {
 it.effect("reports a logged-in account as ready when the SDK probe returns nothing", () =>
   Effect.gen(function* () {
     const hostProbe = yield* makeClaudeHostProbe(defaultClaudeSettings, process.env, undefined);
-    const nothingProbed = yield* Cache.make({
+    const nothingProbed = yield* Cache.make<unknown, ClaudeCapabilities | undefined>({
       capacity: 1,
       timeToLive: "5 minutes",
       lookup: () => Effect.succeed(undefined),

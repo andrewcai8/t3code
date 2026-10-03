@@ -13,7 +13,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { vi } from "vite-plus/test";
 
-import { makeClaudeHostProbe } from "../Drivers/claudeHostProbe.ts";
+import { type ClaudeCapabilities, makeClaudeHostProbe } from "../Drivers/claudeHostProbe.ts";
 import { checkClaudeProviderStatus, probeClaudeCapabilities } from "./ClaudeProvider.ts";
 import {
   CLAUDE_USAGE_TURN_PROMPT,
@@ -275,7 +275,7 @@ const statusWithAccountEmail = Effect.fn(function* (
 ) {
   const settings = decodeClaudeSettings({ accountEmail });
   const hostProbe = yield* makeClaudeHostProbe(settings, process.env, undefined);
-  const capabilities = yield* Cache.make({
+  const capabilities = yield* Cache.make<unknown, ClaudeCapabilities | undefined>({
     capacity: 1,
     timeToLive: "5 minutes",
     lookup: () =>

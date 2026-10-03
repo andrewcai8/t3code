@@ -22,7 +22,9 @@ import {
 import { resolveClaudeSdkExecutablePath } from "./ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "./ClaudeHome.ts";
 
-type ClaudeCapabilities = NonNullable<Effect.Success<ReturnType<typeof probeClaudeCapabilities>>>;
+export type ClaudeCapabilities = NonNullable<
+  Effect.Success<ReturnType<typeof probeClaudeCapabilities>>
+>;
 
 export const makeClaudeHostProbe = Effect.fn("makeClaudeHostProbe")(function* (
   settings: ClaudeSettings,
