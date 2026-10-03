@@ -131,7 +131,7 @@
       "generatedNotices": [
         {
           "licenseId": "Apache-2.0",
-          "copyrights": ["Copyright 2009, 2010, 2013 Andr\u00e9 Berg"]
+          "copyrights": ["Copyright 2009, 2010, 2013 André Berg"]
         }
       ]
     },
@@ -598,6 +598,55 @@
       "generatedNotice": {
         "licenseId": "MIT",
         "copyrights": ["Copyright (c) 2015-present 650 Industries, Inc. (aka Expo)"]
+      }
+    },
+    {
+      "name": "@namespacelabs/sdk",
+      "sourceUrl": "https://github.com/namespacelabs/typescript-sdk",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright Namespace Labs"]
+      }
+    },
+    {
+      "license": "MIT",
+      "name": "khroma",
+      "sourceUrl": "https://github.com/fabiospampinato/khroma"
+    },
+    {
+      "name": "@bufbuild/protobuf",
+      "version": "2.16.0",
+      "sourceUrl": "https://github.com/bufbuild/protobuf-es/tree/main/packages/protobuf",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 Buf Technologies, Inc."]
+      }
+    },
+    {
+      "name": "@connectrpc/connect",
+      "version": "2.2.0",
+      "sourceUrl": "https://github.com/connectrpc/connect-es/tree/main/packages/connect",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 The Connect Authors"]
+      }
+    },
+    {
+      "name": "@connectrpc/connect-web",
+      "version": "2.2.0",
+      "sourceUrl": "https://github.com/connectrpc/connect-es/tree/main/packages/connect-web",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 The Connect Authors"]
+      }
+    },
+    {
+      "name": "@connectrpc/connect-node",
+      "version": "2.2.0",
+      "sourceUrl": "https://github.com/connectrpc/connect-es/tree/main/packages/connect-node",
+      "generatedNotice": {
+        "licenseId": "Apache-2.0",
+        "copyrights": ["Copyright 2021-2026 The Connect Authors"]
       }
     }
   ]
