@@ -254,12 +254,22 @@ export function BranchToolbarBranchSelector({
   // from the response entirely, which would defeat the collision check below.
   // Ref names cannot contain an ASCII space, so sanitizing loses no matches.
   const branchRefQuery = sanitizeNewRefName(deferredTrimmedBranchQuery);
+  const pickingCloudBase = cloudBase !== undefined;
+  const cloudBaseFixed = cloudBase?.onChange === null;
   const branchRefState = usePaginatedBranches({
     environmentId,
     cwd: branchCwd,
     query: branchRefQuery,
+    remoteOnly: pickingCloudBase,
   });
-  const refs = branchRefState.refs;
+  const repositoryIdentity = activeProject?.repositoryIdentity;
+  const refs = useMemo(
+    () =>
+      pickingCloudBase
+        ? cloudBaseRefs(branchRefState.refs, repositoryIdentity)
+        : branchRefState.refs,
+    [branchRefState.refs, pickingCloudBase, repositoryIdentity],
+  );
   const hasNextPage =
     branchRefState.data?.nextCursor !== null && branchRefState.data?.nextCursor !== undefined;
   const isFetchingNextPage = branchRefState.isFetchingNextPage;
@@ -424,7 +434,7 @@ export function BranchToolbarBranchSelector({
       onComposerFocusRequest?.();
       return;
     }
-    if (serverThread?.handoff || !branchCwd || !activeProjectCwd || isBranchActionPending) return;
+    if (!branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
     if (isSelectingWorktreeBase) {
       setThreadBranch(refName.name, null);
@@ -486,7 +496,7 @@ export function BranchToolbarBranchSelector({
 
   const createRef = (rawName: string) => {
     const name = sanitizeNewRefName(rawName);
-    if (serverThread?.handoff || !branchCwd || !name || isBranchActionPending) return;
+    if (!branchCwd || !name || isBranchActionPending) return;
 
     setIsBranchMenuOpen(false);
     onComposerFocusRequest?.();
@@ -569,13 +579,15 @@ export function BranchToolbarBranchSelector({
     [cloudBaseFixed, handleOpenChange, isBranchActionPending, isInitialBranchesLoadPending],
   );
 
-  const triggerLabel = resolveBranchTriggerLabel({
-    activeWorktreePath,
-    effectiveEnvMode,
-    resolvedActiveBranch,
-    resolvedActiveBranchIsRemote,
-    startFromOrigin,
-  });
+  const triggerLabel = cloudBase
+    ? (resolvedActiveBranch ?? "Default branch")
+    : resolveBranchTriggerLabel({
+        activeWorktreePath,
+        effectiveEnvMode,
+        resolvedActiveBranch,
+        resolvedActiveBranchIsRemote,
+        startFromOrigin,
+      });
 
   // Branch status is the fallback when this thread has no linked pull requests.
   const branchPrBranch = resolveBranchToolbarPrBranch({
@@ -667,7 +679,11 @@ export function BranchToolbarBranchSelector({
 
     return (
       <BranchPickerRefItem
-        branch={refName}
+        // Every cloud base row is a remote branch named as the remote names it,
+        // so only the default badge tells the rows apart.
+        branch={
+          cloudBase ? { ...refName, isRemote: false, current: false, worktreePath: null } : refName
+        }
         projectCwd={activeProjectCwd}
         index={index}
         value={itemValue}
@@ -751,13 +767,7 @@ export function BranchToolbarBranchSelector({
               )
             }
             className="min-w-0 max-w-full active:scale-100"
-            title={serverThread?.handoff ? "Branch changes are paused for handoff" : undefined}
-            disabled={
-              Boolean(serverThread?.handoff) ||
-              cloudBaseFixed ||
-              isInitialBranchesLoadPending ||
-              isBranchActionPending
-            }
+            disabled={cloudBaseFixed || isInitialBranchesLoadPending || isBranchActionPending}
           >
             <GitBranchIcon
               className={cn(

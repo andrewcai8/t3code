@@ -38,6 +38,12 @@ interface BranchToolbarEnvironmentSelectorProps {
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  // Absent where an environment cannot be created, which is any install
+  // without a configured cloud manager.
+  onCreateCloudEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
+  onCreateNamespaceEnvironment?: ((provider: CloudEnvironmentProvider) => void) | undefined;
+  creatingCloudEnvironment?: boolean;
+  pendingCloudProvider?: CloudEnvironmentProvider | null;
   displayMode?: "toolbar" | "panel";
 }
 

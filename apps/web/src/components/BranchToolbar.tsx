@@ -206,8 +206,10 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
     <>
       {icon}
       <ComposerContextLabel>
-        {autoEnvironmentLabel ??
-          (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+        {pendingCloudProvider
+          ? CLOUD_ENVIRONMENT_OPTIONS[pendingCloudProvider].label
+          : (autoEnvironmentLabel ??
+            (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel))}
       </ComposerContextLabel>
     </>
   );
