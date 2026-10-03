@@ -1129,14 +1129,33 @@ it("lands a plugin holding many skills flat, where the CLI will find each one", 
     await f.cleanup();
   }
 });
+it("keeps the /tmp root an existing E2B box froze before the root moved", async () => {
+  const f = await fixture();
+  try {
+    const frozen = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
+    const preparation = { ...frozen.preparation, root: "/tmp/t3-provision/box" };
+    const path = NodePath.join(f.root, "provisioning", `${input.requestId}.json`);
+    const stored = JSON.parse(await NodeFSP.readFile(path, "utf8"));
+    stored.preparation = preparation;
+    stored.request.preparationHash = provisionDigest(
+      stableStringify({ preparation, egressAllow: frozen.egressAllow }),
+    );
+    await NodeFSP.writeFile(path, JSON.stringify(stored), { mode: 0o600 });
+
+    const again = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
+    expect(again.preparation.root).toBe("/tmp/t3-provision/box");
+  } finally {
+    await f.cleanup();
+  }
+});
 const namespaceToken = `e30.${Buffer.from(
   JSON.stringify({ actor_id: "user-test", tenant_id: "tenant-test", exp: 4102444800 }),
 ).toString("base64url")}.signature`;
-it("roots a Namespace preparation on the retained Devbox volume and every E2B box at one /tmp root", async () => {
+it("roots a Namespace preparation on the retained Devbox volume and every E2B box at one home root", async () => {
   const f = await fixture();
   try {
     const e2b = await f.store.freeze(input, f.config, f.resolver, [f.profile]);
-    expect(e2b.preparation.root).toBe("/tmp/t3-provision/box");
+    expect(e2b.preparation.root).toBe("/home/user/.t3-provision");
     expect(e2b.preparation.artifact.archivePath).toBe(
       `/tmp/t3-runtime-${provisionDigest("artifact")}.tar`,
     );
@@ -1620,9 +1639,9 @@ it("starts a chat from its repository's warm base when one fits, and cold otherw
         manifest.preparation.root,
       ]),
     ).toEqual([
-      ["direct", "warm-snapshot", true, "/tmp/t3-provision/box"],
-      ["fork", "canonical-template", true, "/tmp/t3-provision/box"],
-      ["fork", "canonical-template", false, "/tmp/t3-provision/box"],
+      ["direct", "warm-snapshot", true, "/home/user/.t3-provision"],
+      ["fork", "canonical-template", true, "/home/user/.t3-provision"],
+      ["fork", "canonical-template", false, "/home/user/.t3-provision"],
     ]);
     expect(unwarmed.warmKey).toBeUndefined();
   } finally {

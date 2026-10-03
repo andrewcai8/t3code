@@ -17,6 +17,7 @@ import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts } from "./Provisioning.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import { E2bPlacementUnavailable } from "./e2bResume.ts";
 const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
 const input = decodeInput({
   requestId: "56d8ba31-df41-4918-be6a-acab453c8aed",
@@ -414,6 +415,8 @@ it.effect(
         reason: "not-serving",
         message: "This chat's cloud machine is not serving. Wake it first.",
       };
+      expect(yield* control.attach({ requestId: input.requestId })).toEqual(notServing);
+      attachError = new E2bPlacementUnavailable("E2B could not place sandbox sandbox");
       expect(yield* control.attach({ requestId: input.requestId })).toEqual(notServing);
 
       attachError = new Error("pairing endpoint answered 500");
