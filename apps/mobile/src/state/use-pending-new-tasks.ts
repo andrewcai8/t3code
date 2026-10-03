@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useMemo } from "react";
+
+import { scopedThreadKey } from "../lib/scopedEntities";
+import { useThreadRefs } from "./entities";
 import { buildPendingNewTasks, type PendingNewTask } from "./pending-new-tasks-model";
 import { flattenQueuedThreadMessages } from "./thread-outbox-model";
 import { composerDraftsAtom } from "./use-composer-drafts";

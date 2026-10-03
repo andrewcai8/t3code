@@ -62,17 +62,16 @@ export function readProjects(): ReadonlyArray<EnvironmentProject> {
   return appAtomRegistry.get(environmentProjects.projectsAtom);
 }
 
-/** The environment's server config as the live client store holds it now. */
-export function readServerConfig(environmentId: EnvironmentId): ServerConfig | null {
-  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId) ?? null;
-}
-
 export function useProjects(): ReadonlyArray<EnvironmentProject> {
   return useAtomValue(environmentProjects.projectsAtom);
 }
 
 export function useThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return useAtomValue(environmentThreadShells.threadShellsAtom);
+}
+
+export function useThreadRefs(): ReadonlyArray<ScopedThreadRef> {
+  return useAtomValue(environmentThreadShells.threadRefsAtom);
 }
 
 export function useNavigationThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
