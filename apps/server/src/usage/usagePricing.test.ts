@@ -109,35 +109,6 @@ describe("usage pricing", () => {
     }
   });
 
-  it("prices hour-long cache writes at their own rate", () => {
-    const table = parseRateTable({
-      "claude-opus-5-5": {
-        input_cost_per_token: 4e-6,
-        output_cost_per_token: 2e-5,
-        cache_read_input_token_cost: 2e-7,
-        cache_creation_input_token_cost: 5e-6,
-        cache_creation_input_token_cost_above_1hr: 8e-6,
-      },
-      "no-hour-rate": { input_cost_per_token: 4e-6, output_cost_per_token: 2e-5 },
-    });
-    const writes = (model: string) => ({
-      model,
-      totals: {
-        uncachedInputTokens: 0,
-        cachedInputTokens: 0,
-        cacheCreationTokens: 1_000_000,
-        outputTokens: 0,
-        reasoningTokens: 0,
-      },
-      oneHourCacheWriteTokens: 400_000,
-      reportedCostUsd: null,
-      fast: false,
-    });
-
-    expect(priceUsage(table, writes("claude-opus-5-5")).costUsd).toBeCloseTo(6.2, 10);
-    expect(priceUsage(table, writes("no-hour-rate")).costUsd).toBeCloseTo(4, 10);
-  });
-
   it("prices fast-mode requests at the model's published fast multiple", () => {
     const table = parseRateTable({
       "claude-opus-5-5": { ...rate(4e-6, 2e-7), provider_specific_entry: { fast: 2, us: 1.1 } },

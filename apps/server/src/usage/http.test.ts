@@ -144,7 +144,7 @@ it.effect("a paired operator imports a machine's usage, and a reader cannot", ()
       HttpRouter.serve(
         HttpApiBuilder.layer(UsageHttpApi).pipe(
           Layer.provide(usageHttpApiLayer),
-          Layer.provide(UsageService.layerTest),
+          Layer.provide(Layer.mock(UsageService.UsageService)({})),
           Layer.provide(auth),
           Layer.provide(usageImportBodyLimitLayer),
         ),

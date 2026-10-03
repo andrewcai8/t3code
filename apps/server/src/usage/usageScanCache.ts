@@ -24,9 +24,7 @@ import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
 // v4: records carry Claude fast mode, which v3 rows never captured.
-// v5: a streamed Claude message keeps its final usage rather than its first
-// block's, and records carry hour-long cache writes.
-const USAGE_SCAN_CACHE_VERSION = 5 as const;
+const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -62,7 +60,6 @@ type SerializedRecord = readonly [
   dedupeKey: string | null,
   reportedCostUsd: number | null,
   fast: 0 | 1,
-  oneHourCacheWriteTokens: number,
 ];
 
 interface SerializedFile {
@@ -115,7 +112,6 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.dedupeKey,
     record.reportedCostUsd,
     record.fast ? 1 : 0,
-    record.oneHourCacheWriteTokens ?? 0,
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -172,7 +168,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 12) return null;
+      if (!isRecordArray(row) || row.length < 11) return null;
       const [
         timestampMs,
         modelIndex,
@@ -185,7 +181,6 @@ export function decodeScanCache(document: unknown): ScanCache {
         dedupeKey,
         reportedCostUsd,
         fast,
-        oneHourCacheWrites,
       ] = row as SerializedRecord;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -198,7 +193,6 @@ export function decodeScanCache(document: unknown): ScanCache {
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
         !Number.isFinite(reasoning) ||
-        !Number.isFinite(oneHourCacheWrites) ||
         (fast !== 0 && fast !== 1)
       ) {
         return null;
@@ -218,7 +212,6 @@ export function decodeScanCache(document: unknown): ScanCache {
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         fast: fast === 1,
-        ...(oneHourCacheWrites > 0 ? { oneHourCacheWriteTokens: oneHourCacheWrites } : {}),
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
       });
     }
@@ -320,32 +313,19 @@ export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): num
 /**
  * Within-file de-duplication, applied before an entry is cached.
  *
- * Claude Code writes each streamed block of one message on its own line. Main
- * transcripts repeat the message's full usage on every block, but subagent
- * transcripts carry the usage so far, so the block with the most output is the
- * message's final usage and replaces any earlier one.
- *
  * Callers stitching an incremental parse together pass one `seen` set across
  * the line and tail record batches so the whole file stays deduplicated as a
- * unit; the set is mutated in place. A resumed parse passes the cached records
- * ahead of the appended ones, so a later block still replaces an earlier one.
+ * unit; the set is mutated in place.
  */
 export function dedupeWithinFile(
   records: readonly UsageRecord[],
   seen: Set<string> = new Set(),
 ): readonly UsageRecord[] {
   const kept: UsageRecord[] = [];
-  const keptAt = new Map<string, number>();
   for (const record of records) {
     if (record.dedupeKey !== null) {
-      const at = keptAt.get(record.dedupeKey);
-      if (at !== undefined) {
-        if (record.totals.outputTokens > kept[at]!.totals.outputTokens) kept[at] = record;
-        continue;
-      }
       if (seen.has(record.dedupeKey)) continue;
       seen.add(record.dedupeKey);
-      keptAt.set(record.dedupeKey, kept.length);
     }
     kept.push(record);
   }

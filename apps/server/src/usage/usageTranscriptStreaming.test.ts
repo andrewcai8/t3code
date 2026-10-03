@@ -114,7 +114,6 @@ describe("large usage records", () => {
         timestampMs: Date.parse(timestamp),
         sessionId: "s1",
         model: "claude-fable-5",
-        oneHourCacheWriteTokens: 0,
         totals: {
           uncachedInputTokens: 100,
           outputTokens: 99,
