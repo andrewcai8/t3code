@@ -84,10 +84,10 @@ it.effect("reports a logged-in account as ready when the SDK probe returns nothi
   }).pipe(
     Effect.provide(
       Layer.merge(
+        NodeServices.layer,
         claudeCli(
           '{"loggedIn":true,"email":"user@example.com","subscriptionType":"maxplan","authMethod":"claude.ai"}\n',
         ),
-        NodeServices.layer,
       ),
     ),
   ),
