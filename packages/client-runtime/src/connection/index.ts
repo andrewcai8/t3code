@@ -7,8 +7,10 @@ export * from "./githubRoutingPermissions.ts";
 export * as Connection from "./layer.ts";
 export * from "./model.ts";
 export * as ConnectionOnboarding from "./onboarding.ts";
+export * as Presence from "./presence.ts";
 export * from "./presentation.ts";
 export * as ProfileStore from "./profileStore.ts";
+export * from "./provisioned.ts";
 export * as EnvironmentRegistry from "./registry.ts";
 // Flat so consumers' inferred types can name them.
 export { EnvironmentNotRegisteredError, PlatformEnvironmentRemovalError } from "./registry.ts";
