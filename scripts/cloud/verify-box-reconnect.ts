@@ -28,6 +28,14 @@
  * connects, and its thread loads. A fresh runtime over B's storage opens it again with the same
  * pairing, and after the box is disposed B's sync stops dialing it.
  *
+ * `--lease <leaseId>` runs client B against a chat that already exists, provisioning nothing and
+ * disposing nothing. It finds the chat whose box is that lease in the host's list, checks it is
+ * listed with its title while the box stays paused and undialed, opens it (the box wakes, pairs
+ * once through the host and connects), checks the thread loads with its messages, sends one turn
+ * the way the web composer starts one, and waits for a reply and a settled run. A box made on an
+ * older runtime must come back on the host's pinned build: the client never sees an unsupported
+ * protocol, and the box's descriptor afterwards reports protocol 2. Each check lands in `checks`.
+ *
  * The manager bearer is cached beside the pairing token (0600), shared with smoke-cloud-chat.ts.
  * Tokens and pairing URLs never reach stdout or the report; URLs in failure details lose their
  * query and fragment.
@@ -70,6 +78,7 @@ import {
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import { request, remoteHttpClientLayer, subscribe } from "@t3tools/client-runtime/rpc";
 import { provisionedBox } from "@t3tools/client-runtime/cloud";
+import { startThreadTurn } from "@t3tools/client-runtime/operations";
 import {
   AuthStandardClientScopes,
   type EnvironmentId,
@@ -104,6 +113,8 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Command, Flag } from "effect/unstable/cli";
 
+import { advanceTurn, initialProgress } from "./turnProgress.ts";
+
 const MANAGER_CONNECT_TIMEOUT = "1 minute";
 const PROVISION_TIMEOUT = "20 minutes";
 const BOX_CONNECT_TIMEOUT = "3 minutes";
@@ -114,6 +125,8 @@ const CLIENT_METADATA = { label: "box reconnect verifier", deviceType: "bot" } a
 const SECOND_CLIENT_CHAT_TITLE = "Second client proof";
 /** How long client B waits without opening the chat, to show listing it dials nothing. */
 const SECOND_CLIENT_IDLE = "10 seconds";
+const LEASE_TURN_TIMEOUT = "10 minutes";
+const LEASE_TURN_PROMPT = "Reply with the single word: continued.";
 
 class VerifyFailure extends Schema.TaggedError<VerifyFailure>()("VerifyFailure", {
   message: Schema.String,
@@ -140,9 +153,18 @@ const Outcome = Schema.Literals([
   "not-reconnected",
   "connected-dry-run",
   "second-client-opened",
+  "existing-chat-continued",
   "failed",
 ]);
 type Outcome = typeof Outcome.Type;
+
+const Check = Schema.Struct({
+  name: Schema.String,
+  pass: Schema.Boolean,
+  value: Schema.NullOr(Schema.Union([Schema.Finite, Schema.String])),
+  evidence: Schema.Unknown,
+});
+type Check = typeof Check.Type;
 
 const encodeReport = Schema.encodeEffect(
   Schema.fromJsonString(
@@ -160,6 +182,7 @@ const encodeReport = Schema.encodeEffect(
       cutHostMidWake: Schema.Boolean,
       cutInFlight: Schema.NullOr(Schema.Boolean),
       secondClient: Schema.Boolean,
+      lease: Schema.NullOr(Schema.String),
       box: Schema.NullOr(
         Schema.Struct({
           requestId: Schema.String,
@@ -176,6 +199,7 @@ const encodeReport = Schema.encodeEffect(
       ok: Schema.Boolean,
       error: Schema.NullOr(Schema.String),
       disposed: Schema.NullOr(Schema.String),
+      checks: Schema.Array(Check),
       transitions: Schema.Array(Transition),
     }),
     { space: 2 },
@@ -222,6 +246,7 @@ interface Options {
   readonly reopen: boolean;
   readonly cutHostMidWake: boolean;
   readonly secondClient: boolean;
+  readonly lease: string | null;
 }
 
 const managerBearer = Effect.fn("managerBearer")(function* (options: Options) {
@@ -514,6 +539,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   let outcome = "failed" as Outcome;
   let error: string | null = null;
   let disposed: string | null = null;
+  const checks: Array<Check> = [];
 
   const record = (environment: Transition["environment"], state: SupervisorConnectionState) =>
     Effect.gen(function* () {
@@ -589,6 +615,14 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
 
   const check = (ok: boolean, message: string) =>
     ok ? Effect.void : Effect.fail(new VerifyFailure({ message }));
+
+  /** Records a named check in the report, then stops the run when it failed. */
+  const checked = (name: string, pass: boolean, value: Check["value"], evidence: unknown = null) =>
+    Effect.gen(function* () {
+      checks.push({ name, pass, value, evidence });
+      yield* Console.log(`[${yield* elapsed}s] ${pass ? "PASS" : "FAIL"} ${name} ${value ?? ""}`);
+      if (!pass) return yield* new VerifyFailure({ message: `${name}: ${value ?? "failed"}` });
+    });
 
   /** The title of a chat's thread as the box serves it, once the box has the thread. */
   const threadTitle = (
@@ -793,6 +827,218 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     }).pipe(Effect.scoped, Effect.provide(clientB, { local: true }));
   }, Effect.scoped);
 
+  /**
+   * Client B on a chat that already exists: lists it from the host without dialing its paused
+   * box, opens it, reads its history, and continues it with one turn.
+   */
+  const continueExistingChat = Effect.fn("continueExistingChat")(function* (
+    registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
+    managerId: EnvironmentId,
+    leaseId: string,
+  ) {
+    const cache = yield* Persistence.EnvironmentCacheStore;
+    const credentials = yield* CredentialStore.ConnectionCredentialStore;
+    const rows = yield* listOnHost(registry, managerId);
+    const row = rows.find((candidate) => candidate.leaseId === leaseId);
+    yield* checked("lease.listed", row !== undefined, row?.lifecycle ?? null, {
+      environmentId: row?.environmentId ?? null,
+      provider: row?.provider ?? null,
+    });
+    const boxId = row!.environmentId;
+    yield* checked("lease.paused", row!.lifecycle === "paused", row!.lifecycle);
+    const chat = row!.chat;
+    yield* checked(
+      "lease.chatListed",
+      chat !== undefined && (row!.threadId === null || chat.thread.id === row!.threadId),
+      chat?.thread.title ?? null,
+      { threadId: chat?.thread.id ?? null },
+    );
+    const threadId = chat!.thread.id;
+    const title = chat!.thread.title;
+
+    yield* registry.syncHostBoxes(
+      managerId,
+      rows.map((candidate) => provisionedBox(managerId, candidate)),
+    );
+    const listed = (yield* SubscriptionRef.get(registry.entries)).get(boxId);
+    yield* checked(
+      "lease.savedUnpaired",
+      listed !== undefined &&
+        Option.isNone(listed.profile) &&
+        listed.target._tag === "BearerConnectionTarget" &&
+        listed.target.box?.managerId === managerId,
+      listed?.target._tag ?? null,
+    );
+    const seeded = yield* cache.loadShell(boxId);
+    yield* checked(
+      "lease.cachedShell",
+      Option.exists(seeded, (shell) => shell.threads.some(({ id }) => id === threadId)),
+      Option.match(seeded, { onNone: () => null, onSome: (shell) => shell.threads.length }),
+    );
+
+    yield* registry.stateChanges(boxId).pipe(
+      Stream.runForEach((state) => record("box", state)),
+      Effect.forkScoped,
+    );
+    yield* Effect.sleep(SECOND_CLIENT_IDLE);
+    const idle = (yield* SubscriptionRef.get(log)).filter((entry) => entry.environment === "box");
+    yield* checked(
+      "lease.undialed",
+      idle.every((entry) => entry.phase === "available"),
+      [...new Set(idle.map((entry) => entry.phase))].join(","),
+    );
+    const relisted = yield* listOnHost(registry, managerId);
+    const stillPaused = relisted.find((candidate) => candidate.leaseId === leaseId)?.lifecycle;
+    yield* checked("lease.stillPaused", stillPaused === "paused", stillPaused ?? null);
+
+    const openedAt = (yield* SubscriptionRef.get(log)).length;
+    const openedAtSeconds = yield* elapsed;
+    yield* Queue.offer(inputs, undefined);
+    yield* registry.demand(boxId);
+    yield* Console.log(`[${openedAtSeconds}s] client B opens the chat`);
+    yield* waitFor(
+      "the chat's box connected",
+      Duration.minutes(options.timeoutMinutes),
+      (entries) =>
+        entries
+          .slice(openedAt)
+          .some((entry) => entry.environment === "box" && entry.phase === "connected"),
+    );
+    const opened = (yield* SubscriptionRef.get(log))
+      .slice(openedAt)
+      .filter((entry) => entry.environment === "box");
+    const phases = opened.map((entry) => entry.phase);
+    yield* checked(
+      "lease.woke",
+      phases.includes("waking") && phases.indexOf("waking") < phases.indexOf("connected"),
+      Math.round(
+        ((opened.find((entry) => entry.phase === "connected")?.seconds ?? 0) - openedAtSeconds) *
+          10,
+      ) / 10,
+      { phases: [...new Set(phases)] },
+    );
+    const blocked = opened.filter((entry) => entry.failure?.reason === "unsupported");
+    yield* checked("lease.protocolAccepted", blocked.length === 0, blocked.length, {
+      failures: blocked.map((entry) => entry.failure),
+    });
+    const credential = yield* credentials.get(`bearer:${boxId}`);
+    yield* checked(
+      "lease.paired",
+      Option.isSome(credential),
+      Option.isSome(credential) ? "saved" : null,
+    );
+
+    const profile = Option.getOrUndefined(
+      (yield* SubscriptionRef.get(registry.entries)).get(boxId)?.profile ?? Option.none(),
+    );
+    const descriptor =
+      profile?._tag === "BearerConnectionProfile"
+        ? yield* bounded(
+            fetchRemoteEnvironmentDescriptor({ httpBaseUrl: profile.httpBaseUrl }),
+            "box descriptor",
+          )
+        : null;
+    // A descriptor without the field comes from a server older than protocol negotiation.
+    const protocol = descriptor === null ? null : (descriptor.orchestrationProtocolVersion ?? 1);
+    yield* checked("lease.descriptorAfter", protocol === 2, protocol, {
+      serverVersion: descriptor?.serverVersion ?? null,
+      orchestrationProtocolVersion: protocol,
+    });
+
+    const history = yield* bounded(
+      registry
+        .runStream(boxId, subscribe(ORCHESTRATION_V2_WS_METHODS.subscribeThread, { threadId }))
+        .pipe(
+          Stream.filter((item) => item.kind === "snapshot"),
+          Stream.runHead,
+        ),
+      "load the chat",
+    );
+    const projection =
+      Option.isSome(history) && history.value.kind === "snapshot" ? history.value.projection : null;
+    const count = (role: "user" | "assistant") =>
+      projection?.messages.filter((message) => message.role === role).length ?? 0;
+    yield* checked(
+      "lease.threadLoaded",
+      projection !== null &&
+        projection.thread.title === title &&
+        count("user") > 0 &&
+        count("assistant") > 0,
+      `${count("user")} user, ${count("assistant")} assistant`,
+      {
+        userMessages: count("user"),
+        assistantMessages: count("assistant"),
+        runs: projection?.runs.length ?? 0,
+      },
+    );
+
+    const messageId = MessageId.make(yield* crypto.randomUUIDv4);
+    const sentAt = yield* Clock.currentTimeMillis;
+    yield* bounded(
+      registry.run(
+        boxId,
+        startThreadTurn({
+          threadId,
+          creationSource: "web",
+          message: { messageId, role: "user", text: LEASE_TURN_PROMPT, attachments: [] },
+          runtimeMode: projection!.thread.runtimeMode,
+          interactionMode: projection!.thread.interactionMode,
+          dispatchMode: "start",
+        }),
+      ),
+      "send a turn",
+    ).pipe(
+      Effect.catchTag("VerifyFailure", (failure) =>
+        checked("lease.dispatch", false, failure.message),
+      ),
+    );
+    yield* checked("lease.dispatch", true, "message.dispatch");
+
+    let progress = initialProgress;
+    const watched = yield* registry
+      .runStream(boxId, subscribe(ORCHESTRATION_V2_WS_METHODS.subscribeThread, { threadId }))
+      .pipe(
+        Stream.runForEachWhile((item) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.map((now) => {
+              progress = advanceTurn(progress, item, messageId, now);
+              return progress.completedAt === null;
+            }),
+          ),
+        ),
+        Effect.timeoutOption(LEASE_TURN_TIMEOUT),
+        Effect.map((finished) => (Option.isSome(finished) ? null : "turn did not finish in time")),
+        Effect.catch((cause) => Effect.succeed(describe(cause))),
+      );
+    const reply = [...progress.assistant.values()].join("\n");
+    const toSeconds = (at: number | null) =>
+      at === null ? null : Math.round((at - sentAt) / 100) / 10;
+    const run = progress.projection?.runs.findLast((entry) => entry.userMessageId === messageId);
+    const replied = progress.firstOutputAt !== null;
+    const settled = progress.completedAt !== null && progress.error === null;
+    checks.push(
+      {
+        name: "lease.reply",
+        pass: replied,
+        value: toSeconds(progress.firstOutputAt),
+        evidence: { replyTail: reply.slice(-200) },
+      },
+      {
+        name: "lease.runSettled",
+        pass: settled,
+        value: run?.status ?? null,
+        evidence: { seconds: toSeconds(progress.completedAt), error: progress.error ?? watched },
+      },
+    );
+    yield* Console.log(
+      `[${yield* elapsed}s] ${replied ? "PASS" : "FAIL"} lease.reply; ${settled ? "PASS" : "FAIL"} lease.runSettled ${run?.status ?? ""}`,
+    );
+    if (!replied || !settled)
+      return yield* new VerifyFailure({
+        message: `lease turn: ${progress.error ?? watched ?? run?.status ?? "no reply"}`,
+      });
+  }, Effect.scoped);
+
   const run = Effect.gen(function* () {
     const bearer = yield* managerBearer(options);
     const descriptor = yield* bounded(
@@ -841,6 +1087,11 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         MANAGER_CONNECT_TIMEOUT,
         (entries) => lastOf(entries, "manager")?.phase === "connected",
       );
+      if (options.lease !== null) {
+        yield* continueExistingChat(registry, managerId, options.lease);
+        outcome = "existing-chat-continued";
+        return;
+      }
 
       const config = yield* onManager("server.getConfig", request(WS_METHODS.serverGetConfig, {}));
       const instance = config.providers.find((provider) => provider.enabled);
@@ -1102,7 +1353,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const ok =
     (outcome === "reconnected" && (!options.cutHostMidWake || cutInFlight === true)) ||
     (options.dryRun && outcome === "connected-dry-run") ||
-    (options.secondClient && outcome === "second-client-opened");
+    (options.secondClient && outcome === "second-client-opened") ||
+    (options.lease !== null && outcome === "existing-chat-continued");
   const report = yield* encodeReport({
     harness: "verify-box-reconnect",
     startedAt,
@@ -1117,6 +1369,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     cutHostMidWake: options.cutHostMidWake,
     cutInFlight,
     secondClient: options.secondClient,
+    lease: options.lease,
     box:
       created.box && created.requestId
         ? {
@@ -1137,6 +1390,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     ok,
     error,
     disposed,
+    checks,
     transitions: entries,
   });
   yield* fs.makeDirectory(path.dirname(options.report), { recursive: true });
@@ -1190,10 +1444,28 @@ const command = Command.make(
       ),
       Flag.withDefault(false),
     ),
+    lease: Flag.String("lease").pipe(
+      Flag.withDescription(
+        "Open and continue the existing chat on this paused lease as a second client; provisions and disposes nothing.",
+      ),
+      Flag.optional,
+    ),
   },
   (flags) =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
+      const lease = Option.getOrNull(flags.lease);
+      if (
+        lease !== null &&
+        (flags.secondClient ||
+          flags.dryRun ||
+          flags.reopen ||
+          flags.cutHostMidWake ||
+          flags.awaySeconds > 0)
+      )
+        return yield* new VerifyFailure({
+          message: "--lease runs alone: it continues an existing chat and provisions no box",
+        });
       yield* verify({
         origin: new URL(flags.origin).origin,
         pairingTokenFile: path.resolve(flags.pairingTokenFile),
@@ -1205,6 +1477,7 @@ const command = Command.make(
         reopen: flags.reopen,
         cutHostMidWake: flags.cutHostMidWake,
         secondClient: flags.secondClient,
+        lease,
       });
     }),
 ).pipe(
