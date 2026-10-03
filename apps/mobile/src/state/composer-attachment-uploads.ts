@@ -23,7 +23,7 @@ import {
   flushComposerDrafts,
   setComposerDraftAttachmentUpload,
 } from "./use-composer-drafts";
-import { connectionPhasesAtom } from "./presentation";
+import { useRemoteConnectionStatus } from "./use-remote-environment-registry";
 
 export {
   composerAttachmentUploadBlockReason,
@@ -56,7 +56,7 @@ export function useComposerAttachmentUploadWorker() {
   const drafts = useAtomValue(composerDraftsAtom);
   const queuedMessages = useThreadOutboxMessages();
   const serverConfigs = useServerConfigs();
-  const connectionPhases = useAtomValue(connectionPhasesAtom);
+  const { connectedEnvironments } = useRemoteConnectionStatus();
   const queueRef = useRef<ReturnType<typeof createComposerAttachmentUploadQueue> | null>(null);
 
   useEffect(() => {
@@ -111,9 +111,9 @@ export function useComposerAttachmentUploadWorker() {
   useEffect(() => {
     const queued = flattenQueuedThreadMessages(queuedMessages);
     const connected = new Set(
-      [...connectionPhases].flatMap(([environmentId, phase]) =>
-        phase === "connected" ? [environmentId] : [],
-      ),
+      connectedEnvironments
+        .filter((environment) => environment.connectionState === "connected")
+        .map((environment) => environment.environmentId),
     );
     const requests = Object.entries(drafts).flatMap(([key, draft]) => {
       const environmentId = composerDraftEnvironmentId(key, queued, draft);
@@ -125,5 +125,5 @@ export function useComposerAttachmentUploadWorker() {
         .map((attachment) => ({ environmentId, attachment }));
     });
     queueRef.current?.sync(requests);
-  }, [connectionPhases, drafts, queuedMessages, serverConfigs]);
+  }, [connectedEnvironments, drafts, queuedMessages, serverConfigs]);
 }

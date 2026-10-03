@@ -13,7 +13,6 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type MessageId,
 } from "@t3tools/contracts";
-import { claimFirstTurnBox } from "@t3tools/client-runtime/cloud";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -31,8 +30,8 @@ import {
   retainAcknowledgedThreadMessage,
   forgetAcknowledgedThreadMessage,
 } from "./acknowledged-thread-messages";
-import { provisionedSandboxLeases } from "./provision-stores";
 import { appAtomRegistry } from "./atom-registry";
+import { useCloudChatDelivery } from "./cloud-chat-delivery";
 import { restoredNewTaskDraftKey } from "./new-task-draft-key";
 import { useProjects, useServerConfigs, useThreadShells } from "./entities";
 import {
@@ -82,11 +81,10 @@ import {
   useThreadOutboxMessages,
   useThreadOutboxShellStatuses,
 } from "./use-thread-outbox";
-import { setPendingConnectionError } from "./use-remote-environment-registry";
-import { connectionPhasesAtom } from "./presentation";
-import { useBoxesDemand } from "./box-demand";
-import { connectionBox } from "@t3tools/client-runtime/connection";
-import { environmentCatalog } from "../connection/catalog";
+import {
+  setPendingConnectionError,
+  useRemoteConnectionStatus,
+} from "./use-remote-environment-registry";
 
 // Ordinary offline behavior (a socket dropping mid-request, a retryable
 // attachment upload failure) must not spam `console.warn` on every backoff
@@ -635,9 +633,6 @@ async function preserveUploadedAttachmentsForEditor(
 
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
-  const claimBox = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
-    reportFailure: false,
-  });
   const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
   });
@@ -652,13 +647,8 @@ export function useThreadOutboxDrain(): void {
   const creationOutcomes = useAtomValue(pendingThreadCreationOutcomesAtom);
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
-  const connectionPhases = useAtomValue(connectionPhasesAtom);
-  // A message queued for a cloud box brings the box online until it is delivered.
-  useBoxesDemand(
-    Object.values(queuedMessagesByThreadKey).flatMap((messages) =>
-      messages.map((message) => message.environmentId),
-    ),
-  );
+  const { connectedEnvironments } = useRemoteConnectionStatus();
+  const claimFirstTurnBox = useCloudChatDelivery(queuedMessagesByThreadKey);
   const [retryTick, setRetryTick] = useState(0);
   const retryAttemptRef = useRef(new Map<MessageId, number>());
   const retryNotBeforeRef = useRef(new Map<MessageId, number>());
@@ -1055,31 +1045,7 @@ export function useThreadOutboxDrain(): void {
       // Recorded before the queue entry goes so the thread screen never sees a
       // gap between the queued creation and the server's shell.
       recordPendingThreadCreationOutcome({ kind: "delivered", message: persistedMessage });
-      // The first turn on a cloud machine this phone started claims it on its host, so no
-      // device offers it to a new chat. The turn already started, so a failed claim only logs.
-      void claimFirstTurnBox(
-        provisionedSandboxLeases,
-        {
-          claim: async (request) => {
-            const result = await claimBox(request);
-            return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
-          },
-          refresh: (managerId) =>
-            serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]),
-          boxManager: (environmentId) => {
-            const target = appAtomRegistry
-              .get(environmentCatalog.catalogValueAtom)
-              .entries.get(environmentId)?.target;
-            return target === undefined ? null : (connectionBox(target)?.managerId ?? null);
-          },
-          warn: (attempt) =>
-            console.warn("[thread-outbox] could not claim the cloud machine for its first turn", {
-              threadId: queuedMessage.threadId,
-              attempt,
-            }),
-        },
-        { environmentId: queuedMessage.environmentId, threadId: queuedMessage.threadId },
-      );
+      claimFirstTurnBox(queuedMessage);
       const outcome = await completeQueuedMessageDelivery(persistedMessage, deliveryRevision);
       if (outcome === "edited") {
         if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
@@ -1094,7 +1060,7 @@ export function useThreadOutboxDrain(): void {
       }
       return outcome === "removed";
     },
-    [claimBox, makeDeliveryHelpers, restoreQueuedMessage, startTurn],
+    [claimFirstTurnBox, makeDeliveryHelpers, restoreQueuedMessage, startTurn],
   );
 
   // A creation outcome bridges setup until the server's shell has a turn.
@@ -1193,14 +1159,15 @@ export function useThreadOutboxDrain(): void {
       }
 
       const creation = nextQueuedMessage.creation;
-      const environmentConnected =
-        connectionPhases.get(nextQueuedMessage.environmentId) === "connected";
+      const environment = connectedEnvironments.find(
+        (candidate) => candidate.environmentId === nextQueuedMessage.environmentId,
+      );
       const shellStatus = shellStatuses.get(nextQueuedMessage.environmentId) ?? "empty";
       const deliveryAction = resolveThreadOutboxDeliveryAction({
         isCreation: creation !== undefined,
         threadExists: thread !== undefined,
         shellStatus,
-        environmentConnected,
+        environmentConnected: environment?.connectionState === "connected",
         threadBusy: threadRuntimeIsActive(thread?.runtime),
       });
       // The delivery action resolves first; capability checks apply only to
@@ -1312,7 +1279,7 @@ export function useThreadOutboxDrain(): void {
             isCreation: creation !== undefined,
             threadExists: liveThread !== undefined,
             shellStatus,
-            environmentConnected,
+            environmentConnected: environment?.connectionState === "connected",
             threadBusy: liveThreadBusy,
           });
           if (liveDeliveryAction !== "send") {
@@ -1357,7 +1324,7 @@ export function useThreadOutboxDrain(): void {
       return;
     }
   }, [
-    connectionPhases,
+    connectedEnvironments,
     dispatchingQueuedMessageId,
     editingQueuedMessageIds,
     projects,
