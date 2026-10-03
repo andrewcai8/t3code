@@ -56,17 +56,11 @@ import {
   fetchRemoteEnvironmentDescriptor,
 } from "@t3tools/client-runtime/environment";
 import {
-  ClientPresentation,
-  CloudSession,
-  ConnectionRegistrationStore,
-  ConnectionTargetStore,
+  ClientCapabilities,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
-  EnvironmentCacheStore,
+  Persistence,
   PlatformConnectionSource,
   putRemoteDpopTokenInCatalog,
-  PrimaryEnvironmentAuth,
-  RelayDeviceIdentity,
-  SshEnvironmentGateway,
   registerConnectionInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
@@ -80,8 +74,8 @@ import {
   AuthStandardClientScopes,
   type EnvironmentId,
   MessageId,
-  type OrchestrationShellSnapshot,
-  ORCHESTRATION_WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
+  type OrchestrationV2ShellSnapshot,
   type ProvisionedEnvironment,
   ProvisionRequestId,
   ThreadId,
@@ -275,11 +269,11 @@ const memoryStorageLayer = Layer.effectContext(
         document: typeof EMPTY_CONNECTION_CATALOG_DOCUMENT,
       ) => typeof EMPTY_CONNECTION_CATALOG_DOCUMENT,
     ) => Ref.update(catalog, change);
-    const targets = ConnectionTargetStore.of({
+    const targets = Persistence.ConnectionTargetStore.of({
       list: Effect.map(read, (document) => document.targets),
       listDisabled: Effect.map(read, (document) => document.disabledEnvironmentIds),
     });
-    const registrations = ConnectionRegistrationStore.of({
+    const registrations = Persistence.ConnectionRegistrationStore.of({
       register: (registration) =>
         update((document) => registerConnectionInCatalog(document, registration)),
       remove: (target) => update((document) => removeConnectionFromCatalog(document, target)),
@@ -353,10 +347,10 @@ const memoryStorageLayer = Layer.effectContext(
     });
     // Shells are kept so a second client's seeded chat can be read back; the rest is a startup
     // cache a fresh process has none of.
-    const shells = yield* Ref.make<ReadonlyMap<EnvironmentId, OrchestrationShellSnapshot>>(
+    const shells = yield* Ref.make<ReadonlyMap<EnvironmentId, OrchestrationV2ShellSnapshot>>(
       new Map(),
     );
-    const cache = EnvironmentCacheStore.of({
+    const cache = Persistence.EnvironmentCacheStore.of({
       loadShell: (environmentId) =>
         Effect.map(Ref.get(shells), (current) =>
           Option.fromUndefinedOr(current.get(environmentId)),
@@ -379,12 +373,12 @@ const memoryStorageLayer = Layer.effectContext(
           return next;
         }),
     });
-    return Context.make(ConnectionTargetStore, targets).pipe(
-      Context.add(ConnectionRegistrationStore, registrations),
+    return Context.make(Persistence.ConnectionTargetStore, targets).pipe(
+      Context.add(Persistence.ConnectionRegistrationStore, registrations),
       Context.add(ProfileStore.ConnectionProfileStore, profiles),
       Context.add(CredentialStore.ConnectionCredentialStore, credentials),
       Context.add(TokenStore.RemoteDpopAccessTokenStore, remoteTokens),
-      Context.add(EnvironmentCacheStore, cache),
+      Context.add(Persistence.EnvironmentCacheStore, cache),
     );
   }),
 );
@@ -411,20 +405,25 @@ const platformLayer = (
     Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
     Wakeups.layer({ changes: Stream.never }),
     Layer.succeed(
-      PlatformConnectionSource,
-      PlatformConnectionSource.of({ registrations: Stream.make([manager]) }),
+      PlatformConnectionSource.PlatformConnectionSource,
+      PlatformConnectionSource.PlatformConnectionSource.of({
+        registrations: Stream.make([manager]),
+      }),
     ),
     Layer.succeed(
-      PrimaryEnvironmentAuth,
-      PrimaryEnvironmentAuth.of({ bearerToken: Effect.succeedSome(bearer) }),
+      ClientCapabilities.PrimaryEnvironmentAuth,
+      ClientCapabilities.PrimaryEnvironmentAuth.of({ bearerToken: Effect.succeedSome(bearer) }),
     ),
     Layer.succeed(
-      ClientPresentation,
-      ClientPresentation.of({ metadata: CLIENT_METADATA, scopes: AuthStandardClientScopes }),
+      ClientCapabilities.ClientPresentation,
+      ClientCapabilities.ClientPresentation.of({
+        metadata: CLIENT_METADATA,
+        scopes: AuthStandardClientScopes,
+      }),
     ),
     Layer.succeed(
-      CloudSession,
-      CloudSession.of({
+      ClientCapabilities.CloudSession,
+      ClientCapabilities.CloudSession.of({
         identity: Effect.succeedNone,
         clerkToken: Effect.fail(
           new ConnectionBlockedError({
@@ -434,10 +433,13 @@ const platformLayer = (
         ),
       }),
     ),
-    Layer.succeed(RelayDeviceIdentity, RelayDeviceIdentity.of({ deviceId: Effect.succeedNone })),
     Layer.succeed(
-      SshEnvironmentGateway,
-      SshEnvironmentGateway.of({
+      ClientCapabilities.RelayDeviceIdentity,
+      ClientCapabilities.RelayDeviceIdentity.of({ deviceId: Effect.succeedNone }),
+    ),
+    Layer.succeed(
+      ClientCapabilities.SshEnvironmentGateway,
+      ClientCapabilities.SshEnvironmentGateway.of({
         provision: () => Effect.fail(unavailable("No SSH in this verifier.")),
         prepare: () => Effect.fail(unavailable("No SSH in this verifier.")),
         disconnect: () => Effect.void,
@@ -590,22 +592,22 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
 
   /** The title of a chat's thread as the box serves it, once the box has the thread. */
   const threadTitle = (
-    registry: EnvironmentRegistry["Service"],
+    registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
     boxId: EnvironmentId,
     threadId: ThreadId,
     what: string,
   ) =>
     bounded(
       registry
-        .runStream(boxId, subscribe(ORCHESTRATION_WS_METHODS.subscribeThread, { threadId }))
+        .runStream(boxId, subscribe(ORCHESTRATION_V2_WS_METHODS.subscribeThread, { threadId }))
         .pipe(
           Stream.filter((item) => item.kind === "snapshot"),
           Stream.runHead,
           Effect.flatMap((item) =>
             Option.isSome(item) &&
             item.value.kind === "snapshot" &&
-            item.value.snapshot.thread.id === threadId
-              ? Effect.succeed(item.value.snapshot.thread.title)
+            item.value.projection.thread.id === threadId
+              ? Effect.succeed(item.value.projection.thread.title)
               : Effect.fail(new VerifyFailure({ message: `${what}: no snapshot of the thread` })),
           ),
           Effect.retry(Schedule.spaced("5 seconds")),
@@ -613,7 +615,10 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       what,
     );
 
-  const listOnHost = (registry: EnvironmentRegistry["Service"], managerId: EnvironmentId) =>
+  const listOnHost = (
+    registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
+    managerId: EnvironmentId,
+  ) =>
     Effect.gen(function* () {
       const entries = yield* SubscriptionRef.get(registry.entries);
       return yield* bounded(
@@ -628,7 +633,10 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       );
     });
 
-  const awaitManager = (registry: EnvironmentRegistry["Service"], managerId: EnvironmentId) =>
+  const awaitManager = (
+    registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
+    managerId: EnvironmentId,
+  ) =>
     registry.stateChanges(managerId).pipe(
       Stream.filter((state) => state.phase === "connected"),
       Stream.runHead,
@@ -667,8 +675,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     });
 
     const firstToken = yield* Effect.gen(function* () {
-      const registry = yield* EnvironmentRegistry;
-      const cache = yield* EnvironmentCacheStore;
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const cache = yield* Persistence.EnvironmentCacheStore;
       yield* awaitManager(registry, managerId);
       const rows = yield* listOnHost(registry, managerId);
       const row = rows.find((candidate) => candidate.environmentId === boxId);
@@ -749,7 +757,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     }).pipe(Effect.scoped, Effect.provide(clientB, { local: true }));
 
     yield* Effect.gen(function* () {
-      const registry = yield* EnvironmentRegistry;
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
       yield* awaitManager(registry, managerId);
       const openedAt = (yield* SubscriptionRef.get(log)).length;
       yield* registry.stateChanges(boxId).pipe(
@@ -805,8 +813,8 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     });
 
     yield* Effect.gen(function* () {
-      const registry = yield* EnvironmentRegistry;
-      const onboarding = yield* ConnectionOnboarding;
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* ConnectionOnboarding.ConnectionOnboarding;
       const follow = (environment: Transition["environment"], environmentId: EnvironmentId) =>
         registry.stateChanges(environmentId).pipe(
           Stream.runForEach((state) => record(environment, state)),
@@ -1059,7 +1067,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
 
   /** Disposes the box on the manager, retrying while another lease operation holds it. */
   const dispose = Effect.fn("dispose")(function* (
-    registry: EnvironmentRegistry["Service"],
+    registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
     managerId: EnvironmentId,
   ) {
     if (created.requestId === null || disposed === "disposed") return;
