@@ -1205,15 +1205,27 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           yield* Console.log(`[${yield* elapsed}s] client A has the chat "${title}"`);
           // Closed first, or client A's own demand would wake the box it pauses.
           yield* Scope.close(chat, Exit.void);
+          // The host refuses to pause a box mid-turn, and the chat's first turn may still be running.
           const paused = yield* onManager(
             "environmentControl.pause",
             request(WS_METHODS.environmentControlPause, {
               leaseId: box.leaseId,
               sandboxId: box.sandboxId,
             }),
+          ).pipe(
+            Effect.repeat({
+              while: (result) => result.kind === "refused",
+              schedule: Schedule.spaced("5 seconds"),
+            }),
+            Effect.timeoutOption(Duration.minutes(3)),
           );
-          if (paused.kind !== "paused")
-            return yield* new VerifyFailure({ message: `pause ${paused.kind}` });
+          if (Option.isNone(paused) || paused.value.kind !== "paused")
+            return yield* new VerifyFailure({
+              message: Option.match(paused, {
+                onNone: () => "pause refused for 3 minutes",
+                onSome: (result) => `pause ${result.kind}`,
+              }),
+            });
           yield* Ref.set(pausedAt, yield* Clock.currentTimeMillis);
           yield* Console.log(`[${yield* elapsed}s] client A closed the chat and paused its box`);
           yield* verifySecondClient({ manager, bearer, managerId, boxId, threadId, title });
