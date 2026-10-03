@@ -1,7 +1,8 @@
 // @effect-diagnostics globalFetch:off - the manager reads a remote T3 server over private HTTP.
 import {
-  OrchestrationSession,
-  OrchestrationThreadShell,
+  ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  OrchestrationV2ThreadShell,
   type ProvisionedChat,
   UsageHistoryInput,
   UsageSummary,
@@ -10,33 +11,83 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { leaseOwnedUsage, type BoxUsageStore } from "../usage/boxUsage.ts";
-import type { ProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
+import type { ProvisionedLease, RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat } from "./provisionedChats.ts";
 
 export type LeaseActivity = "busy" | "idle" | "unknown";
+
+/** What a host sends with every orchestration read or launch on one of its boxes. */
+export const boxOrchestrationHeaders = (remote: RemoteAccess) => ({
+  authorization: `Bearer ${remote.brokerToken}`,
+  [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+});
 
 const decodeShell = Schema.decodeUnknownExit(
   Schema.Struct({
     threads: Schema.Array(
       Schema.Struct({
-        archivedAt: OrchestrationThreadShell.fields.archivedAt,
-        session: Schema.NullOr(Schema.Struct({ status: OrchestrationSession.fields.status })),
-        hasPendingApprovals: OrchestrationThreadShell.fields.hasPendingApprovals,
-        backgroundLiveness: OrchestrationThreadShell.fields.backgroundLiveness,
+        archivedAt: Schema.NullOr(Schema.Unknown),
+        status: OrchestrationV2ThreadShell.fields.status,
+        activityRunStatus: OrchestrationV2ThreadShell.fields.activityRunStatus,
+        pendingRuntimeRequest: Schema.NullOr(Schema.Struct({ kind: Schema.String })),
+        pendingBackgroundTasks: Schema.optional(
+          Schema.Array(Schema.Struct({ kind: Schema.String })),
+        ),
       }),
     ),
   }),
 );
 
+/** A box still on a pre-V2 build answers with V1 threads; read them so it is never taken as idle. */
+const decodeV1Shell = Schema.decodeUnknownExit(
+  Schema.Struct({
+    threads: Schema.Array(
+      Schema.Struct({
+        archivedAt: Schema.NullOr(Schema.Unknown),
+        session: Schema.NullOr(
+          Schema.Struct({
+            status: Schema.Literals([
+              "idle",
+              "starting",
+              "running",
+              "ready",
+              "interrupted",
+              "stopped",
+              "error",
+            ]),
+          }),
+        ),
+        hasPendingApprovals: Schema.Boolean,
+        backgroundLiveness: Schema.optional(Schema.NullOr(Schema.String)),
+      }),
+    ),
+  }),
+);
+
+const RUN_IN_FLIGHT: ReadonlySet<string> = new Set(["preparing", "queued", "starting", "running"]);
+
 /**
  * Reads a remote T3 shell snapshot as whether its machine may be paused.
- * Pending user input and "monitoring" watch loops do not count, so a chat
+ * A question for the user and "monitor" watch loops do not count, so a chat
  * waiting on a human cannot keep a machine awake forever.
  */
 export function shellActivity(body: unknown): LeaseActivity {
   const shell = decodeShell(body);
-  if (shell._tag === "Failure") return "unknown";
-  return shell.value.threads.some(
+  if (shell._tag === "Success")
+    return shell.value.threads.some(
+      (thread) =>
+        thread.archivedAt === null &&
+        (RUN_IN_FLIGHT.has(thread.status) ||
+          RUN_IN_FLIGHT.has(thread.activityRunStatus ?? "") ||
+          (thread.pendingRuntimeRequest !== null &&
+            thread.pendingRuntimeRequest.kind !== "user_input") ||
+          (thread.pendingBackgroundTasks ?? []).some((task) => task.kind !== "monitor")),
+    )
+      ? "busy"
+      : "idle";
+  const v1 = decodeV1Shell(body);
+  if (v1._tag === "Failure") return "unknown";
+  return v1.value.threads.some(
     (thread) =>
       thread.archivedAt === null &&
       (thread.session?.status === "starting" ||
@@ -59,7 +110,7 @@ export async function observeLease(lease: ProvisionedLease): Promise<LeaseObserv
   if (!lease.remoteAccess) return { activity: "unknown" };
   try {
     const response = await fetch(`${lease.remoteAccess.origin}/api/orchestration/shell`, {
-      headers: { authorization: `Bearer ${lease.remoteAccess.brokerToken}` },
+      headers: boxOrchestrationHeaders(lease.remoteAccess),
       redirect: "error",
       signal: AbortSignal.timeout(10_000),
     });

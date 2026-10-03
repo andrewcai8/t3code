@@ -19,7 +19,11 @@ vi.mock("./provisionedChats.ts", async (importOriginal) => {
   return { ...original, ownerChat: vi.fn(original.ownerChat) };
 });
 
-const thread = (fields: Record<string, unknown>) => ({
+const thread = (fields: Record<string, unknown>) =>
+  boxThread("thread", "project-app", "Chat", fields);
+const request = (kind: string) => ({ id: "request", kind, createdAt: "2026-09-30T10:03:00.000Z" });
+const task = (kind: string) => ({ taskId: `task-${kind}`, kind });
+const v1Thread = (fields: Record<string, unknown>) => ({
   id: "thread",
   archivedAt: null,
   session: null,
@@ -27,29 +31,54 @@ const thread = (fields: Record<string, unknown>) => ({
   hasPendingUserInput: false,
   ...fields,
 });
-const session = (status: string) => ({ threadId: "thread", status, activeTurnId: null });
+const v1Session = (status: string) => ({ threadId: "thread", status, activeTurnId: null });
 
 describe("shellActivity", () => {
   it.each([
-    ["a starting session", [thread({ session: session("starting") })], "busy"],
-    ["a running session", [thread({ session: session("running") })], "busy"],
-    ["a pending approval", [thread({ hasPendingApprovals: true })], "busy"],
-    ["working background agents", [thread({ backgroundLiveness: "working" })], "busy"],
+    ["a preparing run", [thread({ status: "preparing" })], "busy"],
+    ["a queued run", [thread({ status: "queued" })], "busy"],
+    ["a running run", [thread({ status: "running", activityRunStatus: "running" })], "busy"],
     [
-      "one busy chat among idle ones",
-      [thread({}), thread({ session: session("running") })],
+      "a starting activity run",
+      [thread({ status: "idle", activityRunStatus: "starting" })],
       "busy",
     ],
-    ["a ready session", [thread({ session: session("ready") })], "idle"],
-    ["pending user input", [thread({ hasPendingUserInput: true })], "idle"],
-    ["a monitoring watch loop", [thread({ backgroundLiveness: "monitoring" })], "idle"],
+    [
+      "a pending approval",
+      [thread({ status: "waiting", pendingRuntimeRequest: request("command_execution_approval") })],
+      "busy",
+    ],
+    ["a background subagent", [thread({ pendingBackgroundTasks: [task("subagent")] })], "busy"],
+    ["one busy chat among idle ones", [thread({}), thread({ status: "running" })], "busy"],
+    [
+      "a question for the user",
+      [
+        thread({
+          status: "waiting",
+          activityRunStatus: "waiting",
+          pendingRuntimeRequest: request("user_input"),
+        }),
+      ],
+      "idle",
+    ],
+    ["a monitor watch loop", [thread({ pendingBackgroundTasks: [task("monitor")] })], "idle"],
+    ["a completed run", [thread({ status: "completed" })], "idle"],
     [
       "an archived running chat",
-      [thread({ archivedAt: "2026-01-01T00:00:00.000Z", session: session("running") })],
+      [thread({ archivedAt: "2026-01-01T00:00:00.000Z", status: "running" })],
       "idle",
     ],
     ["no chats", [], "idle"],
-    ["an unrecognized session status", [thread({ session: session("thinking") })], "unknown"],
+    ["a pre-V2 running session", [v1Thread({ session: v1Session("running") })], "busy"],
+    ["a pre-V2 pending approval", [v1Thread({ hasPendingApprovals: true })], "busy"],
+    ["pre-V2 working background agents", [v1Thread({ backgroundLiveness: "working" })], "busy"],
+    ["a pre-V2 ready session", [v1Thread({ session: v1Session("ready") })], "idle"],
+    [
+      "an unrecognized pre-V2 session status",
+      [v1Thread({ session: v1Session("thinking") })],
+      "unknown",
+    ],
+    ["an unrecognized run status", [thread({ status: "pondering" })], "unknown"],
   ])("reads %s as %s", (_name, threads, expected) => {
     expect(shellActivity({ snapshotSequence: 1, projects: [], threads })).toBe(expected);
   });
@@ -64,7 +93,8 @@ describe("observeLease", () => {
     const server = NodeHttp.createServer((request, response) => {
       if (
         request.url !== "/api/orchestration/shell" ||
-        request.headers.authorization !== "Bearer broker"
+        request.headers.authorization !== "Bearer broker" ||
+        request.headers["x-t3-orchestration-protocol"] !== "2"
       ) {
         response.writeHead(401).end();
         return;
@@ -74,13 +104,8 @@ describe("observeLease", () => {
         JSON.stringify(
           boxShell([
             boxThread("thread-owner", "project-app", "Fix the login redirect", {
-              session: {
-                ...session("running"),
-                threadId: "thread-owner",
-                providerName: "codex",
-                lastError: null,
-                updatedAt: "2026-09-30T10:05:00.000Z",
-              },
+              status: "running",
+              activityRunStatus: "running",
             }),
           ]),
         ),
