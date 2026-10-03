@@ -391,21 +391,45 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     }).pipe(Effect.withSpan("EnvironmentRegistry.keepBoxAlive"));
   };
 
+  const retryDownBoxes = Effect.fnUntraced(function* (managerId?: EnvironmentId) {
+    for (const lease of (yield* SubscriptionRef.get(serviceScopes)).values()) {
+      const box = connectionBox(lease.entry.target);
+      if (box === null || (managerId !== undefined && box.managerId !== managerId)) continue;
+      const state = yield* SubscriptionRef.get(lease.supervisor.state);
+      // A wake in flight is left to finish; a retry would start it over.
+      if (state.desired && state.phase !== "connected" && state.phase !== "waking")
+        yield* lease.supervisor.retryNow;
+    }
+  });
+
   // A user coming back retries each box that is down at once, waking it without the wait a box
   // left alone backs off to.
   yield* userReturns.pipe(
-    Effect.andThen(
-      Effect.gen(function* () {
-        for (const lease of (yield* SubscriptionRef.get(serviceScopes)).values()) {
-          if (connectionBox(lease.entry.target) === null) continue;
-          const state = yield* SubscriptionRef.get(lease.supervisor.state);
-          // A wake in flight is left to finish; a retry would start it over.
-          if (state.desired && state.phase !== "connected" && state.phase !== "waking")
-            yield* lease.supervisor.retryNow;
-        }
-      }),
-    ),
+    Effect.andThen(retryDownBoxes()),
     Effect.forever,
+    Effect.forkIn(registryScope),
+  );
+
+  // A host connecting again retries its boxes that are down, so they do not wait out the backoff
+  // they built while it was gone.
+  yield* SubscriptionRef.changes(serviceScopes).pipe(
+    Stream.switchMap((leases) =>
+      Stream.mergeAll(
+        [...leases]
+          .filter(([, lease]) => connectionBox(lease.entry.target) === null)
+          .map(([managerId, lease]) =>
+            SubscriptionRef.changes(lease.supervisor.state).pipe(
+              Stream.map((state) => state.phase === "connected"),
+              Stream.changes,
+              Stream.drop(1),
+              Stream.filter((connected) => connected),
+              Stream.map(() => managerId),
+            ),
+          ),
+        { concurrency: "unbounded" },
+      ),
+    ),
+    Stream.runForEach(retryDownBoxes),
     Effect.forkIn(registryScope),
   );
 

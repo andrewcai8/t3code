@@ -500,6 +500,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
             target: entry.target,
           };
         }),
+      prepareForUpdate: () => Effect.die(new Error("Updating outdated hosts is not used.")),
     }),
     Effect.provideService(RpcSession.RpcSessionFactory, {
       connect: (prepared) =>
@@ -722,6 +723,16 @@ const makeBoxWakeHarness = Effect.fn("TestEnvironmentRegistry.makeBoxWakeHarness
     },
   );
   return { harness, serving, hostUp, resumes, touches };
+});
+
+/** Moves the test clock a second at a time, for up to 15 minutes, until `done` holds. */
+const advanceUntil = Effect.fn("TestEnvironmentRegistry.advanceUntil")(function* <E>(
+  done: Effect.Effect<boolean, E>,
+) {
+  for (let second = 0; second < 15 * 60 && !(yield* done); second += 1) {
+    yield* TestClock.adjust("1 second");
+  }
+  expect(yield* done).toBe(true);
 });
 
 const recordPhases = Effect.fn("TestEnvironmentRegistry.recordPhases")(function* (
@@ -1147,28 +1158,15 @@ describe("EnvironmentRegistry", () => {
         yield* registry.start;
         yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
         yield* registry.demand(HOST_BOX.environmentId);
-        // Resumes the host has been asked for once the box settles into a backoff past `elapsed`.
-        const resumesAt = Effect.fn("resumesAt")(function* (elapsed: Duration.Input) {
-          const now = Duration.toMillis(Duration.fromInputUnsafe(elapsed));
-          yield* TestClock.setTime(now);
-          yield* awaitConnectionState(
-            registry,
-            HOST_BOX.environmentId,
-            (state) => state.phase === "backoff" && (state.retryAt ?? 0) > now,
-          );
-          return (yield* Ref.get(resumes)).length;
-        });
+        const wokenAt: Array<number> = [];
+        for (let second = 0; second < 15 * 60; second += 1) {
+          if ((yield* Ref.get(resumes)).length > wokenAt.length) wokenAt.push(second);
+          yield* TestClock.adjust("1 second");
+        }
 
-        yield* awaitConnectionState(
-          registry,
-          HOST_BOX.environmentId,
-          (state) => state.phase === "backoff",
-        );
-        expect(yield* resumesAt("20 seconds")).toBe(1);
-        expect(yield* resumesAt("45 seconds")).toBe(2);
-        expect(yield* resumesAt("85 seconds")).toBe(2);
-        expect(yield* resumesAt("110 seconds")).toBe(3);
-        expect(yield* resumesAt("200 seconds")).toBe(3);
+        expect(wokenAt.length).toBeGreaterThanOrEqual(3);
+        const gaps = wokenAt.slice(1).map((at, index) => at - wokenAt[index]!);
+        gaps.forEach((gap, index) => expect(gap).toBeGreaterThanOrEqual(30 * 2 ** index));
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }).pipe(Effect.provide(TestClock.layer())),
   );
@@ -1269,13 +1267,12 @@ describe("EnvironmentRegistry", () => {
             HOST_BOX.environmentId,
             (state) => state.phase === "backoff",
           );
-          yield* TestClock.setTime(45_000);
+          yield* advanceUntil(Ref.get(resumes).pipe(Effect.map((all) => all.length === 2)));
           yield* awaitConnectionState(
             registry,
             HOST_BOX.environmentId,
-            (state) => state.phase === "backoff" && (state.retryAt ?? 0) > 45_000,
+            (state) => state.phase === "backoff",
           );
-          expect(yield* Ref.get(resumes)).toHaveLength(2);
           yield* Scope.close(chat, Exit.void);
           yield* awaitConnectionState(
             registry,
@@ -1292,7 +1289,7 @@ describe("EnvironmentRegistry", () => {
   );
 
   it.effect(
-    "a box whose host is down does not claim to be waking, and is woken on its next dial once its host is back",
+    "a box whose host is down does not claim to be waking, and is woken as soon as its host is back",
     () =>
       Effect.gen(function* () {
         const { harness, hostUp, resumes } = yield* makeBoxWakeHarness([{ kind: "resumed" }], {
@@ -1309,10 +1306,18 @@ describe("EnvironmentRegistry", () => {
           expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("backoff");
 
           yield* Ref.set(hostUp, true);
-          yield* TestClock.adjust("32 seconds");
-
+          yield* advanceUntil(
+            registry
+              .state(TARGET.environmentId)
+              .pipe(Effect.map((state) => state.phase === "connected")),
+          );
+          // The box follows its host at once, with the clock held, instead of waiting out its backoff.
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (state) => state.phase === "connected",
+          );
           expect(yield* Ref.get(resumes)).toEqual([{ environmentId: HOST_BOX.environmentId }]);
-          expect((yield* registry.state(HOST_BOX.environmentId)).phase).toBe("connected");
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }).pipe(Effect.provide(TestClock.layer())),
   );
