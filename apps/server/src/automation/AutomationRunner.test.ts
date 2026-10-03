@@ -69,6 +69,7 @@ interface ChildRequest {
   readonly method: string;
   readonly url: string;
   readonly authorization: string | undefined;
+  readonly protocol: string | undefined;
   readonly body: unknown;
 }
 
@@ -79,11 +80,13 @@ const fakeChild = (requests: Array<ChildRequest>) =>
       method: request.method,
       url: url.toString(),
       authorization: request.headers.authorization,
+      protocol: request.headers["x-t3-orchestration-protocol"],
       body: request.body._tag === "Uint8Array" ? JSON.parse(request.body.text ?? "null") : null,
     });
     const body =
       url.pathname === "/api/orchestration/shell"
         ? {
+            schemaVersion: 1,
             snapshotSequence: 3,
             projects: [
               {
@@ -97,9 +100,9 @@ const fakeChild = (requests: Array<ChildRequest>) =>
               },
             ],
             threads: [],
-            updatedAt: "2026-09-26T09:01:00.000Z",
+            archivedThreads: [],
           }
-        : { sequence: requests.length };
+        : { threadId: (requests.at(-1)?.body as { threadId: string }).threadId, resumed: false };
     return Effect.succeed(
       HttpClientResponse.fromWeb(
         request,
@@ -250,44 +253,29 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
             method: "GET",
             url: "https://child.test/api/orchestration/shell",
             authorization: "Bearer broker-token",
+            protocol: "2",
             body: null,
           },
           {
             method: "POST",
-            url: "https://child.test/api/orchestration/dispatch",
+            url: "https://child.test/api/orchestration/launch-thread",
             authorization: "Bearer broker-token",
+            protocol: "2",
             body: {
-              type: "thread.create",
-              commandId: "7c54a386-008d-4c0d-a01f-8c53dc91a47e",
+              commandId: "8993b82d-6e68-4b5d-a66d-b15ee9b8a53c",
+              creationSource: "server",
               threadId: "7a70b895-a164-4c08-ad5b-76a54b016ed6",
               projectId: "project-1",
               title: "Nightly dependency bump",
               modelSelection: { instanceId: "codex", model: "gpt-6-astra" },
               runtimeMode: "full-access",
               interactionMode: "default",
-              branch: null,
-              worktreePath: null,
-              createdAt: "2026-09-26T09:00:00.000Z",
-            },
-          },
-          {
-            method: "POST",
-            url: "https://child.test/api/orchestration/dispatch",
-            authorization: "Bearer broker-token",
-            body: {
-              type: "thread.turn.start",
-              commandId: "de4c54d9-6db9-4660-a180-874b1bc303c0",
-              threadId: "7a70b895-a164-4c08-ad5b-76a54b016ed6",
-              message: {
+              workspaceStrategy: { type: "root" },
+              initialMessage: {
                 messageId: "82f593b6-461d-4a36-a3f9-8f1282d80a32",
-                role: "user",
                 text: "Bump dependencies and open a PR.",
                 attachments: [],
               },
-              modelSelection: { instanceId: "codex", model: "gpt-6-astra" },
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              createdAt: "2026-09-26T09:00:00.000Z",
             },
           },
         ]);
@@ -335,7 +323,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
   it.effect("starts the chat on the automation's chosen model when the host offers it", () =>
     Effect.gen(function* () {
       expect(yield* runWithModel("gpt-6-mini", ["gpt-6-astra", "gpt-6-mini"])).toEqual({
-        models: [undefined, "gpt-6-mini", "gpt-6-mini"],
+        models: [undefined, "gpt-6-mini"],
         state: "started",
         error: null,
       });
@@ -345,7 +333,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
   it.effect("keeps the chosen model when the host's catalog is unknown", () =>
     Effect.gen(function* () {
       expect(yield* runWithModel("gpt-6-mini", null)).toEqual({
-        models: [undefined, "gpt-6-mini", "gpt-6-mini"],
+        models: [undefined, "gpt-6-mini"],
         state: "started",
         error: null,
       });
@@ -355,7 +343,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
   it.effect("falls back to the default model, with a note, when the chosen one is retired", () =>
     Effect.gen(function* () {
       expect(yield* runWithModel("gpt-retired", ["gpt-6-astra", "gpt-6-mini"])).toEqual({
-        models: [undefined, "gpt-6-astra", "gpt-6-astra"],
+        models: [undefined, "gpt-6-astra"],
         state: "started",
         error: "gpt-retired is not offered for Codex, so this run used gpt-6-astra.",
       });
@@ -384,11 +372,7 @@ it.layer(NodeServices.layer)("automation runner", (it) => {
         expect(provisioned).toEqual([]);
         expect(
           requests.map(({ body }) => (body as { commandId?: string } | null)?.commandId),
-        ).toEqual([
-          undefined,
-          "7c54a386-008d-4c0d-a01f-8c53dc91a47e",
-          "de4c54d9-6db9-4660-a180-874b1bc303c0",
-        ]);
+        ).toEqual([undefined, "8993b82d-6e68-4b5d-a66d-b15ee9b8a53c"]);
         expect(finished?.state).toBe("started");
         expect(finished?.threadId).toBe("7a70b895-a164-4c08-ad5b-76a54b016ed6");
       }),

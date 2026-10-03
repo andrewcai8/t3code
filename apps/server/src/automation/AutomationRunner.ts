@@ -4,7 +4,6 @@ import {
   CommandId,
   DEFAULT_MODEL_BY_PROVIDER,
   PROVIDER_DISPLAY_NAMES,
-  type ClientOrchestrationCommand,
   EnvironmentHttpApi,
   MessageId,
   ThreadId,
@@ -25,6 +24,7 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 
 import type { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
+import { boxOrchestrationHeaders } from "../environmentControl/leaseActivity.ts";
 import type { RemoteAccess } from "../environmentControl/ProvisionedLeaseRegistry.ts";
 import {
   AutomationStore,
@@ -126,9 +126,6 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
   const store = yield* AutomationStore;
   const child = (access: RemoteAccess) =>
     HttpApiClient.make(EnvironmentHttpApi, { baseUrl: access.origin });
-  const authorization = (access: RemoteAccess) => ({
-    authorization: `Bearer ${access.brokerToken}`,
-  });
 
   /** Polls the frozen request until it is ready. */
   const provisioned = (run: StoredRun) => {
@@ -193,7 +190,7 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
         );
       if (attempt > 0) yield* Effect.sleep(PROJECT_POLL);
       const shell = yield* client.orchestration
-        .shellSnapshot({ headers: authorization(access) })
+        .shellSnapshot({ headers: boxOrchestrationHeaders(access) })
         .pipe(
           Effect.retry(transient),
           Effect.mapError(
@@ -207,45 +204,32 @@ export const makeAutomationRunner = Effect.fn("makeAutomationRunner")(function* 
       instanceId: defaultInstanceIdForDriver(agentDriver),
       model,
     };
-    const dispatch = (payload: ClientOrchestrationCommand) =>
-      client.orchestration
-        .dispatch({ headers: authorization(access), payload } as Parameters<
-          typeof client.orchestration.dispatch
-        >[0])
-        .pipe(
-          Effect.retry(transient),
-          Effect.mapError(
-            (error) => new RunFailed(`The chat could not be started: ${describe(error)}`),
-          ),
-        );
-    yield* dispatch({
-      type: "thread.create",
-      commandId: CommandId.make(derivedRunId(run.requestId, "thread.create")),
-      threadId,
-      projectId,
-      title: automation.name,
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdAt: run.createdAt,
-    });
-    yield* dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make(derivedRunId(run.requestId, "thread.turn.start")),
-      threadId,
-      message: {
-        messageId: MessageId.make(derivedRunId(run.requestId, "message")),
-        role: "user",
-        text: run.prompt,
-        attachments: [],
-      },
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      createdAt: run.createdAt,
-    });
+    yield* client.orchestration
+      .launchThread({
+        headers: boxOrchestrationHeaders(access),
+        payload: {
+          commandId: CommandId.make(derivedRunId(run.requestId, "thread.launch")),
+          creationSource: "server",
+          threadId,
+          projectId,
+          title: automation.name,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          workspaceStrategy: { type: "root" },
+          initialMessage: {
+            messageId: MessageId.make(derivedRunId(run.requestId, "message")),
+            text: run.prompt,
+            attachments: [],
+          },
+        },
+      })
+      .pipe(
+        Effect.retry(transient),
+        Effect.mapError(
+          (error) => new RunFailed(`The chat could not be started: ${describe(error)}`),
+        ),
+      );
     // An owned lease stays awake while its agent works; an unowned one is paused once its
     // heartbeat lapses, even mid-turn. A refused claim still leaves a working chat.
     const claimed = yield* ports.environmentControl
