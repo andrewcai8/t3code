@@ -1924,6 +1924,26 @@ export const layer = Layer.effect(
           result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
           durationMs: (yield* Clock.currentTimeMillis) - startedAt,
         });
+        // A box keeps the build it was made with across pauses, and a client refuses a server on
+        // an older orchestration protocol, so a woken box moves to the pinned build before anyone
+        // connects. It is a no-op for a box already on it, and a paused box ran no turn to cut.
+        if (result.kind === "resumed" && workspace.lifecycle === "paused") {
+          const upgraded = yield* provisionControl
+            .upgrade({
+              leaseId: workspace.leaseId,
+              sandboxId: workspace.sandboxId,
+              environmentId: input.environmentId,
+            })
+            .pipe(
+              Effect.catch((error) =>
+                Effect.succeed({ kind: "failed" as const, message: error.message }),
+              ),
+            );
+          yield* Effect.logInfo("cloud workspace upgrade on resume answered", {
+            leaseId: workspace.leaseId,
+            result: upgraded.kind === "refused" ? `refused: ${upgraded.reason}` : upgraded.kind,
+          });
+        }
         return result;
       }),
       upgrade: provisionControl.upgrade,

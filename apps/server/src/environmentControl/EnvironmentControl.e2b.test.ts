@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalFetchInEffect:off - this test writes private manager config and drives a local guest.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -64,6 +66,23 @@ vi.mock("e2b", async (importOriginal) => {
       },
     },
     setTimeout: async () => {},
+    // envd's upload endpoint, writing where the guest reads since the guest is this machine.
+    uploadUrl: async (path: string) => {
+      const NodeHttp = await import("node:http");
+      const NodeFS = await import("node:fs");
+      await NodeFS.promises.mkdir((await import("node:path")).dirname(path), { recursive: true });
+      const server = NodeHttp.createServer((request, response) => {
+        const file = NodeFS.createWriteStream(path);
+        request.pipe(file);
+        file.on("finish", () => {
+          response.end();
+          server.close();
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const { port } = server.address() as { port: number };
+      return `http://127.0.0.1:${port}/`;
+    },
   };
   class E2B {
     Sandbox = { getInfo: async () => mocks.info, connect: async () => sandbox };
@@ -87,7 +106,11 @@ const requestId = "0b0f7f61-8a52-4f6c-9d0b-6f3a2a8d3c11";
  * A paused lease on an E2B box this manager prepared, whose guest preparation
  * ran for real and left its T3 server listening on `port`.
  */
-const pausedPreparedBox = (input: { readonly follow: boolean }) =>
+const pausedPreparedBox = (input: {
+  readonly follow: boolean;
+  /** The host pins a newer build than the one the box was made with. */
+  readonly pinnedRevision?: string;
+}) =>
   Effect.gen(function* () {
     const cleanups: Cleanups = [];
     yield* Effect.addFinalizer(() =>
@@ -97,6 +120,32 @@ const pausedPreparedBox = (input: { readonly follow: boolean }) =>
     );
     yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
     const w = yield* Effect.promise(() => world(cleanups));
+    const pinned =
+      input.pinnedRevision === undefined
+        ? undefined
+        : yield* Effect.promise(async () => {
+            const bundle = NodePath.join(w.base, "pinned-bundle");
+            await NodeFSP.mkdir(bundle);
+            await NodeFSP.copyFile(w.archivePath, NodePath.join(w.base, "pinned.tar"));
+            await NodeFSP.writeFile(NodePath.join(bundle, "NEWER"), "newer build\n");
+            NodeChildProcess.execFileSync("tar", [
+              "-rf",
+              NodePath.join(w.base, "pinned.tar"),
+              "-C",
+              bundle,
+              "NEWER",
+            ]);
+            const path = NodePath.join(w.base, "pinned.tar");
+            return {
+              path,
+              sha256: NodeCrypto.createHash("sha256")
+                .update(await NodeFSP.readFile(path))
+                .digest("hex"),
+              revision: input.pinnedRevision!,
+              entrypoint: "cli.mjs",
+              runtimeExecutable: process.execPath,
+            };
+          });
     const configPath = NodePath.join(w.base, "environment-control.json");
     yield* Effect.promise(() =>
       NodeFSP.writeFile(
@@ -110,6 +159,7 @@ const pausedPreparedBox = (input: { readonly follow: boolean }) =>
             ingressKey: "unused",
           },
           targets: [],
+          ...(pinned ? { provisioning: { runtimeArtifacts: { linux: pinned } } } : {}),
         }),
       ),
     );
@@ -307,6 +357,28 @@ it.effect("refuses a box whose T3 server cannot start again, and leaves it to th
         message: "The workspace could not be reconnected. Retry shortly.",
       });
       expect(yield* box.leaseState()).toBe("active");
+    }),
+  ),
+);
+
+it.effect("moves a woken box onto the build the host pins before anyone connects", () =>
+  withManager(
+    Effect.gen(function* () {
+      const pinnedRevision = "e".repeat(40);
+      const box = yield* pausedPreparedBox({ follow: false, pinnedRevision });
+      const manager = yield* EnvironmentControl;
+
+      expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+        kind: "resumed",
+      });
+      expect(
+        yield* manager.upgrade({
+          leaseId: requestId,
+          sandboxId: "sandbox-1",
+          environmentId: box.environmentId,
+        }),
+      ).toEqual({ kind: "current", t3Revision: pinnedRevision });
+      expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
     }),
   ),
 );
