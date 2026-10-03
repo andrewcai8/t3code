@@ -8,26 +8,26 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
-layer("062_OrchestrationV2", (it) => {
+layer("055_OrchestrationV2", (it) => {
   it.effect("keeps released migrations contiguous", () =>
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 64 }, (_, index) => index + 1),
+        Array.from({ length: 56 }, (_, index) => index + 1),
       );
     }),
   );
 
-  it.effect("upgrades a fork database at 61 through the latest migrations", () =>
+  it.effect("upgrades released schema 53 through the latest migrations", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 61 });
+      yield* runMigrations({ toMigrationInclusive: 53 });
 
       const executed = yield* runMigrations();
       assert.deepStrictEqual(executed, [
-        [62, "OrchestrationV2"],
-        [63, "RemoveRedundantProjectionIndexes"],
-        [64, "ProvisionedChatsV2"],
+        [54, "ProjectionThreadsAutoSettleDisabledAt"],
+        [55, "OrchestrationV2"],
+        [56, "RemoveRedundantProjectionIndexes"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -45,19 +45,11 @@ layer("062_OrchestrationV2", (it) => {
         { migration_id: 49, name: "ProjectionThreadsActiveOrderKey" },
         { migration_id: 50, name: "ProjectionThreadPullRequests" },
         { migration_id: 51, name: "ProjectionThreadMessageContext" },
-        { migration_id: 52, name: "ProvisionOperations" },
-        { migration_id: 53, name: "ProjectionThreadHandoff" },
-        { migration_id: 54, name: "ProjectionThreadTitleState" },
-        { migration_id: 55, name: "PullRequestFilesViewed" },
-        { migration_id: 56, name: "Automations" },
-        { migration_id: 57, name: "ProjectionThreadsAutoSettleDisabledAt" },
-        { migration_id: 58, name: "BoxUsage" },
-        { migration_id: 59, name: "AutomationsModel" },
-        { migration_id: 60, name: "BoxUsageOrigin" },
-        { migration_id: 61, name: "ProvisionedChats" },
-        { migration_id: 62, name: "OrchestrationV2" },
-        { migration_id: 63, name: "RemoveRedundantProjectionIndexes" },
-        { migration_id: 64, name: "ProvisionedChatsV2" },
+        { migration_id: 52, name: "ProjectionThreadTitleState" },
+        { migration_id: 53, name: "PullRequestFilesViewed" },
+        { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
+        { migration_id: 55, name: "OrchestrationV2" },
+        { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
