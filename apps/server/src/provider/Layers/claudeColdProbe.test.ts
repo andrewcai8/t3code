@@ -83,11 +83,13 @@ it.effect("reports a logged-in account as ready when the SDK probe returns nothi
     assert.strictEqual(status.usageLimits?.unavailable?.reason, "probeFailed");
   }).pipe(
     Effect.provide(
-      claudeCli(
-        '{"loggedIn":true,"email":"user@example.com","subscriptionType":"maxplan","authMethod":"claude.ai"}\n',
+      Layer.merge(
+        claudeCli(
+          '{"loggedIn":true,"email":"user@example.com","subscriptionType":"maxplan","authMethod":"claude.ai"}\n',
+        ),
+        NodeServices.layer,
       ),
     ),
-    Effect.provide(NodeServices.layer),
   ),
 );
 

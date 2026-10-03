@@ -43,7 +43,6 @@ export function parseClaudeAuthStatusOutput(output: string): ClaudeCliAuthStatus
   if (start < 0 || end <= start) return undefined;
   let parsed: unknown;
   try {
-    // @effect-diagnostics-next-line preferSchemaOverJson:off
     parsed = JSON.parse(trimmed.slice(start, end + 1));
   } catch {
     return undefined;
