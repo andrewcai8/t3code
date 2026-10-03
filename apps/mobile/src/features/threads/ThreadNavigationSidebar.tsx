@@ -32,6 +32,7 @@ import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/server";
+import { threadSettlementEnvironmentIds } from "../../state/thread-list-environments";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import { useWorkspaceState } from "../../state/workspace";
@@ -312,7 +313,6 @@ function ThreadNavigationSidebarPane(
   const {
     providersByEnvironmentId,
     machineByEnvironmentId,
-    settlementEnvironmentIds,
     snoozeEnvironmentIds,
     pinningEnvironmentIds,
     autoSettleOptOutEnvironmentIds,
@@ -320,6 +320,10 @@ function ThreadNavigationSidebarPane(
     activeReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
   } = listEnvironments;
+  const settlementEnvironmentIds = useMemo(
+    () => threadSettlementEnvironmentIds(listEnvironments, threads),
+    [listEnvironments, threads],
+  );
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
   // Up/down menu availability for every card, computed once per section per

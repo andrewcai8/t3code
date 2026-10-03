@@ -59,6 +59,8 @@ function sameProviders(
   );
 }
 
+type ListEnvironments = ReturnType<typeof collectEnvironments>;
+
 function collectEnvironments(environments: ReadonlyMap<EnvironmentId, ListEnvironment>) {
   const providersByEnvironmentId = new Map<EnvironmentId, ReadonlyArray<ThreadListProvider>>();
   const machineByEnvironmentId = new Map<EnvironmentId, EnvironmentMachineKind>();
@@ -125,4 +127,21 @@ export function createThreadListEnvironmentsAtom(
     }
     return result;
   }).pipe(Atom.withLabel("thread-list-environments"));
+}
+
+/**
+ * A thread whose environment has no loaded config (an offline cloud box with a cached shell)
+ * may still settle; the command is checked against the box's capabilities once it reconnects.
+ */
+export function threadSettlementEnvironmentIds(
+  environments: Pick<ListEnvironments, "settlementEnvironmentIds" | "machineByEnvironmentId">,
+  threads: ReadonlyArray<{ readonly environmentId: EnvironmentId }>,
+): ReadonlySet<EnvironmentId> {
+  const configless = threads.filter(
+    (thread) => !environments.machineByEnvironmentId.has(thread.environmentId),
+  );
+  if (configless.length === 0) return environments.settlementEnvironmentIds;
+  const ids = new Set(environments.settlementEnvironmentIds);
+  for (const thread of configless) ids.add(thread.environmentId);
+  return ids;
 }

@@ -36,6 +36,7 @@ import { useThreadSearch } from "../../state/queries";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/server";
+import { threadSettlementEnvironmentIds } from "../../state/thread-list-environments";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import {
@@ -489,7 +490,6 @@ export function HomeScreen(props: HomeScreenProps) {
   const {
     providersByEnvironmentId,
     machineByEnvironmentId,
-    settlementEnvironmentIds,
     snoozeEnvironmentIds,
     pinningEnvironmentIds,
     autoSettleOptOutEnvironmentIds,
@@ -497,6 +497,10 @@ export function HomeScreen(props: HomeScreenProps) {
     activeReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
   } = listEnvironments;
+  const settlementEnvironmentIds = useMemo(
+    () => threadSettlementEnvironmentIds(listEnvironments, props.threads),
+    [listEnvironments, props.threads],
+  );
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
   // Up/down menu availability for every card, computed once per section per
