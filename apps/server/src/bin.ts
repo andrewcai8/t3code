@@ -16,6 +16,7 @@ if (
     runtimeMain: import.meta.main,
   })
 ) {
+  (await import("./stderrGuard.ts")).guardStderr(process.stderr);
   const command = process.argv[2];
   if (command === "acp-mcp-bridge" || command === "acp-mcp-call") {
     const { runAcpMcpCliFastPath } = await import("./mcp/AcpMcpStdioBridge.ts");
