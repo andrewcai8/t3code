@@ -14,7 +14,6 @@ import { useComposerMenuProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
-  disabled?: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   runtimeModeOptions: ReadonlyArray<{
@@ -42,7 +41,6 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
       <MenuTrigger
         render={
           <ComposerControl
-            disabled={props.disabled}
             size={size}
             className="shrink-0"
             aria-label="More composer controls"
