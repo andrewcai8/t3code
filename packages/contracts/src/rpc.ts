@@ -1,30 +1,5 @@
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
-import {
-  EnvironmentControlError,
-  EnvironmentControlInput,
-  EnvironmentControlList,
-  ProvisionedEnvironmentList,
-  SavedEnvironmentAddress,
-  EnvironmentControlResult,
-  EnvironmentProvisionInput,
-  EnvironmentProvisionResult,
-  EnvironmentProvisionAttachInput,
-  EnvironmentProvisionAttachResult,
-  EnvironmentProvisionDisposeInput,
-  EnvironmentProvisionDisposeResult,
-  EnvironmentProvisionPauseInput,
-  EnvironmentProvisionPauseResult,
-  EnvironmentProvisionResumeInput,
-  EnvironmentProvisionResumeResult,
-  EnvironmentProvisionUpgradeInput,
-  EnvironmentProvisionUpgradeResult,
-  EnvironmentProvisionClaimInput,
-  EnvironmentProvisionClaimResult,
-  EnvironmentProvisionTouchInput,
-  EnvironmentProvisionTouchResult,
-  EnvironmentProvisionKeepInput,
-  EnvironmentProvisionKeepResult,
-} from "./environmentControl.ts";
+import { ENVIRONMENT_CONTROL_WS_METHODS, EnvironmentControlRpcs } from "./environmentControlRpc.ts";
 import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
@@ -35,7 +10,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { EnvironmentId, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   CodexAuthCallbackInput,
   CodexAuthCallbackState,
@@ -489,19 +464,7 @@ export const WS_METHODS = {
   serverReportClientActivity: "server.reportClientActivity",
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
-  environmentControlList: "environmentControl.list",
-  environmentControlListProvisioned: "environmentControl.listProvisioned",
-  environmentControlStart: "environmentControl.start",
-  environmentControlStop: "environmentControl.stop",
-  environmentControlProvision: "environmentControl.provision",
-  environmentControlAttach: "environmentControl.attach",
-  environmentControlDispose: "environmentControl.dispose",
-  environmentControlPause: "environmentControl.pause",
-  environmentControlResume: "environmentControl.resume",
-  environmentControlUpgrade: "environmentControl.upgrade",
-  environmentControlClaim: "environmentControl.claim",
-  environmentControlTouch: "environmentControl.touch",
-  environmentControlKeep: "environmentControl.keep",
+  ...ENVIRONMENT_CONTROL_WS_METHODS,
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -866,94 +829,6 @@ const WsServerRetryResourceTelemetryRpc = Rpc.make(WS_METHODS.serverRetryResourc
   payload: Schema.Struct({}),
   success: ResourceTelemetryRetryResult,
   error: EnvironmentAuthorizationError,
-});
-
-const EnvironmentControlListRpc = Rpc.make(WS_METHODS.environmentControlList, {
-  payload: Schema.Struct({}),
-  success: EnvironmentControlList,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlListProvisionedRpc = Rpc.make(
-  WS_METHODS.environmentControlListProvisioned,
-  {
-    payload: Schema.Struct({
-      /**
-       * The environments the client has saved. The host also returns those of them that were
-       * its boxes and are gone, with lifecycle `disposed`.
-       */
-      environmentIds: Schema.optional(Schema.Array(EnvironmentId)),
-      /**
-       * Where the client dials those environments. A box disposed before the host kept its id
-       * is named gone by its address instead.
-       */
-      addresses: Schema.optional(Schema.Array(SavedEnvironmentAddress)),
-      /**
-       * Asks for each box's chat. The host leaves out a chat the client already holds at this
-       * sequence or a newer one.
-       */
-      chats: Schema.optional(
-        Schema.Array(Schema.Struct({ environmentId: EnvironmentId, sequence: NonNegativeInt })),
-      ),
-    }),
-    success: ProvisionedEnvironmentList,
-    error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-  },
-);
-const EnvironmentControlStartRpc = Rpc.make(WS_METHODS.environmentControlStart, {
-  payload: EnvironmentControlInput,
-  success: EnvironmentControlResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlStopRpc = Rpc.make(WS_METHODS.environmentControlStop, {
-  payload: EnvironmentControlInput,
-  success: EnvironmentControlResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-
-const EnvironmentControlProvisionRpc = Rpc.make(WS_METHODS.environmentControlProvision, {
-  payload: EnvironmentProvisionInput,
-  success: EnvironmentProvisionResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlDisposeRpc = Rpc.make(WS_METHODS.environmentControlDispose, {
-  payload: EnvironmentProvisionDisposeInput,
-  success: EnvironmentProvisionDisposeResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlPauseRpc = Rpc.make(WS_METHODS.environmentControlPause, {
-  payload: EnvironmentProvisionPauseInput,
-  success: EnvironmentProvisionPauseResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlAttachRpc = Rpc.make(WS_METHODS.environmentControlAttach, {
-  payload: EnvironmentProvisionAttachInput,
-  success: EnvironmentProvisionAttachResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlClaimRpc = Rpc.make(WS_METHODS.environmentControlClaim, {
-  payload: EnvironmentProvisionClaimInput,
-  success: EnvironmentProvisionClaimResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlResumeRpc = Rpc.make(WS_METHODS.environmentControlResume, {
-  payload: EnvironmentProvisionResumeInput,
-  success: EnvironmentProvisionResumeResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlUpgradeRpc = Rpc.make(WS_METHODS.environmentControlUpgrade, {
-  payload: EnvironmentProvisionUpgradeInput,
-  success: EnvironmentProvisionUpgradeResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlTouchRpc = Rpc.make(WS_METHODS.environmentControlTouch, {
-  payload: EnvironmentProvisionTouchInput,
-  success: EnvironmentProvisionTouchResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-const EnvironmentControlKeepRpc = Rpc.make(WS_METHODS.environmentControlKeep, {
-  payload: EnvironmentProvisionKeepInput,
-  success: EnvironmentProvisionKeepResult,
-  error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
 const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
@@ -1854,19 +1729,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
-  EnvironmentControlListRpc,
-  EnvironmentControlListProvisionedRpc,
-  EnvironmentControlStartRpc,
-  EnvironmentControlStopRpc,
-  EnvironmentControlProvisionRpc,
-  EnvironmentControlAttachRpc,
-  EnvironmentControlDisposeRpc,
-  EnvironmentControlPauseRpc,
-  EnvironmentControlResumeRpc,
-  EnvironmentControlUpgradeRpc,
-  EnvironmentControlClaimRpc,
-  EnvironmentControlTouchRpc,
-  EnvironmentControlKeepRpc,
+  ...EnvironmentControlRpcs,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
