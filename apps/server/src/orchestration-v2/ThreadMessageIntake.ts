@@ -1,6 +1,11 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
-import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
+import type {
+  ChatAttachment,
+  OrchestrationV2Command,
+  OrchestrationV2CreationSource,
+  OrchestrationV2ThreadLaunchInput,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -236,4 +241,39 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
           : Effect.void;
       }),
     );
+});
+
+/** The launch a client asked for over WS or HTTP; `creationSource` fills in when it named none. */
+export const clientLaunchInput = (
+  input: OrchestrationV2ThreadLaunchInput,
+  creationSource: OrchestrationV2CreationSource,
+): ThreadLaunch.ThreadLaunchInput => ({
+  commandId: input.commandId,
+  ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+  ...(input.reuseExistingThread === undefined
+    ? {}
+    : { reuseExistingThread: input.reuseExistingThread }),
+  projectId: input.projectId,
+  title: input.title,
+  ...(input.generateTitle === undefined ? {} : { generateTitle: input.generateTitle }),
+  modelSelection: input.modelSelection,
+  runtimeMode: input.runtimeMode,
+  interactionMode: input.interactionMode,
+  workspaceStrategy: input.workspaceStrategy,
+  ...(input.initialMessage === undefined
+    ? {}
+    : {
+        initialMessage: {
+          ...(input.initialMessage.messageId === undefined
+            ? {}
+            : { messageId: input.initialMessage.messageId }),
+          text: input.initialMessage.text,
+          attachments: input.initialMessage.attachments,
+          ...(input.initialMessage.context === undefined
+            ? {}
+            : { context: input.initialMessage.context }),
+        },
+      }),
+  createdBy: "user",
+  creationSource: input.creationSource ?? creationSource,
 });
