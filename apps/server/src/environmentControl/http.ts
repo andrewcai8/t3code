@@ -15,6 +15,7 @@ import {
   failEnvironmentInternal,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import { makeHostLaunchThread } from "../orchestration-v2/hostLaunchThread.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 
 const MAX_PROVISION_BODY_BYTES = 90 * 1024 * 1024;
@@ -44,7 +45,13 @@ export const environmentControlHttpApiLayer = HttpApiBuilder.group(
   "environmentControl",
   Effect.fnUntraced(function* (handlers) {
     const control = yield* EnvironmentControl.EnvironmentControl;
+    const launchThread = yield* makeHostLaunchThread;
     return handlers
+      .handle("launchThread", (args) =>
+        annotateEnvironmentRequest(args.endpoint.name).pipe(
+          Effect.andThen(launchThread(args.payload)),
+        ),
+      )
       .handle(
         "listProvisioned",
         Effect.fn("environment.control.listProvisioned")(function* (args) {

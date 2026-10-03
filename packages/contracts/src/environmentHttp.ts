@@ -125,7 +125,6 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
-  "orchestration_launch_thread_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -525,23 +524,6 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-const EnvironmentOrchestrationLaunchThreadErrors = [
-  EnvironmentRequestInvalidError,
-  EnvironmentScopeRequiredError,
-  EnvironmentInternalError,
-] as const;
-
-/**
- * What a host learns from starting a chat on one of its cloud boxes. The box replays a repeated
- * `commandId`, so `resumed` is true when an earlier attempt already launched the thread.
- */
-export const EnvironmentOrchestrationLaunchThreadResult = Schema.Struct({
-  threadId: ThreadId,
-  resumed: Schema.Boolean,
-});
-export type EnvironmentOrchestrationLaunchThreadResult =
-  typeof EnvironmentOrchestrationLaunchThreadResult.Type;
-
 const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
@@ -589,14 +571,6 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
       success: OrchestrationV2ThreadHistoryPage,
       error: EnvironmentOrchestrationThreadHistoryErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
-  )
-  .add(
-    HttpApiEndpoint.post("launchThread", "/api/orchestration/launch-thread", {
-      headers: OrchestrationProtocolHeaders,
-      payload: OrchestrationV2ThreadLaunchInput,
-      success: EnvironmentOrchestrationLaunchThreadResult,
-      error: EnvironmentOrchestrationLaunchThreadErrors,
-    }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
@@ -615,6 +589,23 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
       error: EnvironmentProjectMutationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
+
+const EnvironmentOrchestrationLaunchThreadErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
+/**
+ * What a host learns from starting a chat on one of its cloud boxes. The box replays a repeated
+ * `commandId`, so `resumed` is true when an earlier attempt already launched the thread.
+ */
+export const EnvironmentOrchestrationLaunchThreadResult = Schema.Struct({
+  threadId: ThreadId,
+  resumed: Schema.Boolean,
+});
+export type EnvironmentOrchestrationLaunchThreadResult =
+  typeof EnvironmentOrchestrationLaunchThreadResult.Type;
 
 export class EnvironmentControlHttpApi extends HttpApiGroup.make("environmentControl")
   .add(
@@ -663,6 +654,14 @@ export class EnvironmentControlHttpApi extends HttpApiGroup.make("environmentCon
       payload: EnvironmentProvisionDisposeInput,
       success: EnvironmentProvisionDisposeResult,
       error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("launchThread", "/api/orchestration/launch-thread", {
+      headers: OrchestrationProtocolHeaders,
+      payload: OrchestrationV2ThreadLaunchInput,
+      success: EnvironmentOrchestrationLaunchThreadResult,
+      error: EnvironmentOrchestrationLaunchThreadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

@@ -1,5 +1,6 @@
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
@@ -23,6 +24,10 @@ import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { failEnvironmentAuthInvalid } from "../auth/http.ts";
+import * as ServerConfig from "../config.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { EnvironmentControl } from "./EnvironmentControl.ts";
 import { environmentControlBodyLimitLayer, environmentControlHttpApiLayer } from "./http.ts";
 
@@ -103,6 +108,15 @@ it.effect(
       const routes = HttpApiBuilder.layer(ProvisionHttpApi).pipe(
         Layer.provide(environmentControlHttpApiLayer),
         Layer.provide(service),
+        // The launchThread route needs these to build; this proof never calls it.
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-provision-http-" }),
+          ).pipe(Layer.provideMerge(NodeServices.layer)),
+        ),
         Layer.provide(auth),
         Layer.provide(environmentControlBodyLimitLayer),
       );

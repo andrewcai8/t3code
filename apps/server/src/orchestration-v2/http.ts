@@ -30,7 +30,6 @@ import {
 } from "./threadHistoryPaging.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
-import { makeHostLaunchThread } from "./hostLaunchThread.ts";
 import { buildActiveShellSnapshot } from "./ShellStream.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 
@@ -73,7 +72,6 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
-    const launchThread = yield* makeHostLaunchThread;
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -258,11 +256,6 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             hasMoreHistory: pageOrError.page.hasMoreHistory,
           };
         }),
-      )
-      .handle("launchThread", (args) =>
-        annotateEnvironmentRequest(args.endpoint.name).pipe(
-          Effect.andThen(launchThread(args.payload)),
-        ),
       );
   }),
 );

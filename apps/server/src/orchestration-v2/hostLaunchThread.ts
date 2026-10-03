@@ -113,7 +113,7 @@ export const makeHostLaunchThread = Effect.gen(function* () {
           ): Effect.Effect<never, EnvironmentRequestInvalidError | EnvironmentInternalError> =>
             launchRefusedForGood(cause)
               ? failEnvironmentInvalidRequest("invalid_command")
-              : failEnvironmentInternal("orchestration_launch_thread_failed", cause),
+              : failEnvironmentInternal("internal_error", cause),
         ),
       );
     return { threadId: result.threadId, resumed: result.resumed };
