@@ -66,8 +66,9 @@ pairing for. Every pairing opens a session on the box, so pairing again on each
 open would pile them up.
 
 A paused box's address still answers, with a gateway 404, 502 or 503 that the
-resolver reads as `not-serving`, and an unpaired paused box's dial fails the same
-way when its host lists it paused. The supervisor wakes it, not a view: after such
+resolver reads as `not-serving`, and an unpaired box's dial fails the same
+way when its host lists it paused or the host's attach refuses it as not serving.
+The supervisor wakes it, not a view: after such
 a dial it enters `waking`, the registry asks the box's host to resume it, and the
 supervisor dials again. `waking` means a resume is in flight to a connected
 host; while the host is down the box backs off and redials instead, and a

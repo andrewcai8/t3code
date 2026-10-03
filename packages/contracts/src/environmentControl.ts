@@ -257,7 +257,12 @@ export const EnvironmentProvisionAttachResult = Schema.Union([
     environmentId: EnvironmentId,
     pairingUrl: TrimmedNonEmptyString,
   }),
-  Schema.Struct({ kind: Schema.Literal("refused"), message: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    /** `not-serving`: the box is asleep or its T3 server is down; resume it, then attach again. */
+    reason: Schema.optional(Schema.Literal("not-serving")),
+    message: Schema.String,
+  }),
 ]);
 export type EnvironmentProvisionAttachResult = typeof EnvironmentProvisionAttachResult.Type;
 

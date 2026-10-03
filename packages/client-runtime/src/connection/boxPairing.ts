@@ -83,9 +83,9 @@ export function reachablePairingUrl(
 }
 
 /**
- * Obtains this device's pairing for a box through the host that provisioned it. A paused box
- * fails `not-serving`, so the dial wakes it and pairs on its next attempt. A box the host no
- * longer has is a missing workspace.
+ * Obtains this device's pairing for a box through the host that provisioned it. A box the host
+ * lists paused, or whose attach the host refuses as not serving, fails `not-serving`, so the dial
+ * wakes it and pairs on its next attempt. A box the host no longer has is a missing workspace.
  */
 export const pairBoxThroughHost = Effect.fn("BoxPairing.pairBoxThroughHost")(function* (
   box: { readonly environmentId: EnvironmentId } & BoxAttachment,
@@ -102,7 +102,7 @@ export const pairBoxThroughHost = Effect.fn("BoxPairing.pairBoxThroughHost")(fun
   const attached = yield* ports.attach(row.requestId);
   if (attached.kind === "refused")
     return yield* new ConnectionTransientError({
-      reason: "remote-unavailable",
+      reason: attached.reason === "not-serving" ? "not-serving" : "remote-unavailable",
       detail: attached.message,
     });
   if (attached.environmentId !== box.environmentId)
