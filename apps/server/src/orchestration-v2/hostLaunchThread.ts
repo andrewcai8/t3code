@@ -8,7 +8,6 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentInternalError,
   type EnvironmentRequestInvalidError,
-  type OrchestrationV2CreationSource,
   type OrchestrationV2ThreadLaunchInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -49,42 +48,22 @@ export function launchRefusedForGood(error: unknown): boolean {
   );
 }
 
-/**
- * The launch a client asked for; `creationSource` fills in when it named none.
- * Keep in step with the WS `launchThread` handler in `ws.ts`.
- */
-const clientLaunchInput = (
-  input: OrchestrationV2ThreadLaunchInput,
-  creationSource: OrchestrationV2CreationSource,
-): ThreadLaunchService.ThreadLaunchInput => ({
-  commandId: input.commandId,
-  ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-  ...(input.reuseExistingThread === undefined
-    ? {}
-    : { reuseExistingThread: input.reuseExistingThread }),
-  projectId: input.projectId,
-  title: input.title,
-  ...(input.generateTitle === undefined ? {} : { generateTitle: input.generateTitle }),
-  modelSelection: input.modelSelection,
-  runtimeMode: input.runtimeMode,
-  interactionMode: input.interactionMode,
-  workspaceStrategy: input.workspaceStrategy,
-  ...(input.initialMessage === undefined
-    ? {}
-    : {
-        initialMessage: {
-          ...(input.initialMessage.messageId === undefined
-            ? {}
-            : { messageId: input.initialMessage.messageId }),
-          text: input.initialMessage.text,
-          attachments: input.initialMessage.attachments,
-          ...(input.initialMessage.context === undefined
-            ? {}
-            : { context: input.initialMessage.context }),
-        },
-      }),
+/** Drops a decoded value's `undefined` optional keys, as `exactOptionalPropertyTypes` wants. */
+type WithoutUndefined<T> = { [K in keyof T]: Exclude<T[K], undefined> };
+const withoutUndefined = <T extends object>(value: T) =>
+  Object.fromEntries(
+    Object.entries(value).filter(([, field]) => field !== undefined),
+  ) as WithoutUndefined<T>;
+
+/** The launch a client asked for, every decoded field kept; `creationSource` defaults to server. */
+const clientLaunchInput = ({
+  initialMessage,
+  ...input
+}: OrchestrationV2ThreadLaunchInput): ThreadLaunchService.ThreadLaunchInput => ({
+  ...withoutUndefined(input),
+  ...(initialMessage === undefined ? {} : { initialMessage: withoutUndefined(initialMessage) }),
   createdBy: "user",
-  creationSource: input.creationSource ?? creationSource,
+  creationSource: input.creationSource ?? "server",
 });
 
 /** The `launchThread` endpoint's handler body, built once with the layer's services. */
@@ -102,7 +81,7 @@ export const makeHostLaunchThread = Effect.gen(function* () {
     yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
     const result = yield* startup
       .enqueueCommand(
-        ThreadMessageIntake.launchThread(clientLaunchInput(payload, "server")).pipe(
+        ThreadMessageIntake.launchThread(clientLaunchInput(payload)).pipe(
           Effect.provide(intakeContext),
         ),
       )
