@@ -2,7 +2,7 @@ import { CommandId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { AttachmentClaimError } from "./AttachmentClaims.ts";
-import { launchRefusedForGood } from "./http.ts";
+import { launchRefusedForGood } from "./hostLaunchThread.ts";
 import {
   OrchestratorCommandIdConflictError,
   OrchestratorCommandPreviouslyRejectedError,

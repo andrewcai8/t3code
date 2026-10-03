@@ -1,15 +1,11 @@
 import {
-  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
-  type EnvironmentInternalError,
-  type EnvironmentRequestInvalidError,
   ThreadId,
   TurnItemId,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import type * as FileSystem from "effect/FileSystem";
 import * as Predicate from "effect/Predicate";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -21,9 +17,7 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
-import type * as ServerConfig from "../config.ts";
 import * as OrchestrationEventStore from "../persistence/Services/OrchestrationEventStore.ts";
-import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import {
   buildBoundedThreadProjection,
@@ -34,10 +28,9 @@ import {
   THREAD_HISTORY_PAGE_POLICY,
   OLDER_THREAD_USER_TURN_LIMIT,
 } from "./threadHistoryPaging.ts";
-import type * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
-import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import { makeHostLaunchThread } from "./hostLaunchThread.ts";
 import { buildActiveShellSnapshot } from "./ShellStream.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 
@@ -46,29 +39,6 @@ function isThreadNotFound(error: unknown): boolean {
     Predicate.hasProperty(error, "cause") &&
     Predicate.hasProperty(error.cause, "_tag") &&
     error.cause._tag === "ProjectionStoreThreadNotFoundError"
-  );
-}
-
-const refusedForGoodTags: ReadonlySet<string> = new Set([
-  "AttachmentClaimError",
-  "OrchestratorCommandRejectedError",
-  "OrchestratorCommandPreviouslyRejectedError",
-  "OrchestratorCommandIdConflictError",
-]);
-
-/**
- * A launch the box will never accept, whatever the retry: the caller gets a 4xx and stops. Any
- * other failure is a 5xx it retries under the same command id.
- */
-export function launchRefusedForGood(error: unknown): boolean {
-  if (!Predicate.hasProperty(error, "_tag")) return false;
-  if (typeof error._tag === "string" && refusedForGoodTags.has(error._tag)) return true;
-  return (
-    error._tag === "ThreadLaunchError" &&
-    Predicate.hasProperty(error, "cause") &&
-    Predicate.hasProperty(error.cause, "_tag") &&
-    typeof error.cause._tag === "string" &&
-    refusedForGoodTags.has(error.cause._tag)
   );
 }
 
@@ -103,13 +73,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
-    const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
-    const intakeContext = yield* Effect.context<
-      | ThreadManagementService.ThreadManagementService
-      | ThreadLaunchService.ThreadLaunchService
-      | FileSystem.FileSystem
-      | ServerConfig.ServerConfig
-    >();
+    const launchThread = yield* makeHostLaunchThread;
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -295,33 +259,10 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           };
         }),
       )
-      .handle(
-        "launchThread",
-        // A host starts the chat on one of its cloud boxes here; it mirrors the WS launchThread.
-        Effect.fn("environment.orchestration.launchThread")(function* (args) {
-          yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
-          const result = yield* startup
-            .enqueueCommand(
-              ThreadMessageIntake.launchThread(
-                ThreadMessageIntake.clientLaunchInput(args.payload, "server"),
-              ).pipe(Effect.provide(intakeContext)),
-            )
-            .pipe(
-              Effect.catch(
-                (
-                  cause,
-                ): Effect.Effect<
-                  never,
-                  EnvironmentRequestInvalidError | EnvironmentInternalError
-                > =>
-                  launchRefusedForGood(cause)
-                    ? failEnvironmentInvalidRequest("invalid_command")
-                    : failEnvironmentInternal("orchestration_launch_thread_failed", cause),
-              ),
-            );
-          return { threadId: result.threadId, resumed: result.resumed };
-        }),
+      .handle("launchThread", (args) =>
+        annotateEnvironmentRequest(args.endpoint.name).pipe(
+          Effect.andThen(launchThread(args.payload)),
+        ),
       );
   }),
 );

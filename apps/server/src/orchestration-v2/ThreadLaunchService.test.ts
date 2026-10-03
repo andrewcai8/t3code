@@ -56,6 +56,7 @@ import * as IdAllocator from "./IdAllocator.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import { LOCAL_AGENT_RUNS_DISABLED_MESSAGE } from "./cloudOnlyHost.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
@@ -376,10 +377,7 @@ it.effect("a cloud-only host refuses scheduled runs and leaves no thread behind"
         creationSource: "web",
       });
       const { task: ran } = yield* tasks.runNow({ id: task.id });
-      runs.push([
-        ran.lastRunStatus,
-        ran.lastRunError?.includes(ThreadManagement.LOCAL_AGENT_RUNS_DISABLED_MESSAGE),
-      ]);
+      runs.push([ran.lastRunStatus, ran.lastRunError?.includes(LOCAL_AGENT_RUNS_DISABLED_MESSAGE)]);
     }
     assert.deepStrictEqual(runs, [
       ["failed", true],
@@ -429,7 +427,7 @@ it.effect("a cloud-only host refuses turns and answers and accepts other thread 
         answers: { question: "yes" },
       }),
     ];
-    const reason = `Error: ${ThreadManagement.LOCAL_AGENT_RUNS_DISABLED_MESSAGE}`;
+    const reason = `Error: ${LOCAL_AGENT_RUNS_DISABLED_MESSAGE}`;
     assert.deepStrictEqual(refused, [
       ["OrchestratorCommandRejectedError", reason],
       ["OrchestratorCommandRejectedError", reason],

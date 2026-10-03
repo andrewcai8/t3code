@@ -41,6 +41,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import { randomUuidV4 } from "./RandomUuid.ts";
+import { LOCAL_AGENT_RUNS_DISABLED_MESSAGE, localAgentRunsEnabled } from "./cloudOnlyHost.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
@@ -155,7 +156,7 @@ const make = Effect.gen(function* () {
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
-  const localAgentRuns = yield* ThreadManagement.localAgentRunsEnabled;
+  const localAgentRuns = yield* localAgentRunsEnabled;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
@@ -619,7 +620,7 @@ const make = Effect.gen(function* () {
         return yield* mapError(
           input,
           "dispatch-message",
-        )(new Error(ThreadManagement.LOCAL_AGENT_RUNS_DISABLED_MESSAGE));
+        )(new Error(LOCAL_AGENT_RUNS_DISABLED_MESSAGE));
       }
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
