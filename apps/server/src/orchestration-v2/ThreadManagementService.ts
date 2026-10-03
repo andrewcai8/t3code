@@ -386,8 +386,8 @@ const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   // A cloud-only host (T3CODE_LOCAL_AGENT_RUNS=false) must never start a run here. Clients,
-  // launches, scheduled tasks, limit recovery and MCP tools all reach the orchestrator through
-  // this service, so the refusal sits here rather than in each of them.
+  // scheduled tasks, limit recovery and MCP tools all reach the orchestrator through this service,
+  // so the refusal sits here. ThreadLaunchService checks too, before it creates the thread.
   const localAgentRuns = yield* localAgentRunsEnabled;
   const refuseLocalRun = (command: {
     readonly type: string;

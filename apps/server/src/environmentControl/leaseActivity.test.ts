@@ -79,7 +79,7 @@ describe("shellActivity", () => {
       "unknown",
     ],
     ["an unrecognized run status", [thread({ status: "pondering" })], "unknown"],
-  ])("reads %s as %s", (_name, threads, expected) => {
+  ])("reads $0 as $2", (_name, threads, expected) => {
     expect(shellActivity({ snapshotSequence: 1, projects: [], threads })).toBe(expected);
   });
 
