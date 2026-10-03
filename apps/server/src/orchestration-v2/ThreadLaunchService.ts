@@ -155,6 +155,7 @@ const make = Effect.gen(function* () {
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const localAgentRuns = yield* ThreadManagement.localAgentRunsEnabled;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
@@ -613,6 +614,13 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (input) {
+      // Refused before the thread is created, so a cloud-only host keeps no empty thread.
+      if (!localAgentRuns && input.initialMessage !== undefined) {
+        return yield* mapError(
+          input,
+          "dispatch-message",
+        )(new Error(ThreadManagement.LOCAL_AGENT_RUNS_DISABLED_MESSAGE));
+      }
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,

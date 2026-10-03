@@ -31,6 +31,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 
@@ -373,9 +374,35 @@ function latestSteerableRun(
     .toSorted((left, right) => right.ordinal - left.ordinal)[0];
 }
 
+export const LOCAL_AGENT_RUNS_DISABLED_MESSAGE =
+  "This server does not run agents. Start the chat on a cloud environment.";
+
+/** False on a cloud-only host (T3CODE_LOCAL_AGENT_RUNS=false). */
+export const localAgentRunsEnabled = Effect.serviceOption(ServerConfig.ServerConfig).pipe(
+  Effect.map(Option.match({ onNone: () => true, onSome: (config) => config.localAgentRuns })),
+);
+
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+  // A cloud-only host (T3CODE_LOCAL_AGENT_RUNS=false) must never start a run here. Clients,
+  // launches, scheduled tasks, limit recovery and MCP tools all reach the orchestrator through
+  // this service, so the refusal sits here rather than in each of them.
+  const localAgentRuns = yield* localAgentRunsEnabled;
+  const refuseLocalRun = (command: {
+    readonly type: string;
+    readonly commandId: OrchestrationV2ServerCommand["commandId"];
+  }) =>
+    !localAgentRuns &&
+    (command.type === "message.dispatch" || command.type === "runtime-request.respond")
+      ? Effect.fail(
+          new Orchestrator.OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: new Error(LOCAL_AGENT_RUNS_DISABLED_MESSAGE),
+          }),
+        )
+      : Effect.void;
 
   const ensureLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
@@ -443,7 +470,10 @@ const make = Effect.gen(function* () {
     );
 
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(Effect.andThen(orchestrator.dispatch(command)));
+    refuseLocalRun(command).pipe(
+      Effect.andThen(ensureCommandTranscripts(command)),
+      Effect.andThen(orchestrator.dispatch(command)),
+    );
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(
@@ -552,6 +582,7 @@ const make = Effect.gen(function* () {
         };
       }
 
+      yield* refuseLocalRun({ type: "message.dispatch", commandId: input.commandId });
       const dispatch = yield* orchestrator.dispatch({
         type: "message.dispatch",
         commandId: input.commandId,

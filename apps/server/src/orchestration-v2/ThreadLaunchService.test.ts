@@ -20,6 +20,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeRequestId,
   OrchestrationV2ThreadProjectionJson,
   ScheduledTaskId,
   type ServerProvider,
@@ -104,7 +105,17 @@ interface HarnessOptions {
   readonly generateBranchName?: TextGeneration.TextGeneration["Service"]["generateBranchName"];
   readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly providers?: ReadonlyArray<ServerProvider>;
+  /** A host started with T3CODE_LOCAL_AGENT_RUNS=false. */
+  readonly cloudOnlyHost?: boolean;
 }
+
+const cloudOnlyHostConfig = Layer.effect(
+  ServerConfig.ServerConfig,
+  Effect.map(ServerConfig.ServerConfig, (config) => ({ ...config, localAgentRuns: false })),
+).pipe(
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-cloud-only-host-" })),
+  Layer.provide(NodeServices.layer),
+);
 
 function makeHarness(options: HarnessOptions = {}) {
   const database = SqlitePersistenceMemory;
@@ -114,7 +125,10 @@ function makeHarness(options: HarnessOptions = {}) {
     registry,
     { databaseLayer: database, runEffectWorker: false },
   );
-  const threadManagement = ThreadManagement.layer.pipe(Layer.provide(orchestrator));
+  const hostConfig = options.cloudOnlyHost === true ? cloudOnlyHostConfig : Layer.empty;
+  const threadManagement = ThreadManagement.layer.pipe(
+    Layer.provide(Layer.merge(orchestrator, hostConfig)),
+  );
   const receipts = CommandReceiptStore.layer.pipe(Layer.provide(database));
   const outbox = EffectOutbox.layer.pipe(Layer.provide(database));
   const createWorktree = vi.fn(
@@ -184,7 +198,9 @@ function makeHarness(options: HarnessOptions = {}) {
       }),
   );
   const launch = ThreadLaunch.layer.pipe(
-    Layer.provide(Layer.mergeAll(externalServices, threadManagement, receipts, IdAllocator.layer)),
+    Layer.provide(
+      Layer.mergeAll(externalServices, threadManagement, receipts, IdAllocator.layer, hostConfig),
+    ),
   );
   const projectedProjects = Layer.mock(ProjectStore.ProjectStoreV2)({
     get: (requestedProjectId) =>
@@ -329,6 +345,108 @@ it.effect.each(
     }).pipe(Effect.provide(Layer.mergeAll(harness.layer, scheduledTasks)));
   },
 );
+
+it.effect("a cloud-only host refuses scheduled runs and leaves no thread behind", () => {
+  const harness = makeHarness({ cloudOnlyHost: true });
+  const scheduledTasks = ScheduledTasks.layer.pipe(
+    Layer.provide(Layer.mergeAll(harness.layer, NodeCrypto.layer, Scheduler.layer)),
+  );
+  return Effect.gen(function* () {
+    const tasks = yield* ScheduledTasks.ScheduledTaskService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const existing = yield* launches.launch(
+      launchInput({ command: "command:cloud-only", thread: "thread:cloud-only" }),
+    );
+    const runs = [];
+    for (const threadId of [null, existing.threadId]) {
+      const { task } = yield* tasks.upsert({
+        id: ScheduledTaskId.make(`scheduled-task:cloud-only:${threadId ?? "new"}`),
+        title: "Daily audit",
+        prompt: "Audit performance and crashes.",
+        enabled: false,
+        schedule: { type: "interval", everyMs: 60_000 },
+        projectId,
+        threadId,
+        workspaceStrategy: { type: "root" },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const { task: ran } = yield* tasks.runNow({ id: task.id });
+      runs.push([
+        ran.lastRunStatus,
+        ran.lastRunError?.includes(ThreadManagement.LOCAL_AGENT_RUNS_DISABLED_MESSAGE),
+      ]);
+    }
+    assert.deepStrictEqual(runs, [
+      ["failed", true],
+      ["failed", true],
+    ]);
+    const projectThreads = yield* threads.listProjectThreads({
+      projectId,
+      includeSubagents: false,
+    });
+    assert.deepStrictEqual(
+      projectThreads.map((thread) => thread.id),
+      [existing.threadId],
+    );
+    assert.deepStrictEqual((yield* threads.getThreadProjection(existing.threadId)).messages, []);
+  }).pipe(Effect.provide(Layer.mergeAll(harness.layer, scheduledTasks)));
+});
+
+it.effect("a cloud-only host refuses turns and answers and accepts other thread commands", () => {
+  const harness = makeHarness({ cloudOnlyHost: true });
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* (yield* ThreadLaunch.ThreadLaunchService).launch(
+      launchInput({ command: "command:cloud-only:thread", thread: "thread:cloud-only:commands" }),
+    );
+    const refusal = (command: Parameters<typeof threads.dispatch>[0]) =>
+      threads.dispatch(command).pipe(
+        Effect.flip,
+        Effect.map((error) => [error._tag, String(error.cause)]),
+      );
+    const refused = [
+      yield* refusal({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:cloud-only:message"),
+        threadId: launched.threadId,
+        messageId: MessageId.make("message:cloud-only"),
+        text: "Run this here",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      }),
+      yield* refusal({
+        type: "runtime-request.respond",
+        commandId: CommandId.make("command:cloud-only:answer"),
+        threadId: launched.threadId,
+        requestId: RuntimeRequestId.make("request:cloud-only"),
+        answers: { question: "yes" },
+      }),
+    ];
+    const reason = `Error: ${ThreadManagement.LOCAL_AGENT_RUNS_DISABLED_MESSAGE}`;
+    assert.deepStrictEqual(refused, [
+      ["OrchestratorCommandRejectedError", reason],
+      ["OrchestratorCommandRejectedError", reason],
+    ]);
+    yield* threads.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("command:cloud-only:rename"),
+      threadId: launched.threadId,
+      title: "Renamed on a cloud-only host",
+    });
+    const projection = yield* threads.getThreadProjection(launched.threadId);
+    assert.deepStrictEqual(
+      [projection.thread.title, projection.messages.length],
+      ["Renamed on a cloud-only host", 0],
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("retains automation and sender attribution while a message waits in the queue", () => {
   const harness = makeHarness({ runSetup: () => Effect.never });
