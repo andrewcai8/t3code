@@ -7,11 +7,7 @@ import {
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
-import {
-  AVAILABLE_CONNECTION_STATE,
-  connectionBox,
-  type SupervisorConnectionState,
-} from "../connection/model.ts";
+import { AVAILABLE_CONNECTION_STATE, type SupervisorConnectionState } from "../connection/model.ts";
 import {
   connectionCatalogDisplayUrl,
   presentEnvironmentConnection,
@@ -19,6 +15,7 @@ import {
   type EnvironmentPresentation,
 } from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
+import { isBoxEntry } from "./connectionsCloud.ts";
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
   if (left.size !== right.size) {
@@ -62,14 +59,11 @@ export function createEnvironmentPresentationAtoms<E>(input: {
   );
 
   let previous: ReadonlyMap<EnvironmentId, EnvironmentPresentation> = new Map();
-  /**
-   * Every saved environment but the cloud boxes, switched off ones included so Settings can list
-   * them. A box belongs to its chat; read it through `presentationAtom`.
-   */
   const presentationsAtom = Atom.make((get) => {
     const next = new Map<EnvironmentId, EnvironmentPresentation>();
     for (const [environmentId, entry] of get(input.catalogValueAtom).entries) {
-      if (connectionBox(entry.target) !== null) continue;
+      // A cloud box belongs to its chat; read it through `presentationAtom`.
+      if (isBoxEntry(entry)) continue;
       const presentation = get(presentationAtom(environmentId));
       if (presentation !== null) {
         next.set(environmentId, presentation);
