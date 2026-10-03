@@ -1,16 +1,13 @@
-import { createAutomationJoins, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMemo } from "react";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironments } from "../state/environments";
 import { serverEnvironment } from "../state/server";
-import { localProvisionStorage } from "./provisionStorage";
 
-export const automationJoins = createAutomationJoins(localProvisionStorage);
-
-/** Connected hosts that can run automations: they offer cloud environments. */
-export function useAutomationHosts() {
+/** Connected hosts that offer cloud environments. */
+export function useCloudHosts() {
   const { environments } = useEnvironments();
   return useMemo(
     () =>
@@ -20,17 +17,6 @@ export function useAutomationHosts() {
           offeredProvisionProviders(environment.serverConfig).length > 0,
       ),
     [environments],
-  );
-}
-
-/**
- * Whether any known environment offers cloud machines. Connection phase is ignored, so a
- * reconnect does not add and remove the entry points.
- */
-export function useAutomationsAvailable(): boolean {
-  const { environments } = useEnvironments();
-  return environments.some(
-    (environment) => offeredProvisionProviders(environment.serverConfig).length > 0,
   );
 }
 

@@ -95,7 +95,6 @@ describe("running box demand", () => {
             threadId: null,
             lifecycle: get(lifecycle),
             label: "t3code · E2B",
-            automationId: null,
             chat: null,
           },
         ]),
@@ -127,7 +126,7 @@ describe("running box demand", () => {
 
   it("holds a box that joined after its host's list was read once the list is fetched again", () => {
     const { registry, lifecycle, held } = harness({ thread: running, lifecycle: "missing" });
-    // Stands in for the list read before the automation run's box existed.
+    // Stands in for the list read before the box existed.
     expect([...held]).toEqual([]);
     registry.set(lifecycle, "active");
     expect([...held]).toEqual([BOX.environmentId]);

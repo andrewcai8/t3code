@@ -161,7 +161,7 @@ vi.mock("react", () => ({
   useCallback: <T>(callback: T) => callback,
   useMemo: <T>(factory: () => T) => factory(),
 }));
-vi.mock("../cloud/automationHosts", () => ({
+vi.mock("../cloud/cloudHosts", () => ({
   useNewChatPlacement: () => ({
     environmentState: (environmentId: string) =>
       testState.environments.find((environment) => environment.environmentId === environmentId),
@@ -339,8 +339,8 @@ describe("a new chat started from a page with no chat in view", () => {
 
   // Without a chat in view, the new chat is placed from the first project in sidebar order,
   // which here is a box's copy of megpt-mono.
-  const startFromAutomations = (hintEnvironmentId: string) => {
-    testState.router.state.location.href = "/automations";
+  const startFromUsage = (hintEnvironmentId: string) => {
+    testState.router.state.location.href = "/usage";
     return startNewThreadFromContext({
       activeDraftThread: null,
       activeThread: undefined,
@@ -361,7 +361,7 @@ describe("a new chat started from a page with no chat in view", () => {
       environments: [{ environmentId: host, connection: { phase: "connected" } }],
     });
 
-    await startFromAutomations(boxId);
+    await startFromUsage(boxId);
 
     expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
       "megpt-mono",

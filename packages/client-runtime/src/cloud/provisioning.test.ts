@@ -348,7 +348,7 @@ describe("newChatProject", () => {
 
   // The chat in view is on its box, so a chat route asks for the box's copy. Every other page has
   // no chat in view and asks for the first project in sidebar order, which here is also the box's.
-  const routes = ["chat", "/automations", "/usage", "/settings", "/"] as const;
+  const routes = ["chat", "/usage", "/settings", "/"] as const;
   const cases = routes.flatMap((route) =>
     [true, false].map((onHost) => {
       const projects = [copy(box), ...(onHost ? [copy(host)] : []), copy(host, "t3code")];

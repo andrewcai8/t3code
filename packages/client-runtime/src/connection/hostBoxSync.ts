@@ -71,7 +71,7 @@ export function planHostBoxSync(input: HostBoxSyncInput): ReadonlyArray<HostBoxS
     const gone = row.lifecycle === "missing" || row.lifecycle === "disposed";
     const entry = entries.get(row.environmentId);
     if (entry === undefined) {
-      if (!gone && row.threadId !== null && row.automationId === null)
+      if (!gone && row.threadId !== null)
         steps.push({
           _tag: "Adopt",
           target: new BearerConnectionTarget({

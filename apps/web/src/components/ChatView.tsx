@@ -575,7 +575,7 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
-import { refreshProvisionedEnvironments } from "../cloud/automationHosts";
+import { refreshProvisionedEnvironments } from "../cloud/cloudHosts";
 import { useBoxDemand } from "../cloud/CloudBoxes";
 import { type ReconnectResult, useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";

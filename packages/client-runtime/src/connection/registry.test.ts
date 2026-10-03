@@ -175,7 +175,6 @@ function listedBox(
   overrides: {
     readonly lifecycle?: DiscoveredProvisionedEnvironment["lifecycle"];
     readonly label?: string;
-    readonly automationId?: string;
     readonly chat?: ProvisionedChat;
   } = {},
 ): DiscoveredProvisionedEnvironment {
@@ -190,7 +189,6 @@ function listedBox(
     repository: "pingdotgg/t3code",
     projectDir: "/workspace/t3code",
     threadId: "thread-cloud-chat",
-    ...(overrides.automationId === undefined ? {} : { automationId: overrides.automationId }),
     ...(overrides.chat === undefined ? {} : { chat: overrides.chat }),
     createdAt: "2026-10-01T00:00:00.000Z",
     expiresAt: "2026-10-02T00:00:00.000Z",
@@ -2999,13 +2997,7 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
         yield* awaitConnectionState(registry, TARGET.environmentId, (s) => s.phase === "connected");
         yield* registry.syncHostBoxes(
           TARGET.environmentId,
-          listing(
-            listedBox(CHAT_BOX_ID, { lifecycle: "paused", chat: chatAt(4) }),
-            listedBox(EnvironmentId.make("environment-automation-run"), {
-              automationId: "nightly",
-              chat: chatAt(2),
-            }),
-          ),
+          listing(listedBox(CHAT_BOX_ID, { lifecycle: "paused", chat: chatAt(4) })),
         );
         yield* TestClock.adjust("1 hour");
 

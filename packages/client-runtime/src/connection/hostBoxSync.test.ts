@@ -47,7 +47,6 @@ function box(id: string, overrides: Partial<ProvisionedBox> = {}): ProvisionedBo
     threadId: ThreadId.make(`thread-${id}`),
     lifecycle: "active",
     label: "t3code · E2B",
-    automationId: null,
     chat: null,
     ...overrides,
   };
@@ -135,7 +134,7 @@ describe("planHostBoxSync", () => {
     ]);
   });
 
-  it("leaves automation runs, unclaimed and gone boxes, and hosts unadopted", () => {
+  it("leaves unclaimed and gone boxes, and hosts unadopted", () => {
     expect(
       plan({
         entries: [
@@ -143,7 +142,6 @@ describe("planHostBoxSync", () => {
           saved("hosted", { managerId: EnvironmentId.make("hosting-box") }),
         ],
         boxes: [
-          box("automation-run", { automationId: "nightly" }),
           box("unclaimed", { threadId: null }),
           box("gone", { lifecycle: "disposed" }),
           box("lost", { lifecycle: "missing" }),

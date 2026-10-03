@@ -34,7 +34,7 @@ import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { useNewChatPlacement } from "../cloud/automationHosts";
+import { useNewChatPlacement } from "../cloud/cloudHosts";
 import { useClientSettings } from "./useSettings";
 
 interface NewThreadWorkspaceOptions {

@@ -266,12 +266,8 @@ import {
   ComboboxTrigger,
   useComboboxFilter,
 } from "./ui/combobox";
-import { SidebarContent, SidebarGroup, SidebarMenu, useSidebar } from "./ui/sidebar";
-import {
-  SidebarAutomationsItem,
-  SidebarChromeFooter,
-  SidebarChromeHeader,
-} from "./sidebar/SidebarChrome";
+import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
+import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -4836,9 +4832,6 @@ export default function Sidebar() {
               activeSearchResultIndex={activeSearchResultIndex}
               onClearSearch={clearThreadSearch}
             />
-            <SidebarMenu className="mt-1 empty:hidden">
-              <SidebarAutomationsItem />
-            </SidebarMenu>
           </SidebarGroup>
         }
       >

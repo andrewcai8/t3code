@@ -45,7 +45,6 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
-  CloudCogIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -80,7 +79,7 @@ import {
 } from "react";
 import { useAtomValue } from "@effect/atom-react";
 
-import { useAutomationsAvailable, useNewChatPlacement } from "../cloud/automationHosts";
+import { useNewChatPlacement } from "../cloud/cloudHosts";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -561,13 +560,6 @@ export function CommandPalette({ children }: { children: ReactNode }) {
         void navigate({ to: "/usage" });
         return;
       }
-      if (command === "automations.open") {
-        event.preventDefault();
-        event.stopPropagation();
-        setOpen(false);
-        void navigate({ to: "/automations" });
-        return;
-      }
       const mode = overlayModeForCommand(command);
       if (mode === null) {
         return;
@@ -728,7 +720,6 @@ function OpenCommandPaletteDialog(props: {
     reportFailure: false,
   });
   const { environments } = useEnvironments();
-  const automationsAvailable = useAutomationsAvailable();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
@@ -2210,20 +2201,6 @@ function OpenCommandPaletteDialog(props: {
       icon: <PullRequestGlyph.pullRequest className={ITEM_ICON_CLASS} />,
       run: async () => {
         await navigate({ to: "/pull-requests", search: readPullRequestListPreferences() });
-      },
-    });
-  }
-
-  if (automationsAvailable) {
-    actionItems.push({
-      kind: "action",
-      value: "action:automations",
-      searchTerms: ["automations", "schedule", "cron", "webhook", "recurring"],
-      title: "Open automations",
-      icon: <CloudCogIcon className={ITEM_ICON_CLASS} />,
-      shortcutCommand: "automations.open",
-      run: async () => {
-        await navigate({ to: "/automations" });
       },
     });
   }
