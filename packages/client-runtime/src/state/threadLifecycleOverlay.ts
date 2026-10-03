@@ -1,20 +1,24 @@
 import {
   EnvironmentId,
   ThreadId,
+  type OrchestrationV2DispatchCommandResult,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadShell,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
 import { ConnectionBlockedError } from "../connection/model.ts";
 
 import { isTransportConnectionErrorMessage } from "../errors/transport.ts";
 import { EnvironmentRpcUnavailableError, isRpcClientError } from "../rpc/client.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
-import { environmentAllowsThreadSettlement } from "./threadSettled.ts";
+import type { AtomCommand } from "./runtime.ts";
+import { environmentAllowsThreadSettlement } from "./threadSettlement.ts";
 
 const isEnvironmentRpcUnavailable = Schema.is(EnvironmentRpcUnavailableError);
 const isConnectionBlocked = Schema.is(ConnectionBlockedError);
@@ -217,6 +221,39 @@ export function queueOfflineThreadLifecycleOverlay(
   // Keep the original timestamp so a reconnect flush cannot churn the atom.
   if (existing?.kind === kind) return;
   setThreadLifecycleOverlay(registry, ref, { kind, at });
+}
+
+/**
+ * Settles, un-settles and deletes made while the environment is unreachable wait as overlays: the
+ * command reports the offline result and the overlay flushes once the environment reconnects.
+ */
+export function recoverOfflineThreadLifecycle<
+  W extends {
+    readonly environmentId: EnvironmentId;
+    readonly input: { readonly threadId: ThreadId };
+  },
+  E,
+>(
+  kind: ThreadLifecycleOverlayKind,
+  command: AtomCommand<W, OrchestrationV2DispatchCommandResult, E>,
+): AtomCommand<W, OrchestrationV2DispatchCommandResult, E> {
+  return {
+    label: command.label,
+    run: async (registry, target) => {
+      const result = await command.run(registry, target);
+      if (!AsyncResult.isFailure(result)) return result;
+      const error = Cause.findErrorOption(result.cause);
+      if (Option.isNone(error) || !isThreadLifecycleOfflineFailure(error.value)) return result;
+      queueOfflineThreadLifecycleOverlay(
+        registry,
+        { environmentId: target.environmentId, threadId: target.input.threadId },
+        kind,
+      );
+      return AsyncResult.success<OrchestrationV2DispatchCommandResult, E>(
+        OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT,
+      );
+    },
+  };
 }
 
 export interface ThreadLifecycleOverlayFlushJob {

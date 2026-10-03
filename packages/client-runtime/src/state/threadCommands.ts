@@ -2,7 +2,7 @@ import type { ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import { Atom } from "effect/unstable/reactivity";
 import {
   WS_METHODS,
   type EnvironmentId,
@@ -91,32 +91,9 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 import {
-  isThreadLifecycleOfflineFailure,
-  OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT,
-  queueOfflineThreadLifecycleOverlay,
-  type ThreadLifecycleOverlayKind,
+  recoverOfflineThreadLifecycle,
   withThreadLifecycleOverlays,
 } from "./threadLifecycleOverlay.ts";
-
-/** Settles, un-settles and deletes made while the environment is unreachable wait as overlays. */
-function recoverOfflineThreadLifecycle(kind: ThreadLifecycleOverlayKind) {
-  return (
-    error: unknown,
-    context: {
-      readonly input: { readonly threadId: ThreadId };
-      readonly environmentId: EnvironmentId;
-      readonly registry: AtomRegistry.AtomRegistry;
-    },
-  ) => {
-    if (!isThreadLifecycleOfflineFailure(error)) return undefined;
-    queueOfflineThreadLifecycleOverlay(
-      context.registry,
-      { environmentId: context.environmentId, threadId: context.input.threadId },
-      kind,
-    );
-    return Effect.succeed(OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT);
-  };
-}
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
@@ -179,7 +156,6 @@ export function createThreadEnvironmentAtoms<R, E>(
     delete: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:delete",
       execute: (input: DeleteThreadInput) => deleteThread(input),
-      recover: recoverOfflineThreadLifecycle("deleted"),
       scheduler,
       concurrency,
     }),
@@ -198,14 +174,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     settle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:settle",
       execute: (input: SettleThreadInput) => settleThread(input),
-      recover: recoverOfflineThreadLifecycle("settled"),
       scheduler,
       concurrency,
     }),
     unsettle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unsettle",
       execute: (input: UnsettleThreadInput) => unsettleThread(input),
-      recover: recoverOfflineThreadLifecycle("unsettled"),
       scheduler,
       concurrency,
     }),
@@ -415,6 +389,9 @@ export function createThreadEnvironmentAtoms<R, E>(
       concurrency,
     }),
   };
+  commands.delete = recoverOfflineThreadLifecycle("deleted", commands.delete);
+  commands.settle = recoverOfflineThreadLifecycle("settled", commands.settle);
+  commands.unsettle = recoverOfflineThreadLifecycle("unsettled", commands.unsettle);
   const optimistic = createOptimisticThreadLifecycle(snapshotAtom);
   return {
     ...commands,

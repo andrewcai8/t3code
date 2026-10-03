@@ -43,18 +43,6 @@ interface EnvironmentCommandAtomOptions<Input, A, E, R> extends Omit<
     registry: AtomRegistry.AtomRegistry,
     environmentId: EnvironmentIdType,
   ) => Effect.Effect<A, E, R>;
-  /**
-   * Runs after the environment supervisor is acquired, so missing
-   * registrations and missing RPC sessions can recover the same way.
-   */
-  readonly recover?: (
-    error: unknown,
-    context: {
-      readonly input: Input;
-      readonly environmentId: EnvironmentIdType;
-      readonly registry: AtomRegistry.AtomRegistry;
-    },
-  ) => Effect.Effect<A> | undefined;
 }
 
 interface EnvironmentQueryAtomOptions<Input, A, E, R> extends EnvironmentAtomOptions<
@@ -645,28 +633,15 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
         readonly showsOwnProgress?: boolean;
       },
       registry,
-    ) => {
-      const effect = runInEnvironment(
+    ) =>
+      runInEnvironment(
         target.environmentId,
         options
           .execute(target.input, registry, target.environmentId)
           .pipe(
             Effect.provideService(EnvironmentRpcShowsOwnProgress, target.showsOwnProgress === true),
           ),
-      );
-      const recover = options.recover;
-      if (recover === undefined) return effect;
-      return effect.pipe(
-        Effect.catch((error) => {
-          const recovered = recover(error, {
-            input: target.input,
-            environmentId: target.environmentId,
-            registry,
-          });
-          return recovered ?? Effect.fail(error);
-        }),
-      );
-    },
+      ),
   });
 }
 
