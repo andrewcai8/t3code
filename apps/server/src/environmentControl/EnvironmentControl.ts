@@ -781,6 +781,38 @@ export class EnvironmentControl extends Context.Service<
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
+/**
+ * Moves a woken box onto the pinned build before anyone connects, since a client refuses a server
+ * on an older orchestration protocol. It is a no-op for a box already on it, and a paused box ran
+ * no turn to cut. Another caller's upgrade in flight is waited out; a box left behind is refused.
+ */
+export const upgradeAfterResume = (
+  upgrade: Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>,
+): Effect.Effect<EnvironmentProvisionResumeResult> =>
+  upgrade.pipe(
+    Effect.repeat({
+      schedule: Schedule.spaced("2 seconds").pipe(Schedule.upTo({ duration: "10 minutes" })),
+      while: (upgraded) => upgraded.kind === "refused" && upgraded.reason === "busy",
+    }),
+    Effect.map((upgraded): EnvironmentProvisionResumeResult => {
+      if (upgraded.kind !== "refused" || upgraded.reason === "unconfigured") {
+        return { kind: "resumed" };
+      }
+      return {
+        kind: "refused",
+        reason: upgraded.reason === "missing" ? "missing" : "unknown",
+        message: upgraded.message,
+      };
+    }),
+    Effect.catch((error) =>
+      Effect.succeed({
+        kind: "refused" as const,
+        reason: "unknown" as const,
+        message: error.message,
+      }),
+    ),
+  );
+
 export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
@@ -1928,25 +1960,21 @@ export const layer = Layer.effect(
           result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
           durationMs: (yield* Clock.currentTimeMillis) - startedAt,
         });
-        // A box keeps the build it was made with across pauses, and a client refuses a server on
-        // an older orchestration protocol, so a woken box moves to the pinned build before anyone
-        // connects. It is a no-op for a box already on it, and a paused box ran no turn to cut.
         if (result.kind === "resumed" && workspace.lifecycle === "paused") {
-          const upgraded = yield* provisionControl
-            .upgrade({
+          return yield* upgradeAfterResume(
+            provisionControl.upgrade({
               leaseId: workspace.leaseId,
               sandboxId: workspace.sandboxId,
               environmentId: input.environmentId,
-            })
-            .pipe(
-              Effect.catch((error) =>
-                Effect.succeed({ kind: "failed" as const, message: error.message }),
-              ),
-            );
-          yield* Effect.logInfo("cloud workspace upgrade on resume answered", {
-            leaseId: workspace.leaseId,
-            result: upgraded.kind === "refused" ? `refused: ${upgraded.reason}` : upgraded.kind,
-          });
+            }),
+          ).pipe(
+            Effect.tap((upgraded) =>
+              Effect.logInfo("cloud workspace upgrade on resume answered", {
+                leaseId: workspace.leaseId,
+                result: upgraded.kind === "refused" ? `refused: ${upgraded.message}` : "resumed",
+              }),
+            ),
+          );
         }
         return result;
       }),

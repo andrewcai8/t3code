@@ -7,18 +7,24 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { expect, vi } from "vite-plus/test";
-import { EnvironmentId } from "@t3tools/contracts";
+import {
+  EnvironmentControlError,
+  EnvironmentId,
+  type EnvironmentProvisionUpgradeResult,
+} from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { TestClock } from "effect/testing";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { makeE2bProvisionRuntime } from "./E2bProvisionRuntime.ts";
-import { EnvironmentControl, layer } from "./EnvironmentControl.ts";
+import { EnvironmentControl, layer, upgradeAfterResume } from "./EnvironmentControl.ts";
 import { ProvisionPreparationManifest, provisionDigest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
@@ -381,4 +387,60 @@ it.effect("moves a woken box onto the build the host pins before anyone connects
       expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
     }),
   ),
+);
+
+it.effect("waits out another caller's upgrade of a woken box, then reports it resumed", () =>
+  Effect.gen(function* () {
+    const answers: Array<EnvironmentProvisionUpgradeResult> = [
+      { kind: "refused", reason: "busy", message: "This workspace is already being upgraded." },
+      { kind: "current", t3Revision: "e".repeat(40) },
+    ];
+    const resumed = yield* upgradeAfterResume(Effect.sync(() => answers.shift()!)).pipe(
+      Effect.forkChild,
+    );
+    yield* TestClock.adjust("2 seconds");
+
+    expect(yield* Fiber.join(resumed)).toEqual({ kind: "resumed" });
+    expect(answers).toEqual([]);
+  }),
+);
+
+it.effect("refuses a woken box its upgrade left behind the pinned build", () =>
+  Effect.gen(function* () {
+    expect(
+      yield* upgradeAfterResume(
+        Effect.fail(
+          new EnvironmentControlError({
+            message: "Cloud provisioning could not be reconciled. Retry the same request.",
+          }),
+        ),
+      ),
+    ).toEqual({
+      kind: "refused",
+      reason: "unknown",
+      message: "Cloud provisioning could not be reconciled. Retry the same request.",
+    });
+    expect(
+      yield* upgradeAfterResume(
+        Effect.succeed({
+          kind: "refused",
+          reason: "unknown",
+          message: "This workspace could not be found. Upgrade was refused.",
+        }),
+      ),
+    ).toEqual({
+      kind: "refused",
+      reason: "unknown",
+      message: "This workspace could not be found. Upgrade was refused.",
+    });
+    expect(
+      yield* upgradeAfterResume(
+        Effect.succeed({
+          kind: "refused",
+          reason: "unconfigured",
+          message: "Configure a pinned runtime artifact for this cloud platform before upgrading.",
+        }),
+      ),
+    ).toEqual({ kind: "resumed" });
+  }),
 );
