@@ -1,9 +1,4 @@
-import {
-  ArrowLeftIcon,
-  CalendarClockIcon,
-  ChartNoAxesColumnIcon,
-  SettingsIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, CloudCogIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
@@ -220,7 +215,7 @@ export const SidebarAutomationsItem = memo(function SidebarAutomationsItem() {
           void navigate({ to: "/automations" });
         }}
       >
-        <CalendarClockIcon />
+        <CloudCogIcon />
         <span>Automations</span>
       </SidebarMenuButton>
     </SidebarMenuItem>

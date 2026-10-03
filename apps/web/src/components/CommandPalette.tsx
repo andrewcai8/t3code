@@ -45,7 +45,7 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
-  CalendarClockIcon,
+  CloudCogIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -2220,7 +2220,7 @@ function OpenCommandPaletteDialog(props: {
       value: "action:automations",
       searchTerms: ["automations", "schedule", "cron", "webhook", "recurring"],
       title: "Open automations",
-      icon: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+      icon: <CloudCogIcon className={ITEM_ICON_CLASS} />,
       shortcutCommand: "automations.open",
       run: async () => {
         await navigate({ to: "/automations" });
