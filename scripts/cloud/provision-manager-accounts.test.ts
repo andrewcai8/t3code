@@ -3,16 +3,16 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { ServerSettings } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
-import { cursorFileCredentialPath } from "../../apps/server/src/provider/cursorCredentialPath.ts";
+import { resolveProvisioningProviderProfile } from "../../apps/server/src/environmentControl/ProvisioningProviderProfile.ts";
 import { planManagerAccounts, type PlanInput } from "./provision-manager-accounts.ts";
 
-const host: PlanInput["host"] = {
-  homedir: "/Users/op",
-  platform: "darwin",
-  environment: { HOME: "/Users/op", XDG_CONFIG_HOME: "/Users/op/Library/Config" },
-};
+const host: PlanInput["host"] = { homedir: "/Users/op", stateDir: "/Users/op/.t3/userdata" };
 const managerBaseDir = "/home/user/manager-state";
 
 const settings: PlanInput["settings"] = {
@@ -90,8 +90,10 @@ describe("planManagerAccounts", () => {
         codexLogin: { account: "codex_ac1" },
       },
       {
-        source: "/Users/op/.t3/userdata/cursor-homes/cursor_work/.cursor/auth.json",
-        destination: "/home/user/manager-state/cursor-homes/cursor_work/.config/cursor/auth.json",
+        source:
+          "/Users/op/.t3/userdata/secrets/provider-auth-1708c8c8cb8bae5421c955c9031310df41eddd9f868172bd383a19ef2fdada72.bin",
+        destination:
+          "/home/user/manager-state/userdata/secrets/provider-auth-1708c8c8cb8bae5421c955c9031310df41eddd9f868172bd383a19ef2fdada72.bin",
       },
       {
         source: "/Users/op/.t3/userdata/secrets/provider-env-cursor.bin",
@@ -151,18 +153,43 @@ describe("planManagerAccounts", () => {
     ]);
   });
 
-  it("puts the Cursor file where the manager's own resolver looks, whatever its ambient env", () => {
-    const plan = planManagerAccounts({ settings, provisioning, host, managerBaseDir });
-    const environment: Record<string, string> = {
-      HOME: "/home/user",
-      XDG_CONFIG_HOME: "/home/user/.config",
-    };
-    for (const variable of plan.providerInstances.cursor_work?.environment ?? [])
-      environment[variable.name] = variable.value;
-    const credential = plan.files.find(({ destination }) => destination.includes("cursor-homes"));
-
-    assert.equal(cursorFileCredentialPath(environment, "linux"), credential?.destination);
-  });
+  it.effect("puts the Cursor sign-in where the manager's own provisioning reads it", () =>
+    Effect.gen(function* () {
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-plan-cursor-")),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true })),
+      );
+      const plan = planManagerAccounts({
+        settings,
+        provisioning,
+        host,
+        managerBaseDir: base,
+        accounts: ["cursor_work"],
+      });
+      const [carried] = plan.files;
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.dirname(carried!.destination), { recursive: true });
+        await NodeFSP.writeFile(carried!.destination, "cursor-sign-in");
+      });
+      const profile = yield* resolveProvisioningProviderProfile(
+        Schema.decodeUnknownSync(ServerSettings)({ providerInstances: plan.providerInstances }),
+        { providerInstanceId: "cursor_work", agentDriver: "cursor" },
+        undefined,
+        {
+          localAgentRuns: true,
+          secretsDir: NodePath.join(base, "userdata", "secrets"),
+          refresh: () => Effect.void,
+        },
+      );
+      assert.deepEqual(profile.credential, {
+        kind: "file",
+        source: carried!.destination,
+        destination: ".t3/userdata/provider-auth/cursor/cursor.json",
+      });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 
   it("carries a Claude account as a token its instance runs on, and skips one without", () => {
     const plan = planManagerAccounts({
@@ -243,11 +270,7 @@ describe("planManagerAccounts", () => {
       const plan = planManagerAccounts({
         settings: { providerInstances: { claudeAgent: { driver: "claudeAgent", enabled: true } } },
         provisioning: { claudeOAuthTokens: { claudeAgent: "sk-ant-oat01-default" } },
-        host: {
-          homedir,
-          platform: "darwin",
-          environment: { CLAUDE_CONFIG_DIR: NodePath.join(homedir, ".claude_work") },
-        },
+        host: { homedir, stateDir: NodePath.join(homedir, ".t3/userdata") },
         managerBaseDir,
       });
       assert.deepEqual(plan.providerInstances.claudeAgent?.config, {
@@ -289,7 +312,7 @@ describe("planManagerAccounts", () => {
             claude_home: "sk-ant-oat01-home",
           },
         },
-        host: { homedir, platform: "darwin", environment: {} },
+        host: { homedir, stateDir: NodePath.join(homedir, ".t3/userdata") },
         managerBaseDir,
       });
       assert.deepEqual(
