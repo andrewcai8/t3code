@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
+import { createCleanupSweep } from "./cloudCleanup.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
 import * as Effect from "effect/Effect";
@@ -1125,5 +1126,80 @@ describe("a cloud box's chat", () => {
         { message: "new cloud box chats could not be read", cause: "database is locked" },
       ]);
     });
+  });
+});
+
+describe("a cloud box's cleanup", () => {
+  it("cancels the removal of a box whose chat is opened while its work is backed up", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      await withSqlRegistry(async (registry) => {
+        const pausedAt = new Date("2026-03-01T12:00:00.000Z");
+        await registry.register({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          providerInstanceId: "codex",
+          provider: "namespace",
+          namespaceResource: {
+            provider: "namespace",
+            devboxId: "devbox",
+            instanceId: "instance",
+            region: "us",
+            workspaceDir: "/workspace",
+          },
+          owner: { environmentId: "child", threadId: "thread" },
+          now: pausedAt,
+        });
+        await registry.markPaused("lease", pausedAt);
+        vi.setSystemTime(new Date("2026-03-09T00:00:00.000Z"));
+        const { driver, calls } = setup();
+        const manager = createEnvironmentControl([], driver, registry);
+        const disposed: string[] = [];
+        let opened: unknown;
+        const read = async (leaseId: string) => {
+          const lease = await registry.findById(leaseId);
+          return lease ? { lease, thread: null } : null;
+        };
+        await createCleanupSweep({
+          now: () => Date.now(),
+          afterDays: async () => 7,
+          candidates: async () =>
+            (await registry.paused()).map((lease) => ({ lease, thread: null })),
+          read,
+          holdBox: async (sandboxId) => manager.holdBox(sandboxId, "clean"),
+          backUpWork: async () => {
+            opened = await manager.resume({
+              leaseId: "lease",
+              sandboxId: "sandbox",
+              environmentId: EnvironmentId.make("child"),
+            });
+            return { kind: "clean" };
+          },
+          setKeep: registry.setKeep,
+          sleep: manager.sleepBox,
+          dispose: async (leaseId) => {
+            disposed.push(leaseId);
+            return true;
+          },
+          log: () => {},
+          warn: () => {},
+        })();
+
+        expect(opened).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          message:
+            "This machine is being checked before cleanup. Cleanup is cancelled; open it again in a few minutes.",
+        });
+        expect(disposed).toEqual([]);
+        expect(calls).toEqual(["pause"]);
+        expect(await registry.findById("lease")).toMatchObject({
+          state: "paused",
+          updatedAt: "2026-03-09T00:00:00.000Z",
+        });
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
