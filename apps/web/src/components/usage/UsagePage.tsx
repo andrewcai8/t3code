@@ -1086,8 +1086,7 @@ function UsageEnvironmentFilter({
               >
                 <span className="flex min-w-0 items-center gap-3">
                   <span className="min-w-0 flex-1 truncate">{environment.label}</span>
-                  {/* Deselected environments are not asked for usage, so they have no status. */}
-                  {showUsageStatus && checked ? (
+                  {showUsageStatus ? (
                     <span
                       className={cn(
                         "shrink-0 text-xs text-muted-foreground",
