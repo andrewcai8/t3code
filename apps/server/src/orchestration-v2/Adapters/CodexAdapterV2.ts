@@ -1434,15 +1434,18 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
   }),
 );
 
-// An ambient CODEX_HOME from the shell that launched the server must not
-// leak into an instance that uses the shared home.
+// An ambient CODEX_HOME from the shell that launched the server must not leak
+// into an instance. The instance's own CODEX_HOME still wins over the shared home.
 export function resolveCodexProviderEnvironment(
-  environment: NodeJS.ProcessEnv,
+  instanceEnvironment: Parameters<typeof mergeProviderInstanceEnvironment>[0],
+  ambientEnvironment: NodeJS.ProcessEnv,
   homeLayout: { readonly effectiveHomePath: string | undefined; readonly sharedHomePath: string },
 ): NodeJS.ProcessEnv {
+  const { CODEX_HOME: _ambientHome, ...ambient } = ambientEnvironment;
+  const environment = mergeProviderInstanceEnvironment(instanceEnvironment, ambient);
   return {
     ...environment,
-    CODEX_HOME: homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath,
+    CODEX_HOME: homeLayout.effectiveHomePath ?? environment.CODEX_HOME ?? homeLayout.sharedHomePath,
   };
 }
 
@@ -1488,10 +1491,7 @@ export const createCodexAdapterV2 = (
     return makeCodexAdapterV2({
       instanceId,
       settings,
-      environment: resolveCodexProviderEnvironment(
-        mergeProviderInstanceEnvironment(environment, hostEnvironment),
-        homeLayout,
-      ),
+      environment: resolveCodexProviderEnvironment(environment, hostEnvironment, homeLayout),
       clientFactory,
       fileSystem,
       idAllocator,

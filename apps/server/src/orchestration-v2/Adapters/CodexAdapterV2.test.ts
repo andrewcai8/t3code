@@ -853,13 +853,26 @@ describe("CodexAdapterV2 process spawning", () => {
     ),
   );
 
-  it("pins the effective home over an ambient CODEX_HOME", () => {
-    assert.equal(
-      CodexAdapterV2.resolveCodexProviderEnvironment(
-        { CODEX_HOME: "/Users/andrew/.codex_ac3" },
-        { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: "/Users/andrew/.codex_ac2" },
-      ).CODEX_HOME,
-      "/Users/andrew/.codex_ac2",
+  it("runs an instance in its configured home, then its own CODEX_HOME, then the shared home", () => {
+    const ambient = { CODEX_HOME: "/Users/andrew/.codex_ac3", PATH: "/usr/bin" };
+    const instanceHome = [
+      { name: "CODEX_HOME", value: "/Users/andrew/.codex_work", sensitive: false },
+    ];
+    const shared = { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: undefined };
+    const resolveHome = (
+      ...args: Parameters<typeof CodexAdapterV2.resolveCodexProviderEnvironment>
+    ) => CodexAdapterV2.resolveCodexProviderEnvironment(...args).CODEX_HOME;
+
+    assert.deepEqual(
+      [
+        resolveHome(instanceHome, ambient, {
+          ...shared,
+          effectiveHomePath: "/Users/andrew/.codex_ac2",
+        }),
+        resolveHome(instanceHome, ambient, shared),
+        resolveHome([], ambient, shared),
+      ],
+      ["/Users/andrew/.codex_ac2", "/Users/andrew/.codex_work", "/Users/andrew/.codex"],
     );
   });
 });

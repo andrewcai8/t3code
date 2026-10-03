@@ -63,7 +63,6 @@ import * as ModelManifest from "../ModelManifest.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeCachedProviderMaintenanceResolution,
@@ -160,9 +159,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const modelManifest = yield* ModelManifest.ModelManifest;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(config);
-      const providerEnvironment = resolveCodexProviderEnvironment(processEnv, homeLayout);
+      const processEnv = resolveCodexProviderEnvironment(environment, process.env, homeLayout);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -229,7 +227,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
           {
             binaryPath: effectiveConfig.binaryPath,
-            env: providerEnvironment,
+            env: processEnv,
           },
         ).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -275,7 +273,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
                 checkCodexProviderStatus(
                   effectiveConfig,
                   undefined,
-                  providerEnvironment,
+                  processEnv,
                   undefined,
                   refreshLogin,
                 ),
@@ -346,7 +344,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         );
       const textGeneration = yield* makeCodexTextGeneration(
         effectiveConfig,
-        providerEnvironment,
+        processEnv,
         snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
       );
       const snapshotForCwd = (cwd: string) =>
@@ -357,9 +355,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               probeCodexSkillsForCwd({
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, providerEnvironment),
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
                 cwd,
-                environment: providerEnvironment,
+                environment: processEnv,
               }).pipe(
                 Effect.scoped,
                 Effect.timeout("20 seconds"),
@@ -393,10 +391,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               const { client } = yield* withCodexAppServerClient({
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, providerEnvironment),
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
                 // Account-level request; any directory serves, same as the status probe.
                 cwd: process.cwd(),
-                environment: providerEnvironment,
+                environment: processEnv,
               });
               const response = yield* client.request("account/rateLimitResetCredit/consume", {
                 idempotencyKey,
