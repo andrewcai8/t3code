@@ -20,25 +20,28 @@ import {
 import type { PairingConnectionInput } from "./onboarding.ts";
 import { provisionedGatewayPairingUrl } from "./provisioned.ts";
 
+type RedeemPairing = (
+  input: PairingConnectionInput,
+) => Effect.Effect<BearerConnectionRegistration, ConnectionAttemptError>;
+
 /**
  * Turns a minted pairing URL into this device's registration for the server behind it. The
  * connection layer provides it; a registry built without it cannot pair a box.
  */
-export class PairingRedemption extends Context.Reference<{
-  readonly redeem: (
-    input: PairingConnectionInput,
-  ) => Effect.Effect<BearerConnectionRegistration, ConnectionAttemptError>;
-}>("@t3tools/client-runtime/connection/boxPairing/PairingRedemption", {
-  defaultValue: () => ({
-    redeem: () =>
-      Effect.fail(
-        new ConnectionBlockedError({
-          reason: "configuration",
-          detail: "This client cannot pair with a cloud chat's machine.",
-        }),
-      ),
-  }),
-}) {}
+export class PairingRedemption extends Context.Reference<{ readonly redeem: RedeemPairing }>(
+  "@t3tools/client-runtime/connection/boxPairing/PairingRedemption",
+  {
+    defaultValue: () => ({
+      redeem: () =>
+        Effect.fail(
+          new ConnectionBlockedError({
+            reason: "configuration",
+            detail: "This client cannot pair with a cloud chat's machine.",
+          }),
+        ),
+    }),
+  },
+) {}
 
 export interface BoxPairingPorts {
   /** How the box's host lists it now; none when the host does not list it. */
@@ -51,7 +54,7 @@ export interface BoxPairingPorts {
   ) => Effect.Effect<EnvironmentProvisionAttachResult, ConnectionAttemptError>;
   /** The address this client reaches the host by; none until the host connection is prepared. */
   readonly hostHttpBaseUrl: Effect.Effect<Option.Option<string>>;
-  readonly redeem: PairingRedemption["Service"]["redeem"];
+  readonly redeem: RedeemPairing;
 }
 
 /**

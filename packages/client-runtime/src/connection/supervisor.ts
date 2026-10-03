@@ -701,7 +701,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
       latestFailure = outcome.failure.error;
-      const woken = yield* boxWaker.afterFailure(outcome.failure.error, attempt, generation);
+      const woken: Option.Option<ConnectionAttemptError> = yield* boxWaker.afterFailure(
+        outcome.failure.error,
+        attempt,
+        generation,
+      );
       if (Option.isNone(woken)) continue;
       const error: ConnectionAttemptError = woken.value;
       latestFailure = error;
