@@ -88,12 +88,12 @@ Existing prompts for deleting a worktree manually remain available when this pol
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
 
-A paused Namespace Mac keeps costing storage, so the host that runs it removes it after seven
-unused days, or an hour after it pauses once its chat is settled. Change the days or turn this
-off with **Remove unused cloud machines**. Before removal, unpushed work is pushed to a
-`t3-backup/<id>` branch of the repository; a machine whose work cannot be backed up is kept. Select
+Some paused cloud machines keep billing for their disk. The host that runs one removes it after
+seven unused days, or an hour after it pauses once its chat is settled. Change the days or turn
+this off with **Remove unused cloud machines**. Before removal, unpushed work is pushed to
+`t3-backup/<id>` branches of the repository. A machine whose work can't be pushed is kept. Select
 **Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
-while paused, such as E2B sandboxes, are not removed this way.
+while paused, such as E2B sandboxes, are never removed.
 
 ## Project icons
 
