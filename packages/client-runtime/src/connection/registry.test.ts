@@ -3297,6 +3297,56 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("holds only chats it could decode, so the host sends an unreadable card again", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([TARGET]);
+      const otherBoxId = EnvironmentId.make("environment-other-chat-box");
+      // A card from a host still on V1 shells: it fails to decode, so the box lists no chat.
+      const v1Chat = (sequence: number) =>
+        ({
+          sequence,
+          project: CHAT_PROJECT,
+          thread: {
+            id: CHAT_THREAD.id,
+            projectId: CHAT_PROJECT.id,
+            title: CHAT_THREAD.title,
+            session: null,
+            latestTurn: null,
+            hasPendingApprovals: false,
+          },
+        }) as unknown as ProvisionedChat;
+      const heldSequences = (registry: EnvironmentRegistry.EnvironmentRegistry["Service"]) =>
+        SubscriptionRef.get(registry.hostChats).pipe(
+          Effect.map((held) =>
+            [...held].map(([environmentId, { chat }]) => [environmentId, chat.sequence]),
+          ),
+        );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(listedBox(CHAT_BOX_ID, { chat: chatAt(4) })),
+        );
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(
+            listedBox(CHAT_BOX_ID, { chat: v1Chat(7) }),
+            listedBox(otherBoxId, { chat: v1Chat(3) }),
+          ),
+        );
+        expect(yield* heldSequences(registry)).toEqual([[CHAT_BOX_ID, 4]]);
+
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(listedBox(CHAT_BOX_ID, { chat: chatAt(7) })),
+        );
+        expect(yield* heldSequences(registry)).toEqual([[CHAT_BOX_ID, 7]]);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("pairing a box its host already listed keeps the host's name for it", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([TARGET]);
