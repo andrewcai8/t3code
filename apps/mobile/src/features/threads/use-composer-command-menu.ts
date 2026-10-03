@@ -3,6 +3,7 @@ import type {
   ProjectId,
   ProviderInteractionMode,
   ServerProvider,
+  ServerProvisionedSkills,
   ThreadId,
 } from "@t3tools/contracts";
 import { matchComposerThreadItems } from "@t3tools/client-runtime/composerThreadItems";
