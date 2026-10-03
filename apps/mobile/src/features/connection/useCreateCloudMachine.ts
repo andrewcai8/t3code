@@ -16,7 +16,7 @@ import { connectPairing } from "../../connection/onboarding";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { holdBoxDemand } from "../../state/box-demand";
-import { waitForEnvironmentProject } from "../../state/entities";
+import { waitForEnvironmentProject } from "../../state/cloud-entities";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
