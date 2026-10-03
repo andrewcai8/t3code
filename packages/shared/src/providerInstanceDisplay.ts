@@ -17,7 +17,7 @@ import {
  * `codex_personal` becomes "Codex Personal" and `myCustomInstance` becomes
  * "My Custom Instance".
  */
-export function humanizeSlug(slug: string): string {
+function humanizeSlug(slug: string): string {
   return slug
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/[_-]+/g, " ")

@@ -90,9 +90,10 @@ const seedForkDatabase = (statePath: string) =>
         '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z', NULL
       )
     `;
+    const v1CardJson = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))(v1Card);
     yield* sql`
       INSERT INTO provisioned_chats (lease_id, sequence, chat_json, read_at)
-      VALUES ('lease-1', 17, ${Schema.encodeSync(Schema.UnknownFromJsonString)(v1Card)}, '2026-09-30T10:06:00.000Z')
+      VALUES ('lease-1', 17, ${v1CardJson}, '2026-09-30T10:06:00.000Z')
     `;
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: statePath })), Effect.scoped);
 

@@ -62,7 +62,7 @@ export function isOfflineThreadLifecycleDispatchResult(
   );
 }
 
-export function threadLifecycleOverlaysEqual(
+function threadLifecycleOverlaysEqual(
   left: ThreadLifecycleOverlay | undefined,
   right: ThreadLifecycleOverlay | undefined,
 ): boolean {
