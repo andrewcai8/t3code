@@ -25,7 +25,12 @@ import * as ServerSettings from "../serverSettings.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { makeE2bProvisionRuntime } from "./E2bProvisionRuntime.ts";
-import { EnvironmentControl, layer, upgradeAfterResume } from "./EnvironmentControl.ts";
+import {
+  EnvironmentControl,
+  layer,
+  recoverRefusedResume,
+  upgradeAfterResume,
+} from "./EnvironmentControl.ts";
 import { ProvisionPreparationManifest, provisionDigest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
@@ -472,5 +477,44 @@ it.effect("refuses a woken box its upgrade left behind the pinned build", () =>
         }),
       ),
     ).toEqual({ kind: "resumed" });
+  }),
+);
+
+it.effect("recovers a box whose guest cannot start by upgrading it onto the pinned build", () =>
+  Effect.gen(function* () {
+    const stuck = {
+      kind: "refused" as const,
+      reason: "unknown" as const,
+      message: "The workspace could not be reconnected. Retry shortly.",
+    };
+    expect(
+      yield* recoverRefusedResume(
+        stuck,
+        Effect.succeed({ kind: "upgraded", t3Revision: "f".repeat(40) }),
+      ),
+    ).toEqual({ kind: "resumed" });
+    expect(
+      yield* recoverRefusedResume(
+        stuck,
+        Effect.succeed({ kind: "current", t3Revision: "f".repeat(40) }),
+      ),
+    ).toEqual(stuck);
+    expect(
+      yield* recoverRefusedResume(
+        stuck,
+        Effect.fail(new EnvironmentControlError({ message: "E2B can't place this machine." })),
+      ),
+    ).toEqual(stuck);
+    const missing = {
+      kind: "refused" as const,
+      reason: "missing" as const,
+      message: "This workspace is gone.",
+    };
+    expect(
+      yield* recoverRefusedResume(
+        missing,
+        Effect.succeed({ kind: "upgraded", t3Revision: "f".repeat(40) }),
+      ),
+    ).toEqual(missing);
   }),
 );

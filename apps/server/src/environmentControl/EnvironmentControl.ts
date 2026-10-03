@@ -815,6 +815,24 @@ export const upgradeAfterResume = (
     ),
   );
 
+/**
+ * A resume whose guest could not be brought up may be stuck on a build that cannot start, such as
+ * one an earlier upgrade installed. Upgrading onto the pinned build is safe there, since a guest
+ * that is not serving runs no turn, so the box recovers once the host pins a working build.
+ */
+export const recoverRefusedResume = (
+  refused: EnvironmentProvisionResumeResult,
+  upgrade: Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>,
+): Effect.Effect<EnvironmentProvisionResumeResult> =>
+  refused.kind === "refused" && refused.reason === "unknown"
+    ? upgrade.pipe(
+        Effect.map((upgraded): EnvironmentProvisionResumeResult =>
+          upgraded.kind === "upgraded" ? { kind: "resumed" } : refused,
+        ),
+        Effect.catch(() => Effect.succeed(refused)),
+      )
+    : Effect.succeed(refused);
+
 export const layer = Layer.effect(
   EnvironmentControl,
   Effect.gen(function* () {
@@ -1977,6 +1995,21 @@ export const layer = Layer.effect(
               }),
             ),
           );
+        }
+        if (result.kind === "refused") {
+          const recovered = yield* recoverRefusedResume(
+            result,
+            provisionControl.upgrade({
+              leaseId: workspace.leaseId,
+              sandboxId: workspace.sandboxId,
+              environmentId: input.environmentId,
+            }),
+          );
+          if (recovered.kind === "resumed")
+            yield* Effect.logInfo("cloud workspace recovered by upgrade", {
+              leaseId: workspace.leaseId,
+            });
+          return recovered;
         }
         return result;
       }),
