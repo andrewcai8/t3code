@@ -7,6 +7,7 @@ import {
   type ModelSelection,
   type Project,
   ProjectId,
+  type ServerSettings as ServerSettingsValue,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
   ThreadId,
@@ -44,6 +45,7 @@ import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import { deriveProviderInstanceConfigMap } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { forkParked, forkParkedFiber } from "./serverActivation.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
@@ -175,7 +177,7 @@ const recordStartupHeartbeat = Effect.gen(function* () {
   });
 });
 
-export const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
+const AUTO_BOOTSTRAP_FALLBACK_MODEL_SELECTION: ModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: DEFAULT_MODEL,
 };
@@ -301,7 +303,6 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   if (serverConfig.autoBootstrapProjectFromCwd) {
     // Project creation has no user model choice; only the bootstrap thread
     // gets an automatic selection, and an explicit project default wins.
-    const threadModelSelection = getAutoBootstrapThreadModelSelection();
     const { project } = yield* projects.bootstrap({
       commandId: CommandId.make(yield* randomUUID),
       projectId: ProjectId.make(yield* randomUUID),
@@ -322,7 +323,7 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
         title: "New thread",
         modelSelection:
           resolveProjectSettings(settings, project.id, project).settings.defaultModelSelection ??
-          threadModelSelection,
+          getAutoBootstrapThreadModelSelection(settings),
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: resolveProjectSettings(settings, project.id, project).settings
           .defaultRuntimeMode,
