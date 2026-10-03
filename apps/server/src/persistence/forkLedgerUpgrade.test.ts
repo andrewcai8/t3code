@@ -4,6 +4,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -207,5 +208,50 @@ it.layer(NodeServices.layer)("fork database upgrade", (it) => {
         `${v2Path} was created by an upstream T3 Code build (OrchestrationV2 is migration 55, this build expects 62). Move that file aside and restart; this build recreates it from state.sqlite.`,
       );
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("logs each cloud chat card it cannot convert to V2", () =>
+    Effect.gen(function* () {
+      const warnings: Array<unknown> = [];
+      const logger = Logger.make(({ logLevel, message }) => {
+        if (logLevel === "Warn") warnings.push(message);
+      });
+      const encodeCard = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+      const { runtimeMode: _runtimeMode, ...threadWithoutMode } = v1Card.thread;
+      const unownedThread = {
+        ...v1Card.thread,
+        modelSelection: { model: "claude-opus-5-5" },
+        session: null,
+      };
+
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 63 });
+        yield* sql`
+          INSERT INTO provisioned_chats (lease_id, sequence, chat_json, read_at) VALUES
+            ('lease-truncated', 17, '{"sequence":', '2026-09-30T10:06:00.000Z'),
+            ('lease-no-mode', 17, ${encodeCard({ ...v1Card, thread: threadWithoutMode })}, '2026-09-30T10:06:00.000Z'),
+            ('lease-unowned', 17, ${encodeCard({ ...v1Card, thread: unownedThread })}, '2026-09-30T10:06:00.000Z')
+        `;
+        yield* runMigrations().pipe(
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        );
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
+
+      assert.deepStrictEqual(warnings, [
+        [
+          "A cloud chat card was not converted to V2 and will not list",
+          { leaseId: "lease-truncated", reason: "the card is not JSON" },
+        ],
+        [
+          "A cloud chat card was not converted to V2 and will not list",
+          { leaseId: "lease-no-mode", reason: "the card is not a pre-V2 chat card" },
+        ],
+        [
+          "A cloud chat card was not converted to V2 and will not list",
+          { leaseId: "lease-unowned", reason: "the card's thread names no provider instance" },
+        ],
+      ]);
+    }),
   );
 });

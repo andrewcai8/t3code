@@ -1,11 +1,37 @@
-import { ProvisionedChat } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-const decodeV2Chat = Schema.decodeUnknownExit(Schema.toCodecJson(ProvisionedChat));
-const isV2Chat = (chat: unknown) => Exit.isSuccess(decodeV2Chat(chat));
+// Frozen with this migration: what a pre-V2 card needs for its V2 rewrite. It must not follow the
+// live contracts, or each later shell change would alter what this migration converts.
+const NullableText = Schema.optional(Schema.NullOr(Schema.String));
+const isPreV2Card = Schema.is(
+  Schema.Struct({
+    project: Schema.Struct({
+      id: Schema.NonEmptyString,
+      title: Schema.NonEmptyString,
+      workspaceRoot: Schema.NonEmptyString,
+    }),
+    thread: Schema.Struct({
+      id: Schema.NonEmptyString,
+      projectId: Schema.NonEmptyString,
+      title: Schema.String,
+      modelSelection: Schema.Struct({ model: Schema.String }),
+      runtimeMode: Schema.Literals([
+        "approval-required",
+        "auto-accept-edits",
+        "auto",
+        "full-access",
+      ]),
+      interactionMode: Schema.optional(Schema.Literals(["default", "plan"])),
+      branch: NullableText,
+      worktreePath: NullableText,
+      latestUserMessageAt: NullableText,
+      createdAt: Schema.String,
+      updatedAt: Schema.String,
+    }),
+  }),
+);
 
 type Json = Record<string, unknown>;
 const record = (value: unknown): Json | null =>
@@ -70,19 +96,27 @@ function v2Thread(v1: Json): Json | null {
   };
 }
 
-function v2Chat(chatJson: string): string | null {
+type Rewrite =
+  | { readonly kind: "converted"; readonly chatJson: string }
+  | { readonly kind: "current" }
+  | { readonly kind: "skipped"; readonly reason: string };
+
+function v2Chat(chatJson: string): Rewrite {
   let chat: Json | null;
   try {
     chat = record(JSON.parse(chatJson));
   } catch {
-    return null;
+    return { kind: "skipped", reason: "the card is not JSON" };
   }
-  if (chat === null || isV2Chat(chat)) return null;
-  const thread = record(chat.thread);
-  const converted = thread === null ? null : v2Thread(thread);
-  if (converted === null) return null;
-  const next = { ...chat, thread: converted };
-  return isV2Chat(next) ? JSON.stringify(next) : null;
+  if (record(record(chat?.thread)?.lineage) !== null) return { kind: "current" };
+  if (chat === null || !isPreV2Card(chat)) {
+    return { kind: "skipped", reason: "the card is not a pre-V2 chat card" };
+  }
+  const converted = v2Thread(chat.thread);
+  if (converted === null) {
+    return { kind: "skipped", reason: "the card's thread names no provider instance" };
+  }
+  return { kind: "converted", chatJson: JSON.stringify({ ...chat, thread: converted }) };
 }
 
 /**
@@ -97,8 +131,14 @@ export default Effect.gen(function* () {
     readonly chat_json: string;
   }>`SELECT lease_id, chat_json FROM provisioned_chats`;
   for (const row of rows) {
-    const converted = v2Chat(row.chat_json);
-    if (converted === null) continue;
-    yield* sql`UPDATE provisioned_chats SET chat_json = ${converted} WHERE lease_id = ${row.lease_id}`;
+    const rewrite = v2Chat(row.chat_json);
+    if (rewrite.kind === "skipped") {
+      yield* Effect.logWarning("A cloud chat card was not converted to V2 and will not list", {
+        leaseId: row.lease_id,
+        reason: rewrite.reason,
+      });
+    }
+    if (rewrite.kind !== "converted") continue;
+    yield* sql`UPDATE provisioned_chats SET chat_json = ${rewrite.chatJson} WHERE lease_id = ${row.lease_id}`;
   }
 });
