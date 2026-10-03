@@ -30,7 +30,7 @@ describe("storage cleanup settings", () => {
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
-      cloudMachinesAfterDays: 7,
+      cloudMachinesAfterDays: 1,
     });
   });
 
