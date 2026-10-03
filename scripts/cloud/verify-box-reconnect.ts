@@ -845,7 +845,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       provider: row?.provider ?? null,
     });
     const boxId = row!.environmentId;
-    yield* checked("lease.paused", row!.lifecycle === "paused", row!.lifecycle);
+    // A paused chat, or an active one whose guest server died, must both open and wake.
+    const lifecycle = row!.lifecycle;
+    yield* checked("lease.lifecycle", lifecycle === "paused" || lifecycle === "active", lifecycle);
     const chat = row!.chat;
     yield* checked(
       "lease.chatListed",
@@ -889,7 +891,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     );
     const relisted = yield* listOnHost(registry, managerId);
     const stillPaused = relisted.find((candidate) => candidate.leaseId === leaseId)?.lifecycle;
-    yield* checked("lease.stillPaused", stillPaused === "paused", stillPaused ?? null);
+    yield* checked("lease.lifecycleUnchanged", stillPaused === lifecycle, stillPaused ?? null);
 
     const openedAt = (yield* SubscriptionRef.get(log)).length;
     const openedAtSeconds = yield* elapsed;
