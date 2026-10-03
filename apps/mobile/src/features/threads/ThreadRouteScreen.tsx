@@ -1,10 +1,8 @@
-import { useAtomValue } from "@effect/atom-react";
-import { connectionStatusName } from "@t3tools/client-runtime/connection";
-import { environmentCatalog } from "../../connection/catalog";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { useWorktreeSetup } from "./use-worktree-setup";
 import { useBoxDemand } from "../../state/box-demand";
+import { useConnectionStatusLabel } from "./use-connection-status-label";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";
@@ -475,13 +473,10 @@ function ThreadRouteContent(
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
   const routeConnectionError = routeEnvironmentRuntime?.connectionError ?? null;
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  const routeTarget =
-    environmentId === null ? undefined : catalog.entries.get(environmentId)?.target;
-  const connectionStatusLabel =
-    routeTarget === undefined
-      ? (selectedEnvironmentConnection?.environmentLabel ?? null)
-      : connectionStatusName(routeTarget);
+  const connectionStatusLabel = useConnectionStatusLabel(
+    environmentId,
+    selectedEnvironmentConnection?.environmentLabel ?? null,
+  );
   const selectedThreadWithDraftSettings = useMemo(
     () =>
       selectedThread
