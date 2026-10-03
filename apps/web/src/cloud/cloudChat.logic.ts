@@ -8,7 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 
-import type { PendingCloudEnvironmentSend } from "../composerDraftStore";
+import type { PendingCloudEnvironmentSend } from "./pendingCloudSendSchema";
 
 /**
  * The driver and model a cloud chat's draft carries onto the environment it provisions.

@@ -36,12 +36,16 @@ import {
 import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { cancelProvisionRequest } from "./cloud/provisionRequests";
+import {
+  PendingCloudEnvironmentSend,
+  parsePendingEnvironmentSend,
+  pendingEnvironmentSendsEqual,
+} from "./cloud/pendingCloudSendSchema";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -316,29 +320,6 @@ type LegacyV2StoreFields = {
 type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
-
-const PendingCloudEnvironmentSend = Schema.Struct({
-  provider: Schema.Literals(["e2b", "namespace"]),
-  preview: Schema.String,
-  messageId: Schema.String,
-  createdAt: Schema.String,
-  prompt: Schema.String,
-  outgoingMessageText: Schema.String,
-  phase: Schema.Literals(["creating", "pairing", "loading-project", "ready", "failed"]),
-  startedAt: Schema.String,
-  endedAt: Schema.optionalKey(Schema.String),
-  error: Schema.optionalKey(Schema.String),
-  repository: Schema.optionalKey(Schema.String),
-  /** The branch the environment starts from; absent is the repository's default. */
-  branch: Schema.optionalKey(Schema.String),
-  readyEnvironmentId: Schema.optionalKey(Schema.String),
-  /** The model the held message goes out on once the environment is ready. */
-  modelSelection: Schema.optionalKey(ModelSelection),
-  /** The environment's host started the held message itself; the page never sends it. */
-  hostStartedFirstTurn: Schema.optionalKey(Schema.Boolean),
-});
-export type PendingCloudEnvironmentSend = typeof PendingCloudEnvironmentSend.Type;
-const decodeModelSelectionOption = Schema.decodeUnknownOption(ModelSelection);
 
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
@@ -616,15 +597,6 @@ interface ComposerDraftStoreState {
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
     },
-  ) => void;
-  /**
-   * First-send cloud setup that has already left the composer. Survives an
-   * empty prompt so the sidebar and new-thread remap treat the draft as
-   * invested work until the turn lands or the user cancels.
-   */
-  setDraftPendingEnvironmentSend: (
-    target: ComposerThreadTarget,
-    pending: PendingCloudEnvironmentSend | null,
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
   clearProjectDraftThreadById: (
@@ -1728,35 +1700,6 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
   );
 }
 
-function pendingEnvironmentSendsEqual(
-  left: PendingCloudEnvironmentSend | null | undefined,
-  right: PendingCloudEnvironmentSend | null | undefined,
-): boolean {
-  if (left == null && right == null) {
-    return true;
-  }
-  if (left == null || right == null) {
-    return false;
-  }
-  return (
-    left.provider === right.provider &&
-    left.preview === right.preview &&
-    left.messageId === right.messageId &&
-    left.createdAt === right.createdAt &&
-    left.prompt === right.prompt &&
-    left.outgoingMessageText === right.outgoingMessageText &&
-    left.phase === right.phase &&
-    left.startedAt === right.startedAt &&
-    left.endedAt === right.endedAt &&
-    left.error === right.error &&
-    left.repository === right.repository &&
-    left.branch === right.branch &&
-    left.readyEnvironmentId === right.readyEnvironmentId &&
-    left.hostStartedFirstTurn === right.hostStartedFirstTurn &&
-    Equal.equals(left.modelSelection, right.modelSelection)
-  );
-}
-
 function removeDraftThreadReferences(
   state: Pick<
     ComposerDraftStoreState,
@@ -1789,63 +1732,6 @@ function removeDraftThreadReferences(
     draftsByThreadKey: restDraftsByThreadKey,
     draftThreadsByThreadKey: restDraftThreadsByThreadKey,
     logicalProjectDraftThreadKeyByLogicalProjectKey: nextLogicalMappings,
-  };
-}
-
-function parsePendingEnvironmentSend(value: unknown): PendingCloudEnvironmentSend | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const pending = value as Record<string, unknown>;
-  if (pending.provider !== "e2b" && pending.provider !== "namespace") {
-    return undefined;
-  }
-  if (typeof pending.preview !== "string") {
-    return undefined;
-  }
-  if (typeof pending.messageId !== "string" || pending.messageId.length === 0) {
-    return undefined;
-  }
-  if (typeof pending.createdAt !== "string" || pending.createdAt.length === 0) {
-    return undefined;
-  }
-  if (typeof pending.prompt !== "string") {
-    return undefined;
-  }
-  if (typeof pending.outgoingMessageText !== "string") {
-    return undefined;
-  }
-  if (
-    pending.phase !== "creating" &&
-    pending.phase !== "pairing" &&
-    pending.phase !== "loading-project" &&
-    pending.phase !== "ready" &&
-    pending.phase !== "failed"
-  ) {
-    return undefined;
-  }
-  if (typeof pending.startedAt !== "string" || pending.startedAt.length === 0) {
-    return undefined;
-  }
-  const modelSelection = Option.getOrUndefined(decodeModelSelectionOption(pending.modelSelection));
-  return {
-    provider: pending.provider,
-    preview: pending.preview,
-    messageId: pending.messageId,
-    createdAt: pending.createdAt,
-    prompt: pending.prompt,
-    outgoingMessageText: pending.outgoingMessageText,
-    phase: pending.phase,
-    startedAt: pending.startedAt,
-    ...(typeof pending.endedAt === "string" ? { endedAt: pending.endedAt } : {}),
-    ...(typeof pending.error === "string" ? { error: pending.error } : {}),
-    ...(typeof pending.repository === "string" ? { repository: pending.repository } : {}),
-    ...(typeof pending.branch === "string" ? { branch: pending.branch } : {}),
-    ...(typeof pending.readyEnvironmentId === "string" && pending.readyEnvironmentId.length > 0
-      ? { readyEnvironmentId: pending.readyEnvironmentId }
-      : {}),
-    ...(modelSelection ? { modelSelection } : {}),
-    ...(pending.hostStartedFirstTurn === true ? { hostStartedFirstTurn: true } : {}),
   };
 }
 
@@ -1912,6 +1798,9 @@ function normalizePersistedDraftThreads(
       const startFromOrigin = candidateDraftThread.startFromOrigin === true;
       const normalizedWorktreePath = typeof worktreePath === "string" ? worktreePath : null;
       const promotedToCandidate = candidateDraftThread.promotedTo;
+      const pendingEnvironmentSend = parsePendingEnvironmentSend(
+        candidateDraftThread.pendingEnvironmentSend,
+      );
       const promotedToRecord =
         promotedToCandidate && typeof promotedToCandidate === "object"
           ? (promotedToCandidate as Record<string, unknown>)
@@ -1927,9 +1816,6 @@ function normalizePersistedDraftThreads(
               promotedToRecord.threadId as ThreadId,
             )
           : null;
-      const pendingEnvironmentSend = parsePendingEnvironmentSend(
-        candidateDraftThread.pendingEnvironmentSend,
-      );
       if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
         continue;
       }
@@ -2316,10 +2202,10 @@ export function partializeComposerDraftStoreState(
   state: ComposerDraftStoreState,
 ): PersistedComposerDraftStoreState {
   // Draft sessions worth persisting: mapped (a new-thread flow targets
-  // them), promoting (mid-send), or holding invested work (composer
-  // content or an in-flight first-send). Everything else is a zombie — and
-  // its composer blob must be dropped WITH it, or model/mode-only entries
-  // would persist forever keyed to a session that no longer exists.
+  // them), promoting (mid-send), or holding real user content (they back a
+  // sidebar row). Everything else is a zombie — and its composer blob must
+  // be dropped WITH it, or model/mode-only entries would persist forever
+  // keyed to a session that no longer exists.
   const mappedDraftKeys = new Set(
     Object.values(state.logicalProjectDraftThreadKeyByLogicalProjectKey),
   );
@@ -2921,9 +2807,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 ? undefined
                 : nextDraftThreadsByThreadKey[previousThreadKeyForLogicalProject];
             // A remap only garbage-collects the previous draft when the user
-            // never invested in it. Typed content, attachments, or an
-            // in-flight first-send (composer already cleared) stay alive
-            // unmapped so the sidebar can surface them.
+            // never invested content in it. A draft with typed text or
+            // attachments stays alive unmapped — the sidebar draft rows list
+            // every such session, so "new thread" can mint a fresh draft
+            // without destroying the one the user walked away from.
             if (
               previousThreadKeyForLogicalProject &&
               previousThreadKeyForLogicalProject !== draftId &&
@@ -3050,34 +2937,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;
-            }
-            return {
-              draftThreadsByThreadKey: {
-                ...state.draftThreadsByThreadKey,
-                [threadKey]: nextDraftThread,
-              },
-            };
-          });
-        },
-        setDraftPendingEnvironmentSend: (threadRef, pending) => {
-          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
-          if (threadKey.length === 0) {
-            return;
-          }
-          set((state) => {
-            const existing = state.draftThreadsByThreadKey[threadKey];
-            if (!existing) {
-              return state;
-            }
-            const nextPending = pending ?? undefined;
-            if (pendingEnvironmentSendsEqual(existing.pendingEnvironmentSend, nextPending)) {
-              return state;
-            }
-            const nextDraftThread: DraftThreadState = { ...existing };
-            if (nextPending === undefined) {
-              delete nextDraftThread.pendingEnvironmentSend;
-            } else {
-              nextDraftThread.pendingEnvironmentSend = nextPending;
             }
             return {
               draftThreadsByThreadKey: {

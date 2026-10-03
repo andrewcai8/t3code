@@ -9,11 +9,7 @@ import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/unstable/reactivity";
 
 import { toastManager } from "../components/ui/toast";
-import {
-  DraftId,
-  type PendingCloudEnvironmentSend,
-  useComposerDraftStore,
-} from "../composerDraftStore";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -21,20 +17,14 @@ import { waitForProjectMatch } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { readPreparedConnection } from "../state/session";
 import { holdBoxDemand } from "./CloudBoxes";
+import {
+  patchDraftPendingEnvironmentSend,
+  setDraftPendingEnvironmentSend,
+} from "./pendingCloudSend";
 import { provisionRequests } from "./provisionRequests";
 import { provisionedSandboxLeases } from "./provisionedSandboxLeases";
 
 const quietly = { reportFailure: false };
-
-export function patchDraftPendingEnvironmentSend(
-  draftId: DraftId,
-  patch: Partial<PendingCloudEnvironmentSend>,
-): void {
-  const store = useComposerDraftStore.getState();
-  const current = store.getDraftSession(draftId)?.pendingEnvironmentSend;
-  if (!current) return;
-  store.setDraftPendingEnvironmentSend(draftId, { ...current, ...patch });
-}
 
 /** Writes a step onto the draft; its view, wherever it is open, follows the draft. */
 export function recordCloudSendStep(id: string, step: CloudSendStep): void {
@@ -55,7 +45,7 @@ export function recordCloudSendStep(id: string, step: CloudSendStep): void {
       toastManager.add({ type: "error", title: step.message });
       return;
     case "cancelled":
-      store.setDraftPendingEnvironmentSend(draftId, null);
+      setDraftPendingEnvironmentSend(draftId, null);
       return;
     case "ready":
       if (!pending) return;

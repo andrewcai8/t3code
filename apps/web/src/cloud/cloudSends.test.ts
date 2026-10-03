@@ -2,12 +2,10 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
-import {
-  DraftId,
-  type PendingCloudEnvironmentSend,
-  useComposerDraftStore,
-} from "../composerDraftStore";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { recordCloudSendStep } from "./cloudSends";
+import { setDraftPendingEnvironmentSend } from "./pendingCloudSend";
+import type { PendingCloudEnvironmentSend } from "./pendingCloudSendSchema";
 
 const draftId = DraftId.make("draft");
 const codex = ProviderInstanceId.make("codex");
@@ -32,7 +30,7 @@ function draftSettingUp() {
     envMode: "worktree",
     branch: "main",
   });
-  store.setDraftPendingEnvironmentSend(draftId, settingUp);
+  setDraftPendingEnvironmentSend(draftId, settingUp);
 }
 
 function draft() {

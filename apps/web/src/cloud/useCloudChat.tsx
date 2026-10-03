@@ -61,7 +61,6 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftId,
-  type PendingCloudEnvironmentSend,
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
@@ -95,7 +94,12 @@ import {
   pendingCloudSendPreview,
 } from "./cloudChat.logic";
 import { refreshProvisionedEnvironments } from "./cloudHosts";
-import { cloudSends, patchDraftPendingEnvironmentSend } from "./cloudSends";
+import { cloudSends } from "./cloudSends";
+import {
+  patchDraftPendingEnvironmentSend,
+  setDraftPendingEnvironmentSend,
+} from "./pendingCloudSend";
+import type { PendingCloudEnvironmentSend } from "./pendingCloudSendSchema";
 import {
   cancelProvisionRequest,
   forgetProvisionRequest,
@@ -510,7 +514,7 @@ export function useCloudChat(input: {
         )
       ) {
         cancelProvisionRequest(draftId);
-        useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
+        setDraftPendingEnvironmentSend(draftId, null);
       }
     },
     [draftId],
@@ -571,7 +575,7 @@ export function useCloudChat(input: {
         .getState()
         .getDraftSession(draftId)?.pendingEnvironmentSend;
       if (current) {
-        useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, {
+        setDraftPendingEnvironmentSend(draftId, {
           provider: current.provider,
           preview: current.preview,
           messageId: current.messageId,
@@ -669,7 +673,7 @@ export function useCloudChat(input: {
       reviewComments,
       threadContexts,
     };
-    useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, {
+    setDraftPendingEnvironmentSend(draftId, {
       provider: requested,
       preview: pendingCloudSendPreview(outgoingMessageText),
       messageId,
@@ -715,7 +719,7 @@ export function useCloudChat(input: {
     const { composerRef, promptRef, composerDraftTarget } = inputRef.current;
     if (draftId !== null) {
       cancelProvisionRequest(draftId);
-      useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
+      setDraftPendingEnvironmentSend(draftId, null);
     }
     sendInFlightRef.current = false;
     const held = heldRef.current;
@@ -914,7 +918,7 @@ export function useCloudChat(input: {
     owner: ScopedThreadRef,
   ) => {
     if (typeof target !== "string") return;
-    useComposerDraftStore.getState().setDraftPendingEnvironmentSend(target, null);
+    setDraftPendingEnvironmentSend(target, null);
     if (!lease) return;
     const claimed = await claimProvisionedBox(
       {
