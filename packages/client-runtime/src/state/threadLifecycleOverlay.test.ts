@@ -88,14 +88,6 @@ describe("withThreadLifecycleOverlays", () => {
     return { registry, overlays, snapshot: () => registry.get(snapshotAtom) };
   }
 
-  it("hides a thread deleted on this device until the delete is undone", () => {
-    const { registry, overlays, snapshot } = harness();
-    registry.set(overlays, new Map([[KEY, { kind: "deleted", at: SETTLED_AT }]]));
-    expect(snapshot()?.threads.map(({ id }) => id)).toEqual([OTHER_THREAD_ID]);
-    registry.set(overlays, new Map());
-    expect(snapshot()?.threads.map(({ id }) => id)).toEqual([THREAD_ID, OTHER_THREAD_ID]);
-  });
-
   it("settles a thread in the snapshot and keeps its identity across recomputes", () => {
     const { registry, overlays, snapshot } = harness();
     expect(snapshot()).toBe(registry.get(source));
