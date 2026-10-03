@@ -118,9 +118,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 
 import { useThreadActions } from "../hooks/useThreadActions";
-import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
-import { stopProvisionedCloudMachineMenuItem } from "../cloud/cloudThreadMenu";
-import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
+import * as SidebarCloud from "../cloud/sidebarCloud";
 import { projectEnvironment } from "../state/projects";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -1179,7 +1177,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
-  const { stopProvisionedCloudMachine } = useCloudThreadActions();
+  const { stopProvisionedCloudMachine } = SidebarCloud.useCloudThreadActions();
   const environmentMachine = project.allRemoteMembersAreWsl
     ? "linux"
     : project.allRemoteMembersAreDesktopLocal
@@ -2259,7 +2257,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           ...(thread.branch
             ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
             : []),
-          ...(provisionedSandboxFor(threadRef) ? [stopProvisionedCloudMachineMenuItem()] : []),
+          ...(SidebarCloud.provisionedSandboxFor(threadRef)
+            ? [SidebarCloud.stopProvisionedCloudMachineMenuItem()]
+            : []),
           { id: "rename", label: "Rename thread" },
           { id: "mark-unread", label: "Mark unread" },
           { id: "copy-path", label: "Copy Path" },

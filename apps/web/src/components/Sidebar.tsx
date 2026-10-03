@@ -29,7 +29,6 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   canSnooze,
   effectiveSnoozed,
-  environmentAllowsThreadSettlement,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
@@ -141,7 +140,6 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import {
-  useEnvironment,
   useEnvironmentIdentities,
   useConnectedEnvironmentIds,
   useEnvironmentMachines,
@@ -151,7 +149,6 @@ import {
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
-  useThreadRefs,
   useThreadShells,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
@@ -172,14 +169,7 @@ import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
-import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
-import {
-  EMPTY_SIDEBAR_COMPOSER,
-  isCloudSendThreadListed,
-  sidebarDraftStatusLabel,
-} from "../cloud/sidebarCloud";
-import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
-import { draftSessionHasInvestedWork } from "../cloud/draftInvestedWork";
+import * as SidebarCloud from "../cloud/sidebarCloud";
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
@@ -857,7 +847,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
         `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
   const accessibility = resolveSidebarRowAccessibility({
     title: preview,
-    statusLabel: sidebarDraftStatusLabel(session, props.isActive),
+    statusLabel: SidebarCloud.sidebarDraftStatusLabel(session, props.isActive),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -957,7 +947,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
   // Membership-only subscription: the refs array keeps its identity until a
   // thread is added or removed, so thread activity never re-renders the block.
-  const threadRefs = useThreadRefs();
+  const threadRefs = SidebarCloud.useThreadRefs();
   const knownThreadKeys = useMemo(() => new Set(threadRefs.map(scopedThreadKey)), [threadRefs]);
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
@@ -977,8 +967,10 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
       const session = store.getDraftSession(draftId);
       const composer = store.getComposerDraft(draftId);
       row =
-        session && session.promotedTo == null && draftSessionHasInvestedWork(session, composer)
-          ? { draftId, session, composer: composer ?? EMPTY_SIDEBAR_COMPOSER }
+        session &&
+        session.promotedTo == null &&
+        SidebarCloud.draftSessionHasInvestedWork(session, composer)
+          ? { draftId, session, composer: composer ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER }
           : null;
     }
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
@@ -989,7 +981,10 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     // new-thread surfaces mint fresh drafts and leave invested ones behind
     // unmapped, so the mapping only knows about the latest per project.
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (session.promotedTo != null || isCloudSendThreadListed(session, knownThreadKeys)) {
+      if (
+        session.promotedTo != null ||
+        SidebarCloud.isCloudSendThreadListed(session, knownThreadKeys)
+      ) {
         continue;
       }
       if (
@@ -1007,19 +1002,19 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
         if (frozenActive.routeDraftId === draftKey && frozenActive.row !== null) {
           rows.push({ ...frozenActive.row, session });
         } else if (session.pendingEnvironmentSend != null) {
-          const composer = draftsByThreadKey[draftKey] ?? EMPTY_SIDEBAR_COMPOSER;
+          const composer = draftsByThreadKey[draftKey] ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER;
           rows.push({ draftId: DraftId.make(draftKey), session, composer });
         }
         continue;
       }
       const composer = draftsByThreadKey[draftKey];
-      if (!draftSessionHasInvestedWork(session, composer)) {
+      if (!SidebarCloud.draftSessionHasInvestedWork(session, composer)) {
         continue;
       }
       rows.push({
         draftId: DraftId.make(draftKey),
         session,
-        composer: composer ?? EMPTY_SIDEBAR_COMPOSER,
+        composer: composer ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER,
       });
     }
     rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
@@ -1258,7 +1253,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const environment = useEnvironment(thread.environmentId);
+  const environment = SidebarCloud.useEnvironment(thread.environmentId);
   const status = resolveSidebarThreadStatus(thread, environment?.connection);
   const isInFlight =
     status === "working" || status === "waiting" || status === "approval" || status === "input";
@@ -2339,7 +2334,7 @@ export default function Sidebar() {
     archiveThread,
     deleteThread,
   } = useThreadActions();
-  const { stopProvisionedCloudMachine } = useCloudThreadActions();
+  const { stopProvisionedCloudMachine } = SidebarCloud.useCloudThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -2617,7 +2612,7 @@ export default function Sidebar() {
       if (session.promotedTo != null) {
         continue;
       }
-      if (!draftSessionHasInvestedWork(session, store.draftsByThreadKey[draftKey])) {
+      if (!SidebarCloud.draftSessionHasInvestedWork(session, store.draftsByThreadKey[draftKey])) {
         continue;
       }
       if (
@@ -2722,7 +2717,7 @@ export default function Sidebar() {
       // or descriptor not loaded yet) never classify as settled: the user
       // could neither un-settle nor pin them, so auto-settling them would
       // strand rows in a tail with no working affordances.
-      const supportsSettlement = environmentAllowsThreadSettlement(capabilities);
+      const supportsSettlement = SidebarCloud.environmentAllowsThreadSettlement(capabilities);
       const supportsSnooze = capabilities?.threadSnooze === true;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
       if (capabilities?.threadActiveReorder === true) activeReorderable.add(threadKey);
@@ -3800,7 +3795,7 @@ export default function Sidebar() {
             activeSection: draggedFromSection,
             activePinned: source.pinnedAt != null,
             activeSettled: source.settledOverride === "settled",
-            supportsSettlement: environmentAllowsThreadSettlement(
+            supportsSettlement: SidebarCloud.environmentAllowsThreadSettlement(
               serverConfigs.get(source.environmentId)?.environment.capabilities,
             ),
             target,
@@ -3850,7 +3845,7 @@ export default function Sidebar() {
         activeSection,
         activePinned: activeThread.pinnedAt != null,
         activeSettled: activeThread.settledOverride === "settled",
-        supportsSettlement: environmentAllowsThreadSettlement(
+        supportsSettlement: SidebarCloud.environmentAllowsThreadSettlement(
           serverConfigs.get(activeThread.environmentId)?.environment.capabilities,
         ),
         target,
@@ -4313,7 +4308,7 @@ export default function Sidebar() {
         // Un-settle pins the thread active until real activity clears the pin.
         // Environments without
         // the settlement capability get no lifecycle items at all.
-        const supportsSettlement = environmentAllowsThreadSettlement(
+        const supportsSettlement = SidebarCloud.environmentAllowsThreadSettlement(
           serverConfigs.get(thread.environmentId)?.environment.capabilities,
         );
         const supportsSnooze =
@@ -4355,7 +4350,7 @@ export default function Sidebar() {
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-              hasProvisionedCloudMachine: provisionedSandboxFor(threadRef) !== null,
+              hasProvisionedCloudMachine: SidebarCloud.provisionedSandboxFor(threadRef) !== null,
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
               supports: {
@@ -5004,7 +4999,7 @@ export default function Sidebar() {
                                   ? "unsettle"
                                   : "settle"
                             }
-                            settlementSupported={environmentAllowsThreadSettlement(
+                            settlementSupported={SidebarCloud.environmentAllowsThreadSettlement(
                               serverConfigs.get(thread.environmentId)?.environment.capabilities,
                             )}
                             snoozeSupported={

@@ -37,8 +37,7 @@ import {
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
-import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
-import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
+import * as SidebarCloud from "../cloud/sidebarCloud";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
@@ -96,7 +95,7 @@ export function useThreadActionMenu(input: {
     deleteThread,
     markThreadUnread,
   } = useThreadActions();
-  const { stopProvisionedCloudMachine } = useCloudThreadActions();
+  const { stopProvisionedCloudMachine } = SidebarCloud.useCloudThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -152,7 +151,7 @@ export function useThreadActionMenu(input: {
           autoSettleEnabled: thread.autoSettleDisabledAt == null,
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
-          hasProvisionedCloudMachine: provisionedSandboxFor(threadRef) !== null,
+          hasProvisionedCloudMachine: SidebarCloud.provisionedSandboxFor(threadRef) !== null,
           isRegeneratingTitle,
           isRunning: !threadRuntimeCanArchive(thread.runtime),
           supports,

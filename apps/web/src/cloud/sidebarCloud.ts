@@ -2,6 +2,14 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 
 import type { ComposerThreadDraftState, DraftSessionState } from "../composerDraftStore";
 
+export { environmentAllowsThreadSettlement } from "@t3tools/client-runtime/state/thread-settled";
+export { useEnvironment } from "../state/environments";
+export { useThreadRefs } from "../state/entities";
+export { stopProvisionedCloudMachineMenuItem } from "./cloudThreadMenu";
+export { draftSessionHasInvestedWork } from "./draftInvestedWork";
+export { provisionedSandboxFor } from "./provisionedSandboxLeases";
+export { useCloudThreadActions } from "./useCloudThreadActions";
+
 /** The composer a draft row shows when its first cloud send already cleared the composer. */
 export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
   prompt: "",
