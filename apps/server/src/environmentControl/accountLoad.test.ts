@@ -1,32 +1,21 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import {
-  DurableProvisionRequest,
-  ProviderInstanceId,
-  ServerSettings,
-  ThreadId,
-  TurnId,
-} from "@t3tools/contracts";
+import { DurableProvisionRequest, ProviderInstanceId, ServerSettings } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/ProjectionThreadSessions.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import {
-  ProjectionThreadSessionRepository,
-  type ProjectionThreadSession,
-} from "../persistence/Services/ProjectionThreadSessions.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { resolveProvisioningProfiles } from "./ProvisioningProviderProfile.ts";
 
-const layer = Layer.mergeAll(
-  ProjectionThreadSessionRepositoryLive,
-  ProvisionOperationStore.layer,
-).pipe(Layer.provideMerge(SqlitePersistenceMemory), Layer.provideMerge(NodeServices.layer));
+const layer = ProvisionOperationStore.layer.pipe(
+  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(NodeServices.layer),
+);
 const decodeRequest = Schema.decodeUnknownEffect(DurableProvisionRequest);
 const decodeSettings = Schema.decodeSync(ServerSettings);
 const noOperations = { listUnresolved: Effect.succeed([]) };
@@ -44,26 +33,25 @@ const request = (index: number, chat: string, passengers: ReadonlyArray<string> 
     strategy: "direct",
   });
 
-const session = (
-  threadId: string,
-  status: ProjectionThreadSession["status"],
-  providerInstanceId: string | null,
-): ProjectionThreadSession => ({
-  threadId: ThreadId.make(threadId),
-  status,
-  providerName: "claudeAgent",
-  providerInstanceId:
-    providerInstanceId === null ? null : ProviderInstanceId.make(providerInstanceId),
-  runtimeMode: "full-access",
-  activeTurnId: status === "running" ? TurnId.make(`${threadId}-turn`) : null,
-  lastError: null,
-  updatedAt: "2026-09-23T12:00:00.000Z",
-});
+/** A local V2 run as the projection holds it. */
+const run = (threadId: string, ordinal: number, status: string, instanceId: string | null) =>
+  Effect.flatMap(
+    SqlClient.SqlClient,
+    (sql) => sql`
+      INSERT INTO orchestration_v2_projection_runs (
+        run_id, thread_id, ordinal, provider, provider_thread_id, status, requested_at,
+        completed_at, payload_json, provider_instance_id
+      ) VALUES (
+        ${`${threadId}:run:${ordinal}`}, ${threadId}, ${ordinal}, 'claudeAgent', NULL, ${status},
+        '2026-09-23T12:00:00.000Z', NULL, '{}', ${instanceId}
+      )
+    `,
+  );
 
-it.effect("counts awake cloud boxes and local running turns per account", () =>
+it.effect("counts awake cloud boxes and local threads with a run in flight per account", () =>
   Effect.gen(function* () {
     const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-    const sessions = yield* ProjectionThreadSessionRepository;
+    const sql = yield* SqlClient.SqlClient;
     yield* Effect.promise(async () => {
       for (const [leaseId, providerInstanceId] of [
         ["awake-1", "claude-work"],
@@ -76,16 +64,14 @@ it.effect("counts awake cloud boxes and local running turns per account", () =>
       await leases.markPaused("paused");
       await leases.markDisposed("disposed");
     });
-    for (const row of [
-      session("running-work", "running", "claude-work"),
-      session("running-personal", "running", "claude-personal"),
-      session("ready-personal", "ready", "claude-personal"),
-      session("idle-codex", "idle", "codex-personal"),
-      session("running-legacy", "running", null),
-    ])
-      yield* sessions.upsert(row);
+    yield* run("running-work", 1, "running", "claude-work");
+    yield* run("running-work", 2, "queued", "claude-work");
+    yield* run("waiting-personal", 1, "waiting", "claude-personal");
+    yield* run("done-personal", 1, "completed", "claude-personal");
+    yield* run("stopped-codex", 1, "interrupted", "codex-personal");
+    yield* run("running-legacy", 1, "running", null);
 
-    expect(yield* readAccountLoad(leases, sessions, noOperations)).toEqual(
+    expect(yield* readAccountLoad(leases, sql, noOperations)).toEqual(
       new Map([
         ["claude-work", 3],
         ["codex-personal", 1],
@@ -98,7 +84,7 @@ it.effect("counts awake cloud boxes and local running turns per account", () =>
 it.effect("counts an awake box against its companions' accounts too", () =>
   Effect.gen(function* () {
     const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-    const sessions = yield* ProjectionThreadSessionRepository;
+    const sql = yield* SqlClient.SqlClient;
     yield* Effect.promise(async () => {
       await leases.register({
         leaseId: "claude-chat",
@@ -114,7 +100,7 @@ it.effect("counts an awake box against its companions' accounts too", () =>
       });
     });
 
-    expect(yield* readAccountLoad(leases, sessions, noOperations)).toEqual(
+    expect(yield* readAccountLoad(leases, sql, noOperations)).toEqual(
       new Map([
         ["claude-work", 2],
         ["codex-spare", 2],
@@ -127,11 +113,10 @@ it.effect("counts an awake box against its companions' accounts too", () =>
 
 it.effect("counts local turns alone when cloud leases cannot be read", () =>
   Effect.gen(function* () {
-    const sessions = yield* ProjectionThreadSessionRepository;
-    yield* sessions.upsert(session("running-work", "running", "claude-work"));
+    yield* run("running-work", 1, "running", "claude-work");
     const unreadable = { awake: () => Promise.reject(new Error("database is locked")) };
 
-    expect(yield* readAccountLoad(unreadable, sessions, noOperations)).toEqual(
+    expect(yield* readAccountLoad(unreadable, yield* SqlClient.SqlClient, noOperations)).toEqual(
       new Map([["claude-work", 1]]),
     );
   }).pipe(Effect.provide(layer)),
@@ -140,7 +125,7 @@ it.effect("counts local turns alone when cloud leases cannot be read", () =>
 it.effect("counts a box still provisioning, but not one being cancelled or already ended", () =>
   Effect.gen(function* () {
     const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-    const sessions = yield* ProjectionThreadSessionRepository;
+    const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
     yield* store.accept(yield* request(1, "claude-work", ["codex-spare"]));
     const allocating = yield* store.accept(yield* request(2, "codex-spare", ["claude-home"]));
@@ -158,7 +143,7 @@ it.effect("counts a box still provisioning, but not one being cancelled or alrea
     const ended = yield* store.accept(yield* request(4, "claude-work"));
     yield* store.advance(ended, { kind: "disposed" });
 
-    expect(yield* readAccountLoad(leases, sessions, store)).toEqual(
+    expect(yield* readAccountLoad(leases, sql, store)).toEqual(
       new Map([
         ["claude-work", 1],
         ["codex-spare", 2],
@@ -171,7 +156,7 @@ it.effect("counts a box still provisioning, but not one being cancelled or alrea
 it.effect("spreads back-to-back launches over the accounts with the most usage left", () =>
   Effect.gen(function* () {
     const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
-    const sessions = yield* ProjectionThreadSessionRepository;
+    const sql = yield* SqlClient.SqlClient;
     const store = yield* ProvisionOperationStore;
     const apiKey = (driver: string, name: string) => ({
       driver,
@@ -227,7 +212,7 @@ it.effect("spreads back-to-back launches over the accounts with the most usage l
         {
           providers,
           now: Date.parse("2026-10-02T07:33:20.000Z") + index * 10_000,
-          load: yield* readAccountLoad(leases, sessions, store),
+          load: yield* readAccountLoad(leases, sql, store),
         },
       );
       const [chat, ...passengers] = profiles.map(({ instanceId }) => instanceId);

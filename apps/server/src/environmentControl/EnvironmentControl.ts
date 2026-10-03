@@ -84,8 +84,6 @@ import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
-import { ProjectionThreadSessionRepositoryLive } from "../persistence/Layers/ProjectionThreadSessions.ts";
-import { ProjectionThreadSessionRepository } from "../persistence/Services/ProjectionThreadSessions.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
 import { ProvisionRefused, resolveProvisioningProfiles } from "./ProvisioningProviderProfile.ts";
@@ -833,7 +831,6 @@ export const layer = Layer.effect(
       | undefined;
     const settings = yield* ServerSettingsService;
     const providerRegistry = yield* ProviderRegistry;
-    const threadSessions = yield* ProjectionThreadSessionRepository;
     const profileContext = yield* Effect.context<Path.Path | FileSystem.FileSystem>();
     // Promise-side provider code logs through the server's logger, not the default one.
     const runLogged = Effect.runPromiseWith(yield* Effect.context<never>());
@@ -1395,7 +1392,7 @@ export const layer = Layer.effect(
             Effect.all({
               providers: providerRegistry.getProviders,
               now: Clock.currentTimeMillis,
-              load: readAccountLoad(leaseRegistry, threadSessions, store),
+              load: readAccountLoad(leaseRegistry, sql, store),
             }).pipe(
               Effect.flatMap((usage) =>
                 resolveProvisioningProfiles(
@@ -1979,8 +1976,4 @@ export const layer = Layer.effect(
       stop: (id) => run((service) => service.stop(id), refused("unknown")),
     };
   }),
-).pipe(
-  Layer.provide(ProvisionOperationStore.layer),
-  Layer.provide(BoxUsageStore.layer),
-  Layer.provide(ProjectionThreadSessionRepositoryLive),
-);
+).pipe(Layer.provide(ProvisionOperationStore.layer), Layer.provide(BoxUsageStore.layer));

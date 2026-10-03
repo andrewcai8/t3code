@@ -1,7 +1,7 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
 import type { AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
-import type { ProjectionThreadSessionRepositoryShape } from "../persistence/Services/ProjectionThreadSessions.ts";
+import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 
@@ -21,13 +21,13 @@ const boxAccounts = (box: {
  * rather than the account the request hinted at. It counts from the moment
  * its request is saved, minutes before it is ready, so a launch right after
  * another sees the first one's accounts as taken. A box being cancelled no
- * longer counts. A local thread counts while a turn is running on its
- * provider instance. A source that cannot be read counts as zero, so routing
+ * longer counts. A local thread counts once while it has a run in flight on
+ * its provider instance: queued, preparing, starting, running or waiting. A source that cannot be read counts as zero, so routing
  * degrades to usage alone instead of refusing.
  */
 export const readAccountLoad = (
   leases: Pick<ProvisionedLeaseRegistry, "awake">,
-  sessions: Pick<ProjectionThreadSessionRepositoryShape, "listRunning">,
+  sql: SqlClient.SqlClient,
   operations: Pick<ProvisionOperationStore["Service"], "listUnresolved">,
 ) =>
   Effect.all(
@@ -47,8 +47,18 @@ export const readAccountLoad = (
           Effect.as(Effect.logDebug("provisioning boxes unread for account load", { cause }), []),
         ),
       ),
-      local: sessions.listRunning().pipe(
-        Effect.map((running) => running.flatMap((session) => session.providerInstanceId ?? [])),
+      local: sql<{ readonly providerInstanceId: string; readonly threads: number }>`
+        SELECT provider_instance_id AS "providerInstanceId", COUNT(DISTINCT thread_id) AS threads
+        FROM orchestration_v2_projection_runs
+        WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+          AND provider_instance_id IS NOT NULL
+        GROUP BY provider_instance_id
+      `.pipe(
+        Effect.map((rows) =>
+          rows.flatMap(({ providerInstanceId, threads }) =>
+            Array.from({ length: threads }, () => ProviderInstanceId.make(providerInstanceId)),
+          ),
+        ),
         Effect.catch((cause) =>
           Effect.as(Effect.logDebug("local sessions unread for account load", { cause }), []),
         ),
