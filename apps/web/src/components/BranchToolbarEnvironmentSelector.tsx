@@ -6,13 +6,7 @@ import { ScaleIcon } from "lucide-react";
 import { memo, useMemo } from "react";
 
 import type { EnvironmentOption } from "./BranchToolbar.logic";
-import {
-  type CloudRunOn,
-  cloudRunOnItems,
-  CloudRunOnSelectItems,
-  cloudRunOnValue,
-  selectCloudRunOn,
-} from "./CloudRunOn";
+import * as RunOnCloud from "./CloudRunOn";
 import { cn } from "../lib/utils";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -36,7 +30,7 @@ interface BranchToolbarEnvironmentSelectorProps {
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
-  cloudRunOn?: CloudRunOn | undefined;
+  cloudRunOn?: RunOnCloud.CloudRunOn | undefined;
   displayMode?: "toolbar" | "panel";
 }
 
@@ -64,7 +58,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         value: env.environmentId,
         label: env.label,
       })),
-      ...cloudRunOnItems(cloudRunOn),
+      ...RunOnCloud.cloudRunOnItems(cloudRunOn),
     ],
     [availableEnvironments, autoEnvironmentLabel, onAutoEnvironment, cloudRunOn],
   );
@@ -103,9 +97,11 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   return (
     <Select
       modal={false}
-      value={cloudRunOnValue(cloudRunOn) ?? (autoEnvironmentLabel ? "auto" : environmentId)}
+      value={
+        RunOnCloud.cloudRunOnValue(cloudRunOn) ?? (autoEnvironmentLabel ? "auto" : environmentId)
+      }
       onValueChange={(value) =>
-        selectCloudRunOn(cloudRunOn, value) ||
+        RunOnCloud.selectCloudRunOn(cloudRunOn, value) ||
         (value === "auto" ? onAutoEnvironment?.() : onEnvironmentChange(value as EnvironmentId))
       }
       items={environmentItems}
@@ -175,7 +171,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               </span>
             </SelectItem>
           ))}
-          <CloudRunOnSelectItems cloudRunOn={cloudRunOn} />
+          <RunOnCloud.CloudRunOnSelectItems cloudRunOn={cloudRunOn} />
         </SelectGroup>
       </SelectPopup>
     </Select>

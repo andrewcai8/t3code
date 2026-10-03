@@ -39,15 +39,7 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
-import {
-  type CloudRunOn,
-  CloudBaseBranchSelector,
-  CloudRunOnMenuItems,
-  cloudRunOnLabel,
-  cloudRunOnValue,
-  selectCloudRunOn,
-  shouldOfferEnvironmentChoice,
-} from "./CloudRunOn";
+import * as RunOnCloud from "./CloudRunOn";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import { ComposerControl } from "./chat/ComposerControl";
@@ -98,7 +90,7 @@ interface BranchToolbarProps {
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
-  cloudRunOn?: CloudRunOn | undefined;
+  cloudRunOn?: RunOnCloud.CloudRunOn | undefined;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
 }
@@ -114,7 +106,7 @@ interface MobileRunContextSelectorProps {
   showEnvironmentPicker: boolean;
   showEnvironmentIndicator: boolean;
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
-  cloudRunOn: CloudRunOn | undefined;
+  cloudRunOn: RunOnCloud.CloudRunOn | undefined;
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   onEnvModeChange: (mode: EnvMode) => void;
@@ -195,7 +187,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
     <>
       {icon}
       <ComposerContextLabel>
-        {cloudRunOnLabel(cloudRunOn) ??
+        {RunOnCloud.cloudRunOnLabel(cloudRunOn) ??
           autoEnvironmentLabel ??
           (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
       </ComposerContextLabel>
@@ -239,10 +231,11 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
               <MenuGroupLabel>Run on</MenuGroupLabel>
               <MenuRadioGroup
                 value={
-                  cloudRunOnValue(cloudRunOn) ?? (autoEnvironmentLabel ? "auto" : environmentId)
+                  RunOnCloud.cloudRunOnValue(cloudRunOn) ??
+                  (autoEnvironmentLabel ? "auto" : environmentId)
                 }
                 onValueChange={(value) =>
-                  selectCloudRunOn(cloudRunOn, value) ||
+                  RunOnCloud.selectCloudRunOn(cloudRunOn, value) ||
                   (value === "auto"
                     ? onAutoEnvironment?.()
                     : onEnvironmentChange(value as EnvironmentId))
@@ -278,7 +271,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                     </span>
                   </MenuRadioItem>
                 ))}
-                <CloudRunOnMenuItems cloudRunOn={cloudRunOn} envLocked={envLocked} />
+                <RunOnCloud.CloudRunOnMenuItems cloudRunOn={cloudRunOn} envLocked={envLocked} />
               </MenuRadioGroup>
             </MenuGroup>
             <MenuSeparator />
@@ -618,7 +611,7 @@ export const BranchToolbar = memo(function BranchToolbar({
     ],
   );
 
-  const showEnvironmentPicker = shouldOfferEnvironmentChoice({
+  const showEnvironmentPicker = RunOnCloud.shouldOfferEnvironmentChoice({
     environmentCount: availableEnvironments?.length ?? 0,
     canChangeEnvironment: Boolean(availableEnvironments && onEnvironmentChange),
     canCreateEnvironment: cloudRunOn !== undefined,
@@ -759,7 +752,7 @@ export const BranchToolbar = memo(function BranchToolbar({
       ) : null}
 
       {showGitControls && cloudRunOn?.base ? (
-        <CloudBaseBranchSelector
+        <RunOnCloud.CloudBaseBranchSelector
           ref={branchSelectorRef}
           className="min-w-0 flex-initial justify-end @3xl/composer-surface:ml-auto"
           environmentId={environmentId}
