@@ -106,7 +106,7 @@ import {
   codexAppServerArgs,
   resolveCodexLaunchArgs,
 } from "../../provider/Layers/codexLaunchArgs.ts";
-import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import { resolveCodexProviderEnvironment } from "../../provider/codexProviderEnvironment.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterDriverCreateError,
@@ -1433,21 +1433,6 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
     });
   }),
 );
-
-// An ambient CODEX_HOME from the shell that launched the server must not leak
-// into an instance. The instance's own CODEX_HOME still wins over the shared home.
-export function resolveCodexProviderEnvironment(
-  instanceEnvironment: Parameters<typeof mergeProviderInstanceEnvironment>[0],
-  ambientEnvironment: NodeJS.ProcessEnv,
-  homeLayout: { readonly effectiveHomePath: string | undefined; readonly sharedHomePath: string },
-): NodeJS.ProcessEnv {
-  const { CODEX_HOME: _ambientHome, ...ambient } = ambientEnvironment;
-  const environment = mergeProviderInstanceEnvironment(instanceEnvironment, ambient);
-  return {
-    ...environment,
-    CODEX_HOME: homeLayout.effectiveHomePath ?? environment.CODEX_HOME ?? homeLayout.sharedHomePath,
-  };
-}
 
 export type CodexAdapterV2DriverEnv =
   | CodexAppServerClientFactory

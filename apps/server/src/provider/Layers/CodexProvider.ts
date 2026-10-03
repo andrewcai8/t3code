@@ -34,6 +34,7 @@ import {
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
+  AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   type ServerProviderDraft,
@@ -62,10 +63,6 @@ type CodexRateLimitsProbe =
   | { readonly failure: string };
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
-// Longer than other providers' auth probes: with CODEX_HOME on a network
-// filesystem (EFS), app-server startup opens its SQLite state there and can
-// take 5-10 s before it answers `initialize`.
-const CODEX_APP_SERVER_PROBE_TIMEOUT = "30 seconds" as const;
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -463,15 +460,15 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
               rateLimitsByLimitId: response.rateLimitsByLimitId,
               resetCredits: response.rateLimitResetCredits,
             })),
-            Effect.timeout(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
+            Effect.timeoutOption(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
+            Effect.map(
+              Option.getOrElse((): CodexRateLimitsProbe => ({
+                failure: "Codex did not answer the usage request.",
+              })),
+            ),
             Effect.catch((error) =>
-              Effect.logWarning("Codex rate-limit read failed.", { cause: error.message }).pipe(
-                Effect.as<CodexRateLimitsProbe>({
-                  failure:
-                    error._tag === "TimeoutError"
-                      ? "Codex did not answer the usage request."
-                      : codexRateLimitsFailureMessage(error),
-                }),
+              Effect.logDebug("Codex rate-limit read failed.", { cause: error }).pipe(
+                Effect.as<CodexRateLimitsProbe>({ failure: codexRateLimitsFailureMessage(error) }),
               ),
             ),
           ),
@@ -629,7 +626,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     environment: resolvedEnvironment,
     ...(managedAuth ? { skipNativeUsage: true } : {}),
     ...(refreshLogin ? { refreshLogin } : {}),
-  }).pipe(Effect.scoped, Effect.timeoutOption(CODEX_APP_SERVER_PROBE_TIMEOUT), Effect.result);
+  }).pipe(
+    Effect.scoped,
+    Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
+    Effect.result,
+  );
 
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
