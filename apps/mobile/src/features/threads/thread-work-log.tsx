@@ -770,15 +770,6 @@ function workLogRowKey(row: ThreadFeedActivity): string {
   return row.id;
 }
 
-function formatResetTime(iso: string): string {
-  const date = new Date(iso);
-  const today = date.toDateString() === new Date().toDateString();
-  return date.toLocaleString(
-    undefined,
-    today ? { timeStyle: "short" } : { dateStyle: "medium", timeStyle: "short" },
-  );
-}
-
 const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   props: Omit<
     ThreadWorkLogProps,
@@ -873,10 +864,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   const fullDetail = expanded && !reasoning ? row.getFullDetail() : null;
   const viewedImagePath = workEntryViewedImagePath(row.workEntry);
   const toolPresentation = resolveWorkEntryToolPresentation(row.workEntry);
-  const resetsLabel = row.workEntry.resetsAt
-    ? ` Resets ${formatResetTime(row.workEntry.resetsAt)}.`
-    : "";
-  const previewText = workEntryRowLabel(row.workEntry) + resetsLabel;
+  const previewText = workEntryRowLabel(row.workEntry);
   const answerPreview = row.workEntry.questionAnswer
     ? getQuestionAnswerPreview(row.workEntry.questionAnswer)
     : null;
