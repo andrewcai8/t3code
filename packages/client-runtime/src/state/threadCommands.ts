@@ -143,12 +143,6 @@ export function createThreadEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   const commands = {
-    cancelHandoff: createEnvironmentCommand(runtime, {
-      label: "environment-data:commands:thread:cancel-handoff",
-      execute: (input: CancelThreadHandoffInput) => cancelThreadHandoff(input),
-      scheduler,
-      concurrency,
-    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: (input: CreateThreadInput) => createThread(input),
