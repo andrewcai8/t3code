@@ -1,4 +1,5 @@
 // @effect-diagnostics globalDate:off - fixed timestamps exercise cleanup times.
+import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { cleanupPlan, createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
@@ -33,7 +34,7 @@ const withoutDevbox = (overrides: Partial<ProvisionedLease> = {}): ProvisionedLe
   return rest;
 };
 const settled = (settledAt: string) => ({
-  id: "thread-1",
+  id: ThreadId.make("thread-1"),
   settledOverride: "settled" as const,
   settledAt,
 });
@@ -59,7 +60,7 @@ describe("cleanupPlan", () => {
       name: "ignores the settle of a thread that no longer owns the box",
       input: {
         lease: lease(),
-        thread: { ...settled("2026-03-01T09:00:00.000Z"), id: "thread-2" },
+        thread: { ...settled("2026-03-01T09:00:00.000Z"), id: ThreadId.make("thread-2") },
         afterDays: 7,
       },
       plan: { kind: "scheduled", at: "2026-03-08T12:00:00.000Z", reason: "idle" },

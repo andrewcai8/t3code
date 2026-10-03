@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off - fixed historical timestamps exercise expiry.
+// @effect-diagnostics globalDate:off globalDateInEffect:off - fixed historical timestamps exercise expiry.
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
