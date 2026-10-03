@@ -10,16 +10,13 @@ import { connectionAtomRuntime } from "./runtime";
 
 const onboardingScheduler = createAtomCommandScheduler();
 
-export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
-  label: "mobile:connection:connect-pairing",
+export const connectPairingUrl = createRuntimeCommand(connectionAtomRuntime, {
+  label: "mobile:connection:connect-pairing-url",
   scheduler: onboardingScheduler,
-  concurrency: {
-    mode: "singleFlight",
-    key: (input: ConnectionOnboarding.PairingConnectionInput) => JSON.stringify(input),
-  },
-  execute: (input: ConnectionOnboarding.PairingConnectionInput) =>
+  concurrency: { mode: "singleFlight", key: (pairingUrl: string) => pairingUrl },
+  execute: (pairingUrl: string) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
-      Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
+      Effect.flatMap((onboarding) => onboarding.registerPairing({ pairingUrl })),
     ),
 });
 
