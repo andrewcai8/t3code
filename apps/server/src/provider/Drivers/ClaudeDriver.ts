@@ -42,8 +42,7 @@ import {
   makePendingClaudeProvider,
   probeClaudeCapabilities,
 } from "../Layers/ClaudeProvider.ts";
-import { makeClaudeUsageTurnReader } from "../Layers/claudeSetupTokenUsage.ts";
-import { getProbeDroppingFailedUsage } from "../Layers/claudeColdProbe.ts";
+import { makeClaudeHostProbe } from "./claudeHostProbe.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
@@ -196,12 +195,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
       // account-specific probes never share auth metadata across instances.
-      const readUsageTurn = yield* makeClaudeUsageTurnReader;
+      const hostProbe = yield* makeClaudeHostProbe(effectiveConfig, processEnv, cwd);
       const capabilitiesProbeCache = yield* Cache.make({
         capacity: 1,
         timeToLive: CAPABILITIES_PROBE_TTL,
         lookup: () =>
-          probeClaudeCapabilities(effectiveConfig, processEnv, cwd, readUsageTurn).pipe(
+          probeClaudeCapabilities(effectiveConfig, processEnv, cwd).pipe(
+            Effect.flatMap(hostProbe.withSetupTokenUsage),
             Effect.provideService(Path.Path, path),
           ),
       });
@@ -219,7 +219,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.flatMap((manifest) =>
               checkClaudeProviderStatus(
                 effectiveConfig,
-                () => getProbeDroppingFailedUsage(capabilitiesProbeCache, capabilitiesCacheKey),
+                () => hostProbe.readCapabilities(capabilitiesProbeCache, capabilitiesCacheKey),
                 processEnv,
                 cwd,
                 resolveClaudeModelCatalog(manifest),

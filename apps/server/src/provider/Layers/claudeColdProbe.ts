@@ -75,7 +75,6 @@ export interface ClaudeAuthStatusProbe {
   readonly tokenSource: string | undefined;
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
-  readonly usage?: undefined;
 }
 
 /**

@@ -42,8 +42,7 @@ import {
   claudeUsageResponseToLimits,
   recordClaudeUsageResponse,
 } from "./claudeUsageLimits.ts";
-import { resolveClaudeProbeUsage, type ClaudeUsageTurnReader } from "./claudeSetupTokenUsage.ts";
-import { CLAUDE_USAGE_PROBE_TIMEOUT_MS, orClaudeAuthStatus } from "./claudeColdProbe.ts";
+import { CLAUDE_USAGE_PROBE_TIMEOUT_MS } from "./claudeColdProbe.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   type ClaudeModelCatalog,
@@ -335,7 +334,6 @@ const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
-  readUsageTurn?: ClaudeUsageTurnReader,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -360,11 +358,11 @@ const probeClaudeCapabilities = (
         }),
       });
       const init = await q.initializationResult();
-      return { q, init, executablePath, claudeEnvironment };
+      return { q, init };
     });
   }).pipe(
     Effect.timeout(CAPABILITIES_PROBE_TIMEOUT_MS),
-    Effect.flatMap(({ q, init, executablePath, claudeEnvironment }) =>
+    Effect.flatMap(({ q, init }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         const usageResult = yield* Effect.tryPromise(() =>
@@ -384,19 +382,13 @@ const probeClaudeCapabilities = (
               readonly apiProvider?: string;
             }
           | undefined;
-        const probedUsage = yield* resolveClaudeProbeUsage({
-          usage,
-          tokenSource: account?.tokenSource,
-          turn: { executablePath, environment: claudeEnvironment, cwd },
-          readUsageTurn,
-        });
         return {
           email: account?.email,
           subscriptionType: account?.subscriptionType,
           tokenSource: account?.tokenSource,
           apiProvider: account?.apiProvider,
           slashCommands: parseClaudeInitializationCommands(init.commands),
-          ...(probedUsage ? { usage: probedUsage } : {}),
+          ...(usage ? { usage } : {}),
         } satisfies ClaudeCapabilitiesProbe;
       }),
     ),
@@ -410,7 +402,7 @@ const probeClaudeCapabilities = (
   );
 };
 
-const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
+export const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   claudeSettings: ClaudeSettings,
   args: ReadonlyArray<string>,
   environment?: NodeJS.ProcessEnv,
@@ -543,14 +535,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
   const capabilities = resolveCapabilities
-    ? yield* resolveCapabilities(claudeSettings).pipe(
-        Effect.orElseSucceed(() => undefined),
-        Effect.flatMap(
-          orClaudeAuthStatus(
-            runClaudeCommand(claudeSettings, ["auth", "status"], resolvedEnvironment),
-          ),
-        ),
-      )
+    ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
     : undefined;
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
   const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
@@ -574,8 +559,6 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  // A setup-token login cannot read its profile; the host names its account.
-  const email = capabilities.email ?? (claudeSettings.accountEmail || undefined);
   const authMetadata =
     claudeAuthMetadata({
       subscriptionType: capabilities.subscriptionType,
@@ -609,7 +592,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       status: "ready",
       auth: {
         status: "authenticated",
-        ...(email ? { email } : {}),
+        ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),

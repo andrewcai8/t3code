@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ClaudeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import { rankAccounts } from "@t3tools/shared/usageLimits";
+import * as Cache from "effect/Cache";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -12,10 +13,10 @@ import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { vi } from "vite-plus/test";
 
+import { makeClaudeHostProbe } from "../Drivers/claudeHostProbe.ts";
 import { checkClaudeProviderStatus, probeClaudeCapabilities } from "./ClaudeProvider.ts";
 import {
   CLAUDE_USAGE_TURN_PROMPT,
-  makeClaudeUsageTurnReader,
   rateLimitEventToUsageResponse,
 } from "./claudeSetupTokenUsage.ts";
 import { claudeRateLimitEventToUpdate, claudeUsageResponseToLimits } from "./claudeUsageLimits.ts";
@@ -160,16 +161,19 @@ it.effect("reads windows from one probe turn only for a setup-token account", ()
     });
     yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
     const settings = decodeClaudeSettings({ binaryPath: "claude" });
+    const hostProbe = yield* makeClaudeHostProbe(settings, process.env, undefined);
+    const probe = () =>
+      probeClaudeCapabilities(settings).pipe(Effect.flatMap(hostProbe.withSetupTokenUsage));
 
     account = { tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", apiProvider: "firstParty" };
     usage = { rate_limits_available: false, rate_limits: null };
-    const setupToken = yield* probeClaudeCapabilities(settings);
+    const setupToken = yield* probe();
     account = { email: "dev@example.com", subscriptionType: "max", tokenSource: "claude.ai" };
     usage = {
       rate_limits_available: true,
       rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
     };
-    const keychain = yield* probeClaudeCapabilities(settings);
+    const keychain = yield* probe();
 
     assert.deepEqual(setupToken?.usage, {
       rate_limits_available: true,
@@ -217,9 +221,10 @@ it.effect("spends at most one usage turn per 30 minutes on a setup-token account
     });
     yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
     const settings = decodeClaudeSettings({ binaryPath: "claude" });
-    const readUsageTurn = yield* makeClaudeUsageTurnReader;
+    const hostProbe = yield* makeClaudeHostProbe(settings, process.env, undefined);
     const probe = () =>
-      probeClaudeCapabilities(settings, undefined, undefined, readUsageTurn).pipe(
+      probeClaudeCapabilities(settings).pipe(
+        Effect.flatMap(hostProbe.withSetupTokenUsage),
         Effect.map((capabilities) => ({ usage: capabilities?.usage, turns })),
       );
 
@@ -263,23 +268,36 @@ const versionOnlyClaude = Layer.succeed(
   ),
 );
 
-const claudeCapabilities = (overrides: { email?: string; tokenSource?: string }) => () =>
-  Effect.succeed({
-    email: undefined,
-    subscriptionType: undefined,
-    tokenSource: undefined,
-    apiProvider: undefined,
-    slashCommands: [],
-    ...overrides,
+/** The status of a login whose probe reported these fields, on a host that named `accountEmail`. */
+const statusWithAccountEmail = Effect.fn(function* (
+  accountEmail: string,
+  probed: { email?: string; tokenSource?: string },
+) {
+  const settings = decodeClaudeSettings({ accountEmail });
+  const hostProbe = yield* makeClaudeHostProbe(settings, process.env, undefined);
+  const capabilities = yield* Cache.make({
+    capacity: 1,
+    timeToLive: "5 minutes",
+    lookup: () =>
+      Effect.succeed({
+        email: probed.email,
+        subscriptionType: undefined,
+        tokenSource: probed.tokenSource,
+        apiProvider: undefined,
+        slashCommands: [],
+      }),
   });
+  return yield* checkClaudeProviderStatus(settings, () =>
+    hostProbe.readCapabilities(capabilities, "claude"),
+  );
+});
 
 describe("setup-token account email", () => {
   it.effect("reports the configured account email for a setup-token login", () =>
     Effect.gen(function* () {
-      const status = yield* checkClaudeProviderStatus(
-        decodeClaudeSettings({ accountEmail: "work@example.com" }),
-        claudeCapabilities({ tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" }),
-      );
+      const status = yield* statusWithAccountEmail("work@example.com", {
+        tokenSource: "CLAUDE_CODE_OAUTH_TOKEN",
+      });
       assert.strictEqual(status.auth.status, "authenticated");
       assert.strictEqual(status.auth.email, "work@example.com");
     }).pipe(Effect.provide(Layer.merge(NodeServices.layer, versionOnlyClaude))),
@@ -287,10 +305,9 @@ describe("setup-token account email", () => {
 
   it.effect("prefers the email a login reports over the configured one", () =>
     Effect.gen(function* () {
-      const status = yield* checkClaudeProviderStatus(
-        decodeClaudeSettings({ accountEmail: "stale@example.com" }),
-        claudeCapabilities({ email: "claude@example.com" }),
-      );
+      const status = yield* statusWithAccountEmail("stale@example.com", {
+        email: "claude@example.com",
+      });
       assert.strictEqual(status.auth.email, "claude@example.com");
     }).pipe(Effect.provide(Layer.merge(NodeServices.layer, versionOnlyClaude))),
   );

@@ -197,8 +197,8 @@ export const resolveClaudeProbeUsage = (input: {
   readonly usage: ClaudeUsageResponse | undefined;
   readonly tokenSource: string | undefined;
   readonly turn: ClaudeUsageTurnInput;
-  readonly readUsageTurn: ClaudeUsageTurnReader | undefined;
+  readonly readUsageTurn: ClaudeUsageTurnReader;
 }): Effect.Effect<ClaudeUsageResponse | undefined> =>
   input.usage && !input.usage.rate_limits_available && input.tokenSource === SETUP_TOKEN_SOURCE
-    ? (input.readUsageTurn ?? readFreshClaudeUsageTurn)(input.turn)
+    ? input.readUsageTurn(input.turn)
     : Effect.succeed(input.usage);
