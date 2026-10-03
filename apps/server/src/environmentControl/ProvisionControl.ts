@@ -18,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
+import { E2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
@@ -280,7 +281,8 @@ export function makeProvisionControl(
     };
     const attached = yield* remote(operation, () =>
       ports.attach(operation, manifest, lease.namespaceProxy, record).catch((error: unknown) => {
-        if (error instanceof GuestNotServing) return null;
+        if (error instanceof GuestNotServing || error instanceof E2bPlacementUnavailable)
+          return null;
         throw error;
       }),
     ).pipe(

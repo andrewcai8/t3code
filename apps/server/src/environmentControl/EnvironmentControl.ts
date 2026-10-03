@@ -77,7 +77,7 @@ import {
 import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
-import type { E2bResumeRetry } from "./e2bResume.ts";
+import { E2bPlacementUnavailable, type E2bResumeRetry } from "./e2bResume.ts";
 import { provisionFailureMessage } from "./provisionFailure.ts";
 import { logProvisionPhases, type ProvisionPhase } from "./provisionTiming.ts";
 import * as Path from "effect/Path";
@@ -514,7 +514,9 @@ export function createEnvironmentControl(
             message:
               cause instanceof ProvisionedSandboxMissing
                 ? cause.message
-                : "The workspace could not be reconnected. Retry shortly.",
+                : cause instanceof E2bPlacementUnavailable
+                  ? "E2B can't place this machine right now. Retrying."
+                  : "The workspace could not be reconnected. Retry shortly.",
           };
         })
         .finally(() => leaseOperations.delete(input.sandboxId));

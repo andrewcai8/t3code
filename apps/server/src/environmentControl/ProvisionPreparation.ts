@@ -231,8 +231,9 @@ const decodeSettings = Schema.decodeUnknownSync(
 );
 const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
 /**
- * Where a guest keeps everything T3 prepares: the checkout, the isolated home
- * with credentials and T3 state, the runtime archive.
+ * Where a guest keeps the runtime archive it uploads. Everything else T3
+ * prepares (the checkout, the isolated home with credentials and T3 state)
+ * lives under the preparation root.
  *
  * A Namespace Mac wipes /tmp and the runner home on shutdown but keeps its
  * Devbox volume, so only a root on that volume lets a paused Mac resume as the
@@ -242,7 +243,10 @@ const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
  * absolute paths (Python venvs, prepare records, `$HOME` caches), so a base is
  * only reusable by a box that prepares where it was built. Each E2B request
  * has its own sandbox, so the request id never needed to be in the path.
- * Existing manifests keep the root they persisted.
+ * E2B clears /tmp when a sandbox boots cold and keeps the home volume, so the
+ * root lives under the home. The archive can stay in /tmp: prepare uploads it
+ * again whenever the runtime it installs under the root is missing. Existing
+ * manifests keep the root they persisted.
  */
 const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
 /**
@@ -251,7 +255,7 @@ const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
  * template a builder Mac sealed there is valid for every chat.
  */
 const NAMESPACE_INSTANCE_MOUNT = "/Volumes/t3";
-const E2B_ROOT = "/tmp/t3-provision/box";
+const E2B_ROOT = "/home/user/.t3-provision";
 export const provisionDigest = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
 /**
