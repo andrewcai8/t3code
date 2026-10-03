@@ -22,15 +22,7 @@ import {
   rememberCheckoutIsRepo,
 } from "./ChatView.logic";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
-import { needsLoadBalancedPick } from "../cloud/cloudChat.logic";
-import {
-  useChatEnvironmentById,
-  useCloudChat,
-  useNewChatRunTargets,
-  withHeldCloudMessage,
-  withHeldCloudSend,
-} from "../cloud/useCloudChat";
-import { cloudUnavailableBanner } from "../cloud/cloudUnavailableBanner";
+import * as Cloud from "../cloud/useCloudChat";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   latestExecutedRun,
@@ -85,10 +77,7 @@ import {
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import {
-  connectionBox,
-  type EnvironmentConnectionPresentation,
-} from "@t3tools/client-runtime/connection";
+import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
   wasBootstrapThreadDeleted,
@@ -1598,7 +1587,7 @@ export default function ChatView(props: ChatViewProps) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
-  const { environmentById, onAnotherChatsBox } = useChatEnvironmentById({
+  const { environmentById, onAnotherChatsBox } = Cloud.useChatEnvironmentById({
     environments,
     environmentId,
     draftId,
@@ -2622,7 +2611,7 @@ export default function ChatView(props: ChatViewProps) {
     disconnectDelayElapsed &&
     activeEnvironment !== null &&
     activeEnvironment.entry.target._tag !== "PrimaryConnectionTarget" &&
-    connectionBox(activeEnvironment.entry.target) === null &&
+    !Cloud.isCloudBoxTarget(activeEnvironment.entry.target) &&
     !isDesktopLocalConnectionTarget(activeEnvironment.entry.target);
   const [disconnectingEnvironment, setDisconnectingEnvironment] = useState(false);
   const handleDisconnectActiveEnvironment = useCallback(
@@ -2677,7 +2666,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const { runTargets, logicalProjectEnvironments } = useNewChatRunTargets({
+  const { runTargets, logicalProjectEnvironments } = Cloud.useNewChatRunTargets({
     projectEnvironments,
     environmentById,
     environmentId: activeThread?.environmentId ?? null,
@@ -3008,7 +2997,7 @@ export default function ChatView(props: ChatViewProps) {
             {disconnectAction}
           </>
         ),
-        ...cloudUnavailableBanner(activeEnvironmentUnavailableState, environmentReconnecting),
+        ...Cloud.cloudUnavailableBanner(activeEnvironmentUnavailableState, environmentReconnecting),
       });
     }
     if (
@@ -3448,7 +3437,7 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const cloud = useCloudChat({
+  const cloud = Cloud.useCloudChat({
     draftId,
     threadId,
     routeThreadKey,
@@ -3827,7 +3816,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const draftTimelineEntries = useMemo(
     () =>
-      withHeldCloudMessage(optimisticUserMessages, cloud.heldMessage).map(
+      Cloud.withHeldCloudMessage(optimisticUserMessages, cloud.heldMessage).map(
         (message) =>
           ({
             id: message.id,
@@ -4188,7 +4177,7 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen]);
 
-  const needsLoadBalancing = needsLoadBalancedPick({
+  const needsLoadBalancing = Cloud.needsLoadBalancedPick({
     automatic: automaticEnvironment,
     pickedEnvironmentId: draftThread?.loadBalancedEnvironmentId,
     candidates: logicalProjectEnvironments,
@@ -8223,7 +8212,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const heldCloudSend = cloud.heldSendForResume();
-    const sendCtx = withHeldCloudSend(composerRef.current?.getSendContext(), heldCloudSend);
+    const sendCtx = Cloud.withHeldCloudSend(composerRef.current?.getSendContext(), heldCloudSend);
     if (!sendCtx?.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
