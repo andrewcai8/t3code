@@ -9,13 +9,10 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import {
-  ModelSelection,
-  OrchestrationProjectShell,
-  OrchestrationThreadShell,
-  ProviderInteractionMode,
-  RuntimeMode,
-} from "./orchestration.ts";
+import { ModelSelection } from "./modelSelection.ts";
+import { OrchestrationProjectShell } from "./orchestrationProject.ts";
+import { OrchestrationV2ThreadShell } from "./orchestrationV2.ts";
+import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ComputeState = Schema.Union([
@@ -66,7 +63,7 @@ export type ProvisionRequestId = typeof ProvisionRequestId.Type;
 export const ProvisionedChat = Schema.Struct({
   sequence: NonNegativeInt,
   project: OrchestrationProjectShell,
-  thread: OrchestrationThreadShell,
+  thread: OrchestrationV2ThreadShell,
 });
 export type ProvisionedChat = typeof ProvisionedChat.Type;
 

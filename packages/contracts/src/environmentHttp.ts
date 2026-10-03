@@ -36,10 +36,24 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import {
+  EnvironmentProvisionAttachInput,
+  EnvironmentProvisionAttachResult,
+  EnvironmentProvisionClaimInput,
+  EnvironmentProvisionClaimResult,
+  EnvironmentProvisionDisposeInput,
+  EnvironmentProvisionDisposeResult,
+  EnvironmentProvisionInput,
+  EnvironmentProvisionResult,
+  EnvironmentProvisionTouchInput,
+  EnvironmentProvisionTouchResult,
+  ProvisionedEnvironmentList,
+} from "./environmentControl.ts";
+import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ThreadBoundedSnapshot,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
+  OrchestrationV2ThreadLaunchInput,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
@@ -110,6 +124,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
+  "orchestration_launch_thread_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -509,6 +524,23 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentOrchestrationLaunchThreadErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
+/**
+ * What a host learns from starting a chat on one of its cloud boxes. The box replays a repeated
+ * `commandId`, so `resumed` is true when an earlier attempt already launched the thread.
+ */
+export const EnvironmentOrchestrationLaunchThreadResult = Schema.Struct({
+  threadId: ThreadId,
+  resumed: Schema.Boolean,
+});
+export type EnvironmentOrchestrationLaunchThreadResult =
+  typeof EnvironmentOrchestrationLaunchThreadResult.Type;
+
 const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
@@ -555,6 +587,14 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
       query: EnvironmentOrchestrationThreadHistoryQuery,
       success: OrchestrationV2ThreadHistoryPage,
       error: EnvironmentOrchestrationThreadHistoryErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("launchThread", "/api/orchestration/launch-thread", {
+      headers: OrchestrationProtocolHeaders,
+      payload: OrchestrationV2ThreadLaunchInput,
+      success: EnvironmentOrchestrationLaunchThreadResult,
+      error: EnvironmentOrchestrationLaunchThreadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
@@ -729,6 +769,7 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentControlHttpApi)
+  .add(EnvironmentUsageHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

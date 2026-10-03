@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { DiscoveredProvisionedEnvironment } from "./environmentControl.ts";
 
-const decodeDiscovered = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment);
+const decodeDiscovered = Schema.decodeUnknownSync(
+  Schema.toCodecJson(DiscoveredProvisionedEnvironment),
+);
 
 const row = {
   requestId: "11111111-1111-4111-a111-000000000001",
@@ -19,7 +21,7 @@ const row = {
   createdAt: "2026-09-30T10:00:00.000Z",
   expiresAt: "2026-10-30T10:00:00.000Z",
 };
-const chat = (sessionStatus: string) => ({
+const chat = (status: string) => ({
   sequence: 42,
   project: {
     id: "project-app",
@@ -31,34 +33,41 @@ const chat = (sessionStatus: string) => ({
     updatedAt: "2026-09-30T10:00:00.000Z",
   },
   thread: {
+    createdBy: "user",
+    creationSource: "server",
     id: "thread-1",
     projectId: "project-app",
     title: "Fix the login redirect",
+    providerInstanceId: "codex",
     modelSelection: { instanceId: "codex", model: "gpt-5.5" },
     runtimeMode: "full-access",
+    interactionMode: "default",
     branch: "main",
     worktreePath: null,
-    latestTurn: null,
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "thread-1" },
+    forkedFrom: null,
+    activeProviderThreadId: null,
+    latestRunId: null,
+    activeRunId: null,
+    status,
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: "2026-09-30T10:02:00.000Z",
+    hasActionableProposedPlan: false,
+    itemCount: 2,
+    visibleItemCount: 2,
     createdAt: "2026-09-30T10:01:00.000Z",
     updatedAt: "2026-09-30T10:05:00.000Z",
-    session: {
-      threadId: "thread-1",
-      status: sessionStatus,
-      providerName: "codex",
-      activeTurnId: null,
-      lastError: null,
-      updatedAt: "2026-09-30T10:05:00.000Z",
-    },
-    latestUserMessageAt: "2026-09-30T10:02:00.000Z",
-    hasPendingApprovals: false,
-    hasPendingUserInput: false,
-    hasActionableProposedPlan: false,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
   },
 });
 
 describe("DiscoveredProvisionedEnvironment", () => {
   it("keeps a box's chat it can read", () => {
-    const decoded = decodeDiscovered({ ...row, chat: chat("ready") });
+    const decoded = decodeDiscovered({ ...row, chat: chat("idle") });
     expect([decoded.chat?.sequence, decoded.chat?.thread.title]).toEqual([
       42,
       "Fix the login redirect",
