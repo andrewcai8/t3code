@@ -18,6 +18,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./providerUsageLimits.ts";
+import { withProviderCheckPermit } from "./providerCheckPermits.ts";
 import type { ServerProviderShape } from "./Services/ServerProvider.ts";
 
 interface ProviderSnapshotState {
@@ -150,7 +151,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       return state.snapshot;
     }
 
-    const probedSnapshot = yield* input.checkProvider;
+    const probedSnapshot = yield* withProviderCheckPermit(input.checkProvider);
     const { snapshot: nextSnapshot, generation: nextGeneration } = yield* Ref.modify(
       snapshotStateRef,
       (state) => {
