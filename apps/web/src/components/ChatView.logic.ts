@@ -2,6 +2,8 @@ import * as Option from "effect/Option";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
+  cloneRepository,
+  defaultInstanceIdForDriver,
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type ChatFileAttachment,
@@ -73,7 +75,6 @@ import {
 } from "../providerInstances";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
-
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
@@ -1361,6 +1362,40 @@ export function restorePlanFollowUpComposer(input: {
     prompt: input.snapshot.prompt,
     detectTrigger: true,
   });
+}
+
+/**
+ * The driver and model a cloud chat's draft carries onto the environment it provisions.
+ * The box keys its one account per driver by the driver's default instance id, not the
+ * manager's account id, so the selection moves to that key. The model is not checked
+ * against the manager's catalog: the box runs the chat and resolves it against its own.
+ */
+export function buildCloudHandoff(input: {
+  agentDriver: ProviderDriverKind;
+  selection: ModelSelection;
+}): { agentDriver: ProviderDriverKind; modelSelection: ModelSelection } {
+  return {
+    agentDriver: input.agentDriver,
+    modelSelection: createModelSelection(
+      defaultInstanceIdForDriver(input.agentDriver),
+      input.selection.model,
+      input.selection.options,
+    ),
+  };
+}
+
+/**
+ * What a cloud chat clones: the project's repository, on the branch the user
+ * picked. Without a pick the branch is left out and the box asks GitHub for the
+ * default, which a stale local origin/HEAD cannot get wrong.
+ */
+export function cloudCloneSource(
+  identity: RepositoryIdentity | null | undefined,
+  branch: string | null,
+): { readonly repository?: string; readonly branch?: string } {
+  const repository = cloneRepository(identity);
+  if (!repository) return {};
+  return branch ? { repository, branch } : { repository };
 }
 
 /**
