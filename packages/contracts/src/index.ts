@@ -60,6 +60,5 @@ export * from "./worktreeMcp.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./rpc.ts";
 export * from "./environmentControl.ts";
-export * from "./automation.ts";
 export * from "./worktreeSetup.ts";
 export * from "./environmentProvisioning.ts";

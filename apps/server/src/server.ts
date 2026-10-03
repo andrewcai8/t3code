@@ -12,8 +12,6 @@ import {
   environmentControlBodyLimitLayer,
   environmentControlHttpApiLayer,
 } from "./environmentControl/http.ts";
-import { Automations } from "./automation/Automations.ts";
-import { automationWebhookRouteLayer } from "./automation/http.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
@@ -552,8 +550,6 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
   ),
-  // Automations provision through environment control, so it sits above it.
-  Layer.provideMerge(Automations.layer),
   // Cloud provisioning routes each driver to the account with the most usage
   // left, which it reads from the provider registry below.
   Layer.provideMerge(EnvironmentControl.layer.pipe(Layer.provide(ServerSettingsLayerLive))),
@@ -651,7 +647,6 @@ const makeRoutesLayer = Layer.mergeAll(
     otlpTracesProxyRouteLayer,
     assetRouteLayer,
     attachmentUploadRouteLayer,
-    automationWebhookRouteLayer,
     deviceHubProxyRouteLayer,
     provisionedEnvironmentGatewayRouteLayer,
     staticAndDevRouteLayer,

@@ -26,16 +26,6 @@ import {
   EnvironmentProvisionKeepResult,
 } from "./environmentControl.ts";
 import {
-  Automation,
-  AutomationError,
-  AutomationIdInput,
-  AutomationInput,
-  AutomationListRunsInput,
-  AutomationRun,
-  AutomationSaveResult,
-  AutomationUpdateInput,
-} from "./automation.ts";
-import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -512,14 +502,6 @@ export const WS_METHODS = {
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
   environmentControlKeep: "environmentControl.keep",
-  automationsList: "automations.list",
-  automationsCreate: "automations.create",
-  automationsUpdate: "automations.update",
-  automationsDelete: "automations.delete",
-  automationsRunNow: "automations.runNow",
-  automationsRotateWebhook: "automations.rotateWebhook",
-  automationsListRuns: "automations.listRuns",
-  automationsListJoinable: "automations.listJoinable",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -972,48 +954,6 @@ const EnvironmentControlKeepRpc = Rpc.make(WS_METHODS.environmentControlKeep, {
   payload: EnvironmentProvisionKeepInput,
   success: EnvironmentProvisionKeepResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
-});
-
-const AutomationsError = Schema.Union([EnvironmentAuthorizationError, AutomationError]);
-const AutomationsListRpc = Rpc.make(WS_METHODS.automationsList, {
-  payload: Schema.Struct({}),
-  success: Schema.Array(Automation),
-  error: AutomationsError,
-});
-const AutomationsCreateRpc = Rpc.make(WS_METHODS.automationsCreate, {
-  payload: AutomationInput,
-  success: AutomationSaveResult,
-  error: AutomationsError,
-});
-const AutomationsUpdateRpc = Rpc.make(WS_METHODS.automationsUpdate, {
-  payload: AutomationUpdateInput,
-  success: AutomationSaveResult,
-  error: AutomationsError,
-});
-const AutomationsDeleteRpc = Rpc.make(WS_METHODS.automationsDelete, {
-  payload: AutomationIdInput,
-  success: Schema.Struct({}),
-  error: AutomationsError,
-});
-const AutomationsRunNowRpc = Rpc.make(WS_METHODS.automationsRunNow, {
-  payload: AutomationIdInput,
-  success: AutomationRun,
-  error: AutomationsError,
-});
-const AutomationsRotateWebhookRpc = Rpc.make(WS_METHODS.automationsRotateWebhook, {
-  payload: AutomationIdInput,
-  success: AutomationSaveResult,
-  error: AutomationsError,
-});
-const AutomationsListRunsRpc = Rpc.make(WS_METHODS.automationsListRuns, {
-  payload: AutomationListRunsInput,
-  success: Schema.Array(AutomationRun),
-  error: AutomationsError,
-});
-const AutomationsListJoinableRpc = Rpc.make(WS_METHODS.automationsListJoinable, {
-  payload: Schema.Struct({}),
-  success: ProvisionedEnvironmentList,
-  error: AutomationsError,
 });
 
 const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
@@ -1927,14 +1867,6 @@ export const WsRpcGroup = RpcGroup.make(
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
   EnvironmentControlKeepRpc,
-  AutomationsListRpc,
-  AutomationsCreateRpc,
-  AutomationsUpdateRpc,
-  AutomationsDeleteRpc,
-  AutomationsRunNowRpc,
-  AutomationsRotateWebhookRpc,
-  AutomationsListRunsRpc,
-  AutomationsListJoinableRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,

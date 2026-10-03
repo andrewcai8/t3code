@@ -40,7 +40,6 @@ every device without dialing the box, and a paused box stays paused. Unpaired
 means the entry has no profile; it is never a separate flag, and only a box may
 be saved without a credential. A gone box this device never paired is forgotten
 with its cache; one it paired stays as a missing workspace so its history reads.
-Automation runs are not adopted from the list; they keep their own join.
 
 A box is saved like any paired server, so its credential and cached chat survive
 a restart, but its target carries the host that provisioned it
@@ -62,7 +61,7 @@ attempt connects with it and no replacement supervisor pairs again. A loopback
 pairing (Namespace) is redeemed through the host's gateway at the address this
 client already dials the host by. Pairing runs only while the entry has no
 pairing, so a device pairs a box at most once. Later dials, reopens and reloads
-find it saved, and a creating or automation join skips a box it already holds a
+find it saved, and a creating join skips a box it already holds a
 pairing for. Every pairing opens a session on the box, so pairing again on each
 open would pile them up.
 

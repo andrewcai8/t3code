@@ -172,7 +172,6 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
-import { Automations } from "./automation/Automations.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
@@ -1167,7 +1166,6 @@ const makeWsRpcLayer = (
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const environmentControl = yield* EnvironmentControl.EnvironmentControl;
-      const automations = yield* Automations;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -2615,34 +2613,6 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.environmentControlTouch, environmentControl.touch(input)),
         [WS_METHODS.environmentControlKeep]: (input) =>
           observeRpcEffect(WS_METHODS.environmentControlKeep, environmentControl.keep(input)),
-        [WS_METHODS.automationsList]: () =>
-          observeRpcEffect(WS_METHODS.automationsList, automations.list),
-        [WS_METHODS.automationsCreate]: (input) =>
-          observeRpcEffect(WS_METHODS.automationsCreate, automations.create(input)),
-        [WS_METHODS.automationsUpdate]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.automationsUpdate,
-            automations.update(input.id, input.automation),
-          ),
-        [WS_METHODS.automationsDelete]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.automationsDelete,
-            automations.remove(input.id).pipe(Effect.as({})),
-          ),
-        [WS_METHODS.automationsRunNow]: (input) =>
-          observeRpcEffect(WS_METHODS.automationsRunNow, automations.runNow(input.id)),
-        [WS_METHODS.automationsRotateWebhook]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.automationsRotateWebhook,
-            automations.rotateWebhook(input.id),
-          ),
-        [WS_METHODS.automationsListRuns]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.automationsListRuns,
-            automations.listRuns(input.id, input.limit),
-          ),
-        [WS_METHODS.automationsListJoinable]: () =>
-          observeRpcEffect(WS_METHODS.automationsListJoinable, automations.listJoinable),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",

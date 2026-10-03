@@ -98,8 +98,6 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   /** Absent on a `disposed` environment whose workspace the host no longer records. */
   projectDir: Schema.optional(TrimmedNonEmptyString),
   threadId: Schema.NullOr(ThreadId),
-  /** Set when the host started this environment for an automation run rather than a client. */
-  automationId: Schema.optional(TrimmedNonEmptyString),
   /**
    * Only when the request asked for chats and the client does not hold this one already. A chat
    * this client cannot read, as from a newer host, is dropped rather than failing the list.
