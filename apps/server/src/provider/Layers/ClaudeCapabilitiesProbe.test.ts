@@ -159,6 +159,8 @@ it.effect("preserves initialized capabilities when optional usage times out", ()
     ).pipe(Effect.forkChild);
     yield* Deferred.await(usageStarted);
     yield* TestClock.adjust("4 seconds");
+    assert.equal(probe.pollUnsafe(), undefined);
+    yield* TestClock.adjust("11 seconds");
     const capabilities = yield* Fiber.join(probe);
     assert.equal(capabilities?.email, "dev@example.com");
     assert.equal(capabilities?.subscriptionType, "pro");

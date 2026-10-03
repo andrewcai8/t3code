@@ -43,6 +43,7 @@ import {
   probeClaudeCapabilities,
 } from "../Layers/ClaudeProvider.ts";
 import { makeClaudeUsageTurnReader } from "../Layers/claudeSetupTokenUsage.ts";
+import { getProbeDroppingFailedUsage } from "../Layers/claudeColdProbe.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
@@ -218,7 +219,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.flatMap((manifest) =>
               checkClaudeProviderStatus(
                 effectiveConfig,
-                () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
+                () => getProbeDroppingFailedUsage(capabilitiesProbeCache, capabilitiesCacheKey),
                 processEnv,
                 cwd,
                 resolveClaudeModelCatalog(manifest),

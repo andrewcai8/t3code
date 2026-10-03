@@ -43,6 +43,7 @@ import {
   recordClaudeUsageResponse,
 } from "./claudeUsageLimits.ts";
 import { resolveClaudeProbeUsage, type ClaudeUsageTurnReader } from "./claudeSetupTokenUsage.ts";
+import { CLAUDE_USAGE_PROBE_TIMEOUT_MS, orClaudeAuthStatus } from "./claudeColdProbe.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   type ClaudeModelCatalog,
@@ -368,7 +369,7 @@ const probeClaudeCapabilities = (
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         const usageResult = yield* Effect.tryPromise(() =>
           q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(),
-        ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result);
+        ).pipe(Effect.timeout(CLAUDE_USAGE_PROBE_TIMEOUT_MS), Effect.result);
         const usage = Result.isSuccess(usageResult)
           ? {
               rate_limits_available: usageResult.success.rate_limits_available,
@@ -542,7 +543,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
   const capabilities = resolveCapabilities
-    ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
+    ? yield* resolveCapabilities(claudeSettings).pipe(
+        Effect.orElseSucceed(() => undefined),
+        Effect.flatMap(
+          orClaudeAuthStatus(
+            runClaudeCommand(claudeSettings, ["auth", "status"], resolvedEnvironment),
+          ),
+        ),
+      )
     : undefined;
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
   const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
