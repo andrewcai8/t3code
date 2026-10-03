@@ -48,7 +48,10 @@ import {
 import type { EnvironmentOption } from "../components/BranchToolbar.logic";
 import type { ChatComposerHandle } from "../components/chat/ChatComposer";
 import type { ComposerBannerStackItem } from "../components/chat/ComposerBannerStack";
-import type { CloudEnvironmentSetupSnapshot } from "../components/chat/EnvironmentSetupCard";
+import {
+  type CloudEnvironmentSetupSnapshot,
+  EnvironmentSetupFooter,
+} from "../components/chat/EnvironmentSetupCard";
 import type { CloudBaseBranch, CloudRunOn } from "../components/CloudRunOn";
 import {
   cloneComposerImageForRetry,
@@ -758,6 +761,13 @@ export function useCloudChat(input: {
       ...(repository ? { repository } : {}),
     };
   }, [activeProject, pending, setupPhase]);
+  const environmentSetupCard = useMemo(
+    () =>
+      environmentSetup === null ? null : (
+        <EnvironmentSetupFooter snapshot={environmentSetup} onCancel={cancelSetup} />
+      ),
+    [cancelSetup, environmentSetup],
+  );
   const heldMessage = useMemo(
     () =>
       pending === null || pending.messageId === sentHeldMessageId
@@ -973,7 +983,7 @@ export function useCloudChat(input: {
     startsCloudEnvironment: requested !== null,
     onEnvironmentPicked,
     environmentSetup,
-    cancelSetup,
+    environmentSetupCard,
     heldMessage,
     /** A send must wait: the draft's cloud machine is being set up, or its held send is going. */
     blocksSend: () =>

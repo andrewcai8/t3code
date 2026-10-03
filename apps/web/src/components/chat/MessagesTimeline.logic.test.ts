@@ -34,7 +34,6 @@ import {
   workEntryDisplayLabel,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
-  ENVIRONMENT_SETUP_ROW_ID,
 } from "./MessagesTimeline.logic";
 import type { WorkLogEntry } from "../../session-logic";
 
@@ -4501,61 +4500,6 @@ it.each([true, false])(
     if (isWorking) expect(rows.find((row) => row.id === boundary)?.createdAt).toBe(time(40));
   },
 );
-
-it("places an environment setup card under the first user message", () => {
-  const snapshot = {
-    provider: "e2b" as const,
-    phase: "creating" as const,
-    startedAt: "2026-01-01T00:00:00Z",
-    repository: "example/megpt-mono",
-  };
-  const userEntry = {
-    id: "user-entry",
-    kind: "message",
-    createdAt: "2026-01-01T00:00:00Z",
-    message: {
-      id: "user-1" as never,
-      role: "user",
-      text: "Build it",
-      runId: null,
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-      streaming: false,
-    },
-  } as const;
-  const withoutMessages = deriveMessagesTimelineRows({
-    timelineEntries: [],
-    isWorking: true,
-    activeTurnStartedAt: "2026-01-01T00:00:00Z",
-    turnDiffSummaries: [],
-    supportsConversationRollback: false,
-    environmentSetup: snapshot,
-  });
-  expect(withoutMessages).toEqual([
-    {
-      kind: "environment-setup",
-      id: ENVIRONMENT_SETUP_ROW_ID,
-      createdAt: "2026-01-01T00:00:00Z",
-      snapshot,
-    },
-    { kind: "working", id: "working-indicator-row", createdAt: "2026-01-01T00:00:00Z" },
-    { kind: "thinking", id: "live-activity-row", createdAt: "2026-01-01T00:00:00Z" },
-  ]);
-  const withUser = deriveMessagesTimelineRows({
-    timelineEntries: [userEntry],
-    isWorking: true,
-    activeTurnStartedAt: "2026-01-01T00:00:00Z",
-    turnDiffSummaries: [],
-    supportsConversationRollback: false,
-    environmentSetup: snapshot,
-  });
-  expect(withUser.map((row) => row.kind)).toEqual([
-    "message",
-    "environment-setup",
-    "working",
-    "thinking",
-  ]);
-});
 
 it("keeps the working header in place across worktree setup handoff", () => {
   const snapshot: WorktreeSetupSnapshot = {

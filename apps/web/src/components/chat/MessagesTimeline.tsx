@@ -214,7 +214,6 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
-import { EnvironmentSetupCard, type CloudEnvironmentSetupSnapshot } from "./EnvironmentSetupCard";
 import {
   ContextChipPopover as UserMessageContextPopover,
   ContextChipShell,
@@ -323,7 +322,6 @@ interface TimelineRowSharedState {
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
   onCancelWorktreeSetup: (() => void) | null;
-  onCancelEnvironmentSetup: (() => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   workGroupViewState: WorkGroupViewState;
@@ -417,8 +415,8 @@ interface MessagesTimelineProps {
   onCancelWorktreeSetup?: () => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
-  environmentSetup?: CloudEnvironmentSetupSnapshot | null;
-  onCancelEnvironmentSetup?: () => void;
+  /** A card shown after the last row, such as a cloud machine's setup. */
+  footerCard?: ReactNode;
   isPreparingWorktree?: boolean;
   isCompacting?: boolean;
 
@@ -502,8 +500,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onCancelWorktreeSetup,
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
-  environmentSetup = null,
-  onCancelEnvironmentSetup,
+  footerCard,
   isPreparingWorktree = false,
   isCompacting = false,
   listRef,
@@ -761,7 +758,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         turnDiffSummaries,
         supportsConversationRollback,
         worktreeSetup,
-        environmentSetup,
       },
       previous?.threadKey === listIdentityKey && previous.workspaceRoot === workspaceRoot
         ? previous.projection
@@ -785,7 +781,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     turnDiffSummaries,
     supportsConversationRollback,
     worktreeSetup,
-    environmentSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
   // Run status/timestamps churn on every stream event; the shared row context
@@ -977,8 +972,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [shouldRestoreVisibleContentPosition],
   );
   const timelineListFooter = useMemo(
-    () => <TimelineListFooter composerInset={anchoredEndSpace ? 0 : contentInsetEndAdjustment} />,
-    [anchoredEndSpace, contentInsetEndAdjustment],
+    () => (
+      <>
+        {footerCard}
+        <TimelineListFooter composerInset={anchoredEndSpace ? 0 : contentInsetEndAdjustment} />
+      </>
+    ),
+    [anchoredEndSpace, contentInsetEndAdjustment, footerCard],
   );
 
   const measureContentOverflow = useCallback(
@@ -1169,7 +1169,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
       onCancelWorktreeSetup: onCancelWorktreeSetup ?? null,
-      onCancelEnvironmentSetup: onCancelEnvironmentSetup ?? null,
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
       workGroupViewState,
@@ -1203,7 +1202,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       suspendEndScrollMaintenanceForDisclosure,
       onCancelWorktreeSetup,
-      onCancelEnvironmentSetup,
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
       workGroupViewState,
@@ -1766,7 +1764,6 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
                   row.message.role === "assistant" &&
                   !row.showAssistantMeta) ||
                 row.kind === "worktree-setup" ||
-                row.kind === "environment-setup" ||
                 row.kind === "event" ||
                 row.kind === "attempt-fold"
               ? "pb-2"
@@ -1818,25 +1815,10 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
-      {row.kind === "environment-setup" ? <EnvironmentSetupTimelineRow row={row} /> : null}
       {row.kind === "event" ? <V2EventTimelineRow row={row} /> : null}
     </div>
   );
 });
-
-function EnvironmentSetupTimelineRow({
-  row,
-}: {
-  row: Extract<TimelineRow, { kind: "environment-setup" }>;
-}) {
-  const ctx = use(TimelineRowCtx);
-  return (
-    <EnvironmentSetupCard
-      snapshot={row.snapshot}
-      onCancel={row.snapshot.phase === "ready" ? null : ctx.onCancelEnvironmentSetup}
-    />
-  );
-}
 
 function WorktreeSetupTimelineRow({
   row,

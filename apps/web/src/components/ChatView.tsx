@@ -10754,8 +10754,7 @@ export default function ChatView(props: ChatViewProps) {
                 activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
-                environmentSetup={paintOnlyDisplayedTimeline ? null : cloud.environmentSetup}
-                onCancelEnvironmentSetup={cloud.cancelSetup}
+                footerCard={paintOnlyDisplayedTimeline ? null : cloud.environmentSetupCard}
                 {...(draftId ? { onWorktreeSetupWorkLocally } : {})}
                 {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}

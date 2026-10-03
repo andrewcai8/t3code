@@ -42,7 +42,6 @@ import {
   RunId,
 } from "@t3tools/contracts";
 import type { ThreadRunSummary } from "@t3tools/client-runtime/state/shell";
-import type { CloudEnvironmentSetupSnapshot } from "./EnvironmentSetupCard";
 import {
   resolveT3McpToolDefinition,
   resolveT3McpToolPresentation,
@@ -482,12 +481,6 @@ type MessagesTimelineRowContent =
       createdAt: string | null;
       snapshot: WorktreeSetupSnapshot;
       embedded: boolean;
-    }
-  | {
-      kind: "environment-setup";
-      id: string;
-      createdAt: string | null;
-      snapshot: CloudEnvironmentSetupSnapshot;
     }
   | {
       kind: "work";
@@ -1204,8 +1197,6 @@ export function deriveMessagesTimelineRows(input: {
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
   /** Live bootstrap progress. Renders a stage card under the first user message. */
   worktreeSetup?: WorktreeSetupSnapshot | null;
-  /** Cloud sandbox / environment provisioning for the first send. */
-  environmentSetup?: CloudEnvironmentSetupSnapshot | null;
 }): MessagesTimelineRow[] {
   const timelineEntries = withoutSubagentDelegationRows(
     settleSupersededReasoning(input.timelineEntries),
@@ -1718,18 +1709,6 @@ export function deriveMessagesTimelineRows(input: {
       );
     }
   }
-  if (input.environmentSetup) {
-    const setupRow = {
-      kind: "environment-setup",
-      id: ENVIRONMENT_SETUP_ROW_ID,
-      createdAt: input.environmentSetup.startedAt,
-      snapshot: input.environmentSetup,
-    } as const;
-    const firstUserRowIndex = nextRows.findIndex(
-      (row) => row.kind === "message" && row.message.role === "user",
-    );
-    nextRows.splice(firstUserRowIndex >= 0 ? firstUserRowIndex + 1 : nextRows.length, 0, setupRow);
-  }
 
   // A running setup owns the working slot above its card and shows no
   // activity row of its own; every other state gets the usual tail.
@@ -1821,7 +1800,6 @@ function attachCreatedThreadSummaries(
 }
 
 const WORKTREE_SETUP_ROW_ID = "worktree-setup-row";
-export const ENVIRONMENT_SETUP_ROW_ID = "environment-setup-row";
 
 type MessagesTimelineRowsInput = Parameters<typeof deriveMessagesTimelineRows>[0];
 
@@ -1962,8 +1940,6 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "thinking":
       return a.createdAt === (b as typeof a).createdAt;
     case "worktree-setup":
-      return a.snapshot === (b as typeof a).snapshot;
-    case "environment-setup":
       return a.snapshot === (b as typeof a).snapshot;
 
     case "assistant-meta": {
