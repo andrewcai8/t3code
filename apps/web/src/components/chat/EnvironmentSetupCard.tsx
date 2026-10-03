@@ -72,7 +72,7 @@ export function environmentSetupDescription(snapshot: CloudEnvironmentSetupSnaps
   }
 }
 
-export function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps) {
+function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps) {
   const running = snapshot.phase !== "ready" && snapshot.phase !== "failed";
   const nowMs = useNowWhile(running);
   const totalElapsed = (() => {

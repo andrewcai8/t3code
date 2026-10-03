@@ -99,7 +99,8 @@ it.effect("keeps a probe in the cache only when its usage read succeeded", () =>
       const cache = yield* Cache.make({
         capacity: 1,
         timeToLive: "5 minutes",
-        lookup: () => Ref.update(lookups, (count) => count + 1).pipe(Effect.as({ usage })),
+        lookup: (): Effect.Effect<{ readonly usage: typeof usage } | undefined> =>
+          Ref.update(lookups, (count) => count + 1).pipe(Effect.as({ usage })),
       });
       yield* getProbeDroppingFailedUsage(cache, "claude");
       yield* getProbeDroppingFailedUsage(cache, "claude");

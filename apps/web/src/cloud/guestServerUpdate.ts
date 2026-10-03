@@ -38,7 +38,7 @@ export function resolveServerUpdatePath({
 }
 
 /** The update path for a connected environment, using the lease this client holds for it. */
-export function resolveEnvironmentServerUpdatePath(
+function resolveEnvironmentServerUpdatePath(
   environmentId: EnvironmentId | null,
   selfUpdate: ServerSelfUpdateCapability | null,
 ): ServerUpdatePath {

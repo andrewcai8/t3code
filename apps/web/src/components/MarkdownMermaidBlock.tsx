@@ -33,7 +33,7 @@ export function mermaidPreview(
     : undefined;
 }
 
-export function MarkdownMermaidBlock({
+function MarkdownMermaidBlock({
   code,
   theme,
   source,
