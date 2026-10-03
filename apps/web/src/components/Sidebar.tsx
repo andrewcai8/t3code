@@ -141,6 +141,7 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import {
+  useEnvironment,
   useEnvironmentIdentities,
   useConnectedEnvironmentIds,
   useEnvironmentMachines,
@@ -205,6 +206,7 @@ import {
   EMPTY_SIDEBAR_COMPOSER,
   sidebarDraftRows,
   sidebarDraftStatusLabel,
+  type SidebarDraftRowData,
   sidebarListItemId,
   sidebarMarkerId,
   sortInboxThreadsByReturn,
@@ -829,6 +831,7 @@ function SidebarSectionHeader(props: {
 // entirely.
 const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   draftId: DraftId;
+  session: DraftSessionState;
   composer: ComposerThreadDraftState;
   project: ProjectFaviconProject | null;
   projectDisplayName: string | null;
@@ -836,7 +839,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   onNavigate: (draftId: DraftId) => void;
   onDiscard: (draftId: DraftId) => void;
 }) {
-  const { composer, draftId, onDiscard, onNavigate } = props;
+  const { composer, draftId, onDiscard, onNavigate, session } = props;
   const promptPreview =
     replaceComposerContextReferences(composer.prompt, (occurrence) => occurrence.label)
       .trim()
@@ -1019,6 +1022,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
           <SidebarDraftRow
             key={draftId}
             draftId={draftId}
+            session={session}
             composer={composer}
             project={props.projectByKey.get(projectKey) ?? null}
             projectDisplayName={props.projectDisplayNameByKey.get(projectKey) ?? null}
@@ -1223,7 +1227,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  const environment = useEnvironment(thread.environmentId);
+  const status = resolveSidebarThreadStatus(thread, environment?.connection);
   const isInFlight =
     status === "working" || status === "waiting" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is
@@ -1287,10 +1292,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   icon: "failed" as const,
                   className: "text-warning",
                 }
-              : status === "failed"
+              : status === "failed" || status === "expired"
                 ? {
-                    label: "Failed",
-                    icon: "failed" as const,
+                    label: status === "expired" ? "Removed" : "Failed",
+                    icon: status === "expired" ? null : ("failed" as const),
                     className: "text-error",
                   }
                 : isWoke
@@ -4062,7 +4067,7 @@ export default function Sidebar() {
             .threadTitleRegeneration === true,
       );
       const regeneratableTitleThreads = titleRegenerationThreads.filter(
-        (thread) => thread.titleRegeneration == null && thread.handoff == null,
+        (thread) => thread.titleRegeneration == null,
       );
       const titleRegenerationMenuItem = buildBulkTitleRegenerationContextMenuItem({
         supportedCount: titleRegenerationThreads.length,
@@ -4421,7 +4426,7 @@ export default function Sidebar() {
             startThreadRename(threadRef, thread.title);
             return;
           case "regenerate-title": {
-            if (isRegeneratingTitle || thread.handoff) return;
+            if (isRegeneratingTitle) return;
             const result = await updateThreadMetadata({
               environmentId: threadRef.environmentId,
               input: { threadId: threadRef.threadId, regenerateTitle: true },

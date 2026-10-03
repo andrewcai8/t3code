@@ -11,7 +11,19 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
-import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import {
+  isOfflineThreadLifecycleDispatchResult,
+  setThreadLifecycleOverlay,
+  threadLifecycleOverlayAtom,
+} from "@t3tools/client-runtime/state/threads";
+import {
+  EnvironmentId,
+  type EnvironmentProvisionDisposeResult,
+  type EnvironmentProvisionPauseResult,
+  type ScopedThreadRef,
+  ThreadId,
+} from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
@@ -575,14 +587,6 @@ export function useThreadActions() {
         return result;
       }
       const { thread, threadRef } = resolved;
-      if (thread.handoff && !workspaceMissing) {
-        toastManager.add({
-          type: "warning",
-          title: "Thread changes are paused for handoff",
-          description: "Resume this thread before deleting it.",
-        });
-        return AsyncResult.success(undefined);
-      }
       const threads = readEnvironmentThreadRefs(threadRef.environmentId).flatMap((ref) => {
         const shell = readThreadShell(ref);
         return shell === null ? [] : [shell];
@@ -645,7 +649,7 @@ export function useThreadActions() {
         shouldDeleteWorktree = confirmationResult.value;
       }
 
-      if (thread.runtime !== null) {
+      if (connected && thread.runtime !== null) {
         await stopThreadSession({
           environmentId: threadRef.environmentId,
           input: { threadId: threadRef.threadId },

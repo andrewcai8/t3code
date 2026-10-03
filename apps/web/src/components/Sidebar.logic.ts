@@ -6,6 +6,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
+import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
@@ -26,6 +27,12 @@ import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+import {
+  DraftId,
+  draftSessionHasInvestedWork,
+  type ComposerThreadDraftState,
+  type DraftSessionState,
+} from "../composerDraftStore";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -923,6 +930,7 @@ export type SidebarThreadStatus =
   | "waiting"
   | "failed"
   | "limited"
+  | "expired"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -974,6 +982,7 @@ export function resolveSidebarThreadStatus(
 export type SidebarV2TopStatusKind =
   | "approval"
   | "done"
+  | "expired"
   | "failed"
   | "limited"
   | "input"
@@ -998,7 +1007,7 @@ export function resolveSidebarV2TopStatus(input: {
   if (input.status === "input") {
     return "input";
   }
-  if (input.status === "failed" || input.status === "limited") {
+  if (input.status === "failed" || input.status === "limited" || input.status === "expired") {
     return input.status;
   }
   if (input.isWoke) {
@@ -1459,6 +1468,7 @@ export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
   terminalContexts: [],
   previewAnnotations: [],
   reviewComments: [],
+  threadContexts: [],
   modelSelectionByProvider: {},
   activeProvider: null,
   runtimeMode: null,

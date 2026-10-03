@@ -934,6 +934,20 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("working");
   });
 
+  it("reports an expired workspace even when the cached runtime still says it is running", () => {
+    const status = resolveSidebarThreadStatus(
+      { ...idle, runtime, hasPendingApprovals: true },
+      {
+        phase: "error",
+        error: "Machine removed",
+        traceId: null,
+        blockedReason: "workspace-missing",
+      },
+    );
+    expect(status).toBe("expired");
+    expect(resolveSidebarV2TopStatus({ status, isUnread: true, isWoke: true })).toBe("expired");
+  });
+
   it("keeps usage-limit stops Limited and visible until the thread recovers", () => {
     const limited = {
       ...runtime,

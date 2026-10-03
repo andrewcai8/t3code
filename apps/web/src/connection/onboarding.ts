@@ -1,7 +1,4 @@
-import {
-  ConnectionOnboarding,
-  type PairingConnectionInput,
-} from "@t3tools/client-runtime/connection";
+import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
 import {
   createAtomCommandScheduler,
   createRuntimeCommand,
@@ -18,13 +15,9 @@ export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
   scheduler: onboardingScheduler,
   concurrency: {
     mode: "singleFlight",
-    key: (input: PairingConnectionInput) => JSON.stringify(input),
+    key: (input: ConnectionOnboarding.PairingConnectionInput) => JSON.stringify(input),
   },
-  execute: (input: {
-    readonly pairingUrl?: string;
-    readonly host?: string;
-    readonly pairingCode?: string;
-  }) =>
+  execute: (input: ConnectionOnboarding.PairingConnectionInput) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
     ),
