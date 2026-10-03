@@ -66,15 +66,11 @@ export function getProviderSkillsForSlashMenu(
     : [];
 }
 
-/**
- * Provider commands not already shown as a skill. Claude Code lists a skill's
- * command under its frontmatter `name`, which is the skill's `displayName`
- * when it differs from the folder name that actually runs it.
- */
 export function getProviderSlashCommandsForSlashMenu(
   slashCommands: ReadonlyArray<ServerProviderSlashCommand>,
   visibleSkills: ReadonlyArray<ServerProviderSkill>,
 ): ServerProviderSlashCommand[] {
+  // Claude Code lists a skill's command under its frontmatter name, the skill's `displayName`.
   const skillNames = new Set(
     visibleSkills.flatMap((skill) =>
       [skill.name, skill.displayName ?? skill.name].map((name) => name.trim().toLowerCase()),
@@ -122,10 +118,8 @@ function resolveProviderWorkspaceSnapshot(
 }
 
 /**
- * The skills a chat with this provider can start. On a host that runs chats
- * in provisioned environments, `provisionedSkills` from its server config
- * lists what those environments hold, and it wins a name clash because that
- * copy is the one that runs. Then workspace skills, then the provider's own.
+ * Workspace skills join the user's own. A host's `provisionedSkills` win a name clash, since that
+ * copy is the one its chats run.
  */
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,

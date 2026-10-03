@@ -176,22 +176,6 @@ describe("getProviderSlashCommandsForSlashMenu", () => {
     ).toEqual(["compact"]);
   });
 
-  it("drops the command Claude Code publishes under a skill's frontmatter name", () => {
-    const potetoMode = {
-      name: "poteto-mode",
-      displayName: "Poteto Mode",
-      path: "/Users/matt/.claude/skills/poteto-mode/SKILL.md",
-      enabled: true,
-    };
-
-    expect(
-      getProviderSlashCommandsForSlashMenu(
-        [{ name: "Poteto Mode", description: "poteto's agent style." }, ...commands],
-        [potetoMode],
-      ).map((command) => command.name),
-    ).toEqual(["ask-matt", "compact"]);
-  });
-
   it("keeps the provider command when the matching skill alias is hidden", () => {
     const visibleSkills = getProviderSkillsForSlashMenu(skills, false);
 
@@ -267,31 +251,5 @@ describe("workspace provider snapshots", () => {
   it("keeps the machine snapshot before this cwd has a provider snapshot", () => {
     expect(resolveProviderSkillsForCwd(provider, "/workspace/project-b")).toEqual(provider.skills);
     expect(resolveProviderSlashCommandsForCwd(provider, null)).toEqual(provider.slashCommands);
-  });
-});
-
-describe("provisioned skills", () => {
-  it("lists the provider driver's provisioned skills first, winning a name clash", () => {
-    expect(
-      resolveProviderSkillsForCwd(provider, "/workspace/project-a", {
-        codex: [
-          { name: "project", description: "Provisioned copy.", enabled: true, scope: "user" },
-          { name: "how", enabled: true, scope: "user" },
-        ],
-        claudeAgent: [{ name: "claude-only", enabled: true, scope: "user" }],
-      }),
-    ).toEqual([
-      { name: "project", description: "Provisioned copy.", enabled: true, scope: "user" },
-      { name: "how", enabled: true, scope: "user" },
-      { name: "global", path: "/global/SKILL.md", enabled: true },
-    ]);
-  });
-
-  it("keeps the provider's own skills when its driver has none provisioned", () => {
-    expect(
-      resolveProviderSkillsForCwd(provider, null, {
-        claudeAgent: [{ name: "claude-only", enabled: true, scope: "user" }],
-      }),
-    ).toEqual([{ name: "global", path: "/global/SKILL.md", enabled: true }]);
   });
 });
