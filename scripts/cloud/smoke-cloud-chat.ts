@@ -26,7 +26,11 @@ import {
   type AutomationId,
   CommandId,
   MessageId,
-  type OrchestrationThreadStreamItem,
+  ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadStreamItem,
   type ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -37,6 +41,7 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { applyOrchestrationV2ProjectionEvent } from "@t3tools/client-runtime/state/orchestration-v2-projection";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import {
   PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX,
@@ -191,6 +196,7 @@ const seconds = (from: number, to: number) => Math.round((to - from) / 100) / 10
 const wsUrl = (httpBaseUrl: string) => {
   const url = new URL("ws", httpBaseUrl.endsWith("/") ? httpBaseUrl : `${httpBaseUrl}/`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set(ORCHESTRATION_PROTOCOL_QUERY_PARAM, ORCHESTRATION_PROTOCOL_VERSION_TEXT);
   return url.toString();
 };
 
@@ -301,103 +307,78 @@ const readMarkers = (reply: string): Markers => ({
   nonce: readMarker(reply, "NONCE"),
 });
 
-/** What one turn's thread stream has shown so far, folded the way the projector folds it. */
-interface TurnProgress {
+/** What one turn's thread stream has shown so far: the thread folded the way the web folds it. */
+export interface TurnProgress {
+  readonly projection: OrchestrationV2ThreadProjection | null;
+  /** Events at or below it are already folded into `projection`. */
+  readonly sequence: number;
   readonly assistant: ReadonlyMap<string, string>;
   readonly firstOutputAt: number | null;
-  readonly started: boolean;
-  /** The provider turn this message started; a late checkpoint of the previous turn is not ours. */
-  readonly turnId: string | null;
   readonly completedAt: number | null;
   readonly error: string | null;
-  /** Events at or below the snapshot's sequence are already folded into it. */
-  readonly sequence: number;
-  /** A session keeps its last error across turns; only a new one belongs to this turn. */
-  readonly priorError: string | null;
 }
-const initialProgress: TurnProgress = {
+export const initialProgress: TurnProgress = {
+  projection: null,
+  sequence: -1,
   assistant: new Map(),
   firstOutputAt: null,
-  started: false,
-  turnId: null,
   completedAt: null,
   error: null,
-  sequence: -1,
-  priorError: null,
 };
-const advanceTurn = (
+const SETTLED_RUN = new Set<OrchestrationV2Run["status"]>([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+export const advanceTurn = (
   progress: TurnProgress,
-  item: OrchestrationThreadStreamItem,
+  item: OrchestrationV2ThreadStreamItem,
   sentMessageId: string,
   now: number,
 ): TurnProgress => {
-  // The subscription opens after dispatch, so the snapshot may already hold the turn's start.
-  if (item.kind === "snapshot") {
-    const thread = item.snapshot.thread;
-    const base = { ...progress, sequence: item.snapshot.snapshotSequence };
-    const sent = thread.messages.findIndex((message) => message.id === sentMessageId);
-    if (sent === -1) return { ...base, priorError: thread.session?.lastError ?? null };
-    const replies = thread.messages
-      .slice(sent + 1)
-      .filter((message) => message.role === "assistant");
-    const turn = thread.latestTurn;
-    const sentTurnId = thread.messages[sent]!.turnId;
-    const ours =
-      turn !== null &&
-      (sentTurnId !== null
-        ? turn.turnId === sentTurnId
-        : turn.requestedAt >= thread.messages[sent]!.createdAt);
-    const finished = ours && turn.state !== "running";
-    return {
-      ...base,
-      assistant: new Map(replies.map((message) => [message.id, message.text])),
-      firstOutputAt: replies.some((message) => message.text.trim()) ? now : null,
-      started: true,
-      turnId: ours ? turn.turnId : null,
-      completedAt: finished ? now : null,
-      error:
-        finished && turn.state === "error" ? (thread.session?.lastError ?? "turn error") : null,
-      priorError: ours ? null : (thread.session?.lastError ?? null),
-    };
-  }
-  if (item.kind !== "event" || item.event.sequence <= progress.sequence) return progress;
-  const event = item.event;
-  switch (event.type) {
-    case "thread.message-sent": {
-      if (event.payload.role !== "assistant") return progress;
-      const previous = progress.assistant.get(event.payload.messageId) ?? "";
-      const text = event.payload.streaming
-        ? previous + event.payload.text
-        : event.payload.text || previous;
-      const assistant = new Map(progress.assistant).set(event.payload.messageId, text);
-      return {
-        ...progress,
-        assistant,
-        firstOutputAt: progress.firstOutputAt ?? (text.trim() ? now : null),
-      };
-    }
-    case "thread.turn-start-requested":
-      return event.payload.messageId === sentMessageId ? { ...progress, started: true } : progress;
-    case "thread.session-set": {
-      const session = event.payload.session;
-      if (!progress.started) return progress;
-      const newError = session.lastError !== null && session.lastError !== progress.priorError;
-      if (session.status === "error" || newError)
-        return { ...progress, error: session.lastError ?? "session error", completedAt: now };
-      if (session.status === "running" && progress.turnId === null && session.activeTurnId !== null)
-        return { ...progress, turnId: session.activeTurnId };
-      const settled = session.activeTurnId === null && session.status !== "starting";
-      return settled && session.status !== "running" && progress.firstOutputAt !== null
-        ? { ...progress, completedAt: progress.completedAt ?? now }
-        : progress;
-    }
-    case "thread.turn-diff-completed":
-      return progress.turnId !== null && event.payload.turnId === progress.turnId
-        ? { ...progress, completedAt: progress.completedAt ?? now }
-        : progress;
-    default:
-      return progress;
-  }
+  const folded =
+    item.kind === "snapshot"
+      ? { projection: item.projection, sequence: item.snapshotSequence }
+      : item.kind === "synchronized" || item.sequence <= progress.sequence
+        ? null
+        : {
+            projection:
+              item.kind === "event"
+                ? applyOrchestrationV2ProjectionEvent(progress.projection, item.event)
+                : progress.projection,
+            sequence: item.sequence,
+          };
+  if (folded === null || folded.projection === null) return { ...progress, ...folded };
+  const { projection } = folded;
+  // The run the sent message started; a late update to the previous turn's run is not ours.
+  const run = projection.runs
+    .filter((candidate) => candidate.userMessageId === sentMessageId)
+    .toSorted((left, right) => left.ordinal - right.ordinal)
+    .at(-1);
+  const replies = run
+    ? projection.messages.filter(
+        (message) => message.role === "assistant" && message.runId === run.id,
+      )
+    : [];
+  const settled = run !== undefined && SETTLED_RUN.has(run.status);
+  const failure = run
+    ? projection.turnItems.findLast((entry) => entry.type === "error" && entry.runId === run.id)
+    : undefined;
+  return {
+    ...folded,
+    assistant: new Map(replies.map((message) => [message.id, message.text])),
+    firstOutputAt:
+      progress.firstOutputAt ?? (replies.some((message) => message.text.trim()) ? now : null),
+    completedAt: progress.completedAt ?? (settled ? now : null),
+    error:
+      settled && run.status === "failed"
+        ? failure?.type === "error"
+          ? failure.failure.message
+          : "run failed"
+        : null,
+  };
 };
 
 /**
@@ -730,35 +711,37 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     };
     const threadId = thread?.threadId ?? ThreadId.make(yield* uuid);
     const messageId = MessageId.make(yield* uuid);
-    const createdAt = DateTime.formatIso(yield* DateTime.now);
-    const projectId = created.projectId!;
+    const commandId = CommandId.make(yield* uuid);
     const sentAt = yield* Clock.currentTimeMillis;
-    const dispatch = client["orchestration.dispatchCommand"]({
-      type: "thread.turn.start",
-      commandId: CommandId.make(yield* uuid),
-      threadId,
-      message: { messageId, role: "user", text: prompt, attachments: [] },
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      ...(thread
-        ? {}
-        : {
-            bootstrap: {
-              createThread: {
-                projectId,
-                title: `smoke ${label}`,
-                modelSelection,
-                runtimeMode: "full-access",
-                interactionMode: "default",
-                branch: null,
-                worktreePath: null,
-                createdAt,
-              },
-            },
-          }),
-      createdAt,
-    });
+    // Sent the way the web composer sends: a new chat launches its thread with the message, and a
+    // follow-up lets the server choose how to deliver it.
+    const dispatch = thread
+      ? client["orchestration.dispatchCommand"]({
+          type: "message.dispatch",
+          commandId,
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          messageId,
+          text: prompt,
+          attachments: [],
+          modelSelection,
+          deliveryIntent: "auto",
+          dispatchMode: { type: "start_immediately" },
+        })
+      : client["orchestration.launchThread"]({
+          commandId,
+          creationSource: "web",
+          threadId,
+          projectId: created.projectId!,
+          title: `smoke ${label}`,
+          generateTitle: false,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          workspaceStrategy: { type: "root" },
+          initialMessage: { messageId, text: prompt, attachments: [] },
+        });
     yield* bounded(dispatch, "dispatch").pipe(
       Effect.catch((cause) => fail(`${label}.dispatch`, describe(cause))),
     );
@@ -1141,7 +1124,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
             Stream.fromIterable(
               item.kind === "snapshot"
                 ? item.snapshot.projects
-                : item.kind === "project-upserted"
+                : item.kind === "project.updated"
                   ? [item.project]
                   : [],
             ),
@@ -1627,9 +1610,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           Clock.currentTimeMillis.pipe(
             Effect.map((now) => {
               if (sent.message === null && item.kind === "snapshot") {
-                const first = item.snapshot.thread.messages.find(
-                  (message) => message.role === "user",
-                );
+                const first = item.projection.messages.find((message) => message.role === "user");
                 if (first) sent.message = { id: first.id, text: first.text };
               }
               if (sent.message !== null)
