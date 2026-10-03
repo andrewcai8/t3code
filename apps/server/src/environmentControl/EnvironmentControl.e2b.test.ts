@@ -11,6 +11,7 @@ import {
   EnvironmentControlError,
   EnvironmentId,
   type EnvironmentProvisionUpgradeResult,
+  ProvisionRequestId,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Effect from "effect/Effect";
@@ -107,7 +108,7 @@ vi.mock("./driver.ts", async (importOriginal) => {
   };
 });
 
-const requestId = "0b0f7f61-8a52-4f6c-9d0b-6f3a2a8d3c11";
+const requestId = ProvisionRequestId.make("0b0f7f61-8a52-4f6c-9d0b-6f3a2a8d3c11");
 
 /**
  * A paused lease on an E2B box this manager prepared, whose guest preparation

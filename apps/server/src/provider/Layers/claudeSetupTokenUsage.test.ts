@@ -44,24 +44,25 @@ const setupTokenEvent = (fiveHour: number, sevenDay: number) =>
     },
   }) as ClaudeSdk.SDKRateLimitInfo;
 
-const setupTokenWindows = (fiveHour: number, sevenDay: number) => [
-  {
-    id: "five_hour",
-    kind: "session",
-    label: "Session",
-    usedPercent: fiveHour,
-    windowDurationMins: 300,
-    resetsAt: "2026-09-23T23:50:00.000Z",
-  },
-  {
-    id: "seven_day",
-    kind: "weekly",
-    label: "Weekly",
-    usedPercent: sevenDay,
-    windowDurationMins: 10080,
-    resetsAt: "2026-09-29T09:00:00.000Z",
-  },
-];
+const setupTokenWindows = (fiveHour: number, sevenDay: number) =>
+  [
+    {
+      id: "five_hour",
+      kind: "session",
+      label: "Session",
+      usedPercent: fiveHour,
+      windowDurationMins: 300,
+      resetsAt: "2026-09-23T23:50:00.000Z",
+    },
+    {
+      id: "seven_day",
+      kind: "weekly",
+      label: "Weekly",
+      usedPercent: sevenDay,
+      windowDurationMins: 10080,
+      resetsAt: "2026-09-29T09:00:00.000Z",
+    },
+  ] as const;
 
 const turnLimits = (info: ClaudeSdk.SDKRateLimitInfo) => {
   const response = rateLimitEventToUsageResponse(info);

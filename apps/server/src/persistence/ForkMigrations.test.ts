@@ -84,14 +84,14 @@ const forkEraLedgerAt61 = [
   [61, "ProvisionedChats"],
 ] as const;
 
-const expectedUpstreamAbove51 = [
+const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [52, "ProjectionThreadTitleState"],
   [53, "PullRequestFilesViewed"],
   [54, "ProjectionThreadsAutoSettleDisabledAt"],
   [55, "OrchestrationV2"],
   [56, "RemoveRedundantProjectionIndexes"],
 ];
-const expectedForkLedger = [
+const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [1, "ProvisionOperations"],
   [2, "BoxUsage"],
   [3, "BoxUsageOrigin"],
@@ -128,8 +128,8 @@ const readLedgers = Effect.gen(function* () {
     SELECT migration_id, name FROM fork_sql_migrations ORDER BY migration_id
   `;
   return {
-    upstream: upstream.map((row) => [row.migration_id, row.name]),
-    fork: fork.map((row) => [row.migration_id, row.name]),
+    upstream: upstream.map((row): readonly [number, string] => [row.migration_id, row.name]),
+    fork: fork.map((row): readonly [number, string] => [row.migration_id, row.name]),
   };
 });
 
@@ -137,7 +137,7 @@ const assertMigratedLedgers = Effect.gen(function* () {
   const ledgers = yield* readLedgers;
   assert.deepStrictEqual(ledgers.upstream, migrationManifest);
   assert.deepStrictEqual(
-    ledgers.upstream.filter(([id]) => Number(id) > 51),
+    ledgers.upstream.filter(([id]) => id > 51),
     expectedUpstreamAbove51,
   );
   assert.deepStrictEqual(ledgers.fork, expectedForkLedger);
