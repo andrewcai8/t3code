@@ -1,18 +1,16 @@
-import { CloudComputeControls } from "./CloudComputeControls";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { NativeHeaderToolbar } from "../../native/StackHeader";
 import { useNavigation } from "@react-navigation/native";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { Fragment, useCallback, useState } from "react";
+import { useCallback, useState } from "react";
 import { Platform, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { LocalEnvironmentList } from "./LocalEnvironmentList";
-import { ProvisionedEnvironmentRows } from "./ProvisionedEnvironmentRows";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
-import { SavedCloudBoxConnections } from "./SavedCloudBoxConnections";
+import { HostCloudBoxSections } from "./HostCloudBoxSections";
 
 export function ConnectionsRouteScreen() {
   const {
@@ -71,27 +69,7 @@ export function ConnectionsRouteScreen() {
           onSetEnabled={onSetEnvironmentEnabled}
           onUpdate={onUpdateEnvironment}
         />
-        {connectedEnvironments
-          .filter((environment) => environment.connectionState === "connected")
-          .map((environment) => (
-            <Fragment key={environment.environmentId}>
-              <ProvisionedEnvironmentRows
-                managerId={environment.environmentId}
-                managerLabel={environment.environmentLabel}
-              />
-              <CloudComputeControls
-                managerId={environment.environmentId}
-                managerLabel={environment.environmentLabel}
-                onStarted={(id) => {
-                  if (!connectedEnvironments.some((entry) => entry.environmentId === id))
-                    return false;
-                  onReconnectEnvironment(id);
-                  return true;
-                }}
-              />
-            </Fragment>
-          ))}
-        <SavedCloudBoxConnections />
+        <HostCloudBoxSections onReconnectEnvironment={onReconnectEnvironment} />
         <GitHubRoutingSettings />
       </ScrollView>
     </View>
