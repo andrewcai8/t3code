@@ -18,7 +18,6 @@ import * as Connectivity from "./connectivity.ts";
 import * as ConnectionDriver from "./driver.ts";
 import {
   type ConnectionAttemptError,
-  type ConnectionBlockedError,
   type ConnectionTarget,
   ConnectionTransientError,
   type NetworkStatus,
@@ -29,16 +28,13 @@ import * as RpcSession from "../rpc/session.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { type BoxSupervisorOptions, makeBoxWaker } from "./boxWake.ts";
 
 const RETRY_DELAYS_MS = [3_000, 4_000, 8_000, 16_000] as const;
 const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const MOBILE_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
-// A box that keeps saying it is not serving is woken again after 30 s, then 1, 2, 4 and 8
-// minutes, and every 10 minutes after that, so no client resumes it in a loop.
-const WAKE_INTERVAL_MS = 30_000;
-const WAKE_INTERVAL_MAX_MS = 600_000;
 
 interface SupervisorIntent {
   readonly desired: boolean;
@@ -102,25 +98,8 @@ function exitUnlessInterrupted<A, E, R>(
   });
 }
 
-export type BoxWakeOutcome =
-  | { readonly _tag: "Resumed" }
-  | { readonly _tag: "RetryLater"; readonly error: ConnectionTransientError }
-  | { readonly _tag: "Refused"; readonly error: ConnectionBlockedError }
-  /** The host never answered: it was not connected, or its session closed first. */
-  | { readonly _tag: "Undelivered"; readonly error: ConnectionTransientError };
-
-export interface EnvironmentSupervisorOptions {
+export interface EnvironmentSupervisorOptions extends BoxSupervisorOptions {
   readonly initiallyDesired?: boolean;
-  /** Wakes a box whose dial says it is not serving, through the host that provisioned it. */
-  readonly wake?: Effect.Effect<BoxWakeOutcome>;
-  /** Runs while the connection is up, as a box's lease heartbeat does. */
-  readonly keepAlive?: Effect.Effect<void>;
-  /** Whether a wake may start now: its user is here and its host is connected to hear it. */
-  readonly mayWake?: Effect.Effect<boolean>;
-}
-
-function wakeIntervalMs(wakes: number): number {
-  return Math.min(WAKE_INTERVAL_MS * 2 ** (wakes - 1), WAKE_INTERVAL_MAX_MS);
 }
 
 function retryDelayMs(failureCount: number): number {
@@ -649,55 +628,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     );
   });
 
-  const waitForWakeInterrupt = Effect.fnUntraced(function* () {
-    for (;;) {
-      const next = yield* Queue.take(signals);
-      if (
-        next._tag === "DisconnectRequested" ||
-        next._tag === "RetryRequested" ||
-        (next._tag === "NetworkChanged" && next.network === "offline")
-      ) {
-        return { _tag: "Interrupted" } as const;
-      }
-    }
-  });
-
-  const wakeBox = Effect.fnUntraced(function* (
-    wake: Effect.Effect<BoxWakeOutcome>,
-    attempt: number,
-    generation: number,
-    lastFailure: ConnectionAttemptError,
-  ) {
-    const current = yield* Ref.get(intent);
-    if (!current.desired || current.network === "offline") {
-      return { _tag: "Interrupted" } as const;
-    }
-    yield* setState({
-      desired: true,
-      network: current.network,
-      phase: "waking",
-      stage: null,
-      attempt,
-      generation,
-      lastFailure,
-      retryAt: null,
-    });
-    // However a wake ends, the loop goes on: a wake that fails instead of answering is treated as
-    // one the host never heard, so the box cannot be left waking with nothing running.
-    const settledWake = wake.pipe(
-      Effect.catchCause(() =>
-        Effect.succeed<BoxWakeOutcome>({
-          _tag: "Undelivered",
-          error: new ConnectionTransientError({
-            reason: "not-serving",
-            detail: "This chat's cloud host did not answer the wake.",
-          }),
-        }),
-      ),
-    );
-    return yield* Effect.raceFirst(settledWake, waitForWakeInterrupt());
-  });
-
   const waitForSignal = Queue.take(signals).pipe(
     Effect.map(
       (next) => next._tag === "Wakeup" && ConnectionWakeups.isApplicationActiveWakeup(next.reason),
@@ -709,9 +639,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     let generation = 0;
     let latestFailure: ConnectionAttemptError | null = null;
     let pendingRetry = Option.none<PendingRetryTrace>();
-    // Wakes since the box last stayed connected, and when the next one may start.
-    let wakes = 0;
-    let nextWakeAt = 0;
+    const boxWaker = makeBoxWaker(options, {
+      intent: Ref.get(intent),
+      setState,
+      nextSignal: Queue.take(signals),
+    });
     const resetRetryLadder = () => {
       failureCount = 0;
       pendingRetry = Option.none();
@@ -722,16 +654,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         failureCount = 0;
         latestFailure = null;
         pendingRetry = Option.none();
-        wakes = 0;
-        nextWakeAt = 0;
+        boxWaker.reset();
       }
       const currentIntent = yield* Ref.get(intent);
       if (!currentIntent.desired) {
         resetRetryLadder();
         latestFailure = null;
-        // Opening the chat again is a fresh ask, so its wake does not wait out an old interval.
-        wakes = 0;
-        nextWakeAt = 0;
+        boxWaker.reset();
         yield* clearLease;
         yield* setState(availableState(currentIntent, generation));
         yield* waitForSignal;
@@ -760,8 +689,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         if (outcome.stable) {
           resetRetryLadder();
           latestFailure = null;
-          wakes = 0;
-          nextWakeAt = 0;
+          boxWaker.reset();
         }
       }
       if (outcome._tag === "Interrupted") {
@@ -772,31 +700,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       }
 
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
-      let error: ConnectionAttemptError = outcome.failure.error;
+      latestFailure = outcome.failure.error;
+      const woken = yield* boxWaker.afterFailure(outcome.failure.error, attempt, generation);
+      if (Option.isNone(woken)) continue;
+      const error: ConnectionAttemptError = woken.value;
       latestFailure = error;
-      if (
-        options?.wake !== undefined &&
-        error.reason === "not-serving" &&
-        (yield* Clock.currentTimeMillis) >= nextWakeAt &&
-        (yield* options.mayWake ?? Effect.succeed(true))
-      ) {
-        const woken: BoxWakeOutcome | { readonly _tag: "Interrupted" } = yield* wakeBox(
-          options.wake,
-          attempt,
-          generation,
-          error,
-        );
-        if (woken._tag === "Interrupted") continue;
-        // Only a wake the host answered counts toward the interval; one it never heard is not a
-        // wake, and is sent again on the next dial.
-        if (woken._tag !== "Undelivered") {
-          wakes += 1;
-          nextWakeAt = (yield* Clock.currentTimeMillis) + wakeIntervalMs(wakes);
-        }
-        if (woken._tag === "Resumed") continue;
-        error = woken.error;
-        latestFailure = error;
-      }
       if (error._tag === "ConnectionBlockedError") {
         const blockedIntent = yield* Ref.get(intent);
         yield* setState({
