@@ -16,7 +16,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { readProjects, useServerConfigs } from "../../state/entities";
 import { environmentPresentations } from "../../state/presentation";
 import { useMobileProjectGroupingSettings } from "../../state/project-grouping";
-import { newChatPlacement, resolveNewThreadStart } from "./new-task-project-selection";
+import { newChatPlacement, resolveNewThreadStart } from "./new-task-cloud-placement";
 import { useOtherChatBoxes } from "./use-provisioned-boxes";
 
 /** The copy of `environmentId`/`projectId`'s project a new thread opens on, never one on a box. */

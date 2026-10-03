@@ -12,7 +12,7 @@ import { hydrateProvisionStorage } from "../../state/provision-storage";
 import { provisionedSandboxLeases } from "../../state/provision-stores";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
-import { provisioningHostIds } from "./new-task-project-selection";
+import { provisioningHostIds } from "./new-task-cloud-placement";
 
 function useProvisioningHostIds(serverConfigs: ReadonlyMap<EnvironmentId, ServerConfig>) {
   const { connectedEnvironments } = useRemoteConnectionStatus();
