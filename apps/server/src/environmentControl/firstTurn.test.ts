@@ -199,6 +199,10 @@ interface HostOptions {
   readonly allocationFails?: boolean;
   /** Leaves the drive's ready hook out, holding the moment between ready and the lease. */
   readonly withoutReadyHook?: boolean;
+  /** The driver the request recorded for the box. */
+  readonly agentDriver?: ProviderDriverKind;
+  /** The first message the host keeps, in place of `turn`. */
+  readonly turn?: ProvisionFirstTurn;
 }
 
 const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.recurs(0) }) =>
@@ -209,7 +213,11 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
     const box = yield* fakeBox(behavior);
     const preparing = yield* Deferred.make<void>();
     const prepared = yield* Deferred.make<void>();
-    const kept = new Map([[input.requestId, turn]]);
+    const kept = new Map([[input.requestId, options.turn ?? turn]]);
+    const frozen =
+      options.agentDriver === undefined
+        ? manifest
+        : { ...manifest, request: { ...manifest.request, agentDriver: options.agentDriver } };
     let settle: (
       operation: Parameters<NonNullable<ProvisionProviderPorts["Service"]["ready"]>>[0],
     ) => Effect.Effect<unknown> = () => Effect.void;
@@ -251,8 +259,8 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
       store,
       provisioning,
       {
-        freeze: async () => manifest,
-        load: async () => manifest,
+        freeze: async () => frozen,
+        load: async () => frozen,
         attach: async () => ({
           pairingUrl: `${box.origin}/pair#token=grant`,
           remoteAccess: { origin: box.origin, brokerToken: "private-broker" },
@@ -552,4 +560,33 @@ it.live("launches a turn on the box's instance for the driver of the host accoun
       { instanceId: "codex", model: "gpt-5.5" },
     ]);
   }).pipe(Effect.scoped),
+);
+
+it.live("launches a first turn for the driver its request recorded, not the host's settings", () =>
+  withHost(
+    Effect.gen(function* () {
+      // The host no longer knows the account the turn names, as after deleting that instance.
+      const { box, control, prepared } = yield* host(
+        {},
+        {
+          retry: Schedule.recurs(0),
+          agentDriver: ProviderDriverKind.make("codex"),
+          turn: {
+            ...turn,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex_work"),
+              model: "gpt-5.5",
+            } as ProvisionFirstTurn["modelSelection"],
+          },
+        },
+      );
+      yield* Deferred.succeed(prepared, undefined);
+      yield* control.provision(input);
+      yield* control.settleChats;
+
+      expect(box.commands.map((command) => command.modelSelection)).toEqual([
+        { instanceId: "codex", model: "gpt-5.5" },
+      ]);
+    }),
+  ),
 );

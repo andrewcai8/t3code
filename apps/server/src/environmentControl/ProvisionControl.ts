@@ -88,6 +88,7 @@ export interface ProvisionControlPorts {
       readonly threadId: string;
       readonly projectDir: string;
       readonly turn: ProvisionFirstTurn;
+      readonly agentDriver: ProvisionOperation["request"]["agentDriver"];
     },
   ) => Promise<FirstTurnDelivery>;
   /** The chat's first message while it is still owed, or null once it is gone. */
@@ -332,6 +333,7 @@ export function makeProvisionControl(
           threadId: chat.threadId,
           projectDir: state.readiness.projectDir,
           turn,
+          agentDriver: request.agentDriver,
         }),
       );
       if (delivery === "pending") return "pending" as const;

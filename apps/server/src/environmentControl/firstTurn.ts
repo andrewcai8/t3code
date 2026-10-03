@@ -39,8 +39,9 @@ const classify = (status: number): FirstTurnDelivery =>
  * first message under a fixed command id: the box keeps a receipt per command, so a retry after any
  * crash replays the earlier launch instead of starting a second turn.
  *
- * `driverOf` resolves a host instance id to its driver. The box runs each driver's one account
- * under the driver's default instance id, so a turn naming a host account launches there.
+ * The box runs each driver's one account under the driver's default instance id, so a turn naming
+ * a host account launches there. The driver is the one the box was provisioned for; `driverOf`
+ * resolves a host instance id to its driver for a request that recorded none.
  */
 export async function deliverFirstTurn(
   remote: RemoteAccess,
@@ -49,6 +50,7 @@ export async function deliverFirstTurn(
     readonly threadId: string;
     readonly projectDir: string;
     readonly turn: ProvisionFirstTurn;
+    readonly agentDriver?: ProviderDriverKind | undefined;
   },
   driverOf: (instanceId: ProviderInstanceId) => ProviderDriverKind | undefined,
 ): Promise<FirstTurnDelivery> {
@@ -86,7 +88,7 @@ export async function deliverFirstTurn(
     projects.find((candidate) => candidate.workspaceRoot === chat.projectDir) ??
     (projects.length === 1 ? projects[0] : undefined);
   if (!project) return "pending";
-  const driver = driverOf(turn.modelSelection.instanceId);
+  const driver = chat.agentDriver ?? driverOf(turn.modelSelection.instanceId);
   const response = await fetch(`${remote.origin}/api/orchestration/launch-thread`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
