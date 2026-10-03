@@ -34,6 +34,12 @@ import {
   createRuntimeCommand,
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
+import {
+  type HostBoxList,
+  type ProvisionedBox,
+  provisionedBox,
+  sameProvisionedBoxes,
+} from "../cloud/provisioning.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -1002,8 +1008,8 @@ export function createServerEnvironmentAtoms<R, E>(
     refreshIntervalMs: 60_000,
     execute: (_input: Record<string, never>) =>
       Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry;
-        const managerId = (yield* EnvironmentSupervisor).target.environmentId;
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const managerId = (yield* EnvironmentSupervisor.EnvironmentSupervisor).target.environmentId;
         const entries = yield* SubscriptionRef.get(registry.entries);
         const held = yield* SubscriptionRef.get(registry.hostChats);
         const rows = yield* request(WS_METHODS.environmentControlListProvisioned, {
