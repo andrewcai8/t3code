@@ -43,6 +43,7 @@ import {
   type ConnectionTarget,
   ConnectionTransientError,
   connectionBox,
+  type SupervisorConnectionState,
 } from "./model.ts";
 import { UserPresence } from "./presence.ts";
 import type {
@@ -391,45 +392,66 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     }).pipe(Effect.withSpan("EnvironmentRegistry.keepBoxAlive"));
   };
 
-  const retryDownBoxes = Effect.fnUntraced(function* (managerId?: EnvironmentId) {
+  const retryBoxes = Effect.fnUntraced(function* (
+    shouldRetry: (
+      box: { readonly managerId: EnvironmentId },
+      state: SupervisorConnectionState,
+    ) => boolean,
+  ) {
     for (const lease of (yield* SubscriptionRef.get(serviceScopes)).values()) {
       const box = connectionBox(lease.entry.target);
-      if (box === null || (managerId !== undefined && box.managerId !== managerId)) continue;
-      const state = yield* SubscriptionRef.get(lease.supervisor.state);
-      // A wake in flight is left to finish; a retry would start it over.
-      if (state.desired && state.phase !== "connected" && state.phase !== "waking")
+      if (box === null) continue;
+      if (shouldRetry(box, yield* SubscriptionRef.get(lease.supervisor.state)))
         yield* lease.supervisor.retryNow;
     }
   });
 
   // A user coming back retries each box that is down at once, waking it without the wait a box
-  // left alone backs off to.
+  // left alone backs off to. A wake in flight is left to finish; a retry would start it over.
   yield* userReturns.pipe(
-    Effect.andThen(retryDownBoxes()),
+    Effect.andThen(
+      retryBoxes(
+        (_, state) => state.desired && state.phase !== "connected" && state.phase !== "waking",
+      ),
+    ),
     Effect.forever,
     Effect.forkIn(registryScope),
   );
 
-  // A host connecting again retries its boxes that are down, so they do not wait out the backoff
-  // they built while it was gone.
+  // A host connecting again retries its boxes waiting out a backoff they built while it was gone.
+  // A box already dialing or waking is left alone.
   yield* SubscriptionRef.changes(serviceScopes).pipe(
-    Stream.switchMap((leases) =>
+    Stream.map((leases) =>
+      [...leases].flatMap(([managerId, lease]) =>
+        connectionBox(lease.entry.target) === null
+          ? [{ managerId, supervisor: lease.supervisor }]
+          : [],
+      ),
+    ),
+    Stream.changesWith(
+      (left, right) =>
+        left.length === right.length &&
+        left.every((host, index) => host.supervisor === right[index]?.supervisor),
+    ),
+    Stream.switchMap((hosts) =>
       Stream.mergeAll(
-        [...leases]
-          .filter(([, lease]) => connectionBox(lease.entry.target) === null)
-          .map(([managerId, lease]) =>
-            SubscriptionRef.changes(lease.supervisor.state).pipe(
-              Stream.map((state) => state.phase === "connected"),
-              Stream.changes,
-              Stream.drop(1),
-              Stream.filter((connected) => connected),
-              Stream.map(() => managerId),
-            ),
+        hosts.map(({ managerId, supervisor }) =>
+          SubscriptionRef.changes(supervisor.state).pipe(
+            Stream.map((state) => state.phase === "connected"),
+            Stream.changes,
+            Stream.drop(1),
+            Stream.filter((connected) => connected),
+            Stream.map(() => managerId),
           ),
+        ),
         { concurrency: "unbounded" },
       ),
     ),
-    Stream.runForEach(retryDownBoxes),
+    Stream.runForEach((managerId) =>
+      retryBoxes(
+        (box, state) => box.managerId === managerId && state.desired && state.phase === "backoff",
+      ),
+    ),
     Effect.forkIn(registryScope),
   );
 
