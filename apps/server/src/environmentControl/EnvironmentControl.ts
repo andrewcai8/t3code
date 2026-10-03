@@ -83,6 +83,7 @@ import { logProvisionPhases, type ProvisionPhase } from "./provisionTiming.ts";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
@@ -1648,7 +1649,10 @@ export const layer = Layer.effect(
           const manager = await resolve();
           return manager ? manager.holdBox(sandboxId) : () => {};
         },
-        deliverFirstTurn,
+        deliverFirstTurn: async (remote, chat) => {
+          const instances = deriveProviderInstanceConfigMap(await runLogged(settings.getSettings));
+          return deliverFirstTurn(remote, chat, (instanceId) => instances[instanceId]?.driver);
+        },
         readFirstTurn: manifests.readFirstTurn,
         forgetFirstTurn: manifests.forgetFirstTurn,
         listFirstTurns: manifests.listFirstTurns,

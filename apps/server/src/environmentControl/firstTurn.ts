@@ -1,7 +1,10 @@
 // @effect-diagnostics globalFetch:off - the manager calls a remote T3 server over private HTTP.
 import {
   CommandId,
+  defaultInstanceIdForDriver,
   OrchestrationV2ThreadLaunchInput,
+  type ProviderDriverKind,
+  type ProviderInstanceId,
   type ProvisionFirstTurn,
   ProjectId,
   ThreadId,
@@ -35,6 +38,9 @@ const classify = (status: number): FirstTurnDelivery =>
  * Starts a chat's first turn on its box, at most once. One launch creates the thread and sends its
  * first message under a fixed command id: the box keeps a receipt per command, so a retry after any
  * crash replays the earlier launch instead of starting a second turn.
+ *
+ * `driverOf` resolves a host instance id to its driver. The box runs each driver's one account
+ * under the driver's default instance id, so a turn naming a host account launches there.
  */
 export async function deliverFirstTurn(
   remote: RemoteAccess,
@@ -44,6 +50,7 @@ export async function deliverFirstTurn(
     readonly projectDir: string;
     readonly turn: ProvisionFirstTurn;
   },
+  driverOf: (instanceId: ProviderInstanceId) => ProviderDriverKind | undefined,
 ): Promise<FirstTurnDelivery> {
   const headers = boxOrchestrationHeaders(remote);
   const shellResponse = await fetch(`${remote.origin}/api/orchestration/shell`, {
@@ -79,6 +86,7 @@ export async function deliverFirstTurn(
     projects.find((candidate) => candidate.workspaceRoot === chat.projectDir) ??
     (projects.length === 1 ? projects[0] : undefined);
   if (!project) return "pending";
+  const driver = driverOf(turn.modelSelection.instanceId);
   const response = await fetch(`${remote.origin}/api/orchestration/launch-thread`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
@@ -90,7 +98,10 @@ export async function deliverFirstTurn(
         projectId: project.id,
         title: turn.title,
         ...(turn.titleSeed ? { generateTitle: true } : {}),
-        modelSelection: turn.modelSelection,
+        modelSelection:
+          driver === undefined
+            ? turn.modelSelection
+            : { ...turn.modelSelection, instanceId: defaultInstanceIdForDriver(driver) },
         runtimeMode: turn.runtimeMode,
         interactionMode: turn.interactionMode,
         workspaceStrategy: { type: "root" },

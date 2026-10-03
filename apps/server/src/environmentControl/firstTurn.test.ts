@@ -263,7 +263,7 @@ const host = (behavior: BoxBehavior, options: HostOptions = { retry: Schedule.re
           throw new Error("Unexpected setRuntime");
         },
         prepare: () => Effect.die("Unexpected prepare"),
-        deliverFirstTurn,
+        deliverFirstTurn: (remote, chat) => deliverFirstTurn(remote, chat, () => undefined),
         readFirstTurn: async (frozen) => kept.get(frozen.request.requestId) ?? null,
         forgetFirstTurn: async (id) => {
           kept.delete(id);
