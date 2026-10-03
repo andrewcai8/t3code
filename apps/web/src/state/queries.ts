@@ -92,13 +92,11 @@ export function useThreadSearch(
   };
 }
 
-/** `remoteOnly` lists every remote branch, including those a local branch shadows. */
-export function usePaginatedBranches(target: VcsRefTarget & { readonly remoteOnly?: boolean }) {
+export function usePaginatedBranches(target: VcsRefTarget) {
   const query = target.query?.trim() ?? "";
-  const remoteOnly = target.remoteOnly === true;
   const targetKey =
     target.environmentId !== null && target.cwd !== null
-      ? JSON.stringify([target.environmentId, target.cwd, query, remoteOnly])
+      ? JSON.stringify([target.environmentId, target.cwd, query])
       : null;
   const [pagination, setPagination] = useState<{
     readonly targetKey: string | null;
@@ -118,13 +116,12 @@ export function usePaginatedBranches(target: VcsRefTarget & { readonly remoteOnl
                 cwd: target.cwd!,
                 ...(query.length > 0 ? { query } : {}),
                 ...(cursor === undefined ? {} : { cursor }),
-                ...(remoteOnly ? { refKind: "remote", includeMatchingRemoteRefs: true } : {}),
                 limit: VCS_REF_LIST_LIMIT,
               },
             }),
           )
         : [],
-    [cursors, query, remoteOnly, target.cwd, target.environmentId],
+    [cursors, query, target.cwd, target.environmentId],
   );
   const pagesAtom = useMemo(
     () =>

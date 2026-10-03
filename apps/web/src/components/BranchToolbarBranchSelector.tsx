@@ -43,7 +43,6 @@ import { parsePullRequestReference } from "../pullRequestReference";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import {
-  cloudBaseRefs,
   deriveLocalBranchNameFromRemoteRef,
   resolveBranchTriggerLabel,
   resolveBranchToolbarPrBranch,
@@ -87,18 +86,6 @@ interface BranchToolbarBranchSelectorProps {
   onStartFromOriginChange: (startFromOrigin: boolean) => void;
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
-  /**
-   * Set while the draft will start a cloud environment. The picker then chooses
-   * the remote branch that environment starts from. Nothing is checked out here.
-   */
-  cloudBase?: CloudBaseBranch;
-}
-
-export interface CloudBaseBranch {
-  /** null is the repository's default branch. */
-  readonly branch: string | null;
-  /** null once the choice is fixed. */
-  readonly onChange: ((branch: string) => void) | null;
 }
 
 function toBranchActionErrorMessage(error: unknown): string {
@@ -121,7 +108,6 @@ export function BranchToolbarBranchSelector({
   onStartFromOriginChange,
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
-  cloudBase,
 }: BranchToolbarBranchSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, "thread session stop");
@@ -254,22 +240,12 @@ export function BranchToolbarBranchSelector({
   // from the response entirely, which would defeat the collision check below.
   // Ref names cannot contain an ASCII space, so sanitizing loses no matches.
   const branchRefQuery = sanitizeNewRefName(deferredTrimmedBranchQuery);
-  const pickingCloudBase = cloudBase !== undefined;
-  const cloudBaseFixed = cloudBase?.onChange === null;
   const branchRefState = usePaginatedBranches({
     environmentId,
     cwd: branchCwd,
     query: branchRefQuery,
-    remoteOnly: pickingCloudBase,
   });
-  const repositoryIdentity = activeProject?.repositoryIdentity;
-  const refs = useMemo(
-    () =>
-      pickingCloudBase
-        ? cloudBaseRefs(branchRefState.refs, repositoryIdentity)
-        : branchRefState.refs,
-    [branchRefState.refs, pickingCloudBase, repositoryIdentity],
-  );
+  const refs = branchRefState.refs;
   const hasNextPage =
     branchRefState.data?.nextCursor !== null && branchRefState.data?.nextCursor !== undefined;
   const isFetchingNextPage = branchRefState.isFetchingNextPage;
@@ -281,14 +257,12 @@ export function BranchToolbarBranchSelector({
     [branchStatusQuery.data?.sourceControlProvider],
   );
   const SourceControlIcon = sourceControlPresentation.Icon;
-  const canonicalActiveBranch = cloudBase
-    ? (cloudBase.branch ?? refs.find((refName) => refName.isDefault)?.name ?? null)
-    : resolveBranchToolbarValue({
-        envMode: effectiveEnvMode,
-        activeWorktreePath,
-        activeThreadBranch,
-        currentGitBranch,
-      });
+  const canonicalActiveBranch = resolveBranchToolbarValue({
+    envMode: effectiveEnvMode,
+    activeWorktreePath,
+    activeThreadBranch,
+    currentGitBranch,
+  });
   const branchNames = useMemo(() => refs.map((refName) => refName.name), [refs]);
   const branchByName = useMemo(
     () => new Map(refs.map((refName) => [refName.name, refName] as const)),
@@ -297,12 +271,10 @@ export function BranchToolbarBranchSelector({
   const normalizedDeferredBranchQuery = deferredTrimmedBranchQuery.toLowerCase();
   const prReference = parsePullRequestReference(trimmedBranchQuery);
   const isSelectingWorktreeBase =
-    !cloudBase && effectiveEnvMode === "worktree" && !envLocked && !activeWorktreePath;
+    effectiveEnvMode === "worktree" && !envLocked && !activeWorktreePath;
   const checkoutPullRequestItemValue =
-    !cloudBase && prReference && onCheckoutPullRequestRequest
-      ? `__checkout_pull_request__:${prReference}`
-      : null;
-  const canCreateBranch = !cloudBase && !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
+    prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
+  const canCreateBranch = !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
   // The ref is created under its sanitized name, so the collision check has to
   // use that name too. Matching on the raw query would offer to create a ref
   // that already exists whenever sanitizing changes the name.
@@ -347,7 +319,7 @@ export function BranchToolbarBranchSelector({
   const listedActiveBranch =
     resolvedActiveBranch === null ? null : (branchByName.get(resolvedActiveBranch) ?? null);
   const activeBranchRefQuery = useEnvironmentQuery(
-    !cloudBase && branchCwd !== null && resolvedActiveBranch !== null
+    branchCwd !== null && resolvedActiveBranch !== null
       ? vcsEnvironment.listRefs({
           environmentId,
           input: {
@@ -428,12 +400,6 @@ export function BranchToolbarBranchSelector({
   };
 
   const selectBranch = (refName: VcsRef) => {
-    if (cloudBase) {
-      cloudBase.onChange?.(refName.name);
-      setIsBranchMenuOpen(false);
-      onComposerFocusRequest?.();
-      return;
-    }
     if (!branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
     if (isSelectingWorktreeBase) {
@@ -572,22 +538,20 @@ export function BranchToolbarBranchSelector({
     ref,
     () => ({
       open: () => {
-        if (isInitialBranchesLoadPending || isBranchActionPending || cloudBaseFixed) return;
+        if (isInitialBranchesLoadPending || isBranchActionPending) return;
         handleOpenChange(true);
       },
     }),
-    [cloudBaseFixed, handleOpenChange, isBranchActionPending, isInitialBranchesLoadPending],
+    [handleOpenChange, isBranchActionPending, isInitialBranchesLoadPending],
   );
 
-  const triggerLabel = cloudBase
-    ? (resolvedActiveBranch ?? "Default branch")
-    : resolveBranchTriggerLabel({
-        activeWorktreePath,
-        effectiveEnvMode,
-        resolvedActiveBranch,
-        resolvedActiveBranchIsRemote,
-        startFromOrigin,
-      });
+  const triggerLabel = resolveBranchTriggerLabel({
+    activeWorktreePath,
+    effectiveEnvMode,
+    resolvedActiveBranch,
+    resolvedActiveBranchIsRemote,
+    startFromOrigin,
+  });
 
   // Branch status is the fallback when this thread has no linked pull requests.
   const branchPrBranch = resolveBranchToolbarPrBranch({
@@ -679,11 +643,7 @@ export function BranchToolbarBranchSelector({
 
     return (
       <BranchPickerRefItem
-        // Every cloud base row is a remote branch named as the remote names it,
-        // so only the default badge tells the rows apart.
-        branch={
-          cloudBase ? { ...refName, isRemote: false, current: false, worktreePath: null } : refName
-        }
+        branch={refName}
         projectCwd={activeProjectCwd}
         index={index}
         value={itemValue}
@@ -767,7 +727,7 @@ export function BranchToolbarBranchSelector({
               )
             }
             className="min-w-0 max-w-full active:scale-100"
-            disabled={cloudBaseFixed || isInitialBranchesLoadPending || isBranchActionPending}
+            disabled={isInitialBranchesLoadPending || isBranchActionPending}
           >
             <GitBranchIcon
               className={cn(

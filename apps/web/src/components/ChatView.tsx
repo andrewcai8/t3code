@@ -22,20 +22,15 @@ import {
   rememberCheckoutIsRepo,
 } from "./ChatView.logic";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
+import { needsLoadBalancedPick } from "../cloud/cloudChat.logic";
 import {
-  cancelProvisionRequest,
-  forgetProvisionRequest,
-  provisionRequests,
-} from "../cloud/provisionRequests";
-import { cloudSends, patchDraftPendingEnvironmentSend } from "../cloud/cloudSends";
-import {
-  claimProvisionedBox,
-  draftBoxLease,
-  leaseReachesBox,
-  newChatProject,
-  newChatRunTargets,
-  nextDraftEnvironment,
-} from "@t3tools/client-runtime/cloud";
+  useChatEnvironmentById,
+  useCloudChat,
+  useNewChatRunTargets,
+  withHeldCloudMessage,
+  withHeldCloudSend,
+} from "../cloud/useCloudChat";
+import { cloudUnavailableBanner } from "../cloud/cloudUnavailableBanner";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   latestExecutedRun,
@@ -66,12 +61,10 @@ import {
   DEFAULT_MODEL,
   isProviderNativeSubagentThread,
   type ChatAttachment as ContractChatAttachment,
-  EnvironmentId,
-  MessageId,
-  type ThreadContextRecord,
+  type EnvironmentId,
+  type MessageId,
   type ModelSelection,
   type ProjectScript,
-  type ProvisionChat,
   type ProjectId,
   type ProviderApprovalDecision,
   type PreviewAnnotationPayload,
@@ -87,13 +80,12 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderInteractionMode,
   ProviderDriverKind,
+  resolveEnvironmentMachineKind,
   RuntimeMode,
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
-  cloneRepository,
 } from "@t3tools/contracts";
 import {
-  BOX_STATUS_NAME,
   connectionBox,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -104,11 +96,7 @@ import {
 } from "@t3tools/client-runtime/errors";
 import { readPastedComposerContext } from "./composerInlineTokenPaste";
 import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
-import {
-  effectiveSnoozed,
-  environmentAllowsThreadSettlement,
-  threadWokeAt,
-} from "@t3tools/client-runtime/state/thread-settled";
+import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import { useThreadActions } from "../hooks/useThreadActions";
 import {
   deriveProviderSubagentStatus,
@@ -309,7 +297,6 @@ import {
   ChevronDownIcon,
   DownloadIcon,
   GitBranchIcon,
-  SendIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomUUID } from "~/lib/utils";
@@ -328,7 +315,6 @@ import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities } from "../providerModels";
 import {
   applyProviderInstanceSettings,
-  cloudProviderEntries,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
   sortProviderInstanceEntries,
@@ -375,7 +361,6 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
-  type PendingCloudEnvironmentSend,
   useComposerDraftStore,
   DraftId,
 } from "../composerDraftStore";
@@ -410,10 +395,6 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import {
-  provisionedSandboxFor,
-  transferProvisionedSandboxLease,
-} from "../cloud/provisionedSandboxLeases";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
@@ -421,7 +402,7 @@ import { vcsEnvironment } from "../state/vcs";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useProjectClone } from "../state/projectClones";
 import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
-import { useEnvironment, useEnvironments, usePrimaryEnvironment } from "../state/environments";
+import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   resolveThreadDetailRef,
   useProject,
@@ -464,6 +445,7 @@ import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImag
 import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
+  type EnvironmentOption,
   resolveEffectiveEnvMode,
   resolveLocalCheckoutBranchMismatch,
   shouldShowComposerContextStrip,
@@ -488,9 +470,7 @@ import {
 } from "./chat/QueuedRunsControl";
 import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
-import type { CloudEnvironmentSetupSnapshot } from "./chat/EnvironmentSetupCard";
 import { ComposerSurface } from "./chat/ComposerSurface";
-import { Spinner } from "./ui/spinner";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
   hasAvailableCompactionProvider,
@@ -542,8 +522,6 @@ import {
   reconcileMountedTerminalThreadIds,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
-  buildCloudHandoff,
-  cloudCloneSource,
   getAntigravitySendBlockReason,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
@@ -555,9 +533,6 @@ import {
   codexArtifactTemplatePromptToAppend,
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
-  needsLoadBalancedPick,
-  isDraftOnAnotherChatsBox,
-  projectEnvironmentOptions,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -576,9 +551,6 @@ import { fileAttachmentCapabilityBlockReason } from "./chat/composerAttachmentFi
 import { assetEnvironment } from "../state/assets";
 import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
-import { refreshProvisionedEnvironments } from "../cloud/cloudHosts";
-import { useBoxDemand } from "../cloud/CloudBoxes";
-import { type ReconnectResult, useReconnectSend } from "../cloud/useReconnectSend";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button, InlineButton } from "./ui/button";
 import {
@@ -604,7 +576,6 @@ import {
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
   resolveServerConfigVersionMismatch,
-  resolveEnvironmentServerUpdatePath,
   resolveServerSelfUpdateCapability,
   serverUpdateGuidance,
   supportsDesktopAppUpdate,
@@ -853,29 +824,6 @@ interface TerminalLaunchContext {
 }
 
 type PersistentTerminalLaunchContext = Pick<TerminalLaunchContext, "cwd" | "worktreePath">;
-
-type HeldCloudSendSnapshot = {
-  readonly messageId: MessageId;
-  readonly createdAt: string;
-  readonly prompt: string;
-  readonly images: ComposerImageAttachment[];
-  readonly files: ComposerFileAttachment[];
-  readonly terminalContexts: TerminalContextDraft[];
-  readonly previewAnnotations: PreviewAnnotationPayload[];
-  readonly reviewComments: ReviewCommentContext[];
-  readonly threadContexts: ThreadContextRecord[];
-};
-
-function pendingCloudSendPreview(text: string): string {
-  const line = text.trim().split("\n", 1)[0] ?? "";
-  return line.length > 0 ? line : "Preparing environment";
-}
-
-function isInProgressCloudProvisioningPhase(
-  phase: PendingCloudEnvironmentSend["phase"] | null,
-): boolean {
-  return phase === "creating" || phase === "pairing" || phase === "loading-project";
-}
 
 function useLocalDispatchState(input: {
   activeThread: Thread | undefined;
@@ -1564,22 +1512,6 @@ function releaseChatTimelineAnchor<T extends { readonly messageId: MessageId | n
   return current.messageId === null ? current : { ...current, messageId: null };
 }
 
-/** The box a draft's held cloud send made ready, if any. */
-function readyDraftBoxEnvironmentId(draftId: DraftId): string | null {
-  return (
-    useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend
-      ?.readyEnvironmentId ?? null
-  );
-}
-
-/** The host a saved box connection names, read when a send or pick needs it. */
-function catalogBoxManager(environmentId: EnvironmentId): EnvironmentId | null {
-  const target = appAtomRegistry
-    .get(environmentCatalog.catalogValueAtom)
-    .entries.get(environmentId)?.target;
-  return target === undefined ? null : (connectionBox(target)?.managerId ?? null);
-}
-
 export default function ChatView(props: ChatViewProps) {
   const {
     environmentId,
@@ -1591,7 +1523,7 @@ export default function ChatView(props: ChatViewProps) {
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const handleNewThread = useNewThreadHandler();
-  const { settleThread, unsettleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
+  const { settleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
@@ -1663,25 +1595,13 @@ export default function ChatView(props: ChatViewProps) {
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
-  const awaitEnvironmentConnected = useAtomCommand(environmentCatalog.awaitConnected, {
-    reportFailure: false,
-  });
-  // The send button spins while a queued send waits for its environment, through a box's wake.
-  const reconnectEnvironmentForSend = useCallback(
-    async (environmentId: EnvironmentId): Promise<ReconnectResult> => {
-      await retryEnvironment(environmentId);
-      const connected = await awaitEnvironmentConnected(environmentId);
-      if (connected._tag !== "Failure") return { kind: "ready" };
-      const error = squashAtomCommandFailure(connected);
-      return {
-        kind: "failed",
-        message: error instanceof Error ? error.message : "The environment could not reconnect.",
-      };
-    },
-    [awaitEnvironmentConnected, retryEnvironment],
-  );
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
+  });
+  const { environmentById, onAnotherChatsBox } = useChatEnvironmentById({
+    environments,
+    environmentId,
+    draftId,
   });
   // Queued-message edit mode. While active, the composer is retargeted to a
   // per-run edit draft so the user's in-progress draft on the thread survives
@@ -1960,18 +1880,6 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [pendingServerThreadEnvMode, setPendingServerThreadEnvMode] =
     useState<DraftThreadEnvMode | null>(null);
-  // The cloud kind the user picked; `cloudProvisioningRequested` adds the default.
-  const [cloudProvisioningChoice, setCloudProvisioningChoice] = useState<
-    "e2b" | "namespace" | null
-  >(null);
-  // The branch a cloud environment starts from; null is the repository's default.
-  const [cloudBaseBranch, setCloudBaseBranch] = useState<string | null>(null);
-  const [creatingCloudEnvironment, setCreatingCloudEnvironment] = useState(false);
-  const [cloudProvisioningPhase, setCloudProvisioningPhase] = useState<
-    "creating" | "pairing" | "loading-project" | "ready" | "failed" | null
-  >(null);
-  const [pendingCloudSendEnvironmentId, setPendingCloudSendEnvironmentId] =
-    useState<EnvironmentId | null>(null);
   const [pendingServerThreadBranch, setPendingServerThreadBranch] = useState<string | null>();
   const [
     pendingServerThreadStartFromOriginByThreadId,
@@ -2028,15 +1936,6 @@ export default function ChatView(props: ChatViewProps) {
   const multipleModelSelectionsRef = useRef(multipleModelSelections);
   multipleModelSelectionsRef.current = multipleModelSelections;
   const uncertainMultipleSubmissionsRef = fanoutState.uncertainSubmissions;
-  // The cloud handoff resumes sending from the same render that clears the
-  // pending environment flag. Let that internal call cross the guard once;
-  // an ordinary user send must still wait for the handoff to finish.
-  const resumingCloudSendRef = useRef(false);
-  const heldCloudSendSnapshotRef = useRef<HeldCloudSendSnapshot | null>(null);
-  const cloudProvisioningStartedAtRef = useRef<string | null>(null);
-  const cloudProvisioningEndedAtRef = useRef<string | null>(null);
-  const cloudSetupProviderRef = useRef<"e2b" | "namespace">("e2b");
-  const [cloudProvisioningError, setCloudProvisioningError] = useState<string | null>(null);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
@@ -2236,40 +2135,6 @@ export default function ChatView(props: ChatViewProps) {
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
-  const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
-  // A cloud box is not a user environment, so `environments` leaves it out. The chat it runs,
-  // or the draft that just started it, still reads it.
-  const activeThreadEnvironment = useEnvironment(activeThreadEnvironmentId);
-  const cloudBoxIds = useAtomValue(environmentCatalog.boxIdsAtom);
-  // The box a draft's own cloud send started stays its own after the send clears, until the
-  // draft becomes the thread on it.
-  const readyBoxEnvironmentId = draftThread?.pendingEnvironmentSend?.readyEnvironmentId ?? null;
-  const [ownBox, setOwnBox] = useState<{ draftId: string; environmentId: string } | null>(null);
-  if (
-    draftId !== null &&
-    readyBoxEnvironmentId !== null &&
-    (ownBox?.draftId !== draftId || ownBox.environmentId !== readyBoxEnvironmentId)
-  ) {
-    setOwnBox({ draftId, environmentId: readyBoxEnvironmentId });
-  }
-  const ownBoxEnvironmentId =
-    readyBoxEnvironmentId ?? (ownBox?.draftId === draftId ? ownBox.environmentId : null);
-  const onAnotherChatsBox = isDraftOnAnotherChatsBox({
-    draftId: isServerThread ? null : draftId,
-    environmentId: activeThreadEnvironmentId,
-    ownBoxEnvironmentId,
-    boxIds: cloudBoxIds,
-  });
-  const environmentById = useMemo(() => {
-    const byId = new Map(
-      environments.map((environment) => [environment.environmentId, environment]),
-    );
-    if (activeThreadEnvironment !== null && !onAnotherChatsBox) {
-      byId.set(activeThreadEnvironment.environmentId, activeThreadEnvironment);
-    }
-    return byId;
-  }, [activeThreadEnvironment, environments, onAnotherChatsBox]);
-  useBoxDemand(onAnotherChatsBox ? null : activeThreadEnvironmentId);
   // Prefer the larger of turn-item-committed ids and projection messages so
   // env lock does not unlock while turn items lag projection hydration.
   const activeMessageCount = isServerThread
@@ -2782,36 +2647,44 @@ export default function ChatView(props: ChatViewProps) {
     },
     [navigate, setEnvironmentEnabled],
   );
-  const logicalProjectEnvironments = useMemo(() => {
+  const projectEnvironments = useMemo(() => {
     if (!activeProject) return [];
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
-    return projectEnvironmentOptions({
-      projects: allProjects.filter(
-        (p) => deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey,
-      ),
-      environmentById,
-      primaryEnvironmentId,
+    const memberProjects = allProjects.filter(
+      (p) =>
+        deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey &&
+        environmentById.has(p.environmentId),
+    );
+    const seen = new Set<string>();
+    const envs: EnvironmentOption[] = [];
+    for (const p of memberProjects) {
+      if (seen.has(p.environmentId)) continue;
+      seen.add(p.environmentId);
+      const isPrimary = p.environmentId === primaryEnvironmentId;
+      const environment = environmentById.get(p.environmentId) ?? null;
+      envs.push({
+        environmentId: p.environmentId,
+        projectId: p.id,
+        label: environment?.label ?? p.environmentId,
+        isPrimary,
+        machine: resolveEnvironmentMachineKind(environment?.serverConfig ?? null),
+      });
+    }
+    // Sort: primary first, then alphabetical
+    envs.sort((a, b) => {
+      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+      return a.label.localeCompare(b.label);
     });
+    return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
-  const runTargets = useMemo(
-    () =>
-      newChatRunTargets({
-        environments: logicalProjectEnvironments,
-        environmentState: (environmentId) => environmentById.get(environmentId),
-        environmentId: activeThreadEnvironmentId,
-        managerConfig: primaryEnvironment?.serverConfig,
-      }),
-    [
-      logicalProjectEnvironments,
-      environmentById,
-      activeThreadEnvironmentId,
-      primaryEnvironment?.serverConfig,
-    ],
-  );
-  // A draft offers only machines a new chat can run on, never another chat's
-  // box; a started thread still names the machine it ran on.
-  const pickableEnvironments = draftId ? runTargets.environments : logicalProjectEnvironments;
-  const hasMultipleEnvironments = pickableEnvironments.length > 1;
+  const { runTargets, logicalProjectEnvironments } = useNewChatRunTargets({
+    projectEnvironments,
+    environmentById,
+    environmentId: activeThread?.environmentId ?? null,
+    draftId,
+    managerConfig: primaryEnvironment?.serverConfig,
+  });
+  const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
       (environment) => environment.environmentId === activeThread?.environmentId,
@@ -3040,12 +2913,12 @@ export default function ChatView(props: ChatViewProps) {
   const autoUpdateEnvironments = useMemo(
     () =>
       automaticEnvironment
-        ? pickableEnvironments.flatMap(({ environmentId }) => {
+        ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
             const environment = environmentById.get(environmentId);
             return environment ? [environment] : [];
           })
         : [],
-    [automaticEnvironment, pickableEnvironments, environmentById],
+    [automaticEnvironment, logicalProjectEnvironments, environmentById],
   );
   const autoBalanceUpdateBanner = useAutoBalanceUpdateBanner(autoUpdateEnvironments);
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
@@ -3073,10 +2946,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [setDismissedVersionMismatchKey, versionMismatchDismissKey]);
   const serverUpdateEnvironmentId = activeThread?.environmentId ?? null;
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
-  const versionMismatchUpdatePath = resolveEnvironmentServerUpdatePath(
-    serverUpdateEnvironmentId,
-    versionMismatchSelfUpdate,
-  );
   const versionMismatchDesktopAppUpdate = supportsDesktopAppUpdate(serverConfig);
   const versionMismatchThreadContinuation = supportsServerUpdateThreadContinuation(serverConfig);
   const serverUpdateState = useAtomValue(
@@ -3088,13 +2957,10 @@ export default function ChatView(props: ChatViewProps) {
   const serverUpdateFailureDismissed =
     serverUpdateState === dismissedServerUpdateState ||
     isServerUpdateFailureDismissed(serverUpdateState);
-  const activeEnvironmentIsBox =
-    activeEnvironment !== null && connectionBox(activeEnvironment.entry.target) !== null;
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     const updateRunning = serverUpdateState.status === "running";
     const unavailableConnection = activeEnvironmentUnavailableState?.connection ?? null;
-    const workspaceMissing = unavailableConnection?.blockedReason === "workspace-missing";
     const disconnectAction =
       canDisconnectActiveEnvironment && activeEnvironmentUnavailableState ? (
         <Button
@@ -3113,11 +2979,6 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
-    const environmentWaking = unavailableConnection?.phase === "waking";
-    // A box's saved label names the machine it first ran on, so a box is named by its role.
-    const unavailableName = activeEnvironmentIsBox
-      ? BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME.slice(1)
-      : (activeEnvironmentUnavailableState?.label ?? "");
     // While an update runs, transient connect blips are expected (the server
     // restarts) and the update banner already shows progress. Hard failure
     // phases still surface so the Reconnect action stays reachable.
@@ -3128,21 +2989,10 @@ export default function ChatView(props: ChatViewProps) {
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
         variant: unavailableConnection.phase === "error" ? "error" : "warning",
         icon: <WifiOffIcon />,
-        title: workspaceMissing
-          ? `${unavailableName} is no longer available`
-          : environmentWaking
-            ? `${unavailableName} is waking up...`
-            : `${unavailableName} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
-        description: workspaceMissing
-          ? "This chat's cloud machine was removed. Its saved history stays readable here."
-          : environmentWaking
-            ? "This can take a few minutes. It reconnects on its own."
-            : environmentReconnecting
-              ? "Trying again"
-              : "Reconnect to continue",
+        title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         actions: (
           <>
-            {!workspaceMissing && (
+            {!environmentReconnecting ? (
               <Button
                 size="xs"
                 variant="ghost"
@@ -3154,20 +3004,11 @@ export default function ChatView(props: ChatViewProps) {
               >
                 Reconnect
               </Button>
-            )}
-            {workspaceMissing ? (
-              <Button
-                size="xs"
-                variant="ghost"
-                onClick={() => void navigate({ to: "/settings/connections" })}
-              >
-                Connections
-              </Button>
-            ) : (
-              disconnectAction
-            )}
+            ) : null}
+            {disconnectAction}
           </>
         ),
+        ...cloudUnavailableBanner(activeEnvironmentUnavailableState, environmentReconnecting),
       });
     }
     if (
@@ -3214,8 +3055,9 @@ export default function ChatView(props: ChatViewProps) {
         description:
           !updateInProgress &&
           !updateFailed &&
+          versionMismatchSelfUpdate !== null &&
           (versionMismatchSelfUpdate !== "desktop-managed" || !versionMismatchDesktopAppUpdate)
-            ? (serverUpdateGuidance(versionMismatchUpdatePath) ?? undefined)
+            ? serverUpdateGuidance(versionMismatchSelfUpdate)
             : undefined,
         actions: updateInProgress ? (
           disconnectAction
@@ -3253,7 +3095,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     automaticEnvironment,
     autoBalanceUpdateBanner,
-    activeEnvironmentIsBox,
     activeEnvironmentUnavailableState,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,
@@ -3607,6 +3448,35 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
+  const cloud = useCloudChat({
+    draftId,
+    threadId,
+    routeThreadKey,
+    activeProject,
+    activeThreadEnvironmentId: activeThread?.environmentId ?? null,
+    activeEnvironment,
+    allProjects,
+    projectGroupingSettings,
+    environmentById,
+    onAnotherChatsBox,
+    runTargets,
+    projectEnvironments,
+    primaryEnvironmentId,
+    providerInstanceEntries,
+    activeProviderStatus,
+    automaticEnvironment,
+    envLocked,
+    sendInFlightRef,
+    promptRef,
+    composerImagesRef,
+    composerFilesRef,
+    composerTerminalContextsRef,
+    composerRef,
+    composerDraftTarget,
+    sendReady:
+      !activeEnvironmentUnavailable && !threadDetailLoading && !isSendBusy && serverConfig !== null,
+    send: (...args) => onSendRef.current(undefined, ...args),
+  });
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
   const latestServerUserItem = serverVisibleTurnItems.findLast(
     (row) => row.item.type === "user_message",
@@ -3633,12 +3503,11 @@ export default function ChatView(props: ChatViewProps) {
   // A rewind is not agent work: the composer shows "Rewinding conversation"
   // instead of the timeline growing a Thinking row.
   const isWorking =
-    !activeWorkspaceMissing &&
-    (phase === "running" ||
-      isSendBusy ||
-      isConnecting ||
-      isCompacting ||
-      runlessWorkStartedAt !== null);
+    phase === "running" ||
+    isSendBusy ||
+    isConnecting ||
+    isCompacting ||
+    runlessWorkStartedAt !== null;
   const activeContextWindow = useMemo(
     () =>
       deriveLatestContextWindowSnapshot(
@@ -3958,7 +3827,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const draftTimelineEntries = useMemo(
     () =>
-      optimisticUserMessages.map(
+      withHeldCloudMessage(optimisticUserMessages, cloud.heldMessage).map(
         (message) =>
           ({
             id: message.id,
@@ -3967,7 +3836,7 @@ export default function ChatView(props: ChatViewProps) {
             message,
           }) as const,
       ),
-    [optimisticUserMessages],
+    [cloud.heldMessage, optimisticUserMessages],
   );
   const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
   const timelineMessages = useMemo(
@@ -4069,59 +3938,8 @@ export default function ChatView(props: ChatViewProps) {
     isWorking,
     draftHeroDockRequested,
     backgroundSubmissionPending,
-    hasWorktreeSetupCard: worktreeSetup !== null,
-    hasEnvironmentSetupCard: cloudProvisioningPhase !== null,
+    hasWorktreeSetupCard: worktreeSetup !== null || cloud.environmentSetup !== null,
   });
-  const onCancelEnvironmentSetup = useCallback(() => {
-    if (draftId !== null) {
-      cancelProvisionRequest(draftId);
-      useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
-    }
-    sendInFlightRef.current = false;
-    const held = heldCloudSendSnapshotRef.current;
-    heldCloudSendSnapshotRef.current = null;
-    if (held) {
-      setOptimisticUserMessages((existing) => {
-        const removed = existing.filter((message) => message.id === held.messageId);
-        for (const message of removed) {
-          revokeUserMessagePreviewUrls(message);
-        }
-        const next = existing.filter((message) => message.id !== held.messageId);
-        return next.length === existing.length ? existing : next;
-      });
-      promptRef.current = held.prompt;
-      const retryComposerImages = held.images.map(cloneComposerImageForRetry);
-      composerImagesRef.current = retryComposerImages;
-      composerFilesRef.current = held.files;
-      composerTerminalContextsRef.current = held.terminalContexts;
-      setComposerDraftPrompt(composerDraftTarget, held.prompt);
-      addComposerDraftImages(composerDraftTarget, retryComposerImages);
-      addComposerDraftFiles(composerDraftTarget, held.files);
-      setComposerDraftTerminalContexts(composerDraftTarget, held.terminalContexts);
-      setComposerDraftPreviewAnnotations(composerDraftTarget, held.previewAnnotations);
-      setComposerDraftReviewComments(composerDraftTarget, held.reviewComments);
-      setComposerDraftThreadContexts(composerDraftTarget, held.threadContexts);
-      composerRef.current?.resetCursorState({
-        cursor: collapseExpandedComposerCursor(held.prompt, held.prompt.length),
-        prompt: held.prompt,
-        detectTrigger: true,
-      });
-    }
-    setDockedDraftHeroThreadKey((currentThreadKey) =>
-      currentThreadKey === activeThreadKey ? null : currentThreadKey,
-    );
-  }, [
-    activeThreadKey,
-    addComposerDraftFiles,
-    addComposerDraftImages,
-    composerDraftTarget,
-    draftId,
-    setComposerDraftPreviewAnnotations,
-    setComposerDraftPrompt,
-    setComposerDraftReviewComments,
-    setComposerDraftTerminalContexts,
-    setComposerDraftThreadContexts,
-  ]);
   const draftHeroTransition = useDraftHeroLayoutTransition(
     isDraftHeroState,
     panelAnimationsActive,
@@ -4373,12 +4191,12 @@ export default function ChatView(props: ChatViewProps) {
   const needsLoadBalancing = needsLoadBalancedPick({
     automatic: automaticEnvironment,
     pickedEnvironmentId: draftThread?.loadBalancedEnvironmentId,
-    candidates: pickableEnvironments,
+    candidates: logicalProjectEnvironments,
   });
   const loadBalancingCandidates = useMemo(
     () =>
       needsLoadBalancing
-        ? pickableEnvironments
+        ? logicalProjectEnvironments
             .filter((candidate) => {
               const environment = environmentById.get(candidate.environmentId);
               return (
@@ -4401,7 +4219,7 @@ export default function ChatView(props: ChatViewProps) {
         : [],
     [
       needsLoadBalancing,
-      pickableEnvironments,
+      logicalProjectEnvironments,
       environmentById,
       loadBalancingSettings.loadBalancingWeights,
       activeProviderInstanceId,
@@ -4414,7 +4232,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
-    const target = pickableEnvironments.find(
+    const target = logicalProjectEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
     if (!target) return;
@@ -4428,50 +4246,12 @@ export default function ChatView(props: ChatViewProps) {
     loadBalancing.pending,
     loadBalancing.environmentId,
     draftId,
-    pickableEnvironments,
+    logicalProjectEnvironments,
     setDraftThreadContext,
   ]);
-  // A draft on an expired box, or on another chat's box or a host that runs no
-  // agents with no cloud kind to start instead, moves to a machine that can take it.
-  const redirectEnvironment =
-    draftId && !envLocked && !automaticEnvironment && runTargets.redirect?.kind === "environment"
-      ? runTargets.redirect.environment
-      : null;
-  const projectOffAnotherChatsBox = useMemo(
-    () =>
-      onAnotherChatsBox && activeProject
-        ? newChatProject({
-            requested: scopeProjectRef(activeProject.environmentId, activeProject.id),
-            projects: allProjects,
-            logicalProjectKey: (project) =>
-              deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
-            environmentState: (environmentId) => environmentById.get(environmentId),
-          })
-        : null,
-    [activeProject, allProjects, environmentById, onAnotherChatsBox, projectGroupingSettings],
-  );
-  useEffect(() => {
-    if (!draftId || !projectOffAnotherChatsBox || sendInFlightRef.current) return;
-    setDraftThreadContext(draftId, {
-      projectRef: scopeProjectRef(
-        projectOffAnotherChatsBox.environmentId,
-        projectOffAnotherChatsBox.id,
-      ),
-      loadBalancedEnvironmentId: null,
-    });
-  }, [draftId, projectOffAnotherChatsBox, setDraftThreadContext]);
-  useEffect(() => {
-    if (!draftId || !redirectEnvironment || sendInFlightRef.current) return;
-    setDraftThreadContext(draftId, {
-      projectRef: scopeProjectRef(redirectEnvironment.environmentId, redirectEnvironment.projectId),
-      environmentSelection: "manual",
-      loadBalancedEnvironmentId: null,
-    });
-  }, [draftId, redirectEnvironment, setDraftThreadContext]);
   const onAutoEnvironment = useCallback(() => {
     if (envLocked || !draftId) return;
-    setCloudProvisioningChoice(null);
-    setPendingCloudSendEnvironmentId(null);
+    cloud.onEnvironmentPicked(null);
     if (composerHasAttachments) {
       toastManager.add({
         type: "warning",
@@ -4482,7 +4262,9 @@ export default function ChatView(props: ChatViewProps) {
       });
       return;
     }
-    loadBalancing.refresh(pickableEnvironments.map((environment) => environment.environmentId));
+    loadBalancing.refresh(
+      logicalProjectEnvironments.map((environment) => environment.environmentId),
+    );
     setDraftThreadContext(draftId, {
       environmentSelection: "auto",
       loadBalancedEnvironmentId: null,
@@ -4494,8 +4276,9 @@ export default function ChatView(props: ChatViewProps) {
     draftId,
     setDraftThreadContext,
     loadBalancing.refresh,
-    pickableEnvironments,
+    logicalProjectEnvironments,
     composerHasAttachments,
+    cloud.onEnvironmentPicked,
   ]);
   const autoEnvironmentLabel = automaticEnvironment
     ? draftThread?.loadBalancedEnvironmentId
@@ -4517,28 +4300,20 @@ export default function ChatView(props: ChatViewProps) {
         (env) => env.environmentId === nextEnvironmentId,
       );
       if (!target) return;
-      setCloudProvisioningChoice(null);
-      setPendingCloudSendEnvironmentId(null);
-      // Moving off the box this draft provisioned lets the box go, so no later send claims it.
-      const lease = provisionedSandboxFor(draftId);
-      if (
-        lease &&
-        !leaseReachesBox(
-          draftBoxLease(lease, readyDraftBoxEnvironmentId(draftId)),
-          nextEnvironmentId,
-          catalogBoxManager,
-        )
-      ) {
-        cancelProvisionRequest(draftId);
-        useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, null);
-      }
+      cloud.onEnvironmentPicked(nextEnvironmentId);
       setDraftThreadContext(draftId, {
         projectRef: scopeProjectRef(target.environmentId, target.projectId),
         environmentSelection: "manual",
         loadBalancedEnvironmentId: null,
       });
     },
-    [draftId, envLocked, logicalProjectEnvironments, setDraftThreadContext],
+    [
+      draftId,
+      envLocked,
+      logicalProjectEnvironments,
+      setDraftThreadContext,
+      cloud.onEnvironmentPicked,
+    ],
   );
 
   const activeTerminalGroup =
@@ -5423,134 +5198,6 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectRepository = sourceControlRepositorySelector(
     activeProject?.repositoryIdentity,
   );
-  const claimCloudLease = useAtomCommand(serverEnvironment.claimProvisionedEnvironment, {
-    reportFailure: false,
-  });
-  // The manager picks the account; this instance is only the hint the picker shows for the driver.
-  const cloudAccount = useMemo(
-    () =>
-      cloudProviderEntries(providerInstanceEntries).find(
-        (entry) => entry.driverKind === activeProviderStatus?.driver,
-      )?.snapshot ?? activeProviderStatus,
-    [activeProviderStatus, providerInstanceEntries],
-  );
-  const offeredCloudProviders = runTargets.cloudProviders;
-  const canCreateCloudEnvironment =
-    draftId !== null &&
-    primaryEnvironmentId !== null &&
-    offeredCloudProviders.length > 0 &&
-    cloudAccount !== null;
-  const cloudProvisioningRequested =
-    cloudProvisioningChoice ??
-    (canCreateCloudEnvironment && !automaticEnvironment && runTargets.redirect?.kind === "cloud"
-      ? runTargets.redirect.provider
-      : null);
-  // While a cloud environment is pending, the branch picker chooses the branch
-  // it clones. The choice is fixed once a send has reserved the request.
-  const cloudBase = useMemo(
-    () =>
-      cloudProvisioningRequested !== null && cloneRepository(activeProject?.repositoryIdentity)
-        ? {
-            branch: cloudBaseBranch,
-            onChange: cloudProvisioningPhase === null ? setCloudBaseBranch : null,
-          }
-        : undefined,
-    [activeProject, cloudBaseBranch, cloudProvisioningPhase, cloudProvisioningRequested],
-  );
-  const handleSelectCloudEnvironment = useCallback(
-    (provider: "e2b" | "namespace") => {
-      if (!canCreateCloudEnvironment || !cloudAccount) return;
-      cloudSetupProviderRef.current = provider;
-      setCloudProvisioningChoice(provider);
-      setPendingCloudSendEnvironmentId(null);
-      toastManager.add({
-        type: "info",
-        title: `${provider === "namespace" ? "Namespace Mac" : "E2B"} selected`,
-        description: `Your ${provider === "namespace" ? "Namespace Mac" : "E2B"} environment will start when you send the first message.`,
-      });
-    },
-    [canCreateCloudEnvironment, cloudAccount],
-  );
-  const provisionCloudEnvironmentForSend = useCallback(
-    async (
-      startedDraftId: DraftId,
-      handoff: {
-        readonly agentDriver: ProviderDriverKind;
-        readonly modelSelection: ModelSelection;
-      },
-      chat: ProvisionChat | undefined,
-    ) => {
-      if (
-        !cloudProvisioningRequested ||
-        !canCreateCloudEnvironment ||
-        primaryEnvironmentId === null ||
-        !cloudAccount
-      ) {
-        return;
-      }
-      // Saved with the draft, so a page that picks the send back up sends it on the same model.
-      patchDraftPendingEnvironmentSend(startedDraftId, { modelSelection: handoff.modelSelection });
-      await cloudSends.start({
-        draftId: startedDraftId,
-        managerEnvironmentId: primaryEnvironmentId,
-        input: {
-          provider: cloudProvisioningRequested,
-          providerInstanceId: cloudAccount.instanceId,
-          agentDriver: handoff.agentDriver,
-          ...cloudCloneSource(activeProject?.repositoryIdentity, cloudBaseBranch),
-          ...(chat ? { chat } : {}),
-        },
-      });
-    },
-    [
-      activeProject,
-      canCreateCloudEnvironment,
-      cloudBaseBranch,
-      cloudProvisioningRequested,
-      cloudAccount,
-      primaryEnvironmentId,
-    ],
-  );
-  const cloudProvisioningBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
-    if (
-      cloudProvisioningPhase === null ||
-      cloudProvisioningPhase === "failed" ||
-      !isDraftHeroState
-    ) {
-      return null;
-    }
-    const copy = {
-      creating: [
-        "Preparing environment",
-        "Setting up the environment. This can take a few minutes.",
-      ],
-      pairing: ["Connecting environment", "Adding the new environment to this chat."],
-      "loading-project": ["Loading project", "Waiting for the checkout to appear."],
-      ready: ["Environment ready", "Sending your first message."],
-    }[cloudProvisioningPhase];
-    return {
-      id: `cloud-provisioning:${draftId ?? routeThreadKey}`,
-      variant: "default",
-      priority: "activity",
-      icon: <Spinner />,
-      title: copy[0],
-      description: copy[1],
-    };
-  }, [cloudProvisioningPhase, draftId, isDraftHeroState, routeThreadKey]);
-  const environmentSetup = useMemo<CloudEnvironmentSetupSnapshot | null>(() => {
-    if (cloudProvisioningPhase === null) return null;
-    const repository = cloneRepository(activeProject?.repositoryIdentity);
-    return {
-      provider: cloudProvisioningRequested ?? cloudSetupProviderRef.current,
-      phase: cloudProvisioningPhase,
-      startedAt: cloudProvisioningStartedAtRef.current ?? new Date().toISOString(),
-      ...(cloudProvisioningEndedAtRef.current && cloudProvisioningPhase === "failed"
-        ? { endedAt: cloudProvisioningEndedAtRef.current }
-        : {}),
-      ...(cloudProvisioningError ? { error: cloudProvisioningError } : {}),
-      ...(repository ? { repository } : {}),
-    };
-  }, [activeProject, cloudProvisioningError, cloudProvisioningPhase, cloudProvisioningRequested]);
   const persistedLinkedThreadPullRequestStatus = useLinkedThreadPullRequest(
     activeThreadRef?.environmentId ?? null,
     persistedLinkedThreadPullRequest,
@@ -6819,87 +6466,16 @@ export default function ChatView(props: ChatViewProps) {
     optimisticUserMessages,
   ]);
 
-  const cloudRestoreKeyRef = useRef("");
-  useLayoutEffect(() => {
-    const restoreKey = `${draftId ?? ""}:${threadId}`;
-    if (cloudRestoreKeyRef.current === restoreKey) {
-      return;
-    }
-    cloudRestoreKeyRef.current = restoreKey;
-    sendInFlightRef.current = false;
-    resumingCloudSendRef.current = false;
-    const pending =
-      draftId !== null
-        ? (useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend ??
-          null)
-        : null;
+  useEffect(() => {
     setOptimisticUserMessages((existing) => {
       for (const message of existing) {
         revokeUserMessagePreviewUrls(message);
       }
-      if (!pending) {
-        return [];
-      }
-      return [
-        {
-          id: MessageId.make(pending.messageId),
-          role: "user",
-          text: pending.outgoingMessageText,
-          runId: null,
-          createdAt: pending.createdAt,
-          updatedAt: pending.createdAt,
-          streaming: false,
-        },
-      ];
+      return [];
     });
     resetLocalDispatch();
     setExpandedImage(null);
-    if (!pending) {
-      heldCloudSendSnapshotRef.current = null;
-      setCloudProvisioningChoice(null);
-      setCloudBaseBranch(null);
-      setDockedDraftHeroThreadKey(null);
-      return;
-    }
-    setCloudBaseBranch(pending.branch ?? null);
-    heldCloudSendSnapshotRef.current = {
-      messageId: MessageId.make(pending.messageId),
-      createdAt: pending.createdAt,
-      prompt: pending.prompt,
-      images: [],
-      files: [],
-      terminalContexts: [],
-      previewAnnotations: [],
-      reviewComments: [],
-      threadContexts: [],
-    };
   }, [draftId, resetLocalDispatch, threadId]);
-
-  // Any page with the draft may be driving its cloud send (see `cloudSends`), so the setup card
-  // follows the draft's record, including on the page that pressed Send.
-  const draftPendingCloudSend = useComposerDraftStore((store) =>
-    draftId === null ? null : (store.getDraftSession(draftId)?.pendingEnvironmentSend ?? null),
-  );
-  useLayoutEffect(() => {
-    const pending = draftPendingCloudSend;
-    cloudProvisioningStartedAtRef.current = pending?.startedAt ?? null;
-    cloudProvisioningEndedAtRef.current = pending?.endedAt ?? null;
-    setCloudProvisioningError(pending?.error ?? null);
-    setCloudProvisioningPhase(pending?.phase ?? null);
-    setCreatingCloudEnvironment(isInProgressCloudProvisioningPhase(pending?.phase ?? null));
-    if (!pending) {
-      setPendingCloudSendEnvironmentId(null);
-      return;
-    }
-    cloudSetupProviderRef.current = pending.provider;
-    if (pending.phase === "ready" && pending.readyEnvironmentId) {
-      setCloudProvisioningChoice(null);
-      setPendingCloudSendEnvironmentId(EnvironmentId.make(pending.readyEnvironmentId));
-    } else {
-      setCloudProvisioningChoice(pending.provider);
-      setPendingCloudSendEnvironmentId(null);
-    }
-  }, [draftPendingCloudSend]);
 
   const closeExpandedImage = useCallback(() => {
     setExpandedImage(null);
@@ -7093,9 +6669,7 @@ export default function ChatView(props: ChatViewProps) {
     useRightPanelStore.getState().openPullRequest(activeThreadRef, linkedThreadPullRequest);
   }, [activeThreadRef, linkedThreadPullRequest, supportsPullRequests]);
   const pullRequestSurfaceAvailable = supportsPullRequests && linkedThreadPullRequest !== null;
-  const supportsSettlement = environmentAllowsThreadSettlement(
-    serverConfig?.environment.capabilities,
-  );
+  const supportsSettlement = serverConfig?.environment.capabilities.threadSettlement === true;
   const supportsSnooze = serverConfig?.environment.capabilities.threadSnooze === true;
   const supportsPinning = serverConfig?.environment.capabilities.threadPinning === true;
   const activeThreadPinned = supportsPinning && activeThreadShell?.pinnedAt != null;
@@ -7154,6 +6728,9 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";
+  const unsettleThreadMutation = useAtomCommand(threadEnvironment.unsettle, {
+    reportFailure: false,
+  });
   // Keyed by thread, not a boolean: the pending state must follow the thread
   // it belongs to across navigation, and a request resolving for thread A
   // must never clear (or re-enable) thread B's button.
@@ -7164,7 +6741,10 @@ export default function ChatView(props: ChatViewProps) {
     const threadKey = scopedThreadKey(activeThreadRef);
     setUnsettlingThreadKey(threadKey);
     try {
-      const result = await unsettleThread(activeThreadRef);
+      const result = await unsettleThreadMutation({
+        environmentId: activeThreadRef.environmentId,
+        input: { threadId: activeThreadRef.threadId, reason: "user" },
+      });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -7178,7 +6758,7 @@ export default function ChatView(props: ChatViewProps) {
     } finally {
       setUnsettlingThreadKey((current) => (current === threadKey ? null : current));
     }
-  }, [activeThreadRef, unsettleThread]);
+  }, [activeThreadRef, unsettleThreadMutation]);
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
@@ -7327,8 +6907,7 @@ export default function ChatView(props: ChatViewProps) {
   // the turn; once it settles, the composer stop button is gone, so this
   // banner is the only visible stop affordance. The interrupt path also
   // accepts a completed run while its provider still has background work.
-  const activeBackgroundTasks =
-    !activeWorkspaceMissing && !isWorking && activeThread ? pendingBackgroundTasks : [];
+  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -7625,8 +7204,6 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = backgroundWorkBannerItem === null ? [] : [backgroundWorkBannerItem];
-    const cloudProvisioningItems =
-      cloudProvisioningBannerItem === null ? [] : [cloudProvisioningBannerItem];
     const resumeCompactionItems =
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -7636,8 +7213,8 @@ export default function ChatView(props: ChatViewProps) {
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...cloud.bannerItems,
         ...feedbackBannerItems,
-        ...cloudProvisioningItems,
         ...limitRecoveryItems,
         ...usageLimitsItems,
         ...projectCloneItems,
@@ -7649,8 +7226,8 @@ export default function ChatView(props: ChatViewProps) {
       ];
     }
     return [
+      ...cloud.bannerItems,
       ...feedbackBannerItems,
-      ...cloudProvisioningItems,
       ...limitRecoveryItems,
       ...usageLimitsItems,
       ...projectCloneItems,
@@ -7702,7 +7279,7 @@ export default function ChatView(props: ChatViewProps) {
     activeBranchMismatchKey,
     activeThreadShell,
     serverRuntime?.usageLimitResetAt,
-    cloudProvisioningBannerItem,
+    cloud.bannerItems,
     feedbackBannerItems,
     limitRecoveryBanner,
     handleRestoreThreadBranch,
@@ -8596,11 +8173,8 @@ export default function ChatView(props: ChatViewProps) {
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
       (threadDetailLoading && !canReconnectOnSend) ||
-      isReconnectPending() ||
       sendInFlightRef.current ||
-      (pendingCloudSendEnvironmentId !== null && !resumingCloudSendRef.current) ||
-      (isInProgressCloudProvisioningPhase(cloudProvisioningPhase) &&
-        !resumingCloudSendRef.current) ||
+      cloud.blocksSend() ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
@@ -8620,7 +8194,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (activeEnvironmentUnavailable) {
       if (canReconnectOnSend) {
-        await reconnectAndSend(activeThread.environmentId, {
+        await cloud.reconnectAndSend(activeThread.environmentId, {
           dispatchMode,
           submissionIntent,
           directAnnotation,
@@ -8648,7 +8222,8 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const sendCtx = composerRef.current?.getSendContext();
+    const heldCloudSend = cloud.heldSendForResume();
+    const sendCtx = withHeldCloudSend(composerRef.current?.getSendContext(), heldCloudSend);
     if (!sendCtx?.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
@@ -8680,11 +8255,11 @@ export default function ChatView(props: ChatViewProps) {
     }
     const {
       images: sendContextImages,
-      files: sendContextFiles,
-      terminalContexts: sendContextTerminalContexts,
+      files: composerFiles,
+      terminalContexts: composerTerminalContexts,
       previewAnnotations: sendContextPreviewAnnotations,
-      reviewComments: sendContextReviewComments,
-      threadContexts: sendContextThreadContexts,
+      reviewComments: composerReviewComments,
+      threadContexts: composerThreadContexts,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
       selectedProviderModels: ctxSelectedProviderModels,
@@ -8693,29 +8268,21 @@ export default function ChatView(props: ChatViewProps) {
       interactionMode: sendInteractionMode,
       interactionModeEnabled: sendInteractionModeEnabled,
     } = sendCtx;
-    const heldCloudSend = resumingCloudSendRef.current ? heldCloudSendSnapshotRef.current : null;
-    const composerFiles = heldCloudSend?.files ?? sendContextFiles;
-    const composerTerminalContexts = heldCloudSend?.terminalContexts ?? sendContextTerminalContexts;
-    const composerReviewComments = heldCloudSend?.reviewComments ?? sendContextReviewComments;
-    const composerThreadContexts = heldCloudSend?.threadContexts ?? sendContextThreadContexts;
     const annotationImageAlreadyAttached =
       directAnnotation?.image !== undefined &&
       sendContextImages.some((image) => image.id === directAnnotation.image?.id);
     // A full composer (e.g. 8 files) cannot take the annotation screenshot;
     // over the cap the server rejects the whole turn.
     const annotationImageAppended =
-      !heldCloudSend &&
       directAnnotation?.image !== undefined &&
       !annotationImageAlreadyAttached &&
       sendContextImages.length + composerFiles.length < PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
     const composerImages =
-      heldCloudSend?.images ??
-      (directAnnotation?.image && annotationImageAppended
+      directAnnotation?.image && annotationImageAppended
         ? [...sendContextImages, directAnnotation.image]
-        : sendContextImages);
+        : sendContextImages;
     const composerPreviewAnnotations =
-      heldCloudSend?.previewAnnotations ??
-      (directAnnotation &&
+      directAnnotation &&
       !sendContextPreviewAnnotations.some(
         (annotation) => annotation.id === directAnnotation.annotation.id,
       )
@@ -8732,16 +8299,14 @@ export default function ChatView(props: ChatViewProps) {
                   : null,
             },
           ]
-        : sendContextPreviewAnnotations);
+        : sendContextPreviewAnnotations;
     // A direct "send annotation" writes the draft and sends in the same tick; the reference
     // must be in the text now, not after the next render.
-    const promptForSend =
-      heldCloudSend?.prompt ??
-      (directAnnotation
-        ? ensureInlineContextReferences(promptRef.current, [
-            previewAnnotationContextReference(directAnnotation.annotation),
-          ])
-        : promptRef.current);
+    const promptForSend = directAnnotation
+      ? ensureInlineContextReferences(promptRef.current, [
+          previewAnnotationContextReference(directAnnotation.annotation),
+        ])
+      : (heldCloudSend?.prompt ?? promptRef.current);
     if (editingQueuedRun !== null) {
       // Edit mode repurposes the composer: sending saves the queued message
       // in place instead of dispatching a new turn.
@@ -9025,13 +8590,21 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (
-      !hasSendableContent &&
-      !(
-        cloudProvisioningRequested &&
-        heldCloudSendSnapshotRef.current !== null &&
-        !resumingCloudSendRef.current
-      )
+      await cloud.holdFirstSend({
+        sendCtx,
+        prompt: promptForSend,
+        trimmed,
+        images: composerImages,
+        previewAnnotations: composerPreviewAnnotations,
+        sendableTerminalContexts: sendableComposerTerminalContexts,
+        hasSendableContent,
+        runtimeMode,
+        interactionMode: sendInteractionMode,
+      })
     ) {
+      return;
+    }
+    if (!hasSendableContent) {
       if (expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
           expiredTerminalContextCount,
@@ -9055,210 +8628,6 @@ export default function ChatView(props: ChatViewProps) {
           description: "This draft no longer points to an available project.",
         }),
       );
-      return;
-    }
-    if (cloudProvisioningRequested && heldCloudSend === null) {
-      if (draftId === null) {
-        return;
-      }
-      const cloudHandoff = buildCloudHandoff({
-        agentDriver: ctxSelectedProvider,
-        selection: ctxSelectedModelSelection,
-      });
-      if (heldCloudSendSnapshotRef.current) {
-        const currentPending = useComposerDraftStore
-          .getState()
-          .getDraftSession(draftId)?.pendingEnvironmentSend;
-        if (currentPending) {
-          useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, {
-            provider: currentPending.provider,
-            preview: currentPending.preview,
-            messageId: currentPending.messageId,
-            createdAt: currentPending.createdAt,
-            prompt: currentPending.prompt,
-            outgoingMessageText: currentPending.outgoingMessageText,
-            phase: "creating",
-            startedAt: cloudProvisioningStartedAtRef.current ?? new Date().toISOString(),
-            ...(currentPending.repository ? { repository: currentPending.repository } : {}),
-            ...(currentPending.branch ? { branch: currentPending.branch } : {}),
-            ...(currentPending.readyEnvironmentId
-              ? { readyEnvironmentId: currentPending.readyEnvironmentId }
-              : {}),
-          });
-        }
-        // The request is reserved with its exact input, so a retry sends the chat it saved.
-        await provisionCloudEnvironmentForSend(
-          draftId,
-          cloudHandoff,
-          provisionRequests.current(draftId)?.input.chat,
-        );
-        return;
-      }
-      const composerImagesSnapshot = [...composerImages];
-      const composerFilesSnapshot = [...composerFiles];
-      const composerAttachmentsSnapshot = [...composerImagesSnapshot, ...composerFilesSnapshot];
-      const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
-      const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
-      const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
-      const composerThreadContextsSnapshot = [...composerThreadContexts];
-      const messageTextForSend = composerTerminalContexts
-        .filter((context) => !composerTerminalContextsSnapshot.includes(context))
-        .reduce(
-          (text, context) =>
-            removeInlineContextReference(text, terminalContextReference(context).contextId).prompt,
-          promptForSend,
-        )
-        .trim();
-      const outgoingMessageContext = buildMessageContext({
-        terminalContexts: composerTerminalContextsSnapshot,
-        reviewComments: composerReviewCommentsSnapshot,
-        previewAnnotations: composerPreviewAnnotationsSnapshot,
-        threadContexts: composerThreadContextsSnapshot,
-        attachments: composerAttachmentsSnapshot.map((attachment) => ({
-          attachment,
-          attachmentId: attachment.id,
-        })),
-      });
-      const outgoingMessageText = formatOutgoingPrompt({
-        provider: ctxSelectedProvider,
-        model: ctxSelectedModel,
-        models: ctxSelectedProviderModels,
-        effort: ctxSelectedPromptEffort,
-        text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-      });
-      if (composerRef.current?.validateProviderInput(outgoingMessageText) === false) {
-        return;
-      }
-      if (
-        shouldDockDraftHeroForSubmission({
-          isDraftHeroState,
-          activeThreadKey,
-          submissionIntent: "foreground",
-        }) &&
-        activeThreadKey
-      ) {
-        let resolveDockStarted: (() => void) | undefined;
-        const dockStarted = new Promise<void>((resolve) => {
-          resolveDockStarted = resolve;
-        });
-        const dockTransition = runMobileComposerTransition(
-          () => {
-            flushSync(() => {
-              captureDraftHeroComposerRect();
-              setDockedDraftHeroThreadKey(activeThreadKey);
-            });
-            resolveDockStarted?.();
-          },
-          {
-            active: panelAnimationsActive,
-            durationMs: panelAnimationDurationMs,
-          },
-        );
-        void dockTransition.catch(() => resolveDockStarted?.());
-        await dockStarted;
-      }
-
-      const messageIdForSend = newMessageId();
-      const messageCreatedAt = new Date().toISOString();
-      const optimisticAttachments = composerAttachmentsSnapshot.map((attachment) =>
-        attachment.type === "image"
-          ? {
-              type: "image" as const,
-              id: attachment.id,
-              name: attachment.name,
-              mimeType: attachment.mimeType,
-              sizeBytes: attachment.sizeBytes,
-              previewUrl: attachment.previewUrl,
-              ...(attachment.source ? { source: attachment.source } : {}),
-            }
-          : {
-              type: "file" as const,
-              id: attachment.id,
-              name: attachment.name,
-              mimeType: attachment.mimeType,
-              sizeBytes: attachment.sizeBytes,
-              downloadable: false,
-              ...(attachment.source ? { source: attachment.source } : {}),
-            },
-      );
-      isAtEndRef.current = true;
-      timelineScrollModeRef.current = "anchoring-new-turn";
-      liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-      setTimelineLiveFollowEnabled(true);
-      pendingTimelineAnchorRef.current = messageIdForSend;
-      activeTimelineAnchorIndexRef.current = null;
-      showScrollDebouncer.current.cancel();
-      setShowScrollToBottom(false);
-      setTimelineAnchor({
-        threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id)),
-        messageId: messageIdForSend,
-      });
-      setOptimisticUserMessages((existing) => [
-        ...existing,
-        {
-          id: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-          ...(outgoingMessageContext !== undefined ? { context: outgoingMessageContext } : {}),
-          runId: null,
-          createdAt: messageCreatedAt,
-          updatedAt: messageCreatedAt,
-          streaming: false,
-        },
-      ]);
-      const startedAt = new Date().toISOString();
-      useComposerDraftStore.getState().setDraftPendingEnvironmentSend(draftId, {
-        provider: cloudProvisioningRequested,
-        preview: pendingCloudSendPreview(outgoingMessageText),
-        messageId: messageIdForSend,
-        createdAt: messageCreatedAt,
-        prompt: promptForSend,
-        outgoingMessageText,
-        phase: "creating",
-        startedAt,
-        ...cloudCloneSource(activeProject.repositoryIdentity, cloudBaseBranch),
-      });
-      promptRef.current = "";
-      clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
-      heldCloudSendSnapshotRef.current = {
-        messageId: messageIdForSend,
-        createdAt: messageCreatedAt,
-        prompt: promptForSend,
-        images: composerImagesSnapshot,
-        files: composerFilesSnapshot,
-        terminalContexts: composerTerminalContextsSnapshot,
-        previewAnnotations: composerPreviewAnnotationsSnapshot,
-        reviewComments: composerReviewCommentsSnapshot,
-        threadContexts: composerThreadContextsSnapshot,
-      };
-      const firstTurnTitleSeed =
-        assistantCitationsToPlainText(stripInlineContextReferences(trimmed)).trim() || "New thread";
-      // The host starts a plain-text first turn itself once the box is ready, so it runs whether
-      // or not this page is still open. Attachments and context still go out from this page.
-      const sendsFromHost =
-        composerAttachmentsSnapshot.length === 0 && outgoingMessageContext === undefined;
-      const chat: ProvisionChat = {
-        threadId: activeThread.id,
-        ...(sendsFromHost
-          ? {
-              firstTurn: {
-                messageId: messageIdForSend,
-                text: outgoingMessageText,
-                title: truncate(firstTurnTitleSeed),
-                titleSeed: firstTurnTitleSeed,
-                modelSelection: cloudHandoff.modelSelection,
-                runtimeMode,
-                interactionMode: sendInteractionMode,
-                createdAt: messageCreatedAt,
-              },
-            }
-          : {}),
-      };
-      // Not marked in flight: the setup phase holds the composer, and the held message's own
-      // send starts the moment setup records ready, before this call returns.
-      await provisionCloudEnvironmentForSend(draftId, cloudHandoff, chat);
       return;
     }
     const threadIdForSend = activeThread.id;
@@ -9310,8 +8679,8 @@ export default function ChatView(props: ChatViewProps) {
     const outgoingMessageContext = buildOutgoingMessageContext(
       composerAttachmentsSnapshot.map((attachment) => attachment.id),
     );
-    const messageIdForSend = heldCloudSend?.messageId ?? newMessageId();
-    const messageCreatedAt = heldCloudSend?.createdAt ?? new Date().toISOString();
+    const messageIdForSend = heldCloudSend?.message.id ?? newMessageId();
+    const messageCreatedAt = heldCloudSend?.message.createdAt ?? new Date().toISOString();
     const shouldQueueBehindActiveRun = phase === "running" && dispatchMode === "queue";
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
@@ -9780,29 +9149,27 @@ export default function ChatView(props: ChatViewProps) {
         messageId: messageIdForSend,
       });
     }
-    if (!heldCloudSend) {
-      setOptimisticUserMessages((existing) => [
-        ...existing,
-        {
-          id: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-          ...(outgoingMessageContext !== undefined ? { context: outgoingMessageContext } : {}),
-          runId: null,
-          createdAt: messageCreatedAt,
-          updatedAt: messageCreatedAt,
-          streaming: false,
-          ...(shouldQueueBehindActiveRun
-            ? { inputIntent: "queued_turn" as const }
-            : phase === "running" && dispatchMode === "steer"
-              ? { inputIntent: "steer" as const }
-              : {}),
-        },
-      ]);
-    }
+    setOptimisticUserMessages((existing) => [
+      ...existing,
+      {
+        id: messageIdForSend,
+        role: "user",
+        text: outgoingMessageText,
+        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+        ...(outgoingMessageContext !== undefined ? { context: outgoingMessageContext } : {}),
+        runId: null,
+        createdAt: messageCreatedAt,
+        updatedAt: messageCreatedAt,
+        streaming: false,
+        ...(shouldQueueBehindActiveRun
+          ? { inputIntent: "queued_turn" as const }
+          : phase === "running" && dispatchMode === "steer"
+            ? { inputIntent: "steer" as const }
+            : {}),
+      },
+    ]);
     setThreadError(threadIdForSend, null);
-    if (expiredTerminalContextCount > 0 && !heldCloudSend) {
+    if (expiredTerminalContextCount > 0) {
       const toastCopy = buildExpiredTerminalContextToastCopy(
         expiredTerminalContextCount,
         "omitted",
@@ -9917,23 +9284,10 @@ export default function ChatView(props: ChatViewProps) {
           ? scopeThreadRef(environmentId, threadIdForSend)
           : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-      const storedDraftLease =
-        isLocalDraftThread && typeof composerDraftTarget === "string"
-          ? provisionedSandboxFor(composerDraftTarget)
-          : null;
-      const draftLease =
-        storedDraftLease && typeof composerDraftTarget === "string"
-          ? draftBoxLease(storedDraftLease, readyDraftBoxEnvironmentId(composerDraftTarget))
-          : null;
-      // A draft keeps its lease when provisioning fails, and may then run on a real server. Only
-      // a send on its own box claims the box; any other leaves the box for the draft to dispose.
-      const cloudLease =
-        draftLease && leaseReachesBox(draftLease, environmentId, catalogBoxManager)
-          ? draftLease
-          : null;
-      if (draftLease && !cloudLease && typeof composerDraftTarget === "string") {
-        cancelProvisionRequest(composerDraftTarget);
-      }
+      const cloudLease = cloud.leaseForSend(
+        isLocalDraftThread ? composerDraftTarget : null,
+        environmentId,
+      );
       const startPromise = startThreadTurn({
         environmentId,
         input: {
@@ -9981,20 +9335,10 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (backgroundThreadRef) {
         markPromotedDraftThreadByRef(backgroundThreadRef);
-        // Never open the next draft on the box this chat just took: its claim may not have
-        // landed, so nothing else would stop the draft from starting on it.
-        const nextDraftTarget = nextDraftEnvironment({
-          environmentId: activeProject.environmentId,
-          ownBoxManagerId: cloudLease?.managerEnvironmentId ?? null,
-          environments: logicalProjectEnvironments,
-          runTargets: runTargets.environments,
-        });
         try {
           backgroundDraftOpened = Boolean(
             await handleNewThread(
-              nextDraftTarget
-                ? scopeProjectRef(nextDraftTarget.environmentId, nextDraftTarget.projectId)
-                : scopeProjectRef(activeProject.environmentId, activeProject.id),
+              cloud.nextDraftProjectRef(activeProject, cloudLease),
               resolveBackgroundDraftWorkspaceOptions({
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
@@ -10018,42 +9362,11 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
-        if (typeof composerDraftTarget === "string") {
-          useComposerDraftStore
-            .getState()
-            .setDraftPendingEnvironmentSend(composerDraftTarget, null);
-        }
-        if (cloudLease && typeof composerDraftTarget === "string") {
-          const claimed = await claimProvisionedBox(
-            {
-              claim: async (request) => {
-                const result = await claimCloudLease(request);
-                return AsyncResult.isSuccess(result) && result.value.kind === "claimed";
-              },
-              refresh: refreshProvisionedEnvironments,
-              boxManager: catalogBoxManager,
-              warn: (attempt) =>
-                console.warn("[cloud] could not claim the box for its first turn", {
-                  leaseId: cloudLease.leaseId,
-                  attempt,
-                }),
-            },
-            cloudLease,
-            scopeThreadRef(environmentId, threadIdForSend),
-          );
-          transferProvisionedSandboxLease(
-            composerDraftTarget,
-            scopeThreadRef(environmentId, threadIdForSend),
-          );
-          forgetProvisionRequest(composerDraftTarget);
-          if (!claimed) {
-            toastManager.add({
-              type: "warning",
-              title: "Cloud chat started, but its lease could not be claimed.",
-              description: "Stop the cloud machine from the thread menu after reconnecting.",
-            });
-          }
-        }
+        await cloud.claimFirstTurn(
+          composerDraftTarget,
+          cloudLease,
+          scopeThreadRef(environmentId, threadIdForSend),
+        );
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.
@@ -10896,122 +10209,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [cancelWorktreeSetup, draftId, setupTarget.environmentId, worktreeSetup]);
   const onSendRef = useRef(onSend);
   onSendRef.current = onSend;
-
-  const notifyReconnectSendAbandoned = useCallback(() => {
-    toastManager.add({
-      type: "info",
-      title: "Message not sent",
-      description: "You left the chat before it reconnected. The message is still in its composer.",
-    });
-  }, []);
-  const {
-    reconnectAndSend,
-    reconnecting: reconnectingSend,
-    isPending: isReconnectPending,
-    cancel: cancelReconnectSend,
-  } = useReconnectSend<{
-    dispatchMode: ComposerDispatchMode;
-    submissionIntent: ComposerSubmissionIntent;
-    directAnnotation:
-      | { annotation: PreviewAnnotationPayload; image: ComposerImageAttachment | null }
-      | undefined;
-  }>({
-    threadKey: routeThreadKey,
-    ready:
-      !activeEnvironmentUnavailable && !threadDetailLoading && !isSendBusy && serverConfig !== null,
-    recover: reconnectEnvironmentForSend,
-    send: ({ dispatchMode, submissionIntent, directAnnotation }) => {
-      void onSendRef.current(undefined, dispatchMode, submissionIntent, directAnnotation);
-    },
-    onAbandoned: notifyReconnectSendAbandoned,
-    onFailure: (message) => {
-      toastManager.add(
-        stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
-      );
-    },
-  });
-
-  // A send waiting on a reconnect, which a box's wake can stretch to minutes, can be called off;
-  // its message stays in the composer.
-  const composerBannerItemsWithPendingSend = useMemo<ComposerBannerStackItem[]>(
-    () =>
-      reconnectingSend
-        ? [
-            {
-              id: `pending-send:${routeThreadKey}`,
-              variant: "info",
-              icon: <SendIcon />,
-              title: "Your message sends once this chat reconnects",
-              actions: (
-                <Button size="xs" variant="ghost" onClick={cancelReconnectSend}>
-                  Cancel send
-                </Button>
-              ),
-            },
-            ...composerBannerItems,
-          ]
-        : composerBannerItems,
-    [cancelReconnectSend, composerBannerItems, reconnectingSend, routeThreadKey],
-  );
-
-  useEffect(() => {
-    if (
-      pendingCloudSendEnvironmentId === null ||
-      draftId === null ||
-      activeProject?.environmentId !== pendingCloudSendEnvironmentId ||
-      activeThread?.environmentId !== pendingCloudSendEnvironmentId ||
-      activeEnvironment?.serverConfig == null ||
-      sendInFlightRef.current
-    ) {
-      return;
-    }
-    setPendingCloudSendEnvironmentId(null);
-    setCloudProvisioningPhase(null);
-    setCloudProvisioningError(null);
-    if (
-      useComposerDraftStore.getState().getDraftSession(draftId)?.pendingEnvironmentSend
-        ?.hostStartedFirstTurn
-    ) {
-      // The host confirmed it started this turn on the box, which its chat now owns. The draft
-      // becomes the thread as soon as the box reports it, so the page only stops tracking the
-      // request. Without that confirmation, from an older host or a turn the host could not
-      // start, the page sends the message itself below.
-      transferProvisionedSandboxLease(
-        draftId,
-        scopeThreadRef(pendingCloudSendEnvironmentId, threadId),
-      );
-      forgetProvisionRequest(draftId);
-      return;
-    }
-    // Another tab may hold the same draft, and only one of them sends the held message. Until
-    // this tab's turn comes the composer stays held, and leaving the draft drops the send here.
-    const held = heldCloudSendSnapshotRef.current;
-    sendInFlightRef.current = true;
-    void cloudSends
-      .sendHeld(draftId, async () => {
-        if (heldCloudSendSnapshotRef.current !== held) return;
-        sendInFlightRef.current = false;
-        resumingCloudSendRef.current = true;
-        try {
-          await onSend();
-        } finally {
-          resumingCloudSendRef.current = false;
-        }
-      })
-      .finally(() => {
-        if (heldCloudSendSnapshotRef.current !== held) return;
-        heldCloudSendSnapshotRef.current = null;
-        sendInFlightRef.current = false;
-      });
-  }, [
-    activeEnvironment?.serverConfig,
-    activeThread?.environmentId,
-    activeProject?.environmentId,
-    draftId,
-    onSend,
-    pendingCloudSendEnvironmentId,
-    threadId,
-  ]);
   // Resend once the cancelled dispatch has settled and the composer is free.
   // Every state that makes `onSend` bail and wait is part of the readiness
   // check, so the flag survives a reconnect, a reverting checkpoint, or a
@@ -11557,8 +10754,8 @@ export default function ChatView(props: ChatViewProps) {
                 activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
-                environmentSetup={paintOnlyDisplayedTimeline ? null : environmentSetup}
-                onCancelEnvironmentSetup={onCancelEnvironmentSetup}
+                environmentSetup={paintOnlyDisplayedTimeline ? null : cloud.environmentSetup}
+                onCancelEnvironmentSetup={cloud.cancelSetup}
                 {...(draftId ? { onWorktreeSetupWorkLocally } : {})}
                 {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
@@ -11738,7 +10935,7 @@ export default function ChatView(props: ChatViewProps) {
                                 serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
                                 true
                               }
-                              startsCloudEnvironment={cloudProvisioningRequested !== null}
+                              startsCloudEnvironment={cloud.startsCloudEnvironment}
                               onMultipleModelSelectionsChange={setMultipleModelSelections}
                               composerRef={composerRef}
                               composerDraftTarget={composerDraftTarget}
@@ -11765,7 +10962,7 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               phase={phase}
                               canInterrupt={canInterruptRunningThread}
-                              isConnecting={isConnecting || reconnectingSend}
+                              isConnecting={isConnecting || cloud.reconnectingSend}
                               isSendBusy={isSendBusy || isSavingQueuedEdit || isResuming}
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
@@ -11804,7 +11001,7 @@ export default function ChatView(props: ChatViewProps) {
                                   />
                                 ) : null
                               }
-                              bannerItems={composerBannerItemsWithPendingSend}
+                              bannerItems={composerBannerItems}
                               // With attachments or contexts aboard the pick just inserts the
                               // text, so it sends as a prompt like the typed path would.
                               onUsageLimitsCommand={
@@ -11814,7 +11011,9 @@ export default function ChatView(props: ChatViewProps) {
                                   ? openUsageLimits
                                   : undefined
                               }
-                              environmentUnavailable={activeEnvironmentUnavailableState}
+                              environmentUnavailable={
+                                canReconnectOnSend ? null : activeEnvironmentUnavailableState
+                              }
                               canReconnectOnSend={canReconnectOnSend}
                               activePendingApproval={activePendingApproval}
                               pendingApprovals={pendingApprovals}
@@ -11956,7 +11155,7 @@ export default function ChatView(props: ChatViewProps) {
                                 {...(canCheckoutPullRequestIntoThread
                                   ? { onCheckoutPullRequestRequest: openPullRequestDialog }
                                   : {})}
-                                {...(hasMultipleEnvironments || canCreateCloudEnvironment
+                                {...(hasMultipleEnvironments || cloud.runOn
                                   ? { onEnvironmentChange }
                                   : {})}
                                 autoEnvironmentLabel={autoEnvironmentLabel}
@@ -11968,18 +11167,8 @@ export default function ChatView(props: ChatViewProps) {
                                     ? onAutoEnvironment
                                     : undefined
                                 }
-                                availableEnvironments={pickableEnvironments}
-                                {...(canCreateCloudEnvironment &&
-                                offeredCloudProviders.includes("e2b")
-                                  ? { onCreateCloudEnvironment: handleSelectCloudEnvironment }
-                                  : {})}
-                                {...(canCreateCloudEnvironment &&
-                                offeredCloudProviders.includes("namespace")
-                                  ? { onCreateNamespaceEnvironment: handleSelectCloudEnvironment }
-                                  : {})}
-                                creatingCloudEnvironment={creatingCloudEnvironment}
-                                pendingCloudProvider={cloudProvisioningRequested}
-                                cloudBase={cloudBase}
+                                availableEnvironments={logicalProjectEnvironments}
+                                cloudRunOn={cloud.runOn}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />

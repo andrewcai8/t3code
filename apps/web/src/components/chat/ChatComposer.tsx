@@ -1074,6 +1074,7 @@ import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
+  FileIcon,
   BotIcon,
   CircleAlertIcon,
   PaperclipIcon,
@@ -1084,9 +1085,9 @@ import {
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { hasProviderSetup } from "./ProviderStatusBanner";
+import { useCloudProviderPicker } from "../../cloud/cloudProviderEntries";
 import {
   applyProviderInstanceSettings,
-  cloudProviderEntries,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
   sortProviderInstanceEntries,
@@ -1509,7 +1510,7 @@ export interface ChatComposerProps {
   multipleModelSelections: ReadonlyArray<ModelSelection> | null;
   supportsMultipleModels: boolean;
   /** The draft will provision a cloud environment, so the picker offers drivers, not accounts. */
-  startsCloudEnvironment: boolean;
+  startsCloudEnvironment?: boolean;
   onMultipleModelSelectionsChange: React.Dispatch<
     React.SetStateAction<ReadonlyArray<ModelSelection> | null>
   >;
@@ -1544,6 +1545,7 @@ export interface ChatComposerProps {
     readonly label: string;
     readonly connection: EnvironmentConnectionPresentation;
   } | null;
+  /** A send reconnects the environment first, so no provider list is needed to send. */
   canReconnectOnSend?: boolean;
 
   // Pending approvals / inputs
@@ -1582,7 +1584,7 @@ export interface ChatComposerProps {
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
   /** What a chat from this host will find in its provisioned environment. */
-  provisionedSkills: ServerProvisionedSkills | undefined;
+  provisionedSkills?: ServerProvisionedSkills | undefined;
   /** False until the environment's server config has arrived at least once. */
   providerCatalogKnown: boolean;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
@@ -1698,7 +1700,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     draftId,
     multipleModelSelections,
     supportsMultipleModels,
-    startsCloudEnvironment,
+    startsCloudEnvironment = false,
     onMultipleModelSelectionsChange: setMultipleModelSelections,
     activeThreadId,
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
@@ -2084,13 +2086,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ),
     [providerStatuses, settings],
   );
-  const pickerInstanceEntries = useMemo(
-    () =>
-      startsCloudEnvironment
-        ? cloudProviderEntries(providerInstanceEntries)
-        : providerInstanceEntries,
-    [providerInstanceEntries, startsCloudEnvironment],
-  );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const {
     selectedProviderEntry,
@@ -2123,15 +2118,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedInstanceId =
     selectedProviderEntry?.instanceId ?? NO_PROVIDER_MODEL_SELECTION.instanceId;
   const noProviderAvailable =
-    selectedProviderEntry === undefined && multipleModelSelections === null;
+    selectedProviderEntry === undefined && multipleModelSelections === null && !canReconnectOnSend;
   // Before the catalog arrives, every thread resolves to "no provider". Send
   // stays blocked either way; only the chrome waits, keeping the picker with
   // the thread's own selection instead of swapping in the setup button and
   // back once the catalog lands.
   const providerCatalogPending = noProviderAvailable && !providerCatalogKnown;
-  const sendNeedsConnection = environmentUnavailable !== null && canReconnectOnSend;
-  const sendingUnavailable =
-    !sendNeedsConnection && (environmentUnavailable !== null || noProviderAvailable);
   const showProviderUnavailable = noProviderAvailable && !providerCatalogPending;
   const providerSetupInstanceId = noProviderAvailable
     ? (unavailableProviderInstanceId ??
@@ -2288,11 +2280,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
-  // A cloud draft still pinned to another account of the same driver shows as that driver's row.
-  const pickerSelectedInstanceId =
-    (startsCloudEnvironment
-      ? pickerInstanceEntries.find((entry) => entry.driverKind === selectedProvider)?.instanceId
-      : undefined) ?? selectedInstanceId;
+  const cloudPicker = useCloudProviderPicker({
+    startsCloudEnvironment,
+    entries: providerInstanceEntries,
+    selectedProvider,
+    selectedInstanceId,
+  });
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
   // options are server-reported models plus that exact instance's
@@ -2960,8 +2953,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy ||
     isSendDisabled ||
     isConnecting ||
-    sendingUnavailable ||
+    noProviderAvailable ||
     projectSelectionRequired ||
+    environmentUnavailable !== null ||
     (!composerSendState.hasSendableContent && !showResumeAction);
   const collapsedComposerPrimaryActionLabel = showResumeAction ? "Resume thread" : "Send message";
   const showMobilePendingAnswerActions =
@@ -4086,7 +4080,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const shouldBlurMobileComposerOnSubmit = useCallback(() => {
     if (!isMobileViewport) return false;
-    if (isSendBusy || isSendDisabled || isConnecting || sendingUnavailable || phase === "running") {
+    if (
+      isSendBusy ||
+      isSendDisabled ||
+      isConnecting ||
+      noProviderAvailable ||
+      environmentUnavailable !== null ||
+      phase === "running"
+    ) {
       return false;
     }
     if (activePendingProgress) {
@@ -4097,12 +4098,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activePendingProgress,
     activePendingResolvedAnswers,
     composerSendState.hasSendableContent,
+    environmentUnavailable,
     isConnecting,
     isMobileViewport,
     isSendBusy,
     isSendDisabled,
+    noProviderAvailable,
     phase,
-    sendingUnavailable,
     showPlanFollowUpPrompt,
   ]);
 
@@ -4112,7 +4114,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       dispatchMode?: ComposerDispatchMode,
       submissionIntent?: ComposerSubmissionIntent,
     ) => {
-      if ((!sendNeedsConnection && noProviderAvailable) || isSendDisabled) {
+      if (noProviderAvailable || isSendDisabled) {
         event?.preventDefault();
         return;
       }
@@ -4177,7 +4179,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       blurMobileComposerAfterSend,
       isSendDisabled,
       noProviderAvailable,
-      sendNeedsConnection,
       onSend,
       settings.followUpBehavior,
       phase,
@@ -5414,7 +5415,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         activeInstanceId={
           providerCatalogPending
             ? (activeThreadModelSelection?.instanceId ?? selectedInstanceId)
-            : pickerSelectedInstanceId
+            : cloudPicker.activeInstanceId
         }
         model={
           providerCatalogPending
@@ -5423,7 +5424,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         lockedProvider={lockedProvider}
         lockedContinuationGroupKey={lockedContinuationGroupKey}
-        instanceEntries={pickerInstanceEntries}
+        instanceEntries={cloudPicker.instanceEntries}
         keybindings={keybindings}
         modelOptionsByInstance={modelOptionsByInstance}
         size={composerControlsCollapsed ? "xs" : "sm"}
@@ -6698,7 +6699,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               sendDisabledReason={sendDisabledReason}
                               isConnecting={isConnecting}
                               isEnvironmentUnavailable={
-                                sendingUnavailable || projectSelectionRequired
+                                environmentUnavailable !== null ||
+                                noProviderAvailable ||
+                                projectSelectionRequired
                               }
                               isPreparingWorktree={false}
                               hasSendableContent={false}
@@ -7380,7 +7383,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isSendBusy={isSendBusy}
                       sendDisabledReason={sendDisabledReason}
                       isConnecting={isConnecting}
-                      isEnvironmentUnavailable={sendingUnavailable || projectSelectionRequired}
+                      isEnvironmentUnavailable={
+                        environmentUnavailable !== null ||
+                        noProviderAvailable ||
+                        projectSelectionRequired
+                      }
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
@@ -7500,7 +7507,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isSendBusy={isSendBusy}
                     sendDisabledReason={sendDisabledReason}
                     isConnecting={isConnecting}
-                    isEnvironmentUnavailable={sendingUnavailable || projectSelectionRequired}
+                    isEnvironmentUnavailable={
+                      environmentUnavailable !== null ||
+                      noProviderAvailable ||
+                      projectSelectionRequired
+                    }
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     canResume={showResumeAction}

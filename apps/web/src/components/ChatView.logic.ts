@@ -2,8 +2,6 @@ import * as Option from "effect/Option";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
-  cloneRepository,
-  defaultInstanceIdForDriver,
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type ChatFileAttachment,
@@ -16,9 +14,6 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type PreviewAnnotationPayload,
   type ProviderInteractionMode,
-  type RepositoryIdentity,
-  resolveEnvironmentMachineKind,
-  type ServerConfig,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -33,13 +28,11 @@ import {
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import * as DateTime from "effect/DateTime";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { EnvironmentOption } from "./BranchToolbar.logic";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import { createModelSelection } from "@t3tools/shared/model";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
   appendCodexArtifactTemplateUsePrompt,
@@ -299,10 +292,8 @@ export function resolveDraftHeroState(input: {
   backgroundSubmissionPending: boolean;
   /** A worktree setup card is on the timeline, so the timeline must stay visible. */
   hasWorktreeSetupCard?: boolean;
-  /** A cloud environment setup card is on the timeline, so the timeline must stay visible. */
-  hasEnvironmentSetupCard?: boolean;
 }): boolean {
-  if (input.hasWorktreeSetupCard || input.hasEnvironmentSetupCard) {
+  if (input.hasWorktreeSetupCard) {
     return false;
   }
   if (input.backgroundSubmissionPending) {
@@ -1362,109 +1353,4 @@ export function restorePlanFollowUpComposer(input: {
     prompt: input.snapshot.prompt,
     detectTrigger: true,
   });
-}
-
-/**
- * The driver and model a cloud chat's draft carries onto the environment it provisions.
- * The box keys its one account per driver by the driver's default instance id, not the
- * manager's account id, so the selection moves to that key. The model is not checked
- * against the manager's catalog: the box runs the chat and resolves it against its own.
- */
-export function buildCloudHandoff(input: {
-  agentDriver: ProviderDriverKind;
-  selection: ModelSelection;
-}): { agentDriver: ProviderDriverKind; modelSelection: ModelSelection } {
-  return {
-    agentDriver: input.agentDriver,
-    modelSelection: createModelSelection(
-      defaultInstanceIdForDriver(input.agentDriver),
-      input.selection.model,
-      input.selection.options,
-    ),
-  };
-}
-
-/**
- * What a cloud chat clones: the project's repository, on the branch the user
- * picked. Without a pick the branch is left out and the box asks GitHub for the
- * default, which a stale local origin/HEAD cannot get wrong.
- */
-export function cloudCloneSource(
-  identity: RepositoryIdentity | null | undefined,
-  branch: string | null,
-): { readonly repository?: string; readonly branch?: string } {
-  const repository = cloneRepository(identity);
-  if (!repository) return {};
-  return branch ? { repository, branch } : { repository };
-}
-
-/**
- * Whether auto balance must pick a machine: it has not picked one, or its pick
- * no longer takes new chats (such as a host whose local agent runs were
- * switched off after the pick).
- */
-export function needsLoadBalancedPick(input: {
-  readonly automatic: boolean;
-  readonly pickedEnvironmentId: EnvironmentId | null | undefined;
-  readonly candidates: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
-}): boolean {
-  if (!input.automatic) return false;
-  const picked = input.pickedEnvironmentId;
-  return !picked || !input.candidates.some((candidate) => candidate.environmentId === picked);
-}
-
-/**
- * Whether a draft points at a cloud box it did not start, as one opened from another chat's box
- * before boxes were marked. Such a box is not the draft's: it neither connects for it nor shows,
- * and the draft moves to its project's copy on a user environment.
- */
-export function isDraftOnAnotherChatsBox(input: {
-  readonly draftId: string | null;
-  readonly environmentId: EnvironmentId | null;
-  /** The box the draft's own cloud send started, once it is ready. */
-  readonly ownBoxEnvironmentId: string | null;
-  readonly boxIds: ReadonlySet<EnvironmentId>;
-}): boolean {
-  return (
-    input.draftId !== null &&
-    input.environmentId !== null &&
-    input.environmentId !== input.ownBoxEnvironmentId &&
-    input.boxIds.has(input.environmentId)
-  );
-}
-
-/**
- * The machines "Run on" offers for a chat's project: one per environment holding a copy that
- * `environmentById` knows, the primary first, then by name. `environmentById` holds the user
- * environments and the chat's own box, so another chat's box never shows.
- */
-export function projectEnvironmentOptions(input: {
-  readonly projects: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly id: EnvironmentOption["projectId"];
-  }>;
-  readonly environmentById: ReadonlyMap<
-    EnvironmentId,
-    { readonly label: string; readonly serverConfig: ServerConfig | null }
-  >;
-  readonly primaryEnvironmentId: EnvironmentId | null;
-}): EnvironmentOption[] {
-  const seen = new Set<EnvironmentId>();
-  const options: EnvironmentOption[] = [];
-  for (const project of input.projects) {
-    if (seen.has(project.environmentId)) continue;
-    seen.add(project.environmentId);
-    const environment = input.environmentById.get(project.environmentId);
-    if (environment === undefined) continue;
-    options.push({
-      environmentId: project.environmentId,
-      projectId: project.id,
-      label: environment.label,
-      isPrimary: project.environmentId === input.primaryEnvironmentId,
-      machine: resolveEnvironmentMachineKind(environment.serverConfig),
-    });
-  }
-  return options.sort((a, b) =>
-    a.isPrimary !== b.isPrimary ? (a.isPrimary ? -1 : 1) : a.label.localeCompare(b.label),
-  );
 }
