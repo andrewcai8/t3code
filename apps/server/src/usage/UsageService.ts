@@ -162,7 +162,7 @@ const emptySummary = (input: Pick<UsageSummaryInput, "timeZone" | "sinceDay" | "
   }) satisfies UsageSummary;
 
 /** Empty summary, for suites that only need the RPC surface to resolve. */
-const layerTest = Layer.succeed(
+export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
     readSummary: (input) => Effect.succeed(emptySummary(input)),

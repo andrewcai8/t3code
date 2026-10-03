@@ -8,6 +8,10 @@ import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReact
 import * as NodeHttp from "node:http";
 
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
+import {
+  environmentControlBodyLimitLayer,
+  environmentControlHttpApiLayer,
+} from "./environmentControl/http.ts";
 import { Automations } from "./automation/Automations.ts";
 import { automationWebhookRouteLayer } from "./automation/http.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -172,6 +176,7 @@ import {
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { orchestrationHttpApiLayer } from "./orchestration-v2/http.ts";
+import { usageHttpApiLayer, usageImportBodyLimitLayer } from "./usage/http.ts";
 import { projectHttpApiLayer } from "./project/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
