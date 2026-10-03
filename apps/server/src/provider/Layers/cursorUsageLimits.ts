@@ -20,7 +20,6 @@ const CursorCredentials = Schema.Struct({ accessToken: Schema.optional(Schema.St
 const DEFAULT_CURSOR_API_ENDPOINT = "https://api2.cursor.sh";
 const decodeCredentials = Schema.decodeEffect(Schema.fromJsonString(CursorCredentials));
 const CursorUsageResponse = Schema.Struct({
-  billingCycleStart: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
   billingCycleEnd: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
   planUsage: Schema.optional(
     Schema.Struct({
@@ -36,12 +35,11 @@ export function cursorUsageResponseToLimits(
   response: typeof CursorUsageResponse.Type,
   checkedAt: string,
 ) {
-  const start = Number(response.billingCycleStart);
-  const end = Number(response.billingCycleEnd);
-  const reset = DateTime.make(end);
-  const resetsAt = end > 0 && Option.isSome(reset) ? DateTime.formatIso(reset.value) : undefined;
-  // The billing cycle's length gives each pool its pace marker.
-  const windowDurationMins = start > 0 && end > start ? Math.round((end - start) / 60_000) : 0;
+  const reset = DateTime.make(Number(response.billingCycleEnd));
+  const resetsAt =
+    Number(response.billingCycleEnd) > 0 && Option.isSome(reset)
+      ? DateTime.formatIso(reset.value)
+      : undefined;
   const windows: ServerProviderUsageWindow[] = [];
   if (response.planUsage) {
     for (const { id, label } of CURSOR_USAGE_WINDOWS) {
@@ -53,7 +51,6 @@ export function cursorUsageResponseToLimits(
         label,
         usedPercent: clampPercent(usedPercent),
         ...(resetsAt ? { resetsAt } : {}),
-        ...(windowDurationMins > 0 ? { windowDurationMins } : {}),
       });
     }
   }
@@ -143,19 +140,12 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
     return cursorUsageResponseToLimits(body, checkedAt);
   }).pipe(
     Effect.timeout("10 seconds"),
-    Effect.catch((error) =>
-      Effect.logWarning("Cursor usage read failed.", {
-        // A schema failure can echo the input it rejected, and one input is auth.json.
-        cause: error._tag === "SchemaError" ? error._tag : error.message,
-      }).pipe(
-        Effect.as(
-          makeUnavailableUsageLimits({
-            checkedAt,
-            reason: "probeFailed",
-            message: "Cursor could not read usage limits.",
-          }),
-        ),
-      ),
+    Effect.orElseSucceed(() =>
+      makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message: "Cursor could not read usage limits.",
+      }),
     ),
   );
 });

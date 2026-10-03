@@ -35,7 +35,6 @@ type SkillFrontmatter =
   | { readonly kind: "malformed" }
   | {
       readonly kind: "parsed";
-      readonly displayName?: string;
       readonly description?: string;
       readonly userInvocationOnly?: boolean;
       readonly userInvocable?: boolean;
@@ -88,10 +87,8 @@ function parseSkillFrontmatter(contents: string): SkillFrontmatter {
 
   const record = parsed as Record<string, unknown>;
   const description = typeof record.description === "string" ? record.description.trim() : "";
-  const displayName = typeof record.name === "string" ? record.name.trim() : "";
   return {
     kind: "parsed",
-    ...(displayName ? { displayName } : {}),
     ...(description ? { description } : {}),
     ...(parseFrontmatterBoolean(record["disable-model-invocation"]) === true
       ? { userInvocationOnly: true }
@@ -348,10 +345,10 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
 
       // Claude Code identifies a skill by its directory, not by the
       // frontmatter `name`: verified against the CLI, a skill in `probe-alias/`
-      // declaring `name: probe-alias-frontmatter` runs only as `/probe-alias`,
-      // and only `skillOverrides["probe-alias"]` switches it off. The SDK
-      // still lists its command as `probe-alias-frontmatter`, so that name is
-      // kept as the display name for composers to match it against.
+      // declaring `name: probe-alias-frontmatter` is published as
+      // `probe-alias`, and only `skillOverrides["probe-alias"]` switches it
+      // off. Keying off the frontmatter name would report a command that does
+      // not exist and miss the override that disables it.
       const name = entry.trim();
       if (!name) {
         continue;
@@ -372,11 +369,6 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
         path: skillPath,
         enabled: override?.enabled ?? true,
         scope: root.scope,
-        ...(frontmatter.kind === "parsed" &&
-        frontmatter.displayName &&
-        frontmatter.displayName !== name
-          ? { displayName: frontmatter.displayName }
-          : {}),
         ...(frontmatter.kind === "parsed" && frontmatter.description
           ? { description: frontmatter.description }
           : {}),
