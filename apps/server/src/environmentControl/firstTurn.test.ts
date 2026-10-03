@@ -79,36 +79,25 @@ const manifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)({
   },
   egressAllow: [],
 });
-const threadCreate = {
-  type: "thread.create",
-  commandId: `first-turn-thread:${input.requestId}`,
+const launch = {
+  commandId: `first-turn:${input.requestId}`,
+  creationSource: "server",
   threadId: "draft-thread",
   projectId: "box-project",
   title: turn.title,
+  generateTitle: true,
   modelSelection: turn.modelSelection,
   runtimeMode: "full-access",
   interactionMode: "default",
-  branch: null,
-  worktreePath: null,
-  createdAt: turn.createdAt,
-};
-const turnStart = {
-  type: "thread.turn.start",
-  commandId: `first-turn:${input.requestId}`,
-  threadId: "draft-thread",
-  message: { messageId: "message-1", role: "user", text: turn.text, attachments: [] },
-  modelSelection: turn.modelSelection,
-  titleSeed: turn.titleSeed,
-  runtimeMode: "full-access",
-  interactionMode: "default",
-  createdAt: turn.createdAt,
+  workspaceStrategy: { type: "root" },
+  initialMessage: { messageId: "message-1", text: turn.text, attachments: [] },
 };
 
 interface BoxBehavior {
   /** Requests answered 503 before the box starts answering. */
   readonly unavailableFor?: number;
-  /** The box turns away `thread.create` as an invalid command. */
-  readonly rejectCreate?: boolean;
+  /** The box turns the launch away as an invalid command. */
+  readonly rejectLaunch?: boolean;
   /** A page already started the same message on the box. */
   readonly alreadySent?: boolean;
   /** The box takes requests and never answers them. */
@@ -130,7 +119,10 @@ const fakeBox = (behavior: BoxBehavior) =>
           .writeHead(status, { "content-type": "application/json" })
           .end(JSON.stringify(body));
       const server = NodeHttp.createServer((request, response) => {
-        if (request.headers.authorization !== "Bearer private-broker") {
+        if (
+          request.headers.authorization !== "Bearer private-broker" ||
+          request.headers["x-t3-orchestration-protocol"] !== "2"
+        ) {
           response.writeHead(401).end();
           return;
         }
@@ -150,25 +142,30 @@ const fakeBox = (behavior: BoxBehavior) =>
         if (request.method === "GET" && request.url?.startsWith("/api/orchestration/threads/")) {
           const id = decodeURIComponent(request.url.split("/").pop() ?? "");
           const thread = threads.find((candidate) => candidate.id === id);
-          if (thread) json(response, 200, { snapshotSequence: 1, thread });
+          if (thread)
+            json(response, 200, { snapshotSequence: 1, projection: { messages: thread.messages } });
           else response.writeHead(404).end();
           return;
         }
         let body = "";
         request.on("data", (chunk) => (body += chunk));
         request.on("end", () => {
+          if (request.method !== "POST" || request.url !== "/api/orchestration/launch-thread") {
+            response.writeHead(404).end();
+            return;
+          }
           const command = JSON.parse(body) as Record<string, unknown>;
-          if (command.type === "thread.create" && behavior.rejectCreate) {
+          if (behavior.rejectLaunch) {
             json(response, 400, { code: "invalid_request", reason: "invalid_command" });
             return;
           }
-          if (!commands.some((seen) => seen.commandId === command.commandId)) {
+          const resumed = commands.some((seen) => seen.commandId === command.commandId);
+          if (!resumed) {
             commands.push(command);
-            if (command.type === "thread.create")
-              threads.push({ id: String(command.threadId), messages: [] });
-            if (command.type === "thread.turn.start") Deferred.doneUnsafe(turnStarted, Effect.void);
+            threads.push({ id: String(command.threadId), messages: [{ id: "message-1" }] });
+            Deferred.doneUnsafe(turnStarted, Effect.void);
           }
-          json(response, 200, { sequence: 1 });
+          json(response, 200, { threadId: command.threadId, resumed });
         });
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -300,7 +297,7 @@ it.live("starts a draft's first turn on its box and owns the box, with no client
       yield* control.settleChats;
 
       expect(ready).toMatchObject({ kind: "ready", environment: { firstTurn: "started" } });
-      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(box.commands).toEqual([launch]);
       expect(yield* lease()).toMatchObject({
         owner: { environmentId: "remote", threadId: "draft-thread" },
         firstTurn: { status: "started" },
@@ -326,7 +323,7 @@ it.live("retries a box that is not answering yet, then upkeep starts the turn", 
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "pending" } });
 
       yield* control.settleChats;
-      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(box.commands).toEqual([launch]);
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "started" } });
     }),
   ),
@@ -335,7 +332,7 @@ it.live("retries a box that is not answering yet, then upkeep starts the turn", 
 it.live("gives up at once on a turn the box refuses, and lets the page send it", () =>
   withHost(
     Effect.gen(function* () {
-      const { box, control, lease, kept, prepared } = yield* host({ rejectCreate: true });
+      const { box, control, lease, kept, prepared } = yield* host({ rejectLaunch: true });
       yield* Deferred.succeed(prepared, undefined);
       const ready = yield* control.provision(input);
       yield* control.settleChats;
@@ -502,7 +499,7 @@ it.live("keeps the first message of a ready request whose lease is not registere
       expect(kept.size).toBe(1);
 
       expect(yield* control.settleChat(ready)).toBe("started");
-      expect(box.commands).toEqual([threadCreate, turnStart]);
+      expect(box.commands).toEqual([launch]);
       expect(kept.size).toBe(0);
     }),
   ),
