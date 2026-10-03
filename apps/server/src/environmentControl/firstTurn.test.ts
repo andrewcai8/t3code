@@ -453,11 +453,12 @@ it.live("keeps the first message of a request still being prepared", () =>
   ),
 );
 
-for (const [stopped, stop] of [
+it.live.each([
   ["disposed", "markDisposed"],
   ["paused", "markPaused"],
-] as const)
-  it.live(`gives up and deletes the first message of a box ${stopped} before its turn`, () =>
+] as const)(
+  "gives up and deletes the first message of a box %s before its turn",
+  ([stopped, stop]) =>
     withHost(
       Effect.gen(function* () {
         const { control, leases, lease, kept, prepared } = yield* host({ unavailableFor: 1 });
@@ -475,7 +476,7 @@ for (const [stopped, stop] of [
         });
       }),
     ),
-  );
+);
 
 it.live("answers ready within seconds when the box hangs, leaving later tries to upkeep", () =>
   withHost(
