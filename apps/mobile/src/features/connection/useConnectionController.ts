@@ -12,10 +12,7 @@ import * as Option from "effect/Option";
 import { useCallback, useMemo } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
-import {
-  connectPairingUrl as connectPairingUrlAtom,
-  updateBearerConnection,
-} from "../../connection/onboarding";
+import { connectPairing, updateBearerConnection } from "../../connection/onboarding";
 import { useWorkspaceEnvironments } from "../../state/workspace";
 import { relayEnvironmentDiscovery } from "../../state/relay";
 import { useAtomCommand } from "../../state/use-atom-command";
