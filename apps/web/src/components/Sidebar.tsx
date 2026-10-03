@@ -174,6 +174,12 @@ import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
 import {
+  EMPTY_SIDEBAR_COMPOSER,
+  isCloudSendThreadListed,
+  sidebarDraftStatusLabel,
+} from "../cloud/sidebarCloud";
+import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
+import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
@@ -203,10 +209,6 @@ import {
   shouldNavigateAfterThreadPark,
   shouldRecedeSidebarThread,
   resolveWorkingStartedAt,
-  EMPTY_SIDEBAR_COMPOSER,
-  sidebarDraftRows,
-  sidebarDraftStatusLabel,
-  type SidebarDraftRowData,
   sidebarListItemId,
   sidebarMarkerId,
   sortInboxThreadsByReturn,
@@ -851,9 +853,8 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   const preview =
     promptPreview.length > 0
       ? promptPreview
-      : session.pendingEnvironmentSend?.preview.trim()
-        ? session.pendingEnvironmentSend.preview.trim()
-        : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
+      : session.pendingEnvironmentSend?.preview.trim() ||
+        `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`;
   const accessibility = resolveSidebarRowAccessibility({
     title: preview,
     statusLabel: sidebarDraftStatusLabel(session, props.isActive),
@@ -934,6 +935,12 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   );
 });
 
+interface SidebarDraftRowData {
+  draftId: DraftId;
+  session: DraftSessionState;
+  composer: ComposerThreadDraftState;
+}
+
 // Draft sessions with user content, surfaced above the pinned block so an
 // interrupted "new thread" stays one click away. Self-contained (own store
 // subscription + closing divider) so per-keystroke composer updates
@@ -955,11 +962,9 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
   // types. A draft that was never navigated away from has no snapshot to
-  // freeze, so a fresh typing session shows no row at all. A started
-  // first-send still gets a live row so it appears as soon as Enter docks
-  // the chat. Captured synchronously on route change (setState-during-render
-  // derived state) so the row never flickers out for a frame between route
-  // change and capture.
+  // freeze, so a fresh typing session shows no row at all. Captured
+  // synchronously on route change (setState-during-render derived state) so
+  // the row never flickers out for a frame between route change and capture.
   const [frozenActive, setFrozenActive] = useState<{
     routeDraftId: string | null;
     row: SidebarDraftRowData | null;
@@ -978,25 +983,55 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     }
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
   }
-  const drafts = useMemo(
-    () =>
-      sidebarDraftRows({
-        sessions: draftThreadsByThreadKey,
-        composers: draftsByThreadKey,
-        scopedProjectKeys: props.scopedProjectKeys,
-        routeDraftId: props.routeDraftId,
-        frozenRouteRow: frozenActive.routeDraftId === props.routeDraftId ? frozenActive.row : null,
-        knownThreadKeys,
-      }),
-    [
-      draftThreadsByThreadKey,
-      draftsByThreadKey,
-      frozenActive,
-      knownThreadKeys,
-      props.routeDraftId,
-      props.scopedProjectKeys,
-    ],
-  );
+  const drafts = useMemo(() => {
+    const rows: SidebarDraftRowData[] = [];
+    // Every non-promoted session with content gets a row, mapped or not:
+    // new-thread surfaces mint fresh drafts and leave invested ones behind
+    // unmapped, so the mapping only knows about the latest per project.
+    for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
+      if (session.promotedTo != null || isCloudSendThreadListed(session, knownThreadKeys)) {
+        continue;
+      }
+      if (
+        props.scopedProjectKeys !== null &&
+        !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+      ) {
+        continue;
+      }
+      if (draftKey === props.routeDraftId) {
+        // Open draft: render the frozen entry snapshot, or nothing for a
+        // draft that has never been left. Gated on the LIVE session above so
+        // send/discard still removes the row immediately.
+        // Only the composer is frozen; the live session shows a started first send's status,
+        // and a started first send has a row even before the draft was ever left.
+        if (frozenActive.routeDraftId === draftKey && frozenActive.row !== null) {
+          rows.push({ ...frozenActive.row, session });
+        } else if (session.pendingEnvironmentSend != null) {
+          const composer = draftsByThreadKey[draftKey] ?? EMPTY_SIDEBAR_COMPOSER;
+          rows.push({ draftId: DraftId.make(draftKey), session, composer });
+        }
+        continue;
+      }
+      const composer = draftsByThreadKey[draftKey];
+      if (!draftSessionHasInvestedWork(session, composer)) {
+        continue;
+      }
+      rows.push({
+        draftId: DraftId.make(draftKey),
+        session,
+        composer: composer ?? EMPTY_SIDEBAR_COMPOSER,
+      });
+    }
+    rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
+    return rows;
+  }, [
+    draftThreadsByThreadKey,
+    draftsByThreadKey,
+    frozenActive,
+    knownThreadKeys,
+    props.routeDraftId,
+    props.scopedProjectKeys,
+  ]);
   const handleDiscard = useCallback(
     (draftId: DraftId) => {
       // The /draft/$draftId route redirects home on its own when the draft
@@ -2303,8 +2338,8 @@ export default function Sidebar() {
     markThreadUnread,
     archiveThread,
     deleteThread,
-    stopProvisionedCloudMachine,
   } = useThreadActions();
+  const { stopProvisionedCloudMachine } = useCloudThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -2573,8 +2608,8 @@ export default function Sidebar() {
   // empty state, while SidebarDraftBlock owns the per-keystroke content
   // subscription. Selecting a number keeps typing in a draft composer from
   // re-rendering the whole sidebar. Approximates the block's row filter
-  // (every non-promoted invested session). An open never-left typing draft
-  // can overcount by one, which only softens the empty state.
+  // (every non-promoted session with content); it can overcount by one for
+  // an open never-left draft, which only softens the empty state.
   const routeDraftIdForRows = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
   const visibleDraftSessionCount = useComposerDraftStore((store) => {
     let count = 0;

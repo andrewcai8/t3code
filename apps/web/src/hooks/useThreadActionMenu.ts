@@ -38,6 +38,7 @@ import {
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { provisionedSandboxFor } from "../cloud/provisionedSandboxLeases";
+import { useCloudThreadActions } from "../cloud/useCloudThreadActions";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
@@ -94,8 +95,8 @@ export function useThreadActionMenu(input: {
     archiveThread,
     deleteThread,
     markThreadUnread,
-    stopProvisionedCloudMachine,
   } = useThreadActions();
+  const { stopProvisionedCloudMachine } = useCloudThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });

@@ -10,7 +10,6 @@ const baseState: ThreadActionMenuState = {
   autoSettleEnabled: true,
   isSnoozed: false,
   canSnoozeNow: true,
-  hasProvisionedCloudMachine: false,
   isRegeneratingTitle: false,
   isRunning: false,
   supports: {
@@ -96,23 +95,6 @@ describe("buildThreadActionMenuItems", () => {
       expect.arrayContaining(["unpin", "unsettle", "unsnooze"]),
     );
     expect(ids(baseState)).toEqual(expect.arrayContaining(["pin", "settle", "snooze"]));
-  });
-
-  it("places cloud machine teardown after lifecycle actions and before rename", () => {
-    const items = buildThreadActionMenuItems({ ...baseState, hasProvisionedCloudMachine: true });
-    const stopIndex = items.findIndex((item) => item.id === "stop-cloud-machine");
-    const renameIndex = items.findIndex((item) => item.id === "rename");
-    expect(stopIndex).toBeGreaterThan(-1);
-    expect(stopIndex).toBeLessThan(renameIndex);
-    expect(items[stopIndex]).toMatchObject({
-      label: "Stop cloud machine",
-      icon: "cloud",
-      destructive: true,
-      separatorBefore: true,
-    });
-    expect(
-      buildThreadActionMenuItems(baseState).find((item) => item.id === "stop-cloud-machine"),
-    ).toBeUndefined();
   });
 
   it("offers auto-settle as a submenu with the current option checked", () => {

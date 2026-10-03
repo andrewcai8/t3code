@@ -51,9 +51,6 @@ import {
   sortSidebarV2ProjectGroups,
   shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
-  EMPTY_SIDEBAR_COMPOSER,
-  sidebarDraftRows,
-  sidebarDraftStatusLabel,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   type SidebarListItem,
   type SidebarListMarker,
@@ -64,11 +61,6 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 
-import {
-  DraftId,
-  type DraftSessionState,
-  type PendingCloudEnvironmentSend,
-} from "../composerDraftStore";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -932,20 +924,6 @@ describe("resolveSidebarThreadStatus", () => {
         runtime: { ...runtime, status: "starting" as const },
       }),
     ).toBe("working");
-  });
-
-  it("reports an expired workspace even when the cached runtime still says it is running", () => {
-    const status = resolveSidebarThreadStatus(
-      { ...idle, runtime, hasPendingApprovals: true },
-      {
-        phase: "error",
-        error: "Machine removed",
-        traceId: null,
-        blockedReason: "workspace-missing",
-      },
-    );
-    expect(status).toBe("expired");
-    expect(resolveSidebarV2TopStatus({ status, isUnread: true, isWoke: true })).toBe("expired");
   });
 
   it("keeps usage-limit stops Limited and visible until the thread recovers", () => {
@@ -2073,83 +2051,6 @@ describe("navigation after parking a thread", () => {
       ).toBe(expected);
     },
   );
-});
-
-describe("sidebarDraftRows", () => {
-  const cloudEnvironmentId = EnvironmentId.make("environment-cloud");
-  const readySend: PendingCloudEnvironmentSend = {
-    provider: "e2b",
-    preview: "fix the flaky test",
-    messageId: "message-cloud",
-    createdAt: "2026-09-27T10:00:00.000Z",
-    prompt: "fix the flaky test",
-    outgoingMessageText: "fix the flaky test",
-    phase: "ready",
-    startedAt: "2026-09-27T10:00:00.000Z",
-    readyEnvironmentId: "environment-cloud",
-  };
-  const unsent: DraftSessionState = {
-    threadId: ThreadId.make("thread-cloud"),
-    environmentId: cloudEnvironmentId,
-    projectId: ProjectId.make("project-cloud"),
-    logicalProjectKey: "project-cloud",
-    createdAt: "2026-09-27T10:00:00.000Z",
-    runtimeMode: DEFAULT_RUNTIME_MODE,
-    interactionMode: DEFAULT_INTERACTION_MODE,
-    branch: null,
-    worktreePath: null,
-    envMode: "local",
-    startFromOrigin: false,
-  };
-  const cloudSend: DraftSessionState = { ...unsent, pendingEnvironmentSend: readySend };
-  const rowsFor = (knownThreadKeys: ReadonlySet<string>, routeDraftId: string | null) =>
-    sidebarDraftRows({
-      sessions: { "draft-cloud": cloudSend },
-      composers: {},
-      scopedProjectKeys: null,
-      routeDraftId,
-      frozenRouteRow: null,
-      knownThreadKeys,
-    }).map((row) => row.draftId);
-
-  it("drops a pending cloud send once the box's thread exists", () => {
-    const threadKey = "environment-cloud:thread-cloud";
-    expect(rowsFor(new Set(), "draft-cloud")).toEqual(["draft-cloud"]);
-    expect(rowsFor(new Set(), null)).toEqual(["draft-cloud"]);
-    expect(rowsFor(new Set([threadKey]), "draft-cloud")).toEqual([]);
-    expect(rowsFor(new Set([threadKey]), null)).toEqual([]);
-  });
-
-  it("labels a draft row by its live send and whether it is open", () => {
-    const labelFor = (session: DraftSessionState, routeDraftId: string | null) =>
-      sidebarDraftRows({
-        sessions: { "draft-cloud": session },
-        composers: { "draft-cloud": { ...EMPTY_SIDEBAR_COMPOSER, prompt: "fix the flaky test" } },
-        scopedProjectKeys: null,
-        routeDraftId,
-        frozenRouteRow:
-          routeDraftId === null
-            ? null
-            : {
-                draftId: DraftId.make("draft-cloud"),
-                session: unsent,
-                composer: EMPTY_SIDEBAR_COMPOSER,
-              },
-        knownThreadKeys: new Set(),
-      }).map((row) => sidebarDraftStatusLabel(row.session, row.draftId === routeDraftId));
-    const inPhase = (phase: PendingCloudEnvironmentSend["phase"]): DraftSessionState => ({
-      ...unsent,
-      pendingEnvironmentSend: { ...readySend, phase },
-    });
-
-    expect(labelFor(unsent, "draft-cloud")).toEqual(["Unsent draft"]);
-    expect(labelFor(inPhase("creating"), "draft-cloud")).toEqual(["Starting cloud machine…"]);
-    expect(labelFor(inPhase("creating"), null)).toEqual(["Starting cloud machine…"]);
-    expect(labelFor(inPhase("ready"), "draft-cloud")).toEqual(["Sending…"]);
-    // Parked, or left after a failed turn start: the held send is not going out.
-    expect(labelFor(inPhase("ready"), null)).toEqual(["Unsent draft"]);
-    expect(labelFor(inPhase("failed"), "draft-cloud")).toEqual(["Unsent draft"]);
-  });
 });
 
 describe("Working shelf (beta)", () => {
