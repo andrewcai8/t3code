@@ -262,6 +262,8 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeEnvironmentShellState = useEnvironmentShellReadiness(environmentId);
+  // An open chat on a cloud box keeps the box connected, which wakes it when it is paused.
+  useBoxDemand(environmentId);
   const { onReconnectEnvironment } = useRemoteConnections();
   const navigation = useNavigation();
   const routeConnectionState =
