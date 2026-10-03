@@ -1,12 +1,10 @@
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import * as Effect from "effect/Effect";
-import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
-import type { PlatformConnectionRegistration } from "./catalog.ts";
 
 import * as ConnectionResolver from "./resolver.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -16,23 +14,7 @@ import * as PlatformConnectionSource from "../platform/source.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as RpcSession from "../rpc/session.ts";
-
-/**
- * Applies the platform's registrations to the registry when they change. The platform is polled,
- * so most reports repeat the last one, and reconciling those would do nothing but record spans.
- */
-export const followPlatformRegistrations = (
-  registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
-  registrations: Stream.Stream<ReadonlyArray<PlatformConnectionRegistration>>,
-) =>
-  registrations.pipe(
-    Stream.changesWith(
-      (previous, next) =>
-        previous.length === next.length &&
-        previous.every((registration, index) => Equal.equals(registration, next[index])),
-    ),
-    Stream.runForEach(registry.reconcilePlatform),
-  );
+import { followPlatformRegistrations } from "./platformRegistrations.ts";
 
 export const watchDiscoveredCompatibility = Effect.fn("connection.watchDiscoveredCompatibility")(
   function* () {

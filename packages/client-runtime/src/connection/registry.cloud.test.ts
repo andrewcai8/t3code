@@ -74,7 +74,7 @@ import * as RpcSession from "../rpc/session.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 import { UserPresence, makeUserPresence } from "./presence.ts";
-import { followPlatformRegistrations } from "./layer.ts";
+import { followPlatformRegistrations } from "./platformRegistrations.ts";
 import { v2ShellSnapshot, v2ThreadShell } from "../state/orchestrationV2TestFixtures.ts";
 
 const TARGET = new PrimaryConnectionTarget({
