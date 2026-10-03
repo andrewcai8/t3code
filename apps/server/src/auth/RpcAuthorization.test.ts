@@ -34,6 +34,33 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("lets read-only clients list cloud machines and automations but not run or change them", () => {
+    const scopes = [
+      WS_METHODS.environmentControlListProvisioned,
+      WS_METHODS.environmentControlStart,
+      WS_METHODS.environmentControlStop,
+      WS_METHODS.environmentControlProvision,
+      WS_METHODS.environmentControlDispose,
+      WS_METHODS.environmentControlKeep,
+      WS_METHODS.automationsList,
+      WS_METHODS.automationsListJoinable,
+      WS_METHODS.automationsRunNow,
+      WS_METHODS.automationsRotateWebhook,
+    ].map(requiredScopeForRpcMethod);
+    expect(scopes).toEqual([
+      AuthOrchestrationReadScope,
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationReadScope,
+      AuthOrchestrationReadScope,
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationOperateScope,
+    ]);
+  });
+
   it("allows relay status reads without granting relay installation access", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudGetRelayClientStatus)).toBe(
       AuthRelayReadScope,

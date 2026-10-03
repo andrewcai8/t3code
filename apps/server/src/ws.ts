@@ -171,6 +171,8 @@ import { makeProviderInstallation } from "./provider/providerInstallation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
+import { Automations } from "./automation/Automations.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
@@ -1164,6 +1166,8 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const environmentControl = yield* EnvironmentControl.EnvironmentControl;
+      const automations = yield* Automations;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -1620,7 +1624,11 @@ const makeWsRpcLayer = (
           const environment = yield* serverEnvironment.getDescriptor;
           const provisionedSkills = yield* environmentControl.provisionedSkills;
           const auth = yield* serverAuth.getDescriptor();
-          const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
+          // A host that runs no agents sends every chat to a cloud box cloned from
+          // the project's repository, and Scratch has none, so it offers no Scratch.
+          const scratchWorkspaceRoot = config.localAgentRuns
+            ? yield* managedFolders.scratchRoot
+            : Option.none<string>();
           const availableEditors: ReadonlyArray<EditorId> = yield* resolveAvailableEditorsForConfig(
             externalLauncher.resolveAvailableEditors(),
           );
