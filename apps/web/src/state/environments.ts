@@ -4,7 +4,6 @@ import {
   type EnvironmentPresentation as BaseEnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
 import { Discovery } from "@t3tools/client-runtime/relay";
-import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useMemo } from "react";
@@ -58,15 +57,6 @@ export function useEnvironments() {
     environments,
     presentationById,
   };
-}
-
-/**
- * Every enabled environment, cloud boxes included. Only what follows a box's own chats, such as
- * its notifications, reads this; anything that lists places to run things reads `useEnvironments`.
- */
-export function useEnabledEnvironmentIds(): ReadonlyArray<EnvironmentId> {
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  return useMemo(() => [...enabledEnvironmentIds(catalog)], [catalog]);
 }
 
 export function usePrimaryEnvironmentId(): EnvironmentId | null {

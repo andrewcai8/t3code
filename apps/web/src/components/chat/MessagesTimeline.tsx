@@ -5040,9 +5040,6 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const questionHeading = workEntry.questionAnswer
     ? getQuestionTextPreview(workEntry.questionAnswer)
     : "";
-  const resetsLabel = workEntry.resetsAt
-    ? ` Resets ${formatUpcomingTimestamp(workEntry.resetsAt, timestampFormat)}.`
-    : "";
   const previewText =
     isReasoning && expanded
       ? workEntry.toolLifecycleStatus === "inProgress"

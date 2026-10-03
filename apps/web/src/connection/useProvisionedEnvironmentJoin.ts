@@ -16,7 +16,7 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironmentHttpBaseUrl } from "../state/environments";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
-import { waitForThreadShell } from "../state/waitForThreadShell";
+import { waitForThreadShell } from "../state/entities";
 import { environmentCatalog } from "./catalog";
 import { connectPairing } from "./onboarding";
 import { openProvisionedEnvironment } from "./provisioned";
@@ -104,7 +104,7 @@ export function useProvisionedEnvironmentJoin(managerId: EnvironmentId) {
         return result.value;
       },
       rewritePairingUrl: (pairingUrl, lease) => rewritePairingUrl(pairingUrl, lease.leaseId),
-      waitForThread: waitForThreadShell,
+      waitForThread: (ref) => waitForThreadShell(ref, 15_000),
       refreshBoxList: () => serverEnvironment.refreshProvisionedBoxes(appAtomRegistry, [managerId]),
       rememberLease: (ref) =>
         remember(environment, ref, {
