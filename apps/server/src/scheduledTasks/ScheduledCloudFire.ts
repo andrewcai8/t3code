@@ -83,12 +83,14 @@ const failed = (task: ScheduledTask, message: string) =>
 /**
  * Starts one fire of a task on a fresh cloud machine, succeeding once the machine is ready and
  * holds the chat's first turn. Without a host that can provision, every cloud fire fails.
+ * Firing again with the same key and time sends the same request, so it resumes the first fire.
  */
 export class ScheduledCloudFire extends Context.Reference<{
   readonly fire: (input: {
     readonly task: ScheduledTask;
     readonly provider: ProvisionProvider;
     readonly fireKey: string;
+    readonly firedAt: DateTime.Utc;
   }) => Effect.Effect<void, ScheduledTaskError>;
 }>("t3/scheduledTasks/ScheduledCloudFire", {
   defaultValue: () => ({
@@ -125,7 +127,7 @@ export const layer = Layer.effect(
       );
 
     return ScheduledCloudFire.of({
-      fire: Effect.fn("ScheduledCloudFire.fire")(function* ({ task, provider, fireKey }) {
+      fire: Effect.fn("ScheduledCloudFire.fire")(function* ({ task, provider, fireKey, firedAt }) {
         const project = yield* projects
           .getById(task.projectId)
           .pipe(Effect.mapError((cause) => failed(task, cause.message)));
@@ -137,7 +139,7 @@ export const layer = Layer.effect(
           task,
           provider,
           fireKey,
-          firedAt: yield* DateTime.now,
+          firedAt,
           repository: cloneRepository(identity),
         });
         // A refusal can follow an allocation, so any failure may leave a machine behind.

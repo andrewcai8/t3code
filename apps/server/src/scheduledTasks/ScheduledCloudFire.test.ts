@@ -143,7 +143,7 @@ const fireWith = (results: ReadonlyArray<EnvironmentProvisionResult>) =>
     );
     const fiber = yield* Effect.gen(function* () {
       const { fire } = yield* ScheduledCloudFire.ScheduledCloudFire;
-      return yield* fire({ task, provider: "e2b", fireKey: "fire-1" });
+      return yield* fire({ task, provider: "e2b", fireKey: "fire-1", firedAt });
     }).pipe(Effect.provide(layer), Effect.exit, Effect.forkChild);
     yield* TestClock.adjust("1 minute");
     return {
