@@ -1,6 +1,12 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 
-import type { ComposerThreadDraftState, DraftSessionState } from "../composerDraftStore";
+import {
+  type ComposerThreadDraftState,
+  type DraftId,
+  type DraftSessionState,
+  useComposerDraftStore,
+} from "../composerDraftStore";
+import { discardComposerDraft } from "../lib/discardComposerDraft";
 
 export { environmentAllowsThreadSettlement } from "@t3tools/client-runtime/state/thread-settled";
 export { useEnvironment } from "../state/environments";
@@ -26,6 +32,19 @@ export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
   runtimeMode: null,
   interactionMode: null,
 };
+
+/**
+ * Discards a sidebar draft row. A cloud first send clears the composer before its draft settles,
+ * which leaves `discardComposerDraft` nothing to undo, so that row's session is dropped directly.
+ */
+export function discardDraftRow(draftId: DraftId): void {
+  const store = useComposerDraftStore.getState();
+  if (store.getComposerDraft(draftId) === null) {
+    store.clearDraftThread(draftId);
+    return;
+  }
+  discardComposerDraft(draftId);
+}
 
 /**
  * A cloud first-send keeps its draft until the local send settles, which can trail the box's
