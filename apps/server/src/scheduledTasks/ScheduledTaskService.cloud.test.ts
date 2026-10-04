@@ -94,7 +94,7 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
   }).pipe(Effect.provide(SqlitePersistenceMemory)),
 );
 
-const dependenciesWith = (fire: ScheduledCloudFire["Service"]["fire"]) =>
+const dependenciesWith = (fire: (typeof ScheduledCloudFire)["Service"]["fire"]) =>
   Layer.mergeAll(
     NodeCrypto.layer,
     Scheduler.layer,
