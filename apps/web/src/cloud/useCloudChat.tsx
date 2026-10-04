@@ -505,7 +505,14 @@ export function useCloudChat(input: {
     });
   }, [draftId, projectOffAnotherChatsBox, sendInFlightRef]);
   useEffect(() => {
-    if (!draftId || !redirectEnvironment || sendInFlightRef.current) return;
+    // A machine whose "No project" folder does not exist yet has no project to move to.
+    if (
+      !draftId ||
+      !redirectEnvironment ||
+      redirectEnvironment.projectId === null ||
+      sendInFlightRef.current
+    )
+      return;
     useComposerDraftStore.getState().setDraftThreadContext(draftId, {
       projectRef: scopeProjectRef(redirectEnvironment.environmentId, redirectEnvironment.projectId),
       environmentSelection: "manual",
@@ -985,7 +992,7 @@ export function useCloudChat(input: {
       environments: input.projectEnvironments,
       runTargets: runTargets.environments,
     });
-    return next
+    return next?.projectId
       ? scopeProjectRef(next.environmentId, next.projectId)
       : scopeProjectRef(project.environmentId, project.id);
   };
