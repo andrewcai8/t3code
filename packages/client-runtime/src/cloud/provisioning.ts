@@ -352,7 +352,8 @@ export function newChatRunTargets<
   return { environments, cloudProviders, redirect };
 }
 
-function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
+/** The name a cloud machine kind goes by wherever a person picks or reads it. */
+export function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
   return provider === "namespace" ? "Namespace Mac" : "E2B";
 }
 

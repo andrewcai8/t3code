@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -90,6 +91,13 @@ export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Typ
 export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succeeded", "failed"]);
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
+/**
+ * Where a fire runs: on this server, or in a fresh E2B box or Namespace Mac this server
+ * provisions for it. A cloud fire always starts a new chat on its own machine.
+ */
+export const ScheduledTaskTarget = Schema.Literals(["local", "e2b", "namespace"]);
+export type ScheduledTaskTarget = typeof ScheduledTaskTarget.Type;
+
 export const ScheduledTask = Schema.Struct({
   id: ScheduledTaskId,
   title: TrimmedNonEmptyString,
@@ -98,6 +106,7 @@ export const ScheduledTask = Schema.Struct({
   schedule: ScheduledTaskSchedule,
   projectId: ProjectId,
   threadId: Schema.NullOr(ThreadId),
+  target: ScheduledTaskTarget.pipe(Schema.withDecodingDefault(Effect.succeed("local" as const))),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -134,6 +143,9 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   schedule: ScheduledTaskUpsertSchedule,
   projectId: ProjectId,
   threadId: Schema.optional(Schema.NullOr(ThreadId)),
+  target: Schema.optional(ScheduledTaskTarget).annotate({
+    description: "Omit to keep the task's current target; new tasks default to local.",
+  }),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,

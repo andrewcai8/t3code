@@ -14,6 +14,7 @@ import BoxUsage from "./ForkMigrations/002_BoxUsage.ts";
 import BoxUsageOrigin from "./ForkMigrations/003_BoxUsageOrigin.ts";
 import ProvisionedChats from "./ForkMigrations/004_ProvisionedChats.ts";
 import ProvisionedChatsV2 from "./ForkMigrations/005_ProvisionedChatsV2.ts";
+import ScheduledTaskTarget from "./ForkMigrations/006_ScheduledTaskTarget.ts";
 
 export const forkMigrationEntries = [
   [1, "ProvisionOperations", ProvisionOperations],
@@ -21,6 +22,7 @@ export const forkMigrationEntries = [
   [3, "BoxUsageOrigin", BoxUsageOrigin],
   [4, "ProvisionedChats", ProvisionedChats],
   [5, "ProvisionedChatsV2", ProvisionedChatsV2],
+  [6, "ScheduledTaskTarget", ScheduledTaskTarget],
 ] as const;
 
 // Fork migrations that older builds recorded in upstream's ledger and that no longer run. The

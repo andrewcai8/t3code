@@ -19,6 +19,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -31,6 +32,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import { ScheduledCloudFire } from "./ScheduledCloudFire.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
@@ -53,6 +55,7 @@ interface ScheduledTaskRow {
   readonly schedule_json: string;
   readonly project_id: string;
   readonly thread_id: string | null;
+  readonly target: string;
   readonly workspace_strategy_json: string;
   readonly model_selection_json: string;
   readonly runtime_mode: string;
@@ -140,6 +143,7 @@ const decodeRow = (row: ScheduledTaskRow) =>
       schedule,
       projectId: row.project_id,
       threadId: row.thread_id,
+      target: row.target,
       workspaceStrategy,
       modelSelection,
       runtimeMode: row.runtime_mode,
@@ -210,6 +214,8 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const scheduler = yield* Scheduler.Scheduler;
+    const cloudFire = yield* ScheduledCloudFire;
+    const cloudRuns = yield* FiberSet.make();
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
     // full list() re-emit anyway, so a slow subscriber only ever needs the
@@ -226,6 +232,7 @@ export const layer = Layer.effect(
         schedule_json,
         project_id,
         thread_id,
+        target,
         workspace_strategy_json,
         model_selection_json,
         runtime_mode,
@@ -258,6 +265,7 @@ export const layer = Layer.effect(
         schedule_json,
         project_id,
         thread_id,
+        target,
         workspace_strategy_json,
         model_selection_json,
         runtime_mode,
@@ -310,6 +318,7 @@ export const layer = Layer.effect(
           schedule_json,
           project_id,
           thread_id,
+          target,
           workspace_strategy_json,
           model_selection_json,
           runtime_mode,
@@ -332,6 +341,7 @@ export const layer = Layer.effect(
           ${JSON.stringify(task.schedule)},
           ${task.projectId},
           ${task.threadId},
+          ${task.target},
           ${JSON.stringify(task.workspaceStrategy)},
           ${JSON.stringify(task.modelSelection)},
           ${task.runtimeMode},
@@ -355,6 +365,7 @@ export const layer = Layer.effect(
           schedule_json = excluded.schedule_json,
           project_id = excluded.project_id,
           thread_id = excluded.thread_id,
+          target = excluded.target,
           workspace_strategy_json = excluded.workspace_strategy_json,
           model_selection_json = excluded.model_selection_json,
           runtime_mode = excluded.runtime_mode,
@@ -511,13 +522,20 @@ export const layer = Layer.effect(
         // after the poll read are honoured.
         const prompt = active.prompt;
 
+        // A cloud task never binds a thread (upsert refuses it), so it always takes the launch
+        // branch, which starts its chat on a fresh machine instead of here.
+        const target = active.target;
+        const launch =
+          target === "local"
+            ? threadLaunch.launch
+            : () => cloudFire.fire({ task: active, provider: target, fireKey });
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
         // aborting before markCompleted.
         const result =
           active.threadId === null
             ? yield* Effect.exit(
-                threadLaunch.launch({
+                launch({
                   commandId,
                   projectId: active.projectId,
                   title: active.title,
@@ -595,6 +613,19 @@ export const layer = Layer.effect(
       );
     });
 
+    // A cloud fire waits minutes for its machine, so it runs beside the poll loop and the caller
+    // rather than holding them; its row reads 'running' until the machine is ready.
+    const startRun = (task: ScheduledTask, trigger: "scheduled" | "manual") =>
+      task.target === "local"
+        ? runTask(task, trigger)
+        : runTask(task, trigger).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Cloud scheduled task run failed", { taskId: task.id, cause }),
+            ),
+            FiberSet.run(cloudRuns),
+            Effect.as(task),
+          );
+
     // A due fixed-time run that is long past its slot (server was off or
     // asleep) is skipped and re-aimed at its next occurrence, not fired late.
     const rescheduleMissedRun = Effect.fn("ScheduledTaskService.rescheduleMissedRun")(function* (
@@ -633,7 +664,7 @@ export const layer = Layer.effect(
         ({ task, dueAt }) =>
           (isMissedFixedTimeRun(task.schedule, dueAt, now)
             ? rescheduleMissedRun(task, now)
-            : runTask(task, "scheduled")
+            : startRun(task, "scheduled")
           ).pipe(
             Effect.catch((cause) =>
               Effect.logWarning("Scheduled task run failed", { taskId: task.id, cause }),
@@ -738,6 +769,13 @@ export const layer = Layer.effect(
         // keep their run history, and so real load failures propagate instead
         // of silently resetting an existing row.
         const existingTask = yield* findTask(id);
+        const threadId = input.threadId ?? null;
+        const target = input.target ?? existingTask?.target ?? "local";
+        if (target !== "local" && threadId !== null) {
+          return yield* taskError("A task that runs on a cloud machine must start a new chat.", {
+            taskId: id,
+          });
+        }
         // Keep the existing next_run_at when the schedule itself is untouched:
         // editing a title or prompt must not postpone (or resurrect) a due
         // run — only schedule/enabled changes restart the clock.
@@ -752,7 +790,8 @@ export const layer = Layer.effect(
           enabled: input.enabled,
           schedule: input.schedule,
           projectId: input.projectId,
-          threadId: input.threadId ?? null,
+          threadId,
+          target,
           workspaceStrategy: input.workspaceStrategy,
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode,
@@ -809,7 +848,7 @@ export const layer = Layer.effect(
     const runNow: ScheduledTaskService["Service"]["runNow"] = (input: ScheduledTaskRunNowInput) =>
       Effect.gen(function* () {
         const task = yield* loadTask(input.id);
-        const next = yield* runTask(task, "manual").pipe(
+        const next = yield* startRun(task, "manual").pipe(
           Effect.mapError((cause) =>
             taskError("Could not run schedule task.", { taskId: input.id, cause }),
           ),
