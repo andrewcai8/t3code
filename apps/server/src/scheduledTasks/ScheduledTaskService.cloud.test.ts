@@ -4,6 +4,7 @@ import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -90,5 +91,84 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
         .pipe(Effect.flip);
       assert.equal(bound.message, "A task that runs on a cloud machine must start a new chat.");
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
+  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+);
+
+const dependenciesWith = (fire: ScheduledCloudFire["Service"]["fire"]) =>
+  Layer.mergeAll(
+    NodeCrypto.layer,
+    Scheduler.layer,
+    Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+    Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+    Layer.succeed(ScheduledCloudFire, { fire }),
+  );
+
+it.effect("refuses to run a cloud task that is already running, as it does a local one", () =>
+  Effect.gen(function* () {
+    const fireStarted = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const cloud = (yield* service.upsert(taskInput("cloud", "e2b"))).task;
+      yield* service.runNow({ id: cloud.id });
+      yield* Deferred.await(fireStarted);
+      const again = yield* service.runNow({ id: cloud.id }).pipe(Effect.flip);
+      assert.equal(again.message, "Could not run schedule task.");
+      assert.equal(
+        (again.cause as { readonly message?: string } | undefined)?.message,
+        "Schedule task is already running.",
+      );
+    }).pipe(
+      Effect.provide(
+        ScheduledTaskService.layer.pipe(
+          Layer.provide(
+            dependenciesWith(() =>
+              Deferred.succeed(fireStarted, undefined).pipe(Effect.andThen(Effect.never)),
+            ),
+          ),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+);
+
+it.effect("settles a cloud fire cut short by shutdown from the same request after a restart", () =>
+  Effect.gen(function* () {
+    const fires = yield* Ref.make<ReadonlyArray<unknown>>([]);
+    const fireStarted = yield* Deferred.make<void>();
+    const dependencies = dependenciesWith(({ fireKey, firedAt }) =>
+      Ref.modify(fires, (calls) => [calls.length, [...calls, { fireKey, firedAt }]]).pipe(
+        // The first fire is still provisioning when the server stops; the host finishes it.
+        Effect.flatMap((attempt) =>
+          attempt === 0
+            ? Deferred.succeed(fireStarted, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.void,
+        ),
+      ),
+    );
+    const serverLayer = ScheduledTaskService.layer.pipe(Layer.provide(dependencies));
+
+    const taskId = yield* Effect.gen(function* () {
+      const tasks = yield* ScheduledTaskService.ScheduledTaskService;
+      const cloud = (yield* tasks.upsert(taskInput("cloud", "e2b"))).task;
+      yield* tasks.runNow({ id: cloud.id });
+      yield* Deferred.await(fireStarted);
+      return cloud.id;
+    }).pipe(Effect.provide(serverLayer));
+
+    const settled = yield* Effect.gen(function* () {
+      const tasks = yield* ScheduledTaskService.ScheduledTaskService;
+      return yield* tasks.subscribeList().pipe(
+        Stream.map(({ tasks }) => tasks.find((task) => task.id === taskId)),
+        Stream.filter((task) => task !== undefined && task.lastRunStatus !== "running"),
+        Stream.runHead,
+      );
+    }).pipe(Effect.provide(serverLayer));
+
+    const task = Option.getOrThrow(settled);
+    assert.equal(task?.lastRunStatus, "succeeded");
+    assert.equal(task?.lastRunError, null);
+    assert.equal(task?.runCount, 1);
+    const [first, resumed] = yield* Ref.get(fires);
+    assert.deepEqual(resumed, first);
   }).pipe(Effect.provide(SqlitePersistenceMemory)),
 );
