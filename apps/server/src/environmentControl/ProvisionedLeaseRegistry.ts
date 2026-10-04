@@ -72,6 +72,11 @@ export const StoredProvisionedLease = Schema.Struct({
    */
   firstTurn: Schema.optional(FirstTurnState),
   keep: Schema.optional(LeaseKeep),
+  /**
+   * Moves upkeep made in a row to keep a working chat on a new Mac, with no client heartbeat or
+   * resume since the first of them. Absent means none.
+   */
+  unwatchedMoves: Schema.optional(Schema.Int),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
@@ -109,7 +114,12 @@ export interface ProvisionedLeaseRegistry {
     readonly owner: ProvisionedLeaseOwner;
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
-  readonly touch: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
+  /** A client's heartbeat ends a run of unwatched moves; the host keeping a busy box awake does not. */
+  readonly touch: (
+    leaseId: string,
+    now?: Date,
+    by?: "client" | "host",
+  ) => Promise<ProvisionedLease | null>;
   /**
    * Records how a pending first turn ended. A failed one also drops the owner: that chat may
    * never exist, and the page that sends the message itself claims the box again.
@@ -134,6 +144,8 @@ export interface ProvisionedLeaseRegistry {
     readonly namespaceResource?: NamespaceResource;
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly remoteAccess?: RemoteAccess;
+    /** Upkeep moved the chat to a new Mac with no client asking; any other wake is a client's. */
+    readonly hostMove?: boolean;
     readonly now?: Date;
   }) => Promise<ProvisionedLease | null>;
   readonly expired: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
@@ -284,7 +296,7 @@ export function createProvisionedLeaseRegistry(
         next[index] = updated;
         return { leases: next, value: updated };
       }),
-    touch: (leaseId, now) =>
+    touch: (leaseId, now, by = "client") =>
       mutate((leases) => {
         const index = leases.findIndex((lease) => lease.leaseId === leaseId);
         const current = index < 0 ? undefined : leases[index];
@@ -297,8 +309,9 @@ export function createProvisionedLeaseRegistry(
         const timestamp = now ?? new Date();
         if (retentionExpired(current.retentionDeadline, timestamp.getTime()))
           return { leases, value: null };
+        const { unwatchedMoves: _moves, ...rest } = current;
         const updated: ProvisionedLease = {
-          ...current,
+          ...(by === "host" ? current : rest),
           updatedAt: timestamp.toISOString(),
           expiresAt: new Date(
             Math.min(
@@ -393,10 +406,11 @@ export function createProvisionedLeaseRegistry(
         )
           throw new Error("Provisioned lease identity conflict");
         const now = input.now ?? new Date();
-        const { keep, ...rest } = current;
+        const { keep, unwatchedMoves, ...rest } = current;
         const updated: ProvisionedLease = {
           ...rest,
           ...(keep === "user" ? { keep } : {}),
+          ...(input.hostMove ? { unwatchedMoves: (unwatchedMoves ?? 0) + 1 } : {}),
           ...(input.namespaceResource ? { namespaceResource: input.namespaceResource } : {}),
           ...(input.namespaceProxy ? { namespaceProxy: input.namespaceProxy } : {}),
           ...(input.remoteAccess ? { remoteAccess: input.remoteAccess } : {}),

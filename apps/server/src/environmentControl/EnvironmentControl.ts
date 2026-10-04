@@ -151,13 +151,22 @@ const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult
 });
 
 /**
+ * Moves to a new Mac upkeep makes in a row for a chat still working at its Mac's deadline while no
+ * client heartbeats or resumes it. Each costs a Mac and prompts the agent to continue, so a chat
+ * that never settles is put to sleep after this many.
+ */
+const MAX_UNWATCHED_MOVES = 3;
+
+/**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
- * save, or a release ahead of its Mac's deadline. Null for any other lease.
+ * save, or a release ahead of its Mac's deadline. `reopen` when the chat is
+ * off its Mac but must not sleep, such as one still working at the deadline,
+ * or on a Mac a move never finished restoring. Null for any other lease.
  */
 type UpkeepChat = (input: {
   readonly sandboxId: string;
-  readonly busy: () => Promise<boolean>;
-}) => Promise<"kept" | "released" | "missing" | null>;
+  readonly idle: () => Promise<boolean>;
+}) => Promise<"kept" | "released" | "reopen" | "missing" | null>;
 
 export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
@@ -205,6 +214,23 @@ export function createEnvironmentControl(
   const pullBeforeStop = async (lease: ProvisionedLease): Promise<void> => {
     if (lease.state !== "active" || !lease.remoteAccess) return;
     await pullUsage(lease).catch(() => undefined);
+  };
+  /** Brings a lease's machine back and records it awake: a client's resume, or a moved chat's. */
+  const wake = async (
+    lease: ProvisionedLease,
+    environmentId: string | undefined,
+    hostMove = false,
+  ) => {
+    const resumed = await driver.resume({
+      leaseId: lease.leaseId,
+      sandboxId: lease.sandboxId,
+      ...(environmentId ? { environmentId } : {}),
+      providerInstanceId: lease.providerInstanceId,
+      ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+      ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
+    });
+    if (!(await leaseRegistry?.markActive({ leaseId: lease.leaseId, hostMove, ...resumed })))
+      throw new Error("Lease could not be resumed");
   };
   const snapshot = async (target: ManagedTarget): Promise<ManagedEnvironment> => {
     let state: ComputeState;
@@ -291,7 +317,7 @@ export function createEnvironmentControl(
         if (
           lease.state === "active" &&
           (await activity(lease)) === "busy" &&
-          (await leaseRegistry.touch(lease.leaseId))
+          (await leaseRegistry.touch(lease.leaseId, undefined, "host"))
         )
           continue;
         const release =
@@ -493,16 +519,7 @@ export function createEnvironmentControl(
             message: "This workspace could not be found. Reconnect was refused.",
           };
         if (lease.state === "missing") throw new ProvisionedSandboxMissing();
-        const resumed = await driver.resume({
-          leaseId: lease.leaseId,
-          sandboxId: lease.sandboxId,
-          environmentId: input.environmentId,
-          providerInstanceId: lease.providerInstanceId,
-          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
-          ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
-        });
-        if (!(await leaseRegistry.markActive({ leaseId: lease.leaseId, ...resumed })))
-          throw new Error("Lease could not be resumed");
+        await wake(lease, input.environmentId);
         return { kind: "resumed" };
       })()
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
@@ -636,11 +653,25 @@ export function createEnvironmentControl(
             try {
               const result = await upkeepChat({
                 sandboxId: lease.sandboxId,
-                busy: async () => (await activity(lease)) === "busy",
+                idle: async () => (await activity(lease)) === "idle",
               });
               if (result === "released") await leaseRegistry.markPaused(lease.leaseId);
               if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
+              // Still held, so neither the reaper nor a client's pause lands between the move's
+              // release and its new Mac. A failed move leaves the lease awake for the next pass.
+              // Past the cap the chat sleeps as an idle one does, and opening it continues it; the
+              // release also ends a move a host restart left on a half-restored Mac.
+              if (result === "reopen") {
+                const moves = (await leaseRegistry.findById(lease.leaseId))?.unwatchedMoves ?? 0;
+                if (moves < MAX_UNWATCHED_MOVES)
+                  await wake(lease, lease.owner?.environmentId, true);
+                else if ((await driver.pause({ sandboxId: lease.sandboxId })) === "missing")
+                  await leaseRegistry.markMissing(lease.leaseId);
+                else await leaseRegistry.markPaused(lease.leaseId);
+              }
             } catch (cause) {
+              if (cause instanceof ProvisionedSandboxMissing)
+                await leaseRegistry.markMissing(lease.leaseId).catch(() => undefined);
               // The next pass retries. A snapshot over its cap fails here every pass until the
               // deadline, so it must be visible.
               reportFailure("cloud chat upkeep failed", { chatId: lease.leaseId, cause });
@@ -979,9 +1010,9 @@ export const layer = Layer.effect(
                 const state = await chat.mac.touch(chat.operation);
                 return state === "released" ? "paused" : state;
               },
-              upkeepChat: async ({ sandboxId, busy }) => {
+              upkeepChat: async ({ sandboxId, idle }) => {
                 const chat = await instanceChat(sandboxId);
-                return chat ? chat.mac.upkeep(chat.operation, chat.manifest, busy) : null;
+                return chat ? chat.mac.upkeep(chat.operation, chat.manifest, idle) : null;
               },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and

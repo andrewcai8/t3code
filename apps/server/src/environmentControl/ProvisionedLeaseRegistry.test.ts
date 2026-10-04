@@ -95,6 +95,28 @@ it.effect("persists proxy identity, renews a claimed lease, and gives one releas
   }),
 );
 
+it.effect("counts the host's moves in a row until a client heartbeats or resumes the chat", () =>
+  withRegistry(async (registry) => {
+    await registry.register({
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      providerInstanceId: "codex",
+    });
+    await registry.claim({ leaseId: "lease", owner: { environmentId: "remote", threadId: "t" } });
+    await registry.markActive({ leaseId: "lease", hostMove: true });
+    expect(await registry.markActive({ leaseId: "lease", hostMove: true })).toMatchObject({
+      unwatchedMoves: 2,
+    });
+    expect(
+      await registry.touch("lease", undefined, "host"),
+      "the host keeping a busy box awake is not a client",
+    ).toMatchObject({ unwatchedMoves: 2 });
+    expect((await registry.touch("lease"))?.unwatchedMoves).toBeUndefined();
+    await registry.markActive({ leaseId: "lease", hostMove: true });
+    expect((await registry.markActive({ leaseId: "lease" }))?.unwatchedMoves).toBeUndefined();
+  }),
+);
+
 it.effect("records the proxy an attach opened after registration and never lets it change", () =>
   withRegistry(async (first, second) => {
     const registration = { leaseId: "lease", sandboxId: "sandbox", providerInstanceId: "codex" };
