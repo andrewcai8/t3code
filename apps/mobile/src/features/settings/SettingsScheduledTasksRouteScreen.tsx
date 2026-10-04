@@ -5,6 +5,7 @@ import type {
   ScheduledTaskUpsertInput,
 } from "@t3tools/contracts";
 import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { MenuAction } from "@react-native-menu/menu";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import {
@@ -553,6 +554,8 @@ function TaskForm({
   const projects = useProjects().filter((project) => project.environmentId === environmentId);
   const config = useEnvironmentServerConfig(environmentId);
   const modelOptions = useMemo(() => buildModelOptions(config, null), [config]);
+  const cloudProviders = offeredProvisionProviders(config);
+  const cloud = draft.target !== "local";
   const upsert = useAtomCommand(serverEnvironment.upsertScheduledTask, {
     label: "scheduled task upsert",
     reportFailure: false,
@@ -589,7 +592,7 @@ function TaskForm({
       !draft.projectId ||
       !draft.modelSelection ||
       !schedule ||
-      (draft.workspace === "existing_worktree" && !draft.checkoutPath.trim())
+      (!cloud && draft.workspace === "existing_worktree" && !draft.checkoutPath.trim())
     ) {
       Alert.alert(
         "Incomplete task",
@@ -610,10 +613,11 @@ function TaskForm({
       schedule,
       enabled: draft.enabled,
       threadId: draft.task?.threadId ?? null,
+      target: draft.target,
       workspaceStrategy:
-        draft.workspace === "root"
+        !cloud && draft.workspace === "root"
           ? { type: "root" }
-          : draft.workspace === "existing_worktree"
+          : !cloud && draft.workspace === "existing_worktree"
             ? { type: "existing_worktree", worktreePath: draft.checkoutPath.trim() }
             : {
                 type: "worktree",
@@ -655,7 +659,7 @@ function TaskForm({
       ) : null}
       <SettingsSection>
         <SelectRow
-          label="Runs on"
+          label="Server"
           value={environmentLabel}
           valueIcon={
             <EnvironmentMachineSymbol
@@ -734,38 +738,62 @@ function TaskForm({
       </SettingsSection>
 
       <SettingsSection title="Workspace">
-        <SelectRow
-          label="Run in"
-          value={
-            draft.workspace === "worktree"
-              ? "New worktree"
-              : draft.workspace === "root"
-                ? "Project checkout"
-                : "Specific checkout"
-          }
-          actions={[
-            {
-              id: "worktree",
-              title: "New worktree",
-              state: draft.workspace === "worktree" ? "on" : undefined,
-            },
-            {
-              id: "root",
-              title: "Project checkout",
-              state: draft.workspace === "root" ? "on" : undefined,
-            },
-            {
-              id: "existing_worktree",
-              title: "Specific checkout",
-              state: draft.workspace === "existing_worktree" ? "on" : undefined,
-            },
-          ]}
-          onSelect={(id) => {
-            if (id === "worktree" || id === "root" || id === "existing_worktree")
-              setDraft({ ...draft, workspace: id });
-          }}
-        />
-        {draft.workspace === "worktree" ? (
+        {cloudProviders.length > 0 || cloud ? (
+          <SelectRow
+            label="Run on"
+            value={cloud ? cloudEnvironmentLabel(draft.target) : "This server"}
+            actions={[
+              { id: "local", title: "This server", state: cloud ? undefined : "on" },
+              // A task bound to an existing chat keeps running in that chat on this server.
+              ...(draft.task?.threadId
+                ? []
+                : cloudProviders.map((provider) => ({
+                    id: provider,
+                    title: cloudEnvironmentLabel(provider),
+                    state: draft.target === provider ? ("on" as const) : undefined,
+                  }))),
+            ]}
+            onSelect={(id) => {
+              if (id === "local" || id === "e2b" || id === "namespace")
+                setDraft({ ...draft, target: id });
+            }}
+          />
+        ) : null}
+        {cloud ? null : (
+          <SelectRow
+            label="Run in"
+            value={
+              draft.workspace === "worktree"
+                ? "New worktree"
+                : draft.workspace === "root"
+                  ? "Project checkout"
+                  : "Specific checkout"
+            }
+            actions={[
+              {
+                id: "worktree",
+                title: "New worktree",
+                state: draft.workspace === "worktree" ? "on" : undefined,
+              },
+              {
+                id: "root",
+                title: "Project checkout",
+                state: draft.workspace === "root" ? "on" : undefined,
+              },
+              {
+                id: "existing_worktree",
+                title: "Specific checkout",
+                state: draft.workspace === "existing_worktree" ? "on" : undefined,
+              },
+            ]}
+            onSelect={(id) => {
+              if (id === "worktree" || id === "root" || id === "existing_worktree")
+                setDraft({ ...draft, workspace: id });
+            }}
+            borderTop={cloudProviders.length > 0}
+          />
+        )}
+        {cloud || draft.workspace === "worktree" ? (
           <PickerRow
             label="Base branch"
             value={resolveNewTaskBranchLabel({
@@ -778,7 +806,7 @@ function TaskForm({
             onPress={() => navigation.navigate("SettingsScheduledTaskBranch")}
           />
         ) : null}
-        {draft.workspace === "existing_worktree" ? (
+        {!cloud && draft.workspace === "existing_worktree" ? (
           <FormField
             label="Checkout path"
             disabled={saving}
@@ -1018,6 +1046,7 @@ function EnvironmentTasks({
               </Text>
               <Text className="text-sm text-foreground-muted" numberOfLines={2}>
                 {describeSchedule(task)}
+                {task.target === "local" ? "" : ` · ${cloudEnvironmentLabel(task.target)}`}
                 {!task.enabled
                   ? " · Paused"
                   : task.nextRunAt

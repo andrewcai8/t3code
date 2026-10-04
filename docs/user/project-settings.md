@@ -63,6 +63,11 @@ environment's time zone, which may differ from your phone's.
 You can edit, pause, resume, run immediately, or delete a task from the list.
 Leaving an edited form asks before discarding unsaved changes.
 
+On a server that can start cloud machines, **Run on** can send each run to a fresh E2B box or
+Namespace Mac instead. Every run clones the project's repository at the base branch and starts a
+new chat there, on the account for the task's model with the most usage left. The chat shows in
+the sidebar like any cloud chat. The machine and its chat are removed a day after the run.
+
 ## Defaults and inheritance
 
 General contains the model and workspace for new threads. Integrations controls agent browser

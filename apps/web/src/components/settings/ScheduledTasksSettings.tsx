@@ -24,6 +24,7 @@ import {
   ProviderInstanceId,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
+import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -104,6 +105,7 @@ const EMPTY_DRAFT: DraftState = {
   weekdays: new Set([1, 2, 3, 4, 5]),
   projectId: "",
   threadId: "",
+  target: "local",
   workspaceMode: "worktree",
   baseRef: "main",
   startFromOrigin: true,
@@ -414,7 +416,8 @@ function ScheduledTaskRow({
       status={
         <div className="flex flex-wrap items-center gap-2">
           <span>
-            {scheduleLabel(task.schedule)} ·{" "}
+            {scheduleLabel(task.schedule)}
+            {task.target === "local" ? null : ` · ${cloudEnvironmentLabel(task.target)}`} ·{" "}
             {task.enabled
               ? task.nextRunAt
                 ? `Next run ${relativeLabel(task.nextRunAt)}`
@@ -521,6 +524,8 @@ function ScheduledTaskEditorDialog({
     !tasksQuery.data.tasks.some((entry) => entry.id === draft.editingId);
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
+  const cloudProviders = offeredProvisionProviders(environment?.serverConfig);
+  const cloud = draft.target !== "local";
 
   // The real model picker is keyed by a `${instanceId}:${model}` string, which
   // is exactly how the draft stores its selection.
@@ -573,7 +578,11 @@ function ScheduledTaskEditorDialog({
       reportFailure("Invalid interval", "Enter an interval of at least one minute.");
       return;
     }
-    if (draft.workspaceMode === "existing_worktree" && !draft.existingWorktreePath.trim()) {
+    if (
+      !cloud &&
+      draft.workspaceMode === "existing_worktree" &&
+      !draft.existingWorktreePath.trim()
+    ) {
       reportFailure("Checkout path is required", "Enter the path of the checkout to run in.");
       return;
     }
@@ -586,9 +595,9 @@ function ScheduledTaskEditorDialog({
         ? draft.baseModelSelection
         : selection;
     const workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy =
-      draft.workspaceMode === "root"
+      !cloud && draft.workspaceMode === "root"
         ? { type: "root" }
-        : draft.workspaceMode === "existing_worktree"
+        : !cloud && draft.workspaceMode === "existing_worktree"
           ? { type: "existing_worktree", worktreePath: draft.existingWorktreePath.trim() }
           : {
               type: "worktree",
@@ -603,6 +612,7 @@ function ScheduledTaskEditorDialog({
       schedule,
       projectId: selectedProjectId as ProjectId,
       threadId: draft.threadId ? (draft.threadId as ThreadId) : null,
+      target: draft.target,
       workspaceStrategy,
       modelSelection,
       runtimeMode: draft.runtimeMode,
@@ -644,7 +654,7 @@ function ScheduledTaskEditorDialog({
             {!connected ? (
               <p className="text-sm text-destructive">Reconnect this environment before saving.</p>
             ) : null}
-            <Field label="Runs on" htmlFor="scheduled-task-environment">
+            <Field label="Server" htmlFor="scheduled-task-environment">
               <Select
                 value={environmentId}
                 disabled={task !== null || saving}
@@ -655,6 +665,7 @@ function ScheduledTaskEditorDialog({
                   setDraft((current) => ({
                     ...current,
                     projectId: "",
+                    target: "local",
                     modelKey: "",
                     baseModelSelection: null,
                     baseRef: "main",
@@ -687,6 +698,30 @@ function ScheduledTaskEditorDialog({
                 </SelectPopup>
               </Select>
             </Field>
+            {cloudProviders.length > 0 || cloud ? (
+              <Field label="Run on" htmlFor="scheduled-task-target">
+                <Select
+                  value={draft.target}
+                  onValueChange={(target) => {
+                    if (target) setDraft((current) => ({ ...current, target }));
+                  }}
+                >
+                  <SelectTrigger id="scheduled-task-target" size="sm">
+                    <SelectValue>
+                      {cloud ? cloudEnvironmentLabel(draft.target) : "This server"}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value="local">This server</SelectItem>
+                    {cloudProviders.map((provider) => (
+                      <SelectItem key={provider} value={provider} disabled={draft.threadId !== ""}>
+                        {cloudEnvironmentLabel(provider)}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </Field>
+            ) : null}
             {tasksQuery.error ? (
               <p className="text-sm text-destructive" role="status">
                 {tasksQuery.error}
@@ -731,26 +766,28 @@ function ScheduledTaskEditorDialog({
                 </Select>
               </Field>
 
-              <Field label="Workspace" htmlFor="scheduled-task-workspace">
-                <Select
-                  value={draft.workspaceMode}
-                  onValueChange={(value) =>
-                    setDraft((current) => ({ ...current, workspaceMode: value as WorkspaceMode }))
-                  }
-                >
-                  <SelectTrigger size="sm" id="scheduled-task-workspace">
-                    <SelectValue>{WORKSPACE_MODE_LABELS[draft.workspaceMode]}</SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    <SelectItem value="worktree">Create a new worktree</SelectItem>
-                    <SelectItem value="root">Use the project checkout</SelectItem>
-                    <SelectItem value="existing_worktree">Use a specific checkout</SelectItem>
-                  </SelectPopup>
-                </Select>
-              </Field>
+              {cloud ? null : (
+                <Field label="Workspace" htmlFor="scheduled-task-workspace">
+                  <Select
+                    value={draft.workspaceMode}
+                    onValueChange={(value) =>
+                      setDraft((current) => ({ ...current, workspaceMode: value as WorkspaceMode }))
+                    }
+                  >
+                    <SelectTrigger size="sm" id="scheduled-task-workspace">
+                      <SelectValue>{WORKSPACE_MODE_LABELS[draft.workspaceMode]}</SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      <SelectItem value="worktree">Create a new worktree</SelectItem>
+                      <SelectItem value="root">Use the project checkout</SelectItem>
+                      <SelectItem value="existing_worktree">Use a specific checkout</SelectItem>
+                    </SelectPopup>
+                  </Select>
+                </Field>
+              )}
             </div>
 
-            {draft.workspaceMode === "worktree" ? (
+            {cloud || draft.workspaceMode === "worktree" ? (
               <Field label="Base branch" htmlFor="scheduled-task-base-ref">
                 <WorktreeBaseBranchPicker
                   key={`${environmentId}:${selectedProjectId}`}
@@ -767,7 +804,7 @@ function ScheduledTaskEditorDialog({
                 />
               </Field>
             ) : null}
-            {draft.workspaceMode === "existing_worktree" ? (
+            {!cloud && draft.workspaceMode === "existing_worktree" ? (
               <Field label="Checkout path" htmlFor="scheduled-task-checkout">
                 <Input
                   id="scheduled-task-checkout"

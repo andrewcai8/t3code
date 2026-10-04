@@ -97,6 +97,7 @@ const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [3, "BoxUsageOrigin"],
   [4, "ProvisionedChats"],
   [5, "ProvisionedChatsV2"],
+  [6, "ScheduledTaskTarget"],
 ];
 
 /** Replaces the ledger above upstream's shared 51 with what an older fork build recorded. */

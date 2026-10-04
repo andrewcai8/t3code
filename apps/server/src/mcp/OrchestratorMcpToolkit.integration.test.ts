@@ -438,6 +438,7 @@ function scheduledTaskFromUpsert(input: ScheduledTaskUpsertInput): ScheduledTask
     schedule: input.schedule,
     projectId: input.projectId,
     threadId: input.threadId ?? null,
+    target: input.target ?? "local",
     workspaceStrategy: input.workspaceStrategy,
     modelSelection: input.modelSelection,
     runtimeMode: input.runtimeMode,
