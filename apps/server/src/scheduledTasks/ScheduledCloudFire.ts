@@ -21,6 +21,7 @@ import * as Option from "effect/Option";
 
 import { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { RepositoryIdentityResolver } from "../project/RepositoryIdentityResolver.ts";
 
 /**
  * How long a fire's machine may live. The deadline is frozen into the provision request, so it
@@ -32,7 +33,7 @@ const PROVISION_TIMEOUT = Duration.minutes(30);
 const PROVISION_RETRY = Duration.seconds(10);
 
 /** A UUID derived from one fire, so a retried fire names the same request, chat, and message. */
-export function derivedFireId(fireKey: string, purpose: string): string {
+function derivedFireId(fireKey: string, purpose: string): string {
   const hex = NodeCrypto.createHash("sha256").update(`${fireKey}:${purpose}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
@@ -100,6 +101,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const control = yield* EnvironmentControl;
     const projects = yield* ProjectService.ProjectService;
+    const repositories = yield* RepositoryIdentityResolver;
 
     const untilReady = (task: ScheduledTask, request: EnvironmentProvisionInput) =>
       Effect.gen(function* () {
@@ -128,12 +130,15 @@ export const layer = Layer.effect(
           .getById(task.projectId)
           .pipe(Effect.mapError((cause) => failed(task, cause.message)));
         if (Option.isNone(project)) return yield* failed(task, "The task's project is gone.");
+        // Resolved here rather than read off the project, whose identity stays empty until a
+        // background lookup lands, as on the first fire after a restart.
+        const identity = yield* repositories.resolve(project.value.workspaceRoot);
         const request = cloudFireInput({
           task,
           provider,
           fireKey,
           firedAt: yield* DateTime.now,
-          repository: cloneRepository(project.value.repositoryIdentity),
+          repository: cloneRepository(identity),
         });
         // A refusal can follow an allocation, so any failure may leave a machine behind.
         yield* untilReady(task, request).pipe(

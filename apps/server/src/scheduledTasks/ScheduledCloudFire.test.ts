@@ -16,6 +16,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { RepositoryIdentityResolver } from "../project/RepositoryIdentityResolver.ts";
 import * as ScheduledCloudFire from "./ScheduledCloudFire.ts";
 
 const task = Schema.decodeUnknownSync(ScheduledTask)({
@@ -89,7 +90,7 @@ it("names the same request, chat, and message for every retry of one fire", () =
   assert.equal(retry.chat?.firstTurn?.messageId, first.chat?.firstTurn?.messageId);
   assert.notEqual(next.requestId, first.requestId);
   assert.notEqual(next.chat?.threadId, first.chat?.threadId);
-  assert.notEqual(first.chat?.threadId, first.requestId);
+  assert.notEqual<string | undefined>(first.chat?.threadId, first.requestId);
 });
 
 it("clones the default branch of a repository-less or branchless project as asked", () => {
@@ -128,9 +129,13 @@ const fireWith = (results: ReadonlyArray<EnvironmentProvisionResult>) =>
           Layer.mock(ProjectService.ProjectService)({
             getById: () =>
               Effect.succeed(
-                Option.some({
-                  repositoryIdentity: { owner: "acme", name: "widgets" },
-                } as never),
+                Option.some({ workspaceRoot: "/work/widgets", repositoryIdentity: null } as never),
+              ),
+          }),
+          Layer.mock(RepositoryIdentityResolver)({
+            resolve: (cwd) =>
+              Effect.succeed(
+                cwd === "/work/widgets" ? ({ owner: "acme", name: "widgets" } as never) : null,
               ),
           }),
         ),

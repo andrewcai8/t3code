@@ -525,10 +525,12 @@ export const layer = Layer.effect(
         // A cloud task never binds a thread (upsert refuses it), so it always takes the launch
         // branch, which starts its chat on a fresh machine instead of here.
         const target = active.target;
-        const launch =
+        const launch = (
+          input: Parameters<typeof threadLaunch.launch>[0],
+        ): Effect.Effect<unknown, ThreadLaunchService.ThreadLaunchError | ScheduledTaskError> =>
           target === "local"
-            ? threadLaunch.launch
-            : () => cloudFire.fire({ task: active, provider: target, fireKey });
+            ? threadLaunch.launch(input)
+            : cloudFire.fire({ task: active, provider: target, fireKey });
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
         // aborting before markCompleted.
