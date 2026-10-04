@@ -635,11 +635,42 @@ describe("Namespace Mac runtime", () => {
     const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
     const op = t.operation(ready.environmentId);
     await t.write("agent.txt", "work\n");
-    expect(await t.runtime.upkeep(op, t.manifest, async () => true)).toBe("kept");
-    expect(await t.runtime.upkeep(op, t.manifest, async () => false)).toBe("released");
+    expect(await t.runtime.upkeep(op, t.manifest, async () => false)).toBe("kept");
+    expect(await t.runtime.upkeep(op, t.manifest, async () => true)).toBe("released");
     expect(t.namespace.live()).toEqual([]);
     expect(await t.runtime.touch(op)).toBe("released");
     expect(t.namespace.departures.map(({ departure }) => departure)).toEqual(["abandon"]);
+  });
+
+  it("moves a chat still working at its deadline off its Mac, and asks for a new Mac until one holds it", async () => {
+    const t = await setup({ lifetimeMs: 5 * MINUTE });
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    const op = t.operation(ready.environmentId);
+    const idle = async () => false;
+    await t.write("agent.txt", "mid-turn\n");
+    expect(await t.runtime.upkeep(op, t.manifest, idle)).toBe("reopen");
+    expect(t.namespace.live()).toEqual([]);
+    expect(await t.record()).toMatchObject({ kind: "idle", snapshot: { mode: "final" } });
+    expect(
+      await t.runtime.upkeep(op, t.manifest, idle),
+      "a host that restarted before reopening it still reopens it",
+    ).toBe("reopen");
+
+    await t.runtime.resume(op, t.manifest);
+    expect(await t.read("agent.txt")).toBe("mid-turn\n");
+    const moved = await t.record();
+    if (moved?.kind !== "live") throw new Error("expected a live Mac");
+    await t.namespace.kill(moved.mac.incarnation.instanceId);
+    expect(
+      await t.runtime.upkeep(op, t.manifest, idle),
+      "an awake chat whose Mac died goes back on one",
+    ).toBe("reopen");
+
+    await t.runtime.resume(op, t.manifest);
+    expect(
+      await t.runtime.upkeep(op, t.manifest, async () => true),
+      "an idle chat at its deadline is released, not moved",
+    ).toBe("released");
   });
 });
 

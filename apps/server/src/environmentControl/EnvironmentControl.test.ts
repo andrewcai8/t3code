@@ -150,6 +150,43 @@ describe("managed cloud commands", () => {
     });
   });
 
+  it("puts a chat its upkeep moved off a Mac back on one without a client, retrying until it lands", async () => {
+    await withLease(async ({ registry, driver }) => {
+      const outcomes: Array<Error | "moved"> = [new Error("no Mac yet"), "moved"];
+      const reported: string[] = [];
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          resume: async () => {
+            const outcome = outcomes.shift();
+            if (outcome instanceof Error) throw outcome;
+            if (outcome === undefined) throw new ProvisionedSandboxMissing();
+            return { namespaceProxy: { proxyId: "proxy", proxyOrigin: "https://moved.example" } };
+          },
+          upkeepChat: async () => "reopen",
+        },
+        registry,
+        async () => ({ activity: "busy" }),
+        async () => {},
+        (message) => reported.push(message),
+      );
+      await manager.upkeepCloudChats();
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+      expect(reported).toEqual(["cloud chat upkeep failed"]);
+      await manager.upkeepCloudChats();
+      expect(await registry.findById("lease")).toMatchObject({
+        state: "active",
+        namespaceProxy: { proxyId: "proxy", proxyOrigin: "https://moved.example" },
+      });
+      await manager.upkeepCloudChats();
+      expect(
+        await registry.findById("lease"),
+        "an expired snapshot ends the retries",
+      ).toMatchObject({ state: "missing" });
+    });
+  });
+
   it("upkeeps each chat on its own, so one slow save never holds up another chat's deadline", async () => {
     await withSqlRegistry(async (registry) => {
       // The slow chat is listed first, so a pass that awaited chats in turn would never reach the other.
