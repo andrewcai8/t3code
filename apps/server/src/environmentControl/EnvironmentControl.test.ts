@@ -187,6 +187,58 @@ describe("managed cloud commands", () => {
     });
   });
 
+  it("moves a working chat at most three times in a row with no client, then lets it sleep until opened", async () => {
+    await withLease(async ({ registry, driver }) => {
+      const resumes: Array<Error | "moved"> = [new Error("no Mac yet")];
+      const paused: string[] = [];
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          resume: async () => {
+            const outcome = resumes.shift() ?? "moved";
+            if (outcome instanceof Error) throw outcome;
+            return {};
+          },
+          pause: async ({ sandboxId }) => void paused.push(sandboxId),
+          // Every pass finds the chat still working at its Mac's deadline.
+          upkeepChat: async () => "reopen",
+        },
+        registry,
+        async () => ({ activity: "busy" }),
+      );
+      const pass = async () => {
+        await manager.upkeepCloudChats();
+        return (await registry.findById("lease"))?.state;
+      };
+      const passes = async (count: number) => {
+        const states: Array<string | undefined> = [];
+        for (let index = 0; index < count; index++) states.push(await pass());
+        return states;
+      };
+
+      expect(await passes(5), "a failed move is not counted").toEqual([
+        "active",
+        "active",
+        "active",
+        "active",
+        "paused",
+      ]);
+      expect(paused).toEqual(["sandbox"]);
+      expect(await pass(), "a paused chat is not moved").toBe("paused");
+
+      expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
+      expect(await passes(2)).toEqual(["active", "active"]);
+      expect(await manager.touch({ leaseId: "lease" })).toEqual({ kind: "touched" });
+      expect(await passes(4), "a client heartbeat starts the count again").toEqual([
+        "active",
+        "active",
+        "active",
+        "paused",
+      ]);
+    });
+  });
+
   it("upkeeps each chat on its own, so one slow save never holds up another chat's deadline", async () => {
     await withSqlRegistry(async (registry) => {
       // The slow chat is listed first, so a pass that awaited chats in turn would never reach the other.

@@ -151,10 +151,17 @@ const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult
 });
 
 /**
+ * Moves to a new Mac upkeep makes in a row for a chat still working at its Mac's deadline while no
+ * client heartbeats or resumes it. Each costs a Mac and prompts the agent to continue, so a chat
+ * that never settles is put to sleep after this many.
+ */
+const MAX_UNWATCHED_MOVES = 3;
+
+/**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
  * save, or a release ahead of its Mac's deadline. `reopen` when the chat is
- * off its Mac but must not sleep, such as one still working at the deadline.
- * Null for any other lease.
+ * off its Mac but must not sleep, such as one still working at the deadline,
+ * or on a Mac a move never finished restoring. Null for any other lease.
  */
 type UpkeepChat = (input: {
   readonly sandboxId: string;
@@ -209,7 +216,11 @@ export function createEnvironmentControl(
     await pullUsage(lease).catch(() => undefined);
   };
   /** Brings a lease's machine back and records it awake: a client's resume, or a moved chat's. */
-  const wake = async (lease: ProvisionedLease, environmentId: string | undefined) => {
+  const wake = async (
+    lease: ProvisionedLease,
+    environmentId: string | undefined,
+    hostMove = false,
+  ) => {
     const resumed = await driver.resume({
       leaseId: lease.leaseId,
       sandboxId: lease.sandboxId,
@@ -218,7 +229,7 @@ export function createEnvironmentControl(
       ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
       ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
     });
-    if (!(await leaseRegistry?.markActive({ leaseId: lease.leaseId, ...resumed })))
+    if (!(await leaseRegistry?.markActive({ leaseId: lease.leaseId, hostMove, ...resumed })))
       throw new Error("Lease could not be resumed");
   };
   const snapshot = async (target: ManagedTarget): Promise<ManagedEnvironment> => {
@@ -306,7 +317,7 @@ export function createEnvironmentControl(
         if (
           lease.state === "active" &&
           (await activity(lease)) === "busy" &&
-          (await leaseRegistry.touch(lease.leaseId))
+          (await leaseRegistry.touch(lease.leaseId, undefined, "host"))
         )
           continue;
         const release =
@@ -648,7 +659,16 @@ export function createEnvironmentControl(
               if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
               // Still held, so neither the reaper nor a client's pause lands between the move's
               // release and its new Mac. A failed move leaves the lease awake for the next pass.
-              if (result === "reopen") await wake(lease, lease.owner?.environmentId);
+              // Past the cap the chat sleeps as an idle one does, and opening it continues it; the
+              // release also ends a move a host restart left on a half-restored Mac.
+              if (result === "reopen") {
+                const moves = (await leaseRegistry.findById(lease.leaseId))?.unwatchedMoves ?? 0;
+                if (moves < MAX_UNWATCHED_MOVES)
+                  await wake(lease, lease.owner?.environmentId, true);
+                else if ((await driver.pause({ sandboxId: lease.sandboxId })) === "missing")
+                  await leaseRegistry.markMissing(lease.leaseId);
+                else await leaseRegistry.markPaused(lease.leaseId);
+              }
             } catch (cause) {
               if (cause instanceof ProvisionedSandboxMissing)
                 await leaseRegistry.markMissing(lease.leaseId).catch(() => undefined);
