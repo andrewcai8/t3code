@@ -1,6 +1,16 @@
-import { assert, it } from "@effect/vitest";
+// @effect-diagnostics nodeBuiltinImport:off - the test reads the repo's real lockfile.
+import * as NodeFS from "node:fs";
 
-import { findUntestedPackages, resolveRuntimeDependencies } from "./runtimeDependencies.ts";
+import { assert, it } from "@effect/vitest";
+import { fromYaml } from "@t3tools/shared/schemaYaml";
+import e2bPackage from "e2b/package.json" with { type: "json" };
+import * as Schema from "effect/Schema";
+
+import {
+  findUntestedPackages,
+  PnpmLock,
+  resolveRuntimeDependencies,
+} from "./runtimeDependencies.ts";
 
 const lock = {
   importers: {
@@ -78,5 +88,23 @@ it("fails when pnpm-lock.yaml is missing a package in the closure", () => {
         "apps/server",
       ),
     /no snapshot for zod@3.25.76/,
+  );
+});
+
+// The bundle inlines e2b, but its `import("undici")` resolves from the runtime's node_modules.
+// With only Cursor's undici 5 there, HTTP/2 never ended a body-less DELETE, so E2B refused
+// every sandbox kill and snapshot delete after a 10 s read timeout.
+it("installs the undici major the bundled E2B SDK was built against", () => {
+  const { dependencies, overrides } = resolveRuntimeDependencies(
+    Schema.decodeUnknownSync(fromYaml(PnpmLock))(
+      NodeFS.readFileSync(new URL("../../../pnpm-lock.yaml", import.meta.url), "utf8"),
+    ),
+    "apps/server",
+  );
+  const major = (version: string | undefined) => version?.replace(/^\D*/, "").split(".")[0];
+
+  assert.deepStrictEqual(
+    { installed: major(dependencies.undici ?? overrides.undici) },
+    { installed: major(e2bPackage.dependencies.undici) },
   );
 });
