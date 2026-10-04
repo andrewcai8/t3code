@@ -700,27 +700,34 @@ export function makeNamespaceMacRuntime(config: {
     },
     /**
      * One upkeep pass for an awake chat: release a Mac nearing its deadline,
-     * idle ones first, otherwise save what changed since the last pass.
+     * idle ones first, otherwise save what changed since the last pass. Only a
+     * chat confirmed idle is released to sleep; any other awake chat off its Mac
+     * is `reopen`, owed a new one, so a host restart mid-move still finishes it.
      */
     upkeep: async (
       operation: ProvisionOperation,
       manifest: ProvisionPreparationManifest,
-      busy: () => Promise<boolean>,
-    ): Promise<"kept" | ChatOutcome> => {
+      idle: () => Promise<boolean>,
+    ): Promise<"kept" | "reopen" | ChatOutcome> => {
       const chatId = operation.request.requestId;
+      const reopen = (outcome: ChatOutcome) => (outcome === "released" ? "reopen" : outcome);
       const record = await store.read(chatId);
-      if (record?.kind !== "live") return outcome(record);
+      if (record?.kind !== "live") return reopen(outcome(record));
       const current = chat(operation, manifest);
       const facts = await current.ports.facts();
       if (!facts.instances.includes(record.mac.incarnation.instanceId)) {
         const gone = await settleGone(chatId, record.mac.incarnation.instanceId);
-        return gone === "running" ? "kept" : gone;
+        return gone === "running" ? "kept" : reopen(gone);
       }
       const instanceId = record.mac.incarnation.instanceId;
       const left = record.mac.incarnation.deadline - facts.now;
-      if (left < ROTATE_FORCE_MS || (left < ROTATE_IDLE_MS && !(await busy()))) {
-        log("namespace mac released before its deadline", { chatId, leftMs: left });
-        return release(operation, manifest);
+      if (left < ROTATE_IDLE_MS) {
+        const asleep = await idle();
+        if (asleep || left < ROTATE_FORCE_MS) {
+          log("namespace mac released before its deadline", { chatId, leftMs: left, asleep });
+          const released = await release(operation, manifest);
+          return asleep ? released : reopen(released);
+        }
       }
       const last = lastSave.get(instanceId);
       if (last !== undefined && facts.now - last < SAVE_INTERVAL_MS) return "kept";
