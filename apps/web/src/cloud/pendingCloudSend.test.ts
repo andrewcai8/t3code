@@ -11,6 +11,7 @@ import {
 import { draftSessionHasInvestedWork } from "./draftInvestedWork";
 import { setDraftPendingEnvironmentSend } from "./pendingCloudSend";
 import type { PendingCloudEnvironmentSend } from "./pendingCloudSendSchema";
+import { discardDraftRow } from "./sidebarCloud";
 
 const environmentId = EnvironmentId.make("environment-local");
 const projectRef = scopeProjectRef(environmentId, ProjectId.make("project-a"));
@@ -73,6 +74,31 @@ describe("a draft's pending cloud send", () => {
 
     const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
     expect(persisted.draftThreadsByThreadKey[draftId]?.pendingEnvironmentSend).toEqual(pending);
+  });
+
+  it("drops a send whose composer it already cleared when its sidebar row is discarded", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "start the sandbox");
+    setDraftPendingEnvironmentSend(draftId, {
+      provider: "e2b",
+      preview: "start the sandbox",
+      messageId: "msg-pending",
+      createdAt: "2026-09-14T00:00:00.000Z",
+      prompt: "start the sandbox",
+      outgoingMessageText: "start the sandbox",
+      phase: "failed",
+      startedAt: "2026-09-14T00:00:01.000Z",
+      endedAt: "2026-09-14T00:00:02.000Z",
+      error: "No capacity",
+      repository: "me/repo",
+      branch: "feature",
+    });
+    store.clearComposerContent(draftId);
+
+    discardDraftRow(draftId);
+
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
   });
 
   it("reloads an environment send cut off mid-setup as it was, for the page to pick back up", () => {
