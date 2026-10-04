@@ -5,13 +5,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import packageJson from "../package.json" with { type: "json" };
-import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as Schema from "effect/Schema";
-
-const WorkspaceConfig = Schema.Struct({
-  catalog: Schema.optional(Schema.Record(Schema.String, Schema.String)),
-});
+import {
+  findUntestedPackages,
+  PnpmLock,
+  resolveRuntimeDependencies,
+} from "./runtimeDependencies.ts";
 
 const args = process.argv.slice(2);
 const output = args.find((arg) => !arg.startsWith("--"));
@@ -27,8 +27,11 @@ if (platform && !install) {
 }
 
 const repoRoot = NodePath.resolve(new URL("../../..", import.meta.url).pathname);
-const workspace = Schema.decodeUnknownSync(fromYaml(WorkspaceConfig))(
-  await NodeFSP.readFile(NodePath.join(repoRoot, "pnpm-workspace.yaml"), "utf8"),
+const { dependencies, overrides, versions } = resolveRuntimeDependencies(
+  Schema.decodeUnknownSync(fromYaml(PnpmLock))(
+    await NodeFSP.readFile(NodePath.join(repoRoot, "pnpm-lock.yaml"), "utf8"),
+  ),
+  "apps/server",
 );
 const stage = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-runtime-artifact-"));
 try {
@@ -69,14 +72,8 @@ try {
     bin: packageJson.bin,
     engines: packageJson.engines,
     files: packageJson.files,
-    dependencies: resolveCatalogDependencies(
-      packageJson.dependencies,
-      workspace.catalog ?? {},
-      "apps/server",
-    ),
-    // @opencode/client pins an older effect as an optional peer. As the lockfile's root this
-    // package would fail to resolve; the server runs one effect, so every dependent gets ours.
-    overrides: { effect: "$effect" },
+    dependencies,
+    overrides,
   };
   await NodeFSP.writeFile(
     NodePath.join(stage, "package.json"),
@@ -88,6 +85,12 @@ try {
     { cwd: stage, stdio: "inherit" },
   );
   if (lock.status !== 0) throw new Error("npm could not resolve the runtime artifact lockfile");
+  const untested = findUntestedPackages(
+    JSON.parse(await NodeFSP.readFile(NodePath.join(stage, "package-lock.json"), "utf8")),
+    versions,
+  );
+  if (untested.length > 0)
+    throw new Error(`npm resolved versions pnpm-lock.yaml does not have: ${untested.join(", ")}`);
   if (install) {
     if (platform) {
       // E2B templates are linux/amd64. Install node-pty's native addon here so
@@ -120,7 +123,6 @@ try {
             "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 make g++",
             "npm ci --omit=dev --no-audit --no-fund --foreground-scripts",
             "rm -rf node_modules/node-pty/prebuilds/darwin-* node_modules/node-pty/prebuilds/win32-*",
-            "rm -rf node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl",
             "rm -rf node_modules/@ff-labs/fff-bin-linux-x64-musl",
             "rm -rf node_modules/@yuuang/ffi-rs-linux-x64-musl",
             "find . -name '*.map' -delete",
