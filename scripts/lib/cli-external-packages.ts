@@ -50,6 +50,8 @@ export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
 
 // These are Cursor's disk-backed dependency closure. Match package boundaries
 // so "zod" does not also externalize unrelated packages such as zod-to-json-schema.
+// The inlined e2b SDK also imports undici at runtime, which is why the server
+// declares the major e2b needs instead of leaving Cursor's undici 5 on top.
 const CURSOR_RUNTIME_DEPENDENCIES = [
   "@bufbuild/protobuf",
   "@connectrpc/connect",

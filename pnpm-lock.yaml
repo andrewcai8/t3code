@@ -580,6 +580,9 @@ importers:
       stream-json:
         specifier: 3.6.0
         version: 3.6.0
+      undici:
+        specifier: 7.29.1
+        version: 7.29.1
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
