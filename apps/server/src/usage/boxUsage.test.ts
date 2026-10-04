@@ -421,6 +421,36 @@ describe("foldBoxUsage", () => {
     );
   });
 
+  it("keeps a box's cost split by token type and speed", () => {
+    const folded = foldBoxUsage(
+      hostSummary,
+      { timeZone: "UTC", sinceDay: hostSummary.sinceDay, untilDay: hostSummary.untilDay },
+      [
+        row("lease-live", false, [
+          hourBucket("2026-09-01T03:00:00.000Z", 10, {
+            categoryCostUsd: { input: 4, cacheRead: 1, cacheWrite: 0, output: 5 },
+            fastCostUsd: 10,
+            speedPremiumUsd: 5,
+          }),
+          hourBucket("2026-09-01T04:00:00.000Z", 20, {
+            categoryCostUsd: { input: 8, cacheRead: 2, cacheWrite: 0, output: 10 },
+          }),
+        ]),
+      ],
+      { hostId: "host", path: "/state/cloud-box-usage" },
+    );
+
+    assert.deepStrictEqual(
+      folded.buckets.map((bucket) => [
+        bucket.categoryCostUsd,
+        bucket.fastCostUsd,
+        bucket.ultrafastCostUsd,
+        bucket.speedPremiumUsd,
+      ]),
+      [[{ input: 12, cacheRead: 3, cacheWrite: 0, output: 15 }, 10, undefined, 5]],
+    );
+  });
+
   it("keeps hour buckets in an hourly window", () => {
     const folded = foldBoxUsage(
       hostSummary,

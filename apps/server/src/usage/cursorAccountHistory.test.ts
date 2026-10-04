@@ -20,7 +20,7 @@ const record = (timestampMs: number): UsageRecord => ({
     reasoningTokens: 0,
   },
   reportedCostUsd: 0.01,
-  fast: false,
+  speed: "standard",
   dedupeKey: `cursor-account:a:${timestampMs}`,
 });
 

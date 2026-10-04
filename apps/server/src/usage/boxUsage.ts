@@ -39,7 +39,6 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import { makeDayFormatter } from "./usageAggregation.ts";
-import { addTotals } from "./usageTranscripts.ts";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -360,11 +359,35 @@ export function boxUsageListWindow(input: UsageSummaryInput): {
 }
 
 function sumBuckets(a: UsageBucket, b: UsageBucket): UsageBucket {
+  const ca = a.categoryCostUsd;
+  const cb = b.categoryCostUsd;
+  const fastCostUsd = (a.fastCostUsd ?? 0) + (b.fastCostUsd ?? 0);
+  const ultrafastCostUsd = (a.ultrafastCostUsd ?? 0) + (b.ultrafastCostUsd ?? 0);
+  const speedPremiumUsd = (a.speedPremiumUsd ?? 0) + (b.speedPremiumUsd ?? 0);
   return {
     ...a,
-    totals: addTotals(a.totals, b.totals),
+    totals: {
+      uncachedInputTokens: a.totals.uncachedInputTokens + b.totals.uncachedInputTokens,
+      cachedInputTokens: a.totals.cachedInputTokens + b.totals.cachedInputTokens,
+      cacheCreationTokens: a.totals.cacheCreationTokens + b.totals.cacheCreationTokens,
+      outputTokens: a.totals.outputTokens + b.totals.outputTokens,
+      reasoningTokens: a.totals.reasoningTokens + b.totals.reasoningTokens,
+    },
     costUsd: a.costUsd + b.costUsd,
     cacheSavingsUsd: a.cacheSavingsUsd + b.cacheSavingsUsd,
+    ...(ca === undefined && cb === undefined
+      ? {}
+      : {
+          categoryCostUsd: {
+            input: (ca?.input ?? 0) + (cb?.input ?? 0),
+            cacheRead: (ca?.cacheRead ?? 0) + (cb?.cacheRead ?? 0),
+            cacheWrite: (ca?.cacheWrite ?? 0) + (cb?.cacheWrite ?? 0),
+            output: (ca?.output ?? 0) + (cb?.output ?? 0),
+          },
+        }),
+    ...(fastCostUsd === 0 ? {} : { fastCostUsd }),
+    ...(ultrafastCostUsd === 0 ? {} : { ultrafastCostUsd }),
+    ...(speedPremiumUsd === 0 ? {} : { speedPremiumUsd }),
     // Mixed provenance reads as model-priced, as a scanned bucket would.
     costSource: a.costSource === b.costSource ? a.costSource : "modelPriced",
     records: a.records + b.records,
@@ -414,19 +437,12 @@ export function foldBoxUsage(
       const day = toDay(hourMs) as UsageBucket["day"];
       if (!hourly && (day < input.sinceDay || day > input.untilDay)) continue;
       const sourcePath = row.retired ? retiredHome.path : `${row.leaseId}:${bucket.sourcePath}`;
+      const { hourStart, ...measures } = bucket;
       const cell: UsageBucket = {
+        ...measures,
         day,
-        ...(hourly ? { hourStart: bucket.hourStart } : {}),
-        provider: bucket.provider,
-        model: bucket.model,
+        ...(hourly ? { hourStart } : {}),
         sourcePath,
-        totals: bucket.totals,
-        costUsd: bucket.costUsd,
-        cacheSavingsUsd: bucket.cacheSavingsUsd,
-        costSource: bucket.costSource,
-        records: bucket.records,
-        unpricedRecords: bucket.unpricedRecords,
-        sessions: bucket.sessions,
       };
       const cellKey = [day, cell.hourStart ?? "", cell.provider, cell.model, sourcePath].join(
         "\u0000",
