@@ -188,6 +188,7 @@ const legacyTask: ScheduledTask = {
   schedule: { type: "interval", everyMs: 60_000 },
   projectId: ProjectId.make("project"),
   threadId: null,
+  target: "local",
   workspaceStrategy: { type: "worktree", baseRef: "release" },
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
   runtimeMode: "full-access",
@@ -216,6 +217,19 @@ describe("editing scheduled task branch settings", () => {
       workspaceStrategy: { type: "worktree", baseRef: "release", startFromOrigin },
     });
     expect(draft.startFromOrigin).toBe(startFromOrigin);
+  });
+});
+
+describe("scheduled task run target", () => {
+  it("edits a cloud task on its target and branch, and marks a target change dirty", () => {
+    const draft = editDraft({
+      ...legacyTask,
+      target: "namespace",
+      workspaceStrategy: { type: "root", branch: "release" },
+    });
+    expect([draft.target, draft.baseRef]).toEqual(["namespace", "release"]);
+    expect(hasScheduledTaskDraftChanges(draft, { ...draft, target: "local" })).toBe(true);
+    expect(hasScheduledTaskDraftChanges(draft, { ...draft, target: "namespace" })).toBe(false);
   });
 });
 

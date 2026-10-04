@@ -3,6 +3,7 @@ import {
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  type ScheduledTaskTarget,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -57,6 +58,7 @@ export interface DraftState {
   readonly weekdays: ReadonlySet<number>;
   readonly projectId: string;
   readonly threadId: string;
+  readonly target: ScheduledTaskTarget;
   readonly workspaceMode: WorkspaceMode;
   readonly baseRef: string;
   readonly startFromOrigin: boolean;
@@ -91,8 +93,13 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     weekdays,
     projectId: task.projectId,
     threadId: task.threadId ?? "",
+    target: task.target,
     workspaceMode: task.workspaceStrategy.type,
-    baseRef: task.workspaceStrategy.type === "worktree" ? task.workspaceStrategy.baseRef : "main",
+    // A cloud box clones a non-worktree strategy's branch, so that is the base branch to edit.
+    baseRef:
+      task.workspaceStrategy.type === "worktree"
+        ? task.workspaceStrategy.baseRef
+        : (task.workspaceStrategy.branch ?? "main"),
     startFromOrigin:
       task.workspaceStrategy.type === "worktree"
         ? (task.workspaceStrategy.startFromOrigin ?? false)

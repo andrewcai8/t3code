@@ -4,6 +4,7 @@ import type {
   ProjectId,
   RuntimeMode,
   ScheduledTask,
+  ScheduledTaskTarget,
   ScheduledTaskUpsertSchedule,
 } from "@t3tools/contracts";
 
@@ -97,6 +98,7 @@ export type ScheduledTaskDraft = {
   readonly modelSelection: ModelSelection | null;
   readonly modelSelectionIsExplicit: boolean;
   readonly schedule: ScheduleDraft;
+  readonly target: ScheduledTaskTarget;
   readonly workspace: Workspace;
   readonly baseRef: string;
   readonly checkoutPath: string;
@@ -119,6 +121,7 @@ function draftSignature(draft: ScheduledTaskDraft): string {
     draft.schedule.timeOfDay,
     [...draft.schedule.weekdays].sort((a, b) => a - b),
     draft.schedule.intervalMinutes,
+    draft.target,
     draft.workspace,
     draft.baseRef,
     draft.checkoutPath,
@@ -147,6 +150,7 @@ export function createDraft(
     modelSelection,
     modelSelectionIsExplicit: false,
     schedule: DEFAULT_SCHEDULE,
+    target: "local",
     workspace: "worktree",
     baseRef: "main",
     checkoutPath: "",
@@ -165,8 +169,13 @@ export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
     modelSelection: task.modelSelection,
     modelSelectionIsExplicit: true,
     schedule: scheduleDraftForTask(task),
+    target: task.target,
     workspace: task.workspaceStrategy.type,
-    baseRef: task.workspaceStrategy.type === "worktree" ? task.workspaceStrategy.baseRef : "main",
+    // A cloud box clones a non-worktree strategy's branch, so that is the base branch to edit.
+    baseRef:
+      task.workspaceStrategy.type === "worktree"
+        ? task.workspaceStrategy.baseRef
+        : (task.workspaceStrategy.branch ?? "main"),
     checkoutPath:
       task.workspaceStrategy.type === "existing_worktree"
         ? task.workspaceStrategy.worktreePath

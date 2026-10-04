@@ -137,6 +137,7 @@ const legacyTask: ScheduledTask = {
   schedule: { type: "interval", everyMs: 60_000 },
   projectId: ProjectId.make("project"),
   threadId: null,
+  target: "local",
   workspaceStrategy: { type: "worktree", baseRef: "release" },
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
   runtimeMode: "full-access",
