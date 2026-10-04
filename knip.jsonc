@@ -42,11 +42,13 @@
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
-      // The bundled e2b SDK imports connect-web, which stays external for Cursor.
+      // The bundled e2b SDK imports connect-web, which stays external for Cursor,
+      // and undici, through a runtime import knip cannot see.
       "ignoreDependencies": [
         "@effect/platform-node-shared",
         "@t3tools/web",
         "@connectrpc/connect-web",
+        "undici",
       ],
     },
     "apps/desktop": {
