@@ -1127,6 +1127,9 @@ importers:
       '@t3tools/tailscale':
         specifier: workspace:*
         version: link:../packages/tailscale
+      e2b:
+        specifier: 2.49.0
+        version: 2.49.0
       effect:
         specifier: 4.0.0-rc.115
         version: 4.0.0-rc.115(patch_hash=e7f58877e87996e73e44f697dd39ec71b3a05dcfd00047253c11eb9ee47d84ec)
