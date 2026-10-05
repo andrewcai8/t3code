@@ -197,6 +197,7 @@ import {
   resolveSidebarRowAccessibility,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
+  cloudMachinePill,
   resolveThreadLastVisitedAt,
   searchSidebarThreads,
   shouldCreateNewThreadInCurrentProject,
@@ -1250,6 +1251,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const environment = SidebarCloud.useEnvironment(thread.environmentId);
   const status = resolveSidebarThreadStatus(thread, environment?.connection);
+  const machinePill = cloudMachinePill(
+    SidebarCloud.useCloudMachineStatus(thread.environmentId, environment?.connection),
+  );
   const isInFlight =
     status === "working" || status === "waiting" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is
@@ -1319,19 +1323,27 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     icon: status === "expired" ? null : ("failed" as const),
                     className: "text-error",
                   }
-                : isWoke
-                  ? {
-                      label: "Woke",
-                      icon: "woke" as const,
-                      className: "text-warning",
-                    }
-                  : isUnread
+                : machinePill && machinePill.label !== "Asleep"
+                  ? { label: machinePill.label, icon: null, className: machinePill.colorClass }
+                  : isWoke
                     ? {
-                        label: "Done",
-                        icon: "done" as const,
-                        className: "text-success",
+                        label: "Woke",
+                        icon: "woke" as const,
+                        className: "text-warning",
                       }
-                    : null;
+                    : isUnread
+                      ? {
+                          label: "Done",
+                          icon: "done" as const,
+                          className: "text-success",
+                        }
+                      : machinePill
+                        ? {
+                            label: machinePill.label,
+                            icon: null,
+                            className: machinePill.colorClass,
+                          }
+                        : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({

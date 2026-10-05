@@ -395,9 +395,18 @@ export type EnvironmentControlPresenceInput = typeof EnvironmentControlPresenceI
 export const CloudMachineState = Schema.Literals(["asleep", "waking", "updating"]);
 export type CloudMachineState = typeof CloudMachineState.Type;
 
-/** The host's machines that are not awake right now. Any other listed box is awake. */
+/**
+ * The host's machines that are not awake right now, and what each runs on, which sets how long
+ * it takes to wake. Any other box the host lists is awake.
+ */
 export const EnvironmentControlPresenceResult = Schema.Struct({
-  machines: Schema.Array(Schema.Struct({ environmentId: EnvironmentId, state: CloudMachineState })),
+  machines: Schema.Array(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      state: CloudMachineState,
+      machine: CloudMachineKind,
+    }),
+  ),
 });
 export type EnvironmentControlPresenceResult = typeof EnvironmentControlPresenceResult.Type;
 

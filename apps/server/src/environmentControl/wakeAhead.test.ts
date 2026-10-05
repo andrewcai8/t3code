@@ -170,24 +170,24 @@ it.effect(
 
       expect(yield* wakeAhead.presence(false)).toEqual({
         machines: [
-          { environmentId: "first", state: "asleep" },
-          { environmentId: "second", state: "asleep" },
-          { environmentId: "settled", state: "asleep" },
+          { environmentId: "first", state: "asleep", machine: "sandbox" },
+          { environmentId: "second", state: "asleep", machine: "sandbox" },
+          { environmentId: "settled", state: "asleep", machine: "sandbox" },
         ],
       });
       expect(resumed).toEqual([]);
       expect(yield* wakeAhead.presence(true)).toEqual({
         machines: [
-          { environmentId: "second", state: "waking" },
-          { environmentId: "first", state: "waking" },
-          { environmentId: "settled", state: "asleep" },
+          { environmentId: "second", state: "waking", machine: "sandbox" },
+          { environmentId: "first", state: "waking", machine: "sandbox" },
+          { environmentId: "settled", state: "asleep", machine: "sandbox" },
         ],
       });
       expect(resumed).toEqual(["second", "first"]);
       yield* Deferred.succeed(release, undefined);
       yield* Effect.yieldNow;
       expect(yield* wakeAhead.presence(false)).toEqual({
-        machines: [{ environmentId: "settled", state: "asleep" }],
+        machines: [{ environmentId: "settled", state: "asleep", machine: "sandbox" }],
       });
     }).pipe(Effect.scoped),
 );
@@ -243,7 +243,7 @@ it.effect("tracks an upgrade as updating over a wake of the same machine", () =>
     );
     yield* Effect.yieldNow;
     expect(yield* wakeAhead.presence(false)).toEqual({
-      machines: [{ environmentId: "box", state: "updating" }],
+      machines: [{ environmentId: "box", state: "updating", machine: "sandbox" }],
     });
     yield* Deferred.succeed(upgrade, undefined);
     yield* Fiber.join(fiber);

@@ -2606,6 +2606,7 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [activeReconnectingEnvironmentId]);
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
+  const activeCloudMachine = Cloud.useCloudMachine(activeEnvironment?.environmentId ?? null);
   const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
       return null;
@@ -3067,7 +3068,11 @@ export default function ChatView(props: ChatViewProps) {
             {disconnectAction}
           </>
         ),
-        ...Cloud.cloudUnavailableBanner(activeEnvironmentUnavailableState, environmentReconnecting),
+        ...Cloud.cloudUnavailableBanner(
+          activeEnvironmentUnavailableState,
+          environmentReconnecting,
+          activeCloudMachine,
+        ),
       });
     }
     if (
@@ -3155,6 +3160,7 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
+    activeCloudMachine,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,
     disconnectingEnvironment,

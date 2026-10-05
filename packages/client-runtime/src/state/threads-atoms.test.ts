@@ -137,6 +137,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     markWorkspaceMissing: () => Effect.die("Unexpected missing workspace"),
     syncHostBoxes: () => Effect.die("Unexpected host box sync"),
     hostChats: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, HostChat>>(new Map()),
+    cloudMachines: yield* SubscriptionRef.make(new Map()),
     markBoxes: () => Effect.die("Unexpected box marking"),
     unmarkBox: () => Effect.die("Unexpected box unmarking"),
     demand: () => Effect.void,

@@ -9,7 +9,12 @@ import {
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type {
+  CloudMachineState,
+  ContextMenuItem,
+  EnvironmentId,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
@@ -626,7 +631,10 @@ export interface ThreadStatusPill {
     | "Pending Approval"
     | "Awaiting Input"
     | "Waiting"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Asleep"
+    | "Waking"
+    | "Updating";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -640,7 +648,37 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Waiting: 2.5,
   "Plan Ready": 2,
   Completed: 1,
+  Waking: 0.6,
+  Updating: 0.6,
+  Asleep: 0.5,
 };
+
+/**
+ * A cloud chat's machine as its row says it, shown when nothing about the chat itself is: waking
+ * and updating in the working hue, asleep muted. Static, since a sidebar full of them must not
+ * repaint.
+ */
+export function cloudMachinePill(status: CloudMachineState | null): ThreadStatusPill | null {
+  switch (status) {
+    case null:
+      return null;
+    case "asleep":
+      return {
+        label: "Asleep",
+        colorClass: "text-sidebar-muted-foreground",
+        dotClass: "bg-sidebar-muted-foreground",
+        pulse: false,
+      };
+    case "waking":
+    case "updating":
+      return {
+        label: status === "waking" ? "Waking" : "Updating",
+        colorClass: "text-sky-600 dark:text-sky-300/80",
+        dotClass: "bg-sky-500 dark:bg-sky-300/80",
+        pulse: false,
+      };
+  }
+}
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,

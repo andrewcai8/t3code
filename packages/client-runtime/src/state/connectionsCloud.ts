@@ -1,7 +1,9 @@
 import type { EnvironmentId as EnvironmentIdType } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
-import { Atom } from "effect/unstable/reactivity";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import type { HostBoxList } from "../cloud/provisioning.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
@@ -12,6 +14,7 @@ import {
   connectionBox,
 } from "../connection/model.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
+import type { CloudMachine } from "../connection/registryBoxes.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import { type AtomCommandScheduler, createRuntimeCommand } from "./runtime.ts";
 
@@ -159,8 +162,26 @@ export function createEnvironmentCatalogCloudAtoms<R, E>(
       ),
   });
 
+  const cloudMachinesAtom = runtime.atom(
+    Stream.unwrap(
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.map((registry) => SubscriptionRef.changes(registry.cloudMachines)),
+      ),
+    ),
+    { initialValue: new Map() as ReadonlyMap<EnvironmentIdType, CloudMachine> },
+  );
+  /** A box's machine while it is asleep, waking or updating; null while awake. */
+  const cloudMachineAtom = Atom.family((environmentId: EnvironmentIdType) =>
+    Atom.make(
+      (get): CloudMachine | null =>
+        Option.getOrUndefined(AsyncResult.value(get(cloudMachinesAtom)))?.get(environmentId) ??
+        null,
+    ).pipe(Atom.withLabel(`environment-cloud-machine:${environmentId}`)),
+  );
+
   return {
     boxIdsAtom,
+    cloudMachineAtom,
     markWorkspaceMissing,
     syncHostBoxes,
     markBoxes,

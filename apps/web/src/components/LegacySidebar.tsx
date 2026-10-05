@@ -191,6 +191,7 @@ import {
   resolveThreadRowClassName,
   resolveThreadLastVisitedAt,
   resolveThreadStatusPill,
+  cloudMachinePill,
   orderItemsByPreferredIds,
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,
@@ -466,12 +467,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     [discoveredPorts, navigateToThread, openPreview, threadRef],
   );
   const isThreadRunning = !threadRuntimeCanArchive(thread.runtime);
-  const threadStatus = resolveThreadStatusPill({
-    thread: {
-      ...thread,
-      lastVisitedAt,
-    },
-  });
+  const machineStatus = SidebarCloud.useCloudMachineStatus(
+    thread.environmentId,
+    environment?.connection,
+  );
+  const threadStatus =
+    resolveThreadStatusPill({
+      thread: {
+        ...thread,
+        lastVisitedAt,
+      },
+    }) ?? cloudMachinePill(machineStatus);
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     thread.environmentId,
     thread.linkedPullRequest,

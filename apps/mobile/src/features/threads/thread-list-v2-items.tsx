@@ -10,6 +10,7 @@ import {
 import { RowPressable } from "../../components/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { useCloudMachineStatus } from "../../state/cloud-machine";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import type { ThreadMoveDestination } from "./threadOrder";
 import type {
@@ -17,7 +18,7 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
-import type { EnvironmentMachineKind } from "@t3tools/contracts";
+import type { CloudMachineState, EnvironmentMachineKind } from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
@@ -70,6 +71,13 @@ const STATUS_LABEL_BY_STATUS: Partial<
   working: { label: "Working", className: "text-adaptive-sky-600-400" },
   failed: { label: "Failed", className: "text-danger-foreground" },
   limited: { label: "Limited", className: "text-warning-foreground" },
+};
+
+/** A cloud chat's machine, said when nothing about the chat itself is; waking outranks Done. */
+const MACHINE_LABEL_BY_STATE: Record<CloudMachineState, { label: string; className: string }> = {
+  waking: { label: "Waking", className: "text-adaptive-sky-600-400" },
+  updating: { label: "Updating", className: "text-adaptive-sky-600-400" },
+  asleep: { label: "Asleep", className: "text-foreground-muted" },
 };
 
 // Menus keep lifecycle and title regeneration together. Archive keeps its
@@ -583,13 +591,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const rowAppearance = getThreadListV2RowAppearance(theme, sidebarPane, selected);
 
   const status = resolveThreadListV2Status(thread);
+  const machineStatus = useCloudMachineStatus(thread.environmentId);
+  const machineLabel = machineStatus === null ? undefined : MACHINE_LABEL_BY_STATE[machineStatus];
   // "Done" marks a completion the user has not opened yet — same emerald
   // label as the web sidebar, sourced from the server-side visited watermark
   // so checking a thread on any device clears it everywhere.
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
   const statusLabel =
     STATUS_LABEL_BY_STATUS[status] ??
-    (isUnread ? { label: "Done", className: "text-adaptive-emerald-700-300" } : undefined);
+    (machineStatus === "asleep" ? undefined : machineLabel) ??
+    (isUnread ? { label: "Done", className: "text-adaptive-emerald-700-300" } : undefined) ??
+    machineLabel;
   // The timestamp is precomputed on the list item (same stamps the settled
   // tail sorts by) so a minute tick only re-renders rows that draw it.
   const timeLabel = props.timeLabel;

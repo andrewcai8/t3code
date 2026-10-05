@@ -36,6 +36,8 @@ export function connectionFloatingStatus(input: {
   readonly connectionState: EnvironmentConnectionPhase;
   readonly environmentLabel: string | null;
   readonly onReconnect: () => void;
+  /** A cloud machine waking or updating, said in place of a reconnect with its real time. */
+  readonly wake?: { readonly title: string; readonly eta: string | null } | null;
 }): FloatingWorkingStatus | null {
   const environmentLabel = input.environmentLabel ?? "Environment";
   const unavailable = (label: string): FloatingWorkingStatus => ({
@@ -45,6 +47,20 @@ export function connectionFloatingStatus(input: {
     onPress: input.onReconnect,
   });
 
+  if (
+    input.wake &&
+    (input.connectionState === "waking" ||
+      input.connectionState === "connecting" ||
+      input.connectionState === "reconnecting")
+  )
+    return {
+      kind: "connection",
+      tone: "reconnecting",
+      label: input.wake.eta
+        ? `${input.wake.title}, ${input.wake.eta}...`
+        : `${input.wake.title}...`,
+      onPress: input.onReconnect,
+    };
   switch (input.connectionState) {
     case "connecting":
     case "reconnecting":

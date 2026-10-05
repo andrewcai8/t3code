@@ -130,15 +130,23 @@ export function makeWakeAhead(deps: {
   const machines = (
     boxes: ReadonlyArray<DiscoveredProvisionedEnvironment>,
   ): EnvironmentControlPresenceResult["machines"] => [
-    ...[...tracked].map(([environmentId, entries]) => ({
-      environmentId,
-      state: [...entries.values()].some((entry) => entry.wake === "updating")
-        ? ("updating" as const)
-        : ("waking" as const),
-    })),
+    ...[...tracked].map(([environmentId, entries]) => {
+      const wakes = [...entries.values()];
+      return {
+        environmentId,
+        state: wakes.some((entry) => entry.wake === "updating")
+          ? ("updating" as const)
+          : ("waking" as const),
+        machine: wakes[0]!.machine,
+      };
+    }),
     ...boxes
       .filter((box) => box.lifecycle === "paused" && !tracked.has(box.environmentId))
-      .map((box) => ({ environmentId: box.environmentId, state: "asleep" as const })),
+      .map((box) => ({
+        environmentId: box.environmentId,
+        state: "asleep" as const,
+        machine: box.machine ?? "sandbox",
+      })),
   ];
 
   const wakeBox = Effect.fn("wakeAhead.wake")(function* (box: DiscoveredProvisionedEnvironment) {
