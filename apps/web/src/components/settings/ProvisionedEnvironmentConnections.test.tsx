@@ -50,7 +50,13 @@ vi.mock("../../state/server", () => ({
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: string) =>
-    ({ resume: state.resume, keep: state.keep, restore: state.restore })[command] ?? state.dispose,
+    command === "resume"
+      ? state.resume
+      : command === "keep"
+        ? state.keep
+        : command === "restore"
+          ? state.restore
+          : state.dispose,
 }));
 vi.mock("../ui/button", () => ({
   Button: (props: ComponentProps<"button">) => <button {...props} />,
