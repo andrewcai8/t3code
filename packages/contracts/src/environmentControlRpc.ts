@@ -15,6 +15,8 @@ import {
   ProvisionedEnvironmentList,
   SavedEnvironmentAddress,
   EnvironmentControlResult,
+  EnvironmentControlPresenceInput,
+  EnvironmentControlPresenceResult,
   EnvironmentProvisionInput,
   EnvironmentProvisionResult,
   EnvironmentProvisionAttachInput,
@@ -49,6 +51,7 @@ export const ENVIRONMENT_CONTROL_WS_METHODS = {
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
   environmentControlKeep: "environmentControl.keep",
+  environmentControlPresence: "environmentControl.presence",
 } as const;
 
 const EnvironmentControlListRpc = Rpc.make(ENVIRONMENT_CONTROL_WS_METHODS.environmentControlList, {
@@ -166,6 +169,15 @@ const EnvironmentControlKeepRpc = Rpc.make(ENVIRONMENT_CONTROL_WS_METHODS.enviro
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
 
+const EnvironmentControlPresenceRpc = Rpc.make(
+  ENVIRONMENT_CONTROL_WS_METHODS.environmentControlPresence,
+  {
+    payload: EnvironmentControlPresenceInput,
+    success: EnvironmentControlPresenceResult,
+    error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+  },
+);
+
 export const EnvironmentControlRpcs = [
   EnvironmentControlListRpc,
   EnvironmentControlListProvisionedRpc,
@@ -180,4 +192,5 @@ export const EnvironmentControlRpcs = [
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
   EnvironmentControlKeepRpc,
+  EnvironmentControlPresenceRpc,
 ] as const;

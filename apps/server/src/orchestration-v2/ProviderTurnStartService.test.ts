@@ -2,6 +2,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -166,6 +167,12 @@ function makeLocalCommandHarness(input: {
    * fallback succeeds, then reading history for its handoff fails.
    */
   readonly historyReadFailureAfterFallback?: unknown;
+  /**
+   * Resumes a thread that has a native ref and a handoff its last turn sent but did not record
+   * as delivered, as a restart between the two leaves it. `inject` gives the session native
+   * history injection; without it the handoff went inline, in the message text.
+   */
+  readonly pendingHandoff?: { readonly inject: boolean };
   readonly interruptOpen?: boolean;
   readonly interruptRunBeforeOpenFailure?: boolean;
   readonly writeFailure?: unknown;
@@ -342,7 +349,7 @@ function makeLocalCommandHarness(input: {
     checkpoints: [],
     updatedAt: now,
   };
-  if ("historyReadFailureAfterFallback" in input) {
+  if ("historyReadFailureAfterFallback" in input || input.pendingHandoff !== undefined) {
     const nativeThreadRef = {
       driver: providerThread.driver,
       nativeId: "native-resume-thread",
@@ -353,8 +360,34 @@ function makeLocalCommandHarness(input: {
       providerThreads: projection.providerThreads.map((candidate) =>
         candidate.id === providerThreadId ? { ...candidate, nativeThreadRef } : candidate,
       ),
+      contextHandoffs:
+        input.pendingHandoff === undefined
+          ? []
+          : [
+              {
+                id: ContextHandoffId.make("handoff-sent-before-restart"),
+                threadId,
+                targetRunId: RunId.make("run-before-restart"),
+                fromProviderThreadIds: [providerThreadId],
+                toProviderThreadId: providerThreadId,
+                coveredRunOrdinals: { from: 1, to: 1 },
+                strategy: "delta_since_target_last_seen",
+                status: "ready",
+                summaryMessageId: null,
+                summaryText: "",
+                createdByProviderInstanceId: null,
+                delivery: {
+                  nativeThreadId: nativeThreadRef.nativeId,
+                  status: "pending",
+                  itemIds: [],
+                },
+                createdAt: now,
+                updatedAt: now,
+              },
+            ],
     };
   }
+  const resumedNativeIds: Array<string> = [];
   const events: Array<OrchestrationV2DomainEvent> = [];
   const interruptRun = () => {
     projection = {
@@ -383,20 +416,26 @@ function makeLocalCommandHarness(input: {
   );
   const resumeFallbackSession = {
     driver: providerThread.driver,
-    resumeThread: () =>
-      Effect.fail(
-        new ProviderAdapterEventStreamError({
-          driver: providerThread.driver,
-          providerSessionId,
-          cause: "native thread is gone",
-        }),
-      ),
+    resumeThread: (resume: { readonly providerThread: typeof providerThread }) =>
+      input.pendingHandoff === undefined
+        ? Effect.fail(
+            new ProviderAdapterEventStreamError({
+              driver: providerThread.driver,
+              providerSessionId,
+              cause: "native thread is gone",
+            }),
+          )
+        : Effect.sync(() => {
+            resumedNativeIds.push(resume.providerThread.nativeThreadRef?.nativeId ?? "none");
+            return resume.providerThread;
+          }),
     ensureThread: () => Effect.succeed(providerThread),
+    ...(input.pendingHandoff?.inject ? { injectHistory: () => Effect.succeed(true) } : {}),
   };
   const open = vi.fn(() =>
     input.interruptOpen === true
       ? Effect.interrupt
-      : "historyReadFailureAfterFallback" in input
+      : "historyReadFailureAfterFallback" in input || input.pendingHandoff !== undefined
         ? Effect.succeed(resumeFallbackSession as never)
         : "ensureThreadFailure" in input
           ? Effect.succeed({ driver: providerThread.driver, ensureThread } as never)
@@ -487,9 +526,39 @@ function makeLocalCommandHarness(input: {
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
-          prepareProviderHandoff: () => Effect.die("history read must fail first"),
+          prepareProviderHandoff: (prepared) =>
+            input.pendingHandoff === undefined
+              ? Effect.die("history read must fail first")
+              : Effect.succeed({
+                  id: ContextHandoffId.make("handoff-after-fallback"),
+                  threadId,
+                  targetRunId: prepared.targetRunId,
+                  fromProviderThreadIds: prepared.fromProviderThreadIds,
+                  toProviderThreadId: prepared.toProviderThreadId,
+                  coveredRunOrdinals: prepared.coveredRunOrdinals,
+                  strategy: prepared.strategy,
+                  status: "ready",
+                  summaryMessageId: null,
+                  summaryText: "",
+                  createdByProviderInstanceId: null,
+                  createdAt: now,
+                  updatedAt: now,
+                }),
         }),
-        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeIfRunCurrent,
+          write: ({ events: incoming }) =>
+            Effect.sync(() => {
+              for (const event of incoming) {
+                events.push(event as OrchestrationV2DomainEvent);
+                projection = ProjectionStore.applyToProjection(
+                  projection,
+                  event as OrchestrationV2DomainEvent,
+                );
+              }
+              return { storedEvents: [] } as never;
+            }),
+        }),
         IdAllocator.layer,
         FileSystem.layerNoop({}),
         Layer.mock(GitWorkflow.GitWorkflowService)({}),
@@ -514,12 +583,14 @@ function makeLocalCommandHarness(input: {
               ),
             }),
           getTurnStartHistory: () =>
-            Effect.fail(
-              new ProjectionStore.ProjectionStoreReadError({
-                threadId,
-                cause: input.historyReadFailureAfterFallback,
-              }),
-            ),
+            input.pendingHandoff === undefined
+              ? Effect.fail(
+                  new ProjectionStore.ProjectionStoreReadError({
+                    threadId,
+                    cause: input.historyReadFailureAfterFallback,
+                  }),
+                )
+              : Effect.succeed([]),
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
@@ -532,6 +603,7 @@ function makeLocalCommandHarness(input: {
   );
   return {
     open,
+    resumedNativeIds,
     writeIfRunCurrent,
     startRootRun,
     tryHandlePromptCommand,
@@ -734,6 +806,51 @@ effectIt.effect(
       expect(harness.writeIfRunCurrent).not.toHaveBeenCalled();
       expect(harness.projection().runs.at(-1)?.status).toBe("starting");
       expect(harness.events).toEqual([]);
+    }),
+);
+
+effectIt.effect(
+  "resumes the native session after a restart left an inline handoff unconfirmed",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        pendingHandoff: { inject: false },
+      });
+
+      yield* harness.start.pipe(Effect.exit);
+
+      expect(harness.resumedNativeIds).toEqual(["native-resume-thread"]);
+      expect(harness.projection().contextTransfers.map((transfer) => transfer.type)).not.toContain(
+        "provider_handoff",
+      );
+    }),
+);
+
+effectIt.effect(
+  "starts a fresh native session, and says so, when injected history may have half landed before a restart",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        pendingHandoff: { inject: true },
+      });
+
+      yield* harness.start.pipe(Effect.exit);
+
+      expect(harness.resumedNativeIds).toEqual([]);
+      expect(
+        harness
+          .projection()
+          .turnItems.flatMap((item) =>
+            item.type === "system_notice" ? [[item.title, item.message]] : [],
+          ),
+      ).toEqual([
+        [
+          "New agent session",
+          "The agent's previous session could not be resumed, so it started a new one with this chat's history handed over. Details it held only in memory, such as files it read, may need to be read again.",
+        ],
+      ]);
     }),
 );
 

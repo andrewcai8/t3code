@@ -1219,6 +1219,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         >
           {!isEnvironmentReady ? (
             <EnvironmentConnectionNotice
+              environmentId={environment.presentation?.entry.target.environmentId ?? null}
               environmentLabel={
                 (environment.presentation
                   ? connectionStatusName(environment.presentation.entry.target)

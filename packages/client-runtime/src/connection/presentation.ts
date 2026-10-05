@@ -9,7 +9,13 @@ import type {
 } from "./model.ts";
 import { presentMissingWorkspace } from "./boxPresentation.ts";
 
-export { BOX_STATUS_NAME, connectionStatusName } from "./boxPresentation.ts";
+export {
+  BOX_STATUS_NAME,
+  cloudMachineStatus,
+  cloudWakeNotice,
+  connectionStatusName,
+} from "./boxPresentation.ts";
+export type { CloudMachine } from "./registryBoxes.ts";
 
 export type EnvironmentConnectionPhase =
   | "available"

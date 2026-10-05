@@ -70,7 +70,11 @@ if (args[0] === 'auth') {
   http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url === '/.well-known/t3/environment') {
-      response.end(JSON.stringify({ environmentId: fs.readFileSync(path.join(home, 'userdata/environment-id'), 'utf8').trim() }));
+      const protocol = path.join(home, 'orchestration-protocol');
+      response.end(JSON.stringify({
+        environmentId: fs.readFileSync(path.join(home, 'userdata/environment-id'), 'utf8').trim(),
+        ...(fs.existsSync(protocol) ? { orchestrationProtocolVersion: Number(fs.readFileSync(protocol, 'utf8')) } : {}),
+      }));
     } else if (request.url === '/api/auth/pairing-token') {
       response.end(JSON.stringify({ credential: 'pair-credential' }));
     } else if (request.url === '/api/auth/session') {

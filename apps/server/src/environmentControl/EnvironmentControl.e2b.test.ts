@@ -102,6 +102,17 @@ vi.mock("e2b", async (importOriginal) => {
   }
   return { ...actual, E2B };
 });
+// The guest's descriptor at its E2B public host, read from the port it really listens on.
+vi.mock("./leaseActivity.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./leaseActivity.ts")>();
+  return {
+    ...actual,
+    readGuestProtocol: (origin: string) =>
+      actual.readGuestProtocol(
+        origin.replace(/^https:\/\/(\d+)-sandbox-1\.e2b\.app$/, "http://127.0.0.1:$1"),
+      ),
+  };
+});
 vi.mock("./driver.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./driver.ts")>();
   return {
@@ -272,6 +283,14 @@ const pausedPreparedBox = (input: {
         leaseId: requestId,
         owner: { environmentId: readiness.environmentId, threadId: "thread" },
       });
+      // Attach recorded where the host reaches the box.
+      await registry.markActive({
+        leaseId: requestId,
+        remoteAccess: {
+          origin: `https://${port}-sandbox-1.e2b.app`,
+          brokerToken: "test-private-broker",
+        },
+      });
       await registry.markPaused(requestId);
     });
     mocks.wake.mockResolvedValue({});
@@ -283,6 +302,29 @@ const pausedPreparedBox = (input: {
         Effect.promise(() => registry.findById(requestId)).pipe(
           Effect.map((lease) => lease?.state),
         ),
+      /** The build the host records the box running. */
+      runningRevision: () =>
+        store
+          .get(requestId)
+          .pipe(
+            Effect.map((current) =>
+              current.state.kind === "ready" ? current.state.readiness.t3Revision : null,
+            ),
+          ),
+      /** Makes the guest's T3 server report it speaks `version` of the orchestration protocol. */
+      speaksProtocol: (version: number) =>
+        Effect.promise(async () => {
+          const home = NodePath.dirname(
+            NodePath.dirname(
+              NodeChildProcess.execFileSync("find", [w.root, "-name", "environment-id"], {
+                encoding: "utf8",
+              })
+                .trim()
+                .split("\n")[0]!,
+            ),
+          );
+          await NodeFSP.writeFile(NodePath.join(home, "orchestration-protocol"), String(version));
+        }),
       /** Kills the guest's T3 server and waits until it has let go of its lock. */
       killServer: () =>
         Effect.promise(async () => {
@@ -419,6 +461,22 @@ it.effect("moves a woken box onto the build the host pins before anyone connects
           environmentId: box.environmentId,
         }),
       ).toEqual({ kind: "current", t3Revision: pinnedRevision });
+      expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
+    }),
+  ),
+);
+
+it.effect("connects a woken box on its own build when it speaks the host's protocol", () =>
+  withManager(
+    Effect.gen(function* () {
+      const box = yield* pausedPreparedBox({ follow: false, pinnedRevision: "e".repeat(40) });
+      yield* box.speaksProtocol(2);
+      const manager = yield* EnvironmentControl;
+
+      expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+        kind: "resumed",
+      });
+      expect(yield* box.runningRevision()).toBe("c".repeat(40));
       expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
     }),
   ),

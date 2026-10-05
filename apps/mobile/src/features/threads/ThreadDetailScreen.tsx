@@ -4,7 +4,11 @@ import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useNavigation } from "@react-navigation/native";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
-import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import {
+  cloudMachineStatus,
+  cloudWakeNotice,
+  type EnvironmentConnectionPhase,
+} from "@t3tools/client-runtime/connection";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type {
   CodexFeedbackSubmission,
@@ -90,6 +94,7 @@ import { RenderErrorBoundary, RenderFailureView } from "../../components/RenderE
 import { CHAT_CONTENT_MAX_WIDTH, type LayoutVariant } from "../../lib/layout";
 import { editPendingThreadMessage } from "../../state/edit-pending-thread-message";
 import { deviceEnvironment } from "../../state/device";
+import { useCloudMachine } from "../../state/cloud-machine";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
@@ -450,12 +455,18 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const pendingBackgroundWork = presentPendingBackgroundWork(
     props.selectedThread.pendingBackgroundTasks,
   );
+  const cloudMachine = useCloudMachine(props.environmentId);
+  const machineStatus = cloudMachineStatus(cloudMachine ?? undefined, props.connectionStateLabel);
   const floatingStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
       connectionState: props.connectionStateLabel,
       environmentLabel: props.connectionStatusLabel,
       onReconnect: props.onReconnectEnvironment,
+      wake:
+        machineStatus === "waking" || machineStatus === "updating"
+          ? cloudWakeNotice(machineStatus, cloudMachine?.machine)
+          : null,
     });
     if (connectionStatus !== null) {
       return connectionStatus;

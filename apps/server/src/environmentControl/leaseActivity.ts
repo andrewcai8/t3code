@@ -1,6 +1,7 @@
-// @effect-diagnostics globalFetch:off - the manager reads a remote T3 server over private HTTP.
+// @effect-diagnostics globalFetch:off globalTimers:off - the manager reads a remote T3 server over private HTTP, Promise-side.
 import {
   ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   OrchestrationV2ThreadShell,
   type ProvisionedChat,
@@ -132,6 +133,49 @@ function readOwnerChat(lease: ProvisionedLease, body: unknown) {
   } catch {
     return undefined;
   }
+}
+
+const decodeDescriptor = Schema.decodeUnknownExit(
+  Schema.Struct({ orchestrationProtocolVersion: Schema.optional(Schema.Int) }),
+);
+
+/**
+ * The orchestration protocol a box's T3 server speaks, from its public descriptor; a server that
+ * predates the field speaks 1. Null when no attempt reads it: a just-started server may still be
+ * coming up, so it is asked a few times.
+ */
+export async function readGuestProtocol(
+  origin: string,
+  attempts = 3,
+  delayMs = 1_000,
+): Promise<number | null> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await fetch(`${origin}/.well-known/t3/environment`, {
+        redirect: "error",
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (response.ok) {
+        const descriptor = decodeDescriptor(await response.json());
+        if (descriptor._tag === "Success")
+          return descriptor.value.orchestrationProtocolVersion ?? 1;
+      } else await response.body?.cancel();
+    } catch {
+      // Retried below.
+    }
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return null;
+}
+
+/**
+ * Whether a resumed box must move onto the pinned build before a client connects. A box that
+ * speaks this host's protocol is used on whatever build it runs, and upgraded later while idle.
+ * One that cannot be read is upgraded only if it was asleep, since then nothing runs on it to cut.
+ */
+export function wakeNeedsUpgrade(guestProtocol: number | null, wasPaused: boolean): boolean {
+  if (guestProtocol === null) return wasPaused;
+  return guestProtocol !== ORCHESTRATION_PROTOCOL_VERSION;
 }
 
 const decodeUsageSummary = Schema.decodeUnknownSync(UsageSummary);

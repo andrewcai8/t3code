@@ -1,6 +1,9 @@
+import type { CloudMachineKind, CloudMachineState } from "@t3tools/contracts";
+
 import { workspaceMissingError } from "./boxErrors.ts";
 import { type ConnectionTarget, connectionBox } from "./model.ts";
 import type { EnvironmentConnectionPresentation } from "./presentation.ts";
+import type { CloudMachine } from "./registryBoxes.ts";
 
 /** What a cloud box is called in status copy. */
 export const BOX_STATUS_NAME = "this chat's cloud machine";
@@ -25,4 +28,64 @@ export function presentMissingWorkspace(
         blockedReason: "workspace-missing",
       }
     : null;
+}
+
+/**
+ * What a cloud chat's machine is doing, for its row and banner. This client's own connection
+ * decides first: connected is awake, and its wake is one, or an update its host reports. Otherwise
+ * the host's last answer does. Null for an awake machine or anything else.
+ */
+export function cloudMachineStatus(
+  machine: CloudMachine | undefined,
+  phase: EnvironmentConnectionPresentation["phase"] | undefined,
+): CloudMachineState | null {
+  if (phase === "connected") return null;
+  if (phase === "waking") return machine?.state === "updating" ? "updating" : "waking";
+  return machine?.state ?? null;
+}
+
+const BOX_TITLE_NAME = BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME.slice(1);
+
+/**
+ * The banner for a cloud chat whose machine is waking or updating, with the time that machine
+ * really takes: an E2B sandbox resumes in seconds, a Namespace Devbox boots, and a Namespace Mac is
+ * restored onto a new machine. `eta` is that time alone, for a status too short for a sentence.
+ */
+export function cloudWakeNotice(
+  state: Exclude<CloudMachineState, "asleep">,
+  machine: CloudMachineKind | undefined,
+): { readonly title: string; readonly description: string; readonly eta: string | null } {
+  if (state === "updating")
+    return {
+      title: `${BOX_TITLE_NAME} is updating`,
+      description:
+        "It moves to the latest version, then reconnects on its own. This usually takes a few minutes.",
+      eta: "a few minutes",
+    };
+  switch (machine) {
+    case "sandbox":
+      return {
+        title: `${BOX_TITLE_NAME} is waking up`,
+        description: "This usually takes about 10 seconds.",
+        eta: "about 10 seconds",
+      };
+    case "mac":
+      return {
+        title: "Restoring this chat's Mac",
+        description: "This takes about 2 minutes. It reconnects on its own.",
+        eta: "about 2 minutes",
+      };
+    case "devbox":
+      return {
+        title: `${BOX_TITLE_NAME} is starting`,
+        description: "This usually takes a minute or two.",
+        eta: "a minute or two",
+      };
+    case undefined:
+      return {
+        title: `${BOX_TITLE_NAME} is waking up`,
+        description: "It reconnects on its own.",
+        eta: null,
+      };
+  }
 }

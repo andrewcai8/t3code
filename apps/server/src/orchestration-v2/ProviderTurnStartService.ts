@@ -35,6 +35,7 @@ import {
   latestNativeContextUsage,
 } from "./ContextHandoffBudget.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { lowDiskNoteFor } from "./DiskHeadroom.ts";
 import {
   ProviderAdapterTurnStartError,
   type ProviderAdapterV2Error,
@@ -62,6 +63,10 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
 ) {}
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
+
+/** Shown in the chat when the agent's native session could not be resumed and a new one began. */
+const RESUME_FALLBACK_NOTICE =
+  "The agent's previous session could not be resumed, so it started a new one with this chat's history handed over. Details it held only in memory, such as files it read, may need to be read again.";
 
 export interface ProviderTurnStartServiceV2Shape {
   /**
@@ -656,12 +661,17 @@ export const layer: Layer.Layer<
             }),
           );
         }
-        const uncertainDelivery = projection.contextHandoffs.some(
-          (handoff) =>
-            handoff.toProviderThreadId === providerThread.id &&
-            handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
-            handoff.delivery?.status === "pending",
-        );
+        // Only history injected into the native session can have half landed. A handoff sent
+        // inline was in the message text, so a restart before its delivery was recorded leaves
+        // the session whole; it is resumed and the handoff sent again with the next message.
+        const uncertainDelivery =
+          session.injectHistory !== undefined &&
+          projection.contextHandoffs.some(
+            (handoff) =>
+              handoff.toProviderThreadId === providerThread.id &&
+              handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+              handoff.delivery?.status === "pending",
+          );
         const resumed = yield* Effect.result(
           uncertainDelivery
             ? Effect.fail(
@@ -766,6 +776,37 @@ export const layer: Layer.Layer<
                 createdAt,
                 updatedAt: createdAt,
                 consumedAt: null,
+              },
+            },
+            {
+              id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+              type: "turn-item.updated",
+              threadId: projection.thread.id,
+              runId: run.id,
+              ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: createdAt,
+              // The user sees that the agent lost its session; the agent reads it in the handoff.
+              payload: {
+                id: idAllocator.derive.runSignalTurnItem({
+                  runId: run.id,
+                  signal: `provider-resume-fallback:${transferId}`,
+                }),
+                threadId: projection.thread.id,
+                runId: run.id,
+                nodeId: run.rootNodeId,
+                providerThreadId: providerThread.id,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: run.ordinal * 100 - 2,
+                status: "completed",
+                title: "New agent session",
+                type: "system_notice",
+                message: RESUME_FALLBACK_NOTICE,
+                startedAt: createdAt,
+                completedAt: createdAt,
+                updatedAt: createdAt,
               },
             },
           ],
@@ -970,10 +1011,15 @@ export const layer: Layer.Layer<
         run,
         attempts: projection.attempts,
       });
-      const restartNote =
+      // Sent with the user's text: work a restart cancelled, and a disk about to fill.
+      const restartNote = [
         restartCancelledWork.length === 0
           ? ""
-          : restartCancelledBackgroundWorkNote(restartCancelledWork);
+          : restartCancelledBackgroundWorkNote(restartCancelledWork),
+        yield* lowDiskNoteFor(resolvedRuntimePolicy.cwd),
+      ]
+        .filter((note) => note !== "")
+        .join("\n\n");
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );

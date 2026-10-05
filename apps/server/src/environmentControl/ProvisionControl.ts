@@ -557,6 +557,8 @@ export function makeProvisionControl(
     }),
     touch: Effect.fn("EnvironmentControl.touchProvision")(function* (
       input: EnvironmentProvisionTouchInput,
+      // The host renewing a box it woke ahead of the user is not a client watching it.
+      by: "client" | "host" = "client",
     ): Effect.fn.Return<EnvironmentProvisionTouchResult, EnvironmentControlError> {
       const id = yield* decodeRequestId(input.leaseId).pipe(logCause, Effect.mapError(safeError));
       const operation = yield* store.get(id).pipe(logCause, Effect.mapError(safeError));
@@ -577,7 +579,7 @@ export function makeProvisionControl(
       const release = ports.holdBox ? yield* promise(() => ports.holdBox!(lease.sandboxId)) : null;
       // Another operation owns the box right now; renewing the lease is all a heartbeat may do.
       if (ports.holdBox && release === null) {
-        const renewed = yield* promise(() => leases.touch(input.leaseId));
+        const renewed = yield* promise(() => leases.touch(input.leaseId, undefined, by));
         return renewed
           ? ({ kind: "touched" } as const)
           : ({
@@ -602,7 +604,7 @@ export function makeProvisionControl(
           message: "The workspace is paused. Reconnect to continue.",
         };
       }
-      const touched = yield* promise(() => leases.touch(input.leaseId));
+      const touched = yield* promise(() => leases.touch(input.leaseId, undefined, by));
       return touched
         ? { kind: "touched" }
         : { kind: "refused", reason: "unknown", message: "This environment's lease has ended." };

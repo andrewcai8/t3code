@@ -512,6 +512,75 @@ it.effect(
 );
 
 it.effect(
+  "only a client heartbeat ends a run of unwatched Mac moves; the host renewing a box it woke does not",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProvisionOperationStore;
+      const leases = createProvisionedLeaseRegistry(sql);
+      const provisioning = yield* Provisioning.make.pipe(
+        Effect.provideService(ProvisionProviderPorts, {
+          create: () => Effect.succeed({ provider: "e2b" as const, sandboxId: "sandbox" }),
+          recoverCreate: () => Effect.succeed([]),
+          fork: () => Effect.die("unexpected fork"),
+          recoverFork: () => Effect.succeed([]),
+          dispose: () => Effect.void,
+          prepare: () =>
+            Effect.succeed({
+              environmentId: EnvironmentId.make("remote"),
+              projectDir: "/private/operation/workspace",
+              sourceRevision: null,
+              preparationHash: "a".repeat(64),
+              t3Revision: "c".repeat(40),
+              artifactSha256: "b".repeat(64),
+            }),
+        }),
+      );
+      const control = makeProvisionControl(
+        store,
+        provisioning,
+        {
+          ...noRuntimePorts,
+          freeze: async () => manifest,
+          load: async () => manifest,
+          attach: async () => ({
+            pairingUrl: "https://remote/pair#token=grant",
+            remoteAccess: { origin: "https://remote", brokerToken: "private-broker" },
+          }),
+          touch: async () => "running" as const,
+        },
+        leases,
+      );
+      expect(yield* control.provision(input)).toMatchObject({ kind: "ready" });
+      yield* Effect.promise(() =>
+        leases.claim({
+          leaseId: input.requestId,
+          owner: { environmentId: "remote", threadId: "thread" },
+        }),
+      );
+      yield* Effect.promise(() => leases.markActive({ leaseId: input.requestId, hostMove: true }));
+      yield* Effect.promise(() => leases.markActive({ leaseId: input.requestId, hostMove: true }));
+      expect(yield* control.touch({ leaseId: input.requestId }, "host")).toEqual({
+        kind: "touched",
+      });
+      expect(yield* Effect.promise(() => leases.findById(input.requestId))).toMatchObject({
+        unwatchedMoves: 2,
+      });
+      expect(yield* control.touch({ leaseId: input.requestId })).toEqual({ kind: "touched" });
+      expect(
+        (yield* Effect.promise(() => leases.findById(input.requestId)))?.unwatchedMoves,
+      ).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+it.effect(
   "a heartbeat whose box is gone but saved pauses the lease so a resume brings it back",
   () =>
     Effect.gen(function* () {

@@ -99,6 +99,12 @@ node apps/server/scripts/mac-chat-e2e.ts --origin http://127.0.0.1:$(cat .t3/man
 
 It needs `nsc login` on the machine running it, and it disposes what it made and releases the repository's cache volume at the end.
 
+## Waking and updating boxes
+
+A woken box that speaks the manager's orchestration protocol connects on the build it runs; only an incompatible one moves to the pinned build before a client connects. A box behind the pinned build moves to it when the reaper finds it idle and about to sleep, at most twice per build, so its next wake needs no update. While any client reports its user present, the manager wakes every paused box that holds an unsettled chat, most recently active first and at most 20 at a time, and renews them while the reports continue. A Mac wakes one at a time, and only while one of the account's four Mac slots stays free. A refused wake retries after 30 seconds, then 1, 2, 4 and 8 minutes, then every 10 minutes. E2B's `autoResume` stays off: clients dial a box's public address directly, so any stray request would wake a box the manager believes is asleep and its six-hour timeout would keep it running unseen.
+
+Before a box's T3 server starts, its preparation sets aside a 256 MB reserve file on Linux. A watcher gives the reserve back and clears package caches when free space drops under 1 GB, so the server can still save the chat. Agents are told at the start of each turn when their disk has under 2 GB free.
+
 ## Why the manager runs the artifact
 
 The E2B template ships the published `t3` package from npm. That is upstream's build. It does not contain this fork's provisioning code, and the version number matches, so the mismatch is invisible until the server fails to start.

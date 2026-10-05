@@ -1,10 +1,15 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   BOX_STATUS_NAME,
+  type CloudMachine,
+  cloudMachineStatus,
+  cloudWakeNotice,
   connectionBox,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { Atom } from "effect/unstable/reactivity";
 
 import type { ComposerBannerStackItem } from "../components/chat/ComposerBannerStack";
 import { Button } from "../components/ui/button";
@@ -24,10 +29,21 @@ function OpenConnectionsButton() {
   );
 }
 
+const NO_MACHINE = Atom.make((): CloudMachine | null => null).pipe(
+  Atom.withLabel("web-cloud-machine:none"),
+);
+
+/** A cloud chat's machine while it is asleep, waking or updating, as its host last said. */
+export function useCloudMachine(environmentId: EnvironmentId | null): CloudMachine | null {
+  return useAtomValue(
+    environmentId === null ? NO_MACHINE : environmentCatalog.cloudMachineAtom(environmentId),
+  );
+}
+
 /**
  * What the composer's "unavailable" banner says for a cloud machine: one removed for good, one
- * waking from sleep, or a box named by its role, since its saved label names the machine it
- * first ran on. Empty for any other environment.
+ * waking or updating with the time its machine really takes, or a box named by its role, since
+ * its saved label names the machine it first ran on. Empty for any other environment.
  */
 export function cloudUnavailableBanner(
   state: {
@@ -36,6 +52,7 @@ export function cloudUnavailableBanner(
     readonly connection: EnvironmentConnectionPresentation;
   },
   reconnecting: boolean,
+  machine: CloudMachine | null,
 ): Partial<Pick<ComposerBannerStackItem, "title" | "description" | "actions">> {
   const target = appAtomRegistry
     .get(environmentCatalog.catalogValueAtom)
@@ -51,11 +68,10 @@ export function cloudUnavailableBanner(
       actions: <OpenConnectionsButton />,
     };
   }
-  if (state.connection.phase === "waking") {
-    return {
-      title: `${name} is waking up...`,
-      description: "This can take a few minutes. It reconnects on its own.",
-    };
+  const status = isBox ? cloudMachineStatus(machine ?? undefined, state.connection.phase) : null;
+  if (status === "waking" || status === "updating") {
+    const { title, description } = cloudWakeNotice(status, machine?.machine);
+    return { title, description };
   }
   return isBox ? { title: `${name} is ${reconnecting ? "reconnecting" : "offline"}` } : {};
 }

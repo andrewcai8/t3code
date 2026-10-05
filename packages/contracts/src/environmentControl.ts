@@ -85,6 +85,9 @@ export const ProvisionedCleanup = Schema.Union([
 ]);
 export type ProvisionedCleanup = typeof ProvisionedCleanup.Type;
 
+export const CloudMachineKind = Schema.Literals(["sandbox", "devbox", "mac"]);
+export type CloudMachineKind = typeof CloudMachineKind.Type;
+
 export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
   leaseId: TrimmedNonEmptyString,
@@ -93,6 +96,12 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   lifecycle: Schema.Literals(["active", "paused", "missing", "disposed"]),
   environmentId: EnvironmentId,
   provider: Schema.Literals(["e2b", "namespace"]),
+  /**
+   * What the box runs on, which sets how long waking it takes: an E2B sandbox resumes in seconds,
+   * a Namespace Devbox boots, and a Namespace Mac is restored onto a new machine. Absent from
+   * hosts that predate it.
+   */
+  machine: Schema.optional(CloudMachineKind).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
   label: TrimmedNonEmptyString,
   repository: Schema.NullOr(TrimmedNonEmptyString),
   /** Absent on a `disposed` environment whose workspace the host no longer records. */
@@ -371,6 +380,35 @@ export const EnvironmentProvisionTouchResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionTouchResult = typeof EnvironmentProvisionTouchResult.Type;
+
+/**
+ * A client reports whether its user is here. While any client's user is, the host wakes the
+ * machines of their unsettled cloud chats ahead of them and keeps those machines awake. A client
+ * whose user is away sends `false`, which only reads the answer.
+ */
+export const EnvironmentControlPresenceInput = Schema.Struct({
+  present: Schema.Boolean,
+});
+export type EnvironmentControlPresenceInput = typeof EnvironmentControlPresenceInput.Type;
+
+/** Where a cloud machine stands before its chat can connect: asleep, waking, or being updated. */
+export const CloudMachineState = Schema.Literals(["asleep", "waking", "updating"]);
+export type CloudMachineState = typeof CloudMachineState.Type;
+
+/**
+ * The host's machines that are not awake right now, and what each runs on, which sets how long
+ * it takes to wake. Any other box the host lists is awake.
+ */
+export const EnvironmentControlPresenceResult = Schema.Struct({
+  machines: Schema.Array(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      state: CloudMachineState,
+      machine: CloudMachineKind,
+    }),
+  ),
+});
+export type EnvironmentControlPresenceResult = typeof EnvironmentControlPresenceResult.Type;
 
 /** Keeps a cloud machine from automatic cleanup, or allows it again. */
 export const EnvironmentProvisionKeepInput = Schema.Struct({

@@ -1,10 +1,14 @@
 import {
+  type CloudMachineKind,
+  type CloudMachineState,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
   type ProvisionedChat,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
@@ -58,6 +62,18 @@ import * as EnvironmentSupervisor from "./supervisor.ts";
 const BOX_LEASE_HEARTBEAT_INTERVAL = "4 minutes";
 /** Past a host's 15-second connection attempt. */
 const HOST_SETTLE_TIMEOUT = "20 seconds";
+/** How often a host is asked again while one of its machines is waking or updating. */
+const MACHINE_CHANGE_POLL_INTERVAL = "15 seconds";
+/** Before a host that could not take a presence report is asked again. */
+const PRESENCE_RETRY_INTERVAL = "1 minute";
+/** A host counts a user present for six minutes after a report, so one every four keeps it. */
+const PRESENCE_REPORT_MS = 4 * 60_000;
+
+/** A cloud box's machine while it is not awake, as its host last answered. */
+export interface CloudMachine {
+  readonly state: CloudMachineState;
+  readonly machine: CloudMachineKind;
+}
 
 /** What the environment registry offers for cloud boxes and the hosts that provision them. */
 export interface BoxRegistryMethods {
@@ -105,6 +121,12 @@ export interface BoxRegistryMethods {
    * chats newer than these, and a box's shell that is not live takes a newer one.
    */
   readonly hostChats: SubscriptionRef.SubscriptionRef<ReadonlyMap<EnvironmentId, HostChat>>;
+  /**
+   * Each box whose machine is asleep, waking or updating, as its host last answered. A box
+   * missing here is awake. While the user is here, this client tells each of its cloud hosts so,
+   * which wakes their unsettled chats ahead of the user.
+   */
+  readonly cloudMachines: SubscriptionRef.SubscriptionRef<ReadonlyMap<EnvironmentId, CloudMachine>>;
 }
 
 /** The registry's own state and steps the box code works through. */
@@ -229,6 +251,9 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   const demandCounts = yield* Ref.make<ReadonlyMap<EnvironmentId, number>>(new Map());
   const demanded = yield* SubscriptionRef.make<ReadonlySet<EnvironmentId>>(new Set());
   const hostChats = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, HostChat>>(new Map());
+  const cloudMachines = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, CloudMachine>>(
+    new Map(),
+  );
 
   // Swaps a changed entry in without replacing its supervisor, so its socket and durable streams
   // stay; `installEntryLocked` would tear them down. Run under the entry's lease lock.
@@ -459,6 +484,112 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         (box, state) => box.managerId === managerId && state.desired && state.phase === "backoff",
       ),
     ),
+    Effect.forkIn(registryScope),
+  );
+
+  // Replaces one host's machines with its answer. An unchanged machine keeps its object, so a
+  // row reading it does not render again.
+  const applyHostMachines = (
+    managerId: EnvironmentId,
+    machines: ReadonlyArray<{ readonly environmentId: EnvironmentId } & CloudMachine>,
+  ) =>
+    Effect.gen(function* () {
+      const boxesOfHost = new Set(
+        [...(yield* SubscriptionRef.get(entries)).values()].flatMap((entry) =>
+          connectionBox(entry.target)?.managerId === managerId ? [entry.target.environmentId] : [],
+        ),
+      );
+      yield* SubscriptionRef.update(cloudMachines, (current) => {
+        const next = new Map(
+          [...current].filter(([environmentId]) => !boxesOfHost.has(environmentId)),
+        );
+        for (const { environmentId, state, machine } of machines) {
+          const previous = current.get(environmentId);
+          next.set(
+            environmentId,
+            previous?.state === state && previous.machine === machine
+              ? previous
+              : { state, machine },
+          );
+        }
+        return next.size === current.size &&
+          [...next].every(([environmentId, machine]) => current.get(environmentId) === machine)
+          ? current
+          : next;
+      });
+    });
+
+  // Tells a host the user is here, about every four minutes and at once when they return, and
+  // reads its machines more often while one is waking or updating. Nothing is sent while the
+  // user is away, since their chats should sleep.
+  const reportPresence = (managerId: EnvironmentId): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      let reportedAt = -Infinity;
+      for (;;) {
+        if (!(yield* userHere)) {
+          yield* userArrives;
+          reportedAt = -Infinity;
+        }
+        if (!(yield* hostConnected(managerId))) {
+          yield* Effect.raceFirst(Effect.sleep(PRESENCE_RETRY_INTERVAL), userReturns);
+          continue;
+        }
+        const now = yield* Clock.currentTimeMillis;
+        const present = now - reportedAt >= PRESENCE_REPORT_MS;
+        const answer = yield* runOnHost(
+          managerId,
+          EnvironmentRpc.request(WS_METHODS.environmentControlPresence, { present }),
+        ).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              if (present) reportedAt = now;
+            }),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning("Could not tell a cloud host the user is here.", {
+              managerId,
+              error,
+            }).pipe(Effect.as(null)),
+          ),
+        );
+        if (answer !== null) yield* applyHostMachines(managerId, answer.machines);
+        const changing = answer?.machines.some((machine) => machine.state !== "asleep") ?? false;
+        const reportDue = Math.max(0, reportedAt + PRESENCE_REPORT_MS - now);
+        yield* Effect.raceFirst(
+          Effect.sleep(
+            answer === null
+              ? PRESENCE_RETRY_INTERVAL
+              : changing
+                ? MACHINE_CHANGE_POLL_INTERVAL
+                : Duration.millis(reportDue),
+          ),
+          userReturns.pipe(Effect.andThen(Effect.sync(() => (reportedAt = -Infinity)))),
+        );
+      }
+    }).pipe(Effect.withSpan("EnvironmentRegistry.reportPresence"));
+
+  // One presence report per host this device holds boxes of, restarted only when that set changes.
+  yield* SubscriptionRef.changes(entries).pipe(
+    Stream.map((current) =>
+      [
+        ...new Set(
+          [...current.values()].flatMap((entry) => {
+            const box = connectionBox(entry.target);
+            return box === null ? [] : [box.managerId];
+          }),
+        ),
+      ].sort(),
+    ),
+    Stream.changesWith(
+      (left, right) =>
+        left.length === right.length && left.every((id, index) => id === right[index]),
+    ),
+    Stream.switchMap((hosts) =>
+      Stream.fromEffect(
+        Effect.forEach(hosts, reportPresence, { concurrency: "unbounded", discard: true }),
+      ),
+    ),
+    Stream.runDrain,
     Effect.forkIn(registryScope),
   );
 
@@ -997,6 +1128,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     markWorkspaceMissing,
     syncHostBoxes,
     hostChats,
+    cloudMachines,
   };
 
   return {

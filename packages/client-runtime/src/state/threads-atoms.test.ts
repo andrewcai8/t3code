@@ -23,6 +23,7 @@ import { Atom, AtomRegistry } from "effect/unstable/reactivity";
 
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import type { HostChat } from "../connection/hostBoxSync.ts";
+import type { CloudMachine } from "../connection/registryBoxes.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -139,6 +140,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     markWorkspaceMissing: () => Effect.die("Unexpected missing workspace"),
     syncHostBoxes: () => Effect.die("Unexpected host box sync"),
     hostChats: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, HostChat>>(new Map()),
+    cloudMachines: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, CloudMachine>>(new Map()),
     markBoxes: () => Effect.die("Unexpected box marking"),
     unmarkBox: () => Effect.die("Unexpected box unmarking"),
     demand: () => Effect.void,

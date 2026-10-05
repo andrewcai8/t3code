@@ -8,6 +8,8 @@ import {
   type SupervisorConnectionState,
 } from "./model.ts";
 import {
+  cloudMachineStatus,
+  cloudWakeNotice,
   connectionStatusName,
   connectionStatusText,
   connectionStatusTitle,
@@ -99,5 +101,36 @@ describe("cloud box connection presentation", () => {
     });
     expect(connectionStatusText(connection)).toBe("Machine removed");
     expect(connectionStatusTitle(connection)).toBe("Machine removed");
+  });
+});
+
+describe("a cloud chat's machine", () => {
+  it("reads awake while connected, follows this client's wake, and otherwise its host", () => {
+    const asleep = { state: "asleep", machine: "sandbox" } as const;
+    const updating = { state: "updating", machine: "sandbox" } as const;
+    expect([
+      cloudMachineStatus(asleep, "connected"),
+      cloudMachineStatus(undefined, "waking"),
+      cloudMachineStatus(asleep, "waking"),
+      cloudMachineStatus(updating, "waking"),
+      cloudMachineStatus(asleep, "available"),
+      cloudMachineStatus(updating, "reconnecting"),
+      cloudMachineStatus(undefined, "available"),
+    ]).toEqual([null, "waking", "waking", "updating", "asleep", "updating", null]);
+  });
+
+  it("says how long the machine it runs on takes to wake", () => {
+    expect(cloudWakeNotice("waking", "sandbox")).toEqual({
+      title: "This chat's cloud machine is waking up",
+      description: "This usually takes about 10 seconds.",
+      eta: "about 10 seconds",
+    });
+    expect(cloudWakeNotice("waking", "mac")).toEqual({
+      title: "Restoring this chat's Mac",
+      description: "This takes about 2 minutes. It reconnects on its own.",
+      eta: "about 2 minutes",
+    });
+    expect(cloudWakeNotice("updating", "mac").title).toBe("This chat's cloud machine is updating");
+    expect(cloudWakeNotice("waking", undefined).description).toBe("It reconnects on its own.");
   });
 });

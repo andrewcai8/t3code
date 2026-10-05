@@ -18,7 +18,7 @@ import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../persistence/Layers/Sqlite.ts";
-import { boxLabel, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
+import { boxLabel, boxMachine, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { createProvisionedChatStore, ownerChat } from "./provisionedChats.ts";
@@ -132,6 +132,7 @@ it.effect(
           lifecycle: "active",
           environmentId: "environment-1",
           provider: "e2b",
+          machine: "sandbox",
           label: "repository · E2B",
           repository: "proof/repository",
           projectDir: "/private/project",
@@ -190,6 +191,7 @@ it.effect(
             lifecycle: "disposed",
             environmentId: "environment-7",
             provider: "e2b",
+            machine: "sandbox",
             label: "repository · E2B",
             repository: "proof/repository",
             projectDir: "/private/project",
@@ -204,6 +206,7 @@ it.effect(
             lifecycle: "disposed",
             environmentId: "environment-8",
             provider: "e2b",
+            machine: "sandbox",
             label: "repository · E2B",
             repository: "proof/repository",
             projectDir: "/private/project",
@@ -335,6 +338,7 @@ it.effect("a box disposed through the host is reported disposed, by the id the b
         lifecycle: "disposed",
         environmentId: "box-1",
         provider: "e2b",
+        machine: "sandbox",
         label: "repository · E2B",
         repository: "proof/repository",
         threadId: "thread-1",
@@ -675,7 +679,7 @@ it.effect("a paused Devbox lists when it will be removed, or that it is kept", (
   ),
 );
 
-it("labels a box by its repository's name and where it runs", () => {
+it("labels a box by its repository's name and where it runs, and names its machine", () => {
   const e2b = {
     requestId: id(1),
     provider: "e2b",
@@ -706,4 +710,8 @@ it("labels a box by its repository's name and where it runs", () => {
   expect(label({ ...namespace, engine: "instance" })).toBe("Namespace Mac");
   expect(label({ ...namespace, repository: "pingdotgg/t3code" })).toBe("t3code · Namespace Mac");
   expect(label(namespace)).toBe("Namespace Mac");
+  const machine = (request: Record<string, unknown>) => boxMachine(decodeRequest(request));
+  expect([machine(e2b), machine({ ...namespace, engine: "instance" }), machine(namespace)]).toEqual(
+    ["sandbox", "mac", "devbox"],
+  );
 });

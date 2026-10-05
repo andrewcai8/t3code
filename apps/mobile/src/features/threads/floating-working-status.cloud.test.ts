@@ -20,3 +20,29 @@ describe("connectionFloatingStatus for a cloud box", () => {
     });
   });
 });
+
+describe("connectionFloatingStatus for a waking cloud machine", () => {
+  it("says what the machine is doing and how long it takes, in place of a reconnect", () => {
+    const status = (
+      connectionState: "reconnecting" | "waking" | "error",
+      wake: { readonly title: string; readonly eta: string | null },
+    ) => {
+      const floating = connectionFloatingStatus({
+        connectionError: null,
+        connectionState,
+        environmentLabel: "this chat's cloud machine",
+        onReconnect: () => {},
+        wake,
+      });
+      return floating?.kind === "connection" ? floating.label : null;
+    };
+    const sandbox = { title: "This chat's cloud machine is waking up", eta: "about 10 seconds" };
+    expect(status("waking", sandbox)).toBe(
+      "This chat's cloud machine is waking up, about 10 seconds...",
+    );
+    expect(
+      status("reconnecting", { title: "This chat's cloud machine is updating", eta: null }),
+    ).toBe("This chat's cloud machine is updating...");
+    expect(status("error", sandbox)).toBe("Failed to connect to this chat's cloud machine");
+  });
+});

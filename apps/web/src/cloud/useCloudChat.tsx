@@ -113,7 +113,7 @@ import { provisionedSandboxFor, transferProvisionedSandboxLease } from "./provis
 import { type ReconnectResult, useReconnectSend } from "./useReconnectSend";
 
 export { needsLoadBalancedPick } from "./cloudChat.logic";
-export { cloudUnavailableBanner } from "./cloudUnavailableBanner";
+export { cloudUnavailableBanner, useCloudMachine } from "./cloudUnavailableBanner";
 
 type CloudProvider = PendingCloudEnvironmentSend["provider"];
 

@@ -10,6 +10,8 @@ import {
   type ComputeState,
   type EnvironmentId,
   type EnvironmentControlResult,
+  type EnvironmentControlPresenceInput,
+  type EnvironmentControlPresenceResult,
   type EnvironmentProvisionAttachInput,
   type EnvironmentProvisionAttachResult,
   type EnvironmentProvisionInput,
@@ -66,7 +68,7 @@ import {
   settleSpare,
   warmBasePolicy,
 } from "./warmBases.ts";
-import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
+import { boxMachine, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { makeProvisionControl } from "./ProvisionControl.ts";
 import { deliverFirstTurn } from "./firstTurn.ts";
 import { makeNamespaceAllocationPorts } from "./namespaceAllocation.ts";
@@ -104,7 +106,14 @@ import {
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
 import { NamespaceProxyManager, type NamespaceProxyLease } from "./namespaceProxy.ts";
-import { observeLease, pullLeaseUsage, type LeaseObservation } from "./leaseActivity.ts";
+import {
+  observeLease,
+  pullLeaseUsage,
+  readGuestProtocol,
+  wakeNeedsUpgrade,
+  type LeaseObservation,
+} from "./leaseActivity.ts";
+import { makeWakeAhead } from "./wakeAhead.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
@@ -158,6 +167,22 @@ const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult
 const MAX_UNWATCHED_MOVES = 3;
 
 /**
+ * Times the reaper keeps one idle box awake to move it onto one pinned build. A box that fails
+ * them sleeps on its old build, so a broken upgrade never keeps a box awake.
+ */
+const MAX_IDLE_UPGRADES = 2;
+
+/**
+ * Moving an idle box onto the pinned build before it sleeps, so its next wake is not held up.
+ * `due` names the build a box would move to, or null when it is on it. `start` runs in the
+ * background under the box's own lock.
+ */
+interface IdleUpgrade {
+  readonly due: (lease: ProvisionedLease) => Promise<string | null>;
+  readonly start: (lease: ProvisionedLease) => void;
+}
+
+/**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
  * save, or a release ahead of its Mac's deadline. `reopen` when the chat is
  * off its Mac but must not sleep, such as one still working at the deadline,
@@ -170,7 +195,10 @@ type UpkeepChat = (input: {
 
 export function createEnvironmentControl(
   targets: ReadonlyArray<ManagedTarget>,
-  driver: CloudDriver & { readonly upkeepChat?: UpkeepChat },
+  driver: CloudDriver & {
+    readonly upkeepChat?: UpkeepChat;
+    readonly idleUpgrade?: IdleUpgrade;
+  },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
   pullUsage: (lease: ProvisionedLease) => Promise<void> = async () => {},
@@ -209,6 +237,8 @@ export function createEnvironmentControl(
   };
   /** The last activity each awake lease settled on, so a finished turn pulls once. */
   const settledActivity = new Map<string, "busy" | "idle">();
+  /** Idle upgrades started per box and build, which bounds how long upgrades keep a box awake. */
+  const idleUpgrades = new Map<string, number>();
   // A stopped box's transcripts are unreachable, so its usage is pulled first.
   // A failed pull never blocks the stop.
   const pullBeforeStop = async (lease: ProvisionedLease): Promise<void> => {
@@ -292,6 +322,7 @@ export function createEnvironmentControl(
   };
   const reapExpiredLeases = async (only?: ReadonlySet<string>): Promise<void> => {
     if (!leaseRegistry) return;
+    const upgrades: Array<ProvisionedLease> = [];
     // Heartbeat expiry is a liveness transition only. Keep the provider
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
@@ -314,12 +345,18 @@ export function createEnvironmentControl(
         // An expired heartbeat means no client is watching, not that the agent
         // stopped. Only a machine confirmed busy stays awake; one that cannot be
         // read is paused, so a broken machine is never kept alive.
-        if (
-          lease.state === "active" &&
-          (await activity(lease)) === "busy" &&
-          (await leaseRegistry.touch(lease.leaseId, undefined, "host"))
-        )
+        const observed = lease.state === "active" ? await activity(lease) : null;
+        if (observed === "busy" && (await leaseRegistry.touch(lease.leaseId, undefined, "host")))
           continue;
+        // Nothing runs on an idle box, so it moves onto the pinned build now and sleeps on a
+        // later sweep, rather than holding up the wake that next opens it.
+        const build = observed === "idle" ? await driver.idleUpgrade?.due(lease) : null;
+        const tries = build ? (idleUpgrades.get(`${lease.leaseId}:${build}`) ?? 0) : 0;
+        if (build && tries < MAX_IDLE_UPGRADES) {
+          idleUpgrades.set(`${lease.leaseId}:${build}`, tries + 1);
+          upgrades.push(lease);
+          continue;
+        }
         const release =
           lease.state === "releasing"
             ? "started"
@@ -351,6 +388,8 @@ export function createEnvironmentControl(
         leaseOperations.delete(lease.sandboxId);
       }
     }
+    // Each upgrade takes its box's lock itself, so it starts once the sweep has let go of it.
+    for (const lease of upgrades) driver.idleUpgrade?.start(lease);
   };
   return {
     list: () => Promise.all(targets.map(snapshot)),
@@ -811,6 +850,14 @@ export class EnvironmentControl extends Context.Service<
     readonly upgrade: (
       input: EnvironmentProvisionUpgradeInput,
     ) => Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>;
+    /**
+     * A client's report of whether its user is here. While any client's user is, the host wakes
+     * their unsettled cloud chats ahead of them and keeps them awake. Answers with the machines
+     * waking or updating right now.
+     */
+    readonly presence: (
+      input: EnvironmentControlPresenceInput,
+    ) => Effect.Effect<EnvironmentControlPresenceResult, EnvironmentControlError>;
   }
 >()("t3/environmentControl/EnvironmentControl") {}
 
@@ -1013,6 +1060,29 @@ export const layer = Layer.effect(
               upkeepChat: async ({ sandboxId, idle }) => {
                 const chat = await instanceChat(sandboxId);
                 return chat ? chat.mac.upkeep(chat.operation, chat.manifest, idle) : null;
+              },
+              idleUpgrade: {
+                due: async (lease) => {
+                  if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId))
+                    return null;
+                  const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(
+                    () => null,
+                  );
+                  if (operation?.state.kind !== "ready") return null;
+                  // Read per sweep: upkeep keeps the service it started with, and the pinned
+                  // build follows config edits.
+                  const current = await resolve();
+                  const pinned = current
+                    ? configuredRuntimeArtifact(
+                        current.config,
+                        operation.state.allocation.resource.provider,
+                      )
+                    : null;
+                  return pinned && pinned.sha256 !== operation.state.readiness.artifactSha256
+                    ? pinned.sha256
+                    : null;
+                },
+                start: (lease) => void runLogged(upgradeIdleBox(lease)),
               },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and
@@ -1883,6 +1953,135 @@ export const layer = Layer.effect(
       Effect.repeat(Schedule.spaced(Duration.minutes(1))),
       Effect.forkScoped,
     );
+    /**
+     * Moves an idle box the reaper is about to put to sleep onto the pinned build. A wake or
+     * another upgrade holding the box is waited out briefly; past that the next sweep decides.
+     */
+    const upgradeIdleBox = Effect.fn("EnvironmentControl.upgradeIdleBox")(
+      function* (lease: ProvisionedLease) {
+        const operation = yield* store.get(ProvisionRequestId.make(lease.leaseId));
+        if (operation.state.kind !== "ready") return;
+        const environmentId = operation.state.readiness.environmentId;
+        const startedAt = yield* Clock.currentTimeMillis;
+        const upgraded = yield* provisionControl
+          .upgrade({ leaseId: lease.leaseId, sandboxId: lease.sandboxId, environmentId })
+          .pipe(
+            Effect.repeat({
+              schedule: Schedule.spaced("2 seconds").pipe(Schedule.upTo({ duration: "1 minute" })),
+              while: (result) => result.kind === "refused" && result.reason === "busy",
+            }),
+            wakeAhead.track(environmentId, boxMachine(operation.request), "updating"),
+          );
+        yield* Effect.logInfo("idle cloud workspace upgraded before sleeping", {
+          leaseId: lease.leaseId,
+          result: upgraded.kind === "refused" ? `refused: ${upgraded.message}` : upgraded.kind,
+          durationMs: (yield* Clock.currentTimeMillis) - startedAt,
+        });
+      },
+      Effect.catchCause((cause) =>
+        Effect.logWarning("idle cloud workspace could not be upgraded", { cause }),
+      ),
+    );
+    const resumeWorkspace = Effect.fn("EnvironmentControl.resume")(function* (
+      input: EnvironmentProvisionResumeInput,
+    ) {
+      const workspace = (yield* listProvisionedEnvironments(sql)).find(
+        (candidate) => candidate.environmentId === input.environmentId,
+      );
+      if (!workspace) {
+        yield* Effect.logInfo("cloud workspace resume refused", {
+          environmentId: input.environmentId,
+          reason: "not-provisioned",
+        });
+        return {
+          kind: "refused" as const,
+          reason: "not-provisioned" as const,
+          message: "This machine has no workspace for that environment.",
+        };
+      }
+      const machine = workspace.machine ?? "sandbox";
+      // A resume can run for many minutes (a Mac boot, a stopped Devbox), and its first sign
+      // otherwise is the machine it creates, so each one is logged as it starts and ends.
+      const startedAt = yield* Clock.currentTimeMillis;
+      yield* Effect.logInfo("cloud workspace resume started", {
+        environmentId: input.environmentId,
+        leaseId: workspace.leaseId,
+        lifecycle: workspace.lifecycle,
+      });
+      const result = yield* run<EnvironmentProvisionResumeResult>(
+        (service) => service.resume(workspace),
+        {
+          kind: "refused",
+          reason: "unknown",
+          message: "This install has no provisioning template configured.",
+        },
+      ).pipe(wakeAhead.track(workspace.environmentId, machine, "waking"));
+      yield* Effect.logInfo("cloud workspace resume answered", {
+        leaseId: workspace.leaseId,
+        result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
+        durationMs: (yield* Clock.currentTimeMillis) - startedAt,
+      });
+      const upgrade = provisionControl.upgrade({
+        leaseId: workspace.leaseId,
+        sandboxId: workspace.sandboxId,
+        environmentId: input.environmentId,
+      });
+      if (result.kind === "resumed") {
+        const guestProtocol = yield* Effect.promise(async () => {
+          const lease = await leaseRegistry.findById(workspace.leaseId).catch(() => null);
+          if (!lease?.remoteAccess) return null;
+          await serveProxy(lease);
+          return readGuestProtocol(lease.remoteAccess.origin);
+        });
+        const mustUpgrade = wakeNeedsUpgrade(guestProtocol, workspace.lifecycle === "paused");
+        yield* Effect.logInfo("cloud workspace build checked on resume", {
+          leaseId: workspace.leaseId,
+          guestProtocol,
+          upgrade: mustUpgrade ? "before connecting" : "none before connecting",
+        });
+        if (!mustUpgrade) return result;
+        return yield* upgradeAfterResume(upgrade).pipe(
+          wakeAhead.track(workspace.environmentId, machine, "updating"),
+          Effect.tap((upgraded) =>
+            Effect.flatMap(Clock.currentTimeMillis, (now) =>
+              Effect.logInfo("cloud workspace upgrade on resume answered", {
+                leaseId: workspace.leaseId,
+                result: upgraded.kind === "refused" ? `refused: ${upgraded.message}` : "resumed",
+                durationMs: now - startedAt,
+              }),
+            ),
+          ),
+        );
+      }
+      const recovered = yield* recoverRefusedResume(result, upgrade).pipe(
+        wakeAhead.track(workspace.environmentId, machine, "updating"),
+      );
+      if (recovered.kind === "resumed")
+        yield* Effect.logInfo("cloud workspace recovered by upgrade", {
+          leaseId: workspace.leaseId,
+        });
+      return recovered;
+    });
+    const wakeAhead = makeWakeAhead({
+      list: listProvisionedEnvironments(sql, [], [], []),
+      resume: (box) =>
+        resumeWorkspace({ environmentId: box.environmentId }).pipe(
+          Effect.catch((error) =>
+            Effect.succeed({
+              kind: "refused" as const,
+              reason: "unknown" as const,
+              message: error.message,
+            }),
+          ),
+        ),
+      renew: (box) => provisionControl.touch({ leaseId: box.leaseId }, "host"),
+      scope: yield* Effect.scope,
+    });
+    // Unsettled chats are woken again after a refusal and renewed while the user stays.
+    yield* wakeAhead.pass.pipe(
+      Effect.repeat(Schedule.spaced(Duration.seconds(30))),
+      Effect.forkScoped,
+    );
     return {
       namespaceProxyOrigin: (leaseId) =>
         Effect.tryPromise({
@@ -1973,78 +2172,9 @@ export const layer = Layer.effect(
           message: "This install has no provisioning template configured.",
         }),
       claim: provisionControl.claim,
-      resume: Effect.fn("EnvironmentControl.resume")(function* (
-        input: EnvironmentProvisionResumeInput,
-      ) {
-        const workspace = (yield* listProvisionedEnvironments(sql)).find(
-          (candidate) => candidate.environmentId === input.environmentId,
-        );
-        if (!workspace) {
-          yield* Effect.logInfo("cloud workspace resume refused", {
-            environmentId: input.environmentId,
-            reason: "not-provisioned",
-          });
-          return {
-            kind: "refused" as const,
-            reason: "not-provisioned" as const,
-            message: "This machine has no workspace for that environment.",
-          };
-        }
-        // A resume can run for many minutes (a Mac boot, a stopped Devbox), and its first sign
-        // otherwise is the machine it creates, so each one is logged as it starts and ends.
-        const startedAt = yield* Clock.currentTimeMillis;
-        yield* Effect.logInfo("cloud workspace resume started", {
-          environmentId: input.environmentId,
-          leaseId: workspace.leaseId,
-          lifecycle: workspace.lifecycle,
-        });
-        const result = yield* run<EnvironmentProvisionResumeResult>(
-          (service) => service.resume(workspace),
-          {
-            kind: "refused",
-            reason: "unknown",
-            message: "This install has no provisioning template configured.",
-          },
-        );
-        yield* Effect.logInfo("cloud workspace resume answered", {
-          leaseId: workspace.leaseId,
-          result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
-          durationMs: (yield* Clock.currentTimeMillis) - startedAt,
-        });
-        if (result.kind === "resumed" && workspace.lifecycle === "paused") {
-          return yield* upgradeAfterResume(
-            provisionControl.upgrade({
-              leaseId: workspace.leaseId,
-              sandboxId: workspace.sandboxId,
-              environmentId: input.environmentId,
-            }),
-          ).pipe(
-            Effect.tap((upgraded) =>
-              Effect.logInfo("cloud workspace upgrade on resume answered", {
-                leaseId: workspace.leaseId,
-                result: upgraded.kind === "refused" ? `refused: ${upgraded.message}` : "resumed",
-              }),
-            ),
-          );
-        }
-        if (result.kind === "refused") {
-          const recovered = yield* recoverRefusedResume(
-            result,
-            provisionControl.upgrade({
-              leaseId: workspace.leaseId,
-              sandboxId: workspace.sandboxId,
-              environmentId: input.environmentId,
-            }),
-          );
-          if (recovered.kind === "resumed")
-            yield* Effect.logInfo("cloud workspace recovered by upgrade", {
-              leaseId: workspace.leaseId,
-            });
-          return recovered;
-        }
-        return result;
-      }),
+      resume: resumeWorkspace,
       upgrade: provisionControl.upgrade,
+      presence: (input) => wakeAhead.presence(input.present),
       touch: (input) =>
         importedLeases.has(input.leaseId)
           ? run<EnvironmentProvisionTouchResult>(

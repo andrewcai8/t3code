@@ -1,4 +1,10 @@
+import { useAtomValue } from "@effect/atom-react";
+import {
+  cloudMachineStatus,
+  type EnvironmentConnectionPresentation,
+} from "@t3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { CloudMachineState, EnvironmentId } from "@t3tools/contracts";
 
 import {
   type ComposerThreadDraftState,
@@ -6,6 +12,7 @@ import {
   type DraftSessionState,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { environmentCatalog } from "../connection/catalog";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 
 export { environmentAllowsThreadSettlement } from "@t3tools/client-runtime/state/thread-settled";
@@ -76,4 +83,13 @@ export function sidebarDraftStatusLabel(session: DraftSessionState, isOpen: bool
     default:
       return "Unsent draft";
   }
+}
+
+/** Whether a chat's cloud machine is asleep, waking or updating; null while awake or not a box. */
+export function useCloudMachineStatus(
+  environmentId: EnvironmentId,
+  connection: EnvironmentConnectionPresentation | undefined,
+): CloudMachineState | null {
+  const machine = useAtomValue(environmentCatalog.cloudMachineAtom(environmentId));
+  return cloudMachineStatus(machine ?? undefined, connection?.phase);
 }

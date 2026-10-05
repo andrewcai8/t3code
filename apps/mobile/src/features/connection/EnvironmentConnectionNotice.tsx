@@ -1,12 +1,16 @@
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import {
+  cloudMachineStatus,
+  cloudWakeNotice,
   type EnvironmentConnectionPhase,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { SymbolView } from "../../components/AppSymbol";
 import { ActivityIndicator, Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
+import { useCloudMachine } from "../../state/cloud-machine";
 
 function noticeTitle(phase: EnvironmentConnectionPhase, environmentLabel: string): string {
   switch (phase) {
@@ -45,7 +49,7 @@ function noticeDetail(
     case "reconnecting":
       return `The ${resourceName} will load as soon as the environment is ready.`;
     case "waking":
-      return "This can take a few minutes. It reconnects on its own.";
+      return "It reconnects on its own.";
     case "unsupported":
       return "Use compatible versions of the app and server to connect.";
     case "available":
@@ -61,7 +65,15 @@ export function EnvironmentConnectionNotice(props: {
   readonly connection: EnvironmentConnectionPresentation;
   readonly resourceName: string;
   readonly onRetry: () => void;
+  /** A cloud box's id, so a waking or updating machine is said with the time it takes. */
+  readonly environmentId?: EnvironmentId | null;
 }) {
+  const machine = useCloudMachine(props.environmentId ?? null);
+  const machineStatus = cloudMachineStatus(machine ?? undefined, props.connection.phase);
+  const wake =
+    machineStatus === "waking" || machineStatus === "updating"
+      ? cloudWakeNotice(machineStatus, machine?.machine)
+      : null;
   const isRetrying =
     props.connection.phase === "connecting" ||
     props.connection.phase === "reconnecting" ||
@@ -82,10 +94,11 @@ export function EnvironmentConnectionNotice(props: {
         )}
 
         <Text className="text-center text-lg font-t3-bold text-foreground">
-          {noticeTitle(props.connection.phase, props.environmentLabel)}
+          {wake?.title ?? noticeTitle(props.connection.phase, props.environmentLabel)}
         </Text>
         <Text className="text-center text-sm leading-normal text-foreground-muted">
-          {noticeDetail(props.connection.phase, props.resourceName, props.connection.error)}
+          {wake?.description ??
+            noticeDetail(props.connection.phase, props.resourceName, props.connection.error)}
           {props.connection.traceId ? (
             <ConnectionTraceId traceId={props.connection.traceId} />
           ) : null}

@@ -7,6 +7,8 @@ import {
   type EnvironmentProvisionResumeInput,
   type EnvironmentProvisionResumeResult,
   type EnvironmentProvisionTouchInput,
+  type EnvironmentControlPresenceInput,
+  type EnvironmentControlPresenceResult,
   WS_METHODS,
   type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
@@ -257,6 +259,10 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       input: EnvironmentProvisionAttachInput,
     ) => Effect.Effect<EnvironmentProvisionAttachResult>;
     readonly touch?: (input: EnvironmentProvisionTouchInput) => Effect.Effect<void>;
+    /** The host's answer to a presence report; no machine asleep or waking unless given. */
+    readonly presence?: (
+      input: EnvironmentControlPresenceInput,
+    ) => Effect.Effect<EnvironmentControlPresenceResult>;
     readonly beforeSessionConnect?: (environmentId: EnvironmentId) => Effect.Effect<void>;
     readonly beforeRegistrationRegister?: (
       registration: CatalogRegistration,
@@ -542,6 +548,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
                   (options?.touch?.(input) ?? Effect.void).pipe(
                     Effect.as({ kind: "touched" as const }),
                   ),
+                [WS_METHODS.environmentControlPresence]: (input: EnvironmentControlPresenceInput) =>
+                  options?.presence?.(input) ?? Effect.succeed({ machines: [] }),
               } as unknown as RpcSession.RpcSession["client"],
               initialConfig: Effect.die(new Error("Config is not used by registry tests.")),
               subscribeServerConfig: () =>
@@ -1525,6 +1533,69 @@ describe("EnvironmentRegistry", () => {
           expect(yield* touchCount("1 hour")).toBe(17);
           yield* Queue.offer(inputs, undefined);
           expect(yield* touchCount("1 second")).toBe(18);
+        }).pipe(
+          Effect.provide(harness.layer),
+          Effect.provideService(UserPresence, presence),
+          Effect.scoped,
+        );
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "tells a box's host its user is here every four minutes, reads it every 15 seconds while a machine wakes, and says nothing while away",
+    () =>
+      Effect.gen(function* () {
+        const visible = yield* Queue.unbounded<boolean>();
+        const presence = yield* makeUserPresence({
+          visible: Stream.fromQueue(visible),
+          inputs: Stream.never,
+        });
+        yield* Queue.offer(visible, true);
+        const reports = yield* Ref.make<ReadonlyArray<boolean>>([]);
+        const answer = yield* Ref.make<EnvironmentControlPresenceResult>({
+          machines: [
+            { environmentId: HOST_BOX.environmentId, state: "waking", machine: "sandbox" },
+          ],
+        });
+        const harness = yield* makeHarness(
+          [TARGET, HOST_BOX],
+          [HOST_BOX_PROFILE],
+          [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+          {
+            presence: (input) =>
+              Ref.update(reports, (current) => [...current, input.present]).pipe(
+                Effect.andThen(Ref.get(answer)),
+              ),
+          },
+        );
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          const after = Effect.fn("after")(function* (elapsed: Duration.Input) {
+            yield* TestClock.adjust(elapsed);
+            return yield* Ref.get(reports);
+          });
+          expect(yield* after("1 second")).toEqual([true]);
+          expect(yield* SubscriptionRef.get(registry.cloudMachines)).toEqual(
+            new Map([[HOST_BOX.environmentId, { state: "waking", machine: "sandbox" }]]),
+          );
+
+          yield* Ref.set(answer, { machines: [] });
+          expect(yield* after("15 seconds")).toEqual([true, false]);
+          expect(yield* SubscriptionRef.get(registry.cloudMachines)).toEqual(new Map());
+          expect(yield* after("3 minutes")).toEqual([true, false]);
+          expect(yield* after("1 minute")).toEqual([true, false, true]);
+
+          yield* Queue.offer(visible, false);
+          expect(yield* after("20 minutes")).toEqual([true, false, true]);
+          yield* Queue.offer(visible, true);
+          expect(yield* after("1 second")).toEqual([true, false, true, true]);
         }).pipe(
           Effect.provide(harness.layer),
           Effect.provideService(UserPresence, presence),
