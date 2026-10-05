@@ -19,4 +19,5 @@ export const ENVIRONMENT_CONTROL_REQUIRED_SCOPES = {
   [WS_METHODS.environmentControlClaim]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlTouch]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlKeep]: AuthOrchestrationOperateScope,
+  [WS_METHODS.environmentControlPresence]: AuthOrchestrationOperateScope,
 } as const;

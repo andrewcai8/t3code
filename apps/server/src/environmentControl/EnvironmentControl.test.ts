@@ -873,6 +873,7 @@ describe("managed cloud commands", () => {
 
 describe("a cloud machine whose agent is working", () => {
   const pauseInput = { leaseId: "lease", sandboxId: "sandbox" };
+  let holdBox: ReturnType<typeof createEnvironmentControl>["holdBox"] | undefined;
   async function withExpiredLease(
     activity: "busy" | "idle" | "unknown",
     test: (context: {
@@ -882,6 +883,7 @@ describe("a cloud machine whose agent is working", () => {
       manager: ReturnType<typeof createEnvironmentControl>;
     }) => Promise<void>,
     retentionDeadline?: string,
+    idleUpgrade?: Parameters<typeof createEnvironmentControl>[1]["idleUpgrade"],
   ) {
     await withSqlRegistry(async (registry) => {
       await registry.register({
@@ -903,10 +905,15 @@ describe("a cloud machine whose agent is working", () => {
       driver.pause = async ({ sandboxId }) => {
         calls.push(`pause:${sandboxId}`);
       };
-      const manager = createEnvironmentControl([], driver, registry, async (lease) => {
-        checked.push(lease.leaseId);
-        return { activity };
-      });
+      const manager = createEnvironmentControl(
+        [],
+        { ...driver, ...(idleUpgrade ? { idleUpgrade } : {}) },
+        registry,
+        async (lease) => {
+          checked.push(lease.leaseId);
+          return { activity };
+        },
+      );
       await test({ registry, calls, checked, manager });
     });
   }
@@ -931,6 +938,67 @@ describe("a cloud machine whose agent is working", () => {
       });
     },
   );
+
+  it("moves an idle box onto the pinned build before it sleeps, then pauses it on the next sweep", async () => {
+    let pinnedAhead = true;
+    const started: Array<string> = [];
+    await withExpiredLease(
+      "idle",
+      async ({ registry, calls, manager }) => {
+        holdBox = manager.holdBox;
+        await manager.reapExpiredLeases();
+        expect(started).toEqual(["lease:held"]);
+        expect(calls).toEqual([]);
+        expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["pause:sandbox"]);
+        expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+      },
+      undefined,
+      {
+        due: async () => (pinnedAhead ? "new-build" : null),
+        start: (lease) => {
+          const release = holdBox?.(lease.sandboxId);
+          started.push(`${lease.leaseId}:${release ? "held" : "busy"}`);
+          release?.();
+          pinnedAhead = false;
+        },
+      },
+    );
+  });
+
+  it("lets an idle box sleep on its old build once two upgrades to the pinned one failed", async () => {
+    const started: Array<string> = [];
+    await withExpiredLease(
+      "idle",
+      async ({ registry, calls, manager }) => {
+        await manager.reapExpiredLeases();
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual([]);
+        await manager.reapExpiredLeases();
+        expect(started).toEqual(["lease", "lease"]);
+        expect(calls).toEqual(["pause:sandbox"]);
+        expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
+      },
+      undefined,
+      { due: async () => "new-build", start: (lease) => void started.push(lease.leaseId) },
+    );
+  });
+
+  it("never upgrades a box whose activity cannot be read, and pauses it", async () => {
+    const started: Array<string> = [];
+    await withExpiredLease(
+      "unknown",
+      async ({ calls, manager }) => {
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["pause:sandbox"]);
+        expect(started).toEqual([]);
+      },
+      undefined,
+      { due: async () => "new-build", start: (lease) => void started.push(lease.leaseId) },
+    );
+  });
 
   it("pauses a busy machine whose retention deadline has passed", async () => {
     await withExpiredLease(

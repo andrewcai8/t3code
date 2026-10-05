@@ -1,4 +1,5 @@
 import {
+  type CloudMachineKind,
   DiscoveredProvisionedEnvironment,
   DurableProvisionRequest,
   EnvironmentControlError,
@@ -54,6 +55,12 @@ export function boxLabel(request: DurableProvisionRequest): string {
   const where = request.provider === "e2b" ? "E2B" : "Namespace Mac";
   const name = request.repository?.split("/").findLast((segment) => segment !== "");
   return name === undefined ? where : `${name} · ${where}`;
+}
+
+/** What a box runs on, which sets how long it takes to wake. */
+export function boxMachine(request: DurableProvisionRequest): CloudMachineKind {
+  if (request.provider === "e2b") return "sandbox";
+  return request.engine === "instance" ? "mac" : "devbox";
 }
 
 /**
@@ -202,6 +209,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         lifecycle: box.lifecycle,
         environmentId: box.environmentId,
         provider: request.provider,
+        machine: boxMachine(request),
         label: boxLabel(request),
         repository: request.repository ?? null,
         ...(box.projectDir === undefined ? {} : { projectDir: box.projectDir }),
