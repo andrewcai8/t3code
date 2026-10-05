@@ -388,6 +388,19 @@ function loadState(threadId: string): MoveState {
   };
 }
 
+/**
+ * Sets a finished or dead move's state aside, so moving the same chat again starts a new move
+ * instead of replaying this one's request and message ids.
+ */
+function retireState(threadId: string, state: MoveState, outcome: "done" | "failed") {
+  const file = NodePath.join(STATE_DIR, `${threadId}.json`);
+  if (NodeFS.existsSync(file))
+    NodeFS.renameSync(
+      file,
+      NodePath.join(STATE_DIR, `${threadId}.${state.requestId}.${outcome}.json`),
+    );
+}
+
 function saveState(threadId: string, state: MoveState) {
   NodeFS.mkdirSync(STATE_DIR, { recursive: true });
   NodeFS.writeFileSync(
@@ -505,15 +518,20 @@ async function toCloud(flags: {
             schedule: Schedule.spaced("10 seconds"),
           }),
         );
-        if (ready.kind !== "ready")
+        if (ready.kind !== "ready") {
+          retireState(local.threadId, state, "failed");
           return yield* Effect.fail(new Error(`provision ${ready.kind}: ${ready.message}`));
+        }
         const attached = yield* manager["environmentControl.attach"]({
           requestId: ProvisionRequestId.make(state.requestId),
         });
         if (attached.kind !== "attached")
           return yield* Effect.fail(new Error(`attach refused: ${attached.message}`));
         const { pairingUrl } = childPairingUrl({
-          attachedPairingUrl: new URL(attached.pairingUrl),
+          // URL.parse, unlike new URL, never puts the credential-bearing input in an error.
+          attachedPairingUrl:
+            URL.parse(attached.pairingUrl) ??
+            (yield* Effect.fail(new Error("the host returned an unreadable pairing URL"))),
           origin: flags.origin,
           leaseId: ready.environment.leaseId,
         });
@@ -673,6 +691,7 @@ async function toCloud(flags: {
     );
   });
   await Effect.runPromise(program.pipe(Effect.provide(FetchHttpClient.layer)));
+  retireState(local.threadId, state, "done");
 }
 
 async function toLocal(flags: {
