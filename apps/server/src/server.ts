@@ -8,6 +8,8 @@ import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchRea
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
+import * as BoxFleetClient from "./environmentControl/BoxFleetClient.ts";
+import * as CloudFleetHost from "./environmentControl/CloudFleetHost.ts";
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
 import {
   environmentControlBodyLimitLayer,
@@ -529,6 +531,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,
+  // The host relays each awake cloud chat's fleet calls to the user's other cloud chats.
+  Layer.effectDiscard(
+    CloudFleetHost.CloudFleetHost.pipe(Effect.flatMap((host) => host.start)),
+  ).pipe(Layer.provide(CloudFleetHost.layer), Layer.provide(BoxFleetClient.layer)),
   layerThreadSettlementWorker,
   Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
     Layer.provide(ProjectionStoreV2.layer),
