@@ -34,6 +34,8 @@ export type HostBoxSyncStep =
     }
   /** Stop dialing a box the host lost, keeping its history readable. */
   | { readonly _tag: "MarkMissing"; readonly environmentId: EnvironmentId }
+  /** Dial a box marked missing again once the host lists it live, as after a restore. */
+  | { readonly _tag: "UnmarkMissing"; readonly environmentId: EnvironmentId }
   /**
    * Drop an unpaired box that is gone, with its seeded cache. `disposed` when the host listed it
    * disposed, false when the host no longer lists it.
@@ -110,6 +112,8 @@ export function planHostBoxSync(input: HostBoxSyncInput): ReadonlyArray<HostBoxS
       steps.push({ _tag: "Reseed", environmentId: row.environmentId, chat: row.chat });
     if (gone && target.workspaceStatus !== "missing")
       steps.push({ _tag: "MarkMissing", environmentId: row.environmentId });
+    if (!gone && target.workspaceStatus === "missing")
+      steps.push({ _tag: "UnmarkMissing", environmentId: row.environmentId });
   }
   for (const [environmentId, entry] of entries) {
     if (

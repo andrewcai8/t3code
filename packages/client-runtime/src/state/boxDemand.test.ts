@@ -96,6 +96,7 @@ describe("running box demand", () => {
             lifecycle: get(lifecycle),
             label: "t3code · E2B",
             chat: null,
+            restorableUntil: null,
           },
         ]),
       demandAtom,

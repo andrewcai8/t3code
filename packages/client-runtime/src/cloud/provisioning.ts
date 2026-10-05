@@ -79,6 +79,8 @@ export interface ProvisionedBox {
   readonly label: string;
   /** The host's last read of the box's chat, sent only when newer than this runtime holds. */
   readonly chat: ProvisionedChat | null;
+  /** On a removed box, until when its host can still restore it. */
+  readonly restorableUntil: string | null;
 }
 
 /** One host's list of its boxes, as it last answered. */
@@ -100,6 +102,7 @@ export function provisionedBox(
     lifecycle: row.lifecycle,
     label: row.label,
     chat: row.chat ?? null,
+    restorableUntil: row.restorableUntil ?? null,
   };
 }
 
@@ -118,7 +121,8 @@ export function sameProvisionedBoxes(
         box.threadId === other.threadId &&
         box.lifecycle === other.lifecycle &&
         box.label === other.label &&
-        box.chat?.sequence === other.chat?.sequence
+        box.chat?.sequence === other.chat?.sequence &&
+        box.restorableUntil === other.restorableUntil
       );
     })
   );

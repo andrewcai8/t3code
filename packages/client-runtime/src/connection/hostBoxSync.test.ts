@@ -48,6 +48,7 @@ function box(id: string, overrides: Partial<ProvisionedBox> = {}): ProvisionedBo
     lifecycle: "active",
     label: "t3code · E2B",
     chat: null,
+    restorableUntil: null,
     ...overrides,
   };
 }
@@ -194,6 +195,29 @@ describe("planHostBoxSync", () => {
       { _tag: "MarkMissing", environmentId: "disposed-paired" },
       { _tag: "MarkMissing", environmentId: "missing-unpaired" },
       { _tag: "Forget", environmentId: "unlisted-unpaired", disposed: false },
+    ]);
+  });
+
+  it("dials a box marked missing again once its host lists it live, as after a restore", () => {
+    expect(
+      plan({
+        entries: [
+          saved("restored", { missing: true }),
+          saved("restored-awake", { missing: true }),
+          saved("still-removed", { missing: true }),
+        ],
+        boxes: [
+          box("restored", { lifecycle: "paused" }),
+          box("restored-awake"),
+          box("still-removed", {
+            lifecycle: "disposed",
+            restorableUntil: "2026-11-04T12:00:00.000Z",
+          }),
+        ],
+      }),
+    ).toEqual([
+      { _tag: "UnmarkMissing", environmentId: "restored" },
+      { _tag: "UnmarkMissing", environmentId: "restored-awake" },
     ]);
   });
 

@@ -162,6 +162,17 @@ export function createServerCloudAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.requestId}`,
       },
     }),
+    restoreProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:restore",
+      tag: WS_METHODS.environmentControlRestore,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
+      },
+      // The host's next list names the box live again, which lets this device dial it.
+      onSettled: (target, registry) =>
+        Effect.sync(() => refreshProvisionedBoxes(registry, [target.environmentId])),
+    }),
     pauseProvisionedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:pause",
       tag: WS_METHODS.environmentControlPause,

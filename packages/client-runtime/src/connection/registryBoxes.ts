@@ -1007,6 +1007,10 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         );
       case "MarkMissing":
         return markWorkspaceMissing(step.environmentId);
+      case "UnmarkMissing":
+        return rewriteBearerTarget(step.environmentId, ({ workspaceStatus, ...target }) =>
+          workspaceStatus === "missing" ? new BearerConnectionTarget(target) : null,
+        );
       case "Forget":
         // A box that paired since the list was read is kept, and one its host disposed is missing.
         return forgetUnpairedBox(step.environmentId).pipe(
