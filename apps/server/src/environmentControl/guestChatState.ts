@@ -767,7 +767,7 @@ def scrub_template(template, spec):
     atomic(template / 'warm.json', json.dumps({key: journal[key] for key in WARM_KEYS if key in journal}))
     (template / 'preparation.json').unlink()
     for entry in os.listdir(template):
-        if entry in ('broker-token', 'server.json', 'server.log', 'server.lock', 'prepare.lock', 'tool-install.log', 'adopt.json', 'restore.json') or entry.startswith(('input-', 'artifact-')):
+        if entry in ('broker-token', 'server.json', 'server.log', 'server.lock', 'prepare.lock', 'tool-install.log', 'adopt.json', 'restore.json', 'disk-guard.lock', 'disk-guard.log', 'disk-reserve') or entry.startswith(('input-', 'artifact-')):
             remove(template / entry)
     home = template / 'home'
     if home.is_dir():

@@ -14,6 +14,7 @@ import {
   brokerTokenScript,
   prepareRemoteHost,
   checkRemoteHost,
+  diskGuardScript,
   remotePreparationScript,
   sealWarmBase,
   type RemotePreparationInput,
@@ -1432,6 +1433,37 @@ describe("remote branch refresh", () => {
       refreshError: null,
       serverReady: true,
     });
+  });
+});
+
+describe("box disk guard", () => {
+  it("gives back its reserve and clears package caches when the disk runs low, and keeps the work", async () => {
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "disk-guard-"));
+    try {
+      const home = NodePath.join(root, "home");
+      await NodeFSP.mkdir(NodePath.join(home, ".npm", "_cacache"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(home, ".npm", "_cacache", "index"), "cached");
+      await NodeFSP.mkdir(NodePath.join(home, ".cache", "pip"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(root, "disk-reserve"), "held");
+      await NodeFSP.mkdir(NodePath.join(root, "workspace"));
+      await NodeFSP.writeFile(NodePath.join(root, "workspace", "notes.md"), "work");
+      // A threshold above any disk's free space makes this disk read as nearly full.
+      const guarded = NodeChildProcess.spawnSync(
+        "python3",
+        ["-c", diskGuardScript, root, home, "once", String(2 ** 60)],
+        { encoding: "utf8" },
+      );
+
+      expect(guarded.status).toBe(0);
+      expect((await NodeFSP.readdir(root)).toSorted()).toEqual(["home", "workspace"]);
+      expect(await NodeFSP.readdir(NodePath.join(home, ".npm"))).toEqual([]);
+      expect(await NodeFSP.readdir(NodePath.join(home, ".cache"))).toEqual([]);
+      expect(await NodeFSP.readFile(NodePath.join(root, "workspace", "notes.md"), "utf8")).toBe(
+        "work",
+      );
+    } finally {
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -360,6 +360,53 @@ ${boundedRunScript}
 ${brokerTokenFunctions}
 `;
 
+/**
+ * Keeps a full disk from stopping a box's T3 server, which must write to save the chat. On Linux
+ * a reserve file holds space the guard gives back when the disk runs low; it also clears package
+ * caches the agent can download again. `once` frees room before the server starts; `watch` checks
+ * every 30 seconds for as long as the server runs, one watcher per box. Arguments: root, home,
+ * mode, and the low-disk threshold in bytes (1 GiB when absent).
+ */
+export const diskGuardScript = String.raw`
+import fcntl,json,os,pathlib,shutil,sys,time
+root, home, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+reserve = root / 'disk-reserve'
+RESERVE = 256 << 20
+LOW = int(sys.argv[4]) if len(sys.argv) > 4 else 1 << 30
+CACHES = ['.npm/_cacache', '.cache/pnpm', '.cache/yarn', '.yarn/berry/cache', '.bun/install/cache', '.cache/pip', '.cache/uv', '.cache/go-build', 'Library/Caches/Yarn', 'Library/Caches/pip']
+def headroom():
+    free = shutil.disk_usage(root).free
+    if free < LOW:
+        if reserve.exists():
+            reserve.unlink(missing_ok=True)
+            print('disk low: released the reserve', free, flush=True)
+        for cache in CACHES:
+            shutil.rmtree(home / cache, ignore_errors=True)
+    elif sys.platform.startswith('linux') and not reserve.exists() and free > LOW + RESERVE:
+        partial = root / 'disk-reserve.tmp'
+        with open(partial, 'wb') as output:
+            os.posix_fallocate(output.fileno(), 0, RESERVE)
+        os.replace(partial, reserve)
+if mode == 'once':
+    headroom()
+    sys.exit(0)
+with open(root / 'disk-guard.lock', 'a') as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(0)
+    while True:
+        try:
+            os.kill(json.loads((root / 'server.json').read_text())['pid'], 0)
+        except (OSError, ValueError, KeyError):
+            sys.exit(0)
+        try:
+            headroom()
+        except OSError as error:
+            print('disk guard:', error, flush=True)
+        time.sleep(30)
+`;
+
 /** Python's kernel locks work on Linux and macOS and release when a preparation process dies. */
 export const remotePreparationScript = String.raw`
 import time
@@ -921,6 +968,9 @@ def prepare(spec):
             serving = server_process()
             current = server_lock_free() or (serving is not None and serving['sha256'] == runtime['sha256'])
             token = renew_broker_token(root, run, broker_issue if current else serving_broker_issue(root, '/proc'))
+        with step('diskGuard'):
+            # A full disk gets room back before the server starts writing to it.
+            subprocess.run([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'once'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
         healthy = probe()
         process = server_process()
         if not (healthy and process is not None and process['sha256'] == runtime['sha256']):
@@ -967,6 +1017,8 @@ def prepare(spec):
         process = server_process()
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
+        with open(root / 'disk-guard.log', 'a') as log:
+            subprocess.Popen([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'watch'], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         if tooling is not None:
             since, started = tooling
             try:
@@ -984,6 +1036,8 @@ def prepare(spec):
                 mark('toolInstallFailed', since)
         mark('prepareTotal', entered)
         return {'refreshError': refresh_error, 'environmentId': journal['environmentId'], 'projectDir': str(project), 'sourceRevision': repository['revision'] if repository else None, 'headRevision': run(['git', 'rev-parse', 'HEAD'], project, env), 'preparationHash': spec['preparationHash'], 't3Revision': process['revision'], 'artifactSha256': process['sha256'], 'runtimeVersion': run([spec['runtimeExecutable'], '--version'], root, env), 'serverPid': process['pid'], 'brokerCredentialPath': str(credential_path), 'phases': phases}
+
+DISK_GUARD = ${JSON.stringify(diskGuardScript)}
 
 SUPERVISOR = r"""
 import fcntl,json,os,pathlib,sys
@@ -1066,7 +1120,7 @@ def seal(spec):
             journal = json.loads(journal_path.read_text())
             atomic(root / 'warm.json', json.dumps({key: journal[key] for key in ${JSON.stringify(warmJournalKeys)} if key in journal}))
             journal_path.unlink()
-        for name in ('broker-token', 'server.json', 'server.log', 'tool-install.log'):
+        for name in ('broker-token', 'server.json', 'server.log', 'tool-install.log', 'disk-guard.lock', 'disk-guard.log', 'disk-reserve'):
             (root / name).unlink(missing_ok=True)
         if (home / '.t3').exists():
             shutil.rmtree(home / '.t3')
