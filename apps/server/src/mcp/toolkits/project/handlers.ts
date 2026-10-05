@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { refuseHomeFolder } from "../../../home/FleetService.ts";
 import * as HomeService from "../../../home/HomeService.ts";
-import { callerIsHome, routeHome, runAsHome } from "../../homeRouting.ts";
+import { callerHasFleetReach, callerIsHome, routeHome, runAsHome } from "../../homeRouting.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
@@ -103,7 +103,7 @@ export const layer = ProjectToolkit.toLayer({
           message:
             "Home must pass projectId or scratch:true. Threads never launch in Home's folder.",
         });
-      if (remote && !isHome)
+      if (remote && !isHome && !(yield* callerHasFleetReach()))
         return yield* new OrchestratorMcpFailure({
           code: "capability_denied",
           message: "Only Home can act in another environment.",
@@ -143,13 +143,16 @@ export const layer = ProjectToolkit.toLayer({
         isHome ? `${HOME_LAUNCHED_THREAD_ID_PREFIX}${commandId}` : commandId,
       );
       const messageId = MessageId.make(commandId);
-      if (homeThreadId !== undefined && attachments.length === 0) {
+      // Remote attachments were refused above, so every remote launch takes this path. Only
+      // Home's launches are watched and carry a Home launch id; a cloud chat's host picks its own.
+      if ((isHome || remote) && attachments.length === 0) {
         // Provider instances differ per machine, so another machine uses its own default.
         const modelSelection =
           input.modelSelection ?? (remote ? undefined : caller?.modelSelection);
-        yield* watchLaunched(homeThreadId, targetEnvironmentId, threadId);
+        if (homeThreadId !== undefined)
+          yield* watchLaunched(homeThreadId, targetEnvironmentId, threadId);
         return yield* runAsHome(input.environmentId, "threads.launch", {
-          threadId,
+          ...(isHome ? { threadId } : {}),
           ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
           ...(input.scratch === undefined ? {} : { scratch: input.scratch }),
           title: input.title,

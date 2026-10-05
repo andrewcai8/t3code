@@ -12,5 +12,7 @@ export const notHomeLayer = Layer.mergeAll(
     isHome: () => Effect.succeed(false),
   }),
   Layer.mock(FleetService.FleetService)({}),
-  Layer.mock(FleetBroker.FleetBroker)({}),
+  Layer.mock(FleetBroker.FleetBroker)({
+    reach: Effect.succeed({ hostConnected: false, environments: [] }),
+  }),
 );

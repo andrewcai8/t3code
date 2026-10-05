@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../../../home/FleetBroker.ts";
 import * as HomeService from "../../../home/HomeService.ts";
-import { callerIsHome, readHomeChangeCaller } from "../../homeRouting.ts";
+import { callerHasFleetReach, callerIsHome, readHomeChangeCaller } from "../../homeRouting.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { HomeToolkit } from "./tools.ts";
 
@@ -20,7 +20,7 @@ export const HomeHandlersLive = HomeToolkit.toLayer({
         connected: true,
         current: true,
       };
-      if (!(yield* callerIsHome())) {
+      if (!(yield* callerHasFleetReach())) {
         return {
           currentEnvironmentId: scope.environmentId,
           relayConnected: false,

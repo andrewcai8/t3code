@@ -178,6 +178,7 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
+import { PROVISION_BROKER_SUBJECT } from "./environmentControl/remotePreparation.ts";
 import {
   environmentControlServerConfig,
   environmentControlWsHandlers,
@@ -3559,7 +3560,8 @@ const layerWsRpc = (
         [WS_METHODS.fleetConnect]: (input) =>
           observeRpcStreamEffect(
             WS_METHODS.fleetConnect,
-            home.available
+            // A cloud box's host relays for its chats as the desktop relays for Home.
+            home.available || currentSession.subject === PROVISION_BROKER_SUBJECT
               ? fleetBroker.connect(input)
               : Effect.fail(
                   new HomeUnavailableError({
