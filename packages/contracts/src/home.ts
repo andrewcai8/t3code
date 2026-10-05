@@ -34,6 +34,7 @@ import {
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadSendResult,
+  OrchestratorMcpThreadStatus,
 } from "./orchestratorMcp.ts";
 import {
   OrchestrationV2DispatchCommandResult,
@@ -332,10 +333,23 @@ export type FleetInvokeInput = typeof FleetInvokeInput.Type;
 // Hub <-> desktop renderer relay.
 // ---------------------------------------------------------------------------
 
+/**
+ * The chat an environment holds when it is one chat's own machine, as its
+ * relay last read it, so listing and filtering never wake that machine.
+ */
+export const FleetEnvironmentChat = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  status: OrchestratorMcpThreadStatus,
+  updatedAt: IsoDateTime,
+});
+export type FleetEnvironmentChat = typeof FleetEnvironmentChat.Type;
+
 export const FleetEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
   connected: Schema.Boolean,
+  chat: Schema.optional(FleetEnvironmentChat),
 });
 export type FleetEnvironment = typeof FleetEnvironment.Type;
 

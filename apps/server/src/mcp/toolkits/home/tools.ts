@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  FleetEnvironmentChat,
   HomeWatch,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
@@ -27,7 +28,7 @@ const shared = {
 const EnvironmentListTool = Tool.make("t3_environment_list", {
   ...shared,
   description:
-    "List the environments this thread can act in. Other threads see only their own environment. Home sees every environment the user's desktop app is connected to; relayConnected is false when no desktop window is open to relay calls to them.",
+    "List the environments this thread can act in. Other threads see only their own environment. Home sees every environment the user's desktop app is connected to; relayConnected is false when no desktop window is open to relay calls to them. A top-level chat on a cloud machine sees the user's other cloud chats, each its own environment with its chat's last known title and status (listing never wakes a sleeping one; acting on it does), plus one environment that starts a new chat: t3_thread_launch there with a title and message starts a cloud chat on a fresh machine like this one. Another cloud chat can reply with t3_thread_send to this chat's environment and threadId.",
   success: Schema.Struct({
     currentEnvironmentId: EnvironmentId,
     relayConnected: Schema.Boolean,
@@ -37,6 +38,7 @@ const EnvironmentListTool = Tool.make("t3_environment_list", {
         label: Schema.String,
         connected: Schema.Boolean,
         current: Schema.Boolean,
+        chat: Schema.optional(FleetEnvironmentChat),
       }),
     ),
   }),

@@ -290,13 +290,13 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 );
 
 /**
- * Optional on tools Home can aim at another environment. Other threads may
- * only name their own environment.
+ * Optional on tools Home, or a top-level chat on a cloud machine, can aim at
+ * another environment. Other threads may only name their own environment.
  */
 export const OrchestratorMcpEnvironmentTarget = Schema.optional(
   EnvironmentId.annotate({
     description:
-      "Home only: the environment to act in. Omit for this environment. t3_environment_list lists them.",
+      "Home, or a top-level chat on a cloud machine: the environment to act in. Omit for this environment. t3_environment_list lists them.",
   }),
 );
 
