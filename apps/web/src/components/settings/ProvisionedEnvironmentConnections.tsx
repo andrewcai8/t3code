@@ -1,4 +1,4 @@
-import { describeCloudCleanup } from "@t3tools/client-runtime/cloud";
+import { describeCloudCleanup, describeRestorable } from "@t3tools/client-runtime/cloud";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -23,7 +23,7 @@ const LIFECYCLE_LABELS: Record<DiscoveredProvisionedEnvironment["lifecycle"], st
 
 /**
  * One cloud machine the host runs for a chat. Its chat opens it, when that chat is on this
- * device; here it can only be woken, kept from cleanup, or deleted.
+ * device; here it can only be woken, kept from cleanup, deleted, or restored once deleted.
  */
 function ProvisionedEnvironmentRow({
   environment,
@@ -31,16 +31,19 @@ function ProvisionedEnvironmentRow({
   onResume,
   onKeep,
   onDelete,
+  onRestore,
 }: {
   environment: DiscoveredProvisionedEnvironment;
   busy: boolean;
   onResume: () => void;
   onKeep: (keep: boolean) => void;
   onDelete: (title: string) => void;
+  onRestore: () => void;
 }) {
   // The minute clock is UTC without its zone.
   const now = Date.parse(`${useNowMinute()}Z`);
   const cleanup = describeCloudCleanup(environment.cleanup, now);
+  const restorable = describeRestorable(environment.restorableUntil, now);
   const threadRef =
     environment.threadId === null
       ? null
@@ -57,6 +60,7 @@ function ProvisionedEnvironmentRow({
           {environment.provider === "e2b" ? "E2B" : "Namespace"} ·{" "}
           {LIFECYCLE_LABELS[environment.lifecycle]}
           {cleanup ? ` · ${cleanup.text}` : null}
+          {restorable ? ` · ${restorable}` : null}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
@@ -84,14 +88,22 @@ function ProvisionedEnvironmentRow({
             Open chat
           </Button>
         ) : null}
-        <Button
-          size="xs"
-          variant="destructive-outline"
-          disabled={busy}
-          onClick={() => onDelete(title)}
-        >
-          Delete
-        </Button>
+        {environment.lifecycle === "disposed" ? (
+          restorable ? (
+            <Button size="xs" variant="outline" disabled={busy} onClick={onRestore}>
+              Restore
+            </Button>
+          ) : null
+        ) : (
+          <Button
+            size="xs"
+            variant="destructive-outline"
+            disabled={busy}
+            onClick={() => onDelete(title)}
+          >
+            Delete
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -118,6 +130,9 @@ export function ProvisionedEnvironmentConnections({
     reportFailure: false,
   });
   const keep = useAtomCommand(serverEnvironment.keepProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const restore = useAtomCommand(serverEnvironment.restoreProvisionedEnvironment, {
     reportFailure: false,
   });
   const [busy, setBusy] = useState<string | null>(null);
@@ -168,7 +183,7 @@ export function ProvisionedEnvironmentConnections({
     const confirmed = await ensureLocalApi().dialogs.confirm(
       [
         `Delete the cloud machine for "${title}"?`,
-        "This permanently stops it and ends any running work. The chat's history stays.",
+        "This stops it and ends any running work. A chat's machine can be restored here for 30 days. The chat's history stays.",
       ].join("\n"),
       { variant: "destructive" },
     );
@@ -180,11 +195,21 @@ export function ProvisionedEnvironmentConnections({
       });
       if (result._tag === "Failure") return "The host could not delete this machine. Try again.";
       if (result.value.kind !== "disposed") return "The host could not delete this machine.";
-      if (environment.threadId !== null)
+      // A machine that can be restored keeps its chat's lease, so a restore brings both back.
+      if (environment.threadId !== null && result.value.restorableUntil === undefined)
         forgetProvisionedSandbox(scopeThreadRef(environment.environmentId, environment.threadId));
       return null;
     });
   };
+  const restoreEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
+    act(environment, async () => {
+      const result = await restore({
+        environmentId: managerId,
+        input: { leaseId: environment.leaseId },
+      });
+      if (result._tag === "Failure") return "The host could not restore this machine. Try again.";
+      return result.value.kind === "restored" ? null : result.value.message;
+    });
 
   if (!supported || (!query.error && !query.data?.length)) return null;
   return (
@@ -211,6 +236,7 @@ export function ProvisionedEnvironmentConnections({
           onResume={() => void resumeEnvironment(environment)}
           onKeep={(kept) => void keepEnvironment(environment, kept)}
           onDelete={(title) => void deleteEnvironment(environment, title)}
+          onRestore={() => void restoreEnvironment(environment)}
         />
       ))}
       {message ? (

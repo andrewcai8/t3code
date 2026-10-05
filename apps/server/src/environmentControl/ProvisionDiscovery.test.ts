@@ -2,6 +2,7 @@
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  type DiscoveredProvisionedEnvironment,
   DurableProvisionRequest,
   EnvironmentId,
   type ProvisionOperation,
@@ -359,6 +360,69 @@ it.effect("a box disposed through the host is reported disposed, by the id the b
       Effect.scoped,
     );
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "a removed box lists as disposed, restorable until its grace ends, to a client that knows it or asks",
+  () =>
+    Effect.gen(function* () {
+      const provisioning = yield* Provisioning;
+      const sql = yield* SqlClient.SqlClient;
+      const registry = createProvisionedLeaseRegistry(sql);
+      for (const index of [1, 2]) {
+        const operation = yield* provisioning.ensure(
+          decodeRequest({
+            requestId: id(index),
+            provider: "e2b",
+            providerInstanceId: "account",
+            sourceRevision: null,
+            repository: "proof/repository",
+            preparationHash: "a".repeat(64),
+            strategy: "direct",
+            templateId: "fixture",
+          }),
+        );
+        yield* Effect.promise(() =>
+          registry.register({
+            leaseId: id(index),
+            sandboxId: sandboxOf(operation),
+            provider: "e2b",
+            providerInstanceId: "account",
+            owner: { environmentId: boxEnvironment(operation), threadId: `thread-${index}` },
+          }),
+        );
+      }
+      yield* Effect.promise(() =>
+        registry.markRemoved(id(1), new Date("2026-10-05T12:00:00.000Z")),
+      );
+      const rows = (listed: ReadonlyArray<DiscoveredProvisionedEnvironment>) =>
+        listed.map((row) => [row.environmentId, row.lifecycle, row.restorableUntil ?? null]);
+
+      expect(rows(yield* listProvisionedEnvironments(sql))).toEqual([["box-2", "active", null]]);
+      const removed = [
+        ["box-2", "active", null],
+        ["box-1", "disposed", "2026-11-04T12:00:00.000Z"],
+      ];
+      expect(rows(yield* listProvisionedEnvironments(sql, [EnvironmentId.make("box-1")]))).toEqual(
+        removed,
+      );
+      expect(rows(yield* listProvisionedEnvironments(sql, [], [], undefined, null, true))).toEqual(
+        removed,
+      );
+      yield* Effect.promise(() => registry.restore(id(1), new Date("2026-10-06T00:00:00.000Z")));
+      expect(rows(yield* listProvisionedEnvironments(sql, [], [], undefined, null, true))).toEqual([
+        ["box-1", "paused", null],
+        ["box-2", "active", null],
+      ]);
+    }).pipe(
+      Effect.provide(
+        Provisioning.layer.pipe(
+          Layer.provideMerge(ProvisionOperationStore.layer),
+          Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
+          Layer.provideMerge(SqlitePersistenceMemory),
+        ),
+      ),
+    ),
 );
 
 it.effect("a box disposed before the host kept its id is named by the address a client saved", () =>

@@ -236,3 +236,54 @@ it.effect("keeps a box by request, lists paused boxes, and rechecks unsaved work
     expect((await second.findById("kept"))?.keep).toBeUndefined();
   }),
 );
+it.effect(
+  "a removed box sleeps out of every wake path, restores within its grace, and is purgeable after",
+  () =>
+    withRegistry(async (first, second) => {
+      const at = (iso: string) => new Date(iso);
+      const owner = { environmentId: "remote", threadId: "thread" };
+      for (const leaseId of ["kept", "late"])
+        await first.register({
+          leaseId,
+          sandboxId: `${leaseId}-box`,
+          providerInstanceId: "codex",
+          owner,
+          now: at("2026-01-01T00:00:00.000Z"),
+        });
+      await first.markPaused("late", at("2026-01-01T00:00:00.000Z"));
+
+      expect(await first.markRemoved("kept", at("2026-01-02T00:00:00.000Z"))).toMatchObject({
+        state: "removed",
+        removedAt: "2026-01-02T00:00:00.000Z",
+      });
+      expect(await second.markRemoved("kept", at("2026-01-05T00:00:00.000Z"))).toMatchObject({
+        removedAt: "2026-01-02T00:00:00.000Z",
+      });
+      await first.markRemoved("late", at("2026-01-02T00:00:00.000Z"));
+      await first.markPaused("kept");
+      await first.markMissing("kept");
+      expect(await first.claim({ leaseId: "kept", owner })).toBeNull();
+      expect(await first.touch("kept")).toBeNull();
+      expect(await first.markActive({ leaseId: "kept" })).toBeNull();
+      expect(await first.expired(at("2026-02-01T00:00:00.000Z"))).toEqual([]);
+      expect(await first.paused()).toEqual([]);
+      expect((await second.findById("kept"))?.state).toBe("removed");
+
+      expect(await second.restore("kept", at("2026-01-31T23:59:59.000Z"))).toMatchObject({
+        state: "paused",
+        updatedAt: "2026-01-31T23:59:59.000Z",
+      });
+      expect((await first.findById("kept"))?.removedAt).toBeUndefined();
+      expect(await second.restore("kept")).toBeNull();
+
+      expect(await first.purgeable(at("2026-01-31T23:59:59.000Z"))).toEqual([]);
+      expect(await second.restore("late", at("2026-02-01T00:00:00.000Z"))).toBeNull();
+      expect(
+        (await first.purgeable(at("2026-02-01T00:00:00.000Z"))).map((lease) => lease.leaseId),
+      ).toEqual(["late"]);
+      await first.markDisposed("late");
+      expect(await second.findById("late")).toMatchObject({ state: "disposed" });
+      expect((await second.findById("late"))?.removedAt).toBeUndefined();
+      expect(await first.markRemoved("late")).toBeNull();
+    }),
+);

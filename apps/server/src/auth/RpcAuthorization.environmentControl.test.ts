@@ -40,6 +40,7 @@ describe("environment control RPC scopes", () => {
       WS_METHODS.environmentControlClaim,
       WS_METHODS.environmentControlTouch,
       WS_METHODS.environmentControlKeep,
+      WS_METHODS.environmentControlRestore,
       WS_METHODS.environmentControlPresence,
       WS_METHODS.environmentControlDispose,
     ]) {

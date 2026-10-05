@@ -1,4 +1,4 @@
-import { describeCloudCleanup } from "@t3tools/client-runtime/cloud";
+import { describeCloudCleanup, describeRestorable } from "@t3tools/client-runtime/cloud";
 import type { DiscoveredProvisionedEnvironment } from "@t3tools/contracts";
 
 /** What a row is doing on the user's behalf. */
@@ -14,6 +14,8 @@ export interface ProvisionedEnvironmentPresentation {
   readonly tone: "muted" | "danger";
   /** Keep a machine scheduled for removal, or allow cleanup of one the user kept. */
   readonly cleanupAction: "keep" | "allow" | null;
+  /** A deleted machine its host can still bring back. */
+  readonly restorable: boolean;
 }
 
 const PROVIDER_LABELS = { e2b: "E2B", namespace: "Namespace" } as const;
@@ -33,6 +35,7 @@ export function presentProvisionedEnvironment(input: {
 }): ProvisionedEnvironmentPresentation {
   const { environment, action } = input;
   const cleanup = describeCloudCleanup(environment.cleanup, input.now);
+  const restorable = describeRestorable(environment.restorableUntil, input.now);
   return {
     title: input.threadTitle ?? environment.label,
     detail: `${PROVIDER_LABELS[environment.provider]} · ${environment.repository ?? environment.projectDir}`,
@@ -41,10 +44,11 @@ export function presentProvisionedEnvironment(input: {
         ? action.label
         : action.kind === "failed"
           ? action.message
-          : cleanup
-            ? `${LIFECYCLE_LABELS[environment.lifecycle]} · ${cleanup.text}`
-            : LIFECYCLE_LABELS[environment.lifecycle],
+          : [LIFECYCLE_LABELS[environment.lifecycle], cleanup?.text, restorable]
+              .filter((part) => part)
+              .join(" · "),
     tone: action.kind === "failed" ? "danger" : "muted",
     cleanupAction: cleanup?.action ?? null,
+    restorable: restorable !== null,
   };
 }

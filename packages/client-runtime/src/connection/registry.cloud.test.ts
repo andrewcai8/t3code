@@ -2214,6 +2214,48 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
       }),
   );
 
+  it.effect(
+    "a saved box its host listed removed is dialed again once its host lists it restored",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [TARGET, HOST_BOX],
+          [HOST_BOX_PROFILE],
+          [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+        );
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          const listed = (lifecycle: DiscoveredProvisionedEnvironment["lifecycle"]) =>
+            registry.syncHostBoxes(
+              TARGET.environmentId,
+              listing(listedBox(HOST_BOX.environmentId, { lifecycle })),
+            );
+          yield* listed("disposed");
+          expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)).toEqual(
+            new BearerConnectionTarget({
+              ...HOST_BOX,
+              label: "t3code · E2B",
+              workspaceStatus: "missing",
+            }),
+          );
+
+          yield* listed("paused");
+          const restored = new BearerConnectionTarget({ ...HOST_BOX, label: "t3code · E2B" });
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).get(HOST_BOX.environmentId)?.target,
+          ).toEqual(restored);
+          expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)).toEqual(
+            restored,
+          );
+          expect((yield* Ref.get(harness.storedCredentials)).get(HOST_BOX.connectionId)).toEqual(
+            BEARER_CREDENTIAL,
+          );
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
   it.effect("a box's label follows its host without replacing its connection", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness(

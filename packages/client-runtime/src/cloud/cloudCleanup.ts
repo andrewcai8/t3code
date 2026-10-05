@@ -32,3 +32,19 @@ export function describeCloudCleanup(
   const text = removedIn(Date.parse(cleanup.at) - now);
   return { text: cleanup.reason === "settled" ? `Settled · ${text}` : text, action: "keep" };
 }
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * How long a removed cloud machine can still be brought back, as its row and banner say it. Null
+ * for a machine that cannot be restored, or once its grace has ended.
+ */
+export function describeRestorable(
+  restorableUntil: string | null | undefined,
+  now: number,
+): string | null {
+  if (!restorableUntil) return null;
+  const until = new Date(restorableUntil);
+  if (!(until.getTime() > now)) return null;
+  return `Restorable until ${MONTHS[until.getMonth()]} ${until.getDate()}`;
+}

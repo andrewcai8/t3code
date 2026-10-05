@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalFetchInEffect:off - this test writes private manager config and drives a local guest.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalFetchInEffect:off globalDate:off - this test writes private manager config and drives a local guest.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
@@ -40,6 +40,8 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest);
 const mocks = vi.hoisted(() => ({
   wake: vi.fn(),
+  pause: vi.fn(),
+  kill: vi.fn(),
   info: null as null | Record<string, unknown>,
 }));
 
@@ -98,7 +100,7 @@ vi.mock("e2b", async (importOriginal) => {
     },
   };
   class E2B {
-    Sandbox = { getInfo: async () => mocks.info, connect: async () => sandbox };
+    Sandbox = { getInfo: async () => mocks.info, connect: async () => sandbox, kill: mocks.kill };
   }
   return { ...actual, E2B };
 });
@@ -120,6 +122,7 @@ vi.mock("./driver.ts", async (importOriginal) => {
     createCloudDriver: (...args: Parameters<typeof actual.createCloudDriver>) => ({
       ...actual.createCloudDriver(...args),
       resume: mocks.wake,
+      pause: mocks.pause,
     }),
   };
 });
@@ -132,6 +135,8 @@ const requestId = ProvisionRequestId.make("0b0f7f61-8a52-4f6c-9d0b-6f3a2a8d3c11"
  */
 const pausedPreparedBox = (input: {
   readonly follow: boolean;
+  /** A chat claimed the box; true unless set. */
+  readonly owned?: boolean;
   /** The host pins a newer build than the one the box was made with. */
   readonly pinnedRevision?: string;
 }) =>
@@ -279,10 +284,11 @@ const pausedPreparedBox = (input: {
         provider: "e2b",
         providerInstanceId: "codex",
       });
-      await registry.claim({
-        leaseId: requestId,
-        owner: { environmentId: readiness.environmentId, threadId: "thread" },
-      });
+      if (input.owned !== false)
+        await registry.claim({
+          leaseId: requestId,
+          owner: { environmentId: readiness.environmentId, threadId: "thread" },
+        });
       // Attach recorded where the host reaches the box.
       await registry.markActive({
         leaseId: requestId,
@@ -302,6 +308,14 @@ const pausedPreparedBox = (input: {
         Effect.promise(() => registry.findById(requestId)).pipe(
           Effect.map((lease) => lease?.state),
         ),
+      /** When the box was removed, as the host recorded it. */
+      removedAt: () =>
+        Effect.promise(() => registry.findById(requestId)).pipe(
+          Effect.map((lease) => lease?.removedAt),
+        ),
+      /** Moves the box's removal back past its grace, as if it had sat removed that long. */
+      removedLongAgo: () =>
+        sql`UPDATE provisioned_leases SET lease_json = json_set(lease_json, '$.removedAt', '2020-01-01T00:00:00.000Z') WHERE lease_id = ${requestId}`,
       /** The build the host records the box running. */
       runningRevision: () =>
         store
@@ -345,12 +359,30 @@ const pausedPreparedBox = (input: {
     };
   });
 
-/** Runs `body` against a manager whose state lives in a fresh directory. */
+/**
+ * Runs `body` against a manager whose state lives in a fresh directory. The manager starts on a
+ * config of its own there, so its upkeep runs and never reads this machine's real one.
+ */
 const withManager = <A, E, R>(body: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const directory = yield* Effect.acquireRelease(
       Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "e2b-resume-"))),
       (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
+    );
+    yield* Effect.promise(() =>
+      NodeFSP.writeFile(
+        NodePath.join(directory, "environment-control.json"),
+        encodeJson({
+          e2bApiKey: "test-key",
+          broker: {
+            sandboxId: "unused",
+            metadata: { owner: "fixture" },
+            url: "https://unused.invalid",
+            ingressKey: "unused",
+          },
+          targets: [],
+        }),
+      ),
     );
     return yield* body.pipe(
       Effect.provide(
@@ -478,6 +510,103 @@ it.effect("connects a woken box on its own build when it speaks the host's proto
       });
       expect(yield* box.runningRevision()).toBe("c".repeat(40));
       expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
+    }),
+  ),
+);
+
+const DAY_MS = 86_400_000;
+const plusDays = (iso: string | undefined, days: number) =>
+  new Date(Date.parse(iso ?? "") + days * DAY_MS).toISOString();
+
+it.effect(
+  "removing a chat's box puts it to sleep, restorable, and restoring it wakes as before",
+  () =>
+    withManager(
+      Effect.gen(function* () {
+        const box = yield* pausedPreparedBox({ follow: false });
+        const manager = yield* EnvironmentControl;
+        expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+          kind: "resumed",
+        });
+        mocks.pause.mockClear().mockResolvedValue(undefined);
+        mocks.kill.mockClear();
+
+        const removed = yield* manager.dispose({ requestId });
+        const restorableUntil = plusDays(yield* box.removedAt(), 30);
+        expect(removed).toEqual({ kind: "disposed", restorableUntil });
+        expect(yield* manager.dispose({ leaseId: requestId, sandboxId: "sandbox-1" })).toEqual(
+          removed,
+        );
+        expect(mocks.pause.mock.calls).toEqual([[{ sandboxId: "sandbox-1" }]]);
+        expect(mocks.kill.mock.calls).toEqual([]);
+        expect(yield* box.leaseState()).toBe("removed");
+        const listed = (yield* manager.listProvisioned()).map((row) => [
+          row.environmentId,
+          row.lifecycle,
+          row.restorableUntil,
+        ]);
+        expect(listed).toEqual([[box.environmentId, "disposed", restorableUntil]]);
+        expect(yield* manager.resume({ environmentId: box.environmentId })).toMatchObject({
+          kind: "refused",
+          reason: "not-provisioned",
+        });
+
+        expect(yield* manager.restore({ leaseId: requestId })).toEqual({ kind: "restored" });
+        expect(yield* box.leaseState()).toBe("paused");
+        expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+          kind: "resumed",
+        });
+        expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
+        expect(yield* box.leaseState()).toBe("active");
+        expect(mocks.kill.mock.calls).toEqual([]);
+      }),
+    ),
+);
+
+it.effect(
+  "upkeep deletes a removed box once its grace is over, and it can no longer be restored",
+  () =>
+    withManager(
+      Effect.gen(function* () {
+        const box = yield* pausedPreparedBox({ follow: false });
+        const manager = yield* EnvironmentControl;
+        mocks.pause.mockClear();
+        expect(yield* manager.dispose({ requestId })).toMatchObject({ kind: "disposed" });
+        expect(mocks.pause.mock.calls).toEqual([]);
+        yield* box.removedLongAgo();
+        mocks.kill.mockReset();
+        const killed = new Promise<unknown>((resolve) =>
+          mocks.kill.mockImplementation(async (sandboxId: string) => {
+            resolve(sandboxId);
+            return true;
+          }),
+        );
+
+        yield* TestClock.adjust("5 minutes");
+        expect(yield* Effect.promise(() => killed)).toBe("sandbox-1");
+        expect(yield* manager.restore({ leaseId: requestId })).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          message: "This cloud machine can no longer be restored.",
+        });
+        expect(mocks.kill.mock.calls).toEqual([["sandbox-1"]]);
+      }),
+    ),
+);
+
+it.effect("a box no chat owns is still deleted the moment it is removed", () =>
+  withManager(
+    Effect.gen(function* () {
+      const box = yield* pausedPreparedBox({ follow: false, owned: false });
+      const manager = yield* EnvironmentControl;
+      mocks.pause.mockClear();
+      mocks.kill.mockReset().mockResolvedValue(true);
+
+      expect(yield* manager.dispose({ requestId })).toEqual({ kind: "disposed" });
+      expect(mocks.kill.mock.calls).toEqual([["sandbox-1"]]);
+      expect(mocks.pause.mock.calls).toEqual([]);
+      expect(yield* box.leaseState()).toBe("disposed");
+      expect(yield* manager.restore({ leaseId: requestId })).toMatchObject({ kind: "refused" });
     }),
   ),
 );

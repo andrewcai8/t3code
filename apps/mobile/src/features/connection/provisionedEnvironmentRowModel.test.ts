@@ -36,6 +36,7 @@ describe("presentProvisionedEnvironment", () => {
       status: "Paused",
       tone: "muted",
       cleanupAction: null,
+      restorable: false,
     });
   });
 
@@ -87,5 +88,23 @@ describe("presentProvisionedEnvironment", () => {
       { status: "Paused · Kept", cleanupAction: "allow" },
       { status: "Paused · Kept · work could not be backed up", cleanupAction: null },
     ]);
+  });
+
+  it("shows until when a deleted machine can be restored, and offers it only until then", () => {
+    const deleted = (restorableUntil: string) =>
+      presentProvisionedEnvironment({
+        environment: { ...machine, lifecycle: "disposed", restorableUntil },
+        threadTitle: null,
+        action: { kind: "idle" },
+        now,
+      });
+    expect(deleted("2026-03-31T12:00:00.000Z")).toMatchObject({
+      status: "Deleted · Restorable until Mar 31",
+      restorable: true,
+    });
+    expect(deleted("2026-03-01T11:00:00.000Z")).toMatchObject({
+      status: "Deleted",
+      restorable: false,
+    });
   });
 });

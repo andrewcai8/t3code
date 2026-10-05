@@ -11,6 +11,7 @@ export const ProvisionedLeaseState = Schema.Literals([
   "paused",
   "missing",
   "releasing",
+  "removed",
   "disposed",
 ]);
 export type ProvisionedLeaseState = typeof ProvisionedLeaseState.Type;
@@ -26,6 +27,23 @@ const FIRST_TURN_DEADLINE_MS = 30 * 60_000;
 export const firstTurnOverdue = (lease: ProvisionedLease, now: number) =>
   lease.firstTurn?.status === "pending" &&
   now - Date.parse(lease.createdAt) > FIRST_TURN_DEADLINE_MS;
+
+/**
+ * How long a chat's removed box stays asleep and restorable. Lease upkeep deletes it for good
+ * after that.
+ */
+const REMOVED_GRACE_MS = 30 * 86_400_000;
+/** When a removed lease's box is deleted for good; null for any lease that is not removed. */
+export const restorableUntil = (lease: ProvisionedLease): string | null =>
+  lease.state === "removed" && lease.removedAt !== undefined
+    ? new Date(Date.parse(lease.removedAt) + REMOVED_GRACE_MS).toISOString()
+    : null;
+/**
+ * Whether removing a lease's box only puts it to sleep, restorable: a chat owns it and something
+ * has run on it. Any other box is deleted at once.
+ */
+export const keepsRemovedBox = (lease: ProvisionedLease): boolean =>
+  lease.owner !== null && lease.firstTurn?.status !== "pending";
 
 /**
  * Why a paused box is exempt from cleanup: its owner asked to keep it, or its work could not be
@@ -77,6 +95,8 @@ export const StoredProvisionedLease = Schema.Struct({
    * resume since the first of them. Absent means none.
    */
   unwatchedMoves: Schema.optional(Schema.Int),
+  /** When the lease's box was removed; present exactly while `state` is `removed`. */
+  removedAt: Schema.optional(Schema.String),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   expiresAt: Schema.String,
@@ -139,6 +159,15 @@ export interface ProvisionedLeaseRegistry {
   readonly markDisposed: (leaseId: string, now?: Date) => Promise<void>;
   readonly markMissing: (leaseId: string, now?: Date) => Promise<void>;
   readonly markPaused: (leaseId: string, now?: Date) => Promise<void>;
+  /**
+   * Records a lease's box removed, once its provider put it to sleep. A lease already removed
+   * keeps its first removal time. Null for a missing or disposed lease.
+   */
+  readonly markRemoved: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
+  /** Puts a removed lease back to paused until its grace ends; null after, or when not removed. */
+  readonly restore: (leaseId: string, now?: Date) => Promise<ProvisionedLease | null>;
+  /** Removed leases past their grace, whose boxes upkeep deletes for good. */
+  readonly purgeable: (now?: Date) => Promise<ReadonlyArray<ProvisionedLease>>;
   readonly markActive: (input: {
     readonly leaseId: string;
     readonly namespaceResource?: NamespaceResource;
@@ -362,11 +391,11 @@ export function createProvisionedLeaseRegistry(
       }),
     markDisposed: (leaseId, now) =>
       mutate((leases) => ({
-        leases: leases.map((lease) =>
-          lease.leaseId === leaseId
-            ? { ...lease, state: "disposed" as const, updatedAt: nowIso(now) }
-            : lease,
-        ),
+        leases: leases.map((lease) => {
+          if (lease.leaseId !== leaseId) return lease;
+          const { removedAt: _removedAt, ...rest } = lease;
+          return { ...rest, state: "disposed" as const, updatedAt: nowIso(now) };
+        }),
         value: undefined,
       })),
     markMissing: (leaseId, now) =>
@@ -389,6 +418,47 @@ export function createProvisionedLeaseRegistry(
         ),
         value: undefined,
       })),
+    markRemoved: (leaseId, now) =>
+      mutate((leases) => {
+        const current = leases.find((lease) => lease.leaseId === leaseId);
+        if (current?.state === "removed") return { leases, value: current };
+        if (
+          !current ||
+          (current.state !== "active" &&
+            current.state !== "paused" &&
+            current.state !== "releasing")
+        )
+          return { leases, value: null };
+        const updated: ProvisionedLease = {
+          ...current,
+          state: "removed",
+          removedAt: nowIso(now),
+          updatedAt: nowIso(now),
+        };
+        return {
+          leases: leases.map((lease) => (lease.leaseId === leaseId ? updated : lease)),
+          value: updated,
+        };
+      }),
+    restore: (leaseId, now) =>
+      mutate((leases) => {
+        const current = leases.find((lease) => lease.leaseId === leaseId);
+        const until = current ? restorableUntil(current) : null;
+        if (!current || until === null || until <= nowIso(now)) return { leases, value: null };
+        const { removedAt: _removedAt, ...rest } = current;
+        const updated: ProvisionedLease = { ...rest, state: "paused", updatedAt: nowIso(now) };
+        return {
+          leases: leases.map((lease) => (lease.leaseId === leaseId ? updated : lease)),
+          value: updated,
+        };
+      }),
+    purgeable: (now) =>
+      consistentRead((leases) =>
+        leases.filter((lease) => {
+          const until = restorableUntil(lease);
+          return until !== null && until <= nowIso(now);
+        }),
+      ),
     markActive: (input) =>
       mutate((leases) => {
         const current = leases.find((lease) => lease.leaseId === input.leaseId);

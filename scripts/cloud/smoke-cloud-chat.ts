@@ -1342,7 +1342,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
   });
 
-  /** Deletes the run's threads, disposes the box twice, and confirms the lease is gone. */
+  /** Deletes the run's threads, removes the box twice, and confirms the host lists it gone. */
   const remove = Effect.fn("remove")(function* (manager: T3Client) {
     const box = created.box;
     if (!box && !created.requestId) return;
@@ -1409,9 +1409,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       Effect.map((list) => list.find((candidate) => candidate.leaseId === box.leaseId)),
       Effect.catch((cause) => Effect.succeed({ lifecycle: `unknown: ${describe(cause)}` })),
     );
+    // A claimed chat's box is kept asleep and restorable, so the host lists it disposed.
     yield* record(
       "delete.leaseGone",
-      entry === undefined || entry.lifecycle === "missing",
+      entry === undefined || entry.lifecycle === "missing" || entry.lifecycle === "disposed",
       entry?.lifecycle ?? "absent",
     );
   });

@@ -25,7 +25,7 @@ const IDLE: ProvisionedRowAction = { kind: "idle" };
 /**
  * "Cloud machines" section: every machine a connected manager runs for a chat. A machine belongs
  * to its chat, so it is opened through that chat; here it can be woken, kept from automatic
- * cleanup or deleted, and the "+" starts a new cloud chat. Renders nothing for an environment
+ * cleanup, deleted or restored once deleted, and the "+" starts a new cloud chat. Renders nothing for an environment
  * that is not a manager.
  */
 export function ProvisionedEnvironmentRows(props: {
@@ -47,6 +47,9 @@ export function ProvisionedEnvironmentRows(props: {
     reportFailure: false,
   });
   const keep = useAtomCommand(serverEnvironment.keepProvisionedEnvironment, {
+    reportFailure: false,
+  });
+  const restore = useAtomCommand(serverEnvironment.restoreProvisionedEnvironment, {
     reportFailure: false,
   });
   const navigation = useNavigation();
@@ -87,7 +90,7 @@ export function ProvisionedEnvironmentRows(props: {
   const deleteEnvironment = (environment: DiscoveredProvisionedEnvironment, title: string) =>
     Alert.alert(
       "Delete this cloud machine?",
-      `This permanently stops the machine for "${title}" and ends any running work. The chat's history stays.`,
+      `This stops the machine for "${title}" and ends any running work. A chat's machine can be restored here for 30 days. The chat's history stays.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -101,7 +104,8 @@ export function ProvisionedEnvironmentRows(props: {
               });
               if (result._tag === "Failure" || result.value.kind !== "disposed")
                 return "The host could not delete this machine. Try again.";
-              if (environment.threadId !== null)
+              // A machine that can be restored keeps its chat's lease, so a restore brings both back.
+              if (environment.threadId !== null && result.value.restorableUntil === undefined)
                 provisionedSandboxLeases.forget(
                   scopeThreadRef(environment.environmentId, environment.threadId),
                 );
@@ -110,6 +114,15 @@ export function ProvisionedEnvironmentRows(props: {
         },
       ],
     );
+  const restoreEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
+    act(environment, "Restoring…", async () => {
+      const result = await restore({
+        environmentId: managerId,
+        input: { leaseId: environment.leaseId },
+      });
+      if (result._tag === "Failure") return "The host could not restore this machine. Try again.";
+      return result.value.kind === "restored" ? null : result.value.message;
+    });
 
   if (!supported) return null;
   return (
@@ -186,6 +199,7 @@ export function ProvisionedEnvironmentRows(props: {
               onResume={() => void resumeEnvironment(environment)}
               onKeep={(kept) => void keepEnvironment(environment, kept)}
               onDelete={(title) => deleteEnvironment(environment, title)}
+              onRestore={() => void restoreEnvironment(environment)}
             />
           ))}
         </View>
@@ -201,6 +215,7 @@ function ProvisionedEnvironmentRowView(props: {
   readonly onResume: () => void;
   readonly onKeep: (keep: boolean) => void;
   readonly onDelete: (title: string) => void;
+  readonly onRestore: () => void;
 }) {
   const { environment } = props;
   const threadRef =
@@ -241,7 +256,10 @@ function ProvisionedEnvironmentRowView(props: {
           },
         ]
       : []),
-    { label: "Delete", onPress: () => props.onDelete(presentation.title) },
+    ...(presentation.restorable ? [{ label: "Restore", onPress: props.onRestore }] : []),
+    ...(environment.lifecycle === "disposed"
+      ? []
+      : [{ label: "Delete", onPress: () => props.onDelete(presentation.title) }]),
   ];
   return (
     <View

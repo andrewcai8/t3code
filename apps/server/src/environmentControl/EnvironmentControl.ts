@@ -31,6 +31,8 @@ import {
   type EnvironmentProvisionTouchResult,
   type EnvironmentProvisionKeepInput,
   type EnvironmentProvisionKeepResult,
+  type EnvironmentProvisionRestoreInput,
+  type EnvironmentProvisionRestoreResult,
   type EnvironmentProvisionUpgradeInput,
   type EnvironmentProvisionUpgradeResult,
   type ManagedEnvironment,
@@ -102,6 +104,8 @@ import {
   firstTurnOverdue,
   createProvisionedLeaseRegistry,
   decodeLegacyLeases,
+  keepsRemovedBox,
+  restorableUntil,
   type ProvisionedLease,
   type ProvisionedLeaseRegistry,
 } from "./ProvisionedLeaseRegistry.ts";
@@ -458,6 +462,54 @@ export function createEnvironmentControl(
         leaseOperations.delete(input.sandboxId);
       }
     },
+    /**
+     * Puts a chat's box to sleep and records it removed, restorable until its grace ends. Unlike
+     * a pause it never waits for a working agent. A box already removed answers the same, and
+     * `missing` means its provider no longer has it.
+     */
+    remove: async (
+      leaseId: string,
+    ): Promise<EnvironmentProvisionDisposeResult | { readonly kind: "missing" }> => {
+      const lease = await leaseRegistry?.findById(leaseId);
+      const removedUntil = lease ? restorableUntil(lease) : null;
+      if (removedUntil !== null) return { kind: "disposed", restorableUntil: removedUntil };
+      if (!leaseRegistry || !lease || lease.state === "disposed")
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "The cloud sandbox lease is unknown.",
+        };
+      if (lease.state === "missing") return { kind: "missing" };
+      if (leaseOperations.has(lease.sandboxId))
+        return {
+          kind: "refused",
+          reason: "unknown",
+          message: "Another workspace operation is in progress. Retry shortly.",
+        };
+      leaseOperations.set(lease.sandboxId, { action: "dispose" });
+      try {
+        if (lease.state !== "paused") {
+          await pullBeforeStop(lease);
+          const result = await driver.pause({
+            sandboxId: lease.sandboxId,
+            ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+          });
+          if (result === "missing") return { kind: "missing" };
+        }
+        const removed = await leaseRegistry.markRemoved(lease.leaseId);
+        const until = removed ? restorableUntil(removed) : null;
+        if (until !== null) return { kind: "disposed", restorableUntil: until };
+      } catch (cause) {
+        reportFailure("cloud box could not be removed", { chatId: leaseId, cause });
+      } finally {
+        leaseOperations.delete(lease.sandboxId);
+      }
+      return {
+        kind: "refused",
+        reason: "unknown",
+        message: "The cloud sandbox could not be disposed.",
+      };
+    },
     pause: async (
       input: EnvironmentProvisionPauseInput,
     ): Promise<EnvironmentProvisionPauseResult> => {
@@ -804,9 +856,10 @@ export class EnvironmentControl extends Context.Service<
      */
     readonly provisionedSkills: Effect.Effect<ServerProvisionedSkills | undefined>;
     /**
-     * Also reports those of `knownEnvironmentIds` that were this host's boxes and are gone, and
-     * those of `addresses` that dial such a box. With `chats`, each box carries the chat the host
-     * last read from it, when newer than the one the client holds.
+     * Also reports removed boxes that can still be restored, those of `knownEnvironmentIds` that
+     * were this host's boxes and are gone, and those of `addresses` that dial such a box. With
+     * `chats`, each box carries the chat the host last read from it, when newer than the one the
+     * client holds.
      */
     readonly listProvisioned: (
       knownEnvironmentIds?: ReadonlyArray<EnvironmentId>,
@@ -850,6 +903,10 @@ export class EnvironmentControl extends Context.Service<
     readonly upgrade: (
       input: EnvironmentProvisionUpgradeInput,
     ) => Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>;
+    /** Brings a chat's removed box back asleep, as its chat left it, until its grace ends. */
+    readonly restore: (
+      input: EnvironmentProvisionRestoreInput,
+    ) => Effect.Effect<EnvironmentProvisionRestoreResult, EnvironmentControlError>;
     /**
      * A client's report of whether its user is here. While any client's user is, the host wakes
      * their unsettled cloud chats ahead of them and keeps them awake. Answers with the machines
@@ -1858,6 +1915,61 @@ export const layer = Layer.effect(
       });
       return { kind: "disposed" };
     });
+    /**
+     * Removing a chat's ready box puts it to sleep, restorable for a grace period, since a sleeping
+     * box costs little and a deleted one is gone for good. Any other box is deleted at once: one
+     * still provisioning, one no chat owns, one whose chat never ran on it, or a Devbox, whose
+     * disk bills while it sleeps. A failed read refuses rather than deleting.
+     */
+    const removeProvision = Effect.fn("EnvironmentControl.removeProvision")(function* (
+      requestId: ProvisionRequestId,
+    ): Effect.fn.Return<EnvironmentProvisionDisposeResult, EnvironmentControlError> {
+      const lease = yield* Effect.tryPromise({
+        try: () => leaseRegistry.findById(requestId),
+        catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
+      });
+      if (lease && keepsRemovedBox(lease)) {
+        const operation = yield* store
+          .get(requestId)
+          .pipe(
+            Effect.mapError(
+              () => new EnvironmentControlError({ message: "Cloud request could not be loaded." }),
+            ),
+          );
+        if (operation.state.kind !== "ready" || boxMachine(operation.request) === "devbox")
+          return yield* cancelProvision(requestId);
+        const removed = yield* run<
+          EnvironmentProvisionDisposeResult | { readonly kind: "missing" }
+        >((service) => service.remove(lease.leaseId), {
+          kind: "refused",
+          reason: "unconfigured",
+          message: "This install has no cloud provisioning configuration.",
+        });
+        if (removed.kind !== "missing") return removed;
+      }
+      return yield* cancelProvision(requestId);
+    });
+    /** Deletes for good each removed box whose grace has ended; a failed one is tried next pass. */
+    const purgeRemovedBoxes = async () => {
+      for (const lease of await leaseRegistry.purgeable()) {
+        if (!isProvisionRequestId(lease.leaseId)) continue;
+        const purged = await runLogged(
+          cancelProvision(lease.leaseId).pipe(
+            Effect.catch((error) =>
+              Effect.succeed({ kind: "refused" as const, message: error.message }),
+            ),
+          ),
+        );
+        await runLogged(
+          purged.kind === "disposed"
+            ? Effect.logInfo("removed cloud box deleted", { leaseId: lease.leaseId })
+            : Effect.logWarning("removed cloud box could not be deleted yet", {
+                leaseId: lease.leaseId,
+                cause: purged.message,
+              }),
+        );
+      }
+    };
     const cloudMachinesAfterDays = settings.getSettings.pipe(
       Effect.map((current) => current.storageCleanup.cloudMachinesAfterDays),
     );
@@ -1934,7 +2046,10 @@ export const layer = Layer.effect(
         reapExpiredLeases: () => service.reapExpiredLeases(),
         syncLeaseUsage: () => service.syncLeaseUsage(),
         upkeepCloudChats: () => service.upkeepCloudChats(),
-        cleanUpBoxes: cleanUpPausedBoxes,
+        cleanUpBoxes: async () => {
+          await purgeRemovedBoxes();
+          await cleanUpPausedBoxes();
+        },
         reconcileProvisions: provisioning.reconcile,
         settleChats: provisionControl.settleChats,
         boxUsage,
@@ -2126,7 +2241,14 @@ export const layer = Layer.effect(
         cloudMachinesAfterDays.pipe(
           Effect.orElseSucceed(() => null),
           Effect.flatMap((afterDays) =>
-            listProvisionedEnvironments(sql, knownEnvironmentIds, addresses, chats, afterDays),
+            listProvisionedEnvironments(
+              sql,
+              knownEnvironmentIds,
+              addresses,
+              chats,
+              afterDays,
+              true,
+            ),
           ),
           // A chat started since the last sweep has no card yet, so it is read in the background
           // and the client's next list carries it.
@@ -2145,7 +2267,7 @@ export const layer = Layer.effect(
       dispose: Effect.fn("EnvironmentControl.dispose")(function* (
         input: EnvironmentProvisionDisposeInput,
       ) {
-        if ("requestId" in input) return yield* cancelProvision(input.requestId);
+        if ("requestId" in input) return yield* removeProvision(input.requestId);
         const lease = yield* Effect.tryPromise({
           try: () => leaseRegistry.findBySandbox(input.sandboxId),
           catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
@@ -2157,7 +2279,7 @@ export const layer = Layer.effect(
               reason: "unknown" as const,
               message: "The lease does not match this environment.",
             };
-          return yield* cancelProvision(lease.leaseId);
+          return yield* removeProvision(lease.leaseId);
         }
         return yield* run<EnvironmentProvisionDisposeResult>((service) => service.dispose(input), {
           kind: "refused",
@@ -2173,6 +2295,19 @@ export const layer = Layer.effect(
         }),
       claim: provisionControl.claim,
       resume: resumeWorkspace,
+      restore: (input) =>
+        Effect.tryPromise({
+          try: async (): Promise<EnvironmentProvisionRestoreResult> =>
+            (await leaseRegistry.restore(input.leaseId))
+              ? { kind: "restored" }
+              : {
+                  kind: "refused",
+                  reason: "unknown",
+                  message: "This cloud machine can no longer be restored.",
+                },
+          catch: () =>
+            new EnvironmentControlError({ message: "Cloud lease could not be updated." }),
+        }),
       upgrade: provisionControl.upgrade,
       presence: (input) => wakeAhead.presence(input.present),
       touch: (input) =>

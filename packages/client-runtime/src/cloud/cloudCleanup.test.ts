@@ -1,7 +1,7 @@
 // @effect-diagnostics globalDate:off - fixed timestamps exercise cleanup times.
 import { describe, expect, it } from "vite-plus/test";
 
-import { describeCloudCleanup } from "./cloudCleanup.ts";
+import { describeCloudCleanup, describeRestorable } from "./cloudCleanup.ts";
 
 const now = Date.parse("2026-03-01T12:00:00.000Z");
 
@@ -38,5 +38,13 @@ describe("describeCloudCleanup", () => {
     { cleanup: undefined, shown: null },
   ] as const)("shows $shown.text", ({ cleanup, shown }) => {
     expect(describeCloudCleanup(cleanup, now)).toEqual(shown);
+  });
+});
+
+describe("describeRestorable", () => {
+  it("names the day a removed machine can be restored until, and nothing once it cannot", () => {
+    expect(describeRestorable("2026-03-31T12:00:00.000Z", now)).toBe("Restorable until Mar 31");
+    expect(describeRestorable("2026-03-01T11:00:00.000Z", now)).toBeNull();
+    expect(describeRestorable(undefined, now)).toBeNull();
   });
 });
