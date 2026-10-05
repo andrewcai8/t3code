@@ -85,6 +85,14 @@ export const ProvisionedCleanup = Schema.Union([
 ]);
 export type ProvisionedCleanup = typeof ProvisionedCleanup.Type;
 
+/**
+ * On a `disposed` box, until when restoring it brings it back asleep. A chat's removed box sleeps
+ * this long before its host deletes it for good. Absent once it can no longer be restored.
+ */
+const RestorableUntil = Schema.optional(IsoDateTime).pipe(
+  Schema.catchDecoding(() => Effect.succeedNone),
+);
+
 export const CloudMachineKind = Schema.Literals(["sandbox", "devbox", "mac"]);
 export type CloudMachineKind = typeof CloudMachineKind.Type;
 
@@ -92,7 +100,10 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   requestId: ProvisionRequestId,
   leaseId: TrimmedNonEmptyString,
   sandboxId: TrimmedNonEmptyString,
-  /** `disposed` is only returned for environments a client asked about by id. */
+  /**
+   * `disposed` is only returned for environments a client asked about by id, and for removed
+   * boxes that can still be restored.
+   */
   lifecycle: Schema.Literals(["active", "paused", "missing", "disposed"]),
   environmentId: EnvironmentId,
   provider: Schema.Literals(["e2b", "namespace"]),
@@ -114,6 +125,7 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   chat: Schema.optional(ProvisionedChat).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
   /** Absent when the machine is never cleaned up, as one that costs nothing while paused. */
   cleanup: Schema.optional(ProvisionedCleanup).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
+  restorableUntil: RestorableUntil,
   createdAt: Schema.String,
   expiresAt: Schema.String,
 });
@@ -286,7 +298,7 @@ export const EnvironmentProvisionDisposeInput = Schema.Union([
 export type EnvironmentProvisionDisposeInput = typeof EnvironmentProvisionDisposeInput.Type;
 
 export const EnvironmentProvisionDisposeResult = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("disposed") }),
+  Schema.Struct({ kind: Schema.Literal("disposed"), restorableUntil: RestorableUntil }),
   Schema.Struct({
     kind: Schema.Literal("refused"),
     reason: Schema.Literals(["unconfigured", "unknown"]),
@@ -426,3 +438,19 @@ export const EnvironmentProvisionKeepResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionKeepResult = typeof EnvironmentProvisionKeepResult.Type;
+
+/** Brings a removed cloud machine back, asleep, while it can still be restored. */
+export const EnvironmentProvisionRestoreInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionRestoreInput = typeof EnvironmentProvisionRestoreInput.Type;
+
+export const EnvironmentProvisionRestoreResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("restored") }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literal("unknown"),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionRestoreResult = typeof EnvironmentProvisionRestoreResult.Type;

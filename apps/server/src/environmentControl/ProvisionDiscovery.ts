@@ -16,7 +16,7 @@ import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { isLoopbackHostname } from "../http.ts";
 import { cleanupPlan } from "./cloudCleanup.ts";
 import { ProvisionedChatJson } from "./provisionedChats.ts";
-import { StoredProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
+import { restorableUntil, StoredProvisionedLease } from "./ProvisionedLeaseRegistry.ts";
 
 const decodeRows = Schema.decodeUnknownEffect(
   Schema.Array(
@@ -73,6 +73,9 @@ export function boxMachine(request: DurableProvisionRequest): CloudMachineKind {
  * it at that sequence or a newer one. Without, no chat is sent.
  *
  * Each box also carries its cleanup under `afterDays`, the host's cloud machine cleanup setting.
+ *
+ * A removed box lists as `disposed` with the time it stays restorable, when it is one of `known`,
+ * and with `removed` even when it is not.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
   function* (
@@ -81,6 +84,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     addresses: ReadonlyArray<SavedEnvironmentAddress> = [],
     chats?: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly sequence: number }>,
     afterDays: number | null = null,
+    removed = false,
   ) {
     const { byLease, byOrigin } = savedBoxAddresses(addresses);
     const heldChats =
@@ -105,6 +109,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     LEFT JOIN provisioned_chats AS chats ON chats.lease_id = leases.lease_id
     WHERE (json_extract(operations.state_json, '$.kind') = 'ready'
         AND (json_extract(leases.lease_json, '$.state') IN ('active', 'paused', 'missing', 'releasing')
+          OR ${removed ? sql`json_extract(leases.lease_json, '$.state') = 'removed'` : sql`1 = 0`}
           OR ${
             known.length === 0
               ? sql`1 = 0`
@@ -144,15 +149,17 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
         // A lease is `releasing` for as long as a pause takes. Its box stays listed as paused, so
         // a client does not take a pause for a deletion and forget the chat.
         const lifecycle =
-          !expired &&
-          (lease.state === "active" || lease.state === "paused" || lease.state === "missing")
-            ? lease.state
-            : !expired && lease.state === "releasing"
-              ? "paused"
-              : saved.has(state.readiness.environmentId) &&
-                  (lease.state === "disposed" || (expired && lease.state !== "releasing"))
-                ? "disposed"
-                : null;
+          lease.state === "removed"
+            ? "disposed"
+            : !expired &&
+                (lease.state === "active" || lease.state === "paused" || lease.state === "missing")
+              ? lease.state
+              : !expired && lease.state === "releasing"
+                ? "paused"
+                : saved.has(state.readiness.environmentId) &&
+                    (lease.state === "disposed" || (expired && lease.state !== "releasing"))
+                  ? "disposed"
+                  : null;
         box =
           lifecycle === null || lease.sandboxId !== provisionSandboxId(resource)
             ? null
@@ -220,10 +227,12 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
             ? request.retentionDeadline
             : lease.expiresAt,
       });
+      const until = restorableUntil(lease);
       const environment = {
         ...discovered,
         ...(chat === undefined ? {} : { chat }),
         ...(cleanup === null ? {} : { cleanup }),
+        ...(until === null ? {} : { restorableUntil: until }),
       };
       if (box.lifecycle !== "disposed") result.push(environment);
       else if (!gone.has(environment.environmentId))

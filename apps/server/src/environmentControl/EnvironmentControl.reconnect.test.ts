@@ -8,13 +8,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NodeWS } from "@effect/platform-node-shared/NodeSocket";
 import { it } from "@effect/vitest";
 import { expect, vi } from "vite-plus/test";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ProvisionRequestId } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { AccessMode } from "@namespacelabs/sdk/proto/namespace/private/devbox/devbox_pb";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { TestClock } from "effect/testing";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -32,11 +33,27 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest);
 const sessionFactory = vi.hoisted(() => vi.fn());
 const exposeInstance = vi.hoisted(() => vi.fn());
+type MacChat = { readonly request: { readonly requestId: string } };
+const mac = vi.hoisted(() => ({
+  release: vi.fn<(chat: MacChat) => Promise<"released" | "missing">>(),
+  dispose: vi.fn<(chat: MacChat) => Promise<void>>(),
+}));
 
 vi.mock("./NamespaceProvisionRuntime.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./NamespaceProvisionRuntime.ts")>()),
   makeNamespaceAccountSession: sessionFactory,
 }));
+vi.mock("./NamespaceMacRuntime.ts", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./NamespaceMacRuntime.ts")>();
+  return {
+    ...original,
+    makeNamespaceMacRuntime: (...args: Parameters<typeof original.makeNamespaceMacRuntime>) => ({
+      ...original.makeNamespaceMacRuntime(...args),
+      release: mac.release,
+      dispose: mac.dispose,
+    }),
+  };
+});
 vi.mock("./namespaceInstances.ts", async (importOriginal) => {
   const original = await importOriginal<typeof import("./namespaceInstances.ts")>();
   return {
@@ -384,6 +401,35 @@ it.effect.each(["devbox", "instance"] as const)(
           reason: "unknown",
           message: "Another chat on this machine is still working.",
         });
+      }),
+    ),
+);
+
+it.effect(
+  "removing a chat on a Mac releases it to its snapshot, and upkeep deletes it past its grace",
+  () =>
+    afterRestart("instance", ({ manager }) =>
+      Effect.gen(function* () {
+        const chatIds = (calls: ReadonlyArray<[MacChat]>) =>
+          calls.map(([chat]) => chat.request.requestId);
+        mac.release.mockReset().mockResolvedValue("released");
+        mac.dispose.mockReset();
+
+        expect(
+          yield* manager.dispose({ requestId: ProvisionRequestId.make(requestId) }),
+        ).toMatchObject({ kind: "disposed", restorableUntil: expect.any(String) });
+        expect(chatIds(mac.release.mock.calls)).toEqual([requestId]);
+        expect(mac.dispose.mock.calls).toEqual([]);
+
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE provisioned_leases SET lease_json = json_set(lease_json, '$.removedAt', '2020-01-01T00:00:00.000Z') WHERE lease_id = ${requestId}`;
+        const disposed = new Promise<void>((resolve) =>
+          mac.dispose.mockImplementation(async () => resolve()),
+        );
+        yield* TestClock.adjust("5 minutes");
+        yield* Effect.promise(() => disposed);
+        expect(chatIds(mac.dispose.mock.calls)).toEqual([requestId]);
+        expect(chatIds(mac.release.mock.calls)).toEqual([requestId]);
       }),
     ),
 );

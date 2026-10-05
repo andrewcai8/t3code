@@ -1,6 +1,6 @@
 /**
  * The environment-control WebSocket methods: cloud boxes a host provisions,
- * attaches, pauses, and disposes. `rpc.ts` spreads these into `WS_METHODS`
+ * attaches, pauses, removes, and restores. `rpc.ts` spreads these into `WS_METHODS`
  * and `WsRpcGroup`.
  */
 import * as Schema from "effect/Schema";
@@ -35,6 +35,8 @@ import {
   EnvironmentProvisionTouchResult,
   EnvironmentProvisionKeepInput,
   EnvironmentProvisionKeepResult,
+  EnvironmentProvisionRestoreInput,
+  EnvironmentProvisionRestoreResult,
 } from "./environmentControl.ts";
 
 export const ENVIRONMENT_CONTROL_WS_METHODS = {
@@ -51,6 +53,7 @@ export const ENVIRONMENT_CONTROL_WS_METHODS = {
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
   environmentControlKeep: "environmentControl.keep",
+  environmentControlRestore: "environmentControl.restore",
   environmentControlPresence: "environmentControl.presence",
 } as const;
 
@@ -168,6 +171,14 @@ const EnvironmentControlKeepRpc = Rpc.make(ENVIRONMENT_CONTROL_WS_METHODS.enviro
   success: EnvironmentProvisionKeepResult,
   error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
 });
+const EnvironmentControlRestoreRpc = Rpc.make(
+  ENVIRONMENT_CONTROL_WS_METHODS.environmentControlRestore,
+  {
+    payload: EnvironmentProvisionRestoreInput,
+    success: EnvironmentProvisionRestoreResult,
+    error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+  },
+);
 
 const EnvironmentControlPresenceRpc = Rpc.make(
   ENVIRONMENT_CONTROL_WS_METHODS.environmentControlPresence,
@@ -192,5 +203,6 @@ export const EnvironmentControlRpcs = [
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
   EnvironmentControlKeepRpc,
+  EnvironmentControlRestoreRpc,
   EnvironmentControlPresenceRpc,
 ] as const;

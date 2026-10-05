@@ -74,6 +74,8 @@ export const environmentControlWsHandlers = (
       observeRpcEffect(WS_METHODS.environmentControlTouch, environmentControl.touch(input)),
     [WS_METHODS.environmentControlKeep]: (input) =>
       observeRpcEffect(WS_METHODS.environmentControlKeep, environmentControl.keep(input)),
+    [WS_METHODS.environmentControlRestore]: (input) =>
+      observeRpcEffect(WS_METHODS.environmentControlRestore, environmentControl.restore(input)),
     [WS_METHODS.environmentControlPresence]: (input) =>
       observeRpcEffect(WS_METHODS.environmentControlPresence, environmentControl.presence(input)),
   }) satisfies RpcGroup.HandlersFrom<(typeof EnvironmentControlRpcs)[number]>;
