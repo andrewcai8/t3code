@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   resume: vi.fn(),
   dispose: vi.fn(),
   keep: vi.fn(),
+  restore: vi.fn(),
   confirm: vi.fn(),
   forget: vi.fn(),
   navigate: vi.fn(),
@@ -44,11 +45,12 @@ vi.mock("../../state/server", () => ({
     resumeProvisionedEnvironment: "resume",
     disposeProvisionedEnvironment: "dispose",
     keepProvisionedEnvironment: "keep",
+    restoreProvisionedEnvironment: "restore",
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: string) =>
-    command === "resume" ? state.resume : command === "keep" ? state.keep : state.dispose,
+    ({ resume: state.resume, keep: state.keep, restore: state.restore })[command] ?? state.dispose,
 }));
 vi.mock("../ui/button", () => ({
   Button: (props: ComponentProps<"button">) => <button {...props} />,
@@ -77,6 +79,7 @@ beforeEach(() => {
   state.resume.mockResolvedValue(AsyncResult.success({ kind: "resumed" }));
   state.dispose.mockResolvedValue(AsyncResult.success({ kind: "disposed" }));
   state.keep.mockResolvedValue(AsyncResult.success({ kind: "updated" }));
+  state.restore.mockResolvedValue(AsyncResult.success({ kind: "restored" }));
 });
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -181,4 +184,28 @@ it("allows cleanup again of a machine the user kept", async () => {
     environmentId: "host",
     input: { requestId: "11111111-1111-4111-a111-111111111111", keep: false },
   });
+});
+
+it("keeps the lease of a deleted machine its host can still restore", async () => {
+  state.confirm.mockResolvedValue(true);
+  state.dispose.mockResolvedValue(
+    AsyncResult.success({ kind: "disposed", restorableUntil: "2026-03-31T12:00:00.000Z" }),
+  );
+  const view = await mount();
+  await click(view, "Delete");
+  expect(state.forget).not.toHaveBeenCalled();
+  expect(paragraphs(view)).not.toContain("The host could not delete this machine.");
+});
+
+it("shows until when a deleted machine can be restored, and restores it through its host", async () => {
+  state.rows = [{ ...machine("disposed"), restorableUntil: "2026-03-31T12:00:00.000Z" }];
+  const view = await mount();
+  expect(paragraphs(view)).toContain("proof/repo · E2B · Deleted · Restorable until Mar 31");
+  expect(buttons(view)).toEqual(["Refresh", "Restore"]);
+  await click(view, "Restore");
+  expect(state.restore).toHaveBeenCalledWith({
+    environmentId: "host",
+    input: { leaseId: "11111111-1111-4111-a111-111111111112" },
+  });
+  expect(state.refresh).toHaveBeenCalledTimes(2);
 });
