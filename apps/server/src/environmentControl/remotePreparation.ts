@@ -366,14 +366,15 @@ ${brokerTokenFunctions}
  * caches the agent can download again. `once` runs before the server starts: it frees room, or
  * sets the reserve aside when there is plenty. `watch` only gives room back, checking every 30
  * seconds for as long as the server runs, one watcher per box. Arguments: root, home, mode, and
- * the low-disk threshold in bytes (1 GiB when absent).
+ * for `watch` an open descriptor of the guard's lock. T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB
+ * low-disk threshold.
  */
 export const diskGuardScript = String.raw`
 import fcntl,json,os,pathlib,shutil,sys,time
 root, home, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 reserve = root / 'disk-reserve'
 RESERVE = 256 << 20
-LOW = int(sys.argv[4]) if len(sys.argv) > 4 else 1 << 30
+LOW = int(os.environ.get('T3_DISK_GUARD_LOW_BYTES', 1 << 30))
 CACHES = ['.npm/_cacache', '.cache/pnpm', '.cache/yarn', '.yarn/berry/cache', '.bun/install/cache', '.cache/pip', '.cache/uv', '.cache/go-build', 'Library/Caches/Yarn', 'Library/Caches/pip']
 def headroom():
     free = shutil.disk_usage(root).free
@@ -391,7 +392,8 @@ def headroom():
 if mode == 'once':
     headroom()
     sys.exit(0)
-with open(root / 'disk-guard.lock', 'a') as lock:
+# The lock comes open from the preparer, so a watcher never creates a file in the root.
+with os.fdopen(int(sys.argv[4]), 'w') as lock:
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -1018,8 +1020,10 @@ def prepare(spec):
         process = server_process()
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
+        guard_lock = os.open(root / 'disk-guard.lock', os.O_WRONLY | os.O_CREAT, 0o600)
         with open(root / 'disk-guard.log', 'a') as log:
-            subprocess.Popen([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'watch'], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            subprocess.Popen([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'watch', str(guard_lock)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, pass_fds=(guard_lock,))
+        os.close(guard_lock)
         if tooling is not None:
             since, started = tooling
             try:

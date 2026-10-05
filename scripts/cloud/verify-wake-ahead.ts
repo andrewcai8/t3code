@@ -44,9 +44,9 @@ import {
   PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX,
   resolveRemotePairingTarget,
 } from "@t3tools/shared/remote";
-import * as NodeChildProcess from "node:child_process";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -56,6 +56,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
@@ -104,6 +105,10 @@ const StateJson = Schema.fromJsonString(State);
 const decodeState = Schema.decodeUnknownEffect(StateJson);
 const encodeState = Schema.encodeEffect(StateJson);
 const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
+const decodeManagerConfig = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ e2bApiKey: Schema.String })),
+);
+const encodeValue = Schema.encodeSync(Schema.UnknownFromJsonString);
 const decodeTicket = Schema.decodeUnknownEffect(
   Schema.Struct({ ticket: AuthWebSocketTicketResult.fields.ticket }),
 );
@@ -179,6 +184,8 @@ const seconds = (from: number, to: number) => Math.round((to - from) / 100) / 10
 
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const uuid = (yield* Crypto.Crypto).randomUUIDv4;
   let state: State = (yield* fs.exists(statePath))
     ? yield* decodeState(yield* fs.readFileString(statePath))
     : { boxes: [], checks: [] };
@@ -191,7 +198,7 @@ const program = Effect.gen(function* () {
       failed ||= !pass;
       state = { ...state, checks: [...state.checks, { step, name, pass, value }] };
       yield* save;
-      yield* Console.log(`${pass ? "PASS" : "FAIL"} ${step}.${name} ${JSON.stringify(value)}`);
+      yield* Console.log(`${pass ? "PASS" : "FAIL"} ${step}.${name} ${encodeValue(value)}`);
     });
   if (state.managerBearer === undefined) {
     state = {
@@ -221,7 +228,7 @@ const program = Effect.gen(function* () {
     launch: boolean,
     timeout: `${number} minutes` = "8 minutes",
   ) {
-    const messageId = MessageId.make(crypto.randomUUID());
+    const messageId = MessageId.make(yield* uuid);
     const threadId = ThreadId.make(box.threadId);
     const modelSelection = {
       instanceId: ProviderInstanceId.make(box.instanceId),
@@ -231,7 +238,7 @@ const program = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* launch
           ? client["orchestration.launchThread"]({
-              commandId: CommandId.make(crypto.randomUUID()),
+              commandId: CommandId.make(yield* uuid),
               creationSource: "web",
               threadId,
               projectId: ProjectId.make(box.projectId),
@@ -245,7 +252,7 @@ const program = Effect.gen(function* () {
             })
           : client["orchestration.dispatchCommand"]({
               type: "message.dispatch",
-              commandId: CommandId.make(crypto.randomUUID()),
+              commandId: CommandId.make(yield* uuid),
               createdBy: "user",
               creationSource: "web",
               threadId,
@@ -315,7 +322,7 @@ const program = Effect.gen(function* () {
         Array.from({ length: count }, (_, index) => index),
         (index) =>
           Effect.gen(function* () {
-            const requestId = ProvisionRequestId.make(crypto.randomUUID());
+            const requestId = ProvisionRequestId.make(yield* uuid);
             const started = yield* Clock.currentTimeMillis;
             const ready = yield* onManager((client) =>
               client["environmentControl.provision"]({
@@ -400,7 +407,7 @@ const program = Effect.gen(function* () {
               httpBaseUrl: target.httpBaseUrl,
               bearer,
               projectId: projectId.value,
-              threadId: crypto.randomUUID(),
+              threadId: yield* uuid,
               instanceId: onBoxProvider.instanceId,
               model: model.slug,
             };
@@ -432,8 +439,8 @@ const program = Effect.gen(function* () {
     }
     case "memory": {
       // A chat of its own, so earlier runs of this step never shape the agent's answer.
-      const box = { ...state.boxes[0]!, threadId: crypto.randomUUID() };
-      const word = `ORCHID-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+      const box = { ...state.boxes[0]!, threadId: yield* uuid };
+      const word = `ORCHID-${(yield* uuid).slice(0, 6).toUpperCase()}`;
       const taught = yield* turn(
         box,
         `We're labelling this work session ${word}. Please keep that label in mind; I'll ask for it later. Reply with just OK.`,
@@ -456,30 +463,24 @@ const program = Effect.gen(function* () {
         Effect.forkChild,
       );
       yield* Effect.sleep("12 seconds");
-      const apiKey = (
-        JSON.parse(yield* fs.readFileString(argument("manager-config"))) as {
-          readonly e2bApiKey: string;
-        }
-      ).e2bApiKey;
-      const killed = yield* Effect.promise(
-        () =>
-          new Promise<number | null>((resolve) =>
-            NodeChildProcess.execFile(
-              process.execPath,
-              [
-                "--input-type=module",
-                "-e",
-                `import { Sandbox } from "e2b"; const box = await Sandbox.connect(process.argv[1], { apiKey: process.env.E2B_API_KEY }); const ran = await box.commands.run("kill -TERM ${pidBefore}"); process.exit(ran.exitCode);`,
-                box.sandboxId,
-              ],
-              {
-                cwd: new URL("../../apps/server/", import.meta.url),
-                env: { ...process.env, E2B_API_KEY: apiKey },
-              },
-              (error) =>
-                resolve(error === null ? 0 : typeof error.code === "number" ? error.code : 1),
-            ),
-          ),
+      const { e2bApiKey } = yield* decodeManagerConfig(
+        yield* fs.readFileString(argument("manager-config")),
+      );
+      const killed = yield* spawner.exitCode(
+        ChildProcess.make(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `import { Sandbox } from "e2b"; const box = await Sandbox.connect(process.argv[1], { apiKey: process.env.E2B_API_KEY }); const ran = await box.commands.run("kill -TERM ${pidBefore}"); process.exit(ran.exitCode);`,
+            box.sandboxId,
+          ],
+          {
+            cwd: new URL("../../apps/server/", import.meta.url).pathname,
+            env: { E2B_API_KEY: e2bApiKey },
+            extendEnv: true,
+          },
+        ),
       );
       const cut = yield* Fiber.join(working);
       yield* record("serverStopped", killed === 0, {
@@ -519,10 +520,11 @@ const program = Effect.gen(function* () {
     case "presence": {
       const [first, second, settled] = state.boxes.slice(1, 4);
       if (!first || !second || !settled) return yield* Effect.die("presence needs boxes 1-3");
+      const settleId = CommandId.make(yield* uuid);
       yield* onBox(settled, (client) =>
         client["orchestration.dispatchCommand"]({
           type: "thread.settle",
-          commandId: CommandId.make(crypto.randomUUID()),
+          commandId: settleId,
           threadId: ThreadId.make(settled.threadId),
         }),
       );

@@ -1450,8 +1450,11 @@ describe("box disk guard", () => {
       // A threshold above any disk's free space makes this disk read as nearly full.
       const guarded = NodeChildProcess.spawnSync(
         "python3",
-        ["-c", diskGuardScript, root, home, "once", String(2 ** 60)],
-        { encoding: "utf8" },
+        ["-c", diskGuardScript, root, home, "once"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, T3_DISK_GUARD_LOW_BYTES: String(2 ** 60) },
+        },
       );
 
       expect(guarded.status).toBe(0);
