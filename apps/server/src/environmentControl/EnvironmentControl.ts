@@ -1918,16 +1918,26 @@ export const layer = Layer.effect(
     /**
      * Removing a chat's ready box puts it to sleep, restorable for a grace period, since a sleeping
      * box costs little and a deleted one is gone for good. Any other box is deleted at once: one
-     * still provisioning, one no chat owns, or one whose chat never ran on it.
+     * still provisioning, one no chat owns, one whose chat never ran on it, or a Devbox, whose
+     * disk bills while it sleeps. A failed read refuses rather than deleting.
      */
     const removeProvision = Effect.fn("EnvironmentControl.removeProvision")(function* (
       requestId: ProvisionRequestId,
     ): Effect.fn.Return<EnvironmentProvisionDisposeResult, EnvironmentControlError> {
-      const lease = yield* Effect.promise(() =>
-        leaseRegistry.findById(requestId).catch(() => null),
-      );
-      const operation = yield* store.get(requestId).pipe(Effect.orElseSucceed(() => null));
-      if (lease && keepsRemovedBox(lease) && operation?.state.kind === "ready") {
+      const lease = yield* Effect.tryPromise({
+        try: () => leaseRegistry.findById(requestId),
+        catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
+      });
+      if (lease && keepsRemovedBox(lease)) {
+        const operation = yield* store
+          .get(requestId)
+          .pipe(
+            Effect.mapError(
+              () => new EnvironmentControlError({ message: "Cloud request could not be loaded." }),
+            ),
+          );
+        if (operation.state.kind !== "ready" || boxMachine(operation.request) === "devbox")
+          return yield* cancelProvision(requestId);
         const removed = yield* run<
           EnvironmentProvisionDisposeResult | { readonly kind: "missing" }
         >((service) => service.remove(lease.leaseId), {
