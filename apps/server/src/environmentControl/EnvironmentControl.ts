@@ -2032,7 +2032,7 @@ export const layer = Layer.effect(
         yield* Effect.logInfo("cloud workspace build checked on resume", {
           leaseId: workspace.leaseId,
           guestProtocol,
-          upgrade: mustUpgrade ? "before connecting" : "later, while idle",
+          upgrade: mustUpgrade ? "before connecting" : "none before connecting",
         });
         if (!mustUpgrade) return result;
         return yield* upgradeAfterResume(upgrade).pipe(

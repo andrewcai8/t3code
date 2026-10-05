@@ -363,9 +363,10 @@ ${brokerTokenFunctions}
 /**
  * Keeps a full disk from stopping a box's T3 server, which must write to save the chat. On Linux
  * a reserve file holds space the guard gives back when the disk runs low; it also clears package
- * caches the agent can download again. `once` frees room before the server starts; `watch` checks
- * every 30 seconds for as long as the server runs, one watcher per box. Arguments: root, home,
- * mode, and the low-disk threshold in bytes (1 GiB when absent).
+ * caches the agent can download again. `once` runs before the server starts: it frees room, or
+ * sets the reserve aside when there is plenty. `watch` only gives room back, checking every 30
+ * seconds for as long as the server runs, one watcher per box. Arguments: root, home, mode, and
+ * the low-disk threshold in bytes (1 GiB when absent).
  */
 export const diskGuardScript = String.raw`
 import fcntl,json,os,pathlib,shutil,sys,time
@@ -382,7 +383,7 @@ def headroom():
             print('disk low: released the reserve', free, flush=True)
         for cache in CACHES:
             shutil.rmtree(home / cache, ignore_errors=True)
-    elif sys.platform.startswith('linux') and not reserve.exists() and free > LOW + RESERVE:
+    elif mode == 'once' and sys.platform.startswith('linux') and not reserve.exists() and free > LOW + RESERVE:
         partial = root / 'disk-reserve.tmp'
         with open(partial, 'wb') as output:
             os.posix_fallocate(output.fileno(), 0, RESERVE)

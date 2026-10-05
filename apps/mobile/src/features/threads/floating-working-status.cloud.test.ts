@@ -26,14 +26,16 @@ describe("connectionFloatingStatus for a waking cloud machine", () => {
     const status = (
       connectionState: "reconnecting" | "waking" | "error",
       wake: { readonly title: string; readonly eta: string | null },
-    ) =>
-      connectionFloatingStatus({
+    ) => {
+      const floating = connectionFloatingStatus({
         connectionError: null,
         connectionState,
         environmentLabel: "this chat's cloud machine",
         onReconnect: () => {},
         wake,
-      })?.label;
+      });
+      return floating?.kind === "connection" ? floating.label : null;
+    };
     const sandbox = { title: "This chat's cloud machine is waking up", eta: "about 10 seconds" };
     expect(status("waking", sandbox)).toBe(
       "This chat's cloud machine is waking up, about 10 seconds...",
