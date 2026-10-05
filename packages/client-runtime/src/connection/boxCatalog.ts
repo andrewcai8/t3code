@@ -2,7 +2,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { ConnectionCatalogEntry, ConnectionRegistration } from "./catalog.ts";
-import { BearerConnectionTarget, type ConnectionTarget, connectionBox } from "./model.ts";
+import { BearerConnectionTarget, connectionBox } from "./model.ts";
 
 /**
  * Saves a box's target and leaves whatever pairing this device holds for it untouched. It is the
@@ -29,19 +29,4 @@ export function holdsPairing(entry: ConnectionCatalogEntry | undefined): boolean
 /** A box its host listed that this device has never paired. Opening it pairs it first. */
 export function isUnpairedBox(entry: ConnectionCatalogEntry): boolean {
   return connectionBox(entry.target) !== null && !holdsPairing(entry);
-}
-
-/**
- * Whether saving `registration` over `previous` keeps the profile and credential saved under the
- * unchanged connection id, so relabeling or marking a paired box never drops its pairing.
- */
-export function keepsBoxPairing(
-  registration: CatalogRegistration,
-  previous: ConnectionTarget,
-): boolean {
-  return (
-    registration._tag === "BoxTargetRegistration" &&
-    previous._tag === "BearerConnectionTarget" &&
-    previous.connectionId === registration.target.connectionId
-  );
 }

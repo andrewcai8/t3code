@@ -12,6 +12,7 @@ import {
   type ProvisionProvider,
   type ScheduledTask,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -20,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
+import type * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { RepositoryIdentityResolver } from "../project/RepositoryIdentityResolver.ts";
 
@@ -97,6 +99,43 @@ export class ScheduledCloudFire extends Context.Reference<{
     fire: ({ task }) => Effect.fail(failed(task, "This server cannot start cloud machines.")),
   }),
 }) {}
+
+/**
+ * Launches one fire of a task: a chat here for a local task, or a fresh machine for a cloud one.
+ * A cloud fire is keyed by its start alone, which its row keeps as `last_run_at`, so a fire
+ * resumed after a restart sends the same request.
+ */
+export const launchFire =
+  (
+    cloudFire: (typeof ScheduledCloudFire)["Service"],
+    threadLaunch: ThreadLaunchService.ThreadLaunchService["Service"],
+  ) =>
+  (
+    task: ScheduledTask,
+    startedAt: DateTime.DateTime,
+    input: Parameters<ThreadLaunchService.ThreadLaunchService["Service"]["launch"]>[0],
+  ): Effect.Effect<unknown, ThreadLaunchService.ThreadLaunchError | ScheduledTaskError> =>
+    task.target === "local"
+      ? threadLaunch.launch(input)
+      : cloudFire.fire({
+          task,
+          provider: task.target,
+          fireKey: `${task.id}:${DateTime.toEpochMillis(startedAt)}`,
+          firedAt: DateTime.toUtc(startedAt),
+        });
+
+/**
+ * Whether a run's end leaves its row 'running'. A cloud fire cut short by shutdown has not
+ * failed: its machine keeps provisioning, and startup resumes the same fire.
+ */
+export const keepsCloudRun = (task: ScheduledTask, cause: Cause.Cause<unknown>): boolean =>
+  task.target !== "local" && Cause.hasInterruptsOnly(cause);
+
+/** The start of a cloud fire its row still marks running, which startup resumes. */
+export const resumableCloudRun = (task: ScheduledTask): Option.Option<DateTime.Utc> =>
+  task.target === "local" || task.lastRunAt === null
+    ? Option.none()
+    : DateTime.make(task.lastRunAt).pipe(Option.map(DateTime.toUtc));
 
 export const layer = Layer.effect(
   ScheduledCloudFire,

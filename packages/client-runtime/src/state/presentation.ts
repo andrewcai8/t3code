@@ -15,6 +15,7 @@ import {
   type EnvironmentPresentation,
 } from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
+import { hasRelayRoute } from "../connection/routes.ts";
 import { isBoxEntry } from "./connectionsCloud.ts";
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
@@ -101,7 +102,7 @@ export function projectEnvironmentConnectionSummary(
     environmentId,
     environmentLabel: environment.entry.target.label,
     displayUrl: connectionCatalogDisplayUrl(environment.entry) ?? "",
-    isRelayManaged: environment.entry.target._tag === "RelayConnectionTarget",
+    isRelayManaged: hasRelayRoute(environment.entry),
     isEnabled: environment.entry.enabled,
     connectionState: environment.connection.phase,
     connectionError: environment.connection.error,

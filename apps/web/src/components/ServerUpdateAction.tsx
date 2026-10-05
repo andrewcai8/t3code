@@ -1,4 +1,8 @@
-import type { EnvironmentId, ServerSelfUpdateCapability } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ServerInstallation,
+  ServerSelfUpdateCapability,
+} from "@t3tools/contracts";
 import type { ServerUpdateStage, ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import {
   isAtomCommandInterrupted,
@@ -44,6 +48,7 @@ export interface ServerUpdateTarget {
   readonly environmentId: EnvironmentId;
   readonly serverLabel: string;
   readonly selfUpdate: ServerSelfUpdateCapability | null;
+  readonly installation?: ServerInstallation | undefined;
   readonly desktopAppUpdate?: boolean;
   readonly threadContinuation?: boolean;
   readonly targetVersion: string;
@@ -192,6 +197,7 @@ export function ServerUpdateAction({
   environmentId,
   serverLabel,
   selfUpdate,
+  installation,
   desktopAppUpdate = false,
   threadContinuation = false,
   targetVersion,
@@ -208,12 +214,16 @@ export function ServerUpdateAction({
   );
   const update = useServerUpdate();
   const { copyToClipboard } = useCopyToClipboard<{ command: string }>({
-    target: "update command",
+    target: installation?.kind === "npm-global" ? "update command" : "relaunch command",
     onCopy: ({ command }) => {
       toastManager.add({
         type: "success",
-        title: "Update command copied",
-        description: `Run \`${command}\` on ${serverLabel} to update it.`,
+        title:
+          installation?.kind === "npm-global" ? "Update command copied" : "Relaunch command copied",
+        description:
+          installation?.kind === "npm-global"
+            ? `Run \`${command}\` on ${serverLabel}, then restart t3 with your usual options.`
+            : `Stop t3 on ${serverLabel}, then relaunch with \`${command}\` using the same subcommand and options. This does not update an installed t3 command.`,
       });
     },
     onError: (error) => {
@@ -262,8 +272,15 @@ export function ServerUpdateAction({
 
   const guestLabel = guestServerUpdateLabel(environmentId, selfUpdate);
   const manualCommand =
-    selfUpdate === null && guestLabel === null ? manualServerUpdateCommand(targetVersion) : null;
-  const actionLabel = manualCommand !== null ? "Copy update command" : (guestLabel ?? label);
+    selfUpdate === null && guestLabel === null
+      ? manualServerUpdateCommand(targetVersion, installation)
+      : null;
+  const actionLabel =
+    manualCommand !== null
+      ? installation?.kind === "npm-global"
+        ? "Copy update command"
+        : "Copy relaunch command"
+      : (guestLabel ?? label);
   const onClick =
     manualCommand !== null
       ? () => copyToClipboard(manualCommand, { command: manualCommand })
