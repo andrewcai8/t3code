@@ -1484,6 +1484,80 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("does not import Claude background task notifications as user messages", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const notification = [
+          "<task-notification>",
+          "<task-id>a38f1709b105657b6</task-id>",
+          "<tool-use-id>toolu_015Em8i9e7uqc8NTMucp6C3g</tool-use-id>",
+          "<output-file>/private/tmp/claude-501/project/session/tasks/a38f1709b105657b6.output</output-file>",
+          "<status>completed</status>",
+          '<summary>Agent "Amend consent" finished</summary>',
+          "<result>Amended the consent section.</result>",
+          "</task-notification>",
+        ].join("\n");
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "claude-session.jsonl"),
+          contents: [
+            encodeTranscriptRecord({
+              type: "user",
+              cwd: workspace,
+              sessionId: "claude-session",
+              message: { role: "user", content: "Amend the consent section in the background" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "claude-session",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "Started an agent." }],
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "user",
+              cwd: workspace,
+              sessionId: "claude-session",
+              promptSource: "system",
+              origin: { kind: "task-notification", producer: "session-task" },
+              turnOrigin: "task_notification",
+              message: { role: "user", content: notification },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "claude-session",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "The agent finished." }],
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: nowMs - 60 * 60 * 1000,
+        });
+
+        const threads = yield* runRecentThreads({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+        });
+
+        expect(
+          threads.map((thread) => thread.messages.map(({ role, text }) => ({ role, text }))),
+        ).toEqual([
+          [
+            { role: "user", text: "Amend the consent section in the background" },
+            { role: "assistant", text: "Started an agent." },
+            { role: "assistant", text: "The agent finished." },
+          ],
+        ]);
+      }),
+    );
+
     it.effect("imports history recorded with a case alias", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
