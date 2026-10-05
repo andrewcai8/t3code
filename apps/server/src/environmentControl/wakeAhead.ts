@@ -1,6 +1,6 @@
 import type {
   CloudMachineKind,
-  CloudMachineWake,
+  CloudMachineState,
   DiscoveredProvisionedEnvironment,
   EnvironmentControlPresenceResult,
   EnvironmentId,
@@ -10,6 +10,8 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
+
+type MachineWake = Exclude<CloudMachineState, "asleep">;
 
 /** Wakes in flight at once, a client's included. Past it a pass leaves the rest for the next. */
 const MAX_CONCURRENT_WAKES = 20;
@@ -100,12 +102,12 @@ export function makeWakeAhead(deps: {
   /** Each wake or upgrade in flight per machine; one box can have a client's and a host's. */
   const tracked = new Map<
     EnvironmentId,
-    Map<symbol, { readonly machine: CloudMachineKind; readonly wake: CloudMachineWake }>
+    Map<symbol, { readonly machine: CloudMachineKind; readonly wake: MachineWake }>
   >();
   const failures = new Map<string, { readonly count: number; readonly retryAt: number }>();
 
   const track =
-    (environmentId: EnvironmentId, machine: CloudMachineKind, wake: CloudMachineWake) =>
+    (environmentId: EnvironmentId, machine: CloudMachineKind, wake: MachineWake) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
       Effect.acquireUseRelease(
         Effect.sync(() => {
@@ -124,13 +126,20 @@ export function makeWakeAhead(deps: {
           }),
       );
 
-  const machines = (): EnvironmentControlPresenceResult["machines"] =>
-    [...tracked].map(([environmentId, entries]) => ({
+  /** Every machine not awake: those with a wake or upgrade in flight, then the paused ones. */
+  const machines = (
+    boxes: ReadonlyArray<DiscoveredProvisionedEnvironment>,
+  ): EnvironmentControlPresenceResult["machines"] => [
+    ...[...tracked].map(([environmentId, entries]) => ({
       environmentId,
-      wake: [...entries.values()].some((entry) => entry.wake === "updating")
-        ? "updating"
-        : "waking",
-    }));
+      state: [...entries.values()].some((entry) => entry.wake === "updating")
+        ? ("updating" as const)
+        : ("waking" as const),
+    })),
+    ...boxes
+      .filter((box) => box.lifecycle === "paused" && !tracked.has(box.environmentId))
+      .map((box) => ({ environmentId: box.environmentId, state: "asleep" as const })),
+  ];
 
   const wakeBox = Effect.fn("wakeAhead.wake")(function* (box: DiscoveredProvisionedEnvironment) {
     const startedAt = yield* Clock.currentTimeMillis;
@@ -195,16 +204,17 @@ export function makeWakeAhead(deps: {
     track,
     pass,
     /**
-     * A client's report. A present user is counted for a few minutes and their chats are woken
-     * at once; an absent one only reads what is waking, since another client may still be here.
+     * A client's report. A present user is counted for a few minutes and their chats start
+     * waking before the answer; an absent one only reads it, since another client may be here.
      */
     presence: (present: boolean) =>
       Effect.gen(function* () {
         if (present) {
           presentUntil = (yield* Clock.currentTimeMillis) + PRESENCE_TTL_MS;
-          yield* pass.pipe(Effect.forkIn(deps.scope));
+          yield* pass;
         }
-        return { machines: machines() } satisfies EnvironmentControlPresenceResult;
+        const boxes = yield* deps.list.pipe(Effect.orElseSucceed(() => []));
+        return { machines: machines(boxes) } satisfies EnvironmentControlPresenceResult;
       }),
   };
 }

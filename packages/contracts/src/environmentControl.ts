@@ -383,20 +383,21 @@ export type EnvironmentProvisionTouchResult = typeof EnvironmentProvisionTouchRe
 
 /**
  * A client reports whether its user is here. While any client's user is, the host wakes the
- * machines of their unsettled cloud chats ahead of them and keeps those machines awake.
+ * machines of their unsettled cloud chats ahead of them and keeps those machines awake. A client
+ * whose user is away sends `false`, which only reads the answer.
  */
 export const EnvironmentControlPresenceInput = Schema.Struct({
   present: Schema.Boolean,
 });
 export type EnvironmentControlPresenceInput = typeof EnvironmentControlPresenceInput.Type;
 
-/** What the host is doing to a machine before its chat can connect. */
-export const CloudMachineWake = Schema.Literals(["waking", "updating"]);
-export type CloudMachineWake = typeof CloudMachineWake.Type;
+/** Where a cloud machine stands before its chat can connect: asleep, waking, or being updated. */
+export const CloudMachineState = Schema.Literals(["asleep", "waking", "updating"]);
+export type CloudMachineState = typeof CloudMachineState.Type;
 
-/** The machines the host is waking or updating right now. */
+/** The host's machines that are not awake right now. Any other listed box is awake. */
 export const EnvironmentControlPresenceResult = Schema.Struct({
-  machines: Schema.Array(Schema.Struct({ environmentId: EnvironmentId, wake: CloudMachineWake })),
+  machines: Schema.Array(Schema.Struct({ environmentId: EnvironmentId, state: CloudMachineState })),
 });
 export type EnvironmentControlPresenceResult = typeof EnvironmentControlPresenceResult.Type;
 

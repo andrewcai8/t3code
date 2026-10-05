@@ -4,7 +4,6 @@ import {
   type CloudMachineKind,
   type DiscoveredProvisionedEnvironment,
   EnvironmentId,
-  type EnvironmentProvisionResumeResult,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -138,44 +137,60 @@ it("renews awake unsettled chats whose lease ends within ten minutes", () => {
 });
 
 it.effect(
-  "wakes a present user's two unsettled chats, not the settled one, and reports them waking",
+  "wakes a present user's two unsettled chats, not the settled one, and reports each machine",
   () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(NOW);
-      const boxes = [
+      let boxes = [
         box("first"),
         box("second", { thread: { updatedAt: "2026-10-01T11:00:00.000Z" } }),
         box("settled", { thread: { settledOverride: "settled" } }),
       ];
       const resumed: Array<string> = [];
-      const release = yield* Deferred.make<EnvironmentProvisionResumeResult>();
+      const release = yield* Deferred.make<void>();
       const wakeAhead = makeWakeAhead({
-        list: Effect.succeed(boxes),
+        list: Effect.sync(() => boxes),
         resume: (target) =>
           Effect.sync(() => resumed.push(target.environmentId)).pipe(
             Effect.andThen(Deferred.await(release)),
+            Effect.andThen(
+              Effect.sync(() => {
+                boxes = boxes.map((candidate) =>
+                  candidate.environmentId === target.environmentId
+                    ? { ...candidate, lifecycle: "active" as const }
+                    : candidate,
+                );
+                return { kind: "resumed" as const };
+              }),
+            ),
           ),
         renew: () => Effect.void,
         scope: yield* Effect.scope,
       });
 
-      expect(yield* wakeAhead.presence(false)).toEqual({ machines: [] });
-      expect(resumed).toEqual([]);
-      yield* wakeAhead.presence(true);
-      yield* Effect.yieldNow;
-      expect(resumed).toEqual(["second", "first"]);
       expect(yield* wakeAhead.presence(false)).toEqual({
         machines: [
-          { environmentId: "second", wake: "waking" },
-          { environmentId: "first", wake: "waking" },
+          { environmentId: "first", state: "asleep" },
+          { environmentId: "second", state: "asleep" },
+          { environmentId: "settled", state: "asleep" },
         ],
       });
-      yield* Deferred.succeed(release, { kind: "resumed" });
+      expect(resumed).toEqual([]);
+      expect(yield* wakeAhead.presence(true)).toEqual({
+        machines: [
+          { environmentId: "second", state: "waking" },
+          { environmentId: "first", state: "waking" },
+          { environmentId: "settled", state: "asleep" },
+        ],
+      });
+      expect(resumed).toEqual(["second", "first"]);
+      yield* Deferred.succeed(release, undefined);
       yield* Effect.yieldNow;
-      expect(yield* wakeAhead.presence(false)).toEqual({ machines: [] });
+      expect(yield* wakeAhead.presence(false)).toEqual({
+        machines: [{ environmentId: "settled", state: "asleep" }],
+      });
     }).pipe(Effect.scoped),
 );
-
 it.effect(
   "retries a refused wake after its backoff while the user stays, and stops once they leave",
   () =>
@@ -228,7 +243,7 @@ it.effect("tracks an upgrade as updating over a wake of the same machine", () =>
     );
     yield* Effect.yieldNow;
     expect(yield* wakeAhead.presence(false)).toEqual({
-      machines: [{ environmentId: "box", wake: "updating" }],
+      machines: [{ environmentId: "box", state: "updating" }],
     });
     yield* Deferred.succeed(upgrade, undefined);
     yield* Fiber.join(fiber);
