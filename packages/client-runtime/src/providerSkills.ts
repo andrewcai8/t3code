@@ -112,6 +112,14 @@ function resolveProviderWorkspaceSnapshot(
   return provider.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd);
 }
 
+export function hasCompleteProviderWorkspaceSnapshot(
+  provider: ServerProvider | null | undefined,
+  cwd: string | null | undefined,
+): boolean {
+  const snapshot = provider && resolveProviderWorkspaceSnapshot(provider, cwd);
+  return Boolean(snapshot && !snapshot.slashCommandsPending);
+}
+
 /**
  * A host's `provisionedSkills` join the result and win a name clash, since that copy is the one
  * its chats run.

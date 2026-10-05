@@ -21,7 +21,7 @@ import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import type * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRpc from "../rpc/client.ts";
 import { type BoxPairingPorts, PairingRedemption, pairBoxThroughHost } from "./boxPairing.ts";
-import type { BoxSupervisorOptions, BoxWakeOutcome } from "./boxWake.ts";
+import type { BoxWakeOutcome } from "./boxWake.ts";
 import {
   BearerConnectionRegistration,
   BoxTargetRegistration,
@@ -44,9 +44,9 @@ import {
   type BoxAttachment,
   type ConnectionAttemptError,
   ConnectionBlockedError,
-  type ConnectionTarget,
   ConnectionTransientError,
   connectionBox,
+  type PersistedConnectionTarget,
   type SupervisorConnectionState,
 } from "./model.ts";
 import { UserPresence } from "./presence.ts";
@@ -139,7 +139,11 @@ export interface RegistryInternals {
     ReadonlyMap<EnvironmentId, EnvironmentServiceScope>
   >;
   readonly platformEnvironmentIds: Ref.Ref<ReadonlySet<EnvironmentId>>;
-  readonly persistedTargetsByEnvironment: Ref.Ref<ReadonlyMap<EnvironmentId, ConnectionTarget>>;
+  readonly persistedEnvironmentIds: Ref.Ref<ReadonlySet<EnvironmentId>>;
+  /** The targets `registrations` saves for an entry, its preferred route first. */
+  readonly persistedRoutes: (
+    entry: ConnectionCatalogEntry,
+  ) => ReadonlyArray<PersistedConnectionTarget>;
   readonly registrations: Persistence.ConnectionRegistrationStore["Service"];
   readonly credentials: ConnectionCredentialStore.ConnectionCredentialStore["Service"];
   readonly cache: Persistence.EnvironmentCacheStore["Service"];
@@ -154,10 +158,9 @@ export interface RegistryInternals {
   /** Replaces an entry and its runtime. Run under the entry's lease lock. */
   readonly installEntryLocked: (entry: ConnectionCatalogEntry) => Effect.Effect<void>;
   readonly createServiceScope: (entry: ConnectionCatalogEntry) => Effect.Effect<unknown>;
-  /** The registry's `remove`, skipping an entry `keep` holds for under its lock. */
-  readonly remove: (
+  /** Forgets a saved environment. Run under the entry's lease lock. */
+  readonly removeLocked: (
     environmentId: EnvironmentId,
-    keep?: (entry: ConnectionCatalogEntry) => boolean,
   ) => Effect.Effect<
     void,
     | Persistence.ConnectionPersistenceError
@@ -165,6 +168,7 @@ export interface RegistryInternals {
     | EnvironmentNotRegisteredError
     | PlatformEnvironmentRemovalError
   >;
+  readonly removeRoute: EnvironmentRegistry["Service"]["removeRoute"];
   readonly run: EnvironmentRegistry["Service"]["run"];
 }
 
@@ -204,7 +208,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     entries,
     serviceScopes,
     platformEnvironmentIds,
-    persistedTargetsByEnvironment,
+    persistedEnvironmentIds,
+    persistedRoutes,
     registrations,
     credentials,
     cache,
@@ -213,11 +218,13 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     getEntry,
     installEntryLocked,
     createServiceScope,
-    remove: removeEntry,
+    removeLocked,
+    removeRoute: removeRouteEntry,
     run,
   } = internals;
   // A saved connection whose workspace is gone is not dialed again until it is paired anew.
   const driver = ConnectionDriver.ConnectionDriver.of({
+    ...dialer,
     connect: (entry, reportProgress) =>
       entry.target._tag === "BearerConnectionTarget" && entry.target.workspaceStatus === "missing"
         ? Effect.fail(workspaceMissingError())
@@ -657,21 +664,22 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
           ...current.target,
           connectionId: registration.target.connectionId,
         });
+        const next: ConnectionCatalogEntry = {
+          ...current,
+          target,
+          profile: Option.some(registration.profile),
+        };
         yield* registrations.register(
           new BearerConnectionRegistration({
             target,
             profile: registration.profile,
             credential: registration.credential,
           }),
+          persistedRoutes(next),
         );
-        yield* Ref.update(persistedTargetsByEnvironment, (persisted) =>
-          new Map(persisted).set(environmentId, target),
+        yield* Ref.update(persistedEnvironmentIds, (persisted) =>
+          new Set(persisted).add(environmentId),
         );
-        const next: ConnectionCatalogEntry = {
-          ...current,
-          target,
-          profile: Option.some(registration.profile),
-        };
         yield* replaceEntryInPlace(environmentId, next);
         return next;
       }),
@@ -690,6 +698,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   // first and the pairing happens at most once per device: every later dial finds it saved.
   const boxDriver = (environmentId: EnvironmentId, managerId: EnvironmentId) =>
     ConnectionDriver.ConnectionDriver.of({
+      ...driver,
       connect: (captured, reportProgress) =>
         Effect.gen(function* () {
           const entry = (yield* SubscriptionRef.get(entries)).get(environmentId) ?? captured;
@@ -734,9 +743,13 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         if (target === null) {
           return;
         }
+        const next: ConnectionCatalogEntry = { ...entry, target };
         if (target.box !== undefined) {
           // A box's target is saved alone, keeping its pairing, or its lack of one.
-          yield* registrations.register(new BoxTargetRegistration({ target }));
+          yield* registrations.register(
+            new BoxTargetRegistration({ target }),
+            persistedRoutes(next),
+          );
         } else {
           if (
             Option.isNone(entry.profile) ||
@@ -754,12 +767,13 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
               profile: entry.profile.value,
               credential: credential.value,
             }),
+            persistedRoutes(next),
           );
         }
-        yield* Ref.update(persistedTargetsByEnvironment, (current) =>
-          new Map(current).set(environmentId, target),
+        yield* Ref.update(persistedEnvironmentIds, (current) =>
+          new Set(current).add(environmentId),
         );
-        yield* installEntryLocked({ ...entry, target });
+        yield* installEntryLocked(next);
       }),
     );
   });
@@ -857,7 +871,13 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     environmentId: EnvironmentId,
     keep?: (entry: ConnectionCatalogEntry) => boolean,
   ) =>
-    removeEntry(environmentId, keep).pipe(
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        if (keep?.(yield* getEntry(environmentId)) === true) return;
+        yield* removeLocked(environmentId);
+      }),
+    ).pipe(
       Effect.andThen(SubscriptionRef.get(entries)),
       Effect.map((current) => !current.has(environmentId)),
       Effect.tap((forgotten) =>
@@ -880,12 +900,14 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   const forgetUnpairedBox = (environmentId: EnvironmentId) =>
     forgetEntry(environmentId, (current) => !isUnpairedBox(current));
 
-  const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
-    yield* forgetEntry(environmentId);
-    // A host's unpaired boxes exist on this device only because it listed them, so they go too.
-    for (const entry of (yield* SubscriptionRef.get(entries)).values()) {
-      if (!isUnpairedBox(entry) || connectionBox(entry.target)?.managerId !== environmentId)
-        continue;
+  // A host's unpaired boxes exist on this device only because it listed them, so they go with it.
+  const forgetRemovedHostBoxes = Effect.fn("EnvironmentRegistry.forgetRemovedHostBoxes")(function* (
+    managerId: EnvironmentId,
+  ) {
+    const current = yield* SubscriptionRef.get(entries);
+    if (current.has(managerId)) return;
+    for (const entry of current.values()) {
+      if (!isUnpairedBox(entry) || connectionBox(entry.target)?.managerId !== managerId) continue;
       yield* forgetUnpairedBox(entry.target.environmentId).pipe(
         Effect.catch((error) =>
           Effect.logWarning("Could not forget a removed host's unpaired box.", {
@@ -895,6 +917,20 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         ),
       );
     }
+  });
+
+  const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
+    yield* forgetEntry(environmentId);
+    yield* forgetRemovedHostBoxes(environmentId);
+  });
+
+  // Removing a host's last route removes the host, and its unpaired boxes with it.
+  const removeRoute = Effect.fn("EnvironmentRegistry.removeRoute")(function* (
+    environmentId: EnvironmentId,
+    routeId: string,
+  ) {
+    yield* removeRouteEntry(environmentId, routeId);
+    yield* forgetRemovedHostBoxes(environmentId);
   });
 
   const adoptBox = Effect.fn("EnvironmentRegistry.adoptBox")(function* (
@@ -907,9 +943,9 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         if ((yield* SubscriptionRef.get(entries)).has(target.environmentId)) return;
         // Seeded before the entry exists, so the shell its chat lists from starts with the chat.
         if (chat !== null) yield* cache.saveShell(target.environmentId, chatShellSnapshot(chat));
-        yield* registrations.register(new BoxTargetRegistration({ target }));
-        yield* Ref.update(persistedTargetsByEnvironment, (persisted) =>
-          new Map(persisted).set(target.environmentId, target),
+        yield* registrations.register(new BoxTargetRegistration({ target }), [target]);
+        yield* Ref.update(persistedEnvironmentIds, (persisted) =>
+          new Set(persisted).add(target.environmentId),
         );
         yield* installEntryLocked({ target, profile: Option.none(), enabled: true });
       }),
@@ -932,11 +968,12 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         )
           return;
         const target = new BearerConnectionTarget({ ...entry.target, label });
-        yield* registrations.register(new BoxTargetRegistration({ target }));
-        yield* Ref.update(persistedTargetsByEnvironment, (persisted) =>
-          new Map(persisted).set(environmentId, target),
+        const next: ConnectionCatalogEntry = { ...entry, target };
+        yield* registrations.register(new BoxTargetRegistration({ target }), persistedRoutes(next));
+        yield* Ref.update(persistedEnvironmentIds, (persisted) =>
+          new Set(persisted).add(environmentId),
         );
-        yield* replaceEntryInPlace(environmentId, { ...entry, target });
+        yield* replaceEntryInPlace(environmentId, next);
       }),
     );
   });
@@ -1057,8 +1094,11 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
       ),
     );
 
-  // A box's supervisor wakes it through its host and keeps its lease alive while connected.
-  const supervisorOptions = (entry: ConnectionCatalogEntry): BoxSupervisorOptions => {
+  // A box's supervisor wakes it through its host and keeps its lease alive while connected. A box
+  // is reached only through its host, so the addresses it reports are never saved as routes.
+  const supervisorOptions = (
+    entry: ConnectionCatalogEntry,
+  ): EnvironmentSupervisor.EnvironmentSupervisorOptions => {
     const box = connectionBox(entry.target);
     if (box === null) return {};
     const environmentId = entry.target.environmentId;
@@ -1069,6 +1109,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         ([here, connected]) => here && connected,
       ),
       keepAlive: keepBoxAlive(environmentId, box.managerId),
+      learnRoutes: () => Effect.succeedNone,
     };
   };
 
@@ -1093,6 +1134,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   return {
     methods,
     remove,
+    removeRoute,
     wantsConnection,
     supervisorOptions,
     driverFor,

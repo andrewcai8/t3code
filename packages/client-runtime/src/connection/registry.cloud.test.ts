@@ -72,6 +72,8 @@ import {
 } from "./presentation.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as EnvironmentRegistry from "./registry.ts";
+import { remoteHttpClientLayer } from "../rpc/http.ts";
+import { connectionRouteId } from "./routes.ts";
 import * as RpcSession from "../rpc/session.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
@@ -265,15 +267,12 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     readonly beforeRegistrationRegister?: (
       registration: CatalogRegistration,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
-    readonly beforeRegistrationRemove?: (
-      target: ConnectionTarget,
-    ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly initialDisabled?: ReadonlyArray<EnvironmentId>;
     /** Runs as the cache is read, holding whoever reads it. */
     readonly beforeLoadShell?: (environmentId: EnvironmentId) => Effect.Effect<void>;
   },
 ) {
-  const storedTargets = yield* Ref.make(
+  const storedTargets = yield* Ref.make<ReadonlyMap<EnvironmentId, ConnectionTarget>>(
     new Map(initialTargets.map((target) => [target.environmentId, target])),
   );
   const shellCache = yield* Ref.make(new Map([[TARGET.environmentId, CACHED_SNAPSHOT]]));
@@ -321,15 +320,13 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     listDisabled: Ref.get(storedDisabled).pipe(Effect.map((ids) => [...ids])),
   });
   const registrationStore = Persistence.ConnectionRegistrationStore.of({
-    register: (registration) =>
+    register: (registration, routes) =>
       Effect.gen(function* () {
         yield* options?.beforeRegistrationRegister?.(registration) ?? Effect.void;
         yield* Ref.update(registrationWrites, (count) => count + 1);
-        yield* Ref.update(storedTargets, (current) => {
-          const next = new Map(current);
-          next.set(registration.target.environmentId, registration.target);
-          return next;
-        });
+        yield* Ref.update(storedTargets, (current) =>
+          withPreferredRoute(current, registration.target.environmentId, routes),
+        );
         switch (registration._tag) {
           case "RelayConnectionRegistration":
             return;
@@ -353,29 +350,32 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
             });
         }
       }),
-    remove: (target) =>
+    setRoutes: (environmentId, routes) =>
+      Ref.update(storedTargets, (current) => withPreferredRoute(current, environmentId, routes)),
+    remove: (environmentId) =>
       Effect.gen(function* () {
-        yield* options?.beforeRegistrationRemove?.(target) ?? Effect.void;
+        const target = (yield* Ref.get(storedTargets)).get(environmentId);
         yield* Ref.update(storedTargets, (current) => {
           const next = new Map(current);
-          next.delete(target.environmentId);
+          next.delete(environmentId);
           return next;
         });
-        if (target._tag === "BearerConnectionTarget" || target._tag === "SshConnectionTarget") {
+        if (target?._tag === "BearerConnectionTarget" || target?._tag === "SshConnectionTarget") {
+          const { connectionId } = target;
           yield* Ref.update(storedProfiles, (current) => {
             const next = new Map(current);
-            next.delete(target.connectionId);
+            next.delete(connectionId);
             return next;
           });
           yield* Ref.update(storedCredentials, (current) => {
             const next = new Map(current);
-            next.delete(target.connectionId);
+            next.delete(connectionId);
             return next;
           });
         }
         yield* Ref.update(storedRemoteTokens, (current) => {
           const next = new Map(current);
-          next.delete(target.environmentId);
+          next.delete(environmentId);
           return next;
         });
       }),
@@ -508,6 +508,11 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         }),
       prepareForUpdate: () => Effect.die(new Error("Updating outdated hosts is not used.")),
     }),
+    // Route checks find nothing, so each saved route is dialed as it would be after a check.
+    Effect.provide(
+      remoteHttpClientLayer((() =>
+        Promise.reject(new TypeError("Route checks are not used."))) as typeof fetch),
+    ),
     Effect.provideService(RpcSession.RpcSessionFactory, {
       connect: (prepared) =>
         Effect.gen(function* () {
@@ -760,6 +765,19 @@ const recordPhases = Effect.fn("TestEnvironmentRegistry.recordPhases")(function*
   yield* Deferred.await(following);
   return phases;
 });
+
+/** The store keeps one route per environment: the preferred one, which is all a box has. */
+function withPreferredRoute(
+  current: ReadonlyMap<EnvironmentId, ConnectionTarget>,
+  environmentId: EnvironmentId,
+  routes: ReadonlyArray<ConnectionTarget>,
+): ReadonlyMap<EnvironmentId, ConnectionTarget> {
+  const next = new Map(current);
+  const [preferred] = routes;
+  if (preferred === undefined) next.delete(environmentId);
+  else next.set(environmentId, preferred);
+  return next;
+}
 
 describe("EnvironmentRegistry", () => {
   it.effect("persists a missing workspace without reconnecting or deleting saved data", () =>
@@ -2492,6 +2510,33 @@ describe("EnvironmentRegistry.syncHostBoxes", () => {
         ]);
         expect((yield* Ref.get(harness.shellCache)).has(CHAT_BOX_ID)).toBe(false);
         expect(yield* SubscriptionRef.get(registry.hostChats)).toEqual(new Map());
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("removing a host's last route forgets the unpaired boxes it lists", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [TARGET, HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.syncHostBoxes(
+          TARGET.environmentId,
+          listing(listedBox(CHAT_BOX_ID, { chat: chatAt(4) }), listedBox(HOST_BOX.environmentId)),
+        );
+        yield* registry.removeRoute(TARGET.environmentId, connectionRouteId(TARGET));
+
+        expect([...(yield* SubscriptionRef.get(registry.entries)).keys()]).toEqual([
+          HOST_BOX.environmentId,
+        ]);
+        expect([...(yield* Ref.get(harness.storedTargets)).keys()]).toEqual([
+          HOST_BOX.environmentId,
+        ]);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );

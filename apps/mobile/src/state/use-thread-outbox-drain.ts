@@ -81,10 +81,8 @@ import {
   useThreadOutboxMessages,
   useThreadOutboxShellStatuses,
 } from "./use-thread-outbox";
-import {
-  setPendingConnectionError,
-  useRemoteConnectionStatus,
-} from "./use-remote-environment-registry";
+import { clearThreadComposerError, setThreadComposerError } from "./thread-composer-error";
+import { useRemoteConnectionStatus } from "./use-remote-environment-registry";
 
 // Ordinary offline behavior (a socket dropping mid-request, a retryable
 // attachment upload failure) must not spam `console.warn` on every backoff
@@ -283,6 +281,12 @@ export async function completeQueuedMessageDelivery(
   queuedMessage: QueuedThreadMessage,
   deliveryRevision: number,
 ): Promise<"removed" | "edited" | "failed"> {
+  // The server took it after all: an error left by an earlier failed recovery
+  // of this same message no longer applies.
+  clearThreadComposerError(
+    scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId),
+    queuedMessage.messageId,
+  );
   try {
     await removeDeliveredCloudQueuedMessage(queuedMessage).catch((error) => {
       console.warn("[thread-outbox] could not update sign-out snapshot after delivery", {
@@ -439,6 +443,7 @@ export async function restoreRejectedQueuedMessage(
   message: string,
 ): Promise<"restored" | "deferred" | "blocked" | "retry"> {
   const draftKey = recoveryDraftKey(queuedMessage);
+  const threadKey = scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId);
   // Set once the merge publishes, cleared once the queued message is removed.
   // The catch below uses it to take the merged content back out, so a retry
   // after a mid-recovery failure cannot append the recovered text again.
@@ -468,12 +473,21 @@ export async function restoreRejectedQueuedMessage(
       (attachment) => !existingAttachmentIds.has(attachment.id),
     ).length;
     if (existingAttachmentIds.size + addedAttachmentCount > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-      setPendingConnectionError(
+      setThreadComposerError(
+        threadKey,
         `Remove attachments from the draft before restoring this message. Messages can contain at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
+        queuedMessage.messageId,
       );
       return "blocked";
     }
 
+    // Shown before the merge publishes the text, so a resend of that text,
+    // which can happen while this recovery still awaits persistence, clears
+    // it. Withdrawn below wherever the recovery backs out.
+    const withdrawError = () => clearThreadComposerError(threadKey, queuedMessage.messageId);
+    if (!queuedMessage.creation) {
+      setThreadComposerError(threadKey, message, queuedMessage.messageId);
+    }
     let mergedDraft: ComposerDraft;
     try {
       stampRecoveryDraftProject(queuedMessage, draftKey);
@@ -493,6 +507,7 @@ export async function restoreRejectedQueuedMessage(
       rollback = { snapshot: originalDraft, merged: mergedDraft };
     }
     if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
+      withdrawError();
       await undoComposerDraftMerge(draftKey, originalDraft, mergedDraft);
       return "deferred";
     }
@@ -521,6 +536,7 @@ export async function restoreRejectedQueuedMessage(
       !(await confirmThreadOutboxMessageQueued(queuedMessage)) ||
       appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]
     ) {
+      withdrawError();
       await undoComposerDraftMerge(draftKey, originalDraft, restoredDraft);
       return "deferred";
     }
@@ -533,6 +549,7 @@ export async function restoreRejectedQueuedMessage(
         () => !appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId],
       ))
     ) {
+      withdrawError();
       await undoComposerDraftMerge(draftKey, originalDraft, restoredDraft);
       return "deferred";
     }
@@ -540,15 +557,17 @@ export async function restoreRejectedQueuedMessage(
     // must never be rolled back.
     rollback = null;
     if (queuedMessage.creation) {
+      // The failure card shows the reason, so an error left by an earlier
+      // failed attempt at this recovery no longer applies.
+      withdrawError();
       // The thread screen for this creation is likely open; it reads the
-      // outcome to offer reopening the restored draft.
+      // outcome to offer reopening the restored draft, and shows the reason.
       recordPendingThreadCreationOutcome({
         kind: "failed",
         message: queuedMessage,
         reason: message,
       });
     }
-    setPendingConnectionError(message);
     return "restored";
   } catch (error) {
     if (rollback !== null) {
@@ -562,8 +581,10 @@ export async function restoreRejectedQueuedMessage(
       );
     }
     console.warn("[thread-outbox] failed to restore an undeliverable message", error);
-    setPendingConnectionError(
+    setThreadComposerError(
+      threadKey,
       error instanceof Error ? error.message : "The unsent message could not be restored.",
+      queuedMessage.messageId,
     );
     return "retry";
   }

@@ -74,6 +74,7 @@ import {
   removeConnectionFromCatalog,
   replaceCatalogValue,
   setConnectionEnabledInCatalog,
+  setRoutesInCatalog,
 } from "@t3tools/client-runtime/platform";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import { request, remoteHttpClientLayer, subscribe } from "@t3tools/client-runtime/rpc";
@@ -299,9 +300,12 @@ const memoryStorageLayer = Layer.effectContext(
       listDisabled: Effect.map(read, (document) => document.disabledEnvironmentIds),
     });
     const registrations = Persistence.ConnectionRegistrationStore.of({
-      register: (registration) =>
-        update((document) => registerConnectionInCatalog(document, registration)),
-      remove: (target) => update((document) => removeConnectionFromCatalog(document, target)),
+      register: (registration, routes) =>
+        update((document) => registerConnectionInCatalog(document, registration, routes)),
+      setRoutes: (environmentId, routes) =>
+        update((document) => setRoutesInCatalog(document, environmentId, routes)),
+      remove: (environmentId) =>
+        update((document) => removeConnectionFromCatalog(document, environmentId)),
       setEnabled: (environmentId, enabled) =>
         update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled)),
     });

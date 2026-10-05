@@ -32,7 +32,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
-import { ScheduledCloudFire } from "./ScheduledCloudFire.ts";
+import {
+  ScheduledCloudFire,
+  keepsCloudRun,
+  launchFire,
+  resumableCloudRun,
+} from "./ScheduledCloudFire.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
@@ -214,7 +219,7 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const scheduler = yield* Scheduler.Scheduler;
-    const cloudFire = yield* ScheduledCloudFire;
+    const launch = launchFire(yield* ScheduledCloudFire, threadLaunch);
     const cloudRuns = yield* FiberSet.make();
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
@@ -466,213 +471,170 @@ export const layer = Layer.effect(
         ),
       );
 
-    const reserve = (id: ScheduledTaskId) =>
-      Ref.modify(activeRuns, (active) => {
-        if (active.has(id)) return [false, active] as const;
+    const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
+      task: ScheduledTask,
+      trigger: "scheduled" | "manual" | "resumed",
+      resumedAt?: DateTime.DateTime,
+    ) {
+      const reserved = yield* Ref.modify(activeRuns, (active) => {
+        if (active.has(task.id)) return [false, active] as const;
         const next = new Set(active);
-        next.add(id);
+        next.add(task.id);
         return [true, next] as const;
       });
-    const unreserve = (id: ScheduledTaskId) =>
-      Ref.update(activeRuns, (active) => {
-        const next = new Set(active);
-        next.delete(id);
-        return next;
-      });
-
-    // Checks the fresh row and marks it running, or returns the task a run
-    // must not start for.
-    const beginRun = Effect.fn("ScheduledTaskService.beginRun")(function* (
-      task: ScheduledTask,
-      trigger: "scheduled" | "manual",
-    ) {
-      const startedAt = yield* localNow;
-
-      // The in-memory snapshot may be stale: re-read before touching run
-      // state. The task may have been deleted, paused, or postponed since
-      // the poll loaded it — none of those may fire.
-      const active = yield* findTask(task.id);
-      if (active === null) {
-        // A manual run on a just-deleted task must fail loudly, not report
-        // a successful run that never dispatched.
-        if (trigger === "manual") {
-          return yield* taskError("Schedule task not found.", { taskId: task.id });
-        }
-        return { skipped: task } as const;
-      }
-      // A next_run_at corrupted between the poll read and this re-read must
-      // not defect the poll; an unparseable value is treated as not due.
-      const parsedNextRunAt =
-        active.nextRunAt === null ? Option.none() : DateTime.make(active.nextRunAt);
-      if (
-        trigger === "scheduled" &&
-        (!active.enabled ||
-          Option.isNone(parsedNextRunAt) ||
-          DateTime.toEpochMillis(parsedNextRunAt.value) > DateTime.toEpochMillis(startedAt))
-      ) {
-        return { skipped: active } as const;
-      }
-
-      yield* markRunning(active.id, iso(startedAt));
-      yield* notifyChanged;
-      return { active, startedAt } as const;
-    });
-
-    // Dispatches a run its row already marks running, then records how it
-    // ended. The run is keyed by its start, which the row keeps as
-    // last_run_at, so a cloud fire resumed after a restart sends the same
-    // request.
-    const finishRun = Effect.fn("ScheduledTaskService.finishRun")(function* (
-      active: ScheduledTask,
-      startedAt: DateTime.DateTime,
-    ) {
-      const startedAtIso = iso(startedAt);
-      const fireKey = `${active.id}:${DateTime.toEpochMillis(startedAt)}`;
-      const commandId = CommandId.make(`scheduled-task:${fireKey}`);
-      const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
-
-      // A cloud task never binds a thread (upsert refuses it), so it always takes the launch
-      // branch, which starts its chat on a fresh machine instead of here.
-      const target = active.target;
-      const launch = (
-        input: Parameters<typeof threadLaunch.launch>[0],
-      ): Effect.Effect<unknown, ThreadLaunchService.ThreadLaunchError | ScheduledTaskError> =>
-        target === "local"
-          ? threadLaunch.launch(input)
-          : cloudFire.fire({
-              task: active,
-              provider: target,
-              fireKey,
-              firedAt: DateTime.toUtc(startedAt),
-            });
-      // Effect.exit (not Effect.result) so defects and interruptions in the
-      // dispatch are also captured and recorded as a failed run instead of
-      // aborting before markCompleted.
-      const result =
-        active.threadId === null
-          ? yield* Effect.exit(
-              launch({
-                commandId,
-                projectId: active.projectId,
-                title: active.title,
-                modelSelection: active.modelSelection,
-                runtimeMode: active.runtimeMode,
-                interactionMode: active.interactionMode,
-                workspaceStrategy: active.workspaceStrategy,
-                initialMessage: {
-                  messageId,
-                  scheduledTaskId: active.id,
-                  text: active.prompt,
-                  attachments: [],
-                },
-                createdBy: active.createdBy,
-                creationSource: active.creationSource,
-              }),
-            )
-          : yield* Effect.exit(
-              threadManagement.sendToThread({
-                projectId: active.projectId,
-                commandId,
-                threadId: ThreadId.make(active.threadId),
-                messageId,
-                scheduledTaskId: active.id,
-                text: active.prompt,
-                attachments: [],
-                modelSelection: active.modelSelection,
-                mode: "auto",
-                createdBy: active.createdBy,
-                creationSource: active.creationSource,
-              }),
-            );
-
-      const completedAt = yield* localNow;
-      const runSucceeded = result._tag === "Success";
-      const lastRunStatus = runSucceeded ? ("succeeded" as const) : ("failed" as const);
-      const lastRunError = runSucceeded ? null : errorMessage(result.cause);
-      // Re-read the task so the next run is computed from the schedule as it
-      // is *now* (the user may have edited or deleted it while we ran).
-      const current = yield* findTask(active.id);
-      const scheduleSource = current ?? active;
-      const completed: ScheduledTask = {
-        ...scheduleSource,
-        updatedAt: iso(completedAt),
-        lastRunAt: startedAtIso,
-        nextRunAt: nextRunAt(scheduleSource, completedAt),
-        lastRunStatus,
-        lastRunError,
-        runCount: scheduleSource.runCount + 1,
-      };
-      if (current !== null) {
-        // startedAtIso in the guard ensures this writes only to the row this
-        // run marked as running — a task deleted mid-run and recreated with
-        // the same id (idempotent commandId replay) must not be stamped.
-        yield* markCompleted({
-          id: active.id,
-          completedAtIso: completed.updatedAt,
-          nextRunAtIso: completed.nextRunAt,
-          status: lastRunStatus,
-          error: lastRunError,
-          startedAtIso,
-        });
-        yield* notifyChanged;
-      }
-      return completed;
-    });
-
-    // Owns the run's reservation until it ends. A cloud fire cut short by
-    // shutdown is not a failure: its machine keeps provisioning, so the row
-    // stays 'running' and startup resumes the same fire.
-    const settleRun = (active: ScheduledTask, startedAt: DateTime.DateTime) =>
-      finishRun(active, startedAt).pipe(
-        Effect.onError((cause) =>
-          active.target !== "local" && Cause.hasInterruptsOnly(cause)
-            ? Effect.void
-            : releaseStuckRun(active, errorMessage(cause)),
-        ),
-        Effect.ensuring(unreserve(active.id)),
-      );
-
-    // A cloud fire waits minutes for its machine, so once its checks pass it
-    // runs beside the poll loop and the caller rather than holding them; its
-    // row reads 'running' until the machine is ready.
-    const runCloud = (active: ScheduledTask, startedAt: DateTime.DateTime) =>
-      FiberSet.run(
-        cloudRuns,
-        settleRun(active, startedAt).pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("Cloud scheduled task run failed", { taskId: active.id, cause }),
-          ),
-        ),
-      );
-
-    const startRun = Effect.fn("ScheduledTaskService.startRun")(function* (
-      task: ScheduledTask,
-      trigger: "scheduled" | "manual",
-    ) {
-      if (!(yield* reserve(task.id))) {
+      if (!reserved) {
         if (trigger === "manual") {
           return yield* taskError("Schedule task is already running.", { taskId: task.id });
         }
         return task;
       }
-      // Uninterruptible between the checks and the hand-off, so the
-      // reservation always ends up with exactly one owner.
-      return yield* Effect.uninterruptibleMask((restore) =>
-        Effect.gen(function* () {
-          const begun = yield* restore(beginRun(task, trigger)).pipe(
-            Effect.onError(() => unreserve(task.id)),
-          );
-          if ("skipped" in begun) {
-            yield* unreserve(task.id);
-            return begun.skipped;
+
+      return yield* Effect.gen(function* () {
+        const startedAt = resumedAt ?? (yield* localNow);
+        const startedAtIso = iso(startedAt);
+
+        // The in-memory snapshot may be stale: re-read before touching run
+        // state. The task may have been deleted, paused, or postponed since
+        // the poll loaded it — none of those may fire.
+        const active = yield* findTask(task.id);
+        if (active === null) {
+          // A manual run on a just-deleted task must fail loudly, not report
+          // a successful run that never dispatched.
+          if (trigger === "manual") {
+            return yield* taskError("Schedule task not found.", { taskId: task.id });
           }
-          if (begun.active.target === "local") {
-            return yield* restore(settleRun(begun.active, begun.startedAt));
-          }
-          yield* runCloud(begun.active, begun.startedAt);
-          return begun.active;
-        }),
+          return task;
+        }
+        // A next_run_at corrupted between the poll read and this re-read must
+        // not defect the poll; an unparseable value is treated as not due.
+        const parsedNextRunAt =
+          active.nextRunAt === null ? Option.none() : DateTime.make(active.nextRunAt);
+        if (
+          trigger === "scheduled" &&
+          (!active.enabled ||
+            Option.isNone(parsedNextRunAt) ||
+            DateTime.toEpochMillis(parsedNextRunAt.value) > DateTime.toEpochMillis(startedAt))
+        ) {
+          return active;
+        }
+
+        yield* markRunning(active.id, startedAtIso);
+        yield* notifyChanged;
+
+        const fireKey = `${active.id}:${DateTime.toEpochMillis(startedAt)}:${trigger}`;
+        const commandId = CommandId.make(`scheduled-task:${fireKey}`);
+        const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
+        // Dispatch from the fresh row so prompt/model/binding edits made
+        // after the poll read are honoured.
+        const prompt = active.prompt;
+
+        // Effect.exit (not Effect.result) so defects and interruptions in the
+        // dispatch are also captured and recorded as a failed run instead of
+        // aborting before markCompleted.
+        const result =
+          active.threadId === null
+            ? yield* Effect.exit(
+                launch(active, startedAt, {
+                  commandId,
+                  projectId: active.projectId,
+                  title: active.title,
+                  modelSelection: active.modelSelection,
+                  runtimeMode: active.runtimeMode,
+                  interactionMode: active.interactionMode,
+                  workspaceStrategy: active.workspaceStrategy,
+                  initialMessage: {
+                    messageId,
+                    scheduledTaskId: active.id,
+                    text: prompt,
+                    attachments: [],
+                  },
+                  createdBy: active.createdBy,
+                  creationSource: active.creationSource,
+                }),
+              )
+            : yield* Effect.exit(
+                threadManagement.sendToThread({
+                  projectId: active.projectId,
+                  commandId,
+                  threadId: ThreadId.make(active.threadId),
+                  messageId,
+                  scheduledTaskId: active.id,
+                  text: prompt,
+                  attachments: [],
+                  modelSelection: active.modelSelection,
+                  // Scheduled prompts must not interrupt tools in the bound thread.
+                  mode: "queue",
+                  createdBy: active.createdBy,
+                  creationSource: active.creationSource,
+                }),
+              );
+
+        const completedAt = yield* localNow;
+        const runSucceeded = result._tag === "Success";
+        const lastRunStatus = runSucceeded ? ("succeeded" as const) : ("failed" as const);
+        const lastRunError = runSucceeded ? null : errorMessage(result.cause);
+        // Re-read the task so the next run is computed from the schedule as it
+        // is *now* (the user may have edited or deleted it while we ran).
+        const current = yield* findTask(task.id);
+        const scheduleSource = current ?? task;
+        const completed: ScheduledTask = {
+          ...scheduleSource,
+          updatedAt: iso(completedAt),
+          lastRunAt: startedAtIso,
+          nextRunAt: nextRunAt(scheduleSource, completedAt),
+          lastRunStatus,
+          lastRunError,
+          runCount: scheduleSource.runCount + 1,
+        };
+        if (current !== null) {
+          // startedAtIso in the guard ensures this writes only to the row this
+          // run marked as running — a task deleted mid-run and recreated with
+          // the same id (idempotent commandId replay) must not be stamped.
+          yield* markCompleted({
+            id: task.id,
+            completedAtIso: completed.updatedAt,
+            nextRunAtIso: completed.nextRunAt,
+            status: lastRunStatus,
+            error: lastRunError,
+            startedAtIso,
+          });
+          yield* notifyChanged;
+        }
+        return completed;
+      }).pipe(
+        Effect.onError((cause) =>
+          keepsCloudRun(task, cause) ? Effect.void : releaseStuckRun(task, errorMessage(cause)),
+        ),
+        Effect.ensuring(
+          Ref.update(activeRuns, (active) => {
+            const next = new Set(active);
+            next.delete(task.id);
+            return next;
+          }),
+        ),
       );
+    });
+
+    // A cloud fire waits minutes for its machine, so it runs beside the poll
+    // loop and the caller, its row reading 'running' until the machine is ready.
+    const startRun = Effect.fn("ScheduledTaskService.startRun")(function* (
+      task: ScheduledTask,
+      trigger: "scheduled" | "manual" | "resumed",
+      resumedAt?: DateTime.DateTime,
+    ) {
+      if (task.target === "local") return yield* runTask(task, trigger, resumedAt);
+      if (trigger === "manual" && (yield* Ref.get(activeRuns)).has(task.id)) {
+        return yield* taskError("Schedule task is already running.", { taskId: task.id });
+      }
+      yield* FiberSet.run(
+        cloudRuns,
+        runTask(task, trigger, resumedAt).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Cloud scheduled task run failed", { taskId: task.id, cause }),
+          ),
+        ),
+      );
+      return task;
     });
 
     // A due fixed-time run that is long past its slot (server was off or
@@ -742,15 +704,11 @@ export const layer = Layer.effect(
         (row) =>
           Effect.gen(function* () {
             const decoded = yield* Effect.result(decodeRow(row));
-            const cloudStartedAt =
-              Result.isSuccess(decoded) && decoded.success.target !== "local"
-                ? Option.flatMap(Option.fromNullishOr(decoded.success.lastRunAt), (at) =>
-                    DateTime.make(at),
-                  )
-                : Option.none();
-            if (Result.isSuccess(decoded) && Option.isSome(cloudStartedAt)) {
-              yield* reserve(decoded.success.id);
-              yield* runCloud(decoded.success, cloudStartedAt.value);
+            const resumedAt = Result.isSuccess(decoded)
+              ? resumableCloudRun(decoded.success)
+              : Option.none();
+            if (Result.isSuccess(decoded) && Option.isSome(resumedAt)) {
+              yield* startRun(decoded.success, "resumed", resumedAt.value);
               return;
             }
             if (Result.isSuccess(decoded)) {
@@ -831,9 +789,8 @@ export const layer = Layer.effect(
         // keep their run history, and so real load failures propagate instead
         // of silently resetting an existing row.
         const existingTask = yield* findTask(id);
-        const threadId = input.threadId ?? null;
         const target = input.target ?? existingTask?.target ?? "local";
-        if (target !== "local" && threadId !== null) {
+        if (target !== "local" && (input.threadId ?? null) !== null) {
           return yield* taskError("A task that runs on a cloud machine must start a new chat.", {
             taskId: id,
           });
@@ -852,7 +809,7 @@ export const layer = Layer.effect(
           enabled: input.enabled,
           schedule: input.schedule,
           projectId: input.projectId,
-          threadId,
+          threadId: input.threadId ?? null,
           target,
           workspaceStrategy: input.workspaceStrategy,
           modelSelection: input.modelSelection,
