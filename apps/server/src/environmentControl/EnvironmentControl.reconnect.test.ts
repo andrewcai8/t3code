@@ -109,7 +109,7 @@ const afterRestart = <E>(
       url: string | undefined;
       authorization: string | string[] | undefined;
     }>;
-  }) => Effect.Effect<void, E>,
+  }) => Effect.Effect<void, E, SqlClient.SqlClient>,
 ) =>
   Effect.gen(function* () {
     const directory = yield* Effect.acquireRelease(
