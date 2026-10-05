@@ -125,6 +125,10 @@ this off with **Remove unused cloud machines**. Before removal, unpushed work is
 **Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
 while paused, such as E2B sandboxes, are never removed.
 
+Deleting a chat's cloud machine puts it to sleep instead of destroying it. For 30 days, select
+**Restore** on the chat or under **Settings → Connections** to bring it back. After that the host
+deletes it for good.
+
 While you use T3 Code on any device, the machines of cloud chats that are not settled wake ahead of
 you and stay awake, so opening one takes seconds. Settled chats stay asleep until you open them.
 The sidebar says when a chat's machine is asleep, waking, or updating.
