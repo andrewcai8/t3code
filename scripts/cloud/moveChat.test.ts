@@ -5,8 +5,11 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  type CarryProbe,
   claudeProjectDirName,
   githubRepository,
+  planCarry,
+  referencedPaths,
   rewriteSessionCwd,
   snapshotCheckout,
 } from "./moveChat.ts";
@@ -111,5 +114,110 @@ describe("snapshotCheckout", () => {
     } finally {
       NodeFS.rmSync(cwd, { recursive: true, force: true });
     }
+  });
+});
+
+describe("referencedPaths", () => {
+  const scope = { home: "/Users/me", cwd: "/Users/me/.t3/worktrees/repo/wt" };
+  const toolUse = (name: string, input: unknown) =>
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name, input }] },
+    });
+  const toolResult = (content: unknown) =>
+    JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "t", content }] },
+    });
+
+  it("finds outside paths in tool inputs, tool results and saved outputs", () => {
+    const transcripts = [
+      [
+        toolUse("Write", { file_path: "/tmp/astra.md", content: "see /tmp/ledger/ledger.tsv." }),
+        toolUse("Edit", { file_path: "/Users/me/parity-scratch/first-principles/design.md" }),
+        toolUse("Bash", {
+          command:
+            "cat > ~/parity-scratch/e0/acting.txt <<'EOF'\nrun $HOME/notes/a.md\nEOF\nsource /tmp/mind-twin.env && ls /tmp/measure/*.md > /private/tmp/out/list",
+        }),
+        toolUse("Read", { file_path: "/Users/me/.t3/worktrees/repo/wt/src/index.ts" }),
+        toolUse("Bash", {
+          command:
+            "ls ~/.claude_work/projects ~/.codex/sessions ~/Library/Keychains /tmp/claude-501/x",
+        }),
+        JSON.stringify({ type: "user", message: { content: "my own note at /tmp/typed.md" } }),
+      ].join("\n"),
+      toolResult([{ type: "text", text: "wrote /tmp/r5e6/report.json" }]),
+    ];
+    assert.deepStrictEqual(
+      referencedPaths(
+        { transcripts, outputs: ["saved ${HOME}/out.txt and https://x.io/tmp/no"] },
+        scope,
+      ),
+      {
+        paths: [
+          "/Users/me/notes/a.md",
+          "/Users/me/out.txt",
+          "/Users/me/parity-scratch/e0/acting.txt",
+          "/Users/me/parity-scratch/first-principles/design.md",
+          "/tmp/astra.md",
+          "/tmp/ledger/ledger.tsv",
+          "/tmp/measure",
+          "/tmp/mind-twin.env",
+          "/tmp/out/list",
+          "/tmp/r5e6/report.json",
+        ],
+        toolConfig: ["/Users/me/.claude_work", "/Users/me/.codex", "/Users/me/Library"],
+      },
+    );
+  });
+});
+
+describe("planCarry", () => {
+  const MB = 1024 ** 2;
+  const disk: Record<string, CarryProbe> = {
+    "/Users/me/scratch": { kind: "tree", bytes: 9000 * MB, holdsRepo: true },
+    "/Users/me/scratch/notes": { kind: "tree", bytes: 2 * MB, holdsRepo: false },
+    "/Users/me/scratch/notes/a.md": { kind: "tree", bytes: 1 * MB, holdsRepo: false },
+    "/Users/me/scratch/wt/src/a.ts": {
+      kind: "repo",
+      root: "/Users/me/scratch/wt",
+      remote: "git@github.com:o/r.git",
+    },
+    "/Users/me/scratch/wt/README.md": {
+      kind: "repo",
+      root: "/Users/me/scratch/wt",
+      remote: "git@github.com:o/r.git",
+    },
+    "/tmp/big": { kind: "tree", bytes: 1500 * MB, holdsRepo: false },
+    "/tmp/big/summary.md": { kind: "tree", bytes: 1 * MB, holdsRepo: false },
+    "/tmp/gone": { kind: "missing" },
+    "/tmp/gone/x": { kind: "missing" },
+    "/tmp/measure": { kind: "tree", bytes: 700 * MB, holdsRepo: false },
+    "/tmp/proto": { kind: "tree", bytes: 600 * MB, holdsRepo: false },
+    "/tmp/twin.env": { kind: "tree", bytes: 1, holdsRepo: false },
+  };
+
+  it("carries the smallest whole items within the caps and falls back inside oversized ones", () => {
+    const plan = planCarry(Object.keys(disk).toSorted(), (path) => disk[path]!, {
+      itemBytes: 1024 * MB,
+      totalBytes: 1024 * MB,
+    });
+    assert.deepStrictEqual(plan, {
+      carry: [
+        { path: "/Users/me/scratch/notes", bytes: 2 * MB },
+        { path: "/tmp/big/summary.md", bytes: 1 * MB },
+        { path: "/tmp/proto", bytes: 600 * MB },
+        { path: "/tmp/twin.env", bytes: 1 },
+      ],
+      skipped: [
+        { path: "/Users/me/scratch", reason: "holds a git repo" },
+        {
+          path: "/Users/me/scratch/wt",
+          reason: "git repo (code is on GitHub/clone again): git@github.com:o/r.git",
+        },
+        { path: "/tmp/big", reason: "over the 1.0 GB item cap" },
+        { path: "/tmp/measure", reason: "over the 1.0 GB total cap" },
+      ],
+    });
   });
 });

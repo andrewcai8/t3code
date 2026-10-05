@@ -7,11 +7,16 @@
  *     [--include .env --include-cap-mb 50]
  *   node scripts/cloud/move-chat.ts to-local --sandbox <e2b sandbox id> --worktree <dir> \
  *     --claude-config-dir ~/.claude
+ *   node scripts/cloud/move-chat.ts carry --sandbox <e2b sandbox id> --thread <local thread id> \
+ *     [--dry-run]
  *
  * to-cloud reads the local desktop app's database read-only, pushes the snapshot to
  * `handoff/move-*`, provisions an E2B box on the manager for it, imports the session there with
  * the box's own agent session importer, and sends the first message. Re-running it with the same
  * thread picks up where an interrupted run stopped.
+ *
+ * Both to-cloud (unless --no-carry) and carry also copy what the agent used outside its checkout,
+ * found in its session record, to the same absolute paths on the box, plus the repo's Claude memory.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -19,7 +24,9 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeStream from "node:stream";
 import * as NodeUtil from "node:util";
+import * as NodeZlib from "node:zlib";
 import {
   CommandId,
   defaultInstanceIdForDriver,
@@ -40,9 +47,14 @@ import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/unstable/http";
 
 import {
+  type CarryPlan,
+  type CarryProbe,
   claudeProjectDirName,
   claudeSessionPath,
+  formatBytes,
   githubRepository,
+  planCarry,
+  referencedPaths,
   rewriteSessionCwd,
   SNAPSHOT_SCRIPT,
   snapshotCheckout,
@@ -50,7 +62,9 @@ import {
 import { childPairingUrl, exchangePairingToken, type T3Client, withRpc } from "./t3Rpc.ts";
 import { advanceTurn, initialProgress, type TurnProgress } from "./turnProgress.ts";
 
-const BOX_WORKSPACE = "/home/user/.t3-provision/workspace";
+const BOX_HOME = "/home/user";
+const BOX_WORKSPACE = `${BOX_HOME}/.t3-provision/workspace`;
+const BOX_CARRY_TAR = "/tmp/move-chat-carry.tgz";
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 const BOX_INSTANCE = defaultInstanceIdForDriver(CLAUDE);
 const decodeModelSelection = Schema.decodeUnknownSync(ModelSelection);
@@ -177,6 +191,178 @@ async function boxRuntime(sandbox: Sandbox) {
   return { env, claudeDir };
 }
 
+/** The main transcript of a Claude session, its subagents' transcripts and its saved tool outputs. */
+function sessionRecord(sessionFile: string) {
+  const dir = sessionFile.replace(/\.jsonl$/, "");
+  const files = (sub: string) =>
+    NodeFS.existsSync(`${dir}/${sub}`)
+      ? NodeFS.readdirSync(`${dir}/${sub}`).map((name) => `${dir}/${sub}/${name}`)
+      : [];
+  const read = (file: string) => NodeFS.readFileSync(file, "utf8");
+  return {
+    transcripts: [sessionFile, ...files("subagents").filter((f) => f.endsWith(".jsonl"))].map(read),
+    outputs: files("tool-results").map(read),
+  };
+}
+
+function probeCarry(path: string, capBytes: number): CarryProbe {
+  let stat: NodeFS.Stats;
+  try {
+    stat = NodeFS.lstatSync(path);
+  } catch {
+    return { kind: "missing" };
+  }
+  const git = (...args: ReadonlyArray<string>) =>
+    NodeChildProcess.spawnSync(
+      "git",
+      ["-C", stat.isDirectory() ? path : NodePath.dirname(path), ...args],
+      { encoding: "utf8" },
+    );
+  const root = git("rev-parse", "--show-toplevel");
+  if (root.status === 0) {
+    const remote = git("remote", "get-url", "origin");
+    return {
+      kind: "repo",
+      root: root.stdout.trim().replace(/^\/private\/tmp\//, "/tmp/"),
+      remote: remote.status === 0 ? remote.stdout.trim() : null,
+    };
+  }
+  let bytes = 0;
+  let holdsRepo = false;
+  // Stops once the answer is known, so a huge directory costs no more than the cap to measure.
+  const walk = (entry: string, entryStat: NodeFS.Stats) => {
+    if (bytes > capBytes || holdsRepo) return;
+    if (!entryStat.isDirectory()) {
+      bytes += entryStat.size;
+      return;
+    }
+    const names = NodeFS.readdirSync(entry);
+    if (names.includes(".git")) holdsRepo = true;
+    for (const name of names) {
+      // A live /tmp tree can lose a file between listing and reading it.
+      const child = NodeFS.lstatSync(`${entry}/${name}`, { throwIfNoEntry: false });
+      if (child) walk(`${entry}/${name}`, child);
+    }
+  };
+  walk(path, stat);
+  return { kind: "tree", bytes, holdsRepo };
+}
+
+interface Carry {
+  readonly plan: CarryPlan;
+  readonly skipped: CarryPlan["skipped"];
+  /** The repo's Claude auto-memory, which Claude keys by the main checkout, not the worktree. */
+  readonly memory: string | null;
+}
+
+function planLocalCarry(
+  local: { cwd: string; configDir: string },
+  sessionFile: string,
+  caps: { itemBytes: number; totalBytes: number },
+): Carry {
+  const found = referencedPaths(sessionRecord(sessionFile), {
+    home: NodeOS.homedir(),
+    cwd: local.cwd,
+  });
+  const plan = planCarry(found.paths, (path) => probeCarry(path, caps.itemBytes), caps);
+  const mainRoot = NodePath.dirname(
+    sh(local.cwd, "git", "rev-parse", "--path-format=absolute", "--git-common-dir"),
+  );
+  const memory = `${local.configDir}/projects/${claudeProjectDirName(mainRoot)}/memory`;
+  const carry = {
+    plan,
+    skipped: [
+      ...plan.skipped,
+      ...found.toolConfig
+        .filter((path) => NodeFS.existsSync(path))
+        .map((path) => ({ path, reason: "tool config" })),
+    ],
+    memory: NodeFS.existsSync(memory) ? memory : null,
+  };
+  const total = plan.carry.reduce((sum, item) => sum + item.bytes, 0);
+  log(`carry ${plan.carry.length} path(s), ${formatBytes(total)}`);
+  for (const item of plan.carry) console.log(`  carried  ${item.path}  ${formatBytes(item.bytes)}`);
+  if (carry.memory) console.log(`  carried  ${carry.memory}  Claude memory, merged`);
+  for (const item of carry.skipped) console.log(`  skipped  ${item.path}  ${item.reason}`);
+  return carry;
+}
+
+function carryNote(carry: Carry): string {
+  const toolConfig = carry.skipped.filter((item) => item.reason === "tool config");
+  return [
+    "Files you used outside the checkout were copied to the same absolute paths on this box:",
+    ...carry.plan.carry.map((item) => `- ${item.path}`),
+    ...(carry.memory ? ["Your Claude memory for this repo was merged in."] : []),
+    "Not copied:",
+    ...carry.skipped
+      .filter((item) => item.reason !== "tool config")
+      .map((item) => `- ${item.path} (${item.reason})`),
+    `- tool config, which this box has its own of: ${toolConfig.map((item) => item.path).join(", ")}`,
+  ].join("\n");
+}
+
+/**
+ * Streams the carried paths to the box in one tar, renamed so home paths land under the box home
+ * (which the local home also links to) and the memory lands in the box's Claude project. Files the
+ * box already has at the same age or newer are kept, so reruns converge.
+ */
+async function uploadCarry(sandbox: Sandbox, claudeDir: string, carry: Carry) {
+  const home = NodeOS.homedir();
+  const tmp = NodeFS.realpathSync("/tmp");
+  const boxMemory = `${claudeDir}/projects/${claudeProjectDirName(BOX_WORKSPACE)}/memory`;
+  const members = [
+    ...carry.plan.carry.map(({ path }) => (path.startsWith("/tmp/") ? tmp + path.slice(4) : path)),
+    ...(carry.memory ? [carry.memory] : []),
+  ].map((path) => path.slice(1));
+  if (members.length === 0) return;
+  // bsdtar uses the first rename that matches, so the memory rename goes before the home one.
+  const renames = [
+    ...(carry.memory ? [`,^${carry.memory.slice(1)},${boxMemory.slice(1)},`] : []),
+    `,^${tmp.slice(1)}/,tmp/,`,
+    `,^${home.slice(1)}/,${BOX_HOME.slice(1)}/,`,
+  ];
+  // Files only: GNU tar's --keep-newer-files fails on directory entries that already exist.
+  const find = NodeChildProcess.spawn("find", [...members, "!", "-type", "d"], {
+    cwd: "/",
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  const tar = NodeChildProcess.spawn(
+    "tar",
+    [
+      "-cf",
+      "-",
+      "-n",
+      "-T",
+      "-",
+      "--no-mac-metadata",
+      "--no-xattrs",
+      ...renames.flatMap((r) => ["-s", r]),
+      "-C",
+      "/",
+    ],
+    { env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: [find.stdout, "pipe", "inherit"] },
+  );
+  const exited = Promise.all(
+    [find, tar].map((child) => new Promise<number | null>((done) => child.on("exit", done))),
+  );
+  // Compressed here: bsdtar pads its own gzip output, which GNU tar on the box rejects.
+  await sandbox.files.write(
+    BOX_CARRY_TAR,
+    NodeStream.Readable.toWeb(tar.stdout.pipe(NodeZlib.createGzip())) as ReadableStream,
+  );
+  if ((await exited).some((code) => code !== 0))
+    throw new Error("find or tar could not pack the carried paths");
+  await sandbox.commands.run(
+    [
+      `{ [ -e ${home} ] || { sudo mkdir -p ${NodePath.dirname(home)} && sudo ln -s ${BOX_HOME} ${home}; }; }`,
+      `tar -xzf ${BOX_CARRY_TAR} --keep-newer-files --warning=no-ignore-newer -C /`,
+      `rm -f ${BOX_CARRY_TAR}`,
+    ].join(" && "),
+    { timeoutMs: 0 },
+  );
+  log(`carried ${members.length} path(s) to the box`);
+}
+
 interface MoveState {
   readonly requestId: string;
   readonly bootstrapCommandId: string;
@@ -251,6 +437,7 @@ async function toCloud(flags: {
   includeCapBytes: number;
   watchMinutes: number;
   dryRun: boolean;
+  carryCaps: { itemBytes: number; totalBytes: number } | null;
 }) {
   const local = readLocalChat(flags.thread, flags.t3Home);
   if (local.running)
@@ -259,6 +446,7 @@ async function toCloud(flags: {
   if (!NodeFS.existsSync(sessionFile)) throw new Error(`no Claude session at ${sessionFile}`);
   const repository = githubRepository(sh(local.cwd, "git", "remote", "get-url", "origin"));
   if (!repository) throw new Error(`${local.cwd} has no GitHub origin`);
+  const carry = flags.carryCaps ? planLocalCarry(local, sessionFile, flags.carryCaps) : null;
 
   const commit = snapshotCheckout(local.cwd, `move-chat: snapshot of "${local.title}"`);
   const branch = `handoff/move-${local.threadId.slice(0, 8)}-${commit.slice(0, 8)}`;
@@ -358,6 +546,7 @@ async function toCloud(flags: {
       });
       log(`copied ${flags.include.join(", ")} into the box workspace`);
     }
+    if (carry) yield* Effect.promise(() => uploadCarry(sandbox, runtime.claudeDir, carry));
 
     yield* withRpc(box.httpBaseUrl, box.bearer, (client) =>
       Effect.gen(function* () {
@@ -466,7 +655,7 @@ async function toCloud(flags: {
           creationSource: "web",
           threadId: boxThreadId,
           messageId: MessageId.make(state.messageId),
-          text: flags.text,
+          text: carry ? `${flags.text}\n\n${carryNote(carry)}` : flags.text,
           attachments: [],
           modelSelection: selection,
           deliveryIntent: "auto",
@@ -565,8 +754,15 @@ const { positionals, values } = NodeUtil.parseArgs({
     worktree: { type: "string" },
     "claude-config-dir": { type: "string", default: NodePath.join(NodeOS.homedir(), ".claude") },
     session: { type: "string" },
+    "no-carry": { type: "boolean", default: false },
+    "carry-item-cap-mb": { type: "string", default: "1024" },
+    "carry-total-cap-mb": { type: "string", default: "2048" },
   },
 });
+const carryCaps = {
+  itemBytes: Number(values["carry-item-cap-mb"]) * 1024 * 1024,
+  totalBytes: Number(values["carry-total-cap-mb"]) * 1024 * 1024,
+};
 
 if (positionals[0] === "to-cloud") {
   const bearer = JSON.parse(NodeFS.readFileSync(values["bearer-file"], "utf8")) as {
@@ -588,6 +784,7 @@ if (positionals[0] === "to-cloud") {
     includeCapBytes: Number(values["include-cap-mb"]) * 1024 * 1024,
     watchMinutes: Number(values["watch-minutes"]),
     dryRun: values["dry-run"],
+    carryCaps: values["no-carry"] ? null : carryCaps,
   });
 } else if (positionals[0] === "to-local") {
   if (!values.sandbox || !values.worktree)
@@ -598,9 +795,17 @@ if (positionals[0] === "to-cloud") {
     claudeConfigDir: NodePath.resolve(values["claude-config-dir"]),
     session: values.session,
   });
+} else if (positionals[0] === "carry") {
+  if (!values.sandbox || !values.thread) throw new Error("carry needs --sandbox and --thread");
+  const local = readLocalChat(values.thread, values["t3-home"]);
+  const carry = planLocalCarry(local, claudeSessionPath(local), carryCaps);
+  if (!values["dry-run"]) {
+    const sandbox = await Sandbox.connect(values.sandbox, { apiKey: e2bApiKey() });
+    await uploadCarry(sandbox, (await boxRuntime(sandbox)).claudeDir, carry);
+  }
 } else {
   console.error(
-    "usage: move-chat.ts to-cloud --thread <id> --message-file <file> | to-local --sandbox <id> --worktree <dir>",
+    "usage: move-chat.ts to-cloud --thread <id> --message-file <file> | to-local --sandbox <id> --worktree <dir> | carry --sandbox <id> --thread <id>",
   );
   process.exitCode = 2;
 }
