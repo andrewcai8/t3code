@@ -90,6 +90,15 @@ phone's or a second tab's open chat and the wake brings it back, a Mac boot
 every cycle. The host still requires an operate session and an active, claimed
 lease to renew one.
 
+While its user is here, a client also reports presence to each host it holds
+boxes of, every four minutes and at once when the user returns. The host then
+wakes the boxes of every unsettled chat and renews them until the reports stop,
+after which they idle out as usual. The host decides, not the client, because
+only it sees every client's reports and the account's Mac count, and waking a
+box this way opens no connection to it. The answer names each box that is
+asleep, waking or updating, which is what lists show for a cloud chat; the
+client asks again every 15 seconds while one is changing.
+
 "Here" is `UserPresence`: the app is visible (foreground on mobile) and the
 user touched it within the hour. Each surface reports visibility and input; the
 rule lives in client-runtime. A box is woken only while its user is here too,
