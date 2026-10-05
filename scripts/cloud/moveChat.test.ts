@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - builds real git checkouts in a temp directory.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";

@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - pure helpers for the move-chat CLI, which runs git and resolves local paths.
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 

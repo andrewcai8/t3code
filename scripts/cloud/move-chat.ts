@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalConsoleInEffect:off globalDate:off globalDateInEffect:off globalErrorInEffectFailure:off globalTimers:off - an operator CLI that drives git, tar and the local filesystem directly and reports to the terminal.
 /**
  * Moves a chat between this Mac and a cloud box with its agent's memory: the checkout exactly as
  * it is on disk, and the agent's native Claude session, so the agent continues the same
