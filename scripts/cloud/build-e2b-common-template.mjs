@@ -13,7 +13,8 @@ const require = NodeModule.createRequire(
 const { Template } = require("e2b");
 const { values } = NodeUtil.parseArgs({
   options: {
-    name: { type: "string", default: "t3-common-tools-node24-bun140-v7" },
+    name: { type: "string", default: "t3-common-tools-node24-bun140-v8" },
+    "cpu-count": { type: "string", default: "8" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -25,13 +26,16 @@ const { values } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(
-    "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--config FILE] [--print-dockerfile]",
+    "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--cpu-count N] [--config FILE] [--print-dockerfile]",
   );
   console.log(
-    "Builds a clean private E2B template with 4 CPUs, 8 GiB RAM, 8 GiB swap and 50 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
+    "Builds a clean private E2B template with --cpu-count vCPUs (default 8, the E2B Pro maximum), 8 GiB RAM, 8 GiB swap and 50 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
   );
   process.exit(0);
 }
+const cpuCount = Number(values["cpu-count"]);
+if (!Number.isInteger(cpuCount) || cpuCount < 1)
+  throw new Error("--cpu-count must be a positive integer");
 
 const template = Template({
   fileContextPath: NodeURL.fileURLToPath(new URL("./", import.meta.url)),
@@ -95,7 +99,7 @@ const log = await NodeFSP.open(NodePath.join(output, "build.log"), "a", 0o600);
 try {
   const result = await Template.build(template, values.name, {
     apiKey,
-    cpuCount: 4,
+    cpuCount,
     memoryMB: 8192,
     minFreeDiskMb: 51200,
     onBuildLogs: (entry) => {
@@ -111,7 +115,7 @@ try {
     ...result,
     startedAt,
     durationMs: Math.round(performance.now() - started),
-    cpuCount: 4,
+    cpuCount,
     memoryMB: 8192,
   };
   await NodeFSP.writeFile(NodePath.join(output, "build.json"), JSON.stringify(evidence, null, 2), {
