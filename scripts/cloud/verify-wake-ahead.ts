@@ -108,7 +108,7 @@ const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
 const decodeManagerConfig = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ e2bApiKey: Schema.String })),
 );
-const encodeValue = Schema.encodeSync(Schema.UnknownFromJsonString);
+const encodeValue = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeTicket = Schema.decodeUnknownEffect(
   Schema.Struct({ ticket: AuthWebSocketTicketResult.fields.ticket }),
 );

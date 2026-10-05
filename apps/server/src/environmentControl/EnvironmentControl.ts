@@ -1069,10 +1069,15 @@ export const layer = Layer.effect(
                     () => null,
                   );
                   if (operation?.state.kind !== "ready") return null;
-                  const pinned = configuredRuntimeArtifact(
-                    config,
-                    operation.state.allocation.resource.provider,
-                  );
+                  // Read per sweep: upkeep keeps the service it started with, and the pinned
+                  // build follows config edits.
+                  const current = await resolve();
+                  const pinned = current
+                    ? configuredRuntimeArtifact(
+                        current.config,
+                        operation.state.allocation.resource.provider,
+                      )
+                    : null;
                   return pinned && pinned.sha256 !== operation.state.readiness.artifactSha256
                     ? pinned.sha256
                     : null;
