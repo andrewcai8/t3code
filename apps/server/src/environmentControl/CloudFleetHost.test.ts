@@ -11,7 +11,6 @@ import {
   ProvisionRequestId,
   ThreadId,
 } from "@t3tools/contracts";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -99,65 +98,68 @@ const setup = Effect.gen(function* () {
   const resumed: Array<EnvironmentId> = [];
   const provisioned: Array<EnvironmentProvisionInput> = [];
   const invoked: Array<[string, FleetInvokeInput]> = [];
-  const registrations = new Map<string, Deferred.Deferred<FleetHostRegistration>>();
+  const opened: Array<string> = [];
+  const registrations = new Map<string, Queue.Queue<FleetHostRegistration>>();
   const requests = new Map<string, Queue.Queue<FleetHostRequest>>();
   for (const index of [1, 2, 3, 4]) {
-    registrations.set(origin(index), yield* Deferred.make<FleetHostRegistration>());
+    registrations.set(origin(index), yield* Queue.unbounded<FleetHostRegistration>());
     requests.set(origin(index), yield* Queue.unbounded<FleetHostRequest>());
   }
   const responses = yield* Queue.unbounded<FleetHostResponse>();
 
   const boxes = Layer.succeed(BoxFleetClient.BoxFleetClient, {
     open: (access) =>
-      Effect.succeed({
-        connect: (registration) =>
-          Stream.unwrap(
-            Deferred.succeed(registrations.get(access.origin)!, registration).pipe(
-              Effect.as(Stream.fromQueue(requests.get(access.origin)!)),
+      Effect.sync(() => opened.push(access.origin)).pipe(
+        Effect.as({
+          connect: (registration) =>
+            Stream.unwrap(
+              Queue.offer(registrations.get(access.origin)!, registration).pipe(
+                Effect.as(Stream.fromQueue(requests.get(access.origin)!)),
+              ),
             ),
-          ),
-        respond: (response) => Queue.offer(responses, response).pipe(Effect.asVoid),
-        invoke: (input) => {
-          invoked.push([access.origin, input]);
-          const launched = provisioned[0]?.chat?.threadId;
-          return Effect.succeed(
-            input.request.op === "threads.list" && launched !== undefined
-              ? {
-                  projectId: null,
-                  currentThreadId: null,
-                  threads: [
-                    {
-                      threadId: launched,
-                      link: `[Profile the build](t3-thread://v1/box-3/${launched})`,
-                      projectId: "project-app",
-                      title: "Profile the build",
-                      createdBy: "user",
-                      creationSource: "server",
-                      status: "running",
-                      latestRunId: "run-1",
-                      providerInstanceId: "codex",
-                      model: "gpt-5.5",
-                      runtimeMode: "full-access",
-                      interactionMode: "default",
-                      linkedPullRequest: null,
-                      settled: false,
-                      settledAt: null,
-                      snoozed: false,
-                      snoozedUntil: null,
-                      parentThreadId: null,
-                      relationshipToParent: null,
-                      itemCount: 1,
-                      createdAt: "2026-10-05T10:00:00.000Z",
-                      updatedAt: "2026-10-05T10:00:00.000Z",
-                    },
-                  ],
-                  nextCursor: null,
-                  total: 1,
-                }
-              : { answeredBy: access.origin },
-          );
-        },
-      }),
+          respond: (response) => Queue.offer(responses, response).pipe(Effect.asVoid),
+          invoke: (input) => {
+            invoked.push([access.origin, input]);
+            const launched = provisioned[0]?.chat?.threadId;
+            return Effect.succeed(
+              input.request.op === "threads.list" && launched !== undefined
+                ? {
+                    projectId: null,
+                    currentThreadId: null,
+                    threads: [
+                      {
+                        threadId: launched,
+                        link: `[Profile the build](t3-thread://v1/box-3/${launched})`,
+                        projectId: "project-app",
+                        title: "Profile the build",
+                        createdBy: "user",
+                        creationSource: "server",
+                        status: "running",
+                        latestRunId: "run-1",
+                        providerInstanceId: "codex",
+                        model: "gpt-5.5",
+                        runtimeMode: "full-access",
+                        interactionMode: "default",
+                        linkedPullRequest: null,
+                        settled: false,
+                        settledAt: null,
+                        snoozed: false,
+                        snoozedUntil: null,
+                        parentThreadId: null,
+                        relationshipToParent: null,
+                        itemCount: 1,
+                        createdAt: "2026-10-05T10:00:00.000Z",
+                        updatedAt: "2026-10-05T10:00:00.000Z",
+                      },
+                    ],
+                    nextCursor: null,
+                    total: 1,
+                  }
+                : { answeredBy: access.origin },
+            );
+          },
+        }),
+      ),
   });
   const control = Layer.mock(EnvironmentControl.EnvironmentControl)({
     namespaceProxyOrigin: () => Effect.succeed(null),
@@ -203,7 +205,7 @@ const setup = Effect.gen(function* () {
     Effect.gen(function* () {
       const host = yield* CloudFleetHost.CloudFleetHost;
       yield* host.reconcile;
-      yield* Deferred.await(registrations.get(origin(1))!);
+      yield* Queue.take(registrations.get(origin(1))!);
       yield* Queue.offer(requests.get(origin(1))!, {
         requestId: "request-1",
         environmentId: target,
@@ -215,14 +217,14 @@ const setup = Effect.gen(function* () {
       return yield* Queue.take(responses);
     });
 
-  return { layer, relay, resumed, provisioned, invoked, registrations };
+  return { layer, relay, resumed, provisioned, invoked, registrations, opened };
 });
 
 /** Boxes 1 and 4 awake with chats, 2 asleep with one, and 3 awake with no chat yet. */
 const withBoxes = <A, E>(
   body: (
     context: Effect.Success<typeof setup>,
-  ) => Effect.Effect<A, E, CloudFleetHost.CloudFleetHost>,
+  ) => Effect.Effect<A, E, CloudFleetHost.CloudFleetHost | SqlClient.SqlClient>,
 ) =>
   Effect.gen(function* () {
     const context = yield* setup;
@@ -239,7 +241,7 @@ it.effect("offers each awake chat the other chats with their cards, waking none"
   withBoxes(({ registrations, resumed }) =>
     Effect.gen(function* () {
       yield* (yield* CloudFleetHost.CloudFleetHost).reconcile;
-      const registration = yield* Deferred.await(registrations.get(origin(1))!);
+      const registration = yield* Queue.take(registrations.get(origin(1))!);
       expect(registration.environments).toEqual([
         {
           environmentId: "box-2",
@@ -382,6 +384,33 @@ it.effect("starts a new cloud chat through provisioning, once, like this chat's 
         },
       });
       expect(resumed).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("re-registers on the same connection when another chat's card changes", () =>
+  withBoxes(({ registrations, opened }) =>
+    Effect.gen(function* () {
+      const host = yield* CloudFleetHost.CloudFleetHost;
+      yield* host.reconcile;
+      yield* Queue.take(registrations.get(origin(1))!);
+      yield* host.reconcile;
+      const sql = yield* SqlClient.SqlClient;
+      const renamed = ownerChat(
+        boxShell([boxThread("chat-4", "project-app", "Ship release 2", { modelSelection })]),
+        "chat-4",
+      );
+      yield* Effect.promise(() =>
+        createProvisionedChatStore(sql).record(id(4), { ...renamed!, sequence: 43 }),
+      );
+      yield* host.reconcile;
+      const registration = yield* Queue.take(registrations.get(origin(1))!);
+      expect(registration.environments.map((environment) => environment.label)).toEqual([
+        "Write docs",
+        "Ship release 2",
+        "New cloud chat on a fresh machine",
+      ]);
+      expect(opened.filter((at) => at === origin(1))).toEqual([origin(1)]);
     }),
   ),
 );
