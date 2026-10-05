@@ -2074,7 +2074,7 @@ export const layer = Layer.effect(
             }),
           ),
         ),
-      renew: (box) => provisionControl.touch({ leaseId: box.leaseId }),
+      renew: (box) => provisionControl.touch({ leaseId: box.leaseId }, "host"),
       scope: yield* Effect.scope,
     });
     // Unsettled chats are woken again after a refusal and renewed while the user stays.
