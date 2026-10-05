@@ -119,6 +119,7 @@ const TranscriptRecord = Schema.Struct({
   isSidechain: Schema.optional(Schema.Boolean),
   isMeta: Schema.optional(Schema.Boolean),
   isCompactSummary: Schema.optional(Schema.Boolean),
+  origin: Schema.optional(Schema.Struct({ kind: Schema.optional(Schema.String) })),
   message: Schema.optional(TranscriptMessage),
   payload: Schema.optional(
     Schema.Struct({
@@ -399,7 +400,9 @@ function parseAgentSessionRecords(
       if (
         record.isSidechain === true ||
         record.isMeta === true ||
-        record.isCompactSummary === true
+        record.isCompactSummary === true ||
+        // Claude records a finished background task as a user turn.
+        record.origin?.kind === "task-notification"
       ) {
         continue;
       }
