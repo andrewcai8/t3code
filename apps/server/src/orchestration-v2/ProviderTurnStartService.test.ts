@@ -375,6 +375,7 @@ function makeLocalCommandHarness(input: {
                 status: "ready",
                 summaryMessageId: null,
                 summaryText: "",
+                createdByProviderInstanceId: null,
                 delivery: {
                   nativeThreadId: nativeThreadRef.nativeId,
                   status: "pending",
@@ -539,6 +540,7 @@ function makeLocalCommandHarness(input: {
                   status: "ready",
                   summaryMessageId: null,
                   summaryText: "",
+                  createdByProviderInstanceId: null,
                   createdAt: now,
                   updatedAt: now,
                 }),

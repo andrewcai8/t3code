@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off - the manager reads a remote T3 server over private HTTP.
+// @effect-diagnostics globalFetch:off globalTimers:off - the manager reads a remote T3 server over private HTTP, Promise-side.
 import {
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION,

@@ -1,4 +1,5 @@
 import type {
+  EnvironmentControlError,
   CloudMachineKind,
   CloudMachineState,
   DiscoveredProvisionedEnvironment,
@@ -90,11 +91,16 @@ export function planWakeAhead(
  */
 export function makeWakeAhead(deps: {
   /** Every box the host holds, each with the chat it last read from it. */
-  readonly list: Effect.Effect<ReadonlyArray<DiscoveredProvisionedEnvironment>, unknown>;
+  readonly list: Effect.Effect<
+    ReadonlyArray<DiscoveredProvisionedEnvironment>,
+    EnvironmentControlError
+  >;
   readonly resume: (
     box: DiscoveredProvisionedEnvironment,
   ) => Effect.Effect<EnvironmentProvisionResumeResult>;
-  readonly renew: (box: DiscoveredProvisionedEnvironment) => Effect.Effect<unknown, unknown>;
+  readonly renew: (
+    box: DiscoveredProvisionedEnvironment,
+  ) => Effect.Effect<unknown, EnvironmentControlError>;
   readonly scope: Scope.Scope;
 }) {
   let presentUntil = 0;

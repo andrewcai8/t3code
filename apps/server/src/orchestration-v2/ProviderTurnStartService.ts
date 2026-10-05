@@ -783,7 +783,7 @@ export const layer: Layer.Layer<
               type: "turn-item.updated",
               threadId: projection.thread.id,
               runId: run.id,
-              nodeId: run.rootNodeId,
+              ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
               providerInstanceId: run.providerInstanceId,
               occurredAt: createdAt,
               // The user sees that the agent lost its session; the agent reads it in the handoff.

@@ -4,7 +4,9 @@ import {
   type CloudMachineKind,
   type DiscoveredProvisionedEnvironment,
   EnvironmentId,
+  ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -41,7 +43,7 @@ const box = (
     machine: input.machine ?? "sandbox",
     label: name,
     repository: null,
-    threadId: `thread-${name}`,
+    threadId: ThreadId.make(`thread-${name}`),
     createdAt: "2026-09-30T10:00:00.000Z",
     expiresAt: input.expiresAt ?? "2026-10-01T13:00:00.000Z",
     ...(chat ? { chat } : {}),
@@ -88,7 +90,7 @@ it("wakes every paused unsettled chat, most recently active first, and no settle
 it("keeps at most twenty wakes in flight, counting ones already running", () => {
   const paused = Array.from({ length: 25 }, (_, index) =>
     box(`box-${String(index).padStart(2, "0")}`, {
-      thread: { updatedAt: new Date(NOW - index * 60_000).toISOString() },
+      thread: { updatedAt: DateTime.formatIso(DateTime.makeUnsafe(NOW - index * 60_000)) },
     }),
   );
   expect(plan(paused).wake).toHaveLength(20);
@@ -201,7 +203,7 @@ it.effect(
         list: Effect.succeed([box("crowded")]),
         resume: () =>
           Effect.sync(() => {
-            attempts.push(Date.now());
+            attempts.push(attempts.length);
             return {
               kind: "refused",
               reason: "unknown",
