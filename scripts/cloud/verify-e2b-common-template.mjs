@@ -14,6 +14,7 @@ const { Sandbox, ApiClient, ConnectionConfig } = require("e2b");
 const { values } = NodeUtil.parseArgs({
   options: {
     template: { type: "string" },
+    "cpu-count": { type: "string", default: "8" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -24,10 +25,10 @@ const { values } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(
-    "Usage: node scripts/cloud/verify-e2b-common-template.mjs --template ID --output FILE [--config FILE]",
+    "Usage: node scripts/cloud/verify-e2b-common-template.mjs --template ID --output FILE [--cpu-count N] [--config FILE]",
   );
   console.log(
-    "Creates one owned sandbox, verifies the clean tool baseline, 8 GiB swap, 50 GiB free disk and process retention, then deletes that sandbox.",
+    "Creates one owned sandbox, verifies its vCPU count, the clean tool baseline, 8 GiB swap, 50 GiB free disk and process retention, then deletes that sandbox.",
   );
   process.exit(0);
 }
@@ -80,7 +81,7 @@ try {
     metadata: { purpose: "t3-common-tools-verification", owner },
   });
   const info = await owned();
-  NodeAssert.equal(info.cpuCount, 4);
+  NodeAssert.equal(info.cpuCount, Number(values["cpu-count"]));
   NodeAssert.equal(info.memoryMB, 8192);
   await record("fresh owned sandbox created", {
     sandboxId: sandbox.sandboxId,
