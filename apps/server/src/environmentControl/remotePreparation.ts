@@ -283,6 +283,12 @@ def contained(root, relative):
 export const brokerTokenTtl = "7d";
 
 /**
+ * The subject of every box's broker session. Only the host that provisioned a box holds one, so
+ * a box takes a caller with it as that host.
+ */
+export const PROVISION_BROKER_SUBJECT = "provision-broker";
+
+/**
  * Keeps a root's broker token usable for as long as its box lives, which has
  * no deadline by default. It renews with the CLI of the build that is serving,
  * which its supervisor records in server.json, or, for a server started before
@@ -291,6 +297,7 @@ export const brokerTokenTtl = "7d";
  */
 const brokerTokenFunctions = String.raw`
 BROKER_TTL = ${JSON.stringify(brokerTokenTtl)}
+BROKER_SUBJECT = ${JSON.stringify(PROVISION_BROKER_SUBJECT)}
 
 def broker_token_usable(token):
     # A session token is base64url(claims).signature. Renewing at half its
@@ -303,7 +310,7 @@ def broker_token_usable(token):
         return False
 
 def broker_issue_argv(command, t3home, ttl):
-    return command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', ttl, '--subject', 'provision-broker', '--token-only']
+    return command + ['auth', 'session', 'issue', '--base-dir', str(t3home), '--ttl', ttl, '--subject', BROKER_SUBJECT, '--token-only']
 
 def serving_broker_issue(root, proc):
     try:

@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as FleetBroker from "../home/FleetBroker.ts";
 import * as FleetService from "../home/FleetService.ts";
 import * as HomeService from "../home/HomeService.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { readCaller, readFullAccessCaller } from "./threadAccess.ts";
 
@@ -20,6 +21,7 @@ export const homeRoutingDependencies = [
   HomeService.HomeService,
   FleetService.FleetService,
   FleetBroker.FleetBroker,
+  ThreadManagement.ThreadManagementService,
 ] as const;
 
 /**
@@ -32,6 +34,28 @@ export const callerIsHome = Effect.fn("mcp.callerIsHome")(function* () {
   if (!scope.capabilities.has("orchestration") || scope.thread === undefined) return false;
   const home = yield* HomeService.HomeService;
   return yield* home.isHome(scope.thread.threadId);
+});
+
+/**
+ * Whether the caller is a cloud chat whose host relays for it. Where the
+ * desktop app does not host the server, the only fleet host ws.ts admits is
+ * the cloud host that provisioned this box, and it reaches the user's other
+ * cloud chats. The box's top-level chats act through it; subagents do not.
+ */
+const callerHasCloudReach = Effect.fn("mcp.callerHasCloudReach")(function* () {
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  if (!scope.capabilities.has("orchestration") || scope.thread === undefined) return false;
+  if ((yield* HomeService.HomeService).available) return false;
+  if (!(yield* (yield* FleetBroker.FleetBroker).reach).hostConnected) return false;
+  const caller = yield* (yield* ThreadManagement.ThreadManagementService)
+    .getThreadShell(scope.thread.threadId)
+    .pipe(Effect.orElseSucceed(() => null));
+  return caller !== null && caller.lineage.relationshipToParent !== "subagent";
+});
+
+/** Whether the caller may act in other environments: Home, or a cloud chat its host relays for. */
+export const callerHasFleetReach = Effect.fn("mcp.callerHasFleetReach")(function* () {
+  return (yield* callerIsHome()) || (yield* callerHasCloudReach());
 });
 
 /** Whether each operation changes state. A new operation must pick a side. */
@@ -68,7 +92,7 @@ export const runAsHome = Effect.fn("mcp.runAsHome")(function* <Op extends FleetO
   const { scope } = CHANGES_STATE[op] ? yield* readHomeChangeCaller() : yield* readCaller();
   // Checked again here, right before acting: Home may have been turned off or
   // started fresh while the tool did earlier work.
-  if (scope.thread === undefined || !(yield* callerIsHome())) {
+  if (scope.thread === undefined || !(yield* callerHasFleetReach())) {
     return yield* new OrchestratorMcpFailure({
       code: "capability_denied",
       message: "Only Home can act with the user's reach.",
@@ -89,8 +113,9 @@ export const runAsHome = Effect.fn("mcp.runAsHome")(function* <Op extends FleetO
 
 /**
  * Routes a tool call from Home to the environment it names, with Home's reach
- * over every project. Returns None for any other caller, which keeps its
- * calling-project reach and may only name its own environment.
+ * over every project. A cloud chat its host relays for is routed only when it
+ * names another environment. Returns None for any other call, which keeps its
+ * calling-project reach.
  */
 export const routeHome = Effect.fn("mcp.routeHome")(function* <Op extends FleetOperation>(
   environmentId: EnvironmentId | undefined,
@@ -102,6 +127,8 @@ export const routeHome = Effect.fn("mcp.routeHome")(function* <Op extends FleetO
   }
   const scope = yield* McpInvocationContext.McpInvocationContext;
   if (environmentId !== undefined && environmentId !== scope.environmentId) {
+    if (yield* callerHasCloudReach())
+      return Option.some(yield* runAsHome(environmentId, op, input));
     return yield* new OrchestratorMcpFailure({
       code: "capability_denied",
       message: "Only Home can act in another environment.",
