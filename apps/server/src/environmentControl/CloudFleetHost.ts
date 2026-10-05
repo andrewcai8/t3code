@@ -43,6 +43,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { listThreadPage } from "../home/FleetService.ts";
@@ -130,7 +131,13 @@ const make = Effect.gen(function* () {
   const connections = yield* FiberMap.make<string>();
   // Wakes and launches outlive the call that asked, so a retry joins the one in flight.
   const work = yield* FiberMap.make<string, unknown, unknown>();
-  const registered = new Map<string, string>();
+  const registered = new Map<
+    string,
+    {
+      readonly key: string;
+      readonly registration: SubscriptionRef.SubscriptionRef<FleetHostRegistration>;
+    }
+  >();
   const inFlight = new Map<string, number>();
   const uuid = crypto.randomUUIDv4.pipe(Effect.orDie);
 
@@ -324,11 +331,17 @@ const make = Effect.gen(function* () {
       else inFlight.set(leaseId, count);
     });
 
-  const serve = (source: Box, access: RemoteAccess, registration: FleetHostRegistration) =>
+  /** One connection per awake box; a changed registration re-registers on it. */
+  const serve = (
+    source: Box,
+    access: RemoteAccess,
+    registration: SubscriptionRef.SubscriptionRef<FleetHostRegistration>,
+  ) =>
     Effect.scoped(
       Effect.gen(function* () {
         const connection = yield* boxClient.open(access);
-        yield* connection.connect(registration).pipe(
+        yield* SubscriptionRef.changes(registration).pipe(
+          Stream.switchMap(connection.connect),
           Stream.runForEach((request) =>
             Effect.acquireUseRelease(
               track(source.leaseId, 1),
@@ -354,13 +367,16 @@ const make = Effect.gen(function* () {
       awake.add(box.leaseId);
       const registration = registrationFor(box, boxes);
       const key = JSON.stringify(registration.environments);
-      if (
-        FiberMap.hasUnsafe(connections, box.leaseId) &&
-        (registered.get(box.leaseId) === key || inFlight.has(box.leaseId))
-      )
+      const current = registered.get(box.leaseId);
+      if (current !== undefined && FiberMap.hasUnsafe(connections, box.leaseId)) {
+        if (current.key === key || inFlight.has(box.leaseId)) continue;
+        registered.set(box.leaseId, { ...current, key });
+        yield* SubscriptionRef.set(current.registration, registration);
         continue;
-      registered.set(box.leaseId, key);
-      yield* FiberMap.run(connections, box.leaseId, serve(box, access, registration));
+      }
+      const ref = yield* SubscriptionRef.make(registration);
+      registered.set(box.leaseId, { key, registration: ref });
+      yield* FiberMap.run(connections, box.leaseId, serve(box, access, ref));
     }
     for (const leaseId of registered.keys()) {
       if (awake.has(leaseId)) continue;
