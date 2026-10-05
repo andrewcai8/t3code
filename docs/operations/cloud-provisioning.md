@@ -105,6 +105,12 @@ A woken box that speaks the manager's orchestration protocol connects on the bui
 
 Before a box's T3 server starts, its preparation sets aside a 256 MB reserve file on Linux. A watcher gives the reserve back and clears package caches when free space drops under 1 GB, so the server can still save the chat. Agents are told at the start of each turn when their disk has under 2 GB free.
 
+## Chats reaching each other
+
+Each cloud chat's agent can find, read, message, and interrupt the user's other cloud chats, and start a new one, with Home's tools (see [Home](../internals/home.md)). The manager plays the desktop window's part: it registers with every awake box as that box's fleet host, over a WebSocket opened with the box's broker token, and relays each call to the target box with that box's token (`environmentControl/CloudFleetHost.ts`). A box accepts `fleet.connect` only from a broker session, and boxes never hold a manager credential. Only a box's top-level chats act this way; subagents stay on their box, and changes need a full-access/default run, as for Home.
+
+The manager offers a box every other cloud chat, labelled with its stored card, so listing never wakes a machine. Reading or messaging a sleeping chat wakes that one box. A box gives up on a relayed call after 90 seconds, so the manager answers "still waking" after 60 and keeps waking it; a Mac restored onto a new machine often takes longer, and the agent's retry joins the same wake. One more environment starts a new cloud chat: its launch provisions like a client's request, with the calling chat's provider, account routing, repository and branch, and its message as the first turn, so the new chat appears in every client's sidebar and sleeps and restores like any other. To wait on another chat, ask it to reply with `t3_thread_send`.
+
 ## Why the manager runs the artifact
 
 The E2B template ships the published `t3` package from npm. That is upstream's build. It does not contain this fork's provisioning code, and the version number matches, so the mismatch is invisible until the server fails to start.
