@@ -11,18 +11,10 @@
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import {
-  AuthAccessTokenResult,
-  AuthAccessTokenType,
-  AuthEnvironmentBootstrapTokenType,
-  AuthTokenExchangeGrantType,
-  AuthWebSocketTicketResult,
   CommandId,
   type EnvironmentAuthorizationError,
   MessageId,
-  ORCHESTRATION_PROTOCOL_QUERY_PARAM,
-  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   type OrchestrationV2DispatchCommandError,
   type OrchestrationV2ThreadLaunchError,
   type ProjectId,
@@ -32,14 +24,9 @@ import {
   type ProvisionedEnvironment,
   type ServerProvider,
   ThreadId,
-  WsRpcGroup,
 } from "@t3tools/contracts";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-import { isLoopbackHost } from "@t3tools/shared/preview";
-import {
-  PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX,
-  resolveRemotePairingTarget,
-} from "@t3tools/shared/remote";
+import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
@@ -54,11 +41,16 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { RpcClient, type RpcClientError, RpcSerialization } from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+import type { RpcClientError } from "effect/unstable/rpc";
 
+import {
+  childPairingUrl,
+  exchangePairingToken as exchangePairingTokenOnce,
+  type T3Client,
+  withRpc,
+} from "./t3Rpc.ts";
 import { advanceTurn, initialProgress } from "./turnProgress.ts";
 
 /** Where each driver loads user skills from, relative to the box's HOME. */
@@ -147,7 +139,6 @@ const decodeGitRef = Schema.decodeUnknownEffect(
 const decodeGitCommit = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ tree: GitObject })),
 );
-const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
 const decodeBearerCache = Schema.decodeUnknownEffect(BearerCache);
 const encodeBearerCache = Schema.encodeEffect(BearerCache);
 
@@ -174,92 +165,9 @@ const describe = (cause: unknown): string => (hasMessage(cause) ? cause.message 
 
 const seconds = (from: number, to: number) => Math.round((to - from) / 100) / 10;
 
-const wsUrl = (httpBaseUrl: string) => {
-  const url = new URL("ws", httpBaseUrl.endsWith("/") ? httpBaseUrl : `${httpBaseUrl}/`);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set(ORCHESTRATION_PROTOCOL_QUERY_PARAM, ORCHESTRATION_PROTOCOL_VERSION_TEXT);
-  return url.toString();
-};
-
-const makeClient = RpcClient.make(WsRpcGroup);
-type T3Client = typeof makeClient extends Effect.Effect<infer C, infer _E, infer _R> ? C : never;
-
-const decodeWebSocketTicket = Schema.decodeUnknownEffect(
-  Schema.Struct({ ticket: AuthWebSocketTicketResult.fields.ticket }),
-);
-
-/**
- * Runs `use` with an RPC client whose socket closes when `use` finishes. Every connection, the
- * first and each reconnect, authenticates with a fresh ticket in its URL as the web client does:
- * the manager's gateway to a Namespace box forwards the upgrade URL but not its headers.
- */
-const withRpc = <A, E, R>(
-  httpBaseUrl: string,
-  bearer: string,
-  use: (client: T3Client) => Effect.Effect<A, E, R>,
-) =>
-  Effect.gen(function* () {
-    const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-    const connectUrl = http
-      .execute(
-        HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
-          HttpClientRequest.bearerToken(bearer),
-        ),
-      )
-      .pipe(
-        Effect.flatMap((response) => response.json),
-        Effect.flatMap(decodeWebSocketTicket),
-        Effect.map(({ ticket }) => {
-          const url = new URL(wsUrl(httpBaseUrl));
-          url.searchParams.set("wsTicket", ticket);
-          return url.toString();
-        }),
-        Effect.timeout(CALL_TIMEOUT),
-        // Without a ticket the server refuses the upgrade, which the RPC client reports as a
-        // socket error on the call that needed it.
-        Effect.orElseSucceed(() => wsUrl(httpBaseUrl)),
-      );
-    return yield* makeClient.pipe(
-      Effect.flatMap(use),
-      Effect.provide(
-        RpcClient.layerProtocolSocket().pipe(
-          Layer.provide(
-            Socket.layerWebSocket(connectUrl).pipe(
-              Layer.provide(NodeSocket.layerWebSocketConstructor),
-            ),
-          ),
-          Layer.provide(RpcSerialization.layerJson),
-        ),
-      ),
-      Effect.scoped,
-    );
-  });
-
-const exchangePairingToken = Effect.fn("exchangePairingToken")(function* (
-  httpBaseUrl: string,
-  credential: string,
-) {
-  const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-  const request = http.execute(
-    HttpClientRequest.post(new URL("oauth/token", httpBaseUrl)).pipe(
-      HttpClientRequest.bodyUrlParams({
-        grant_type: AuthTokenExchangeGrantType,
-        subject_token: credential,
-        subject_token_type: AuthEnvironmentBootstrapTokenType,
-        requested_token_type: AuthAccessTokenType,
-        client_label: "cloud smoke",
-        client_device_type: "bot",
-      }),
-    ),
-  );
-  return yield* bounded(
-    request.pipe(
-      Effect.flatMap((response) => response.json),
-      Effect.flatMap(decodeAccessToken),
-    ),
-    "token exchange",
-  );
-});
+/** Exchanges a pairing token for a bearer, bounded like every other cloud call. */
+const exchangePairingToken = (httpBaseUrl: string, credential: string) =>
+  bounded(exchangePairingTokenOnce(httpBaseUrl, credential, "cloud smoke"), "token exchange");
 
 /** A driver's agent answers the fixed snippet; these markers prove it ran on the box. */
 interface Markers {
@@ -883,20 +791,16 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       return yield* fail(check, `attach refused: ${attached.message}`);
     if (attached.environmentId !== box.environmentId)
       return yield* fail(check, "attach returned another environment");
-    // A loopback pairing URL is only reachable through the manager's guest gateway.
     // Parse failures would carry the pairing URL, so they surface without it.
     const minted = yield* Effect.try({
       try: () => new URL(attached.pairingUrl),
       catch: () => new SmokeFailure({ message: `${check}: attach returned an invalid URL` }),
     });
-    const gateway = isLoopbackHost(minted.hostname);
-    const pairingUrl = gateway
-      ? Object.assign(new URL(options.origin), {
-          pathname: `${PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX}/${encodeURIComponent(box.leaseId)}/pair`,
-          search: minted.search,
-          hash: minted.hash,
-        }).toString()
-      : attached.pairingUrl;
+    const { pairingUrl, gateway } = childPairingUrl({
+      attachedPairingUrl: minted,
+      origin: options.origin,
+      leaseId: box.leaseId,
+    });
     const target = yield* Effect.try({
       try: () => resolveRemotePairingTarget({ pairingUrl }),
       catch: () => new SmokeFailure({ message: `${check}: pairing URL has no usable target` }),
