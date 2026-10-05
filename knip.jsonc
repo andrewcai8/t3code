@@ -21,6 +21,7 @@
         "mobile-native-client.ts",
         "setup-worktree.ts",
         "cloud/*.mjs",
+        "cloud/move-chat.ts",
         "cloud/smoke-cloud-chat.ts",
         "cloud/verify-box-reconnect.ts",
         "cloud/verify-wake-ahead.ts",
