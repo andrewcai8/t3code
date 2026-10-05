@@ -606,13 +606,9 @@ const program = Effect.gen(function* () {
       break;
     }
     case "dispose": {
-      // Every box this manager holds, so one a failed step never recorded is removed too.
-      const listed = yield* onManager((client) => client["environmentControl.listProvisioned"]({}));
-      const leases = new Map<string, { readonly leaseId: string; readonly sandboxId: string }>(
-        [...state.boxes, ...listed.filter((row) => row.lifecycle !== "disposed")].map((box) => [
-          box.leaseId,
-          { leaseId: box.leaseId, sandboxId: box.sandboxId },
-        ]),
+      // Only boxes this script made: the manager may be a live host whose other boxes are real chats.
+      const leases = new Map(
+        state.boxes.map((box) => [box.leaseId, { leaseId: box.leaseId, sandboxId: box.sandboxId }]),
       );
       const results = yield* Effect.forEach(
         [...leases.values()],
