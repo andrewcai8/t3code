@@ -10,6 +10,7 @@
  */
 import {
   CommandId,
+  type EnvironmentId,
   type FleetActor,
   type FleetInput,
   type FleetInvokeInput,
@@ -20,6 +21,7 @@ import {
   MessageId,
   type ProjectId,
   type OrchestrationV2Command,
+  type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   OrchestratorMcpFailure,
   ThreadId,
@@ -101,6 +103,44 @@ export const refuseHomeFolder = Effect.fn("FleetService.refuseHomeFolder")(funct
     }
   }
 });
+
+/**
+ * One page of `threads.list` over `shells`, already scoped to the input's
+ * project and subagent choice: the filters, the cursor, and the list items.
+ */
+export function listThreadPage(
+  shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+  input: FleetInput<"threads.list">,
+  context: {
+    readonly actor: FleetActor;
+    readonly environmentId: EnvironmentId;
+    readonly nowMs: number;
+  },
+): FleetResult<"threads.list"> {
+  const { actor, environmentId, nowMs } = context;
+  const statuses = input.statuses === undefined ? null : new Set(input.statuses);
+  const titleContains = input.titleContains?.toLocaleLowerCase();
+  const filtered = shells.filter(
+    (thread) =>
+      thread.deletedAt === null &&
+      (statuses === null || statuses.has(thread.activityRunStatus ?? thread.status)) &&
+      (input.settled === undefined || threadSettlement(thread).settled === input.settled) &&
+      (input.snoozed === undefined || isSnoozed(thread, nowMs) === input.snoozed) &&
+      (titleContains === undefined || thread.title.toLocaleLowerCase().includes(titleContains)),
+  );
+  const cursor = input.cursor ?? 0;
+  const page = filtered.slice(cursor, cursor + (input.limit ?? DEFAULT_LIST_LIMIT));
+  const next = cursor + page.length;
+  return {
+    projectId: input.projectId ?? null,
+    currentThreadId: filtered.some((thread) => thread.id === actor.threadId)
+      ? actor.threadId
+      : null,
+    threads: page.map((shell) => listItemFromShell(shell, { environmentId, nowMs })),
+    nextCursor: next < filtered.length ? next : null,
+    total: filtered.length,
+  };
+}
 
 type Handlers = {
   readonly [Op in FleetOperation]: (
@@ -206,29 +246,7 @@ const make = Effect.gen(function* () {
                 .listProjectThreads({ projectId: input.projectId, includeSubagents })
                 .pipe(Effect.mapError(threadManagementFailure));
         const nowMs = yield* Clock.currentTimeMillis;
-        const statuses = input.statuses === undefined ? null : new Set(input.statuses);
-        const titleContains = input.titleContains?.toLocaleLowerCase();
-        const filtered = shells.filter(
-          (thread) =>
-            thread.deletedAt === null &&
-            (statuses === null || statuses.has(thread.activityRunStatus ?? thread.status)) &&
-            (input.settled === undefined || threadSettlement(thread).settled === input.settled) &&
-            (input.snoozed === undefined || isSnoozed(thread, nowMs) === input.snoozed) &&
-            (titleContains === undefined ||
-              thread.title.toLocaleLowerCase().includes(titleContains)),
-        );
-        const cursor = input.cursor ?? 0;
-        const page = filtered.slice(cursor, cursor + (input.limit ?? DEFAULT_LIST_LIMIT));
-        const next = cursor + page.length;
-        return {
-          projectId: input.projectId ?? null,
-          currentThreadId: filtered.some((thread) => thread.id === actor.threadId)
-            ? actor.threadId
-            : null,
-          threads: page.map((shell) => listItemFromShell(shell, { environmentId, nowMs })),
-          nextCursor: next < filtered.length ? next : null,
-          total: filtered.length,
-        };
+        return listThreadPage(shells, input, { actor, environmentId, nowMs });
       }),
 
     "threads.read": (input) =>
