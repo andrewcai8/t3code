@@ -334,7 +334,8 @@ launching again. `create_threads` remains the batch option for a shared checkout
 Lists durable thread shells in one project, newest first: `projectId` when
 given, else the calling thread's project. Callers can filter by title, run
 status, and whether app-owned sub-agent threads are included. Results are
-bounded and offset-paginated. Deleted threads are never listed.
+bounded and offset-paginated. Deleted threads are never listed. Home can name
+any project and environment ([Home](../internals/home.md)).
 
 ### `t3_thread_read`
 
