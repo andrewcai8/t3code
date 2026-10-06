@@ -111,6 +111,8 @@ const setup = Effect.gen(function* () {
   const opened: Array<string> = [];
   const forked: Array<[string, string, FleetInvokeInput["actor"], unknown]> = [];
   const paused = new Set<string>();
+  /** Each box's chat fields as its shell shows them now, or that its shell cannot be read. */
+  const liveChats = new Map<string, Record<string, unknown> | "unreachable">();
   const started: Array<string> = [];
   const registrations = new Map<string, Queue.Queue<FleetHostRegistration>>();
   const requests = new Map<string, Queue.Queue<FleetHostRequest>>();
@@ -126,6 +128,22 @@ const setup = Effect.gen(function* () {
   const provisioning = { hangs: false };
 
   const boxes = Layer.succeed(BoxFleetClient.BoxFleetClient, {
+    readChat: (access, ownerThreadId) => {
+      const live = liveChats.get(access.origin);
+      if (live === "unreachable")
+        return Effect.fail(
+          new BoxFleetClient.BoxUnreachableError({ origin: access.origin, cause: "down" }),
+        );
+      if (live === undefined) return Effect.succeed(null);
+      return Effect.succeed(
+        ownerChat(
+          boxShell([
+            boxThread(ownerThreadId, "project-app", "Fix login", { modelSelection, ...live }),
+          ]),
+          ownerThreadId,
+        ) ?? null,
+      );
+    },
     open: (access) =>
       Effect.sync(() => opened.push(access.origin)).pipe(
         Effect.tap(() => Effect.addFinalizer(() => Queue.offer(closed, access.origin))),
@@ -295,6 +313,7 @@ const setup = Effect.gen(function* () {
     oldBuilds,
     forked,
     started,
+    liveChats,
   };
 });
 
@@ -307,12 +326,13 @@ const withBoxes = <A, E>(
     E,
     CloudFleetHost.CloudFleetHost | SqlClient.SqlClient | ProvisionOperationStore
   >,
-  firstChat: Record<string, unknown> = {},
+  firstChat: Record<string, unknown> | null = {},
 ) =>
   Effect.gen(function* () {
     const context = yield* setup;
     return yield* Effect.gen(function* () {
-      yield* addBox(1, { chat: "Fix login", card: firstChat });
+      // A null first chat leaves box 1 with no stored card, as a box just provisioned.
+      yield* addBox(1, firstChat === null ? {} : { chat: "Fix login", card: firstChat });
       yield* addBox(2, { asleep: true, chat: "Write docs" });
       yield* addBox(3, { chat: null });
       yield* addBox(4, { chat: "Ship release" });
@@ -758,4 +778,42 @@ it.effect("starts forks only for a chat in full-access/default mode", () =>
       }),
     { interactionMode: "plan" },
   ),
+);
+
+it.effect("reads a chat's mode from its box when the host holds no card for it yet", () =>
+  Effect.gen(function* () {
+    const jobs = [{ command: "pnpm test" }];
+    const outcomes = [];
+    for (const live of [
+      { runtimeMode: "full-access", interactionMode: "default" },
+      { runtimeMode: "full-access", interactionMode: "plan" },
+      "unreachable" as const,
+    ]) {
+      outcomes.push(
+        yield* withBoxes(
+          ({ relay, liveChats, forked }) =>
+            Effect.gen(function* () {
+              liveChats.set(origin(1), live);
+              const response = yield* relay(CLOUD_FORKS_ENVIRONMENT_ID, {
+                op: "forks.run",
+                input: { jobs },
+              });
+              const sql = yield* SqlClient.SqlClient;
+              const kept = yield* Effect.promise(() => createProvisionedChatStore(sql).read(id(1)));
+              return {
+                allowed: "result" in response,
+                forked: forked.length,
+                kept: kept?.thread.interactionMode ?? null,
+              };
+            }),
+          null,
+        ),
+      );
+    }
+    expect(outcomes).toEqual([
+      { allowed: true, forked: 1, kept: "default" },
+      { allowed: false, forked: 0, kept: "plan" },
+      { allowed: false, forked: 0, kept: null },
+    ]);
+  }),
 );

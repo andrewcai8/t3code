@@ -56,6 +56,7 @@ import * as BoxFleetClient from "./BoxFleetClient.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { createProvisionedLeaseRegistry, type RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
+import { createProvisionedChatStore } from "./provisionedChats.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import * as WorkerForks from "./WorkerForks.ts";
 
@@ -179,7 +180,7 @@ type BoxConnection = BoxFleetClient.BoxFleetConnection;
 const decodeThreadList = Schema.decodeUnknownEffect(FleetResults["threads.list"]);
 const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-/** Whether the box's chat may change things or wake machines, from the host's own card. */
+/** Whether the box's chat may change things or wake machines, from the card the host holds. */
 const actsFully = (box: Box) =>
   box.chat?.thread.runtimeMode === "full-access" && box.chat.thread.interactionMode === "default";
 
@@ -192,6 +193,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const hostScope = yield* Effect.scope;
   const leases = createProvisionedLeaseRegistry(sql);
+  const chats = createProvisionedChatStore(sql);
   const connections = yield* FiberMap.make<string>();
   // Wakes and launches outlive the call that asked, so a retry joins the one in flight.
   const work = yield* FiberMap.make<string, unknown, unknown>();
@@ -407,6 +409,32 @@ const make = Effect.gen(function* () {
     });
 
   /**
+   * The box with its chat as the box shows it now, when the stored card does not let it act fully:
+   * a new box has no card until the host's next read, and a chat switched to full-access still
+   * has its old one. The host reads it with its own broker token and keeps it. A box that cannot
+   * be read keeps its stored card, so the check fails closed.
+   */
+  const withCurrentCard = (source: Box) =>
+    Effect.gen(function* () {
+      if (actsFully(source) || source.threadId === null) return source;
+      const access = yield* accessOf(source.leaseId);
+      if (access === null) return source;
+      const chat = yield* boxClient
+        .readChat(access, source.threadId)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (chat === null) return source;
+      yield* Effect.tryPromise(() => chats.record(source.leaseId, chat)).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("a cloud chat's card could not be kept", {
+            leaseId: source.leaseId,
+            cause,
+          }),
+        ),
+      );
+      return { ...source, chat };
+    });
+
+  /**
    * Runs one call a box relays. Only another cloud chat's box, or a new one, is a target. The host
    * decides who asks from its own records, never the box's claim: the box's own chat, with the
    * modes on the host's card. Changes and wakes need that card to be full-access/default.
@@ -415,16 +443,19 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const boxes = yield* chatBoxes;
       const { request, actor } = invoke;
-      const source = boxes.find((box) => box.leaseId === sourceLeaseId);
+      const stored = boxes.find((box) => box.leaseId === sourceLeaseId);
       if (
-        source === undefined ||
-        actor.environmentId !== source.environmentId ||
-        actor.threadId !== source.threadId
+        stored === undefined ||
+        actor.environmentId !== stored.environmentId ||
+        actor.threadId !== stored.threadId
       )
         return yield* failure(
           "capability_denied",
           "Only this machine's own chat can act through its host.",
         );
+      // Read again only for a call that needs full access: a change, or a wake further down.
+      const current = yield* Effect.cached(withCurrentCard(stored));
+      const source = CHANGES_STATE[request.op] ? yield* current : stored;
       if (CHANGES_STATE[request.op] && !actsFully(source))
         return yield* failure(
           "capability_denied",
@@ -474,7 +505,7 @@ const make = Effect.gen(function* () {
         return yield* unavailable(`${boxName(target)} has no machine right now.`);
       if (target.lifecycle === "paused") {
         // Waking a machine costs money, so it is a change too.
-        if (!actsFully(source))
+        if (!actsFully(yield* current))
           return yield* unavailable(
             `${boxName(target)} is asleep, and only a full-access chat can wake it.`,
           );

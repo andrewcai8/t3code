@@ -218,7 +218,8 @@ it.effect("runs each job in its own copy and removes every copy once, however it
             durationMs: 0,
             stdoutTail: "ran in /home/user/work/app for at most 600000ms",
             stderrTail: "",
-            outputsUri: `${prefix}/0/`,
+            logsUri: `${prefix}/0/logs/`,
+            outputsUri: `${prefix}/0/outputs/`,
             outputsProblem: "Not found: gone.txt.",
           },
           {
@@ -229,7 +230,7 @@ it.effect("runs each job in its own copy and removes every copy once, however it
             durationMs: 0,
             stdoutTail: "ran in /tmp for at most 600000ms",
             stderrTail: "",
-            outputsUri: `${prefix}/1/`,
+            logsUri: `${prefix}/1/logs/`,
           },
           {
             index: 2,
@@ -244,7 +245,7 @@ it.effect("runs each job in its own copy and removes every copy once, however it
             durationMs: 0,
             stdoutTail: "ran in /home/user/work/app for at most 30000ms",
             stderrTail: "",
-            outputsUri: `${prefix}/3/`,
+            logsUri: `${prefix}/3/logs/`,
           },
         ],
       });

@@ -350,7 +350,9 @@ export const FleetForkJobState = Schema.Union([
     durationMs: NonNegativeInt,
     stdoutTail: Schema.String,
     stderrTail: Schema.String,
-    /** Where the job's logs and outputs were uploaded. */
+    /** Holds the job's stdout.log and stderr.log. */
+    logsUri: Schema.optional(Schema.String),
+    /** Holds each listed output at its path as given, absolute ones without the leading slash. */
     outputsUri: Schema.optional(Schema.String),
     /** Where its outputs were copied on the chat's machine, with copyBack. */
     copiedTo: Schema.optional(Schema.String),
