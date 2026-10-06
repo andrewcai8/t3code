@@ -363,11 +363,14 @@ export const EnvironmentProvisionUpgradeResult = Schema.Union([
 export type EnvironmentProvisionUpgradeResult = typeof EnvironmentProvisionUpgradeResult.Type;
 
 /**
- * Move a cloud chat's machine onto another account of the provider its chat runs on, keeping the
- * conversation, machine and files. The host picks the account with the most usage left.
+ * Move a cloud machine onto another account of the provider one of its chats runs on, keeping the
+ * conversation, machine and files, and continue that chat's run if a usage limit stopped it. The
+ * host picks the account with the most usage left.
  */
 export const EnvironmentProvisionSwitchAccountInput = Schema.Struct({
-  leaseId: TrimmedNonEmptyString,
+  /** The cloud machine's environment. */
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
 });
 export type EnvironmentProvisionSwitchAccountInput =
   typeof EnvironmentProvisionSwitchAccountInput.Type;
