@@ -1525,8 +1525,8 @@ describe("box disk guard", () => {
     return { root, survivors };
   };
 
-  /** One watch pass: a server that already stopped makes the watcher check once and exit. */
-  const guard = async (root: string, depsBytes: number) => {
+  /** Runs the guard in `mode`: `sweep` frees dependencies once; `watch` with a stopped server exits. */
+  const guard = async (root: string, depsBytes: number, mode: "sweep" | "watch" = "sweep") => {
     const stopped = NodeChildProcess.spawnSync("true");
     await NodeFSP.writeFile(
       NodePath.join(root, "server.json"),
@@ -1536,7 +1536,7 @@ describe("box disk guard", () => {
     try {
       return NodeChildProcess.spawnSync(
         "python3",
-        ["-c", diskGuardScript, root, NodePath.join(root, "home"), "watch", "3"],
+        ["-c", diskGuardScript, root, NodePath.join(root, "home"), mode, "3"],
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe", lock.fd],
@@ -1605,6 +1605,15 @@ describe("box disk guard", () => {
       storeModules: true,
       reserve: true,
     });
+  });
+
+  it("deletes nothing once the server has stopped, as the box may be sealing its workspace", async () => {
+    const { root, survivors } = await checkoutTree();
+    const guarded = await guard(root, 2 ** 60, "watch");
+
+    expect(guarded.status).toBe(0);
+    expect(guarded.stdout).toBe("");
+    expect((await survivors()).idleModules).toBe(true);
   });
 });
 

@@ -453,9 +453,10 @@ def untracked(checkout, dep):
     return listed.returncode == 0 and not listed.stdout
 def free_dependencies():
     # Returns how many node_modules it removed.
-    workspace = os.path.realpath(root / 'workspace')
+    # Sealing renames the workspace to workspace.partial, which is still the chat's own checkout.
+    workspaces = {os.path.realpath(root / 'workspace'), os.path.realpath(root / 'workspace.partial')}
     cutoff = time.time() - IDLE_SECONDS
-    idle = sorted((checkout['newest'], path, checkout['deps']) for path, checkout in checkouts().items() if path != workspace and checkout['deps'] and checkout['newest'] < cutoff)
+    idle = sorted((checkout['newest'], path, checkout['deps']) for path, checkout in checkouts().items() if path not in workspaces and checkout['deps'] and checkout['newest'] < cutoff)
     removed = 0
     for _, path, deps in idle:
         free = shutil.disk_usage(root).free
@@ -485,6 +486,9 @@ def headroom():
 if mode == 'once':
     headroom()
     sys.exit(0)
+if mode == 'sweep':
+    free_dependencies()
+    sys.exit(0)
 # The lock comes open from the preparer, so a watcher never creates a file in the root.
 with os.fdopen(int(sys.argv[4]), 'w') as lock:
     try:
@@ -493,6 +497,11 @@ with os.fdopen(int(sys.argv[4]), 'w') as lock:
         sys.exit(0)
     next_sweep = 0.0
     while True:
+        # Checked first: once the server stops, the box may be sealing or snapshotting its workspace.
+        try:
+            os.kill(json.loads((root / 'server.json').read_text())['pid'], 0)
+        except (OSError, ValueError, KeyError):
+            sys.exit(0)
         try:
             headroom()
             if shutil.disk_usage(root).free < DEPS and time.monotonic() >= next_sweep:
@@ -501,10 +510,6 @@ with os.fdopen(int(sys.argv[4]), 'w') as lock:
                     next_sweep = time.monotonic() + SWEEP_SECONDS
         except (OSError, subprocess.SubprocessError) as error:
             print('disk guard:', error, flush=True)
-        try:
-            os.kill(json.loads((root / 'server.json').read_text())['pid'], 0)
-        except (OSError, ValueError, KeyError):
-            sys.exit(0)
         time.sleep(30)
 `;
 
