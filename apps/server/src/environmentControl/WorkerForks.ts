@@ -106,7 +106,7 @@ interface Batch {
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
 
-const encodeKey = Schema.encodeSync(Schema.UnknownFromJsonString);
+const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const hasParentSegment = (path: string) => path.split("/").includes("..");
 

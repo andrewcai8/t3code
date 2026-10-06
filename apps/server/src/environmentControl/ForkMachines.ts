@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - the E2B adapter waits between retries inside Promise SDK calls.
 /**
  * ForkMachines - the cloud provider side of t3_fork_run: copies of a chat's machine.
  *
@@ -111,7 +112,7 @@ export class ForkMachines extends Context.Service<
 const COPY_PURPOSE = "t3-worker-fork";
 const STATE = "/tmp/t3-fork";
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
-const encodeSpec = Schema.encodeSync(Schema.UnknownFromJsonString);
+const encodeSpec = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const python = (script: string, spec?: unknown) =>
   `exec python3 -c ${shellQuote(script)}${spec === undefined ? "" : ` ${shellQuote(encodeSpec(spec))}`}`;
 
