@@ -97,6 +97,7 @@ import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceReg
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
+import { refreshSkillBundle } from "./skillBundleSync.ts";
 import {
   credentialVariables,
   ProvisionRefused,
@@ -2129,6 +2130,27 @@ export const layer = Layer.effect(
     }).pipe(
       Effect.ignore({ log: "Warn", message: "warm bases could not be kept up" }),
       Effect.repeat(Schedule.spaced(Duration.minutes(1))),
+      Effect.forkScoped,
+    );
+    yield* Effect.tryPromise(resolve).pipe(
+      Effect.flatMap((manager) =>
+        Effect.forEach(
+          (manager?.config.provisioning?.skills ?? []).flatMap(({ source, url }) =>
+            url ? [{ source, url }] : [],
+          ),
+          (bundle) =>
+            Effect.tryPromise(() => refreshSkillBundle(bundle)).pipe(
+              Effect.flatMap((result) =>
+                result === "updated" ? Effect.logInfo("skill bundle updated") : Effect.void,
+              ),
+              Effect.ignore({ log: "Warn", message: "skill bundle could not be refreshed" }),
+              Effect.annotateLogs({ source: bundle.source }),
+            ),
+          { discard: true },
+        ),
+      ),
+      Effect.ignore({ log: "Warn", message: "skill bundles could not be refreshed" }),
+      Effect.repeat(Schedule.spaced(Duration.hours(1))),
       Effect.forkScoped,
     );
     /**

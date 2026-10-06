@@ -290,3 +290,38 @@ it("matches repository configuration exactly and rejects duplicates or escaping 
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });
+
+it("accepts an HTTPS skill bundle url and refuses another scheme or a named bundle", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cloud-config-"));
+  const path = NodePath.join(directory, "config.json");
+  const read = async (skill: { url: string; name?: string }) => {
+    await NodeFSP.writeFile(
+      path,
+      JSON.stringify({
+        e2bApiKey: "test-key",
+        broker: {
+          sandboxId: "broker",
+          metadata: { owner: "test" },
+          url: "https://controller.invalid",
+          ingressKey: "test-ingress",
+        },
+        targets: [],
+        provisioning: { skills: [{ source: "/srv/skills", ...skill }] },
+      }),
+      { mode: 0o600 },
+    );
+    return readConfig(path).then(
+      (config) => config.provisioning?.skills?.[0]?.url,
+      () => "refused",
+    );
+  };
+  try {
+    expect([
+      await read({ url: "https://skills.invalid/pstack.tar.gz" }),
+      await read({ url: "http://skills.invalid/pstack.tar.gz" }),
+      await read({ url: "https://skills.invalid/pstack.tar.gz", name: "pstack" }),
+    ]).toEqual(["https://skills.invalid/pstack.tar.gz", "refused", "refused"]);
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
