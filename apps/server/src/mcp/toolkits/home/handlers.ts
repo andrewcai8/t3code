@@ -1,10 +1,15 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { CLOUD_FORKS_ENVIRONMENT_ID, OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../../../home/FleetBroker.ts";
 import * as HomeService from "../../../home/HomeService.ts";
-import { callerHasFleetReach, callerIsHome, readHomeChangeCaller } from "../../homeRouting.ts";
+import {
+  callerHasFleetReach,
+  callerIsHome,
+  readHomeChangeCaller,
+  runAsHome,
+} from "../../homeRouting.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { HomeToolkit } from "./tools.ts";
 
@@ -82,4 +87,8 @@ export const HomeHandlersLive = HomeToolkit.toLayer({
         .pipe(Effect.mapError(unavailable));
       return { watchAll: next.watchAll, watches: next.watches };
     }),
+
+  t3_fork_run: (input) => runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input),
+
+  t3_fork_status: (input) => runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input),
 });

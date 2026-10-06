@@ -76,6 +76,7 @@ it.effect(
           namespaceProxyOrigin: () => Effect.succeed(null),
           list: Effect.succeed([]),
           provisionProviders: Effect.succeed([]),
+          controlConfig: Effect.succeed(null),
           provisionedSkills: Effect.succeed(undefined),
           listProvisioned: () => Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),

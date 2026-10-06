@@ -286,6 +286,88 @@ export const FleetCapabilitiesResult = Schema.Struct({
 });
 export type FleetCapabilitiesResult = typeof FleetCapabilitiesResult.Type;
 
+/**
+ * The environment a cloud chat's host offers for running jobs in throwaway copies of the chat's
+ * machine. Only `forks.run` and `forks.status` work there.
+ */
+export const CLOUD_FORKS_ENVIRONMENT_ID = EnvironmentId.make("cloud:forks");
+
+export const FleetForkJob = Schema.Struct({
+  command: TrimmedNonEmptyString.check(Schema.isMaxLength(20000)).annotate({
+    description: "Shell command, run with bash -lc.",
+  }),
+  cwd: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description: "Absolute directory to run in. Defaults to the chat's checkout.",
+    }),
+  ),
+  outputs: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(32)).annotate({
+      description: "Files or directories to keep, relative to cwd or absolute.",
+    }),
+  ),
+  timeoutSeconds: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 86_400 })).annotate({
+      description: "Stop the job after this long. The host caps it.",
+    }),
+  ),
+});
+export type FleetForkJob = typeof FleetForkJob.Type;
+
+export const FleetForkRunInput = Schema.Struct({
+  jobs: Schema.Array(FleetForkJob).check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+  concurrency: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 64 })).annotate({
+      description: "Copies running at once. Defaults to the host's per-chat limit.",
+    }),
+  ),
+  copyBack: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also copy each job's outputs into this machine, under the folder the result names, when they fit the host's size cap.",
+    }),
+  ),
+});
+export type FleetForkRunInput = typeof FleetForkRunInput.Type;
+
+export const FleetForkStatusInput = Schema.Struct({
+  batchId: TrimmedNonEmptyString,
+  waitSeconds: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 45 })).annotate({
+      description: "Wait up to this long for the batch to finish before answering.",
+    }),
+  ),
+});
+export type FleetForkStatusInput = typeof FleetForkStatusInput.Type;
+
+export const FleetForkJobState = Schema.Union([
+  Schema.Struct({ index: NonNegativeInt, state: Schema.Literals(["queued", "running"]) }),
+  Schema.Struct({
+    index: NonNegativeInt,
+    state: Schema.Literal("exited"),
+    exitCode: Schema.Int,
+    timedOut: Schema.Boolean,
+    durationMs: NonNegativeInt,
+    stdoutTail: Schema.String,
+    stderrTail: Schema.String,
+    /** Where the job's logs and outputs were uploaded. */
+    outputsUri: Schema.optional(Schema.String),
+    /** Where its outputs were copied on the chat's machine, with copyBack. */
+    copiedTo: Schema.optional(Schema.String),
+    /** Why some outputs were not kept. */
+    outputsProblem: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({ index: NonNegativeInt, state: Schema.Literal("failed"), message: Schema.String }),
+]);
+export type FleetForkJobState = typeof FleetForkJobState.Type;
+
+export const FleetForkBatch = Schema.Struct({
+  batchId: TrimmedNonEmptyString,
+  state: Schema.Literals(["running", "finished"]),
+  jobs: Schema.Array(FleetForkJobState),
+});
+export type FleetForkBatch = typeof FleetForkBatch.Type;
+
 const operation = <const Op extends string, S extends Schema.Top>(op: Op, input: S) =>
   Schema.Struct({ op: Schema.Literal(op), input });
 
@@ -303,6 +385,8 @@ export const FleetRequest = Schema.Union([
   operation("requests.list", FleetRequestsListInput),
   operation("requests.read", FleetRequestTarget),
   operation("requests.respond", FleetRequestRespondInput),
+  operation("forks.run", FleetForkRunInput),
+  operation("forks.status", FleetForkStatusInput),
 ]);
 export type FleetRequest = typeof FleetRequest.Type;
 export type FleetOperation = FleetRequest["op"];
@@ -321,6 +405,8 @@ export const FleetResults = {
   "requests.list": FleetRequestsListResult,
   "requests.read": FleetRequestReadResult,
   "requests.respond": OrchestrationV2DispatchCommandResult,
+  "forks.run": FleetForkBatch,
+  "forks.status": FleetForkBatch,
 } satisfies Record<FleetOperation, Schema.Top>;
 export type FleetResult<Op extends FleetOperation> = (typeof FleetResults)[Op]["Type"];
 export type FleetInput<Op extends FleetOperation> = Extract<FleetRequest, { op: Op }>["input"];

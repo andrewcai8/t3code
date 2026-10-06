@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CLOUD_FORKS_ENVIRONMENT_ID,
   EnvironmentId,
   type FleetInvokeInput,
   ProjectId,
@@ -22,7 +23,7 @@ import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Project from "../project/ProjectService.ts";
-import { routeHome } from "./homeRouting.ts";
+import { routeHome, runAsHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
@@ -195,3 +196,28 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
     ]);
   });
 });
+
+it.effect("sends forks to the host only for a top-level chat in full-access mode", () =>
+  Effect.gen(function* () {
+    const input = { jobs: [{ command: "pnpm test" }] };
+    const allowed = onBox();
+    yield* runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input).pipe(
+      Effect.provide(allowed.layer),
+    );
+    expect(allowed.relayed).toEqual([
+      [CLOUD_FORKS_ENVIRONMENT_ID, { actor, request: { op: "forks.run", input } }],
+    ]);
+    for (const caller of [
+      { runtimeMode: "approval-required" },
+      { lineage: { parentThreadId: chat, relationshipToParent: "subagent", rootThreadId: chat } },
+    ] as Array<Partial<typeof topLevelChat>>) {
+      const refused = onBox(caller);
+      const error = yield* runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input).pipe(
+        Effect.flip,
+        Effect.provide(refused.layer),
+      );
+      expect(error.code).toBe("capability_denied");
+      expect(refused.relayed).toEqual([]);
+    }
+  }),
+);
