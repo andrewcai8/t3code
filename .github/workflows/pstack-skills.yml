@@ -33,8 +33,10 @@ jobs:
           built="$(scripts/pstack/build.sh "$RUNNER_TEMP/cursor-plugins" origin/main "$RUNNER_TEMP/build")"
           read -r version commit <<<"$built"
           mkdir -p "$RUNNER_TEMP/assets"
-          tar -czf "$RUNNER_TEMP/assets/pstack-skills.tgz" -C "$RUNNER_TEMP/build/pstack/skills" .
-          tar -czf "$RUNNER_TEMP/assets/pstack-codex-skills.tgz" -C "$RUNNER_TEMP/build/codex/skills" .
+          # Byte-identical archives for identical skills, so hosts swap only on a real change.
+          pack() { tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$1" . | gzip -n > "$2"; }
+          pack "$RUNNER_TEMP/build/pstack/skills" "$RUNNER_TEMP/assets/pstack-skills.tgz"
+          pack "$RUNNER_TEMP/build/codex/skills" "$RUNNER_TEMP/assets/pstack-codex-skills.tgz"
           cd "$RUNNER_TEMP/assets"
           jq -n --arg version "$version" --arg commit "$commit" --arg overlay "$GITHUB_SHA" \
             --arg skills "$(sha256sum pstack-skills.tgz | cut -d' ' -f1)" \
