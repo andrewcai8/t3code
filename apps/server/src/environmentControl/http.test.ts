@@ -36,6 +36,7 @@ import {
 } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderAccountSwitch from "../provider/ProviderAccountSwitch.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { EnvironmentControl } from "./EnvironmentControl.ts";
 import { environmentControlBodyLimitLayer, environmentControlHttpApiLayer } from "./http.ts";
@@ -125,6 +126,7 @@ it.effect(
             Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
             Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(ProviderAccountSwitch.ProviderAccountSwitch)({}),
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-provision-http-" }),
           ).pipe(Layer.provideMerge(NodeServices.layer)),
         ),
@@ -267,6 +269,7 @@ it.effect("the launch-thread route checks scope and tells a refused launch from 
           }),
           launches,
           Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          Layer.mock(ProviderAccountSwitch.ProviderAccountSwitch)({}),
           ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-thread-http-" }),
         ).pipe(Layer.provideMerge(NodeServices.layer)),
       ),

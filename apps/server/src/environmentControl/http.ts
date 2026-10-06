@@ -16,6 +16,7 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import { makeHostLaunchThread } from "../orchestration-v2/hostLaunchThread.ts";
+import * as ProviderAccountSwitch from "../provider/ProviderAccountSwitch.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 
 const MAX_PROVISION_BODY_BYTES = 90 * 1024 * 1024;
@@ -46,11 +47,22 @@ export const environmentControlHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const control = yield* EnvironmentControl.EnvironmentControl;
     const launchThread = yield* makeHostLaunchThread;
+    const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
     return handlers
       .handle("launchThread", (args) =>
         annotateEnvironmentRequest(args.endpoint.name).pipe(
           Effect.andThen(launchThread(args.payload)),
         ),
+      )
+      .handle(
+        "switchAccount",
+        Effect.fn("environment.control.switchAccount")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* accounts
+            .switchAccount(args.payload)
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+        }),
       )
       .handle(
         "listProvisioned",

@@ -6,6 +6,7 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  RunId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -360,6 +361,79 @@ export const EnvironmentProvisionUpgradeResult = Schema.Union([
   }),
 ]);
 export type EnvironmentProvisionUpgradeResult = typeof EnvironmentProvisionUpgradeResult.Type;
+
+/**
+ * Move a cloud chat's machine onto another account of the provider its chat runs on, keeping the
+ * conversation, machine and files. The host picks the account with the most usage left.
+ */
+export const EnvironmentProvisionSwitchAccountInput = Schema.Struct({
+  leaseId: TrimmedNonEmptyString,
+});
+export type EnvironmentProvisionSwitchAccountInput =
+  typeof EnvironmentProvisionSwitchAccountInput.Type;
+
+export const EnvironmentProvisionSwitchAccountResult = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("switched"),
+    /** The account the chat runs on now, by the host's name for it. */
+    account: Schema.String,
+    /** Whether the chat's run that hit a usage limit was continued on the new account. */
+    continued: Schema.Boolean,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    /**
+     * `asleep`: the machine must be awake. `no_account`: every other account is spent or unusable.
+     * `unsupported`: the chat's provider, or the machine's build, cannot switch accounts.
+     */
+    reason: Schema.Literals(["unknown", "asleep", "busy", "no_account", "unsupported"]),
+    message: Schema.String,
+  }),
+]);
+export type EnvironmentProvisionSwitchAccountResult =
+  typeof EnvironmentProvisionSwitchAccountResult.Type;
+
+/** The drivers whose cloud accounts a host can switch. */
+export const SwitchableAccountDriver = Schema.Literals(["claudeAgent", "codex"]);
+export type SwitchableAccountDriver = typeof SwitchableAccountDriver.Type;
+
+/**
+ * A login a host hands one of its boxes: the provider's credential variables, or the contents of
+ * the login file the driver reads from its home (Codex's `auth.json`, Claude's `.credentials.json`).
+ */
+export const GuestAccountCredential = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("environment"),
+    variables: Schema.NonEmptyArray(
+      Schema.Struct({ name: TrimmedNonEmptyString, value: TrimmedNonEmptyString }),
+    ),
+  }),
+  Schema.Struct({ kind: Schema.Literal("file"), contentsBase64: TrimmedNonEmptyString }),
+]);
+export type GuestAccountCredential = typeof GuestAccountCredential.Type;
+
+/** What a host asks one of its boxes when it moves the box's driver onto another account. */
+export const GuestAccountSwitchInput = Schema.Struct({
+  driver: SwitchableAccountDriver,
+  displayName: Schema.optional(TrimmedNonEmptyString),
+  accountEmail: Schema.optional(TrimmedNonEmptyString),
+  credential: GuestAccountCredential,
+  /** The chat moving accounts. Only its provider session restarts. */
+  threadId: ThreadId,
+  /** The chat's run that hit a usage limit, continued on the new account. */
+  continueRunId: Schema.optional(RunId),
+});
+export type GuestAccountSwitchInput = typeof GuestAccountSwitchInput.Type;
+
+export const GuestAccountSwitchResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("switched"), continued: Schema.Boolean }),
+  Schema.Struct({
+    kind: Schema.Literal("refused"),
+    reason: Schema.Literals(["busy", "unsupported"]),
+    message: Schema.String,
+  }),
+]);
+export type GuestAccountSwitchResult = typeof GuestAccountSwitchResult.Type;
 
 export const EnvironmentProvisionClaimInput = Schema.Struct({
   leaseId: TrimmedNonEmptyString,

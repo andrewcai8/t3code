@@ -53,6 +53,7 @@ import * as Stream from "effect/Stream";
 
 import * as Settings from "../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "./builtInDrivers.ts";
+import type { AnyProviderDriver } from "./ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestrationAdapterInfrastructure.ts";
@@ -144,6 +145,26 @@ const layerSettingsWatcher = Layer.effectDiscard(
   }),
 );
 
+/** `layer` over the given drivers rather than the built-in ones. */
+export const layerWithDrivers = <R>(drivers: ReadonlyArray<AnyProviderDriver<R>>) =>
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const serverSettings = yield* Settings.ServerSettingsService;
+      const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
+      const initialConfigMap =
+        initialSettings === undefined
+          ? ({} as ProviderInstanceConfigMap)
+          : deriveProviderInstanceConfigMap(initialSettings);
+      const layerMutable = ProviderInstanceRegistry.layer({
+        drivers,
+        configMap: initialConfigMap,
+      });
+      return layerSettingsWatcher.pipe(Layer.provideMerge(layerMutable));
+    }),
+  );
+
 /**
  * Hydrate `ProviderInstanceRegistry` from `ServerSettings` and keep it in
  * sync with subsequent `streamChanges` emissions.
@@ -164,27 +185,9 @@ export const layer: Layer.Layer<
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   never,
   ProviderInstanceRegistryHydrationEnv
-> = Layer.unwrap(
-  Effect.gen(function* () {
-    const serverSettings = yield* Settings.ServerSettingsService;
-    const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
-      Effect.orElseSucceed(() => undefined),
-    );
-    const initialConfigMap =
-      initialSettings === undefined
-        ? ({} as ProviderInstanceConfigMap)
-        : deriveProviderInstanceConfigMap(initialSettings);
-
-    const layerMutable = ProviderInstanceRegistry.layer({
-      drivers: BUILT_IN_DRIVERS,
-      configMap: initialConfigMap,
-    }).pipe(
-      Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
-      Layer.provide(AcpRegistryCatalog.layer),
-    );
-
-    return layerSettingsWatcher.pipe(Layer.provideMerge(layerMutable));
-  }),
+> = layerWithDrivers(BUILT_IN_DRIVERS).pipe(
+  Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
+  Layer.provide(AcpRegistryCatalog.layer),
 ) as Layer.Layer<
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   never,

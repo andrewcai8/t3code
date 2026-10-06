@@ -29,6 +29,8 @@ import {
   EnvironmentProvisionResumeResult,
   EnvironmentProvisionUpgradeInput,
   EnvironmentProvisionUpgradeResult,
+  EnvironmentProvisionSwitchAccountInput,
+  EnvironmentProvisionSwitchAccountResult,
   EnvironmentProvisionClaimInput,
   EnvironmentProvisionClaimResult,
   EnvironmentProvisionTouchInput,
@@ -50,6 +52,7 @@ export const ENVIRONMENT_CONTROL_WS_METHODS = {
   environmentControlPause: "environmentControl.pause",
   environmentControlResume: "environmentControl.resume",
   environmentControlUpgrade: "environmentControl.upgrade",
+  environmentControlSwitchAccount: "environmentControl.switchAccount",
   environmentControlClaim: "environmentControl.claim",
   environmentControlTouch: "environmentControl.touch",
   environmentControlKeep: "environmentControl.keep",
@@ -158,6 +161,14 @@ const EnvironmentControlUpgradeRpc = Rpc.make(
     error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
   },
 );
+const EnvironmentControlSwitchAccountRpc = Rpc.make(
+  ENVIRONMENT_CONTROL_WS_METHODS.environmentControlSwitchAccount,
+  {
+    payload: EnvironmentProvisionSwitchAccountInput,
+    success: EnvironmentProvisionSwitchAccountResult,
+    error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),
+  },
+);
 const EnvironmentControlTouchRpc = Rpc.make(
   ENVIRONMENT_CONTROL_WS_METHODS.environmentControlTouch,
   {
@@ -200,6 +211,7 @@ export const EnvironmentControlRpcs = [
   EnvironmentControlPauseRpc,
   EnvironmentControlResumeRpc,
   EnvironmentControlUpgradeRpc,
+  EnvironmentControlSwitchAccountRpc,
   EnvironmentControlClaimRpc,
   EnvironmentControlTouchRpc,
   EnvironmentControlKeepRpc,
