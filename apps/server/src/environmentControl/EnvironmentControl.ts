@@ -2145,12 +2145,24 @@ export const layer = Layer.effect(
                 Effect.flatMap((result) =>
                   result === "updated" ? Effect.logInfo("skill bundle updated") : Effect.void,
                 ),
-                Effect.ignore({ log: "Warn", message: "skill bundle could not be refreshed" }),
+                Effect.as(true),
+                Effect.catch((error) =>
+                  Effect.logWarning("skill bundle could not be refreshed", error).pipe(
+                    Effect.as(false),
+                  ),
+                ),
                 Effect.annotateLogs({ source: bundle.source }),
               ),
-            { discard: true },
           ),
         ),
+        Effect.flatMap((refreshed) =>
+          refreshed.every(Boolean)
+            ? Effect.void
+            : Effect.fail(new Error("A skill bundle could not be refreshed.")),
+        ),
+        // Until a bundle's first download lands, new chats start without it,
+        // so a failed refresh retries within minutes before waiting the hour.
+        Effect.retry({ schedule: Schedule.exponential("1 minute"), times: 4 }),
         Effect.ignore({ log: "Warn", message: "skill bundles could not be refreshed" }),
         Effect.repeat(Schedule.spaced(Duration.hours(1))),
         Effect.forkScoped,

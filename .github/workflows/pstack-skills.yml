@@ -19,7 +19,6 @@ jobs:
     name: Build and publish pstack skills
     runs-on: ubuntu-24.04
     env:
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: pstack-skills
     steps:
@@ -48,6 +47,8 @@ jobs:
           echo "UPSTREAM=$commit" >> "$GITHUB_ENV"
 
       - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           notes="$(printf 'pstack %s from cursor/plugins %s with scripts/pstack/overlay.patch at %s. Replaced by the pstack skills workflow.' "$VERSION" "$UPSTREAM" "$GITHUB_SHA")"
