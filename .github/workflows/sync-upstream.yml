@@ -54,6 +54,12 @@ jobs:
             } >&2
             exit 1
           fi
+          # Upstream runs some required jobs on Blacksmith, which the fork has no runners for: those
+          # jobs would queue forever and block the merge, so they run on GitHub's runner here.
+          sed -i -E 's/^( *runs-on: )blacksmith-[0-9]+vcpu-ubuntu-2404$/\1ubuntu-24.04/' .github/workflows/ci.yml
+          if ! git diff --quiet; then
+            git commit -qam "ci: run upstream's Blacksmith jobs on GitHub's runner, as the fork has none"
+          fi
           git push --force origin "$HEAD_BRANCH"
           title="chore: merge upstream pingdotgg/t3code"
           body="Merges ${behind} upstream commits through pingdotgg/t3code@${upstream}. Merge with **Create a merge commit**, never squash."
