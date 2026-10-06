@@ -251,6 +251,82 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
   },
 );
 
+/** How a host reads its accounts' usage when it places or moves a cloud chat. */
+interface AccountUsage {
+  readonly providers: ReadonlyArray<
+    Pick<ServerProvider, "instanceId" | "usageLimits"> & Partial<Pick<ServerProvider, "auth">>
+  >;
+  readonly now: number;
+  readonly load?: AccountLoad;
+}
+
+/** One driver's accounts on this host, the one with the most usage left per session first. */
+const rankDriverAccounts = (
+  settings: ServerSettings,
+  driver: string,
+  usage: AccountUsage,
+  preferred?: ProviderInstanceId,
+) => {
+  const limits = new Map(usage.providers.map((provider) => [provider.instanceId, provider]));
+  return rankAccounts(
+    Object.entries(deriveProviderInstanceConfigMap(settings)).flatMap(([id, instance]) =>
+      instance.driver === driver
+        ? [
+            {
+              instanceId: ProviderInstanceId.make(id),
+              driver: instance.driver,
+              email: limits.get(ProviderInstanceId.make(id))?.auth?.email,
+              usageLimits: limits.get(ProviderInstanceId.make(id))?.usageLimits,
+            },
+          ]
+        : [],
+    ),
+    usage.now,
+    preferred,
+    usage.load,
+  );
+};
+
+/**
+ * The account a cloud box moves its driver onto once the one it runs on is spent: the best ranked
+ * account of the driver whose login can leave this machine, skipping the excluded accounts, any
+ * account of the same subscription as one of them (by email), and any known to be spent. A usage
+ * reading can be half an hour old, so the account that just hit its limit is excluded by the
+ * caller rather than trusted to read as spent. None when no account qualifies.
+ */
+export const resolveSwitchProfile = Effect.fn("resolveSwitchProfile")(function* (
+  settings: ServerSettings,
+  input: { readonly driver: string; readonly exclude: ReadonlySet<string> },
+  claudeOAuthTokens: Provisioning["claudeOAuthTokens"] | undefined,
+  usage: AccountUsage,
+  hostLogins?: HostLogins,
+) {
+  const accounts = rankDriverAccounts(settings, input.driver, usage);
+  const excludedEmails = new Set(
+    accounts.flatMap(({ instanceId, email }) =>
+      input.exclude.has(instanceId) && email ? [email.toLowerCase()] : [],
+    ),
+  );
+  for (const account of accounts) {
+    if (
+      input.exclude.has(account.instanceId) ||
+      (account.email !== undefined && excludedEmails.has(account.email.toLowerCase())) ||
+      isAccountSpent(account.driver, account.usageLimits, usage.now)
+    )
+      continue;
+    const profile = yield* Effect.result(
+      resolveProvisioningProviderProfile(
+        settings,
+        { providerInstanceId: account.instanceId, agentDriver: input.driver },
+        claudeOAuthTokens,
+        hostLogins,
+      ),
+    );
+    if (profile._tag === "Success") return Option.some(profile.success);
+  }
+  return Option.none<ProvisioningProviderProfile>();
+});
+
 /**
  * The accounts a new cloud environment runs, the routed one first.
  *
@@ -277,36 +353,14 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
     readonly pinAccount?: boolean | undefined;
   },
   claudeOAuthTokens: Provisioning["claudeOAuthTokens"] | undefined,
-  usage: {
-    readonly providers: ReadonlyArray<
-      Pick<ServerProvider, "instanceId" | "usageLimits"> & Partial<Pick<ServerProvider, "auth">>
-    >;
-    readonly now: number;
-    readonly load?: AccountLoad;
-  },
+  usage: AccountUsage,
   hostLogins?: HostLogins,
 ) {
   const instances = deriveProviderInstanceConfigMap(settings);
   const hint = ProviderInstanceId.make(input.providerInstanceId);
   const limits = new Map(usage.providers.map((provider) => [provider.instanceId, provider]));
   const ranked = (driver: string) =>
-    rankAccounts(
-      Object.entries(instances).flatMap(([id, instance]) =>
-        instance.driver === driver
-          ? [
-              {
-                instanceId: ProviderInstanceId.make(id),
-                driver: instance.driver,
-                email: limits.get(ProviderInstanceId.make(id))?.auth?.email,
-                usageLimits: limits.get(ProviderInstanceId.make(id))?.usageLimits,
-              },
-            ]
-          : [],
-      ),
-      usage.now,
-      hint,
-      usage.load,
-    ).map(({ instanceId }) => instanceId);
+    rankDriverAccounts(settings, driver, usage, hint).map(({ instanceId }) => instanceId);
   const firstPortable = Effect.fnUntraced(function* (driver: string) {
     const refusals = [];
     for (const instanceId of ranked(driver)) {

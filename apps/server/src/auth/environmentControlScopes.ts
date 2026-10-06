@@ -16,6 +16,7 @@ export const ENVIRONMENT_CONTROL_REQUIRED_SCOPES = {
   [WS_METHODS.environmentControlPause]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlResume]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlUpgrade]: AuthOrchestrationOperateScope,
+  [WS_METHODS.environmentControlSwitchAccount]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlClaim]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlTouch]: AuthOrchestrationOperateScope,
   [WS_METHODS.environmentControlKeep]: AuthOrchestrationOperateScope,

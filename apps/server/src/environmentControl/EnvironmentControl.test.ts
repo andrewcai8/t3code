@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
+import { makeAccountRotation, type AccountSwitchPorts } from "./accountSwitch.ts";
 import { createCleanupSweep } from "./cloudCleanup.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
@@ -999,6 +1000,103 @@ describe("a cloud machine whose agent is working", () => {
       { due: async () => "new-build", start: (lease) => void started.push(lease.leaseId) },
     );
   });
+
+  it.each(["its account lookup fails", "its box predates switching"] as const)(
+    "keeps a box whose chat hit a usage limit awake for one switch, then lets it sleep when %s",
+    async (failure) => {
+      const shell = boxShell([
+        boxThread("thread", "project-app", "Chat", {
+          providerInstanceId: "claudeAgent",
+          modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+          latestRunId: "run-1",
+          status: "failed",
+          lastErrorClass: "usage_limit",
+        }),
+      ]);
+      const sent: Array<string> = [];
+      const ports: AccountSwitchPorts = {
+        readShell: async () => shell,
+        accountDriver: async () => "claudeAgent",
+        pickAccount: async () => {
+          if (failure === "its account lookup fails")
+            throw new Error("The account's login could not be read.");
+          return {
+            instanceId: "claude-b",
+            name: "Claude B",
+            credential: {
+              kind: "environment",
+              variables: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-b" }],
+            },
+          };
+        },
+        sendSwitch: async (_lease, input) => {
+          sent.push(input.continueRunId ?? "none");
+          return "missing";
+        },
+      };
+      await withSqlRegistry(async (registry) => {
+        await registry.register({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          provider: "e2b",
+          providerInstanceId: "claude-a",
+          owner: { environmentId: "child", threadId: "thread" },
+        });
+        await registry.markActive({
+          leaseId: "lease",
+          remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+        });
+        const expire = () => registry.touch("lease", new Date("2026-01-01T00:00:00.000Z"), "host");
+        const calls: string[] = [];
+        const driver = setup().driver;
+        driver.pause = async ({ sandboxId }) => {
+          calls.push(`pause:${sandboxId}`);
+        };
+        const switches: Array<Promise<void>> = [];
+        const reports: Array<string> = [];
+        let manager: ReturnType<typeof createEnvironmentControl> | undefined;
+        const rotation = makeAccountRotation({
+          ports,
+          leases: registry,
+          enabled: async () => true,
+          holdBox: async (sandboxId) => manager?.holdBox(sandboxId) ?? null,
+          report: (_lease, outcome) =>
+            void reports.push(
+              outcome.kind === "failed" ? "failed" : `refused: ${outcome.result.kind}`,
+            ),
+        });
+        manager = createEnvironmentControl(
+          [],
+          {
+            ...driver,
+            accountRotation: {
+              due: rotation.due,
+              start: (lease) => void switches.push(rotation.start(lease)),
+            },
+          },
+          registry,
+          async () => ({ activity: "idle", chat: ownerChat(shell, "thread")! }),
+        );
+
+        await expire();
+        await manager.reapExpiredLeases();
+        await Promise.all(switches);
+        expect(calls).toEqual([]);
+        expect(reports).toEqual([
+          failure === "its account lookup fails" ? "failed" : "refused: refused",
+        ]);
+
+        await expire();
+        await manager.reapExpiredLeases();
+        await Promise.all(switches);
+        expect(calls).toEqual(["pause:sandbox"]);
+        expect(sent).toEqual(failure === "its account lookup fails" ? [] : ["run-1"]);
+        expect((await registry.findById("lease"))?.accountLimits).toEqual([
+          { instanceId: "claude-a", runId: "run-1", until: expect.any(String) },
+        ]);
+      });
+    },
+  );
 
   it("pauses a busy machine whose retention deadline has passed", async () => {
     await withExpiredLease(

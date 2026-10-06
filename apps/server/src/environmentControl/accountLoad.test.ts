@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DurableProvisionRequest, ProviderInstanceId, ServerSettings } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -109,6 +110,46 @@ it.effect("counts an awake box against its companions' accounts too", () =>
       ]),
     );
   }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "counts a box against the account it switched to, and keeps the switch when it re-registers",
+  () =>
+    Effect.gen(function* () {
+      const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
+      const sql = yield* SqlClient.SqlClient;
+      const box = {
+        leaseId: "claude-chat",
+        sandboxId: "claude-chat-box",
+        providerInstanceId: "claude-work",
+        companionInstanceIds: ["codex-spare"],
+      };
+      const switched = yield* Effect.promise(async () => {
+        await leases.register(box);
+        await leases.recordAccountSwitch(
+          "claude-chat",
+          {
+            from: "claude-work",
+            to: "claude-personal",
+            limit: { instanceId: "claude-work", runId: "run-1", until: "2999-01-01T00:00:00.000Z" },
+          },
+          DateTime.toDateUtc(DateTime.makeUnsafe("2026-10-06T12:00:00.000Z")),
+        );
+        // A resume or attach registers the ready box again with its original request.
+        return leases.register(box);
+      });
+
+      expect({ accounts: switched.accounts, limits: switched.accountLimits }).toEqual({
+        accounts: ["claude-personal", "codex-spare"],
+        limits: [{ instanceId: "claude-work", runId: "run-1", until: "2999-01-01T00:00:00.000Z" }],
+      });
+      expect(yield* readAccountLoad(leases, sql, noOperations)).toEqual(
+        new Map([
+          ["claude-personal", 1],
+          ["codex-spare", 1],
+        ]),
+      );
+    }).pipe(Effect.provide(layer)),
 );
 
 it.effect("counts local turns alone when cloud leases cannot be read", () =>

@@ -415,7 +415,7 @@ function file(scope: "home" | "workspace", destination: string, data: Uint8Array
  * that catches it mid-write is retried, and a login that still cannot be
  * parsed is refused rather than handed on raw.
  */
-async function homeFileData(destination: string, read: () => Promise<Buffer>) {
+export async function homeFileData(destination: string, read: () => Promise<Buffer>) {
   if (!credentialDestinations.codex.includes(relativePath(destination))) return await read();
   for (let attempt = 0; attempt < CODEX_LOGIN_READ_ATTEMPTS; attempt++) {
     if (attempt > 0) await NodeTimersPromises.setTimeout(CODEX_LOGIN_READ_RETRY_MS);

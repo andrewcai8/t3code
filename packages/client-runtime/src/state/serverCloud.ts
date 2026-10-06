@@ -205,6 +205,15 @@ export function createServerCloudAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.leaseId}`,
       },
     }),
+    switchProvisionedAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:cloud:switch-account",
+      tag: WS_METHODS.environmentControlSwitchAccount,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.environmentId}:${input.threadId}`,
+      },
+    }),
     stopManagedEnvironment: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:cloud:stop",
       tag: WS_METHODS.environmentControlStop,

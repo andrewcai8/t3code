@@ -12,7 +12,11 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { leaseOwnedUsage, type BoxUsageStore } from "../usage/boxUsage.ts";
-import type { ProvisionedLease, RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
+import {
+  leaseAccounts,
+  type ProvisionedLease,
+  type RemoteAccess,
+} from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat } from "./provisionedChats.ts";
 
 export type LeaseActivity = "busy" | "idle" | "unknown";
@@ -106,9 +110,9 @@ export interface LeaseObservation {
   readonly chat?: ProvisionedChat | null | undefined;
 }
 
-/** Reads a box's shell once, as its activity and its owner's chat. */
-export async function observeLease(lease: ProvisionedLease): Promise<LeaseObservation> {
-  if (!lease.remoteAccess) return { activity: "unknown" };
+/** A box's shell snapshot, or null when the box cannot be read. */
+export async function readLeaseShell(lease: ProvisionedLease): Promise<unknown> {
+  if (!lease.remoteAccess) return null;
   try {
     const response = await fetch(`${lease.remoteAccess.origin}/api/orchestration/shell`, {
       headers: boxOrchestrationHeaders(lease.remoteAccess),
@@ -117,13 +121,19 @@ export async function observeLease(lease: ProvisionedLease): Promise<LeaseObserv
     });
     if (!response.ok) {
       await response.body?.cancel();
-      return { activity: "unknown" };
+      return null;
     }
-    const body: unknown = await response.json();
-    return { activity: shellActivity(body), chat: readOwnerChat(lease, body) };
+    return (await response.json()) as unknown;
   } catch {
-    return { activity: "unknown" };
+    return null;
   }
+}
+
+/** Reads a box's shell once, as its activity and its owner's chat. */
+export async function observeLease(lease: ProvisionedLease): Promise<LeaseObservation> {
+  const body = await readLeaseShell(lease);
+  if (body === null) return { activity: "unknown" };
+  return { activity: shellActivity(body), chat: readOwnerChat(lease, body) };
 }
 
 /** A chat that cannot be read leaves the previous one kept, and never hides a busy box. */
@@ -219,7 +229,7 @@ export const pullLeaseUsage = Effect.fn("pullLeaseUsage")(function* (
   yield* store.replace({
     leaseId: lease.leaseId,
     origin: "box",
-    accountIds: [lease.providerInstanceId, ...(lease.companionInstanceIds ?? [])],
+    accountIds: leaseAccounts(lease),
     usage: leaseOwnedUsage(lease.leaseId, usage),
     pulledAt: DateTime.formatIso(yield* DateTime.now),
   });

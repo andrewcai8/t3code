@@ -63,6 +63,8 @@ export interface SettingsSearchItem {
   readonly wslAvailableOnly?: boolean;
   // Its row only renders while this environment's T3 Connect managed tunnel is on.
   readonly managedTunnelOnly?: boolean;
+  // Its row only renders for a server that provisions cloud machines.
+  readonly environmentControlOnly?: boolean;
   /**
    * Sorts after every other match. Keybinding commands mirror rows on other
    * surfaces, so "model" must still lead with Default model, not Model Picker.
@@ -81,6 +83,7 @@ export interface SettingsSearchAvailability {
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
   readonly managedTunnelActive?: boolean;
+  readonly hasEnvironmentControl?: boolean;
 }
 
 /**
@@ -316,6 +319,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Auto-resume limited threads",
     to: "/settings/general",
     searchTerms: ["usage quota rate limit reset recover continue"],
+  },
+  {
+    id: "auto-switch-cloud-accounts",
+    title: "Switch cloud chats to another account at a usage limit",
+    to: "/settings/general",
+    searchTerms: ["usage quota rate limit rotate account cloud machine continue"],
+    environmentControlOnly: true,
   },
   {
     id: "working-shelf",
@@ -1057,7 +1067,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.localEnvironmentOnly || !availability.localEnvironmentDisabled) &&
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
-      (!item.managedTunnelOnly || availability.managedTunnelActive === true),
+      (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
+      (!item.environmentControlOnly || availability.hasEnvironmentControl === true),
   );
 }
 

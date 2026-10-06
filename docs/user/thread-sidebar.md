@@ -207,6 +207,14 @@ the snooze. Enable **Snooze limited threads** in thread behavior settings to
 snooze limit stops by default. Providers without a reset time offer manual
 retry and the normal snooze choices.
 
+A Claude or Codex cloud chat that stops on a limit moves to the host's account
+of the same provider with the most usage left and continues, keeping its
+conversation and machine. Each account that hits a limit sits out until it
+resets, and the chat stays limited once no other account is left. Choose
+**Switch account** on the limit notice to move it yourself. Turn off **Switch
+cloud chats to another account at a usage limit** in the host's settings to
+leave limited cloud chats where they stopped.
+
 On web and desktop, use **Agents** to follow work delegated to subagents.
 Stop on a thread also stops the subagents it delegated to.
 

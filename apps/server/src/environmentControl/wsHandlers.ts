@@ -66,6 +66,11 @@ export const environmentControlWsHandlers = (
       observeRpcEffect(WS_METHODS.environmentControlResume, environmentControl.resume(input)),
     [WS_METHODS.environmentControlUpgrade]: (input) =>
       observeRpcEffect(WS_METHODS.environmentControlUpgrade, environmentControl.upgrade(input)),
+    [WS_METHODS.environmentControlSwitchAccount]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.environmentControlSwitchAccount,
+        environmentControl.switchAccount(input),
+      ),
     [WS_METHODS.environmentControlAttach]: (input) =>
       observeRpcEffect(WS_METHODS.environmentControlAttach, environmentControl.attach(input)),
     [WS_METHODS.environmentControlClaim]: (input) =>

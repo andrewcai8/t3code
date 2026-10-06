@@ -19,6 +19,8 @@ import {
   EnvironmentProvisionResult,
   EnvironmentProvisionTouchInput,
   EnvironmentProvisionTouchResult,
+  GuestAccountSwitchInput,
+  GuestAccountSwitchResult,
   ProvisionedEnvironmentList,
 } from "./environmentControl.ts";
 import type {
@@ -102,6 +104,16 @@ export function makeEnvironmentCloudHttpApis<
         headers: shared.bearerHeaders,
         payload: EnvironmentProvisionDisposeInput,
         success: EnvironmentProvisionDisposeResult,
+        error: scopedErrors,
+      }).middleware(shared.auth),
+    )
+    .add(
+      // A host moves one of its boxes onto another provider account. A box that predates it
+      // answers 404, which the host reports as an upgrade the box still needs.
+      HttpApiEndpoint.post("switchAccount", "/api/environment-control/switch-account", {
+        headers: shared.bearerHeaders,
+        payload: GuestAccountSwitchInput,
+        success: GuestAccountSwitchResult,
         error: scopedErrors,
       }).middleware(shared.auth),
     )

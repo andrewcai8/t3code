@@ -20,6 +20,7 @@ import {
   type CloudProvisionPorts,
   claimFirstTurnBox,
   claimProvisionedBox,
+  describeAccountSwitch,
   draftBoxLease,
   leaseReachesBox,
   type NewChatEnvironmentState,
@@ -802,5 +803,38 @@ describe("nextDraftEnvironment", () => {
         runTargets: [laptop],
       }),
     ).toBeNull();
+  });
+});
+
+describe("describeAccountSwitch", () => {
+  it("tells the user the chat continues only when the host continued it", () => {
+    expect(
+      describeAccountSwitch({ kind: "switched", account: "Work Claude", continued: true }),
+    ).toEqual({
+      switched: true,
+      title: "Switched to Work Claude",
+      description: "Continuing where it left off.",
+    });
+    expect(
+      describeAccountSwitch({ kind: "switched", account: "Work Claude", continued: false }),
+    ).toEqual({
+      switched: true,
+      title: "Switched to Work Claude",
+      description: "Resume the chat to continue.",
+    });
+  });
+
+  it("reports a refusal with the host's message", () => {
+    expect(
+      describeAccountSwitch({
+        kind: "refused",
+        reason: "no_account",
+        message: "Every other Claude account is out of usage.",
+      }),
+    ).toEqual({
+      switched: false,
+      title: "Could not switch accounts",
+      description: "Every other Claude account is out of usage.",
+    });
   });
 });

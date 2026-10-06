@@ -11,12 +11,14 @@ import {
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 import * as Schema from "effect/Schema";
-import { afterEach, beforeEach, expect } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Option from "effect/Option";
 import {
   resolveProvisioningProfiles,
   resolveProvisioningProviderProfile,
+  resolveSwitchProfile,
 } from "./ProvisioningProviderProfile.ts";
 import { credentialSecretName } from "../provider/providerCredentialName.ts";
 
@@ -725,4 +727,76 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       );
     }),
   );
+
+  describe("the account a cloud box switches to", () => {
+    const token = (name: string) => ({
+      driver: "claudeAgent",
+      enabled: true,
+      environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: `${name}-token`, sensitive: true }],
+    });
+    const settings = decodeSettings({
+      providers: { claudeAgent: { enabled: false } },
+      providerInstances: {
+        claude_work: token("work"),
+        claude_spare: token("spare"),
+        claude_roomy: token("roomy"),
+        claude_twin: token("twin"),
+      },
+    });
+    const now = Date.parse("2026-10-06T12:00:00.000Z");
+    const reading = (instanceId: string, usedPercent: number, email: string) => ({
+      instanceId: ProviderInstanceId.make(instanceId),
+      auth: { status: "authenticated" as const, email },
+      usageLimits: {
+        checkedAt: "2026-10-06T11:45:00.000Z",
+        windows: [
+          {
+            id: "five_hour",
+            kind: "session" as const,
+            label: "Session",
+            usedPercent,
+            resetsAt: "2026-10-06T15:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const switchFrom = (
+      exclude: ReadonlyArray<string>,
+      providers: ReadonlyArray<ReturnType<typeof reading>>,
+    ) =>
+      resolveSwitchProfile(
+        settings,
+        { driver: "claudeAgent", exclude: new Set(exclude) },
+        undefined,
+        { providers, now },
+      ).pipe(Effect.map(Option.map((profile) => profile.instanceId)));
+
+    it.effect("takes the account with the most left, past the one that hit its limit", () =>
+      Effect.gen(function* () {
+        // The work account still reads as roomy: its reading predates the limit it just hit.
+        const providers = [
+          reading("claude_work", 10, "work@example.com"),
+          reading("claude_spare", 60, "spare@example.com"),
+          reading("claude_roomy", 20, "roomy@example.com"),
+          reading("claude_twin", 0, "work@example.com"),
+        ];
+        expect(yield* switchFrom(["claude_work"], providers)).toEqual(Option.some("claude_roomy"));
+      }),
+    );
+
+    it.effect("skips spent accounts, and finds none once every other one is spent", () =>
+      Effect.gen(function* () {
+        const providers = [
+          reading("claude_work", 100, "work@example.com"),
+          reading("claude_spare", 100, "spare@example.com"),
+          reading("claude_roomy", 30, "roomy@example.com"),
+          reading("claude_twin", 100, "twin@example.com"),
+        ];
+        expect(yield* switchFrom(["claude_work"], providers)).toEqual(Option.some("claude_roomy"));
+        expect(yield* switchFrom(["claude_work", "claude_roomy"], providers)).toEqual(
+          Option.none(),
+        );
+      }),
+    );
+  });
 });
