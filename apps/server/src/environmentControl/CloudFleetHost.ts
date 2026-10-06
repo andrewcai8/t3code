@@ -13,6 +13,7 @@
  * @module CloudFleetHost
  */
 import {
+  CLOUD_FORKS_ENVIRONMENT_ID,
   type DiscoveredProvisionedEnvironment,
   defaultInstanceIdForDriver,
   EnvironmentId,
@@ -56,6 +57,7 @@ import * as EnvironmentControl from "./EnvironmentControl.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { createProvisionedLeaseRegistry, type RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
+import * as WorkerForks from "./WorkerForks.ts";
 
 /** The environment every box is offered for starting a chat on a fresh cloud machine. */
 export const NEW_CLOUD_CHAT_ENVIRONMENT_ID = EnvironmentId.make("cloud:new-chat");
@@ -90,7 +92,10 @@ export class CloudFleetHost extends Context.Service<
      * until the call ends, because a new registration fails the box's pending calls.
      */
     readonly reconcile: Effect.Effect<void>;
-    /** Reconciles now and on an interval, for the life of the scope. */
+    /**
+     * Reconciles now and on an interval, for the life of the scope, and removes the worker forks
+     * an earlier run of this host left behind.
+     */
     readonly start: Effect.Effect<void, never, Scope.Scope>;
   }
 >()("t3/environmentControl/CloudFleetHost") {}
@@ -106,7 +111,10 @@ const boxName = (box: Box) => box.chat?.thread.title ?? box.label;
 const startedBy = (box: Box) => `${STARTED_CHAT_PREFIX}${box.leaseId}:`;
 const canStartChats = (box: Box) => !box.threadId?.startsWith(STARTED_CHAT_PREFIX);
 
-/** What one box is offered: every other cloud chat, then a new one unless a chat started it. */
+/**
+ * What one box is offered: every other cloud chat, a new one unless a chat started it, and
+ * copies of its own machine for t3_fork_run.
+ */
 function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegistration {
   const siblings = boxes
     .filter((box) => box.environmentId !== source.environmentId)
@@ -141,6 +149,11 @@ function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegis
             },
           ]
         : []),
+      {
+        environmentId: CLOUD_FORKS_ENVIRONMENT_ID,
+        label: "Throwaway copies of this machine, for t3_fork_run",
+        connected: true,
+      },
     ],
   };
 }
@@ -157,6 +170,7 @@ const make = Effect.gen(function* () {
   const environmentControl = yield* EnvironmentControl.EnvironmentControl;
   const operations = yield* ProvisionOperationStore;
   const boxClient = yield* BoxFleetClient.BoxFleetClient;
+  const forks = yield* WorkerForks.WorkerForks;
   const crypto = yield* Crypto.Crypto;
   const leases = createProvisionedLeaseRegistry(sql);
   const connections = yield* FiberMap.make<string>();
@@ -397,6 +411,16 @@ const make = Effect.gen(function* () {
           "capability_denied",
           "Changing another cloud chat needs this chat in full-access/default mode.",
         );
+      if (environmentId === CLOUD_FORKS_ENVIRONMENT_ID) {
+        if (request.op === "forks.run") return yield* forks.run(source, actor, request.input);
+        if (request.op === "forks.status") return yield* forks.status(source, request.input);
+        return yield* failure(
+          "invalid_request",
+          "Only t3_fork_run and t3_fork_status work in the forks environment.",
+        );
+      }
+      if (request.op === "forks.run" || request.op === "forks.status")
+        return yield* failure("invalid_request", "Forks run only in the forks environment.");
       if (environmentId === NEW_CLOUD_CHAT_ENVIRONMENT_ID) {
         if (request.op !== "threads.launch")
           return yield* failure(
@@ -541,11 +565,10 @@ const make = Effect.gen(function* () {
 
   return CloudFleetHost.of({
     reconcile,
-    start: reconcile.pipe(
-      Effect.repeat(Schedule.spaced(RECONCILE_INTERVAL)),
-      Effect.forkScoped,
-      Effect.asVoid,
-    ),
+    start: Effect.gen(function* () {
+      yield* forks.sweep.pipe(Effect.forkScoped);
+      yield* reconcile.pipe(Effect.repeat(Schedule.spaced(RECONCILE_INTERVAL)), Effect.forkScoped);
+    }),
   });
 });
 

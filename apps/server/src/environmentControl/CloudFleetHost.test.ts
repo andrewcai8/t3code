@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
+  CLOUD_FORKS_ENVIRONMENT_ID,
   DurableProvisionRequest,
   EnvironmentId,
   type EnvironmentProvisionInput,
@@ -25,6 +26,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as BoxFleetClient from "./BoxFleetClient.ts";
 import * as CloudFleetHost from "./CloudFleetHost.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
+import * as WorkerForks from "./WorkerForks.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { createProvisionedChatStore, ownerChat } from "./provisionedChats.ts";
@@ -107,6 +109,7 @@ const setup = Effect.gen(function* () {
   const provisioned: Array<EnvironmentProvisionInput> = [];
   const invoked: Array<[string, FleetInvokeInput]> = [];
   const opened: Array<string> = [];
+  const forked: Array<[string, string, FleetInvokeInput["actor"], unknown]> = [];
   const registrations = new Map<string, Queue.Queue<FleetHostRegistration>>();
   const requests = new Map<string, Queue.Queue<FleetHostRequest>>();
   for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
@@ -217,8 +220,15 @@ const setup = Effect.gen(function* () {
       });
     },
   });
+  const forks = Layer.mock(WorkerForks.WorkerForks)({
+    run: (source, actor, input) => {
+      forked.push([source.leaseId, source.sandboxId, actor, input]);
+      return Effect.succeed({ batchId: "batch-1", state: "running" as const, jobs: [] });
+    },
+    sweep: Effect.void,
+  });
   const layer = CloudFleetHost.layer.pipe(
-    Layer.provideMerge(Layer.mergeAll(boxes, control, NodeCrypto.layer)),
+    Layer.provideMerge(Layer.mergeAll(boxes, control, forks, NodeCrypto.layer)),
     Layer.provideMerge(ProvisionOperationStore.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
   );
@@ -263,6 +273,7 @@ const setup = Effect.gen(function* () {
     opened,
     closed,
     oldBuilds,
+    forked,
   };
 });
 
@@ -319,6 +330,11 @@ it.effect("offers each awake chat the other chats with their cards, waking none"
         {
           environmentId: "cloud:new-chat",
           label: "New cloud chat on a fresh machine",
+          connected: true,
+        },
+        {
+          environmentId: "cloud:forks",
+          label: "Throwaway copies of this machine, for t3_fork_run",
           connected: true,
         },
       ]);
@@ -461,6 +477,7 @@ it.effect("re-registers on the same connection when another chat's card changes"
         "Write docs",
         "Ship release 2",
         "New cloud chat on a fresh machine",
+        "Throwaway copies of this machine, for t3_fork_run",
       ]);
       expect(opened.filter((at) => at === origin(1))).toEqual([origin(1)]);
     }),
@@ -477,6 +494,7 @@ it.effect("lets a chat another chat started reach the others but start no more",
         "box-1",
         "box-2",
         "box-4",
+        "cloud:forks",
       ]);
       for (const index of [6, 7, 8])
         yield* addBox(index, {
@@ -682,5 +700,40 @@ it.effect("backs off from a box that refuses the fleet connection, doubling each
       seen.push(yield* attempts);
       expect(seen).toEqual([1, 1, 2, 2, 3]);
     }),
+  ),
+);
+
+it.effect("runs a chat's forks for the box that relayed them, on no other box", () =>
+  withBoxes(({ relay, forked, invoked }) =>
+    Effect.gen(function* () {
+      const jobs = [{ command: "pnpm test --shard 1/2" }];
+      const response = yield* relay(CLOUD_FORKS_ENVIRONMENT_ID, {
+        op: "forks.run",
+        input: { jobs },
+      });
+      expect(response).toEqual({
+        requestId: "request-1",
+        result: { batchId: "batch-1", state: "running", jobs: [] },
+      });
+      expect(forked).toEqual([
+        [id(1), "sandbox-1", { environmentId: "box-1", threadId: "chat-1" }, { jobs }],
+      ]);
+      expect(invoked).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("starts forks only for a chat in full-access/default mode", () =>
+  withBoxes(
+    ({ relay, forked }) =>
+      Effect.gen(function* () {
+        const response = yield* relay(CLOUD_FORKS_ENVIRONMENT_ID, {
+          op: "forks.run",
+          input: { jobs: [{ command: "pnpm test" }] },
+        });
+        expect(response).toMatchObject({ failure: { code: "capability_denied" } });
+        expect(forked).toEqual([]);
+      }),
+    { interactionMode: "plan" },
   ),
 );

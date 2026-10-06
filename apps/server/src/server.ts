@@ -11,6 +11,8 @@ import * as NodeHttp from "node:http";
 import * as BoxFleetClient from "./environmentControl/BoxFleetClient.ts";
 import * as CloudFleetHost from "./environmentControl/CloudFleetHost.ts";
 import * as EnvironmentControl from "./environmentControl/EnvironmentControl.ts";
+import * as ForkMachines from "./environmentControl/ForkMachines.ts";
+import * as WorkerForks from "./environmentControl/WorkerForks.ts";
 import {
   environmentControlBodyLimitLayer,
   environmentControlHttpApiLayer,
@@ -534,7 +536,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // The host relays each awake cloud chat's fleet calls to the user's other cloud chats.
   Layer.effectDiscard(
     CloudFleetHost.CloudFleetHost.pipe(Effect.flatMap((host) => host.start)),
-  ).pipe(Layer.provide(CloudFleetHost.layer), Layer.provide(BoxFleetClient.layer)),
+  ).pipe(
+    Layer.provide(CloudFleetHost.layer),
+    Layer.provide(WorkerForks.layer),
+    Layer.provide(ForkMachines.layerE2b),
+    Layer.provide(BoxFleetClient.layer),
+  ),
   layerThreadSettlementWorker,
   Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
     Layer.provide(ProjectionStoreV2.layer),

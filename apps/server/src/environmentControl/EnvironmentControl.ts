@@ -844,6 +844,8 @@ export class EnvironmentControl extends Context.Service<
       leaseId: string,
     ) => Effect.Effect<string | null, EnvironmentControlError>;
     readonly list: Effect.Effect<ReadonlyArray<ManagedEnvironment>, EnvironmentControlError>;
+    /** The cloud configuration as last read from disk, or null when this install has none. */
+    readonly controlConfig: Effect.Effect<EnvironmentControlConfig | null, EnvironmentControlError>;
     /** The cloud environments the current configuration can provision; none without one. */
     readonly provisionProviders: Effect.Effect<
       ReadonlyArray<ProvisionProvider>,
@@ -2214,6 +2216,7 @@ export const layer = Layer.effect(
           catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
         }),
       list: run((service) => service.list(), []),
+      controlConfig: run<EnvironmentControlConfig | null>(async (service) => service.config, null),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
       provisionedSkills: localAgentRuns
         ? Effect.succeed(undefined)

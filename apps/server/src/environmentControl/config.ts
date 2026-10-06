@@ -255,6 +255,25 @@ const Provisioning = Schema.Struct({
    * commands, and a chat was created for it. Default 12; `0` disables both.
    */
   warmBaseRefreshHours: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Limits on t3_fork_run, which runs a cloud chat's jobs in throwaway copies of its machine. */
+  workerForks: Schema.optional(
+    Schema.Struct({
+      /** Copies one chat may run at once. Default 8. */
+      maxPerChat: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /** Copies this host runs at once, across chats. Default 20. */
+      maxPerHost: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /** Longest a job may run. Default 120. */
+      maxJobMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /** Largest compressed outputs one job copies back into its chat's machine. Default 100. */
+      maxCopyBackMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+      /**
+       * Where each job uploads its logs and outputs, as `s3://bucket/prefix`, under
+       * `<environmentId>/<batchId>/<job>/`. The copy uploads with the AWS credentials its chat's
+       * agent has. Without it, outputs come back only with copyBack.
+       */
+      outputsUri: Schema.optional(TrimmedNonEmptyString.check(Schema.isPattern(/^s3:\/\/[^/]+/))),
+    }),
+  ),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
   namespace: Schema.optional(
     Schema.Struct({
