@@ -15,12 +15,10 @@ const E2B_RESUME_BACKOFF_MS = 2_000;
  * no capacity, a 5xx), or it did not answer in time.
  */
 export class E2bPlacementUnavailable extends Error {
-  constructor(
-    message: string,
-    readonly failure: ProviderStartFailure,
-    options?: ErrorOptions,
-  ) {
+  readonly failure: ProviderStartFailure;
+  constructor(message: string, failure: ProviderStartFailure, options?: ErrorOptions) {
     super(message, options);
+    this.failure = failure;
   }
 }
 
