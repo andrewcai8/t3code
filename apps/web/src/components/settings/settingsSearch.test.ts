@@ -240,6 +240,24 @@ describe("searchSettings", () => {
     expect(itemIds(true)).toContain("hold-webhooks-while-offline");
   });
 
+  it("offers cloud account switching only for a server that provisions cloud machines", () => {
+    const availability = {
+      hasCloudPublicConfig: true,
+      hasEnvironment: true,
+      hasProviderSettingsEnvironment: true,
+      hasMacProviderSettingsEnvironment: false,
+      canManageLocalBackend: true,
+      isWslSettingsRowVisible: false,
+      hasThreadAutoSettlement: false,
+    };
+    const itemIds = (hasEnvironmentControl: boolean) =>
+      filterAvailableSettingsSearchItems({ ...availability, hasEnvironmentControl }).map(
+        (item) => item.id,
+      );
+    expect(itemIds(false)).not.toContain("auto-switch-cloud-accounts");
+    expect(itemIds(true)).toContain("auto-switch-cloud-accounts");
+  });
+
   it("shows automatic settlement settings when the server supports them", () => {
     const available = filterAvailableSettingsSearchItems({
       hasCloudPublicConfig: false,

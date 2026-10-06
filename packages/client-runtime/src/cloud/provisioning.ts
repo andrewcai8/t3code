@@ -5,6 +5,7 @@ import {
   type DiscoveredProvisionedEnvironment,
   type EnvironmentProvisionInput,
   type EnvironmentProvisionResult,
+  type EnvironmentProvisionSwitchAccountResult,
   type ProjectId,
   type ProvisionedChat,
   ProvisionProvider,
@@ -359,6 +360,25 @@ export function newChatRunTargets<
 /** The name a cloud machine kind goes by wherever a person picks or reads it. */
 export function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
   return provider === "namespace" ? "Namespace Mac" : "E2B";
+}
+
+/** What a client tells the user after asking a host to move a cloud chat onto another account. */
+export function describeAccountSwitch(result: EnvironmentProvisionSwitchAccountResult): {
+  readonly switched: boolean;
+  readonly title: string;
+  readonly description: string;
+} {
+  if (result.kind === "refused") {
+    return { switched: false, title: "Could not switch accounts", description: result.message };
+  }
+  return {
+    switched: true,
+    title: `Switched to ${result.account}`,
+    // The host already sent the continue message when `continued`, so the client must not resume.
+    description: result.continued
+      ? "Continuing where it left off."
+      : "Resume the chat to continue.",
+  };
 }
 
 export interface CloudProvisionDraft {

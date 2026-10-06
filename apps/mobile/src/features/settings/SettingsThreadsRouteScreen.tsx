@@ -90,6 +90,7 @@ function AutoSettleSettingsRows() {
     patch: Partial<AutoSettleSettings> & {
       autoResumeLimitedThreads?: boolean;
       snoozeLimitedThreads?: boolean;
+      autoSwitchCloudAccounts?: boolean;
     },
   ) => {
     if (writeInFlight.current) return;
@@ -128,6 +129,9 @@ function AutoSettleSettingsRows() {
       target.environment.serverConfig.environment.capabilities.projectSettingsOverrides === true,
   );
   const disabled = pendingWrites > 0 || (projectSelected && !supportsProjectOverrides);
+  const runsEnvironmentControl = syncTargets.every(
+    (target) => target.environment.serverConfig.environmentControl === true,
+  );
   const hasProjectOverrides =
     projectSelected &&
     syncTargets.some(
@@ -185,6 +189,15 @@ function AutoSettleSettingsRows() {
             disabled={disabled}
             onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
           />
+          {runsEnvironmentControl ? (
+            <SettingsSwitchRow
+              icon="clock"
+              label="Switch cloud chats to another account at a usage limit"
+              value={uniformMobileSetting(displayTargets, "autoSwitchCloudAccounts")}
+              disabled={disabled}
+              onValueChange={(value) => writeToAll({ autoSwitchCloudAccounts: value })}
+            />
+          ) : null}
         </SettingsSection>
       ) : null}
       <SettingsSection title="Auto-settle">

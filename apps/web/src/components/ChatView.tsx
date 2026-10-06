@@ -79,7 +79,10 @@ import {
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import {
+  connectionBox,
+  type EnvironmentConnectionPresentation,
+} from "@t3tools/client-runtime/connection";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
   wasBootstrapThreadDeleted,
@@ -7566,6 +7569,10 @@ export default function ChatView(props: ChatViewProps) {
       }),
     [feedbackSubmissions, routeThreadKey],
   );
+  const limitBoxManagerId =
+    activeEnvironment === null
+      ? null
+      : (connectionBox(activeEnvironment.entry.target)?.managerId ?? null);
   const limitRecoveryBanner =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -7583,6 +7590,13 @@ export default function ChatView(props: ChatViewProps) {
             });
             if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           },
+          accountSwitch:
+            limitBoxManagerId === null
+              ? null
+              : {
+                  environmentId: limitBoxManagerId,
+                  input: { environmentId, threadId: activeThreadShell.id },
+                },
         })
       : null;
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {

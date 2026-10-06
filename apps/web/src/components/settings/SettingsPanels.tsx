@@ -586,6 +586,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
         ? ["Snooze limited threads"]
         : []),
+      ...(settings.autoSwitchCloudAccounts !== DEFAULT_UNIFIED_SETTINGS.autoSwitchCloudAccounts
+        ? ["Switch cloud chats to another account at a usage limit"]
+        : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
       ...(settings.persistComposerContextStrip !==
       DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip
@@ -706,6 +709,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sidebarAutoSettleOnMerge,
       settings.autoResumeLimitedThreads,
       settings.snoozeLimitedThreads,
+      settings.autoSwitchCloudAccounts,
       settings.sidebarProjectGroupingMode,
       settings.sidebarProjectSortOrder,
       settings.sidebarWorkingShelfEnabled,
@@ -813,6 +817,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
+      autoSwitchCloudAccounts: DEFAULT_UNIFIED_SETTINGS.autoSwitchCloudAccounts,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
@@ -2192,6 +2197,9 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadAutoSettlement === true,
     );
+  const runsEnvironmentControl =
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every((target) => target.serverConfig?.environmentControl === true);
   const supportsRestartContinuation =
     connectedEnvironments.length > 0 &&
     connectedEnvironments.every(
@@ -2362,6 +2370,24 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        {runsEnvironmentControl ? (
+          <SettingsRow
+            serverScoped
+            {...searchableSetting("auto-switch-cloud-accounts")}
+            description="Move a cloud chat stopped by a usage limit to the account with the most usage left, and continue it."
+            settingKeys={["autoSwitchCloudAccounts"]}
+            control={
+              <ScopedSwitch
+                settingKeys={["autoSwitchCloudAccounts"]}
+                checked={settings.autoSwitchCloudAccounts}
+                onCheckedChange={(checked) =>
+                  updateSettings({ autoSwitchCloudAccounts: Boolean(checked) })
+                }
+                aria-label="Switch cloud chats to another account at a usage limit"
+              />
+            }
+          />
+        ) : null}
 
         <SettingsRow
           {...searchableSetting("working-shelf")}
