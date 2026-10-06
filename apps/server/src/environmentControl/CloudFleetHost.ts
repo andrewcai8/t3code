@@ -83,6 +83,8 @@ const WAKE_BUDGET = Duration.seconds(45);
 const LAUNCH_BUDGET = Duration.seconds(50);
 const RELAY_DEADLINE_MS = 55_000;
 const FOLLOW_UP_BUDGET = Duration.seconds(20);
+// A reserved fork batch starts this long after its answer even if the answer never reached the box.
+const START_FALLBACK = Duration.seconds(20);
 
 export class CloudFleetHost extends Context.Service<
   CloudFleetHost,
@@ -164,10 +166,12 @@ function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegis
  * chat's machine, and the pause drops the connection the answer travels on.
  */
 class StartAfterAnswer {
-  constructor(
-    readonly result: unknown,
-    readonly start: Effect.Effect<void>,
-  ) {}
+  readonly result: unknown;
+  readonly start: Effect.Effect<void>;
+  constructor(result: unknown, start: Effect.Effect<void>) {
+    this.result = result;
+    this.start = start;
+  }
 }
 
 type BoxConnection = BoxFleetClient.BoxFleetConnection;
@@ -186,6 +190,7 @@ const make = Effect.gen(function* () {
   const boxClient = yield* BoxFleetClient.BoxFleetClient;
   const forks = yield* WorkerForks.WorkerForks;
   const crypto = yield* Crypto.Crypto;
+  const hostScope = yield* Effect.scope;
   const leases = createProvisionedLeaseRegistry(sql);
   const connections = yield* FiberMap.make<string>();
   // Wakes and launches outlive the call that asked, so a retry joins the one in flight.
@@ -428,6 +433,8 @@ const make = Effect.gen(function* () {
       if (environmentId === CLOUD_FORKS_ENVIRONMENT_ID) {
         if (request.op === "forks.run") {
           const reserved = yield* forks.run(source, actor, request.input);
+          // The answer starts the batch; if it never reaches the box, this still does. Start runs once.
+          yield* reserved.start.pipe(Effect.delay(START_FALLBACK), Effect.forkIn(hostScope));
           return new StartAfterAnswer(reserved.batch, reserved.start);
         }
         if (request.op === "forks.status") return yield* forks.status(source, request.input);
