@@ -50,8 +50,10 @@ const AFTER_JOB_MS = 15 * 60_000;
 /** A job whose copy has not answered this long after its timeout has lost its copy. */
 const RUN_GRACE_MS = 5 * 60_000;
 const FINISHED_BATCH_TTL_MS = 6 * 3_600_000;
+/** E2B keeps no sandbox longer than a day. */
+const MAX_LIFETIME_MS = 86_400_000;
 
-export interface ForkLimits {
+interface ForkLimits {
   readonly maxPerChat: number;
   readonly maxPerHost: number;
   readonly maxJobMs: number;
@@ -59,7 +61,7 @@ export interface ForkLimits {
   readonly outputsUri: string | undefined;
 }
 
-export const forkLimits = (settings: ForkMachines.WorkerForkSettings): ForkLimits => ({
+const forkLimits = (settings: ForkMachines.WorkerForkSettings): ForkLimits => ({
   maxPerChat: settings.maxPerChat ?? 8,
   maxPerHost: settings.maxPerHost ?? 20,
   maxJobMs: (settings.maxJobMinutes ?? 120) * 60_000,
@@ -164,7 +166,11 @@ const make = Effect.gen(function* () {
       });
     return Effect.acquireUseRelease(
       Effect.gen(function* () {
-        const forkId = yield* machines.start(captureId, tag, timeoutMs + AFTER_JOB_MS);
+        const forkId = yield* machines.start(
+          captureId,
+          tag,
+          Math.min(timeoutMs + AFTER_JOB_MS, MAX_LIFETIME_MS),
+        );
         batch.jobs[index] = { index, state: "running" };
         yield* Effect.logInfo("worker fork started", { ...fields, forkId });
         return { forkId, startedAt: yield* Clock.currentTimeMillis };
@@ -213,6 +219,8 @@ const make = Effect.gen(function* () {
               .pipe(Effect.tapError(logStep), Effect.option);
             if (Option.isNone(copied)) problems.push("Copying the outputs back failed.");
             else if (copied.value.kind === "copied") copiedTo = destination;
+            else if (copied.value.kind === "asleep")
+              problems.push("This chat's machine was asleep, so outputs were not copied back.");
             else
               problems.push(
                 `The outputs are ${Math.ceil(copied.value.bytes / 1048576)} MiB compressed, over the ${Math.floor(limits.maxCopyBackBytes / 1048576)} MiB copy-back limit.`,
@@ -258,9 +266,26 @@ const make = Effect.gen(function* () {
       const chat = yield* slotsFor(source.leaseId, limits.maxPerChat);
       yield* hostSlots.resize(limits.maxPerHost);
       const tag = { host, batchId: batch.id, leaseId: source.leaseId };
-      yield* Effect.acquireUseRelease(
-        machines.capture(source.sandboxId, tag),
-        (captureId) =>
+      // Sweeping the batch at its end deletes its capture, and any copy or capture whose
+      // answer was lost on the way back.
+      const sweepBatch = machines.sweep(tag).pipe(
+        Effect.tap(({ forks }) =>
+          forks === 0
+            ? Effect.void
+            : Effect.logWarning("removed worker forks a batch lost track of", {
+                batchId: batch.id,
+                forks,
+              }),
+        ),
+        Effect.catch((error) =>
+          Effect.logWarning("a worker fork batch could not be swept", {
+            batchId: batch.id,
+            cause: error.cause,
+          }),
+        ),
+      );
+      yield* machines.capture(source.sandboxId, tag).pipe(
+        Effect.flatMap((captureId) =>
           Effect.forEach(
             input.jobs.map((_, index) => index),
             (index) =>
@@ -272,8 +297,7 @@ const make = Effect.gen(function* () {
               discard: true,
             },
           ),
-        (captureId) => machines.release(captureId),
-      ).pipe(
+        ),
         Effect.catchTags({
           ForkMachineError: (error) =>
             Effect.sync(() => {
@@ -282,6 +306,7 @@ const make = Effect.gen(function* () {
                   batch.jobs[index] = { index, state: "failed", message: error.message };
             }),
         }),
+        Effect.ensuring(sweepBatch),
       );
     }).pipe(
       Effect.ensuring(
@@ -356,7 +381,7 @@ const make = Effect.gen(function* () {
   return WorkerForks.of({
     run,
     status,
-    sweep: machines.sweep(host).pipe(
+    sweep: machines.sweep({ host }).pipe(
       Effect.tap(({ forks, captures }) =>
         forks + captures === 0
           ? Effect.void

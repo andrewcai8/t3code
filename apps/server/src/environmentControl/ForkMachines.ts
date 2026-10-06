@@ -22,7 +22,7 @@ export type WorkerForkSettings = NonNullable<
 >;
 
 export class ForkMachineError extends Schema.TaggedError<ForkMachineError>()("ForkMachineError", {
-  step: Schema.Literals(["capture", "start", "run", "upload", "copy", "sweep"]),
+  step: Schema.Literals(["settings", "capture", "start", "run", "upload", "copy", "kill", "sweep"]),
   cause: Schema.Defect(),
 }) {
   override get message(): string {
@@ -47,7 +47,9 @@ export interface ForkJobExit {
 
 export type ForkCopyBack =
   | { readonly kind: "copied" }
-  | { readonly kind: "too_large"; readonly bytes: number };
+  | { readonly kind: "too_large"; readonly bytes: number }
+  /** The chat's machine went to sleep while the job ran; it is not woken for this. */
+  | { readonly kind: "asleep" };
 
 export class ForkMachines extends Context.Service<
   ForkMachines,
@@ -56,8 +58,6 @@ export class ForkMachines extends Context.Service<
     readonly settings: Effect.Effect<WorkerForkSettings | null, ForkMachineError>;
     /** Captures the chat's machine once; every copy in its batch starts from the capture. */
     readonly capture: (sandboxId: string, tag: ForkTag) => Effect.Effect<string, ForkMachineError>;
-    /** Deletes a capture. Never fails: a capture left behind is the sweep's. */
-    readonly release: (captureId: string) => Effect.Effect<void>;
     /**
      * Starts one copy, which the provider removes by itself after `lifetimeMs`. Before it
      * returns, the copy's T3 server and every agent process it inherited are stopped.
@@ -90,10 +90,14 @@ export class ForkMachines extends Context.Service<
     ) => Effect.Effect<ForkCopyBack, ForkMachineError>;
     /** Removes a copy. Never fails, and a copy already gone is fine. */
     readonly kill: (forkId: string) => Effect.Effect<void>;
-    /** Removes every copy and capture tagged with `host`; answers how many of each. */
-    readonly sweep: (
-      host: string,
-    ) => Effect.Effect<{ readonly forks: number; readonly captures: number }, ForkMachineError>;
+    /**
+     * Removes every copy and capture tagged with `host`, or only those of one batch; answers how
+     * many of each. A batch's end sweeps it, which also catches a copy whose start answer was lost.
+     */
+    readonly sweep: (scope: {
+      readonly host: string;
+      readonly batchId?: string;
+    }) => Effect.Effect<{ readonly forks: number; readonly captures: number }, ForkMachineError>;
   }
 >()("t3/environmentControl/ForkMachines") {}
 
@@ -285,7 +289,7 @@ export const layerE2b = Layer.effect(
     return ForkMachines.of({
       settings: control.controlConfig.pipe(
         Effect.map((config) => (config === null ? null : (config.provisioning?.workerForks ?? {}))),
-        Effect.mapError((cause) => new ForkMachineError({ step: "start", cause })),
+        Effect.mapError((cause) => new ForkMachineError({ step: "settings", cause })),
       ),
 
       capture: (sandboxId, tag) =>
@@ -295,26 +299,17 @@ export const layerE2b = Layer.effect(
             (
               await e2b.Sandbox.createSnapshot(sandboxId, {
                 name: captureName(tag.host, tag.batchId),
+                requestTimeoutMs: 300_000,
                 signal,
               })
             ).snapshotId,
-        ),
-
-      release: (captureId) =>
-        attempt("capture", (e2b) => e2b.Sandbox.deleteSnapshot(captureId)).pipe(
-          Effect.asVoid,
-          Effect.catch((error) =>
-            Effect.logWarning("a worker fork capture could not be deleted", {
-              captureId,
-              cause: error.cause,
-            }),
-          ),
         ),
 
       start: (captureId, tag, lifetimeMs) =>
         attempt("start", async (e2b, signal) => {
           const sandbox = await e2b.Sandbox.create(captureId, {
             signal,
+            requestTimeoutMs: 300_000,
             timeoutMs: lifetimeMs,
             // Not paused like a chat's machine: a copy the host lost track of ends by itself.
             lifecycle: { onTimeout: "kill" },
@@ -370,6 +365,8 @@ export const layerE2b = Layer.effect(
                 format: "bytes",
                 requestTimeoutMs: 600_000,
               });
+              if ((await e2b.Sandbox.getInfo(input.sourceSandboxId)).state !== "running")
+                return { kind: "asleep" as const };
               const source = await e2b.Sandbox.connect(input.sourceSandboxId);
               const target = shellQuote(input.destination);
               await source.files.write(`${input.destination}.tgz`, new Blob([archive]), {
@@ -387,7 +384,7 @@ export const layerE2b = Layer.effect(
 
       // E2B answers false for a sandbox already gone.
       kill: (forkId) =>
-        attempt("start", async (e2b) => {
+        attempt("kill", async (e2b) => {
           running.delete(forkId);
           await e2b.Sandbox.kill(forkId);
         }).pipe(
@@ -399,26 +396,33 @@ export const layerE2b = Layer.effect(
           ),
         ),
 
-      sweep: (host) =>
+      sweep: ({ host, batchId }) =>
         attempt("sweep", async (e2b) => {
           let forks = 0;
           const copies = e2b.Sandbox.list({
-            query: { metadata: { purpose: COPY_PURPOSE, host }, state: ["running", "paused"] },
+            query: {
+              metadata: { purpose: COPY_PURPOSE, host, ...(batchId ? { batch: batchId } : {}) },
+              state: ["running", "paused"],
+            },
             limit: 100,
           });
           while (copies.hasNext) {
             for (const copy of await copies.nextItems()) {
+              running.delete(copy.sandboxId);
               await e2b.Sandbox.kill(copy.sandboxId);
               forks += 1;
             }
           }
           let captures = 0;
-          const prefix = captureName(host);
+          const name = captureName(host, batchId);
           const snapshots = e2b.Sandbox.listSnapshots({ limit: 100 });
           while (snapshots.hasNext) {
             for (const snapshot of await snapshots.nextItems()) {
-              if (!snapshot.names.some((name) => name.split("/").at(-1)?.startsWith(prefix)))
-                continue;
+              const mine = snapshot.names.some((full) => {
+                const short = full.split("/").at(-1) ?? "";
+                return batchId ? short === name : short.startsWith(name);
+              });
+              if (!mine) continue;
               await e2b.Sandbox.deleteSnapshot(snapshot.snapshotId);
               captures += 1;
             }
