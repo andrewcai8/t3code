@@ -59,7 +59,7 @@ export const callerHasFleetReach = Effect.fn("mcp.callerHasFleetReach")(function
 });
 
 /** Whether each operation changes state. A new operation must pick a side. */
-const CHANGES_STATE = {
+export const CHANGES_STATE = {
   capabilities: false,
   "projects.list": false,
   "threads.list": false,

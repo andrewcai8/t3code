@@ -14,9 +14,11 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -42,6 +44,7 @@ const addBox = (
     readonly asleep?: boolean;
     readonly chat?: string | null;
     readonly threadId?: string;
+    readonly card?: Record<string, unknown>;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -89,7 +92,7 @@ const addBox = (
       });
       if (box.chat !== undefined && box.chat !== null) {
         const chat = ownerChat(
-          boxShell([boxThread(threadId, "project-app", box.chat, { modelSelection })]),
+          boxShell([boxThread(threadId, "project-app", box.chat, { modelSelection, ...box.card })]),
           threadId,
         );
         if (!chat) throw new Error("Expected a chat card");
@@ -111,17 +114,30 @@ const setup = Effect.gen(function* () {
     requests.set(origin(index), yield* Queue.unbounded<FleetHostRequest>());
   }
   const responses = yield* Queue.unbounded<FleetHostResponse>();
+  const closed = yield* Queue.unbounded<string>();
+  const provisionCalls = yield* Queue.unbounded<EnvironmentProvisionInput>();
+  /** Origins that refuse fleet.connect, as a box on an older build does. */
+  const oldBuilds = new Set<string>();
+  const provisioning = { hangs: false };
 
   const boxes = Layer.succeed(BoxFleetClient.BoxFleetClient, {
     open: (access) =>
       Effect.sync(() => opened.push(access.origin)).pipe(
+        Effect.tap(() => Effect.addFinalizer(() => Queue.offer(closed, access.origin))),
         Effect.as({
           connect: (registration) =>
-            Stream.unwrap(
-              Queue.offer(registrations.get(access.origin)!, registration).pipe(
-                Effect.as(Stream.fromQueue(requests.get(access.origin)!)),
-              ),
-            ),
+            oldBuilds.has(access.origin)
+              ? Stream.fail(
+                  new BoxFleetClient.BoxUnreachableError({
+                    origin: access.origin,
+                    cause: "fleet.connect is unknown",
+                  }),
+                )
+              : Stream.unwrap(
+                  Queue.offer(registrations.get(access.origin)!, registration).pipe(
+                    Effect.as(Stream.fromQueue(requests.get(access.origin)!)),
+                  ),
+                ),
           respond: (response) => Queue.offer(responses, response).pipe(Effect.asVoid),
           invoke: (input) => {
             invoked.push([access.origin, input]);
@@ -174,6 +190,8 @@ const setup = Effect.gen(function* () {
     },
     provision: (input) => {
       provisioned.push(input);
+      if (provisioning.hangs)
+        return Queue.offer(provisionCalls, input).pipe(Effect.andThen(Effect.never));
       return Effect.succeed({
         kind: "ready" as const,
         requestId: input.requestId,
@@ -205,24 +223,47 @@ const setup = Effect.gen(function* () {
     Layer.provideMerge(SqlitePersistence.layerMemory),
   );
 
-  /** Relays one call from box 1's chat and waits for the host's answer. */
-  const relay = (target: EnvironmentId, request: FleetInvokeInput["request"]) =>
+  /** Box 1 relays one call, from its own chat unless `threadId` names another. */
+  const send = (
+    requestId: string,
+    target: EnvironmentId,
+    request: FleetInvokeInput["request"],
+    threadId = "chat-1",
+  ) =>
+    Queue.offer(requests.get(origin(1))!, {
+      requestId,
+      environmentId: target,
+      invoke: {
+        actor: { environmentId: environment(1), threadId: ThreadId.make(threadId) },
+        request,
+      },
+    });
+
+  /** Connects box 1, relays one call from it, and waits for the host's answer. */
+  const relay = (target: EnvironmentId, request: FleetInvokeInput["request"], threadId?: string) =>
     Effect.gen(function* () {
       const host = yield* CloudFleetHost.CloudFleetHost;
       yield* host.reconcile;
       yield* Queue.take(registrations.get(origin(1))!);
-      yield* Queue.offer(requests.get(origin(1))!, {
-        requestId: "request-1",
-        environmentId: target,
-        invoke: {
-          actor: { environmentId: environment(1), threadId: ThreadId.make("chat-1") },
-          request,
-        },
-      });
+      yield* send("request-1", target, request, threadId);
       return yield* Queue.take(responses);
     });
 
-  return { layer, relay, resumed, provisioned, invoked, registrations, opened };
+  return {
+    layer,
+    relay,
+    send,
+    responses,
+    resumed,
+    provisioned,
+    provisionCalls,
+    provisioning,
+    invoked,
+    registrations,
+    opened,
+    closed,
+    oldBuilds,
+  };
 });
 
 /** Boxes 1 and 4 awake with chats, 2 asleep with one, and 3 awake with no chat yet. */
@@ -234,11 +275,12 @@ const withBoxes = <A, E>(
     E,
     CloudFleetHost.CloudFleetHost | SqlClient.SqlClient | ProvisionOperationStore
   >,
+  firstChat: Record<string, unknown> = {},
 ) =>
   Effect.gen(function* () {
     const context = yield* setup;
     return yield* Effect.gen(function* () {
-      yield* addBox(1, { chat: "Fix login" });
+      yield* addBox(1, { chat: "Fix login", card: firstChat });
       yield* addBox(2, { asleep: true, chat: "Write docs" });
       yield* addBox(3, { chat: null });
       yield* addBox(4, { chat: "Ship release" });
@@ -475,6 +517,170 @@ it.effect("refuses a new cloud chat on another agent than this machine runs", ()
         },
       });
       expect(provisioned).toEqual([]);
+    }),
+  ),
+);
+
+/** A request this host accepted to start a chat for box 1, still being prepared. */
+const acceptPreparing = (index: number) =>
+  Effect.gen(function* () {
+    const store = yield* ProvisionOperationStore;
+    yield* store.accept(
+      decodeRequest({
+        requestId: id(index),
+        provider: "e2b",
+        providerInstanceId: "account",
+        agentDriver: "codex",
+        sourceRevision: null,
+        repository: "acme/app",
+        preparationHash: "a".repeat(64),
+        strategy: "direct",
+        templateId: "fixture",
+        chat: { threadId: `cloud-started:${id(1)}:${index}` },
+      }),
+    );
+  });
+
+it.effect("counts chats still being prepared toward the cap", () =>
+  withBoxes(({ relay, provisioned }) =>
+    Effect.gen(function* () {
+      for (const index of [11, 12, 13, 14]) yield* acceptPreparing(index);
+      const response = yield* relay(CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, {
+        op: "threads.launch",
+        input: { title: "Fifth", message: "Go." },
+      });
+      expect(response).toMatchObject({
+        failure: {
+          code: "capability_denied",
+          message:
+            "This chat already has 4 cloud chats it started. Delete one of their machines first.",
+        },
+      });
+      expect(provisioned).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("keeps one launch in flight per chat: a repeat joins it, another waits", () =>
+  withBoxes(({ registrations, send, responses, provisioned, provisionCalls, provisioning }) =>
+    Effect.gen(function* () {
+      provisioning.hangs = true;
+      yield* (yield* CloudFleetHost.CloudFleetHost).reconcile;
+      yield* Queue.take(registrations.get(origin(1))!);
+      const launch = (title: string) => ({
+        op: "threads.launch" as const,
+        input: { title, message: "Go." },
+      });
+      yield* send("first", CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, launch("Profile"));
+      yield* Queue.take(provisionCalls);
+      yield* send("other", CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, launch("Benchmark"));
+      expect(yield* Queue.take(responses)).toMatchObject({
+        requestId: "other",
+        failure: {
+          code: "capability_denied",
+          message:
+            "This chat is still starting another cloud chat. Try again once that one is ready.",
+        },
+      });
+      yield* send("again", CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, launch("Profile"));
+      // Both calls wait out the launch budget; time moves until both have answered.
+      const answers: Array<FleetHostResponse> = [];
+      for (let step = 0; step < 30 && answers.length < 2; step++) {
+        yield* TestClock.adjust("10 seconds");
+        const answer = yield* Queue.poll(responses);
+        if (Option.isSome(answer)) answers.push(answer.value);
+      }
+      expect(answers.map((answer) => answer.requestId).toSorted()).toEqual(["again", "first"]);
+      for (const answer of answers)
+        expect(answer).toMatchObject({ failure: { code: "environment_unavailable" } });
+      expect(provisioned.map((input) => input.chat?.firstTurn?.title)).toEqual(["Profile"]);
+    }),
+  ),
+);
+
+it.effect("lets a chat outside full-access read cards but not wake or change other chats", () =>
+  withBoxes(
+    ({ relay, send, responses, resumed, invoked }) =>
+      Effect.gen(function* () {
+        const read = yield* relay(environment(2), {
+          op: "threads.read",
+          input: { threadId: ThreadId.make("chat-2") },
+        });
+        expect(read).toMatchObject({
+          failure: {
+            code: "environment_unavailable",
+            message: "Write docs is asleep, and only a full-access chat can wake it.",
+          },
+        });
+        yield* send("listed", environment(2), { op: "threads.list", input: {} });
+        expect(yield* Queue.take(responses)).toMatchObject({
+          requestId: "listed",
+          result: { total: 1 },
+        });
+        yield* send("sent", environment(4), {
+          op: "threads.send",
+          input: { threadId: ThreadId.make("chat-4"), message: "Ship it." },
+        });
+        expect(yield* Queue.take(responses)).toMatchObject({
+          requestId: "sent",
+          failure: {
+            code: "capability_denied",
+            message: "Changing another cloud chat needs this chat in full-access/default mode.",
+          },
+        });
+        expect(resumed).toEqual([]);
+        expect(invoked).toEqual([]);
+      }),
+    { interactionMode: "plan" },
+  ),
+);
+
+it.effect("acts only for the box's own chat, whatever the box claims", () =>
+  withBoxes(({ relay, resumed, invoked }) =>
+    Effect.gen(function* () {
+      const response = yield* relay(
+        environment(4),
+        { op: "threads.read", input: { threadId: ThreadId.make("chat-4") } },
+        "chat-4",
+      );
+      expect(response).toMatchObject({
+        failure: {
+          code: "capability_denied",
+          message: "Only this machine's own chat can act through its host.",
+        },
+      });
+      expect(resumed).toEqual([]);
+      expect(invoked).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("backs off from a box that refuses the fleet connection, doubling each time", () =>
+  withBoxes(({ oldBuilds, opened, closed }) =>
+    Effect.gen(function* () {
+      oldBuilds.add(origin(4));
+      const host = yield* CloudFleetHost.CloudFleetHost;
+      const attempts = Effect.sync(() => opened.filter((at) => at === origin(4)).length);
+      const failedOnce = Effect.gen(function* () {
+        while ((yield* Queue.take(closed)) !== origin(4));
+      });
+      const seen: Array<number> = [];
+      yield* host.reconcile;
+      yield* failedOnce;
+      seen.push(yield* attempts);
+      yield* host.reconcile;
+      seen.push(yield* attempts);
+      yield* TestClock.adjust("15 seconds");
+      yield* host.reconcile;
+      yield* failedOnce;
+      seen.push(yield* attempts);
+      yield* TestClock.adjust("15 seconds");
+      yield* host.reconcile;
+      seen.push(yield* attempts);
+      yield* TestClock.adjust("15 seconds");
+      yield* host.reconcile;
+      seen.push(yield* attempts);
+      expect(seen).toEqual([1, 1, 2, 2, 3]);
     }),
   ),
 );
