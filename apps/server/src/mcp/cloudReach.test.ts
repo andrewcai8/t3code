@@ -11,11 +11,14 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../home/FleetBroker.ts";
 import * as FleetService from "../home/FleetService.ts";
 import * as HomeService from "../home/HomeService.ts";
@@ -27,6 +30,8 @@ import { routeHome, runAsHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
+import { HomeHandlersLive } from "./toolkits/home/handlers.ts";
+import { HomeToolkit } from "./toolkits/home/tools.ts";
 
 const box = EnvironmentId.make("box-a");
 const sibling = EnvironmentId.make("box-b");
@@ -221,3 +226,44 @@ it.effect("sends forks to the host only for a top-level chat in full-access mode
     }
   }),
 );
+
+it.effect("waits out the pause a fork batch causes and asks the host again", () => {
+  const { layer } = onBox();
+  const batch = { batchId: "batch-1", state: "finished" as const, jobs: [] };
+  const registration = {
+    clientId: "t3-cloud-host",
+    environments: [{ environmentId: CLOUD_FORKS_ENVIRONMENT_ID, label: "Forks", connected: true }],
+  };
+  // The box's own services, with the real broker in place of the fake one.
+  const dependencies = Layer.mergeAll(
+    layer,
+    Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+    FleetBroker.layer.pipe(Layer.provide(NodeCrypto.layer)),
+  );
+  return Effect.gen(function* () {
+    const broker = yield* FleetBroker.FleetBroker;
+    const toolkit = yield* HomeToolkit.pipe(
+      Effect.provide(HomeHandlersLive.pipe(Layer.provide(dependencies))),
+    );
+    const first = yield* broker.connect(registration);
+    const host = yield* Stream.take(first, 1).pipe(Stream.runCollect, Effect.forkChild);
+    const call = yield* toolkit
+      .handle("t3_fork_status", { batchId: "batch-1" })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.forkChild);
+    // The host received the call, then the box paused and the connection dropped.
+    yield* Fiber.join(host);
+    yield* Fiber.interrupt(host);
+    const second = yield* broker.connect(registration);
+    const answered = yield* second.pipe(
+      Stream.take(1),
+      Stream.runForEach((request) =>
+        broker.respond({ requestId: request.requestId, result: batch }),
+      ),
+      Effect.forkChild,
+    );
+    yield* TestClock.adjust("1 second");
+    yield* Fiber.join(answered);
+    const result = yield* Fiber.join(call);
+    expect(result.at(-1)?.result).toEqual(batch);
+  }).pipe(Effect.provide(dependencies));
+});

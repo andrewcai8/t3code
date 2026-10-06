@@ -11,8 +11,9 @@
  * Who may ask is CloudFleetHost's call, from the host's own records: the box's own chat, in
  * full-access/default mode. This service trusts the source and actor it is given.
  *
- * A batch outlives the call that started it. `run` answers within the fleet channel's time limit
- * with whatever has finished, and `status` reports on it later. Batches live in memory: a host
+ * A batch outlives the call that started it. Capturing the chat's machine pauses it, which drops
+ * the fleet connection the call came in on, so `run` only reserves the batch and answers with its
+ * id; its caller starts the batch once that answer is delivered, and `status` reports on it. Batches live in memory: a host
  * restart ends them, and the sweep at start, then every few minutes, removes what they left.
  *
  * @module WorkerForks
@@ -44,8 +45,6 @@ type Box = DiscoveredProvisionedEnvironment;
 
 /** Where copied-back outputs land on the chat's machine, one folder per batch and job. */
 const RESULTS_ROOT = "/home/user/fork-results";
-/** `run` answers by then; the box gives up on a relayed call after 90 seconds. */
-const RUN_ANSWER_BUDGET = Duration.seconds(40);
 /** Time a copy keeps after its job's timeout, for uploading and copying back. */
 const AFTER_JOB_MS = 15 * 60_000;
 /** A job whose copy has not answered this long after its timeout has lost its copy. */
@@ -70,18 +69,24 @@ const forkLimits = (settings: ForkMachines.WorkerForkSettings): ForkLimits => ({
   outputsUri: settings.outputsUri?.replace(/\/+$/, ""),
 });
 
+/**
+ * A batch reserved for a chat, and what starts it. Starting captures the chat's machine, so the
+ * caller answers the chat with `batch` first; `start` runs once however often it is called.
+ */
+export interface ReservedBatch {
+  readonly batch: FleetForkBatch;
+  readonly start: Effect.Effect<void>;
+}
+
 export class WorkerForks extends Context.Service<
   WorkerForks,
   {
-    /**
-     * Starts a batch for `source`'s chat, or joins the same batch already running, and answers
-     * once it finishes or its answer budget runs out.
-     */
+    /** Reserves a batch for `source`'s chat, or joins the same batch already reserved. */
     readonly run: (
       source: Box,
       actor: FleetActor,
       input: FleetForkRunInput,
-    ) => Effect.Effect<FleetForkBatch, OrchestratorMcpFailure>;
+    ) => Effect.Effect<ReservedBatch, OrchestratorMcpFailure>;
     readonly status: (
       source: Box,
       input: FleetForkStatusInput,
@@ -100,6 +105,7 @@ interface Batch {
   readonly key: string;
   readonly jobs: Array<FleetForkJobState>;
   readonly done: Deferred.Deferred<void>;
+  readonly start: Effect.Effect<void>;
   finishedAt: number | null;
 }
 
@@ -347,23 +353,31 @@ const make = Effect.gen(function* () {
         (batch) => batch.leaseId === source.leaseId && batch.finishedAt === null,
       );
       if (running !== undefined && running.key === key)
-        return yield* answer(running, RUN_ANSWER_BUDGET);
+        return { batch: view(running), start: running.start };
       if (running !== undefined)
         return yield* failure(
           "invalid_request",
           `This chat already has fork batch ${running.id} running. Wait for it with t3_fork_status, then start the next.`,
         );
+      let started = false;
       const batch: Batch = {
         id: yield* crypto.randomUUIDv4.pipe(Effect.orDie),
         leaseId: source.leaseId,
         key,
         jobs: input.jobs.map((_, index) => ({ index, state: "queued" as const })),
         done: yield* Deferred.make<void>(),
+        start: Effect.suspend(() => {
+          if (started) return Effect.void;
+          started = true;
+          return runBatch(batch, source, actor, input, limits).pipe(
+            Effect.forkIn(scope),
+            Effect.asVoid,
+          );
+        }),
         finishedAt: null,
       };
       batches.set(batch.id, batch);
-      yield* runBatch(batch, source, actor, input, limits).pipe(Effect.forkIn(scope));
-      return yield* answer(batch, RUN_ANSWER_BUDGET);
+      return { batch: view(batch), start: batch.start };
     });
 
   const status: WorkerForks["Service"]["status"] = (source, input) =>

@@ -158,8 +158,41 @@ const withForks = <A, E>(
     return yield* body(fake).pipe(Effect.provide(fake.layer));
   });
 
+/** Reserves a batch, starts it as the host does once the chat has its id, and waits for it. */
 const run = (input: FleetForkRunInput, source = box()) =>
-  WorkerForks.WorkerForks.pipe(Effect.flatMap((forks) => forks.run(source, actor, input)));
+  Effect.gen(function* () {
+    const forks = yield* WorkerForks.WorkerForks;
+    const { batch, start } = yield* forks.run(source, actor, input);
+    yield* start;
+    return yield* forks.status(source, { batchId: batch.batchId, waitSeconds: 45 });
+  });
+
+it.effect("reserves a batch without touching the chat's machine until it is started", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      const { batch, start } = yield* forks.run(box(), actor, {
+        jobs: [{ command: "exit 0" }, { command: "exit 2" }],
+      });
+      expect(batch).toEqual({
+        batchId: batch.batchId,
+        state: "running",
+        jobs: [
+          { index: 0, state: "queued" },
+          { index: 1, state: "queued" },
+        ],
+      });
+      expect(fake.captures).toEqual([]);
+      yield* start;
+      yield* start;
+      const finished = yield* forks.status(box(), { batchId: batch.batchId, waitSeconds: 45 });
+      expect(
+        finished.jobs.map((job) => (job.state === "exited" ? job.exitCode : job.state)),
+      ).toEqual([0, 2]);
+      expect(fake.captures).toEqual([`sandbox-1@${batch.batchId}`]);
+    }),
+  ),
+);
 
 it.effect("runs each job in its own copy and removes every copy once, however it ended", () =>
   withForks({ outputsUri: "s3://traces/t3-agents/", maxJobMinutes: 10 }, (fake) =>
