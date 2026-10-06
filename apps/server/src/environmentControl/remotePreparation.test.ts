@@ -1468,6 +1468,118 @@ describe("box disk guard", () => {
       await NodeFSP.rm(root, { recursive: true, force: true });
     }
   });
+
+  /** Checkouts the way an agent leaves them: source, an untracked note, and installed dependencies. */
+  const checkoutTree = async () => {
+    const root = await NodeFSP.realpath(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "disk-guard-")),
+    );
+    roots.push(root);
+    const checkout = async (path: string, idle: boolean) => {
+      await NodeFSP.mkdir(NodePath.join(path, "src"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(path, ".git"), "gitdir: elsewhere\n");
+      await NodeFSP.writeFile(NodePath.join(path, "src", "index.ts"), "export {};\n");
+      await NodeFSP.writeFile(NodePath.join(path, "notes.txt"), "mine\n");
+      await NodeFSP.mkdir(NodePath.join(path, "node_modules", "left-pad"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(path, "node_modules", "left-pad", "index.js"), "");
+      if (!idle) return;
+      const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000);
+      const age = async (target: string): Promise<void> => {
+        const entry = await NodeFSP.lstat(target);
+        if (entry.isDirectory())
+          for (const name of await NodeFSP.readdir(target)) await age(NodePath.join(target, name));
+        await NodeFSP.utimes(target, twoHoursAgo, twoHoursAgo);
+      };
+      await age(path);
+    };
+    await checkout(NodePath.join(root, "wt", "idle"), true);
+    await checkout(NodePath.join(root, "wt", "fresh"), false);
+    await checkout(NodePath.join(root, "wt", "busy"), true);
+    await checkout(NodePath.join(root, "workspace"), true);
+    await NodeFSP.mkdir(NodePath.join(root, "home"));
+    await NodeFSP.writeFile(NodePath.join(root, "disk-reserve"), "held");
+    const present = async (relative: string) =>
+      NodeFSP.access(NodePath.join(root, relative)).then(
+        () => true,
+        () => false,
+      );
+    const survivors = async () => ({
+      idleModules: await present("wt/idle/node_modules"),
+      idleSource: await present("wt/idle/src/index.ts"),
+      idleGit: await present("wt/idle/.git"),
+      idleNotes: await present("wt/idle/notes.txt"),
+      freshModules: await present("wt/fresh/node_modules"),
+      busyModules: await present("wt/busy/node_modules"),
+      workspaceModules: await present("workspace/node_modules"),
+      reserve: await present("disk-reserve"),
+    });
+    return { root, survivors };
+  };
+
+  const guard = (root: string, depsBytes: number) =>
+    NodeChildProcess.spawnSync(
+      "python3",
+      ["-c", diskGuardScript, root, NodePath.join(root, "home"), "once"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: NodePath.join(root, "home"),
+          T3_DISK_GUARD_LOW_BYTES: "0",
+          T3_DISK_GUARD_DEPS_BYTES: String(depsBytes),
+        },
+      },
+    );
+
+  it("removes node_modules from checkouts idle for an hour once free space drops under the threshold", async () => {
+    const { root, survivors } = await checkoutTree();
+    // A process working in a checkout keeps its dependencies.
+    const worker = NodeChildProcess.spawn("sleep", ["60"], {
+      cwd: NodePath.join(root, "wt", "busy"),
+      stdio: "ignore",
+    });
+    try {
+      await new Promise((resolve) => worker.once("spawn", resolve));
+      // A threshold above any disk's free space makes this disk read as under it.
+      const guarded = guard(root, 2 ** 60);
+
+      expect(guarded.status).toBe(0);
+      expect(await survivors()).toEqual({
+        idleModules: false,
+        idleSource: true,
+        idleGit: true,
+        idleNotes: true,
+        freshModules: true,
+        busyModules: true,
+        workspaceModules: true,
+        reserve: true,
+      });
+      expect(guarded.stdout).toMatch(
+        new RegExp(`^disk guard: removed ${root}/wt/idle/node_modules, freed \\d+ bytes$`, "m"),
+      );
+      expect(guarded.stdout.match(/removed/g)).toHaveLength(1);
+    } finally {
+      worker.kill();
+    }
+  });
+
+  it("leaves every checkout alone while free space is above the threshold", async () => {
+    const { root, survivors } = await checkoutTree();
+    const guarded = guard(root, 0);
+
+    expect(guarded.status).toBe(0);
+    expect(guarded.stdout).toBe("");
+    expect(await survivors()).toEqual({
+      idleModules: true,
+      idleSource: true,
+      idleGit: true,
+      idleNotes: true,
+      freshModules: true,
+      busyModules: true,
+      workspaceModules: true,
+      reserve: true,
+    });
+  });
 });
 
 describe("bounded preparation commands", () => {
