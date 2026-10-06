@@ -52,7 +52,11 @@ const topLevelChat = {
   modelSelection: { instanceId: codex, model: "gpt-5.5" },
   runtimeMode: "full-access",
   interactionMode: "default",
-  lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: chat },
+  lineage: {
+    parentThreadId: null as ThreadId | null,
+    relationshipToParent: null as "fork" | "subagent" | null,
+    rootThreadId: chat,
+  },
 };
 
 /** A cloud box's server: no Home, and a fleet host connected unless `hostConnected` is false. */
@@ -113,7 +117,7 @@ it.effect("relays a top-level cloud chat's calls to another chat through its hos
 it.effect("keeps a subagent on its own box", () => {
   const { layer, relayed } = onBox({
     lineage: { parentThreadId: chat, relationshipToParent: "subagent", rootThreadId: chat },
-  } as Partial<typeof topLevelChat>);
+  });
   return Effect.gen(function* () {
     const error = yield* routeHome(sibling, "threads.read", { threadId: target }).pipe(Effect.flip);
     expect(error.code).toBe("capability_denied");

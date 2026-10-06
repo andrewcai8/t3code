@@ -30,12 +30,14 @@ import {
   ProvisionRequestId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
@@ -48,6 +50,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { listThreadPage } from "../home/FleetService.ts";
+import { CHANGES_STATE } from "../mcp/homeRouting.ts";
 import * as BoxFleetClient from "./BoxFleetClient.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 import { listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
@@ -66,6 +69,10 @@ const STARTED_CHAT_PREFIX = "cloud-started:";
 const MAX_STARTED_CHATS = 4;
 
 const RECONCILE_INTERVAL = Duration.seconds(15);
+// A box that will not hold a connection, such as one on a build without the fleet RPCs, is tried
+// again after 15 s, doubling up to 10 minutes; a connection that lasts a pass resets it.
+const RETRY_FIRST_MS = 15_000;
+const RETRY_MAX_MS = 10 * 60_000;
 // A box gives up on a relayed call after 90 seconds. The host answers first, and once a wake or
 // launch has used RELAY_DEADLINE it says so rather than acting, so a late answer never makes the
 // agent repeat a change that went through.
@@ -139,6 +146,11 @@ function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegis
 }
 
 const decodeThreadList = Schema.decodeUnknownEffect(FleetResults["threads.list"]);
+const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+/** Whether the box's chat may change things or wake machines, from the host's own card. */
+const actsFully = (box: Box) =>
+  box.chat?.thread.runtimeMode === "full-access" && box.chat.thread.interactionMode === "default";
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -158,6 +170,9 @@ const make = Effect.gen(function* () {
     }
   >();
   const inFlight = new Map<string, number>();
+  const retries = new Map<string, { readonly failures: number; readonly retryAt: number }>();
+  // The one launch each chat may have in flight, by what it asked for.
+  const launching = new Map<string, string>();
   const uuid = crypto.randomUUIDv4.pipe(Effect.orDie);
 
   /** Every cloud chat's box this host holds that is not removed. */
@@ -181,6 +196,25 @@ const make = Effect.gen(function* () {
       if (Option.isSome(running)) return Effect.succeed(running.value as Fiber.Fiber<A, E>);
       const fiber = Effect.runForkWith(caller.context)(effect);
       FiberMap.setUnsafe(work, key, fiber);
+      return Effect.succeed(fiber);
+    });
+
+  const claimLaunch = <A, E>(
+    leaseId: string,
+    asked: string,
+    started: number,
+    effect: Effect.Effect<A, E>,
+  ) =>
+    Effect.withFiber<Fiber.Fiber<A, E> | "busy" | "full">((caller) => {
+      const running = FiberMap.getUnsafe(work, `launch:${leaseId}`);
+      if (Option.isSome(running))
+        return Effect.succeed(
+          launching.get(leaseId) === asked ? (running.value as Fiber.Fiber<A, E>) : "busy",
+        );
+      if (started >= MAX_STARTED_CHATS) return Effect.succeed("full" as const);
+      launching.set(leaseId, asked);
+      const fiber = Effect.runForkWith(caller.context)(effect);
+      FiberMap.setUnsafe(work, `launch:${leaseId}`, fiber);
       return Effect.succeed(fiber);
     });
 
@@ -229,12 +263,19 @@ const make = Effect.gen(function* () {
           "capability_denied",
           "A cloud chat another chat started cannot start more.",
         );
-      const started = boxes.filter((box) => box.threadId?.startsWith(startedBy(source))).length;
-      if (started >= MAX_STARTED_CHATS)
-        return yield* failure(
-          "capability_denied",
-          `This chat already has ${MAX_STARTED_CHATS} cloud chats it started. Delete one of their machines first.`,
-        );
+      // Chats still being prepared count too, from the durable request, so a restart or a launch
+      // that outlived its call cannot slip past the cap.
+      const preparing = yield* operations.listUnresolved.pipe(
+        Effect.mapError(() => unavailable("The host could not read its cloud chats.")),
+      );
+      const started = new Set([
+        ...boxes
+          .filter((box) => box.threadId?.startsWith(startedBy(source)))
+          .map((box) => box.requestId),
+        ...preparing
+          .filter((operation) => operation.request.chat?.threadId.startsWith(startedBy(source)))
+          .map((operation) => operation.request.requestId),
+      ]).size;
       const origin = (yield* operations
         .get(source.requestId)
         .pipe(Effect.mapError(() => unavailable("The host could not read this chat's machine."))))
@@ -255,8 +296,12 @@ const make = Effect.gen(function* () {
         `The new cloud chat "${input.title}" was started and is still getting its machine ready, which can take a few minutes. Do not launch it again; t3_environment_list shows it once it is ready.`,
       );
       const threadId = ThreadId.make(`${startedBy(source)}${yield* uuid}`);
-      const launch = yield* once(
-        `launch:${actor.environmentId}:${actor.threadId}:${input.title}\u0000${message}`,
+      // A chat has one launch in flight: asking again for it joins it, asking for another
+      // waits. Checked and claimed in one step, so two calls cannot both start a machine.
+      const claim = yield* claimLaunch(
+        source.leaseId,
+        `${input.title}\u0000${message}`,
+        started,
         Effect.gen(function* () {
           const createdAt = DateTime.formatIso(yield* DateTime.now);
           return yield* environmentControl.provision({
@@ -281,7 +326,17 @@ const make = Effect.gen(function* () {
           });
         }).pipe(Effect.map((result) => ({ threadId, result }))),
       );
-      const provisioned = yield* Fiber.join(launch).pipe(
+      if (claim === "busy")
+        return yield* failure(
+          "capability_denied",
+          "This chat is still starting another cloud chat. Try again once that one is ready.",
+        );
+      if (claim === "full")
+        return yield* failure(
+          "capability_denied",
+          `This chat already has ${MAX_STARTED_CHATS} cloud chats it started. Delete one of their machines first.`,
+        );
+      const provisioned = yield* Fiber.join(claim).pipe(
         Effect.timeoutOption(LAUNCH_BUDGET),
         Effect.mapError(() =>
           failure("orchestration_error", "The new cloud chat could not start."),
@@ -318,22 +373,40 @@ const make = Effect.gen(function* () {
       } satisfies FleetResult<"threads.launch">;
     });
 
-  /** Runs one call a box relays. Only another cloud chat's box, or a new one, is a target. */
-  const relay = (source: Box, { environmentId, invoke }: FleetHostRequest) =>
+  /**
+   * Runs one call a box relays. Only another cloud chat's box, or a new one, is a target. The host
+   * decides who asks from its own records, never the box's claim: the box's own chat, with the
+   * modes on the host's card. Changes and wakes need that card to be full-access/default.
+   */
+  const relay = (sourceLeaseId: string, { environmentId, invoke }: FleetHostRequest) =>
     Effect.gen(function* () {
       const boxes = yield* chatBoxes;
       const { request, actor } = invoke;
+      const source = boxes.find((box) => box.leaseId === sourceLeaseId);
+      if (
+        source === undefined ||
+        actor.environmentId !== source.environmentId ||
+        actor.threadId !== source.threadId
+      )
+        return yield* failure(
+          "capability_denied",
+          "Only this machine's own chat can act through its host.",
+        );
+      if (CHANGES_STATE[request.op] && !actsFully(source))
+        return yield* failure(
+          "capability_denied",
+          "Changing another cloud chat needs this chat in full-access/default mode.",
+        );
       if (environmentId === NEW_CLOUD_CHAT_ENVIRONMENT_ID) {
         if (request.op !== "threads.launch")
           return yield* failure(
             "invalid_request",
             "Only t3_thread_launch works in the new cloud chat environment.",
           );
-        const current = boxes.find((box) => box.leaseId === source.leaseId);
-        return yield* startChat(current, boxes, actor, request.input);
+        return yield* startChat(source, boxes, actor, request.input);
       }
       const target = boxes.find(
-        (box) => box.environmentId === environmentId && box.leaseId !== source.leaseId,
+        (box) => box.environmentId === environmentId && box.leaseId !== sourceLeaseId,
       );
       if (target === undefined)
         return yield* unavailable(`Environment ${environmentId} is not one of your cloud chats.`);
@@ -352,6 +425,11 @@ const make = Effect.gen(function* () {
       if (target.lifecycle === "missing")
         return yield* unavailable(`${boxName(target)} has no machine right now.`);
       if (target.lifecycle === "paused") {
+        // Waking a machine costs money, so it is a change too.
+        if (!actsFully(source))
+          return yield* unavailable(
+            `${boxName(target)} is asleep, and only a full-access chat can wake it.`,
+          );
         const startedAt = yield* Clock.currentTimeMillis;
         yield* wake(target);
         if ((yield* Clock.currentTimeMillis) - startedAt > RELAY_DEADLINE_MS)
@@ -360,8 +438,8 @@ const make = Effect.gen(function* () {
       return yield* invokeOn(target.leaseId, boxName(target), invoke);
     });
 
-  const answer = (source: Box, request: FleetHostRequest) =>
-    relay(source, request).pipe(
+  const answer = (sourceLeaseId: string, request: FleetHostRequest) =>
+    relay(sourceLeaseId, request).pipe(
       Effect.match({
         onFailure: (error): FleetHostResponse => ({ requestId: request.requestId, failure: error }),
         onSuccess: (result): FleetHostResponse => ({ requestId: request.requestId, result }),
@@ -375,6 +453,22 @@ const make = Effect.gen(function* () {
       else inFlight.set(leaseId, count);
     });
 
+  /** Schedules the next try at a box whose connection ended on its own. */
+  const noteEnded = (leaseId: string, openedAt: number, exit: Exit.Exit<unknown, unknown>) =>
+    Effect.gen(function* () {
+      if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return;
+      const now = yield* Clock.currentTimeMillis;
+      if (now - openedAt >= Duration.toMillis(RECONCILE_INTERVAL)) {
+        retries.delete(leaseId);
+        return;
+      }
+      const failures = (retries.get(leaseId)?.failures ?? 0) + 1;
+      retries.set(leaseId, {
+        failures,
+        retryAt: now + Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS),
+      });
+    });
+
   /** One connection per awake box; a changed registration re-registers on it. */
   const serve = (
     source: Box,
@@ -384,15 +478,17 @@ const make = Effect.gen(function* () {
     Effect.scoped(
       Effect.gen(function* () {
         const connection = yield* boxClient.open(access);
+        const openedAt = yield* Clock.currentTimeMillis;
         yield* SubscriptionRef.changes(registration).pipe(
           Stream.switchMap(connection.connect),
           Stream.runForEach((request) =>
             Effect.acquireUseRelease(
               track(source.leaseId, 1),
-              () => answer(source, request).pipe(Effect.flatMap(connection.respond)),
+              () => answer(source.leaseId, request).pipe(Effect.flatMap(connection.respond)),
               () => track(source.leaseId, -1),
             ).pipe(Effect.ignore, Effect.forkScoped),
           ),
+          Effect.onExit((exit) => noteEnded(source.leaseId, openedAt, exit)),
         );
       }),
     ).pipe(
@@ -403,6 +499,7 @@ const make = Effect.gen(function* () {
 
   const reconcile = Effect.gen(function* () {
     const boxes = yield* chatBoxes;
+    const now = yield* Clock.currentTimeMillis;
     const awake = new Set<string>();
     for (const box of boxes) {
       if (box.lifecycle !== "active") continue;
@@ -411,7 +508,7 @@ const make = Effect.gen(function* () {
       awake.add(box.leaseId);
       const registration = registrationFor(box, boxes);
       // A card's updatedAt moves with every turn; re-registering for it alone would churn.
-      const key = JSON.stringify(
+      const key = encodeKey(
         registration.environments.map(({ chat, ...environment }) => ({
           ...environment,
           chat: chat && { threadId: chat.threadId, title: chat.title, status: chat.status },
@@ -424,6 +521,7 @@ const make = Effect.gen(function* () {
         yield* SubscriptionRef.set(current.registration, registration);
         continue;
       }
+      if ((retries.get(box.leaseId)?.retryAt ?? 0) > now) continue;
       const ref = yield* SubscriptionRef.make(registration);
       registered.set(box.leaseId, { key, registration: ref });
       yield* FiberMap.run(connections, box.leaseId, serve(box, access, ref));
@@ -431,6 +529,7 @@ const make = Effect.gen(function* () {
     for (const leaseId of registered.keys()) {
       if (awake.has(leaseId)) continue;
       registered.delete(leaseId);
+      retries.delete(leaseId);
       yield* FiberMap.remove(connections, leaseId);
     }
   }).pipe(

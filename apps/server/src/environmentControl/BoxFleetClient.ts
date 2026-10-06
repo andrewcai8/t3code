@@ -1,4 +1,3 @@
-// @effect-diagnostics globalFetch:off - the host calls its own box's T3 server over private HTTP.
 /**
  * BoxFleetClient - the host's fleet RPC connection to one of its cloud boxes.
  *
@@ -22,6 +21,7 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
@@ -66,63 +66,64 @@ export class BoxFleetClient extends Context.Service<
   }
 >()("t3/environmentControl/BoxFleetClient") {}
 
-const decodeTicket = Schema.decodeUnknownEffect(Schema.Struct({ ticket: TrimmedNonEmptyString }));
+const Ticket = Schema.Struct({ ticket: TrimmedNonEmptyString });
 const isMcpFailure = Schema.is(OrchestratorMcpFailure);
 
-const open = Effect.fn("BoxFleetClient.open")(function* (access: RemoteAccess) {
-  const unreachable = (cause: unknown) => new BoxUnreachableError({ origin: access.origin, cause });
-  const { ticket } = yield* Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(`${access.origin}/api/auth/websocket-ticket`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${access.brokerToken}` },
-        redirect: "error",
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new Error(`The box answered its WebSocket ticket with status ${response.status}.`);
-      }
-      return response.json() as Promise<unknown>;
-    },
-    catch: unreachable,
-  }).pipe(Effect.flatMap((body) => decodeTicket(body).pipe(Effect.mapError(unreachable))));
-  const socketUrl = new URL("/ws", access.origin);
-  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
-  socketUrl.searchParams.set("wsTicket", ticket);
-  socketUrl.searchParams.set(
-    ORCHESTRATION_PROTOCOL_QUERY_PARAM,
-    String(ORCHESTRATION_PROTOCOL_VERSION),
-  );
-  // A dropped connection is not retried here: the host reconnects on its next pass.
-  const protocol = yield* Layer.build(
-    Layer.effect(
-      RpcClient.Protocol,
-      RpcClient.makeProtocolSocket({
-        retryTransientErrors: false,
-        retryPolicy: Schedule.recurs(0),
-      }),
-    ).pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Socket.layerWebSocket(socketUrl.toString(), { openTimeout: "15 seconds" }).pipe(
-            Layer.provide(NodeSocket.layerWebSocketConstructor),
+const make = Effect.gen(function* () {
+  const httpClient = yield* HttpClient.HttpClient;
+  const open = Effect.fn("BoxFleetClient.open")(function* (access: RemoteAccess) {
+    const unreachable = (cause: unknown) =>
+      new BoxUnreachableError({ origin: access.origin, cause });
+    const { ticket } = yield* httpClient
+      .execute(
+        HttpClientRequest.post(`${access.origin}/api/auth/websocket-ticket`).pipe(
+          HttpClientRequest.bearerToken(access.brokerToken),
+        ),
+      )
+      .pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(Ticket)),
+        Effect.timeout("10 seconds"),
+        Effect.mapError(unreachable),
+      );
+    const socketUrl = new URL("/ws", access.origin);
+    socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+    socketUrl.searchParams.set("wsTicket", ticket);
+    socketUrl.searchParams.set(
+      ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+      String(ORCHESTRATION_PROTOCOL_VERSION),
+    );
+    // A dropped connection is not retried here: the host reconnects on its next pass.
+    const protocol = yield* Layer.build(
+      Layer.effect(
+        RpcClient.Protocol,
+        RpcClient.makeProtocolSocket({
+          retryTransientErrors: false,
+          retryPolicy: Schedule.recurs(0),
+        }),
+      ).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Socket.layerWebSocket(socketUrl.toString(), { openTimeout: "15 seconds" }).pipe(
+              Layer.provide(NodeSocket.layerWebSocketConstructor),
+            ),
+            RpcSerialization.layerJson,
           ),
-          RpcSerialization.layerJson,
         ),
       ),
-    ),
-  );
-  const client = yield* RpcClient.make(WsRpcGroup).pipe(Effect.provide(protocol));
-  return {
-    connect: (registration) =>
-      client["fleet.connect"](registration).pipe(Stream.mapError(unreachable)),
-    respond: (response) => client["fleet.respond"](response).pipe(Effect.mapError(unreachable)),
-    invoke: (input) =>
-      client["fleet.invoke"](input).pipe(
-        Effect.mapError((error) => (isMcpFailure(error) ? error : unreachable(error))),
-      ),
-  } satisfies BoxFleetConnection;
+    );
+    const client = yield* RpcClient.make(WsRpcGroup).pipe(Effect.provide(protocol));
+    return {
+      connect: (registration) =>
+        client["fleet.connect"](registration).pipe(Stream.mapError(unreachable)),
+      respond: (response) => client["fleet.respond"](response).pipe(Effect.mapError(unreachable)),
+      invoke: (input) =>
+        client["fleet.invoke"](input).pipe(
+          Effect.mapError((error) => (isMcpFailure(error) ? error : unreachable(error))),
+        ),
+    } satisfies BoxFleetConnection;
+  });
+  return BoxFleetClient.of({ open });
 });
 
-export const layer = Layer.succeed(BoxFleetClient, BoxFleetClient.of({ open }));
+export const layer = Layer.effect(BoxFleetClient, make);
