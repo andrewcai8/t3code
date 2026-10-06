@@ -903,13 +903,14 @@ export const layer = Layer.effect(
       trigger: "scheduled" | "manual" | "resumed",
       resumedAt?: DateTime.DateTime,
     ) {
-      if (task.target === "local") return yield* runTask(task, trigger, { resumedAt });
+      if (task.target === "local")
+        return yield* runTask(task, trigger, resumedAt === undefined ? {} : { resumedAt });
       if (trigger === "manual" && (yield* Ref.get(activeRuns)).has(task.id)) {
         return yield* taskError("Schedule task is already running.", { taskId: task.id });
       }
       yield* FiberSet.run(
         cloudRuns,
-        runTask(task, trigger, { resumedAt }).pipe(
+        runTask(task, trigger, resumedAt === undefined ? {} : { resumedAt }).pipe(
           Effect.catch((cause) =>
             Effect.logWarning("Cloud scheduled task run failed", { taskId: task.id, cause }),
           ),

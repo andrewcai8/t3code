@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -26,5 +27,5 @@ it.effect("names the secret upstream's credential store writes a binding under",
     const secret = "provider-auth-1708c8c8cb8bae5421c955c9031310df41eddd9f868172bd383a19ef2fdada72";
     assert.deepStrictEqual([...written.keys()], [secret]);
     assert.strictEqual(credentialSecretName("cursor", "cursor_work"), secret);
-  }),
+  }).pipe(Effect.provide(NodeCrypto.layer)),
 );

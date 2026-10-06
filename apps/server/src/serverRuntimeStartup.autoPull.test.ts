@@ -93,6 +93,7 @@ it.effect("parks automatic pull until activation without delaying command readin
           desktopBootstrapToken: undefined,
           logWebSocketEvents: false,
           tailscaleServeEnabled: false,
+          localAgentRuns: true,
           tailscaleServePort: 443,
           mode: "desktop",
           cwd,
