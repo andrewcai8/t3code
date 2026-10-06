@@ -71,6 +71,7 @@ const STARTED_CHAT_PREFIX = "cloud-started:";
 const MAX_STARTED_CHATS = 4;
 
 const RECONCILE_INTERVAL = Duration.seconds(15);
+const FORK_SWEEP_INTERVAL = Duration.minutes(10);
 // A box that will not hold a connection, such as one on a build without the fleet RPCs, is tried
 // again after 15 s, doubling up to 10 minutes; a connection that lasts a pass resets it.
 const RETRY_FIRST_MS = 15_000;
@@ -93,8 +94,8 @@ export class CloudFleetHost extends Context.Service<
      */
     readonly reconcile: Effect.Effect<void>;
     /**
-     * Reconciles now and on an interval, for the life of the scope, and removes the worker forks
-     * an earlier run of this host left behind.
+     * Reconciles now and on an interval, for the life of the scope, and on another removes the
+     * worker forks no running batch owns, starting with those an earlier run left behind.
      */
     readonly start: Effect.Effect<void, never, Scope.Scope>;
   }
@@ -566,7 +567,10 @@ const make = Effect.gen(function* () {
   return CloudFleetHost.of({
     reconcile,
     start: Effect.gen(function* () {
-      yield* forks.sweep.pipe(Effect.forkScoped);
+      yield* forks.sweep.pipe(
+        Effect.repeat(Schedule.spaced(FORK_SWEEP_INTERVAL)),
+        Effect.forkScoped,
+      );
       yield* reconcile.pipe(Effect.repeat(Schedule.spaced(RECONCILE_INTERVAL)), Effect.forkScoped);
     }),
   });

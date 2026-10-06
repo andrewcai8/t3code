@@ -8,7 +8,7 @@
  *
  * @module ForkMachines
  */
-import { CommandExitError, E2B, type Sandbox } from "e2b";
+import { CommandExitError, E2B, type Sandbox, SandboxError, type SandboxNetworkUpdate } from "e2b";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -58,9 +58,12 @@ export class ForkMachines extends Context.Service<
     readonly settings: Effect.Effect<WorkerForkSettings | null, ForkMachineError>;
     /** Captures the chat's machine once; every copy in its batch starts from the capture. */
     readonly capture: (sandboxId: string, tag: ForkTag) => Effect.Effect<string, ForkMachineError>;
+    /** Deletes a capture once no copy of it is left. A capture already gone is fine. */
+    readonly release: (captureId: string) => Effect.Effect<void, ForkMachineError>;
     /**
-     * Starts one copy, which the provider removes by itself after `lifetimeMs`. Before it
-     * returns, the copy's T3 server and every agent process it inherited are stopped.
+     * Starts one copy, which the provider removes by itself after `lifetimeMs`. The copy has no
+     * network until its T3 server and every agent process it inherited are stopped, so it can
+     * never act as the chat; until then it also ends by itself within minutes.
      */
     readonly start: (
       captureId: string,
@@ -91,27 +94,48 @@ export class ForkMachines extends Context.Service<
     /** Removes a copy. Never fails, and a copy already gone is fine. */
     readonly kill: (forkId: string) => Effect.Effect<void>;
     /**
-     * Removes every copy and capture tagged with `host`, or only those of one batch; answers how
-     * many of each. A batch's end sweeps it, which also catches a copy whose start answer was lost.
+     * Removes `host`'s copies, then its captures, of every batch `remove` picks; answers how many
+     * of each it removed and how many it could not. Every item is tried; what fails is left for
+     * the next sweep. A batch's end sweeps it, which catches a copy whose start answer was lost.
      */
-    readonly sweep: (scope: {
-      readonly host: string;
-      readonly batchId?: string;
-    }) => Effect.Effect<{ readonly forks: number; readonly captures: number }, ForkMachineError>;
+    readonly sweep: (
+      host: string,
+      remove: (batchId: string) => boolean,
+    ) => Effect.Effect<
+      { readonly forks: number; readonly captures: number; readonly failed: number },
+      ForkMachineError
+    >;
   }
 >()("t3/environmentControl/ForkMachines") {}
 
 const COPY_PURPOSE = "t3-worker-fork";
 const STATE = "/tmp/t3-fork";
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+const encodeSpec = Schema.encodeSync(Schema.UnknownFromJsonString);
 const python = (script: string, spec?: unknown) =>
-  `exec python3 -c ${shellQuote(script)}${spec === undefined ? "" : ` ${shellQuote(JSON.stringify(spec))}`}`;
+  `exec python3 -c ${shellQuote(script)}${spec === undefined ? "" : ` ${shellQuote(encodeSpec(spec))}`}`;
 
-const captureName = (host: string, batchId?: string) =>
+/** A copy that never gets quieted, as when its start answer is lost, ends by itself by then. */
+const QUIET_WINDOW_MS = 10 * 60_000;
+const IN_USE_RETRIES = 5;
+
+/** Each host's captures share this name prefix, then the batch id. */
+const capturePrefix = (host: string) =>
   `${COPY_PURPOSE}-${host
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .slice(0, 20)}-${batchId ?? ""}`;
+    .slice(0, 20)}-`;
+
+/** The batch a snapshot name belongs to, for `team/name:tag` or a bare name, or null. */
+export const captureBatch = (host: string, snapshotName: string): string | null => {
+  const name =
+    snapshotName
+      .replace(/:[^/]*$/, "")
+      .split("/")
+      .at(-1) ?? "";
+  const prefix = capturePrefix(host);
+  return name.startsWith(prefix) && name.length > prefix.length ? name.slice(prefix.length) : null;
+};
 
 /**
  * Makes a fresh copy run nothing but the job. A copy is the chat's whole machine, memory
@@ -120,7 +144,8 @@ const captureName = (host: string, batchId?: string) =>
  * provider. So before any job runs, the copy records the environment the chat's agent sees (the
  * T3 server's, plus each provider instance's variables, such as the AWS keys outputs upload with)
  * and then kills every process its user owns. The server runs as that user, and the check below
- * refuses a copy where it survived.
+ * refuses a copy where it survived. The copy starts with no network and gets it back only after
+ * this, so nothing it inherited can reach the host, GitHub or a provider before it dies.
  */
 const QUIET = String.raw`
 import json, os, pathlib, signal, time
@@ -255,11 +280,46 @@ async function exec(sandbox: Sandbox, command: string, timeoutMs: number) {
 }
 
 /** Copies E2B sandboxes with the host's own E2B key; the chat's agent never holds it. */
+/** E2B refuses to delete a snapshot while a sandbox made from it exists; a just-killed one lingers. */
+async function deleteSnapshot(e2b: E2B, snapshotId: string) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await e2b.Sandbox.deleteSnapshot(snapshotId);
+      return;
+    } catch (error) {
+      const inUse = error instanceof SandboxError && /sandboxes using it/.test(error.message);
+      if (!inUse || attempt >= IN_USE_RETRIES) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2_000 * attempt));
+    }
+  }
+}
+
+/** Reads a file from a copy, giving up past `maxBytes` whatever the copy claims its size is. */
+async function readBounded(sandbox: Sandbox, path: string, maxBytes: number) {
+  const stream = await sandbox.files.read(path, { format: "stream", requestTimeoutMs: 600_000 });
+  const reader = stream.getReader();
+  const chunks: Array<Uint8Array> = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { kind: "read" as const, data: new Blob(chunks) };
+    bytes += value.byteLength;
+    if (bytes > maxBytes) {
+      await reader.cancel();
+      return { kind: "too_large" as const, bytes };
+    }
+    chunks.push(value);
+  }
+}
+
+/** Copies E2B sandboxes with the host's own E2B key; the chat's agent never holds it. */
 export const layerE2b = Layer.effect(
   ForkMachines,
   Effect.gen(function* () {
     const control = yield* EnvironmentControl.EnvironmentControl;
     const running = new Map<string, Sandbox>();
+    // The chat machine's egress rules per capture, restored on each copy once it is quiet.
+    const networks = new Map<string, SandboxNetworkUpdate>();
     const client = (step: ForkMachineError["step"]) =>
       control.controlConfig.pipe(
         Effect.mapError((cause) => new ForkMachineError({ step, cause })),
@@ -293,24 +353,33 @@ export const layerE2b = Layer.effect(
       ),
 
       capture: (sandboxId, tag) =>
-        attempt(
-          "capture",
-          async (e2b, signal) =>
-            (
-              await e2b.Sandbox.createSnapshot(sandboxId, {
-                name: captureName(tag.host, tag.batchId),
-                requestTimeoutMs: 300_000,
-                signal,
-              })
-            ).snapshotId,
-        ),
+        attempt("capture", async (e2b, signal) => {
+          const { network } = await e2b.Sandbox.getInfo(sandboxId, { signal });
+          const { snapshotId } = await e2b.Sandbox.createSnapshot(sandboxId, {
+            name: `${capturePrefix(tag.host)}${tag.batchId}`,
+            requestTimeoutMs: 300_000,
+            signal,
+          });
+          networks.set(snapshotId, {
+            ...(network?.allowOut ? { allowOut: network.allowOut } : {}),
+            ...(network?.denyOut ? { denyOut: network.denyOut } : {}),
+          });
+          return snapshotId;
+        }),
+
+      release: (captureId) =>
+        attempt("capture", async (e2b) => {
+          networks.delete(captureId);
+          await deleteSnapshot(e2b, captureId);
+        }),
 
       start: (captureId, tag, lifetimeMs) =>
         attempt("start", async (e2b, signal) => {
           const sandbox = await e2b.Sandbox.create(captureId, {
             signal,
             requestTimeoutMs: 300_000,
-            timeoutMs: lifetimeMs,
+            timeoutMs: Math.min(QUIET_WINDOW_MS, lifetimeMs),
+            allowInternetAccess: false,
             // Not paused like a chat's machine: a copy the host lost track of ends by itself.
             lifecycle: { onTimeout: "kill" },
             metadata: {
@@ -322,6 +391,8 @@ export const layerE2b = Layer.effect(
           });
           try {
             await exec(sandbox, python(QUIET), 60_000);
+            await e2b.Sandbox.updateNetwork(sandbox.sandboxId, networks.get(captureId) ?? {});
+            await e2b.Sandbox.setTimeout(sandbox.sandboxId, lifetimeMs);
           } catch (error) {
             await e2b.Sandbox.kill(sandbox.sandboxId).catch(() => undefined);
             throw error;
@@ -355,21 +426,14 @@ export const layerE2b = Layer.effect(
         copyOf("copy", forkId).pipe(
           Effect.flatMap((fork) =>
             attempt("copy", async (e2b) => {
-              const bytes = Number(
-                (
-                  await exec(fork, python(PACK, { cwd: input.cwd, paths: input.paths }), 600_000)
-                ).trim(),
-              );
-              if (!(bytes <= input.maxBytes)) return { kind: "too_large" as const, bytes };
-              const archive = await fork.files.read(`${STATE}/copy.tgz`, {
-                format: "bytes",
-                requestTimeoutMs: 600_000,
-              });
+              await exec(fork, python(PACK, { cwd: input.cwd, paths: input.paths }), 600_000);
+              const archive = await readBounded(fork, `${STATE}/copy.tgz`, input.maxBytes);
+              if (archive.kind === "too_large") return archive;
               if ((await e2b.Sandbox.getInfo(input.sourceSandboxId)).state !== "running")
                 return { kind: "asleep" as const };
               const source = await e2b.Sandbox.connect(input.sourceSandboxId);
               const target = shellQuote(input.destination);
-              await source.files.write(`${input.destination}.tgz`, new Blob([archive]), {
+              await source.files.write(`${input.destination}.tgz`, archive.data, {
                 requestTimeoutMs: 600_000,
               });
               await exec(
@@ -396,38 +460,47 @@ export const layerE2b = Layer.effect(
           ),
         ),
 
-      sweep: ({ host, batchId }) =>
+      sweep: (host, remove) =>
         attempt("sweep", async (e2b) => {
-          let forks = 0;
-          const copies = e2b.Sandbox.list({
-            query: {
-              metadata: { purpose: COPY_PURPOSE, host, ...(batchId ? { batch: batchId } : {}) },
-              state: ["running", "paused"],
-            },
+          // Everything is listed before anything is removed, so removing never shifts a page.
+          const copies: Array<string> = [];
+          const listed = e2b.Sandbox.list({
+            query: { metadata: { purpose: COPY_PURPOSE, host }, state: ["running", "paused"] },
             limit: 100,
           });
-          while (copies.hasNext) {
-            for (const copy of await copies.nextItems()) {
-              running.delete(copy.sandboxId);
-              await e2b.Sandbox.kill(copy.sandboxId);
-              forks += 1;
-            }
-          }
-          let captures = 0;
-          const name = captureName(host, batchId);
+          while (listed.hasNext)
+            for (const copy of await listed.nextItems())
+              if (remove(copy.metadata.batch ?? "")) copies.push(copy.sandboxId);
+          const captures: Array<string> = [];
           const snapshots = e2b.Sandbox.listSnapshots({ limit: 100 });
-          while (snapshots.hasNext) {
+          while (snapshots.hasNext)
             for (const snapshot of await snapshots.nextItems()) {
-              const mine = snapshot.names.some((full) => {
-                const short = full.split("/").at(-1) ?? "";
-                return batchId ? short === name : short.startsWith(name);
-              });
-              if (!mine) continue;
-              await e2b.Sandbox.deleteSnapshot(snapshot.snapshotId);
-              captures += 1;
+              const batchId = snapshot.names
+                .map((name) => captureBatch(host, name))
+                .find((batch) => batch !== null);
+              if (batchId !== undefined && batchId !== null && remove(batchId))
+                captures.push(snapshot.snapshotId);
             }
-          }
-          return { forks, captures };
+          // Copies go first: a capture cannot be deleted while a copy of it exists.
+          const results = [
+            ...(await Promise.allSettled(
+              copies.map((copyId) => {
+                running.delete(copyId);
+                return e2b.Sandbox.kill(copyId);
+              }),
+            )),
+            ...(await Promise.allSettled(
+              captures.map((captureId) => {
+                networks.delete(captureId);
+                return deleteSnapshot(e2b, captureId);
+              }),
+            )),
+          ];
+          return {
+            forks: copies.length,
+            captures: captures.length,
+            failed: results.filter((result) => result.status === "rejected").length,
+          };
         }),
     });
   }),

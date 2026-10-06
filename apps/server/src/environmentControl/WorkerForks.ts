@@ -13,7 +13,7 @@
  *
  * A batch outlives the call that started it. `run` answers within the fleet channel's time limit
  * with whatever has finished, and `status` reports on it later. Batches live in memory: a host
- * restart ends them, and the sweep at start removes what they left.
+ * restart ends them, and the sweep at start, then every few minutes, removes what they left.
  *
  * @module WorkerForks
  */
@@ -34,6 +34,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -85,7 +86,10 @@ export class WorkerForks extends Context.Service<
       source: Box,
       input: FleetForkStatusInput,
     ) => Effect.Effect<FleetForkBatch, OrchestratorMcpFailure>;
-    /** Removes copies and captures a previous run of this host left behind. */
+    /**
+     * Removes this host's copies and captures that no running batch owns: what a previous run
+     * left, and what a batch's own clean-up could not remove.
+     */
     readonly sweep: Effect.Effect<void>;
   }
 >()("t3/environmentControl/WorkerForks") {}
@@ -102,6 +106,8 @@ interface Batch {
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
 
+const encodeKey = Schema.encodeSync(Schema.UnknownFromJsonString);
+
 const hasParentSegment = (path: string) => path.split("/").includes("..");
 
 const view = (batch: Batch): FleetForkBatch => ({
@@ -117,20 +123,6 @@ const make = Effect.gen(function* () {
   const scope = yield* Effect.scope;
   const batches = new Map<string, Batch>();
   const hostSlots = yield* Semaphore.make(forkLimits({}).maxPerHost);
-  const chatSlots = new Map<string, Semaphore.Semaphore>();
-
-  const slotsFor = (leaseId: string, permits: number) =>
-    Effect.gen(function* () {
-      const existing = chatSlots.get(leaseId);
-      if (existing !== undefined) {
-        yield* existing.resize(permits);
-        return existing;
-      }
-      const created = yield* Semaphore.make(permits);
-      chatSlots.set(leaseId, created);
-      return created;
-    });
-
   const prune = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     for (const [id, batch] of batches)
@@ -263,41 +255,44 @@ const make = Effect.gen(function* () {
     limits: ForkLimits,
   ) =>
     Effect.gen(function* () {
-      const chat = yield* slotsFor(source.leaseId, limits.maxPerChat);
       yield* hostSlots.resize(limits.maxPerHost);
       const tag = { host, batchId: batch.id, leaseId: source.leaseId };
-      // Sweeping the batch at its end deletes its capture, and any copy or capture whose
-      // answer was lost on the way back.
-      const sweepBatch = machines.sweep(tag).pipe(
-        Effect.tap(({ forks }) =>
-          forks === 0
-            ? Effect.void
-            : Effect.logWarning("removed worker forks a batch lost track of", {
+      // At its end a batch deletes its capture and sweeps its tag, which also removes a copy whose
+      // start answer was lost. Whatever fails here is left for the next periodic sweep.
+      const cleanUp = (captureId: string) =>
+        machines
+          .sweep(host, (batchId) => batchId === batch.id)
+          .pipe(
+            Effect.tap(({ forks }) =>
+              forks === 0
+                ? Effect.void
+                : Effect.logWarning("removed worker forks a batch lost track of", {
+                    batchId: batch.id,
+                    forks,
+                  }),
+            ),
+            Effect.andThen(machines.release(captureId)),
+            Effect.catch((error) =>
+              Effect.logWarning("a worker fork batch could not clean up; the next sweep retries", {
                 batchId: batch.id,
-                forks,
+                step: error.step,
               }),
-        ),
-        Effect.catch((error) =>
-          Effect.logWarning("a worker fork batch could not be swept", {
-            batchId: batch.id,
-            cause: error.cause,
-          }),
-        ),
-      );
-      yield* machines.capture(source.sandboxId, tag).pipe(
-        Effect.flatMap((captureId) =>
+            ),
+          );
+      yield* Effect.acquireUseRelease(
+        machines.capture(source.sandboxId, tag),
+        (captureId) =>
           Effect.forEach(
             input.jobs.map((_, index) => index),
             (index) =>
-              chat.withPermit(
-                hostSlots.withPermit(runJob(batch, source, actor, input, limits, captureId, index)),
-              ),
+              hostSlots.withPermit(runJob(batch, source, actor, input, limits, captureId, index)),
             {
               concurrency: Math.min(input.concurrency ?? limits.maxPerChat, limits.maxPerChat),
               discard: true,
             },
           ),
-        ),
+        cleanUp,
+      ).pipe(
         Effect.catchTags({
           ForkMachineError: (error) =>
             Effect.sync(() => {
@@ -306,7 +301,6 @@ const make = Effect.gen(function* () {
                   batch.jobs[index] = { index, state: "failed", message: error.message };
             }),
         }),
-        Effect.ensuring(sweepBatch),
       );
     }).pipe(
       Effect.ensuring(
@@ -346,13 +340,19 @@ const make = Effect.gen(function* () {
         return yield* failure("environment_unavailable", "This host has no cloud configuration.");
       const limits = forkLimits(settings);
       yield* prune;
-      // A retried call while its batch runs joins it rather than paying for a second one.
-      const key = JSON.stringify(input);
+      // One batch per chat at a time, so one snapshot and one pause of its machine. A retried call
+      // while its batch runs joins it rather than paying for a second one.
+      const key = encodeKey(input);
       const running = [...batches.values()].find(
-        (batch) =>
-          batch.leaseId === source.leaseId && batch.key === key && batch.finishedAt === null,
+        (batch) => batch.leaseId === source.leaseId && batch.finishedAt === null,
       );
-      if (running !== undefined) return yield* answer(running, RUN_ANSWER_BUDGET);
+      if (running !== undefined && running.key === key)
+        return yield* answer(running, RUN_ANSWER_BUDGET);
+      if (running !== undefined)
+        return yield* failure(
+          "invalid_request",
+          `This chat already has fork batch ${running.id} running. Wait for it with t3_fork_status, then start the next.`,
+        );
       const batch: Batch = {
         id: yield* crypto.randomUUIDv4.pipe(Effect.orDie),
         leaseId: source.leaseId,
@@ -381,11 +381,20 @@ const make = Effect.gen(function* () {
   return WorkerForks.of({
     run,
     status,
-    sweep: machines.sweep({ host }).pipe(
-      Effect.tap(({ forks, captures }) =>
+    sweep: Effect.suspend(() => {
+      const live = new Set(
+        [...batches.values()].filter((batch) => batch.finishedAt === null).map((batch) => batch.id),
+      );
+      return machines.sweep(host, (batchId) => !live.has(batchId));
+    }).pipe(
+      Effect.tap(({ forks, captures, failed }) =>
         forks + captures === 0
           ? Effect.void
-          : Effect.logInfo("removed worker forks a previous run left", { forks, captures }),
+          : Effect.logInfo("removed worker forks no running batch owns", {
+              forks,
+              captures,
+              failed,
+            }),
       ),
       Effect.catch((error) =>
         Effect.logWarning("worker forks could not be swept", { cause: error.cause }),

@@ -40,7 +40,7 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
     const live = new Map<string, ForkMachines.ForkTag>();
     const kills: Array<string> = [];
     const captures: Array<string> = [];
-    const swept: Array<string> = [];
+    const stored = new Map<string, { readonly host: string; readonly batchId: string }>();
     const copied: Array<{ readonly forkId: string; readonly destination: string }> = [];
     const entered = yield* Queue.unbounded<string>();
     const gate = yield* Deferred.make<void>();
@@ -54,8 +54,16 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
       capture: (sandboxId, tag) =>
         Effect.sync(() => {
           captures.push(`${sandboxId}@${tag.batchId}`);
-          return `capture-${captures.length}`;
+          const captureId = `capture-${captures.length}`;
+          stored.set(captureId, { host: tag.host, batchId: tag.batchId });
+          return captureId;
         }),
+      release: (captureId) =>
+        Effect.suspend(() =>
+          providerWorks
+            ? Effect.sync(() => void stored.delete(captureId))
+            : Effect.fail(new ForkMachines.ForkMachineError({ step: "capture", cause: "busy" })),
+        ),
       start: (_captureId, tag) =>
         Effect.suspend(() => {
           started += 1;
@@ -96,17 +104,14 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
           kills.push(forkId);
           if (providerWorks) live.delete(forkId);
         }),
-      sweep: ({ host, batchId }) =>
+      sweep: (host, remove) =>
         Effect.sync(() => {
-          swept.push(batchId ?? `all of ${host}`);
-          if (!providerWorks) return { forks: 0, captures: 0 };
-          const mine = [...live]
-            .filter(
-              ([, tag]) => tag.host === host && (batchId === undefined || tag.batchId === batchId),
-            )
-            .map(([id]) => id);
-          for (const id of mine) live.delete(id);
-          return { forks: mine.length, captures: 0 };
+          if (!providerWorks) return { forks: 0, captures: 0, failed: 1 };
+          const copies = [...live].filter(([, tag]) => tag.host === host && remove(tag.batchId));
+          for (const [id] of copies) live.delete(id);
+          const held = [...stored].filter(([, tag]) => tag.host === host && remove(tag.batchId));
+          for (const [id] of held) stored.delete(id);
+          return { forks: copies.length, captures: held.length, failed: 0 };
         }),
     });
     const layer = WorkerForks.layer.pipe(
@@ -127,7 +132,7 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
       live,
       kills,
       captures,
-      swept,
+      stored,
       copied,
       entered,
       gate,
@@ -213,7 +218,7 @@ it.effect("runs each job in its own copy and removes every copy once, however it
       expect(fake.kills.toSorted()).toEqual(["fork-1", "fork-2", "fork-3", "fork-4"]);
       expect(fake.live.size).toBe(0);
       expect(fake.captures).toEqual([`sandbox-1@${batch.batchId}`]);
-      expect(fake.swept).toEqual([batch.batchId]);
+      expect(fake.stored.size).toBe(0);
     }),
   ),
 );
@@ -332,16 +337,39 @@ it.effect("removes a copy whose start answer was lost when its batch ends", () =
   ),
 );
 
-it.effect("sweeps the copies this host left behind and no other host's", () =>
+it.effect("sweeps what batches left behind, sparing a running batch and other hosts", () =>
   withForks({}, (fake) =>
     Effect.gen(function* () {
       fake.breakProvider(false);
       fake.live.set("fork-other", { host: "host-b", batchId: "b", leaseId: "lease-9" });
       yield* run({ jobs: [{ command: "exit 0" }, { command: "exit 0" }] });
       expect([...fake.live.keys()].toSorted()).toEqual(["fork-1", "fork-2", "fork-other"]);
+      expect([...fake.stored.keys()]).toEqual(["capture-1"]);
       fake.breakProvider(true);
+      const busy = yield* run({ jobs: [{ command: "wait" }] }).pipe(Effect.forkChild);
+      while ((yield* Queue.take(fake.entered)) !== "fork-3");
       yield* WorkerForks.WorkerForks.pipe(Effect.flatMap((forks) => forks.sweep));
+      expect([...fake.live.keys()].toSorted()).toEqual(["fork-3", "fork-other"]);
+      expect([...fake.stored.keys()]).toEqual(["capture-2"]);
+      yield* Deferred.succeed(fake.gate, undefined);
+      yield* Fiber.join(busy);
       expect([...fake.live.keys()]).toEqual(["fork-other"]);
+      expect(fake.stored.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("runs one batch per chat: another waits for it, the same one joins it", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      const first = yield* run({ jobs: [{ command: "wait" }] }).pipe(Effect.forkChild);
+      yield* Queue.take(fake.entered);
+      const other = yield* run({ jobs: [{ command: "exit 0" }] }).pipe(Effect.flip);
+      expect(other.code).toBe("invalid_request");
+      expect(other.message).toMatch(/^This chat already has fork batch .+ running\./);
+      yield* Deferred.succeed(fake.gate, undefined);
+      yield* Fiber.join(first);
+      expect(fake.captures).toHaveLength(1);
     }),
   ),
 );
