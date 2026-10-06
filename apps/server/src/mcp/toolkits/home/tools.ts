@@ -6,7 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";

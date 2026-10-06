@@ -10,7 +10,7 @@ import {
   OrchestratorMcpFailure,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isElectron } from "../../env";

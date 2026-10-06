@@ -268,7 +268,7 @@ it.effect("makes Home name a project and watches the thread before launching it"
       ),
     );
     const toolkit = yield* ProjectToolkit.pipe(
-      Effect.provide(ProjectHandlersLive.pipe(Layer.provide(dependencies))),
+      Effect.provide(ProjectHandlers.layer.pipe(Layer.provide(dependencies))),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
       toolkit
