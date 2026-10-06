@@ -1589,7 +1589,7 @@ describe("EnvironmentRegistry", () => {
           const unplaced = {
             state: "asleep",
             machine: "sandbox",
-            providerUnavailableAt: "2026-10-06T12:00:00.000Z",
+            providerFailure: { cause: "provider-unavailable", at: "2026-10-06T12:00:00.000Z" },
           } as const;
           yield* Ref.set(answer, {
             machines: [{ environmentId: HOST_BOX.environmentId, ...unplaced }],

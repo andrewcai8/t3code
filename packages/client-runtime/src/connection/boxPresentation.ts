@@ -44,7 +44,7 @@ export function cloudMachineStatus(
   phase: EnvironmentConnectionPresentation["phase"] | undefined,
 ): CloudMachineStatus | null {
   if (phase === "connected") return null;
-  if (machine?.providerUnavailableAt !== undefined) return "unavailable";
+  if (machine?.providerFailure !== undefined) return "unavailable";
   if (phase === "waking") return machine?.state === "updating" ? "updating" : "waking";
   return machine?.state ?? null;
 }
@@ -70,15 +70,23 @@ export function cloudWakeNotice(
   const machine = cloudMachine?.machine;
   if (state === "unavailable") {
     const provider = machine === undefined ? "The cloud provider" : PROVIDER_BY_MACHINE[machine];
-    const at = cloudMachine?.providerUnavailableAt;
+    const failure = cloudMachine?.providerFailure;
     // @effect-diagnostics-next-line globalDate:off - the host's ISO time, said in local time.
-    const time = at && new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const lastTried = time ? `, last tried at ${time}` : "";
-    return {
-      title: `${provider} couldn't start ${BOX_STATUS_NAME} yet`,
-      description: `The problem is on their side. Retrying on its own${lastTried}.`,
-      eta: "retrying",
-    };
+    const lastTried = failure && new Date(failure.at);
+    const time = lastTried?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const retrying = `Retrying on its own${time ? `, last tried at ${time}` : ""}.`;
+    // Only a failure the provider answered with is said to be on its side; a timeout may not be.
+    return failure?.cause === "provider-unreachable"
+      ? {
+          title: `Couldn't reach ${provider} yet`,
+          description: `It didn't answer when asked to start ${BOX_STATUS_NAME}. ${retrying}`,
+          eta: "retrying",
+        }
+      : {
+          title: `${provider} couldn't start ${BOX_STATUS_NAME} yet`,
+          description: `The problem is on their side. ${retrying}`,
+          eta: "retrying",
+        };
   }
   if (state === "updating")
     return {

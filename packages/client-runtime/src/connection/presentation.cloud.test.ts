@@ -123,7 +123,7 @@ describe("a cloud chat's machine", () => {
     const unplaced = {
       state: "asleep",
       machine: "sandbox",
-      providerUnavailableAt: "2026-10-06T12:00:00.000Z",
+      providerFailure: { cause: "provider-unreachable", at: "2026-10-06T12:00:00.000Z" },
     } as const;
     expect([
       cloudMachineStatus(unplaced, "reconnecting"),
@@ -136,14 +136,26 @@ describe("a cloud chat's machine", () => {
     // @effect-diagnostics-next-line globalDate:off - a fixed local time.
     const at = new Date(2026, 9, 6, 14, 5);
     const lastTried = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const machine = (kind: "sandbox" | "mac") =>
-      ({ state: "asleep", machine: kind, providerUnavailableAt: at.toISOString() }) as const;
-    expect(cloudWakeNotice("unavailable", machine("sandbox"))).toEqual({
+    const machine = (
+      kind: "sandbox" | "mac",
+      cause: "provider-unavailable" | "provider-unreachable",
+    ) =>
+      ({
+        state: "asleep",
+        machine: kind,
+        providerFailure: { cause, at: at.toISOString() },
+      }) as const;
+    expect(cloudWakeNotice("unavailable", machine("sandbox", "provider-unavailable"))).toEqual({
       title: "E2B couldn't start this chat's cloud machine yet",
       description: `The problem is on their side. Retrying on its own, last tried at ${lastTried}.`,
       eta: "retrying",
     });
-    expect(cloudWakeNotice("unavailable", machine("mac")).title).toBe(
+    expect(cloudWakeNotice("unavailable", machine("sandbox", "provider-unreachable"))).toEqual({
+      title: "Couldn't reach E2B yet",
+      description: `It didn't answer when asked to start this chat's cloud machine. Retrying on its own, last tried at ${lastTried}.`,
+      eta: "retrying",
+    });
+    expect(cloudWakeNotice("unavailable", machine("mac", "provider-unavailable")).title).toBe(
       "Namespace couldn't start this chat's cloud machine yet",
     );
   });

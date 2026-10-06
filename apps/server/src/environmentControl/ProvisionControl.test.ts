@@ -416,7 +416,10 @@ it.effect(
         message: "This chat's cloud machine is not serving. Wake it first.",
       };
       expect(yield* control.attach({ requestId: input.requestId })).toEqual(notServing);
-      attachError = new E2bPlacementUnavailable("E2B could not place sandbox sandbox");
+      attachError = new E2bPlacementUnavailable(
+        "E2B could not place sandbox sandbox",
+        "provider-unavailable",
+      );
       expect(yield* control.attach({ requestId: input.requestId })).toEqual(notServing);
 
       attachError = new Error("pairing endpoint answered 500");

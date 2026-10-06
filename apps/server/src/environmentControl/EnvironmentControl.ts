@@ -670,8 +670,11 @@ export function createEnvironmentControl(
             ? {
                 kind: "refused",
                 reason: "unknown",
-                cause: "provider-unavailable",
-                message: "E2B couldn't start this machine yet. The problem is on E2B's side.",
+                cause: cause.failure,
+                message:
+                  cause.failure === "provider-unavailable"
+                    ? "E2B couldn't start this machine yet. The problem is on E2B's side."
+                    : "Couldn't reach E2B to start this machine yet.",
               }
             : {
                 kind: "refused",

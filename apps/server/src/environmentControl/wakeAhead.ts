@@ -6,6 +6,7 @@ import type {
   EnvironmentControlPresenceResult,
   EnvironmentId,
   EnvironmentProvisionResumeResult,
+  ProviderStartFailure,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -27,6 +28,8 @@ const RENEW_WITHIN_MS = 10 * 60_000;
 const PRESENCE_TTL_MS = 6 * 60_000;
 /** After each refused wake in a row; the last step repeats. Matches the client's wake backoff. */
 const BACKOFF_MS = [30_000, 60_000, 120_000, 240_000, 480_000, 600_000];
+/** A provider failure older than the longest backoff is not one a retry is still answering. */
+const PROVIDER_FAILURE_FRESH_MS = BACKOFF_MS.at(-1)!;
 
 /** When the chat a box holds last changed, or null when it is not one to keep awake. */
 const unsettledSince = (box: DiscoveredProvisionedEnvironment, now: number): number | null => {
@@ -111,13 +114,22 @@ export function makeWakeAhead(deps: {
     Map<symbol, { readonly machine: CloudMachineKind; readonly wake: MachineWake }>
   >();
   const failures = new Map<string, { readonly count: number; readonly retryAt: number }>();
-  /** When each machine's provider last could not start it, whoever asked for the wake. */
-  const providerUnavailableAt = new Map<EnvironmentId, number>();
-  const unavailableSince = (environmentId: EnvironmentId) => {
-    const at = providerUnavailableAt.get(environmentId);
-    return at === undefined
+  /** Why and when each machine's provider last could not start it, whoever asked for the wake. */
+  const providerFailures = new Map<
+    EnvironmentId,
+    { readonly cause: ProviderStartFailure; readonly at: number }
+  >();
+  /** A machine's provider failure, said only while a retry is in flight or still due. */
+  const providerFailure = (environmentId: EnvironmentId, retrying: boolean, now: number) => {
+    const failure = providerFailures.get(environmentId);
+    return failure === undefined || !retrying || now - failure.at > PROVIDER_FAILURE_FRESH_MS
       ? {}
-      : { providerUnavailableAt: DateTime.formatIso(DateTime.makeUnsafe(at)) };
+      : {
+          providerFailure: {
+            cause: failure.cause,
+            at: DateTime.formatIso(DateTime.makeUnsafe(failure.at)),
+          },
+        };
   };
 
   const track =
@@ -143,6 +155,7 @@ export function makeWakeAhead(deps: {
   /** Every machine not awake: those with a wake or upgrade in flight, then the paused ones. */
   const machines = (
     boxes: ReadonlyArray<DiscoveredProvisionedEnvironment>,
+    now: number,
   ): EnvironmentControlPresenceResult["machines"] => [
     ...[...tracked].map(([environmentId, entries]) => {
       const wakes = [...entries.values()];
@@ -152,7 +165,7 @@ export function makeWakeAhead(deps: {
           ? ("updating" as const)
           : ("waking" as const),
         machine: wakes[0]!.machine,
-        ...unavailableSince(environmentId),
+        ...providerFailure(environmentId, true, now),
       };
     }),
     ...boxes
@@ -161,7 +174,7 @@ export function makeWakeAhead(deps: {
         environmentId: box.environmentId,
         state: "asleep" as const,
         machine: box.machine ?? "sandbox",
-        ...unavailableSince(box.environmentId),
+        ...providerFailure(box.environmentId, unsettledSince(box, now) !== null, now),
       })),
   ];
 
@@ -230,9 +243,9 @@ export function makeWakeAhead(deps: {
     /** Records how a resume of a machine answered, so presence can say its provider is failing. */
     settle: (environmentId: EnvironmentId, result: EnvironmentProvisionResumeResult) =>
       Effect.map(Clock.currentTimeMillis, (now) => {
-        if (result.kind === "refused" && result.cause === "provider-unavailable")
-          providerUnavailableAt.set(environmentId, now);
-        else providerUnavailableAt.delete(environmentId);
+        if (result.kind === "refused" && result.cause !== undefined)
+          providerFailures.set(environmentId, { cause: result.cause, at: now });
+        else providerFailures.delete(environmentId);
       }),
     /**
      * A client's report. A present user is counted for a few minutes and their chats start
@@ -245,7 +258,8 @@ export function makeWakeAhead(deps: {
           yield* pass;
         }
         const boxes = yield* deps.list.pipe(Effect.orElseSucceed(() => []));
-        return { machines: machines(boxes) } satisfies EnvironmentControlPresenceResult;
+        const now = yield* Clock.currentTimeMillis;
+        return { machines: machines(boxes, now) } satisfies EnvironmentControlPresenceResult;
       }),
   };
 }

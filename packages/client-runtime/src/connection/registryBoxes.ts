@@ -3,6 +3,7 @@ import {
   type CloudMachineState,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
+  type ProviderStartFailure,
   type ProvisionedChat,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -73,8 +74,10 @@ const PRESENCE_REPORT_MS = 4 * 60_000;
 export interface CloudMachine {
   readonly state: CloudMachineState;
   readonly machine: CloudMachineKind;
-  /** When its provider last could not start it, while the host keeps retrying. */
-  readonly providerUnavailableAt?: string | undefined;
+  /** Why and when its provider last could not start it, while the host still retries it. */
+  readonly providerFailure?:
+    | { readonly cause: ProviderStartFailure; readonly at: string }
+    | undefined;
 }
 
 /** What the environment registry offers for cloud boxes and the hosts that provision them. */
@@ -512,7 +515,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
             environmentId,
             previous?.state === answered.state &&
               previous.machine === answered.machine &&
-              previous.providerUnavailableAt === answered.providerUnavailableAt
+              previous.providerFailure?.cause === answered.providerFailure?.cause &&
+              previous.providerFailure?.at === answered.providerFailure?.at
               ? previous
               : answered,
           );
@@ -560,7 +564,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         if (answer !== null) yield* applyHostMachines(managerId, answer.machines);
         const changing =
           answer?.machines.some(
-            (machine) => machine.state !== "asleep" || machine.providerUnavailableAt !== undefined,
+            (machine) => machine.state !== "asleep" || machine.providerFailure !== undefined,
           ) ?? false;
         const reportDue = Math.max(0, reportedAt + PRESENCE_REPORT_MS - now);
         yield* Effect.raceFirst(

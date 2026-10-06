@@ -276,7 +276,7 @@ it.effect(
             environmentId: "crowded",
             state: "asleep",
             machine: "sandbox",
-            providerUnavailableAt: "2026-10-01T12:00:00.000Z",
+            providerFailure: { cause: "provider-unavailable", at: "2026-10-01T12:00:00.000Z" },
           },
         ],
       });
@@ -289,4 +289,46 @@ it.effect(
         machines: [{ environmentId: "crowded", state: "asleep", machine: "sandbox" }],
       });
     }).pipe(Effect.scoped),
+);
+
+const unplaced = {
+  kind: "refused",
+  reason: "unknown",
+  cause: "provider-unavailable",
+  message: "E2B couldn't start this machine yet. The problem is on E2B's side.",
+} as const;
+
+it.effect("stops saying a provider is failing once the host would not retry the machine", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(NOW);
+    const wakeAhead = makeWakeAhead({
+      list: Effect.succeed([
+        box("crowded"),
+        box("settled", { thread: { settledOverride: "settled" } }),
+      ]),
+      resume: () => Effect.succeed(unplaced),
+      renew: () => Effect.void,
+      scope: yield* Effect.scope,
+    });
+    yield* wakeAhead.settle(EnvironmentId.make("crowded"), unplaced);
+    yield* wakeAhead.settle(EnvironmentId.make("settled"), unplaced);
+    expect(yield* wakeAhead.presence(false)).toEqual({
+      machines: [
+        {
+          environmentId: "crowded",
+          state: "asleep",
+          machine: "sandbox",
+          providerFailure: { cause: "provider-unavailable", at: "2026-10-01T12:00:00.000Z" },
+        },
+        { environmentId: "settled", state: "asleep", machine: "sandbox" },
+      ],
+    });
+    yield* TestClock.adjust("11 minutes");
+    expect(yield* wakeAhead.presence(false)).toEqual({
+      machines: [
+        { environmentId: "crowded", state: "asleep", machine: "sandbox" },
+        { environmentId: "settled", state: "asleep", machine: "sandbox" },
+      ],
+    });
+  }).pipe(Effect.scoped),
 );
