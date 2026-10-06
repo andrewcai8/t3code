@@ -1,4 +1,5 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -13,6 +14,7 @@ import {
   ThreadId,
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -72,11 +74,21 @@ const result = (uuid: string, limited: boolean) =>
     modelUsage: {},
   }) as unknown as SDKMessage;
 
+/** Holds the registry's rebuild onto the second account until the test releases it. */
+interface RebuildGate {
+  readonly started: Deferred.Deferred<void>;
+  readonly release: Deferred.Deferred<void>;
+}
+
 /**
  * The real Claude adapter behind a fake CLI. Each instance the registry builds reads its login from
  * settings, as the shipped driver does, and every CLI process it opens is recorded.
  */
-const claudeDriver = (opened: Ref.Ref<ReadonlyArray<OpenedQuery>>, cwd: string) =>
+const claudeDriver = (
+  opened: Ref.Ref<ReadonlyArray<OpenedQuery>>,
+  cwd: string,
+  rebuild?: RebuildGate,
+) =>
   ({
     driverKind: ProviderDriverKind.make("claudeAgent"),
     metadata: { displayName: "Claude", supportsMultipleInstances: true },
@@ -85,6 +97,10 @@ const claudeDriver = (opened: Ref.Ref<ReadonlyArray<OpenedQuery>>, cwd: string) 
     create: ({ instanceId, environment, enabled, config }) =>
       Effect.gen(function* () {
         const env = mergeProviderInstanceEnvironment(environment);
+        if (rebuild && env.CLAUDE_CODE_OAUTH_TOKEN === "token-b") {
+          yield* Deferred.succeed(rebuild.started, undefined);
+          yield* Deferred.await(rebuild.release);
+        }
         const orchestrationAdapter = ClaudeAdapterV2.makeClaudeAdapterV2({
           instanceId,
           settings: config,
@@ -137,15 +153,23 @@ const claudeDriver = (opened: Ref.Ref<ReadonlyArray<OpenedQuery>>, cwd: string) 
  * The box's server as far as a switch reaches: settings on disk, the provider registry rebuilt from
  * them, and the orchestration runtime that runs the chat's turns.
  */
-const boxRuntime = (opened: Ref.Ref<ReadonlyArray<OpenedQuery>>, cwd: string) => {
+const boxRuntime = (
+  opened: Ref.Ref<ReadonlyArray<OpenedQuery>>,
+  cwd: string,
+  rebuild?: RebuildGate,
+) => {
   const settingsLayer = ServerSettingsModule.layer.pipe(
     Layer.provide(ServerSecretStore.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-account-switch-" })),
+    Layer.provide(Layer.merge(NodeServices.layer, NodeCrypto.layer)),
   );
   const instancesLayer = ProviderInstanceRegistryHydration.layerWithDrivers([
-    claudeDriver(opened, cwd),
-  ]).pipe(Layer.provideMerge(settingsLayer), Layer.provide(IdAllocator.layer));
+    claudeDriver(opened, cwd, rebuild),
+  ]).pipe(
+    Layer.provideMerge(settingsLayer),
+    Layer.provide(Layer.merge(IdAllocator.layer, NodeServices.layer)),
+  );
   const runtime = ProviderReplayHarness.layerWithRegistry(
     { name: "provider-account-switch" },
     ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(Layer.provide(instancesLayer)),
@@ -272,11 +296,12 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             yield* worker.drain();
             const failedRun = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
 
+            const firstTurn = (yield* orchestrator.getThreadProjection(threadId)).providerTurns[0]!;
             const continuedRunning = yield* watch(
               (event) =>
                 event.type === "provider-turn.updated" &&
                 event.payload.status === "running" &&
-                event.payload.runId !== failedRun.id,
+                event.payload.id !== firstTurn.id,
             );
             const switched = yield* toSecondAccount(failedRun.id);
             yield* worker.drain();
@@ -301,6 +326,108 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             assert.deepEqual(instance?.config, { accountEmail: "second@example.com" });
             assert.isFalse(yield* fs.exists(staleLogin));
           }).pipe(Effect.provide(boxRuntime(opened, cwd)));
+        }),
+      ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect(
+    "leaves a turn that started while the instance rebuilt running, and does not continue",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("provider-account-switch-race");
+          const opened = yield* Ref.make<ReadonlyArray<OpenedQuery>>([]);
+          const rebuild: RebuildGate = {
+            started: yield* Deferred.make<void>(),
+            release: yield* Deferred.make<void>(),
+          };
+
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
+            const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+              orchestrator.streamDomainEvents.pipe(
+                Stream.filter(predicate),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+            const send = (id: string, text: string) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(id),
+                threadId,
+                messageId: MessageId.make(id),
+                text,
+                attachments: [],
+                dispatchMode: { type: "start_immediately" },
+                createdBy: "user",
+                creationSource: "web",
+              });
+
+            yield* saveInstance(claudeInstanceId, {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-a", sensitive: true }],
+            });
+            yield* createThread(cwd);
+            const firstRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            );
+            yield* send("first", "Build it.");
+            yield* worker.drain();
+            yield* Fiber.join(firstRunning);
+            const limited = yield* watch(
+              (event) => event.type === "run.updated" && event.payload.status === "failed",
+            );
+            const [query] = yield* Ref.get(opened);
+            yield* Queue.offer(query!.messages, result("limited", true));
+            yield* Fiber.join(limited);
+            yield* worker.drain();
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            const failedRun = projection.runs[0]!;
+
+            const switching = yield* accounts
+              .switchAccount({
+                driver: "claudeAgent",
+                credential: {
+                  kind: "environment",
+                  variables: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-b" }],
+                },
+                threadId,
+                continueRunId: failedRun.id,
+              })
+              .pipe(Effect.forkScoped);
+            yield* Deferred.await(rebuild.started);
+            const nextRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" &&
+                event.payload.status === "running" &&
+                event.payload.id !== projection.providerTurns[0]!.id,
+            );
+            yield* send("next", "Try the next step.");
+            yield* worker.drain();
+            yield* Fiber.join(nextRunning);
+            yield* Deferred.succeed(rebuild.release, undefined);
+            const switched = yield* Fiber.join(switching);
+            yield* worker.drain();
+
+            const after = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(switched, { kind: "switched", continued: false });
+            assert.deepEqual(
+              after.runs.map((run) => run.status),
+              ["failed", "running"],
+            );
+            assert.deepEqual(
+              after.messages.map((message) => message.text),
+              ["Build it.", "Try the next step."],
+            );
+            assert.deepEqual(
+              (yield* Ref.get(opened)).map(({ token }) => token),
+              ["token-a"],
+            );
+          }).pipe(Effect.provide(boxRuntime(opened, cwd, rebuild)));
         }),
       ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );

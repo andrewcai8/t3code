@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import {
   EnvironmentControlError,
+  ProviderInstanceId,
   ProvisionRequestId,
   type ComputeState,
   type EnvironmentId,
@@ -44,7 +45,6 @@ import {
   type ProvisionedChat,
   type ServerProvisionedSkills,
   type ServerSettings,
-  ThreadId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -105,9 +105,8 @@ import {
   type ProvisioningProviderProfile,
 } from "./ProvisioningProviderProfile.ts";
 import {
-  autoSwitchDue,
+  makeAccountRotation,
   sendAccountSwitch,
-  switchLeaseAccount,
   type AccountSwitchPorts,
   type SwitchTarget,
 } from "./accountSwitch.ts";
@@ -138,11 +137,7 @@ import {
   type LeaseObservation,
 } from "./leaseActivity.ts";
 import { makeWakeAhead } from "./wakeAhead.ts";
-import {
-  createProvisionedChatStore,
-  ownerChat,
-  type ProvisionedChatStore,
-} from "./provisionedChats.ts";
+import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
@@ -1204,10 +1199,8 @@ export const layer = Layer.effect(
                 start: (lease) => void runLogged(upgradeIdleBox(lease)),
               },
               accountRotation: {
-                due: async (lease, chat) =>
-                  (await runLogged(settings.getSettings)).autoSwitchCloudAccounts &&
-                  autoSwitchDue(lease, chat),
-                start: (lease) => void rotateAccount(lease),
+                due: (lease, chat) => accountRotation.due(lease, chat),
+                start: (lease) => void accountRotation.start(lease),
               },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and
@@ -2194,7 +2187,9 @@ export const layer = Layer.effect(
         return readLeaseShell(lease);
       },
       accountDriver: async (instanceId) =>
-        deriveProviderInstanceConfigMap(await runLogged(settings.getSettings))[instanceId]?.driver,
+        deriveProviderInstanceConfigMap(await runLogged(settings.getSettings))[
+          ProviderInstanceId.make(instanceId)
+        ]?.driver,
       pickAccount: async (driver, exclude) => {
         const manager = await requireManager();
         const profile = await resolveAccounts((current) =>
@@ -2227,53 +2222,28 @@ export const layer = Layer.effect(
         return sendAccountSwitch(lease.remoteAccess, input);
       },
     };
-    /** Runs one account switch under the box's lock, or refuses while another operation holds it. */
-    const switchUnderLock = async (
-      lease: ProvisionedLease,
-      threadId: ThreadId,
-      due?: (lease: ProvisionedLease) => Promise<boolean>,
-    ): Promise<EnvironmentProvisionSwitchAccountResult | null> => {
-      const release = (await resolve())?.holdBox(lease.sandboxId) ?? null;
-      if (!release)
-        return {
-          kind: "refused",
-          reason: "busy",
-          message: "Another workspace operation is in progress. Retry shortly.",
-        };
-      try {
-        // Read again under the lock: a switch that ran meanwhile has already handled this run.
-        const current = await leaseRegistry.findById(lease.leaseId);
-        if (!current || (due && !(await due(current)))) return null;
-        return await switchLeaseAccount(current, threadId, accountPorts, leaseRegistry);
-      } finally {
-        release();
-      }
-    };
-    /** Upkeep's switch for a box whose owner chat stopped on a usage limit. Never throws. */
-    const rotateAccount = async (lease: ProvisionedLease) => {
-      if (!lease.owner) return;
-      const threadId = ThreadId.make(lease.owner.threadId);
-      const result = await switchUnderLock(lease, threadId, async (current) => {
-        const chat = ownerChat(await accountPorts.readShell(current), threadId);
-        return chat ? autoSwitchDue(current, chat) : false;
-      }).catch((cause: unknown) => {
+    const accountRotation = makeAccountRotation({
+      ports: accountPorts,
+      leases: leaseRegistry,
+      enabled: async () => (await runLogged(settings.getSettings)).autoSwitchCloudAccounts,
+      holdBox: async (sandboxId) => (await resolve())?.holdBox(sandboxId) ?? null,
+      report: (lease, outcome) =>
         void runLogged(
-          Effect.logWarning("cloud chat could not switch accounts", {
-            leaseId: lease.leaseId,
-            cause,
-          }),
-        );
-        return null;
-      });
-      if (result)
-        await runLogged(
-          Effect.logInfo("cloud chat switched accounts at a usage limit", {
-            leaseId: lease.leaseId,
-            result: result.kind === "switched" ? "switched" : `refused: ${result.reason}`,
-            continued: result.kind === "switched" ? result.continued : false,
-          }),
-        );
-    };
+          outcome.kind === "failed"
+            ? Effect.logWarning("cloud chat could not switch accounts", {
+                leaseId: lease.leaseId,
+                cause: outcome.cause,
+              })
+            : Effect.logInfo("cloud chat switch at a usage limit answered", {
+                leaseId: lease.leaseId,
+                result:
+                  outcome.result.kind === "switched"
+                    ? "switched"
+                    : `refused: ${outcome.result.reason}`,
+                continued: outcome.result.kind === "switched" && outcome.result.continued,
+              }),
+        ),
+    });
     const resumeWorkspace = Effect.fn("EnvironmentControl.resume")(function* (
       input: EnvironmentProvisionResumeInput,
     ) {
@@ -2501,25 +2471,23 @@ export const layer = Layer.effect(
             reason: "unknown",
             message: "This host has no cloud machine for that environment.",
           };
-        const result = yield* Effect.tryPromise({
-          try: () => switchUnderLock(lease, input.threadId),
-          catch: (cause) => cause,
-        }).pipe(
-          Effect.tapError((cause) =>
-            Effect.logWarning("cloud machine could not switch accounts", {
-              leaseId: lease.leaseId,
-              cause,
-            }),
-          ),
-          Effect.mapError(
-            () =>
-              new EnvironmentControlError({
-                message: "The cloud machine could not switch accounts. Retry shortly.",
-              }),
+        const result = yield* Effect.promise(() =>
+          accountRotation.switchAccount(lease, input.threadId).then(
+            (answer) => ({ answer }),
+            (cause: unknown) => ({ cause }),
           ),
         );
+        if ("cause" in result) {
+          yield* Effect.logWarning("cloud machine could not switch accounts", {
+            leaseId: lease.leaseId,
+            cause: result.cause,
+          });
+          return yield* new EnvironmentControlError({
+            message: "The cloud machine could not switch accounts. Retry shortly.",
+          });
+        }
         return (
-          result ?? {
+          result.answer ?? {
             kind: "refused",
             reason: "unknown",
             message: "This cloud machine could not be found.",

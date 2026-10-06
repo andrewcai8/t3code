@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DurableProvisionRequest, ProviderInstanceId, ServerSettings } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -132,7 +133,7 @@ it.effect(
             to: "claude-personal",
             limit: { instanceId: "claude-work", runId: "run-1", until: "2999-01-01T00:00:00.000Z" },
           },
-          new Date("2026-10-06T12:00:00.000Z"),
+          DateTime.toDateUtc(DateTime.makeUnsafe("2026-10-06T12:00:00.000Z")),
         );
         // A resume or attach registers the ready box again with its original request.
         return leases.register(box);

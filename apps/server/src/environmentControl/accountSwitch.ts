@@ -15,7 +15,7 @@ import {
   type ProvisionedChat,
   ProviderDriverKind,
   SwitchableAccountDriver,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -99,8 +99,9 @@ const refused = (
  * Moves a box onto another host account of the provider `threadId` runs on, and continues the
  * chat's run when a usage limit stopped it. The account that hit the limit, and every account a
  * chat on this box hit a limit on before, stays out of rotation until it resets, so a run of
- * switches ends once no account is left. A refusal leaves the box as it was; the lease only
- * records that the run was handled.
+ * switches ends once no account is left. A run is handled once: every outcome but a busy chat,
+ * failures included, records it, so upkeep never retries it on each sweep and the box can sleep.
+ * A refusal leaves the box itself as it was.
  */
 export async function switchLeaseAccount(
   lease: ProvisionedLease,
@@ -116,74 +117,133 @@ export async function switchLeaseAccount(
   if (!thread) return refused("unknown", "This chat could not be read on its cloud machine.");
   if (RUN_IN_FLIGHT.has(thread.status))
     return refused("busy", "This chat is working. Switch accounts once its turn ends.");
-  const driver = switchableDriver(thread.providerInstanceId);
-  if (!driver) return refused("unsupported", "Only Claude and Codex chats can switch accounts.");
-  let current: string | undefined;
-  for (const instanceId of leaseAccounts(lease))
-    if ((await ports.accountDriver(instanceId)) === driver) {
-      current = instanceId;
-      break;
-    }
-  if (current === undefined)
-    return refused(
-      "unsupported",
-      "This machine's account for that provider is gone from this host.",
-    );
-
   const runId = limitedRun(thread);
-  const limit: AccountLimit | undefined =
+  let current: string | undefined;
+  const limit = (): AccountLimit | undefined =>
     runId === null
       ? undefined
-      : { instanceId: current, runId, until: limitedUntil(thread.usageLimitResetAt, now) };
-  const exclude = new Set([
-    current,
-    ...(lease.accountLimits ?? [])
-      .filter((entry) => entry.until > now.toISOString())
-      .map((entry) => entry.instanceId),
-  ]);
-  // A run is handled once: whatever stops its switch short, short of the chat being busy again,
-  // keeps upkeep from trying it on every sweep.
-  const handled = async () => {
-    if (limit) await leases.recordAccountLimit(lease.leaseId, limit, now);
-  };
-  const target = await ports.pickAccount(driver, exclude);
-  if (!target) {
-    await handled();
-    return refused(
-      "no_account",
-      "Every other account for this provider is out of usage or can't run in the cloud.",
-    );
-  }
-  const answer = await ports
-    .sendSwitch(lease, {
+      : {
+          ...(current === undefined ? {} : { instanceId: current }),
+          runId,
+          until: limitedUntil(thread.usageLimitResetAt, now),
+        };
+  const attempt = async (): Promise<EnvironmentProvisionSwitchAccountResult> => {
+    const driver = switchableDriver(thread.providerInstanceId);
+    if (!driver) return refused("unsupported", "Only Claude and Codex chats can switch accounts.");
+    let account: string | undefined;
+    for (const instanceId of leaseAccounts(lease))
+      if ((await ports.accountDriver(instanceId)) === driver) {
+        account = instanceId;
+        break;
+      }
+    if (account === undefined)
+      return refused(
+        "unsupported",
+        "This machine's account for that provider is gone from this host.",
+      );
+    current = account;
+    const exclude = new Set([
+      account,
+      ...(lease.accountLimits ?? []).flatMap((entry) =>
+        entry.instanceId !== undefined && entry.until > now.toISOString() ? [entry.instanceId] : [],
+      ),
+    ]);
+    const target = await ports.pickAccount(driver, exclude);
+    if (!target)
+      return refused(
+        "no_account",
+        "Every other account for this provider is out of usage or can't run in the cloud.",
+      );
+    const answer = await ports.sendSwitch(lease, {
       driver,
       ...(target.displayName ? { displayName: target.displayName } : {}),
       ...(target.accountEmail ? { accountEmail: target.accountEmail } : {}),
       credential: target.credential,
       threadId,
       ...(runId === null ? {} : { continueRunId: runId }),
-    })
-    .catch(async (cause: unknown) => {
-      await handled();
-      throw cause;
     });
-  if (answer === "missing") {
-    await handled();
-    return refused(
-      "unsupported",
-      "This cloud machine runs an older build. It can switch accounts after its next update.",
+    if (answer === "missing")
+      return refused(
+        "unsupported",
+        "This cloud machine runs an older build. It can switch accounts after its next update.",
+      );
+    if (answer.kind === "refused") return refused(answer.reason, answer.message);
+    const handledLimit = limit();
+    await leases.recordAccountSwitch(
+      lease.leaseId,
+      { from: account, to: target.instanceId, ...(handledLimit ? { limit: handledLimit } : {}) },
+      now,
     );
-  }
-  if (answer.kind === "refused") {
-    if (answer.reason !== "busy") await handled();
-    return refused(answer.reason, answer.message);
-  }
-  await leases.recordAccountSwitch(
-    lease.leaseId,
-    { from: current, to: target.instanceId, ...(limit ? { limit } : {}) },
-    now,
-  );
-  return { kind: "switched", account: target.name, continued: answer.continued };
+    return { kind: "switched", account: target.name, continued: answer.continued };
+  };
+  const handled = async () => {
+    const handledLimit = limit();
+    if (handledLimit) await leases.recordAccountLimit(lease.leaseId, handledLimit, now);
+  };
+  const outcome = await attempt().catch(async (cause: unknown) => {
+    await handled();
+    throw cause;
+  });
+  if (outcome.kind === "refused" && outcome.reason !== "busy") await handled();
+  return outcome;
+}
+
+/** Upkeep's account switch: when a box is due one, and running it under the box's lock. */
+export function makeAccountRotation(input: {
+  readonly ports: AccountSwitchPorts;
+  readonly leases: Pick<
+    ProvisionedLeaseRegistry,
+    "findById" | "recordAccountSwitch" | "recordAccountLimit"
+  >;
+  /** The host's `autoSwitchCloudAccounts` setting. */
+  readonly enabled: () => Promise<boolean>;
+  /** Takes the box's per-box lock, or null while another operation holds it. */
+  readonly holdBox: (sandboxId: string) => Promise<(() => void) | null>;
+  readonly report: (
+    lease: ProvisionedLease,
+    outcome:
+      | { readonly kind: "done"; readonly result: EnvironmentProvisionSwitchAccountResult }
+      | { readonly kind: "failed"; readonly cause: unknown },
+  ) => void;
+}) {
+  /** One switch under the box's lock, or a busy refusal while another operation holds it. */
+  const switchUnderLock = async (
+    lease: ProvisionedLease,
+    threadId: ThreadId,
+    due?: (lease: ProvisionedLease) => Promise<boolean>,
+  ): Promise<EnvironmentProvisionSwitchAccountResult | null> => {
+    const release = await input.holdBox(lease.sandboxId);
+    if (!release)
+      return refused("busy", "Another workspace operation is in progress. Retry shortly.");
+    try {
+      // Read again under the lock: a switch that ran meanwhile has already handled this run.
+      const current = await input.leases.findById(lease.leaseId);
+      if (!current || (due && !(await due(current)))) return null;
+      return await switchLeaseAccount(current, threadId, input.ports, input.leases);
+    } finally {
+      release();
+    }
+  };
+  return {
+    due: async (lease: ProvisionedLease, chat: ProvisionedChat) =>
+      autoSwitchDue(lease, chat) && (await input.enabled()),
+    /** Upkeep's switch for a box whose owner chat stopped on a usage limit. Never rejects. */
+    start: async (lease: ProvisionedLease): Promise<void> => {
+      if (!lease.owner) return;
+      const threadId = ThreadId.make(lease.owner.threadId);
+      try {
+        const result = await switchUnderLock(lease, threadId, async (current) => {
+          const chat = ownerChat(await input.ports.readShell(current), threadId);
+          return chat ? autoSwitchDue(current, chat) : false;
+        });
+        if (result) input.report(lease, { kind: "done", result });
+      } catch (cause) {
+        input.report(lease, { kind: "failed", cause });
+      }
+    },
+    switchAccount: (lease: ProvisionedLease, threadId: ThreadId) =>
+      switchUnderLock(lease, threadId),
+  };
 }
 
 /** When an account that hit a limit is usable again: its reported reset, or a guess past it. */

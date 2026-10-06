@@ -52,8 +52,9 @@ export const keepsRemovedBox = (lease: ProvisionedLease): boolean =>
 export const LeaseKeep = Schema.Literals(["user", "unsaved-work"]);
 export type LeaseKeep = typeof LeaseKeep.Type;
 
+/** A run a switch handled, and the account it hit its limit on when the host still has it. */
 const AccountLimit = Schema.Struct({
-  instanceId: Schema.String,
+  instanceId: Schema.optional(Schema.String),
   runId: Schema.String,
   until: Schema.String,
 });

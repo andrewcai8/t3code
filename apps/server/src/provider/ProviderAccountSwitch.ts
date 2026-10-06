@@ -164,16 +164,20 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const readThread = (threadId: GuestAccountSwitchInput["threadId"]) =>
+    threads
+      .getThreadRecords(threadId, ["runs", "providerSessions"])
+      .pipe(
+        Effect.mapError((cause) => new ProviderAccountSwitchError({ stage: "read-thread", cause })),
+      );
+  const busy = (records: { readonly runs: ReadonlyArray<{ readonly status: string }> }) =>
+    records.runs.some((run) => RUN_IN_FLIGHT.has(run.status));
+
   const switchAccount = Effect.fn("ProviderAccountSwitch.switchAccount")(function* (
     input: GuestAccountSwitchInput,
   ) {
     const instanceId = defaultInstanceIdForDriver(ProviderDriverKind.make(input.driver));
-    const records = yield* threads
-      .getThreadRecords(input.threadId, ["runs", "providerSessions"])
-      .pipe(
-        Effect.mapError((cause) => new ProviderAccountSwitchError({ stage: "read-thread", cause })),
-      );
-    if (records.runs.some((run) => RUN_IN_FLIGHT.has(run.status)))
+    if (busy(yield* readThread(input.threadId)))
       return {
         kind: "refused",
         reason: "busy",
@@ -198,6 +202,7 @@ const make = Effect.gen(function* () {
         message: "This machine has no account of that provider to switch.",
       } satisfies GuestAccountSwitchResult;
     const loginFile = yield* loginFilePath(current).pipe(
+      Effect.provideService(Path.Path, path),
       Effect.mapError((cause) => new ProviderAccountSwitchError({ stage: "write-login", cause })),
     );
     // A login file wins over credential variables, so a file login lands before settings name the
@@ -228,8 +233,13 @@ const make = Effect.gen(function* () {
         );
     if (previous !== undefined && !sameInstance(before, after, instanceId))
       yield* awaitRebuilt(instanceId, previous);
+    // A turn may have started while the instance rebuilt. Releasing its session would cut it, so
+    // the chat keeps it and runs on the new login from its next session.
+    const latest = yield* readThread(input.threadId);
+    if (busy(latest))
+      return { kind: "switched", continued: false } satisfies GuestAccountSwitchResult;
     yield* Effect.forEach(
-      records.providerSessions.filter(
+      latest.providerSessions.filter(
         (session) =>
           session.providerInstanceId === instanceId &&
           session.status !== "stopped" &&

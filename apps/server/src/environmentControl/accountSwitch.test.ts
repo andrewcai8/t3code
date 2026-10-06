@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ThreadId, type GuestAccountSwitchInput } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -18,7 +19,7 @@ import { boxShell, boxThread } from "./shellTestFixture.ts";
 
 const layer = SqlitePersistence.layerMemory.pipe(Layer.provideMerge(NodeServices.layer));
 const threadId = ThreadId.make("thread-chat");
-const now = new Date("2026-10-06T12:00:00.000Z");
+const now = DateTime.toDateUtc(DateTime.makeUnsafe("2026-10-06T12:00:00.000Z"));
 
 /** The chat stopped on a usage limit in `runId`, on the box's Claude instance. */
 const limitedChat = (runId: string, fields: Record<string, unknown> = {}) =>
