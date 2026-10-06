@@ -2132,27 +2132,29 @@ export const layer = Layer.effect(
       Effect.repeat(Schedule.spaced(Duration.minutes(1))),
       Effect.forkScoped,
     );
-    yield* Effect.tryPromise(resolve).pipe(
-      Effect.flatMap((manager) =>
-        Effect.forEach(
-          (manager?.config.provisioning?.skills ?? []).flatMap(({ source, url }) =>
-            url ? [{ source, url }] : [],
-          ),
-          (bundle) =>
-            Effect.tryPromise(() => refreshSkillBundle(bundle)).pipe(
-              Effect.flatMap((result) =>
-                result === "updated" ? Effect.logInfo("skill bundle updated") : Effect.void,
-              ),
-              Effect.ignore({ log: "Warn", message: "skill bundle could not be refreshed" }),
-              Effect.annotateLogs({ source: bundle.source }),
+    // A server that runs agents itself reads `source` as an operator keeps it.
+    if (!localAgentRuns)
+      yield* Effect.tryPromise(resolve).pipe(
+        Effect.flatMap((manager) =>
+          Effect.forEach(
+            (manager?.config.provisioning?.skills ?? []).flatMap(({ source, url }) =>
+              url ? [{ source, url }] : [],
             ),
-          { discard: true },
+            (bundle) =>
+              Effect.tryPromise(() => refreshSkillBundle(bundle)).pipe(
+                Effect.flatMap((result) =>
+                  result === "updated" ? Effect.logInfo("skill bundle updated") : Effect.void,
+                ),
+                Effect.ignore({ log: "Warn", message: "skill bundle could not be refreshed" }),
+                Effect.annotateLogs({ source: bundle.source }),
+              ),
+            { discard: true },
+          ),
         ),
-      ),
-      Effect.ignore({ log: "Warn", message: "skill bundles could not be refreshed" }),
-      Effect.repeat(Schedule.spaced(Duration.hours(1))),
-      Effect.forkScoped,
-    );
+        Effect.ignore({ log: "Warn", message: "skill bundles could not be refreshed" }),
+        Effect.repeat(Schedule.spaced(Duration.hours(1))),
+        Effect.forkScoped,
+      );
     /**
      * Moves an idle box the reaper is about to put to sleep onto the pinned build. A wake or
      * another upgrade holding the box is waited out briefly; past that the next sweep decides.

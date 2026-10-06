@@ -239,9 +239,9 @@ const Provisioning = Schema.Struct({
         name: Schema.optional(TrimmedNonEmptyString),
         /**
          * An `https:` URL of a gzipped tarball whose root holds skill
-         * directories. When set, the manager owns `source` and refreshes it
-         * from `url` at startup and hourly, so `source` must be a path nothing
-         * else writes.
+         * directories. A manager that runs no agents itself owns `source` and
+         * refreshes it from `url` at startup and hourly, so there `source` must
+         * be a path nothing else writes. Elsewhere `source` is used as is.
          */
         url: Schema.optional(TrimmedNonEmptyString),
         /**

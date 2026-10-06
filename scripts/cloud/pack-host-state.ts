@@ -45,6 +45,7 @@ export interface HostConfig {
     readonly skills?: ReadonlyArray<{
       readonly source: string;
       readonly name?: string;
+      readonly url?: string;
       readonly agents?: ReadonlyArray<string>;
     }>;
   };
@@ -235,16 +236,27 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   const workspaceFiles = await carry("workspaceFiles", "workspace-files");
 
   const bundles = (config.provisioning?.skills ?? []).map((skill, index) => {
-    const directory = NodePath.posix.join(input.skillsDir, String(index));
     const name = NodePath.basename(skill.source);
+    const carried = {
+      ...(skill.name ? { name: skill.name } : {}),
+      ...(skill.agents ? { agents: skill.agents } : {}),
+    };
+    // The host downloads a url bundle itself. Its `source` sits outside the
+    // skills tree, which every new seed replaces, so a reseed or reboot keeps
+    // the copy it already has.
+    if (skill.url)
+      return {
+        source: {
+          source: NodePath.posix.join(input.baseDir, "skill-bundles", String(index), name),
+          url: skill.url,
+          ...carried,
+        },
+      };
+    const directory = NodePath.posix.join(input.skillsDir, String(index));
     return {
       directory,
       archive: tar(["--no-xattrs", "-czf", "-", "-C", NodePath.dirname(skill.source), name]),
-      source: {
-        source: NodePath.posix.join(directory, name),
-        ...(skill.name ? { name: skill.name } : {}),
-        ...(skill.agents ? { agents: skill.agents } : {}),
-      },
+      source: { source: NodePath.posix.join(directory, name), ...carried },
     };
   });
 
@@ -274,7 +286,9 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     warnings: plan.warnings,
     codexLogins,
     files,
-    skills: bundles.map(({ directory, archive }) => ({ directory, archive })),
+    skills: bundles.flatMap(({ directory, archive }) =>
+      directory && archive ? [{ directory, archive }] : [],
+    ),
     config: {
       e2bApiKey,
       ...(namespaceToken ? { namespaceToken } : {}),
