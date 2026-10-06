@@ -40,10 +40,10 @@ import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { Command, Flag } from "effect/unstable/cli";
-import { FetchHttpClient, HttpClient } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import type { RpcClientError } from "effect/unstable/rpc";
+import { Command, Flag } from "effect/cli";
+import { FetchHttpClient, HttpClient } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import type { RpcClientError } from "effect/rpc";
 
 import {
   childPairingUrl,
@@ -977,7 +977,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
         if (options.steps.has("turns"))
           for (const agent of options.agents)
             yield* runTurn(client, agent, `turn.${agent}`, null, claim).pipe(
-              Effect.catchTag("SmokeFailure", () => Effect.void),
+              Effect.catchTags({ SmokeFailure: () => Effect.void }),
               Effect.catch((cause) =>
                 record(`turn.${agent}`, false, null, { error: describe(cause) }),
               ),
@@ -1323,7 +1323,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
 
   const bearer = yield* bearerFor().pipe(
     Effect.asSome,
-    Effect.catchTag("SmokeFailure", () => Effect.succeed(Option.none<string>())),
+    Effect.catchTags({ SmokeFailure: () => Effect.succeed(Option.none<string>()) }),
     Effect.catch((cause) =>
       record("auth.bearer", false, null, { error: describe(cause) }).pipe(
         Effect.as(Option.none<string>()),
@@ -1349,7 +1349,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
               : Effect.void,
           );
       return steps.pipe(
-        Effect.catchTag("SmokeFailure", () => Effect.void),
+        Effect.catchTags({ SmokeFailure: () => Effect.void }),
         Effect.catch((cause) => record("harness", false, null, describe(cause))),
         Effect.ensuring(cleanup),
         Effect.ensuring(

@@ -7,7 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 import { observeLease, pullLeaseUsage, readLeaseUsage, shellActivity } from "./leaseActivity.ts";
 import { ownerChat } from "./provisionedChats.ts";
@@ -269,7 +269,7 @@ describe("pullLeaseUsage", () => {
       ]);
     }).pipe(
       Effect.scoped,
-      Effect.provide(BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory))),
+      Effect.provide(BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
     ),
   );
 });

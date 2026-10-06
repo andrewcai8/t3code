@@ -1,6 +1,6 @@
 import { useAtomMount } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { appAtomRegistry } from "./atom-registry";

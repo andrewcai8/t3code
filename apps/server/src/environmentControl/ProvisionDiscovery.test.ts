@@ -14,11 +14,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import {
-  makeSqlitePersistenceLive,
-  SqlitePersistenceMemory,
-} from "../persistence/Layers/Sqlite.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { boxLabel, boxMachine, listProvisionedEnvironments } from "./ProvisionDiscovery.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
@@ -40,7 +37,7 @@ it.effect(
       const directory = yield* fs.makeTempDirectoryScoped();
       const database = path.join(directory, "manager.sqlite");
       const layer = ProvisionOperationStore.layer.pipe(
-        Layer.provideMerge(makeSqlitePersistenceLive(database)),
+        Layer.provideMerge(SqlitePersistence.layerFromPath(database)),
       );
       let retainedExpiry = "";
       yield* Effect.gen(function* () {
@@ -224,7 +221,7 @@ it.effect(
             createProvisionedLeaseRegistry(sql).findBySandbox("sandbox-1"),
           ))?.expiresAt,
         ).toBe(retainedExpiry);
-      }).pipe(Effect.provide(makeSqlitePersistenceLive(database)), Effect.scoped);
+      }).pipe(Effect.provide(SqlitePersistence.layerFromPath(database)), Effect.scoped);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
@@ -354,7 +351,7 @@ it.effect("a box disposed through the host is reported disposed, by the id the b
         Provisioning.layer.pipe(
           Layer.provideMerge(ProvisionOperationStore.layer),
           Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
-          Layer.provideMerge(makeSqlitePersistenceLive(database)),
+          Layer.provideMerge(SqlitePersistence.layerFromPath(database)),
         ),
       ),
       Effect.scoped,
@@ -419,7 +416,7 @@ it.effect(
         Provisioning.layer.pipe(
           Layer.provideMerge(ProvisionOperationStore.layer),
           Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
         ),
       ),
     ),
@@ -507,7 +504,7 @@ it.effect("a box disposed before the host kept its id is named by the address a 
         Provisioning.layer.pipe(
           Layer.provideMerge(ProvisionOperationStore.layer),
           Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
-          Layer.provideMerge(makeSqlitePersistenceLive(database)),
+          Layer.provideMerge(SqlitePersistence.layerFromPath(database)),
         ),
       ),
       Effect.scoped,
@@ -636,7 +633,7 @@ it.effect(
           Provisioning.layer.pipe(
             Layer.provideMerge(ProvisionOperationStore.layer),
             Layer.provide(Layer.succeed(ProvisionProviderPorts, boxPorts)),
-            Layer.provideMerge(makeSqlitePersistenceLive(database)),
+            Layer.provideMerge(SqlitePersistence.layerFromPath(database)),
           ),
         ),
         Effect.scoped,
@@ -736,7 +733,7 @@ it.effect("a paused Devbox lists when it will be removed, or that it is kept", (
   }).pipe(
     Effect.provide(
       ProvisionOperationStore.layer.pipe(
-        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
         Layer.provide(NodeServices.layer),
       ),
     ),

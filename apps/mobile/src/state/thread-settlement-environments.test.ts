@@ -1,6 +1,6 @@
 import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
-import { Atom, AtomRegistry } from "effect/unstable/reactivity";
+import { Atom, AtomRegistry } from "effect/reactivity";
 
 import { createThreadListEnvironmentsAtom } from "./thread-list-environments";
 import { threadSettlementEnvironmentIds } from "./thread-settlement-environments";

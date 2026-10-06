@@ -4,7 +4,7 @@
  * and `WsRpcGroup`.
  */
 import * as Schema from "effect/Schema";
-import * as Rpc from "effect/unstable/rpc/Rpc";
+import * as Rpc from "effect/rpc/Rpc";
 
 import { EnvironmentAuthorizationError } from "./auth.ts";
 import { EnvironmentId, NonNegativeInt } from "./baseSchemas.ts";

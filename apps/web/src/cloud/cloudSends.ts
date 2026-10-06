@@ -7,7 +7,7 @@ import {
 import { holdsPairing, provisionedGatewayPairingUrl } from "@t3tools/client-runtime/connection";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 
 import { toastManager } from "../components/ui/toast";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";

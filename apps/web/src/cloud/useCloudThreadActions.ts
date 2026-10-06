@@ -11,7 +11,7 @@ import type {
   EnvironmentProvisionPauseResult,
   ScopedThreadRef,
 } from "@t3tools/contracts";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { useCallback, useMemo } from "react";
 
 import { stackedThreadToast, toastManager } from "../components/ui/toast";

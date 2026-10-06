@@ -118,7 +118,8 @@ export const launchFire =
     task.target === "local"
       ? threadLaunch.launch(input)
       : cloudFire.fire({
-          task,
+          // A webhook fire's prompt was rendered from its request; the row holds the template.
+          task: input.initialMessage ? { ...task, prompt: input.initialMessage.text } : task,
           provider: task.target,
           fireKey: `${task.id}:${DateTime.toEpochMillis(startedAt)}`,
           firedAt: DateTime.toUtc(startedAt),
@@ -131,9 +132,12 @@ export const launchFire =
 export const keepsCloudRun = (task: ScheduledTask, cause: Cause.Cause<unknown>): boolean =>
   task.target !== "local" && Cause.hasInterruptsOnly(cause);
 
-/** The start of a cloud fire its row still marks running, which startup resumes. */
+/**
+ * The start of a cloud fire its row still marks running, which startup resumes. A webhook fire is
+ * not resumed, since its rendered prompt lived only in the request.
+ */
 export const resumableCloudRun = (task: ScheduledTask): Option.Option<DateTime.Utc> =>
-  task.target === "local" || task.lastRunAt === null
+  task.target === "local" || task.schedule.type === "webhook" || task.lastRunAt === null
     ? Option.none()
     : DateTime.make(task.lastRunAt).pipe(Option.map(DateTime.toUtc));
 

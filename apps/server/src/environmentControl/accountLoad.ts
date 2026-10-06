@@ -1,7 +1,7 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
 import type { AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
 import type { ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 

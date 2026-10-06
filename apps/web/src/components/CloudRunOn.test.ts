@@ -82,7 +82,7 @@ describe("cloudBaseRefs", () => {
       names({
         canonicalKey: "github.com/them/repo",
         locator: locator("upstream"),
-        origin: { owner: "me", name: "repo", remoteUrl: "git@github.com:me/repo.git" },
+        origin: { canonicalKey: "github.com/me/repo", displayName: "me/repo" },
       }),
     ).toEqual([
       ["main", true],

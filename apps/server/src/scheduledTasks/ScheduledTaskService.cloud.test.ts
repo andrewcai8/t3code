@@ -11,8 +11,9 @@ import * as Stream from "effect/Stream";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import { ScheduledCloudFire } from "./ScheduledCloudFire.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
@@ -47,6 +48,7 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
           ),
       }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
       Layer.succeed(ScheduledCloudFire, {
         fire: ({ task, provider }) =>
           Ref.update(fired, (calls) => [...calls, { title: task.title, provider }]).pipe(
@@ -91,7 +93,7 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
         .pipe(Effect.flip);
       assert.equal(bound.message, "A task that runs on a cloud machine must start a new chat.");
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
-  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
 const dependenciesWith = (fire: (typeof ScheduledCloudFire)["Service"]["fire"]) =>
@@ -100,6 +102,7 @@ const dependenciesWith = (fire: (typeof ScheduledCloudFire)["Service"]["fire"]) 
     Scheduler.layer,
     Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
     Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+    Layer.mock(SecretRequests.SecretRequests)({}),
     Layer.succeed(ScheduledCloudFire, { fire }),
   );
 
@@ -128,7 +131,7 @@ it.effect("refuses to run a cloud task that is already running, as it does a loc
         ),
       ),
     );
-  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
 it.effect("settles a cloud fire cut short by shutdown from the same request after a restart", () =>
@@ -170,5 +173,5 @@ it.effect("settles a cloud fire cut short by shutdown from the same request afte
     assert.equal(task?.runCount, 1);
     const [first, resumed] = yield* Ref.get(fires);
     assert.deepEqual(resumed, first);
-  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

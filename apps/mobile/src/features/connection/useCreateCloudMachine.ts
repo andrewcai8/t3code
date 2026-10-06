@@ -8,7 +8,7 @@ import {
   provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { useCallback, useRef, useState } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";

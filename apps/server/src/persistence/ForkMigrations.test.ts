@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { ownerChat, createProvisionedChatStore } from "../environmentControl/provisionedChats.ts";
 import { boxShell, boxThread } from "../environmentControl/shellTestFixture.ts";
@@ -16,7 +16,7 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
-import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
+import * as SqlitePersistence from "./Sqlite.ts";
 import { forkMigrationEntries } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 
@@ -90,7 +90,11 @@ const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [54, "ProjectionThreadsAutoSettleDisabledAt"],
   [55, "OrchestrationV2"],
   [56, "RemoveRedundantProjectionIndexes"],
+  [57, "ScheduledTaskWebhooks"],
+  [58, "WebhookRelayDeliveries"],
 ];
+/** Upstream migrations newer than any fork-era ledger, which a moved ledger still runs. */
+const upstreamAfterForkEra = expectedUpstreamAbove51.filter(([id]) => id > 56);
 const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [1, "ProvisionOperations"],
   [2, "BoxUsage"],
@@ -206,7 +210,7 @@ const seedForkDatabase = (statePath: string) =>
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: statePath })), Effect.scoped);
 
 const upgradedLayer = (dbPath: string) => {
-  const database = makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer));
+  const database = SqlitePersistence.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer));
   const stores = Layer.mergeAll(
     database,
     EventStore.layer.pipe(Layer.provideMerge(database)),
@@ -328,18 +332,21 @@ it.layer(NodeServices.layer)("fork migrations", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect("a database from the fork's 62-64 numbering moves without rerunning anything", () =>
-    Effect.gen(function* () {
-      yield* runMigrations();
-      yield* writeForkEraLedger([
-        ...forkEraLedgerAt61,
-        [62, "OrchestrationV2"],
-        [63, "RemoveRedundantProjectionIndexes"],
-        [64, "ProvisionedChatsV2"],
-      ]);
-      assert.deepStrictEqual(yield* runMigrations(), []);
-      yield* assertMigratedLedgers;
-    }).pipe(Effect.provide(memory)),
+  it.effect(
+    "a database from the fork's 62-64 numbering moves and runs only newer upstream migrations",
+    () =>
+      Effect.gen(function* () {
+        yield* runMigrations({ toMigrationInclusive: 56 });
+        for (const [, , migration] of forkMigrationEntries.slice(0, 5)) yield* migration;
+        yield* writeForkEraLedger([
+          ...forkEraLedgerAt61,
+          [62, "OrchestrationV2"],
+          [63, "RemoveRedundantProjectionIndexes"],
+          [64, "ProvisionedChatsV2"],
+        ]);
+        assert.deepStrictEqual(yield* runMigrations(), upstreamAfterForkEra);
+        yield* assertMigratedLedgers;
+      }).pipe(Effect.provide(memory)),
   );
 
   it.effect("an upstream V2 database keeps its ledger and gains the fork ledger", () =>
@@ -349,7 +356,7 @@ it.layer(NodeServices.layer)("fork migrations", (it) => {
         yield* tableNames(["fork_sql_migrations", "provision_operations"]),
         [],
       );
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* runMigrations(), upstreamAfterForkEra);
       yield* assertMigratedLedgers;
       assert.deepStrictEqual(yield* tableNames(["provision_operations", "provisioned_chats"]), [
         "provision_operations",

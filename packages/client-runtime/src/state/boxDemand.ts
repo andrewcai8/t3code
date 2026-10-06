@@ -1,5 +1,5 @@
 import type { EnvironmentId, OrchestrationV2ThreadShell } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { isUnpairedBox } from "../connection/catalog.ts";

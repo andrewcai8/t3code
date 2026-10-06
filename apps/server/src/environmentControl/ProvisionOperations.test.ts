@@ -19,9 +19,9 @@ import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
-import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderError, ProvisionProviderPorts } from "./Provisioning.ts";
 
@@ -105,7 +105,7 @@ const makeLayer = (file: string, ports: ProvisionProviderPorts["Service"]) =>
   Provisioning.layer.pipe(
     Layer.provideMerge(ProvisionOperationStore.layer),
     Layer.provide(Layer.succeed(ProvisionProviderPorts, ports)),
-    Layer.provide(makeSqlitePersistenceLive(file)),
+    Layer.provide(SqlitePersistence.layerFromPath(file)),
     Layer.provide(NodeServices.layer),
   );
 /** A prepare that holds until released, recording how often it began and whether it was interrupted. */
@@ -800,7 +800,7 @@ describe("an allocation whose outcome a crash lost", () => {
         const sql = yield* SqlClient.SqlClient;
         yield* sql`UPDATE provision_operations
           SET state_json = '{"kind":"fork_issued","parent":{"provider":"e2b","sandboxId":"parent-1"}}'`;
-      }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+      }).pipe(Effect.provide(SqlitePersistence.layerFromPath(file)), Effect.scoped);
       yield* minutesAfterIssue(0);
       expect((yield* inService(file, ports, reconcile)).state).toEqual({ kind: "disposed" });
       expect(disposed).toEqual([parent]);
@@ -890,7 +890,7 @@ describe("an allocation whose outcome a crash lost", () => {
           WHERE request_id = ${request.requestId}`;
         yield* sql`UPDATE provision_operations SET state_json = '{"kind":"fork_issued"}'
           WHERE request_id = ${unreadable.requestId}`;
-      }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+      }).pipe(Effect.provide(SqlitePersistence.layerFromPath(file)), Effect.scoped);
       yield* minutesAfterIssue(0);
       expect((yield* inService(file, ports, reconcile)).state).toEqual({ kind: "disposed" });
       expect(disposed).toEqual([parent]);
@@ -898,7 +898,7 @@ describe("an allocation whose outcome a crash lost", () => {
         const sql = yield* SqlClient.SqlClient;
         return yield* sql`SELECT state_json AS state FROM provision_operations
           WHERE request_id = ${unreadable.requestId}`;
-      }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+      }).pipe(Effect.provide(SqlitePersistence.layerFromPath(file)), Effect.scoped);
       expect(untouched).toEqual([{ state: '{"kind":"fork_issued"}' }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );

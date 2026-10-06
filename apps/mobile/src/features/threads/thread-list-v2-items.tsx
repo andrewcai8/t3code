@@ -597,8 +597,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // label as the web sidebar, sourced from the server-side visited watermark
   // so checking a thread on any device clears it everywhere.
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
+  const workingLabel = STATUS_LABEL_BY_STATUS[status];
   const statusLabel =
-    STATUS_LABEL_BY_STATUS[status] ??
+    // A native /goal keeps the agent going across turns until it is met.
+    (status === "working" && workingLabel !== undefined && thread.goal?.status === "active"
+      ? { ...workingLabel, label: "Goal" }
+      : workingLabel) ??
     (machineStatus === "asleep" ? undefined : machineLabel) ??
     (isUnread ? { label: "Done", className: "text-adaptive-emerald-700-300" } : undefined) ??
     machineLabel;

@@ -17,7 +17,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 
 const RESOLVABLE: ReadonlySet<string> = new Set([
   ".ts",

@@ -11,14 +11,11 @@ import type * as Cache from "effect/Cache";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
-import type { ChildProcessSpawner } from "effect/unstable/process";
+import type { ChildProcessSpawner } from "effect/process";
 
-import { getProbeDroppingFailedUsage, orClaudeAuthStatus } from "../Layers/claudeColdProbe.ts";
-import { type probeClaudeCapabilities, runClaudeCommand } from "../Layers/ClaudeProvider.ts";
-import {
-  makeClaudeUsageTurnReader,
-  resolveClaudeProbeUsage,
-} from "../Layers/claudeSetupTokenUsage.ts";
+import { getProbeDroppingFailedUsage, orClaudeAuthStatus } from "../claudeColdProbe.ts";
+import { type probeClaudeCapabilities, runClaudeCommand } from "../ClaudeProvider.ts";
+import { makeClaudeUsageTurnReader, resolveClaudeProbeUsage } from "../claudeSetupTokenUsage.ts";
 import { resolveClaudeSdkExecutablePath } from "./ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "./ClaudeHome.ts";
 

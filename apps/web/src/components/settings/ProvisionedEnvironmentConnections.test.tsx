@@ -3,7 +3,7 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { DiscoveredProvisionedEnvironment } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { ProvisionedEnvironmentConnections } from "./ProvisionedEnvironmentConnections";
 
 const state = vi.hoisted(() => ({

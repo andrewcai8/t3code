@@ -363,12 +363,13 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
           return wakeRetryLater(result.message);
       }
     }).pipe(
-      Effect.catchTag("EnvironmentNotRegisteredError", (error) =>
-        Effect.succeed<BoxWakeOutcome>({
-          _tag: "Refused",
-          error: new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
-        }),
-      ),
+      Effect.catchTags({
+        EnvironmentNotRegisteredError: (error) =>
+          Effect.succeed<BoxWakeOutcome>({
+            _tag: "Refused",
+            error: new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
+          }),
+      }),
       Effect.catchTags({
         EnvironmentRpcUnavailableError: (error) => Effect.succeed(wakeUndelivered(error.message)),
         RpcClientError: (error) => Effect.succeed(wakeUndelivered(error.message)),
@@ -645,7 +646,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
       ),
     ).pipe(
       Effect.map(Option.map((prepared) => prepared.httpBaseUrl)),
-      Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.succeedNone),
+      Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.succeedNone }),
     ),
     redeem: pairing.redeem,
   });
@@ -684,14 +685,15 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         return next;
       }),
     ).pipe(
-      Effect.catchTag("ConnectionPersistenceError", (error) =>
-        Effect.fail(
-          new ConnectionBlockedError({
-            reason: "configuration",
-            detail: `This device could not save its pairing with this chat's cloud machine: ${error.message}`,
-          }),
-        ),
-      ),
+      Effect.catchTags({
+        ConnectionPersistenceError: (error) =>
+          Effect.fail(
+            new ConnectionBlockedError({
+              reason: "configuration",
+              detail: `This device could not save its pairing with this chat's cloud machine: ${error.message}`,
+            }),
+          ),
+      }),
     );
 
   // A box this device never paired pairs through its host inside its dial, so a paused one wakes
@@ -806,7 +808,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
                 ? null
                 : new BearerConnectionTarget({ ...target, box: { managerId } }),
             ).pipe(
-              Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.void),
+              Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
               Effect.catch((error) =>
                 Effect.logWarning("Could not mark a saved connection as a box.", {
                   environmentId,

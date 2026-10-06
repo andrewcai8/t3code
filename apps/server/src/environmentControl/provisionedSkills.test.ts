@@ -12,8 +12,8 @@ import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import { EnvironmentControl, layer } from "./EnvironmentControl.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 
@@ -82,9 +82,9 @@ const onHost = (localAgentRuns: boolean) =>
     yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
     const services = yield* Layer.build(
       Layer.merge(layer, ProvisionOperationStore.layer).pipe(
-        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
         Layer.provide(ServerSettings.layerTest()),
-        Layer.provide(makeProviderRegistryLayer()),
+        Layer.provide(ProviderRegistryMock.layer()),
         Layer.provideMerge(
           Layer.effect(
             ServerConfig.ServerConfig,

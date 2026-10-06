@@ -5,11 +5,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import {
-  makeSqlitePersistenceLive,
-  SqlitePersistenceMemory,
-} from "../persistence/Layers/Sqlite.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import {
   createProvisionedLeaseRegistry,
   type ProvisionedLeaseRegistry,
@@ -28,7 +25,7 @@ const withRegistry = (
       yield* Effect.promise(() =>
         body(createProvisionedLeaseRegistry(sql), createProvisionedLeaseRegistry(sql)),
       );
-    }).pipe(Effect.provide(makeSqlitePersistenceLive(database)));
+    }).pipe(Effect.provide(SqlitePersistence.layerFromPath(database)));
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
 it.effect(
@@ -155,7 +152,7 @@ it.effect("imports existing JSON leases once without reviving a later disposal",
     expect(yield* Effect.promise(() => reopened.findBySandbox("legacy-sandbox"))).toMatchObject({
       state: "disposed",
     });
-  }).pipe(Effect.provide(SqlitePersistenceMemory.pipe(Layer.provide(NodeServices.layer)))),
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory.pipe(Layer.provide(NodeServices.layer)))),
 );
 
 it.effect(

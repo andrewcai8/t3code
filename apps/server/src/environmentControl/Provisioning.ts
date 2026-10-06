@@ -579,7 +579,7 @@ export class Provisioning extends Context.Service<
       }).pipe(
         Effect.flatMap((cleanup) => follow(requestId, cleanup)),
         // Only a drive accepts a request, and a cleanup never follows into a drive.
-        Effect.catchTag("ProvisionRequestConflict", Effect.die),
+        Effect.catchTags({ ProvisionRequestConflict: Effect.die }),
       );
     const cancel = (requestId: ProvisionRequestId) => stop(requestId);
     const reconcile = Effect.gen(function* () {

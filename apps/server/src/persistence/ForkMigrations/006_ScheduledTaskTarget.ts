@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Where a scheduled task fires. Existing tasks keep running on this server. A ledger repair can
 // rerun fork migrations, so the column is added only once.
