@@ -1481,7 +1481,15 @@ describe("box disk guard", () => {
       await NodeFSP.writeFile(NodePath.join(path, "src", "index.ts"), "export {};\n");
       await NodeFSP.writeFile(NodePath.join(path, "notes.txt"), "mine\n");
       await NodeFSP.mkdir(NodePath.join(path, "node_modules", "left-pad"), { recursive: true });
-      await NodeFSP.writeFile(NodePath.join(path, "node_modules", "left-pad", "index.js"), "");
+      await NodeFSP.writeFile(
+        NodePath.join(path, "node_modules", "left-pad", "index.js"),
+        "x".repeat(100_000),
+      );
+      // Same size and place in every checkout, different bytes.
+      await NodeFSP.writeFile(
+        NodePath.join(path, "node_modules", "left-pad", "build.js"),
+        NodePath.basename(path).padEnd(16, "."),
+      );
       if (!idle) return;
       const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000);
       const age = async (target: string): Promise<void> => {
@@ -1503,7 +1511,25 @@ describe("box disk guard", () => {
         () => true,
         () => false,
       );
+    const inodes = async (file: string) =>
+      new Set(
+        await Promise.all(
+          ["wt/fresh", "wt/busy", "workspace"].map(
+            async (checkout) =>
+              (await NodeFSP.stat(NodePath.join(root, checkout, "node_modules", "left-pad", file)))
+                .ino,
+          ),
+        ),
+      ).size;
     const survivors = async () => ({
+      sharedCopies: await inodes("index.js"),
+      differingCopies: await inodes("build.js"),
+      freshContent: (
+        await NodeFSP.readFile(
+          NodePath.join(root, "wt/fresh/node_modules/left-pad/build.js"),
+          "utf8",
+        )
+      ).trim(),
       idleModules: await present("wt/idle/node_modules"),
       idleSource: await present("wt/idle/src/index.ts"),
       idleGit: await present("wt/idle/.git"),
@@ -1516,20 +1542,33 @@ describe("box disk guard", () => {
     return { root, survivors };
   };
 
-  const guard = (root: string, depsBytes: number) =>
-    NodeChildProcess.spawnSync(
-      "python3",
-      ["-c", diskGuardScript, root, NodePath.join(root, "home"), "once"],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          HOME: NodePath.join(root, "home"),
-          T3_DISK_GUARD_LOW_BYTES: "0",
-          T3_DISK_GUARD_DEPS_BYTES: String(depsBytes),
-        },
-      },
+  /** One watch pass: a server that already stopped makes the watcher check once and exit. */
+  const guard = async (root: string, depsBytes: number) => {
+    const stopped = NodeChildProcess.spawnSync("true");
+    await NodeFSP.writeFile(
+      NodePath.join(root, "server.json"),
+      JSON.stringify({ pid: stopped.pid }),
     );
+    const lock = await NodeFSP.open(NodePath.join(root, "disk-guard.lock"), "w");
+    try {
+      return NodeChildProcess.spawnSync(
+        "python3",
+        ["-c", diskGuardScript, root, NodePath.join(root, "home"), "watch", "3"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe", lock.fd],
+          env: {
+            ...process.env,
+            HOME: NodePath.join(root, "home"),
+            T3_DISK_GUARD_LOW_BYTES: "0",
+            T3_DISK_GUARD_DEPS_BYTES: String(depsBytes),
+          },
+        },
+      );
+    } finally {
+      await lock.close();
+    }
+  };
 
   it("removes node_modules from checkouts idle for an hour once free space drops under the threshold", async () => {
     const { root, survivors } = await checkoutTree();
@@ -1541,10 +1580,13 @@ describe("box disk guard", () => {
     try {
       await new Promise((resolve) => worker.once("spawn", resolve));
       // A threshold above any disk's free space makes this disk read as under it.
-      const guarded = guard(root, 2 ** 60);
+      const guarded = await guard(root, 2 ** 60);
 
       expect(guarded.status).toBe(0);
       expect(await survivors()).toEqual({
+        sharedCopies: 1,
+        differingCopies: 3,
+        freshContent: "fresh...........",
         idleModules: false,
         idleSource: true,
         idleGit: true,
@@ -1554,6 +1596,9 @@ describe("box disk guard", () => {
         workspaceModules: true,
         reserve: true,
       });
+      expect(guarded.stdout).toContain(
+        "disk guard: linked 3 duplicate files in node_modules, 300000 bytes\n",
+      );
       expect(guarded.stdout).toMatch(
         new RegExp(`^disk guard: removed ${root}/wt/idle/node_modules, freed \\d+ bytes$`, "m"),
       );
@@ -1565,11 +1610,14 @@ describe("box disk guard", () => {
 
   it("leaves every checkout alone while free space is above the threshold", async () => {
     const { root, survivors } = await checkoutTree();
-    const guarded = guard(root, 0);
+    const guarded = await guard(root, 0);
 
     expect(guarded.status).toBe(0);
     expect(guarded.stdout).toBe("");
     expect(await survivors()).toEqual({
+      sharedCopies: 3,
+      differingCopies: 3,
+      freshContent: "fresh...........",
       idleModules: true,
       idleSource: true,
       idleGit: true,
