@@ -364,30 +364,34 @@ ${brokerTokenFunctions}
  * Keeps a full disk from stopping a box's T3 server, which must write to save the chat. On Linux
  * a reserve file holds space the guard gives back when the disk runs low; it also clears package
  * caches the agent can download again. While watching, below T3_DISK_GUARD_DEPS_BYTES (10 GiB), it
- * hardlinks identical files across the node_modules of git checkouts on the root's disk; if that
- * is not enough it deletes node_modules, oldest checkout first until there is room, skipping the
- * chat's workspace, any checkout changed in the last hour, and any a process works in. Package
- * stores that make installs cheap are only cleared with the other caches, below 1 GiB.
- * `once` runs before the server starts: it frees room, or sets the reserve aside when there is
- * plenty, and stays quick so a wake does not wait on it. `watch` only gives room back, checking
- * every 30 seconds until it finds the server stopped, one watcher per box. Arguments: root, home, mode, and for `watch` an open descriptor of the
- * guard's lock. T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB low-disk threshold.
+ * deletes untracked node_modules from git checkouts under the root, oldest checkout first until
+ * there is room, skipping the chat's workspace, any checkout changed in the last hour, and any a
+ * process works in. Package stores that make installs cheap are only cleared with the other
+ * caches, below 1 GiB. `once` runs before the server starts: it frees room, or sets the reserve
+ * aside when there is plenty, and stays quick so a wake does not wait on it. `watch` only gives
+ * room back, checking every 30 seconds until it finds the server stopped, one watcher per box.
+ * Arguments: root, home, mode, and for `watch` an open descriptor of the guard's lock.
+ * T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB low-disk threshold.
  */
 export const diskGuardScript = String.raw`
-import fcntl,filecmp,json,os,pathlib,shutil,stat,subprocess,sys,time
+import fcntl,json,os,pathlib,shutil,subprocess,sys,time
 root, home, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 reserve = root / 'disk-reserve'
 RESERVE = 256 << 20
 LOW = int(os.environ.get('T3_DISK_GUARD_LOW_BYTES', 1 << 30))
 DEPS = int(os.environ.get('T3_DISK_GUARD_DEPS_BYTES', 10 << 30))
 IDLE_SECONDS = 3600
-SWEEP_SECONDS = 300
+# A sweep that freed nothing waits longer: checkouts it skipped stay too recent or busy for a while.
+SWEEP_SECONDS, BACKOFF_SECONDS = 300, 1800
 CACHES = ['.npm/_cacache', '.cache/pnpm', '.cache/yarn', '.yarn/berry/cache', '.bun/install/cache', '.cache/pip', '.cache/uv', '.cache/go-build', 'Library/Caches/Yarn', 'Library/Caches/pip', 'Library/Caches/pnpm', 'Library/Caches/go-build']
-def checkouts(device):
-    # Each git checkout on the root's disk: its node_modules and the newest change outside them.
+# Home directories that hold tools and stores, never an agent's checkout.
+HOME_SKIP = {os.path.realpath(home / name) for name in ['Library', '.cache', '.npm', '.bun', '.local', '.cargo', '.rustup', '.yarn', '.pnpm-store', '.gradle', '.m2', 'go']}
+SKIP_NAMES = {'.git', 'node_modules', 'target'}
+def checkouts():
+    # Each git checkout under the root: its node_modules and the newest change outside them.
+    device = os.stat(root).st_dev
     found = {}
-    bases = sorted({os.path.realpath(root), os.path.realpath(os.path.expanduser('~'))})
-    stack = [(base, None) for base in bases if not any(base.startswith(other + '/') for other in bases)]
+    stack = [(os.path.realpath(root), None)]
     while stack:
         path, owner = stack.pop()
         try:
@@ -398,7 +402,7 @@ def checkouts(device):
             owner = found.setdefault(path, {'deps': [], 'newest': 0.0})
         for entry in entries:
             try:
-                if entry.name == '.git':
+                if entry.name == '.git' or entry.path in HOME_SKIP:
                     continue
                 directory = entry.is_dir(follow_symlinks=False)
                 if owner is not None or directory:
@@ -407,11 +411,13 @@ def checkouts(device):
                         continue
                     if owner is not None:
                         owner['newest'] = max(owner['newest'], info.st_mtime)
-                if directory:
-                    if entry.name != 'node_modules':
-                        stack.append((entry.path, owner))
-                    elif owner is not None:
+                if not directory:
+                    continue
+                if entry.name == 'node_modules':
+                    if owner is not None:
                         owner['deps'].append(entry.path)
+                elif entry.name not in SKIP_NAMES:
+                    stack.append((entry.path, owner))
             except OSError:
                 continue
     return found
@@ -442,56 +448,27 @@ def open_paths():
     if not paths:
         raise OSError('lsof listed no open files')
     return paths
-def link_duplicates(deps, busy):
-    # Package managers replace files by rename, so a later install only breaks its own link.
-    seen = {}
-    linked = size = 0
-    for dep in deps:
-        for directory, _, names in os.walk(dep):
-            for name in names:
-                path = os.path.join(directory, name)
-                try:
-                    found = os.lstat(path)
-                    if not stat.S_ISREG(found.st_mode) or found.st_size == 0 or path in busy:
-                        continue
-                    original, known = seen.setdefault((os.path.relpath(path, dep), found.st_size), (path, found))
-                    if original == path or (known.st_dev, known.st_ino) == (found.st_dev, found.st_ino):
-                        continue
-                    if (known.st_dev, known.st_mode, known.st_uid) != (found.st_dev, found.st_mode, found.st_uid) or not filecmp.cmp(original, path, shallow=False):
-                        continue
-                    temporary = path + '.t3-link'
-                    os.link(original, temporary)
-                    current = os.lstat(path)
-                    if (current.st_ino, current.st_size, current.st_mtime_ns) != (found.st_ino, found.st_size, found.st_mtime_ns):
-                        os.unlink(temporary)
-                        continue
-                    os.replace(temporary, path)
-                    linked += 1
-                    size += found.st_size
-                except OSError:
-                    continue
-    if linked:
-        print('disk guard: linked', linked, 'duplicate files in node_modules,', size, 'bytes', flush=True)
+def untracked(checkout, dep):
+    listed = subprocess.run(['git', '-C', checkout, 'ls-files', '-z', '--', os.path.relpath(dep, checkout)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+    return listed.returncode == 0 and not listed.stdout
 def free_dependencies():
-    device = os.stat(root).st_dev
+    # Returns how many node_modules it removed.
     workspace = os.path.realpath(root / 'workspace')
-    found = checkouts(device)
-    if not any(checkout['deps'] for checkout in found.values()):
-        return
-    busy = set(open_paths())
-    link_duplicates([dep for checkout in found.values() for dep in checkout['deps']], busy)
     cutoff = time.time() - IDLE_SECONDS
-    idle = sorted((checkout['newest'], path, checkout['deps']) for path, checkout in found.items() if path != workspace and checkout['deps'] and checkout['newest'] < cutoff)
+    idle = sorted((checkout['newest'], path, checkout['deps']) for path, checkout in checkouts().items() if path != workspace and checkout['deps'] and checkout['newest'] < cutoff)
+    removed = 0
     for _, path, deps in idle:
         free = shutil.disk_usage(root).free
         if free >= DEPS:
-            return
-        if any(open_path == path or open_path.startswith(path + '/') for open_path in busy):
+            break
+        deps = [dep for dep in deps if untracked(path, dep)]
+        if not deps or any(open_path == path or open_path.startswith(path + '/') for open_path in open_paths()):
             continue
         for dep in deps:
             shutil.rmtree(dep, ignore_errors=True)
-        freed = shutil.disk_usage(root).free - free
-        print('disk guard: removed', ', '.join(deps) + ', freed', max(0, freed), 'bytes', flush=True)
+        removed += len(deps)
+        print('disk guard: removed', ', '.join(deps) + ', freed', max(0, shutil.disk_usage(root).free - free), 'bytes', flush=True)
+    return removed
 def headroom():
     free = shutil.disk_usage(root).free
     if free < LOW:
@@ -514,14 +491,14 @@ with os.fdopen(int(sys.argv[4]), 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         sys.exit(0)
-    swept = None
+    next_sweep = 0.0
     while True:
         try:
             headroom()
-            # The sweep reads every file in every checkout, so a disk that stays under the threshold is swept every few minutes, not every check.
-            if shutil.disk_usage(root).free < DEPS and (swept is None or time.monotonic() - swept >= SWEEP_SECONDS):
-                swept = time.monotonic()
-                free_dependencies()
+            if shutil.disk_usage(root).free < DEPS and time.monotonic() >= next_sweep:
+                next_sweep = time.monotonic() + BACKOFF_SECONDS
+                if free_dependencies():
+                    next_sweep = time.monotonic() + SWEEP_SECONDS
         except (OSError, subprocess.SubprocessError) as error:
             print('disk guard:', error, flush=True)
         try:
