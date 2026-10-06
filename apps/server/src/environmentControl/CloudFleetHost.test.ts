@@ -8,6 +8,7 @@ import {
   type FleetHostRequest,
   type FleetHostResponse,
   type FleetInvokeInput,
+  ProviderInstanceId,
   ProvisionRequestId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -37,7 +38,11 @@ const modelSelection = { instanceId: "codex", model: "gpt-5.5" };
 /** A box this host provisioned and keeps: awake or asleep, with a chat card unless it has none. */
 const addBox = (
   index: number,
-  box: { readonly asleep?: boolean; readonly chat?: string | null } = {},
+  box: {
+    readonly asleep?: boolean;
+    readonly chat?: string | null;
+    readonly threadId?: string;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -69,7 +74,7 @@ const addBox = (
         preparationHash: "a".repeat(64),
       },
     });
-    const threadId = `chat-${index}`;
+    const threadId = box.threadId ?? `chat-${index}`;
     yield* Effect.promise(async () => {
       await leases.register({
         leaseId: id(index),
@@ -101,7 +106,7 @@ const setup = Effect.gen(function* () {
   const opened: Array<string> = [];
   const registrations = new Map<string, Queue.Queue<FleetHostRegistration>>();
   const requests = new Map<string, Queue.Queue<FleetHostRequest>>();
-  for (const index of [1, 2, 3, 4]) {
+  for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
     registrations.set(origin(index), yield* Queue.unbounded<FleetHostRegistration>());
     requests.set(origin(index), yield* Queue.unbounded<FleetHostRequest>());
   }
@@ -224,7 +229,11 @@ const setup = Effect.gen(function* () {
 const withBoxes = <A, E>(
   body: (
     context: Effect.Success<typeof setup>,
-  ) => Effect.Effect<A, E, CloudFleetHost.CloudFleetHost | SqlClient.SqlClient>,
+  ) => Effect.Effect<
+    A,
+    E,
+    CloudFleetHost.CloudFleetHost | SqlClient.SqlClient | ProvisionOperationStore
+  >,
 ) =>
   Effect.gen(function* () {
     const context = yield* setup;
@@ -341,7 +350,7 @@ it.effect("refuses an environment that is not one of the user's cloud chats", ()
   ),
 );
 
-it.effect("starts a new cloud chat through provisioning, once, like this chat's machine", () =>
+it.effect("starts a new cloud chat with one provision like this chat's machine", () =>
   withBoxes(({ relay, provisioned, resumed }) =>
     Effect.gen(function* () {
       const response = yield* relay(CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, {
@@ -372,6 +381,7 @@ it.effect("starts a new cloud chat through provisioning, once, like this chat's 
         },
       });
       const threadId = input!.chat!.threadId;
+      expect(threadId.startsWith(`cloud-started:${id(1)}:`)).toBe(true);
       expect(response).toEqual({
         requestId: "request-1",
         result: {
@@ -411,6 +421,60 @@ it.effect("re-registers on the same connection when another chat's card changes"
         "New cloud chat on a fresh machine",
       ]);
       expect(opened.filter((at) => at === origin(1))).toEqual([origin(1)]);
+    }),
+  ),
+);
+
+it.effect("lets a chat another chat started reach the others but start no more", () =>
+  withBoxes(({ registrations, relay, provisioned }) =>
+    Effect.gen(function* () {
+      yield* addBox(5, { chat: "Child", threadId: `cloud-started:${id(1)}:child` });
+      yield* (yield* CloudFleetHost.CloudFleetHost).reconcile;
+      const registration = yield* Queue.take(registrations.get(origin(5))!);
+      expect(registration.environments.map((environment) => environment.environmentId)).toEqual([
+        "box-1",
+        "box-2",
+        "box-4",
+      ]);
+      for (const index of [6, 7, 8])
+        yield* addBox(index, {
+          chat: `Child ${index}`,
+          threadId: `cloud-started:${id(1)}:${index}`,
+        });
+      const response = yield* relay(CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, {
+        op: "threads.launch",
+        input: { title: "One more", message: "Go." },
+      });
+      expect(response).toMatchObject({
+        failure: {
+          code: "capability_denied",
+          message:
+            "This chat already has 4 cloud chats it started. Delete one of their machines first.",
+        },
+      });
+      expect(provisioned).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("refuses a new cloud chat on another agent than this machine runs", () =>
+  withBoxes(({ relay, provisioned }) =>
+    Effect.gen(function* () {
+      const response = yield* relay(CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, {
+        op: "threads.launch",
+        input: {
+          title: "Review",
+          message: "Review the diff.",
+          modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "opus" },
+        },
+      });
+      expect(response).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: "A new cloud chat runs codex like this one; pick one of its models.",
+        },
+      });
+      expect(provisioned).toEqual([]);
     }),
   ),
 );
