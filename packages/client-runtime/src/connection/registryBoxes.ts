@@ -73,6 +73,8 @@ const PRESENCE_REPORT_MS = 4 * 60_000;
 export interface CloudMachine {
   readonly state: CloudMachineState;
   readonly machine: CloudMachineKind;
+  /** When its provider last could not start it, while the host keeps retrying. */
+  readonly providerUnavailableAt?: string | undefined;
 }
 
 /** What the environment registry offers for cloud boxes and the hosts that provision them. */
@@ -504,13 +506,15 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         const next = new Map(
           [...current].filter(([environmentId]) => !boxesOfHost.has(environmentId)),
         );
-        for (const { environmentId, state, machine } of machines) {
+        for (const { environmentId, ...answered } of machines) {
           const previous = current.get(environmentId);
           next.set(
             environmentId,
-            previous?.state === state && previous.machine === machine
+            previous?.state === answered.state &&
+              previous.machine === answered.machine &&
+              previous.providerUnavailableAt === answered.providerUnavailableAt
               ? previous
-              : { state, machine },
+              : answered,
           );
         }
         return next.size === current.size &&
@@ -521,8 +525,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     });
 
   // Tells a host the user is here, about every four minutes and at once when they return, and
-  // reads its machines more often while one is waking or updating. Nothing is sent while the
-  // user is away, since their chats should sleep.
+  // reads its machines more often while one is waking, updating, or failing to start on its
+  // provider. Nothing is sent while the user is away, since their chats should sleep.
   const reportPresence = (managerId: EnvironmentId): Effect.Effect<void> =>
     Effect.gen(function* () {
       let reportedAt = -Infinity;
@@ -554,7 +558,10 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
           ),
         );
         if (answer !== null) yield* applyHostMachines(managerId, answer.machines);
-        const changing = answer?.machines.some((machine) => machine.state !== "asleep") ?? false;
+        const changing =
+          answer?.machines.some(
+            (machine) => machine.state !== "asleep" || machine.providerUnavailableAt !== undefined,
+          ) ?? false;
         const reportDue = Math.max(0, reportedAt + PRESENCE_REPORT_MS - now);
         yield* Effect.raceFirst(
           Effect.sleep(

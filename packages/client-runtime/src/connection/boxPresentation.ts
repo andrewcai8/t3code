@@ -30,31 +30,56 @@ export function presentMissingWorkspace(
     : null;
 }
 
+/** A cloud machine's state as its row and banner say it: `unavailable` while its provider cannot start it. */
+export type CloudMachineStatus = CloudMachineState | "unavailable";
+
 /**
  * What a cloud chat's machine is doing, for its row and banner. This client's own connection
- * decides first: connected is awake, and its wake is one, or an update its host reports. Otherwise
- * the host's last answer does. Null for an awake machine or anything else.
+ * decides first: connected is awake. A machine its provider keeps failing to start says so through
+ * every retry. Otherwise this client's wake is one, or an update its host reports, and the host's
+ * last answer decides the rest. Null for an awake machine or anything else.
  */
 export function cloudMachineStatus(
   machine: CloudMachine | undefined,
   phase: EnvironmentConnectionPresentation["phase"] | undefined,
-): CloudMachineState | null {
+): CloudMachineStatus | null {
   if (phase === "connected") return null;
+  if (machine?.providerUnavailableAt !== undefined) return "unavailable";
   if (phase === "waking") return machine?.state === "updating" ? "updating" : "waking";
   return machine?.state ?? null;
 }
+
+const PROVIDER_BY_MACHINE: Record<CloudMachineKind, string> = {
+  sandbox: "E2B",
+  devbox: "Namespace",
+  mac: "Namespace",
+};
 
 const BOX_TITLE_NAME = BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME.slice(1);
 
 /**
  * The banner for a cloud chat whose machine is waking or updating, with the time that machine
  * really takes: an E2B sandbox resumes in seconds, a Namespace Devbox boots, and a Namespace Mac is
- * restored onto a new machine. `eta` is that time alone, for a status too short for a sentence.
+ * restored onto a new machine. One its provider cannot start says whose side failed and when it
+ * last tried. `eta` is that time alone, for a status too short for a sentence.
  */
 export function cloudWakeNotice(
-  state: Exclude<CloudMachineState, "asleep">,
-  machine: CloudMachineKind | undefined,
+  state: Exclude<CloudMachineStatus, "asleep">,
+  cloudMachine: CloudMachine | null | undefined,
 ): { readonly title: string; readonly description: string; readonly eta: string | null } {
+  const machine = cloudMachine?.machine;
+  if (state === "unavailable") {
+    const provider = machine === undefined ? "The cloud provider" : PROVIDER_BY_MACHINE[machine];
+    const at = cloudMachine?.providerUnavailableAt;
+    // @effect-diagnostics-next-line globalDate:off - the host's ISO time, said in local time.
+    const time = at && new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const lastTried = time ? `, last tried at ${time}` : "";
+    return {
+      title: `${provider} couldn't start ${BOX_STATUS_NAME} yet`,
+      description: `The problem is on their side. Retrying on its own${lastTried}.`,
+      eta: "retrying",
+    };
+  }
   if (state === "updating")
     return {
       title: `${BOX_TITLE_NAME} is updating`,

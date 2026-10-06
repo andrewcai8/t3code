@@ -1586,16 +1586,29 @@ describe("EnvironmentRegistry", () => {
             new Map([[HOST_BOX.environmentId, { state: "waking", machine: "sandbox" }]]),
           );
 
-          yield* Ref.set(answer, { machines: [] });
+          const unplaced = {
+            state: "asleep",
+            machine: "sandbox",
+            providerUnavailableAt: "2026-10-06T12:00:00.000Z",
+          } as const;
+          yield* Ref.set(answer, {
+            machines: [{ environmentId: HOST_BOX.environmentId, ...unplaced }],
+          });
           expect(yield* after("15 seconds")).toEqual([true, false]);
+          expect(yield* SubscriptionRef.get(registry.cloudMachines)).toEqual(
+            new Map([[HOST_BOX.environmentId, unplaced]]),
+          );
+
+          yield* Ref.set(answer, { machines: [] });
+          expect(yield* after("15 seconds")).toEqual([true, false, false]);
           expect(yield* SubscriptionRef.get(registry.cloudMachines)).toEqual(new Map());
-          expect(yield* after("3 minutes")).toEqual([true, false]);
-          expect(yield* after("1 minute")).toEqual([true, false, true]);
+          expect(yield* after("3 minutes")).toEqual([true, false, false]);
+          expect(yield* after("1 minute")).toEqual([true, false, false, true]);
 
           yield* Queue.offer(visible, false);
-          expect(yield* after("20 minutes")).toEqual([true, false, true]);
+          expect(yield* after("20 minutes")).toEqual([true, false, false, true]);
           yield* Queue.offer(visible, true);
-          expect(yield* after("1 second")).toEqual([true, false, true, true]);
+          expect(yield* after("1 second")).toEqual([true, false, false, true, true]);
         }).pipe(
           Effect.provide(harness.layer),
           Effect.provideService(UserPresence, presence),

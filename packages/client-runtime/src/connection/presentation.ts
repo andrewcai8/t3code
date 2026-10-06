@@ -11,6 +11,7 @@ import { presentMissingWorkspace } from "./boxPresentation.ts";
 
 export {
   BOX_STATUS_NAME,
+  type CloudMachineStatus,
   cloudMachineStatus,
   cloudWakeNotice,
   connectionStatusName,

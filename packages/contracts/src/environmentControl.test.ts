@@ -1,7 +1,10 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DiscoveredProvisionedEnvironment } from "./environmentControl.ts";
+import {
+  DiscoveredProvisionedEnvironment,
+  EnvironmentProvisionResumeResult,
+} from "./environmentControl.ts";
 
 const decodeDiscovered = Schema.decodeUnknownSync(
   Schema.toCodecJson(DiscoveredProvisionedEnvironment),
@@ -76,5 +79,27 @@ describe("DiscoveredProvisionedEnvironment", () => {
 
   it("drops a chat from a newer host it cannot read and keeps the rest of the box", () => {
     expect(decodeDiscovered({ ...row, chat: chat("pondering") })).toEqual(row);
+  });
+});
+
+describe("EnvironmentProvisionResumeResult", () => {
+  const decodeResume = Schema.decodeUnknownSync(
+    Schema.toCodecJson(EnvironmentProvisionResumeResult),
+  );
+  const refused = {
+    kind: "refused",
+    reason: "unknown",
+    message: "E2B couldn't start this machine yet. The problem is on E2B's side.",
+  };
+
+  it("keeps why a provider could not start the machine", () => {
+    expect(decodeResume({ ...refused, cause: "provider-unavailable" })).toEqual({
+      ...refused,
+      cause: "provider-unavailable",
+    });
+  });
+
+  it("reads a cause from a newer host as a plain refusal", () => {
+    expect(decodeResume({ ...refused, cause: "provider-on-fire" })).toEqual(refused);
   });
 });

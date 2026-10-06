@@ -252,3 +252,41 @@ it.effect("tracks an upgrade as updating over a wake of the same machine", () =>
     expect(yield* wakeAhead.presence(false)).toEqual({ machines: [] });
   }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "says when a machine's provider last could not start it, until a wake answers otherwise",
+  () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const wakeAhead = makeWakeAhead({
+        list: Effect.succeed([box("crowded")]),
+        resume: () => Effect.succeed({ kind: "resumed" }),
+        renew: () => Effect.void,
+        scope: yield* Effect.scope,
+      });
+      yield* wakeAhead.settle(EnvironmentId.make("crowded"), {
+        kind: "refused",
+        reason: "unknown",
+        cause: "provider-unavailable",
+        message: "E2B couldn't start this machine yet. The problem is on E2B's side.",
+      });
+      expect(yield* wakeAhead.presence(false)).toEqual({
+        machines: [
+          {
+            environmentId: "crowded",
+            state: "asleep",
+            machine: "sandbox",
+            providerUnavailableAt: "2026-10-01T12:00:00.000Z",
+          },
+        ],
+      });
+      yield* wakeAhead.settle(EnvironmentId.make("crowded"), {
+        kind: "refused",
+        reason: "unknown",
+        message: "The workspace could not be reconnected. Retry shortly.",
+      });
+      expect(yield* wakeAhead.presence(false)).toEqual({
+        machines: [{ environmentId: "crowded", state: "asleep", machine: "sandbox" }],
+      });
+    }).pipe(Effect.scoped),
+);

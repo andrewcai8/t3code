@@ -339,6 +339,13 @@ export const EnvironmentProvisionResumeResult = Schema.Union([
     kind: Schema.Literal("refused"),
     /** `not-provisioned` means this manager holds no workspace for the environment. */
     reason: Schema.Literals(["unknown", "missing", "not-provisioned"]),
+    /**
+     * With `unknown`: the provider could not start the machine on its side (placement, capacity
+     * or its 5xx), so the host keeps retrying. Older clients ignore it and read `unknown`.
+     */
+    cause: Schema.optional(Schema.Literal("provider-unavailable")).pipe(
+      Schema.catchDecoding(() => Effect.succeedNone),
+    ),
     message: Schema.String,
   }),
 ]);
@@ -494,6 +501,13 @@ export const EnvironmentControlPresenceResult = Schema.Struct({
       environmentId: EnvironmentId,
       state: CloudMachineState,
       machine: CloudMachineKind,
+      /**
+       * When its provider last could not start it, while the host keeps retrying. Cleared by the
+       * next wake that answers otherwise. Absent from hosts that predate it.
+       */
+      providerUnavailableAt: Schema.optional(IsoDateTime).pipe(
+        Schema.catchDecoding(() => Effect.succeedNone),
+      ),
     }),
   ),
 });

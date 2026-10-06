@@ -71,8 +71,8 @@ export function EnvironmentConnectionNotice(props: {
   const machine = useCloudMachine(props.environmentId ?? null);
   const machineStatus = cloudMachineStatus(machine ?? undefined, props.connection.phase);
   const wake =
-    machineStatus === "waking" || machineStatus === "updating"
-      ? cloudWakeNotice(machineStatus, machine?.machine)
+    machineStatus !== null && machineStatus !== "asleep"
+      ? cloudWakeNotice(machineStatus, machine)
       : null;
   const isRetrying =
     props.connection.phase === "connecting" ||

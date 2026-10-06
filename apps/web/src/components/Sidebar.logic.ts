@@ -7,14 +7,12 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
-import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
-import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import type {
-  CloudMachineState,
-  ContextMenuItem,
-  EnvironmentId,
-  ThreadId,
-} from "@t3tools/contracts";
+  CloudMachineStatus,
+  EnvironmentConnectionPresentation,
+} from "@t3tools/client-runtime/connection";
+import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
@@ -653,7 +651,8 @@ export interface ThreadStatusPill {
     | "Plan Ready"
     | "Asleep"
     | "Waking"
-    | "Updating";
+    | "Updating"
+    | "Retrying";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -667,6 +666,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Waiting: 2.5,
   "Plan Ready": 2,
   Completed: 1,
+  Retrying: 0.6,
   Waking: 0.6,
   Updating: 0.6,
   Asleep: 0.5,
@@ -674,10 +674,10 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
 
 /**
  * A cloud chat's machine as its row says it, shown when nothing about the chat itself is: waking
- * and updating in the working hue, asleep muted. Static, since a sidebar full of them must not
- * repaint.
+ * and updating in the working hue, retrying a provider that cannot start it in amber, asleep
+ * muted. Static, since a sidebar full of them must not repaint.
  */
-export function cloudMachinePill(status: CloudMachineState | null): ThreadStatusPill | null {
+export function cloudMachinePill(status: CloudMachineStatus | null): ThreadStatusPill | null {
   switch (status) {
     case null:
       return null;
@@ -686,6 +686,13 @@ export function cloudMachinePill(status: CloudMachineState | null): ThreadStatus
         label: "Asleep",
         colorClass: "text-sidebar-muted-foreground",
         dotClass: "bg-sidebar-muted-foreground",
+        pulse: false,
+      };
+    case "unavailable":
+      return {
+        label: "Retrying",
+        colorClass: "text-amber-600 dark:text-amber-300/90",
+        dotClass: "bg-amber-500 dark:bg-amber-300/90",
         pulse: false,
       };
     case "waking":

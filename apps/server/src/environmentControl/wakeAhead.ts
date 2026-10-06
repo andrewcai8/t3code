@@ -111,6 +111,14 @@ export function makeWakeAhead(deps: {
     Map<symbol, { readonly machine: CloudMachineKind; readonly wake: MachineWake }>
   >();
   const failures = new Map<string, { readonly count: number; readonly retryAt: number }>();
+  /** When each machine's provider last could not start it, whoever asked for the wake. */
+  const providerUnavailableAt = new Map<EnvironmentId, number>();
+  const unavailableSince = (environmentId: EnvironmentId) => {
+    const at = providerUnavailableAt.get(environmentId);
+    return at === undefined
+      ? {}
+      : { providerUnavailableAt: DateTime.formatIso(DateTime.makeUnsafe(at)) };
+  };
 
   const track =
     (environmentId: EnvironmentId, machine: CloudMachineKind, wake: MachineWake) =>
@@ -144,6 +152,7 @@ export function makeWakeAhead(deps: {
           ? ("updating" as const)
           : ("waking" as const),
         machine: wakes[0]!.machine,
+        ...unavailableSince(environmentId),
       };
     }),
     ...boxes
@@ -152,6 +161,7 @@ export function makeWakeAhead(deps: {
         environmentId: box.environmentId,
         state: "asleep" as const,
         machine: box.machine ?? "sandbox",
+        ...unavailableSince(box.environmentId),
       })),
   ];
 
@@ -217,6 +227,13 @@ export function makeWakeAhead(deps: {
   return {
     track,
     pass,
+    /** Records how a resume of a machine answered, so presence can say its provider is failing. */
+    settle: (environmentId: EnvironmentId, result: EnvironmentProvisionResumeResult) =>
+      Effect.map(Clock.currentTimeMillis, (now) => {
+        if (result.kind === "refused" && result.cause === "provider-unavailable")
+          providerUnavailableAt.set(environmentId, now);
+        else providerUnavailableAt.delete(environmentId);
+      }),
     /**
      * A client's report. A present user is counted for a few minutes and their chats start
      * waking before the answer; an absent one only reads it, since another client may be here.

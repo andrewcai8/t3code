@@ -9,7 +9,7 @@ const E2B_RESUME_REQUEST_TIMEOUT_MS = 80_000;
 const E2B_RESUME_ATTEMPTS = 3;
 const E2B_RESUME_BACKOFF_MS = 2_000;
 
-/** E2B has no room for the sandbox now: placement kept timing out, or it had no capacity. */
+/** E2B cannot start the sandbox now, on its side: placement kept timing out, no capacity, or a 5xx. */
 export class E2bPlacementUnavailable extends Error {}
 
 export type E2bResumeDecision =
@@ -59,6 +59,15 @@ export async function connectResumingE2b<A>(
           { cause },
         );
       const decision = e2bResumeDecision(cause);
+      if (
+        decision.kind === "fail" &&
+        cause instanceof SandboxError &&
+        (cause.statusCode ?? 0) >= 500
+      )
+        throw new E2bPlacementUnavailable(
+          `E2B could not start sandbox ${sandboxId}: ${cause.message}`,
+          { cause },
+        );
       if (decision.kind === "fail") throw cause;
       if (attempt === E2B_RESUME_ATTEMPTS)
         throw new E2bPlacementUnavailable(

@@ -95,6 +95,19 @@ describe("connectResumingE2b", () => {
     expect(attempts).toBe(1);
   });
 
+  it("gives up at once when E2B fails on its side", async () => {
+    let attempts = 0;
+    const outcome = await connectResumingE2b("retained", async () => {
+      attempts++;
+      throw Object.assign(new SandboxError("502: Bad Gateway"), { statusCode: 502 });
+    }).then(
+      () => "connected",
+      (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
+    );
+    expect(outcome).toEqual([true, "E2B could not start sandbox retained: 502: Bad Gateway"]);
+    expect(attempts).toBe(1);
+  });
+
   it("rethrows a sandbox E2B no longer has as it is", async () => {
     const gone = new SandboxNotFoundError("Paused sandbox retained not found");
     await expect(

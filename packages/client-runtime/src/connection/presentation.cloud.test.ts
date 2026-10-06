@@ -119,18 +119,50 @@ describe("a cloud chat's machine", () => {
     ]).toEqual([null, "waking", "waking", "updating", "asleep", "updating", null]);
   });
 
+  it("reads unavailable while its provider cannot start it, until this client connects", () => {
+    const unplaced = {
+      state: "asleep",
+      machine: "sandbox",
+      providerUnavailableAt: "2026-10-06T12:00:00.000Z",
+    } as const;
+    expect([
+      cloudMachineStatus(unplaced, "reconnecting"),
+      cloudMachineStatus({ ...unplaced, state: "waking" }, "waking"),
+      cloudMachineStatus(unplaced, "connected"),
+    ]).toEqual(["unavailable", "unavailable", null]);
+  });
+
+  it("says plainly that the provider could not start the machine, and when it last tried", () => {
+    // @effect-diagnostics-next-line globalDate:off - a fixed local time.
+    const at = new Date(2026, 9, 6, 14, 5);
+    const lastTried = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const machine = (kind: "sandbox" | "mac") =>
+      ({ state: "asleep", machine: kind, providerUnavailableAt: at.toISOString() }) as const;
+    expect(cloudWakeNotice("unavailable", machine("sandbox"))).toEqual({
+      title: "E2B couldn't start this chat's cloud machine yet",
+      description: `The problem is on their side. Retrying on its own, last tried at ${lastTried}.`,
+      eta: "retrying",
+    });
+    expect(cloudWakeNotice("unavailable", machine("mac")).title).toBe(
+      "Namespace couldn't start this chat's cloud machine yet",
+    );
+  });
+
   it("says how long the machine it runs on takes to wake", () => {
-    expect(cloudWakeNotice("waking", "sandbox")).toEqual({
+    const on = (machine: "sandbox" | "mac") => ({ state: "asleep", machine }) as const;
+    expect(cloudWakeNotice("waking", on("sandbox"))).toEqual({
       title: "This chat's cloud machine is waking up",
       description: "This usually takes about 10 seconds.",
       eta: "about 10 seconds",
     });
-    expect(cloudWakeNotice("waking", "mac")).toEqual({
+    expect(cloudWakeNotice("waking", on("mac"))).toEqual({
       title: "Restoring this chat's Mac",
       description: "This takes about 2 minutes. It reconnects on its own.",
       eta: "about 2 minutes",
     });
-    expect(cloudWakeNotice("updating", "mac").title).toBe("This chat's cloud machine is updating");
+    expect(cloudWakeNotice("updating", on("mac")).title).toBe(
+      "This chat's cloud machine is updating",
+    );
     expect(cloudWakeNotice("waking", undefined).description).toBe("It reconnects on its own.");
   });
 });
