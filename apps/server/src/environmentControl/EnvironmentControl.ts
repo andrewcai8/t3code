@@ -35,18 +35,23 @@ import {
   type EnvironmentProvisionRestoreResult,
   type EnvironmentProvisionUpgradeInput,
   type EnvironmentProvisionUpgradeResult,
+  type EnvironmentProvisionSwitchAccountInput,
+  type EnvironmentProvisionSwitchAccountResult,
   type ManagedEnvironment,
   type DiscoveredProvisionedEnvironment,
   type SavedEnvironmentAddress,
   type ProvisionProvider,
+  type ProvisionedChat,
   type ServerProvisionedSkills,
   type ServerSettings,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -56,6 +61,7 @@ import { Provisioning, ProvisionProviderPorts, ProvisionProviderError } from "./
 import {
   configuredRuntimeArtifact,
   currentMacTemplate,
+  homeFileData,
   provisionProviders,
   makeProvisionPreparationStore,
   spareKey,
@@ -91,7 +97,20 @@ import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceReg
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
-import { ProvisionRefused, resolveProvisioningProfiles } from "./ProvisioningProviderProfile.ts";
+import {
+  credentialVariables,
+  ProvisionRefused,
+  resolveProvisioningProfiles,
+  resolveSwitchProfile,
+  type ProvisioningProviderProfile,
+} from "./ProvisioningProviderProfile.ts";
+import {
+  autoSwitchDue,
+  sendAccountSwitch,
+  switchLeaseAccount,
+  type AccountSwitchPorts,
+  type SwitchTarget,
+} from "./accountSwitch.ts";
 import * as ServerConfig from "../config.ts";
 import {
   readConfig,
@@ -114,11 +133,16 @@ import {
   observeLease,
   pullLeaseUsage,
   readGuestProtocol,
+  readLeaseShell,
   wakeNeedsUpgrade,
   type LeaseObservation,
 } from "./leaseActivity.ts";
 import { makeWakeAhead } from "./wakeAhead.ts";
-import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
+import {
+  createProvisionedChatStore,
+  ownerChat,
+  type ProvisionedChatStore,
+} from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
@@ -187,6 +211,15 @@ interface IdleUpgrade {
 }
 
 /**
+ * Moving a box whose owner's chat stopped on a usage limit onto another account. `due` says the
+ * chat waits on a switch; `start` runs it in the background under the box's own lock.
+ */
+interface AccountRotation {
+  readonly due: (lease: ProvisionedLease, chat: ProvisionedChat) => Promise<boolean>;
+  readonly start: (lease: ProvisionedLease) => void;
+}
+
+/**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
  * save, or a release ahead of its Mac's deadline. `reopen` when the chat is
  * off its Mac but must not sleep, such as one still working at the deadline,
@@ -202,6 +235,7 @@ export function createEnvironmentControl(
   driver: CloudDriver & {
     readonly upkeepChat?: UpkeepChat;
     readonly idleUpgrade?: IdleUpgrade;
+    readonly accountRotation?: AccountRotation;
   },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
@@ -229,7 +263,7 @@ export function createEnvironmentControl(
   const newChatReadAt = new Map<string, number>();
   // Every read of a box's shell also keeps its chat, so the chat a paused box shows is the one it
   // held when last read: at the latest, right before its pause.
-  const activity = async (lease: ProvisionedLease) => {
+  const observeAndKeep = async (lease: ProvisionedLease) => {
     const observation = await observe(lease);
     if (observation.chat && chats)
       await chats
@@ -237,8 +271,14 @@ export function createEnvironmentControl(
         .catch((cause: unknown) =>
           reportFailure("cloud box chat could not be kept", { chatId: lease.leaseId, cause }),
         );
-    return observation.activity;
+    return observation;
   };
+  const activity = async (lease: ProvisionedLease) => (await observeAndKeep(lease)).activity;
+  /** Whether the box's owner chat stopped on a usage limit that an account switch should take. */
+  const rotationDue = async (lease: ProvisionedLease, observation: LeaseObservation) =>
+    observation.chat && driver.accountRotation
+      ? driver.accountRotation.due(lease, observation.chat).catch(() => false)
+      : false;
   /** The last activity each awake lease settled on, so a finished turn pulls once. */
   const settledActivity = new Map<string, "busy" | "idle">();
   /** Idle upgrades started per box and build, which bounds how long upgrades keep a box awake. */
@@ -327,6 +367,7 @@ export function createEnvironmentControl(
   const reapExpiredLeases = async (only?: ReadonlySet<string>): Promise<void> => {
     if (!leaseRegistry) return;
     const upgrades: Array<ProvisionedLease> = [];
+    const rotations: Array<ProvisionedLease> = [];
     // Heartbeat expiry is a liveness transition only. Keep the provider
     // resource paused and reconnectable; disposal is explicit.
     for (const lease of await leaseRegistry.expired()) {
@@ -349,9 +390,19 @@ export function createEnvironmentControl(
         // An expired heartbeat means no client is watching, not that the agent
         // stopped. Only a machine confirmed busy stays awake; one that cannot be
         // read is paused, so a broken machine is never kept alive.
-        const observed = lease.state === "active" ? await activity(lease) : null;
+        const observation = lease.state === "active" ? await observeAndKeep(lease) : null;
+        const observed = observation?.activity ?? null;
         if (observed === "busy" && (await leaseRegistry.touch(lease.leaseId, undefined, "host")))
           continue;
+        // A chat stopped on a usage limit moves to another account and carries on, unwatched.
+        if (
+          observation &&
+          (await rotationDue(lease, observation)) &&
+          (await leaseRegistry.touch(lease.leaseId, undefined, "host"))
+        ) {
+          rotations.push(lease);
+          continue;
+        }
         // Nothing runs on an idle box, so it moves onto the pinned build now and sleeps on a
         // later sweep, rather than holding up the wake that next opens it.
         const build = observed === "idle" ? await driver.idleUpgrade?.due(lease) : null;
@@ -392,8 +443,9 @@ export function createEnvironmentControl(
         leaseOperations.delete(lease.sandboxId);
       }
     }
-    // Each upgrade takes its box's lock itself, so it starts once the sweep has let go of it.
+    // Each upgrade and switch takes its box's lock itself, so it starts once the sweep let go.
     for (const lease of upgrades) driver.idleUpgrade?.start(lease);
+    for (const lease of rotations) driver.accountRotation?.start(lease);
   };
   return {
     list: () => Promise.all(targets.map(snapshot)),
@@ -809,6 +861,7 @@ export function createEnvironmentControl(
     /**
      * Pulls each awake box's usage when its agent settles from busy to idle,
      * or the first time it is seen idle. A failed pull retries next sweep.
+     * A box whose chat stopped on a usage limit starts its account switch.
      */
     syncLeaseUsage: async (): Promise<void> => {
       if (!leaseRegistry) return;
@@ -819,7 +872,9 @@ export function createEnvironmentControl(
       const queue = [...awake];
       const sync = async () => {
         for (let lease = queue.shift(); lease; lease = queue.shift()) {
-          const current = await activity(lease);
+          const observation = await observeAndKeep(lease);
+          if (await rotationDue(lease, observation)) driver.accountRotation?.start(lease);
+          const current = observation.activity;
           if (current === "busy") settledActivity.set(lease.leaseId, "busy");
           else if (current === "idle" && settledActivity.get(lease.leaseId) !== "idle") {
             try {
@@ -903,6 +958,13 @@ export class EnvironmentControl extends Context.Service<
     readonly upgrade: (
       input: EnvironmentProvisionUpgradeInput,
     ) => Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>;
+    /**
+     * Moves a cloud machine onto another account of the provider one of its chats runs on, and
+     * continues that chat's run when a usage limit stopped it.
+     */
+    readonly switchAccount: (
+      input: EnvironmentProvisionSwitchAccountInput,
+    ) => Effect.Effect<EnvironmentProvisionSwitchAccountResult, EnvironmentControlError>;
     /** Brings a chat's removed box back asleep, as its chat left it, until its grace ends. */
     readonly restore: (
       input: EnvironmentProvisionRestoreInput,
@@ -1140,6 +1202,12 @@ export const layer = Layer.effect(
                     : null;
                 },
                 start: (lease) => void runLogged(upgradeIdleBox(lease)),
+              },
+              accountRotation: {
+                due: async (lease, chat) =>
+                  (await runLogged(settings.getSettings)).autoSwitchCloudAccounts &&
+                  autoSwitchDue(lease, chat),
+                start: (lease) => void rotateAccount(lease),
               },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and
@@ -2097,6 +2165,115 @@ export const layer = Layer.effect(
         Effect.logWarning("idle cloud workspace could not be upgraded", { cause }),
       ),
     );
+    /** The login a box is handed for one of this host's accounts. */
+    const switchTarget = async (profile: ProvisioningProviderProfile): Promise<SwitchTarget> => {
+      const named = {
+        instanceId: profile.instanceId,
+        name: profile.displayName ?? profile.instanceId,
+        displayName: profile.displayName,
+        accountEmail: profile.accountEmail,
+      };
+      if (profile.credential.kind === "file") {
+        const { source, destination } = profile.credential;
+        const login = await homeFileData(destination, () => NodeFSP.readFile(source));
+        return {
+          ...named,
+          credential: { kind: "file", contentsBase64: login.toString("base64") },
+        };
+      }
+      const names: ReadonlyArray<string> = credentialVariables[profile.kind];
+      const [first, ...rest] = profile.environment.flatMap(({ name, value }) =>
+        names.includes(name) && value.trim() ? [{ name, value: value.trim() }] : [],
+      );
+      if (!first) throw new Error("The account has no credential to hand a cloud machine.");
+      return { ...named, credential: { kind: "environment", variables: [first, ...rest] } };
+    };
+    const accountPorts: AccountSwitchPorts = {
+      readShell: async (lease) => {
+        await serveProxy(lease);
+        return readLeaseShell(lease);
+      },
+      accountDriver: async (instanceId) =>
+        deriveProviderInstanceConfigMap(await runLogged(settings.getSettings))[instanceId]?.driver,
+      pickAccount: async (driver, exclude) => {
+        const manager = await requireManager();
+        const profile = await resolveAccounts((current) =>
+          Effect.all({
+            providers: providerRegistry.getProviders,
+            now: Clock.currentTimeMillis,
+            load: readAccountLoad(leaseRegistry, sql, store),
+          }).pipe(
+            Effect.flatMap((usage) =>
+              resolveSwitchProfile(
+                current,
+                { driver, exclude },
+                manager.config.provisioning?.claudeOAuthTokens,
+                usage,
+                {
+                  localAgentRuns,
+                  secretsDir,
+                  refresh: (instanceId) =>
+                    providerRegistry.refreshInstance(instanceId).pipe(Effect.asVoid),
+                },
+              ),
+            ),
+          ),
+        );
+        return Option.isSome(profile) ? switchTarget(profile.value) : null;
+      },
+      sendSwitch: async (lease, input) => {
+        if (!lease.remoteAccess) throw new Error("The cloud machine has no remote access.");
+        await serveProxy(lease);
+        return sendAccountSwitch(lease.remoteAccess, input);
+      },
+    };
+    /** Runs one account switch under the box's lock, or refuses while another operation holds it. */
+    const switchUnderLock = async (
+      lease: ProvisionedLease,
+      threadId: ThreadId,
+      due?: (lease: ProvisionedLease) => Promise<boolean>,
+    ): Promise<EnvironmentProvisionSwitchAccountResult | null> => {
+      const release = (await resolve())?.holdBox(lease.sandboxId) ?? null;
+      if (!release)
+        return {
+          kind: "refused",
+          reason: "busy",
+          message: "Another workspace operation is in progress. Retry shortly.",
+        };
+      try {
+        // Read again under the lock: a switch that ran meanwhile has already handled this run.
+        const current = await leaseRegistry.findById(lease.leaseId);
+        if (!current || (due && !(await due(current)))) return null;
+        return await switchLeaseAccount(current, threadId, accountPorts, leaseRegistry);
+      } finally {
+        release();
+      }
+    };
+    /** Upkeep's switch for a box whose owner chat stopped on a usage limit. Never throws. */
+    const rotateAccount = async (lease: ProvisionedLease) => {
+      if (!lease.owner) return;
+      const threadId = ThreadId.make(lease.owner.threadId);
+      const result = await switchUnderLock(lease, threadId, async (current) => {
+        const chat = ownerChat(await accountPorts.readShell(current), threadId);
+        return chat ? autoSwitchDue(current, chat) : false;
+      }).catch((cause: unknown) => {
+        void runLogged(
+          Effect.logWarning("cloud chat could not switch accounts", {
+            leaseId: lease.leaseId,
+            cause,
+          }),
+        );
+        return null;
+      });
+      if (result)
+        await runLogged(
+          Effect.logInfo("cloud chat switched accounts at a usage limit", {
+            leaseId: lease.leaseId,
+            result: result.kind === "switched" ? "switched" : `refused: ${result.reason}`,
+            continued: result.kind === "switched" ? result.continued : false,
+          }),
+        );
+    };
     const resumeWorkspace = Effect.fn("EnvironmentControl.resume")(function* (
       input: EnvironmentProvisionResumeInput,
     ) {
@@ -2309,6 +2486,46 @@ export const layer = Layer.effect(
             new EnvironmentControlError({ message: "Cloud lease could not be updated." }),
         }),
       upgrade: provisionControl.upgrade,
+      switchAccount: Effect.fn("EnvironmentControl.switchAccount")(function* (
+        input: EnvironmentProvisionSwitchAccountInput,
+      ): Effect.fn.Return<EnvironmentProvisionSwitchAccountResult, EnvironmentControlError> {
+        const workspace = (yield* listProvisionedEnvironments(sql)).find(
+          (candidate) => candidate.environmentId === input.environmentId,
+        );
+        const lease = workspace
+          ? yield* Effect.promise(() => leaseRegistry.findById(workspace.leaseId))
+          : null;
+        if (!lease)
+          return {
+            kind: "refused",
+            reason: "unknown",
+            message: "This host has no cloud machine for that environment.",
+          };
+        const result = yield* Effect.tryPromise({
+          try: () => switchUnderLock(lease, input.threadId),
+          catch: (cause) => cause,
+        }).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("cloud machine could not switch accounts", {
+              leaseId: lease.leaseId,
+              cause,
+            }),
+          ),
+          Effect.mapError(
+            () =>
+              new EnvironmentControlError({
+                message: "The cloud machine could not switch accounts. Retry shortly.",
+              }),
+          ),
+        );
+        return (
+          result ?? {
+            kind: "refused",
+            reason: "unknown",
+            message: "This cloud machine could not be found.",
+          }
+        );
+      }),
       presence: (input) => wakeAhead.presence(input.present),
       touch: (input) =>
         importedLeases.has(input.leaseId)

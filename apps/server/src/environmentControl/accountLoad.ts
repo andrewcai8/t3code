@@ -2,14 +2,14 @@ import { ProviderInstanceId } from "@t3tools/contracts";
 import type { AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
 import type * as SqlClient from "effect/sql/SqlClient";
-import type { ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
+import { leaseAccounts, type ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 
-const boxAccounts = (box: {
+const requestAccounts = (request: {
   readonly providerInstanceId: string;
   readonly companionInstanceIds?: ReadonlyArray<string> | undefined;
 }) =>
-  [box.providerInstanceId, ...(box.companionInstanceIds ?? [])].map((id) =>
+  [request.providerInstanceId, ...(request.companionInstanceIds ?? [])].map((id) =>
     ProviderInstanceId.make(id),
   );
 
@@ -17,8 +17,8 @@ const boxAccounts = (box: {
  * Sessions already running on each account, for routing a new cloud chat.
  *
  * A cloud box counts once against each account it runs, its chat's and
- * every companion driver's, as routing froze them into the box's request
- * rather than the account the request hinted at. It counts from the moment
+ * every companion driver's: the ones routing froze into its request, or the
+ * ones an account switch moved it to since. It counts from the moment
  * its request is saved, minutes before it is ready, so a launch right after
  * another sees the first one's accounts as taken. A box being cancelled no
  * longer counts. A local thread counts once while it has a run in flight on
@@ -32,7 +32,11 @@ export const readAccountLoad = (
 ) =>
   Effect.all(
     {
-      boxes: Effect.tryPromise(async () => (await leases.awake()).flatMap(boxAccounts)).pipe(
+      boxes: Effect.tryPromise(async () =>
+        (await leases.awake()).flatMap((lease) =>
+          leaseAccounts(lease).map((id) => ProviderInstanceId.make(id)),
+        ),
+      ).pipe(
         Effect.catch((cause) =>
           Effect.as(Effect.logDebug("cloud leases unread for account load", { cause }), []),
         ),
@@ -40,7 +44,7 @@ export const readAccountLoad = (
       provisioning: operations.listUnresolved.pipe(
         Effect.map((unresolved) =>
           unresolved.flatMap((operation) =>
-            operation.state.kind === "cancel_requested" ? [] : boxAccounts(operation.request),
+            operation.state.kind === "cancel_requested" ? [] : requestAccounts(operation.request),
           ),
         ),
         Effect.catch((cause) =>

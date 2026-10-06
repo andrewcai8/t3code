@@ -83,6 +83,7 @@ it.effect(
           pause: () => Effect.die("Unused in provision HTTP proof"),
           resume: () => Effect.die("Unused in provision HTTP proof"),
           upgrade: () => Effect.die("Unused in provision HTTP proof"),
+          switchAccount: () => Effect.die("Unused in provision HTTP proof"),
           keep: () => Effect.die("Unused in provision HTTP proof"),
           restore: () => Effect.die("Unused in provision HTTP proof"),
           presence: () => Effect.die("Unused in provision HTTP proof"),

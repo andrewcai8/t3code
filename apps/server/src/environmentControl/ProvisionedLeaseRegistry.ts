@@ -52,6 +52,13 @@ export const keepsRemovedBox = (lease: ProvisionedLease): boolean =>
 export const LeaseKeep = Schema.Literals(["user", "unsaved-work"]);
 export type LeaseKeep = typeof LeaseKeep.Type;
 
+const AccountLimit = Schema.Struct({
+  instanceId: Schema.String,
+  runId: Schema.String,
+  until: Schema.String,
+});
+export type AccountLimit = typeof AccountLimit.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -80,8 +87,19 @@ export const StoredProvisionedLease = Schema.Struct({
       workspaceDir: Schema.String,
     }),
   ),
+  /** The account the request routed to, part of the box's identity; `accounts` names the live one. */
   providerInstanceId: Schema.String,
   companionInstanceIds: Schema.optional(Schema.Array(Schema.String)),
+  /**
+   * The host accounts the box runs now, one per driver, once an account switch moved one. Absent
+   * means the ones it was provisioned with. Read it through `leaseAccounts`.
+   */
+  accounts: Schema.optional(Schema.Array(Schema.String)),
+  /**
+   * Accounts a chat on this box ran out of usage on, each with the run that stopped and when the
+   * account is usable again. A switch never moves back onto one before then, and handles a run once.
+   */
+  accountLimits: Schema.optional(Schema.Array(AccountLimit)),
   state: ProvisionedLeaseState,
   owner: Schema.NullOr(ProvisionedLeaseOwner),
   /**
@@ -112,6 +130,10 @@ const LEASE_HEARTBEAT_TTL_MS = 15 * 60 * 1000;
 export type ProvisionedLease = typeof StoredProvisionedLease.Type;
 export type ProvisionedLeaseOwner = typeof ProvisionedLeaseOwner.Type;
 export type RemoteAccess = NonNullable<ProvisionedLease["remoteAccess"]>;
+
+/** The host accounts a box runs now, the chat's driver first. */
+export const leaseAccounts = (lease: ProvisionedLease): ReadonlyArray<string> =>
+  lease.accounts ?? [lease.providerInstanceId, ...(lease.companionInstanceIds ?? [])];
 
 export interface ProvisionedLeaseRegistry {
   readonly register: (input: {
@@ -181,6 +203,21 @@ export interface ProvisionedLeaseRegistry {
   /** Leases whose machine is running, paused and released ones excluded. */
   readonly awake: () => Promise<ReadonlyArray<ProvisionedLease>>;
   readonly paused: () => Promise<ReadonlyArray<ProvisionedLease>>;
+  /**
+   * Records a box moved from one account to another, and the limit that moved it. Limits already
+   * past are dropped. Null when the lease is unknown.
+   */
+  readonly recordAccountSwitch: (
+    leaseId: string,
+    input: { readonly from: string; readonly to: string; readonly limit?: AccountLimit },
+    now?: Date,
+  ) => Promise<ProvisionedLease | null>;
+  /** Records a limit a switch could not move away from, so the run is handled once. */
+  readonly recordAccountLimit: (
+    leaseId: string,
+    limit: AccountLimit,
+    now?: Date,
+  ) => Promise<ProvisionedLease | null>;
   /** Null when the lease is unknown. */
   readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<ProvisionedLease | null>;
 }
@@ -245,6 +282,36 @@ export function createProvisionedLeaseRegistry(
   };
   const consistentRead = async <A>(fn: (leases: ProvisionedLease[]) => A): Promise<A> =>
     fn((await read()).leases);
+  const updateAccounts = (
+    leaseId: string,
+    now: Date | undefined,
+    change: (lease: ProvisionedLease) => {
+      readonly accounts?: ReadonlyArray<string>;
+      readonly limit?: AccountLimit;
+    },
+  ) =>
+    mutate((leases) => {
+      const current = leases.find((lease) => lease.leaseId === leaseId);
+      if (!current) return { leases, value: null };
+      const { accounts, limit } = change(current);
+      const at = nowIso(now);
+      const limits = [
+        ...(current.accountLimits ?? []).filter(
+          (entry) => entry.until > at && entry.runId !== limit?.runId,
+        ),
+        ...(limit ? [limit] : []),
+      ];
+      const updated: ProvisionedLease = {
+        ...current,
+        ...(accounts ? { accounts } : {}),
+        accountLimits: limits,
+        updatedAt: at,
+      };
+      return {
+        leases: leases.map((lease) => (lease.leaseId === leaseId ? updated : lease)),
+        value: updated,
+      };
+    });
 
   return {
     register: (input) =>
@@ -504,6 +571,12 @@ export function createProvisionedLeaseRegistry(
       }),
     awake: () => consistentRead((leases) => leases.filter((lease) => lease.state === "active")),
     paused: () => consistentRead((leases) => leases.filter((lease) => lease.state === "paused")),
+    recordAccountSwitch: (leaseId, input, now) =>
+      updateAccounts(leaseId, now, (lease) => ({
+        accounts: leaseAccounts(lease).map((id) => (id === input.from ? input.to : id)),
+        ...(input.limit ? { limit: input.limit } : {}),
+      })),
+    recordAccountLimit: (leaseId, limit, now) => updateAccounts(leaseId, now, () => ({ limit })),
     setKeep: (leaseId, keep) =>
       mutate((leases) => {
         const current = leases.find((lease) => lease.leaseId === leaseId);

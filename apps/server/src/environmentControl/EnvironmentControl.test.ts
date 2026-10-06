@@ -1000,6 +1000,64 @@ describe("a cloud machine whose agent is working", () => {
     );
   });
 
+  it("keeps a box whose chat stopped on a usage limit awake and switches it once, then lets it sleep", async () => {
+    const limited = ownerChat(
+      boxShell([
+        boxThread("thread", "project-app", "Chat", {
+          latestRunId: "run-1",
+          status: "failed",
+          lastErrorClass: "usage_limit",
+        }),
+      ]),
+      "thread",
+    )!;
+    const switched = new Set<string>();
+    const started: Array<string> = [];
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "codex",
+        owner: { environmentId: "child", threadId: "thread" },
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const calls: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        calls.push(`pause:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          accountRotation: {
+            due: async (lease, chat) =>
+              chat.thread.lastErrorClass === "usage_limit" && !switched.has(lease.leaseId),
+            start: (lease) => {
+              const release = manager.holdBox(lease.sandboxId);
+              started.push(`${lease.leaseId}:${release ? "held" : "busy"}`);
+              switched.add(lease.leaseId);
+              release?.();
+            },
+          },
+        },
+        registry,
+        async () => ({ activity: "idle", chat: limited }),
+      );
+
+      await manager.reapExpiredLeases();
+      expect(started).toEqual(["lease:held"]);
+      expect(calls).toEqual([]);
+      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+
+      await registry.touch("lease", new Date("2026-01-01T00:00:00.000Z"), "host");
+      await manager.reapExpiredLeases();
+      expect(started).toEqual(["lease:held"]);
+      expect(calls).toEqual(["pause:sandbox"]);
+    });
+  });
+
   it("pauses a busy machine whose retention deadline has passed", async () => {
     await withExpiredLease(
       "busy",
