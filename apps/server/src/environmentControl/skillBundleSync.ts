@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - bundles are refreshed at the same Promise-based boundary provisioning reads them from.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - bundles are refreshed at the same Promise-based boundary provisioning reads them from.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";

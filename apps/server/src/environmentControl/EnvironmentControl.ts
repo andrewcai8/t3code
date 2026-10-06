@@ -2158,7 +2158,9 @@ export const layer = Layer.effect(
         Effect.flatMap((refreshed) =>
           refreshed.every(Boolean)
             ? Effect.void
-            : Effect.fail(new Error("A skill bundle could not be refreshed.")),
+            : Effect.fail(
+                new EnvironmentControlError({ message: "A skill bundle could not be refreshed." }),
+              ),
         ),
         // Until a bundle's first download lands, new chats start without it,
         // so a failed refresh retries within minutes before waiting the hour.
