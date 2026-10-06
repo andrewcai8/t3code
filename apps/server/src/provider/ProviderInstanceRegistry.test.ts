@@ -561,6 +561,63 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         expect(ghost.unavailableReason).toMatch(/ghostDriver/);
       }).pipe(Effect.provide(layerTest)),
   );
+
+  it.live("reads each setup-token Claude account's own limits", () =>
+    Effect.gen(function* () {
+      if (yield* isHostWindows) return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fixtureDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-setup-token-" });
+      const binaryPath = path.join(fixtureDir, "claude");
+      yield* fs.copyFile(
+        yield* path.fromFileUrl(
+          new URL("./testing/claudeSetupTokenAccounts.fixture.mjs", import.meta.url),
+        ),
+        binaryPath,
+      );
+      yield* fs.chmod(binaryPath, 0o755);
+      const weekly = { ajc: 0.61, arnold: 0.12, cai: 0.33, car: 0.87 } as const;
+      const weeklyByToken = Object.entries(weekly).map(([token, used]) => ({
+        name: `FAKE_WEEKLY_${token}`,
+        value: String(used),
+        sensitive: false,
+      }));
+      const configMap: ProviderInstanceConfigMap = Object.fromEntries(
+        Object.keys(weekly).map((token) => [
+          ProviderInstanceId.make(`claude_${token}`),
+          {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: true,
+            environment: [
+              ...weeklyByToken,
+              { name: "CLAUDE_CODE_OAUTH_TOKEN", value: token, sensitive: true },
+            ],
+            config: makeClaudeConfig({ enabled: true, binaryPath }),
+          },
+        ]),
+      );
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [ClaudeDriver],
+        configMap,
+      });
+
+      const readings = yield* Effect.forEach(
+        Object.keys(weekly),
+        (token) =>
+          Effect.gen(function* () {
+            const instance = yield* registry.getInstance(
+              ProviderInstanceId.make(`claude_${token}`),
+            );
+            const snapshot = yield* instance!.snapshot.refresh;
+            const window = snapshot.usageLimits?.windows.find((entry) => entry.id === "seven_day");
+            return [token, window?.usedPercent] as const;
+          }),
+        { concurrency: "unbounded" },
+      );
+
+      expect(Object.fromEntries(readings)).toEqual({ ajc: 61, arnold: 12, cai: 33, car: 87 });
+    }).pipe(Effect.provide(layerTest)),
+  );
 });
 
 describe("ProviderInstanceRegistry — all drivers slice", () => {
