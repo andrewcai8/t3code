@@ -692,6 +692,18 @@ it.effect("recovers a box whose guest cannot start by upgrading it onto the pinn
         Effect.fail(new EnvironmentControlError({ message: "E2B can't place this machine." })),
       ),
     ).toEqual(stuck);
+    const unplaced = {
+      kind: "refused" as const,
+      reason: "unknown" as const,
+      cause: "provider-unavailable" as const,
+      message: "E2B couldn't start this machine yet. The problem is on E2B's side.",
+    };
+    expect(
+      yield* recoverRefusedResume(
+        unplaced,
+        Effect.succeed({ kind: "upgraded", t3Revision: "f".repeat(40) }),
+      ),
+    ).toEqual(unplaced);
     const missing = {
       kind: "refused" as const,
       reason: "missing" as const,

@@ -664,16 +664,23 @@ export function createEnvironmentControl(
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
           if (cause instanceof ProvisionedSandboxMissing)
             await leaseRegistry?.markMissing(input.leaseId);
-          return {
-            kind: "refused",
-            reason: cause instanceof ProvisionedSandboxMissing ? "missing" : "unknown",
-            message:
-              cause instanceof ProvisionedSandboxMissing
-                ? cause.message
-                : cause instanceof E2bPlacementUnavailable
-                  ? "E2B can't place this machine right now. Retrying."
-                  : "The workspace could not be reconnected. Retry shortly.",
-          };
+          if (cause instanceof ProvisionedSandboxMissing)
+            return { kind: "refused", reason: "missing", message: cause.message };
+          return cause instanceof E2bPlacementUnavailable
+            ? {
+                kind: "refused",
+                reason: "unknown",
+                cause: cause.failure,
+                message:
+                  cause.failure === "provider-unavailable"
+                    ? "E2B couldn't start this machine yet. The problem is on E2B's side."
+                    : "Couldn't reach E2B to start this machine yet.",
+              }
+            : {
+                kind: "refused",
+                reason: "unknown",
+                message: "The workspace could not be reconnected. Retry shortly.",
+              };
         })
         .finally(() => leaseOperations.delete(input.sandboxId));
       leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
@@ -1013,13 +1020,14 @@ export const upgradeAfterResume = (
 /**
  * A resume whose guest could not be brought up may be stuck on a build that cannot start, such as
  * one an earlier upgrade installed. Upgrading onto the pinned build is safe there, since a guest
- * that is not serving runs no turn, so the box recovers once the host pins a working build.
+ * that is not serving runs no turn, so the box recovers once the host pins a working build. A
+ * machine its provider could not start has no guest to upgrade, so it is left to the next wake.
  */
 export const recoverRefusedResume = (
   refused: EnvironmentProvisionResumeResult,
   upgrade: Effect.Effect<EnvironmentProvisionUpgradeResult, EnvironmentControlError>,
 ): Effect.Effect<EnvironmentProvisionResumeResult> =>
-  refused.kind === "refused" && refused.reason === "unknown"
+  refused.kind === "refused" && refused.reason === "unknown" && refused.cause === undefined
     ? upgrade.pipe(
         Effect.map((upgraded): EnvironmentProvisionResumeResult =>
           upgraded.kind === "upgraded" ? { kind: "resumed" } : refused,
@@ -2320,9 +2328,10 @@ export const layer = Layer.effect(
       ).pipe(wakeAhead.track(workspace.environmentId, machine, "waking"));
       yield* Effect.logInfo("cloud workspace resume answered", {
         leaseId: workspace.leaseId,
-        result: result.kind === "resumed" ? "resumed" : `refused: ${result.reason}`,
+        result: result.kind === "resumed" ? "resumed" : `refused: ${result.cause ?? result.reason}`,
         durationMs: (yield* Clock.currentTimeMillis) - startedAt,
       });
+      yield* wakeAhead.settle(workspace.environmentId, result);
       const upgrade = provisionControl.upgrade({
         leaseId: workspace.leaseId,
         sandboxId: workspace.sandboxId,

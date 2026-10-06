@@ -68,11 +68,11 @@ describe("connectResumingE2b", () => {
         (retry) => retries.push(retry),
       ).then(
         () => "connected",
-        (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
+        (error: E2bPlacementUnavailable) => [error.failure, error.message],
       );
       const [outcome] = await Promise.all([connected, vi.runAllTimersAsync()]);
       expect(outcome).toEqual([
-        true,
+        "provider-unavailable",
         "E2B could not resume sandbox retained after 3 attempts: 504: Failed to place sandbox: placement timed out after 2 attempt(s)",
       ]);
       expect(attempts).toBe(3);
@@ -92,6 +92,38 @@ describe("connectResumingE2b", () => {
       (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
     );
     expect(outcome).toEqual([true, "E2B could not place sandbox retained: 503: no capacity"]);
+    expect(attempts).toBe(1);
+  });
+
+  it("says E2B was unreachable when its last attempt timed out rather than answered", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const connected = connectResumingE2b("retained", async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }).then(
+        () => "connected",
+        (error: E2bPlacementUnavailable) => [error.failure, error.message],
+      );
+      const [outcome] = await Promise.all([connected, vi.runAllTimersAsync()]);
+      expect(outcome).toEqual([
+        "provider-unreachable",
+        "E2B could not resume sandbox retained after 3 attempts: E2B did not answer within 80 s",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up at once when E2B fails on its side", async () => {
+    let attempts = 0;
+    const outcome = await connectResumingE2b("retained", async () => {
+      attempts++;
+      throw Object.assign(new SandboxError("502: Bad Gateway"), { statusCode: 502 });
+    }).then(
+      () => "connected",
+      (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
+    );
+    expect(outcome).toEqual([true, "E2B could not start sandbox retained: 502: Bad Gateway"]);
     expect(attempts).toBe(1);
   });
 

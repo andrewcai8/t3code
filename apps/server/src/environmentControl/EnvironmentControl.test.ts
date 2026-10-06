@@ -7,7 +7,8 @@ import { makeAccountRotation, type AccountSwitchPorts } from "./accountSwitch.ts
 import { createCleanupSweep } from "./cloudCleanup.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
-import { E2bPlacementUnavailable } from "./e2bResume.ts";
+import { SandboxError } from "e2b";
+import { connectResumingE2b } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -590,17 +591,30 @@ describe("managed cloud commands", () => {
       expect(await manager.resume(resumeInput)).toEqual({ kind: "resumed" });
     });
   });
-  it("says E2B cannot place a box it could not resume for lack of room, and leaves it paused", async () => {
+  it("refuses a box E2B keeps failing to place as unavailable on E2B's side, and leaves it paused", async () => {
     await withLease(async ({ registry, driver, manager }) => {
       await registry.markPaused("lease");
-      driver.resume = vi
-        .fn()
-        .mockRejectedValue(new E2bPlacementUnavailable("E2B could not place sandbox sandbox"));
-      expect(await manager.resume(resumeInput)).toEqual({
-        kind: "refused",
-        reason: "unknown",
-        message: "E2B can't place this machine right now. Retrying.",
-      });
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      try {
+        driver.resume = () =>
+          connectResumingE2b("sandbox", async () => {
+            throw Object.assign(
+              new SandboxError(
+                "504: Failed to place sandbox: placement timed out after 2 attempt(s), please retry",
+              ),
+              { statusCode: 504 },
+            );
+          });
+        const [refused] = await Promise.all([manager.resume(resumeInput), vi.runAllTimersAsync()]);
+        expect(refused).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          cause: "provider-unavailable",
+          message: "E2B couldn't start this machine yet. The problem is on E2B's side.",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
       expect(await registry.findBySandbox("sandbox")).toMatchObject({ state: "paused" });
     });
   });

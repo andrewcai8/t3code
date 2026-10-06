@@ -1,10 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  type CloudMachineStatus,
   cloudMachineStatus,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { CloudMachineState, EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 
 import {
   type ComposerThreadDraftState,
@@ -89,7 +90,7 @@ export function sidebarDraftStatusLabel(session: DraftSessionState, isOpen: bool
 export function useCloudMachineStatus(
   environmentId: EnvironmentId,
   connection: EnvironmentConnectionPresentation | undefined,
-): CloudMachineState | null {
+): CloudMachineStatus | null {
   const machine = useAtomValue(environmentCatalog.cloudMachineAtom(environmentId));
   return cloudMachineStatus(machine ?? undefined, connection?.phase);
 }

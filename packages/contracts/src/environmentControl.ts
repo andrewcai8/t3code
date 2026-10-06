@@ -327,6 +327,16 @@ export const EnvironmentProvisionPauseResult = Schema.Union([
 ]);
 export type EnvironmentProvisionPauseResult = typeof EnvironmentProvisionPauseResult.Type;
 
+/**
+ * Why a provider could not start a machine: it answered with a failure on its side
+ * (`provider-unavailable`), or did not answer in time (`provider-unreachable`).
+ */
+export const ProviderStartFailure = Schema.Literals([
+  "provider-unavailable",
+  "provider-unreachable",
+]);
+export type ProviderStartFailure = typeof ProviderStartFailure.Type;
+
 /** Resume the retained workspace this manager provisioned for an environment. */
 export const EnvironmentProvisionResumeInput = Schema.Struct({
   environmentId: EnvironmentId,
@@ -339,6 +349,10 @@ export const EnvironmentProvisionResumeResult = Schema.Union([
     kind: Schema.Literal("refused"),
     /** `not-provisioned` means this manager holds no workspace for the environment. */
     reason: Schema.Literals(["unknown", "missing", "not-provisioned"]),
+    /** With `unknown`: the provider could not start the machine, and the host keeps retrying. */
+    cause: Schema.optional(ProviderStartFailure).pipe(
+      Schema.catchDecoding(() => Effect.succeedNone),
+    ),
     message: Schema.String,
   }),
 ]);
@@ -494,6 +508,13 @@ export const EnvironmentControlPresenceResult = Schema.Struct({
       environmentId: EnvironmentId,
       state: CloudMachineState,
       machine: CloudMachineKind,
+      /**
+       * Why and when its provider last could not start it, while the host still retries it.
+       * Absent from hosts that predate it.
+       */
+      providerFailure: Schema.optional(
+        Schema.Struct({ cause: ProviderStartFailure, at: IsoDateTime }),
+      ).pipe(Schema.catchDecoding(() => Effect.succeedNone)),
     }),
   ),
 });

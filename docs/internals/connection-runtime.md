@@ -96,8 +96,14 @@ wakes the boxes of every unsettled chat and renews them until the reports stop,
 after which they idle out as usual. The host decides, not the client, because
 only it sees every client's reports and the account's Mac count, and waking a
 box this way opens no connection to it. The answer names each box that is
-asleep, waking or updating, which is what lists show for a cloud chat; the
-client asks again every 15 seconds while one is changing.
+asleep, waking or updating, and why and when its provider last could not start
+it, which is what lists and banners show for a cloud chat. That failure lives on
+the host because every client's wake and the host's own join one resume there.
+It is reported only while a wake is in flight or the host would still retry the
+box, and for no longer than the longest backoff, so a label never outlives the
+retries. The client asks again every 15 seconds while a box is changing or its
+provider keeps failing. A refusal for that reason skips the
+upgrade a refused resume otherwise tries, since there is no guest to upgrade.
 
 "Here" is `UserPresence`: the app is visible (foreground on mobile) and the
 user touched it within the hour. Each surface reports visibility and input; the

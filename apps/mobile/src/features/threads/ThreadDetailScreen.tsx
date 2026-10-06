@@ -467,8 +467,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       environmentLabel: props.connectionStatusLabel,
       onReconnect: props.onReconnectEnvironment,
       wake:
-        machineStatus === "waking" || machineStatus === "updating"
-          ? cloudWakeNotice(machineStatus, cloudMachine?.machine)
+        machineStatus !== null && machineStatus !== "asleep"
+          ? cloudWakeNotice(machineStatus, cloudMachine)
           : null,
     });
     if (connectionStatus !== null) {

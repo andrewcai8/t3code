@@ -1,4 +1,5 @@
 // @effect-diagnostics globalTimers:off - this Promise helper backs off between E2B requests outside Effect.
+import type { ProviderStartFailure } from "@t3tools/contracts";
 import { SandboxError, ServiceBusyError } from "e2b";
 
 /**
@@ -9,8 +10,17 @@ const E2B_RESUME_REQUEST_TIMEOUT_MS = 80_000;
 const E2B_RESUME_ATTEMPTS = 3;
 const E2B_RESUME_BACKOFF_MS = 2_000;
 
-/** E2B has no room for the sandbox now: placement kept timing out, or it had no capacity. */
-export class E2bPlacementUnavailable extends Error {}
+/**
+ * E2B cannot start the sandbox now: it answered with a failure on its side (placement timed out,
+ * no capacity, a 5xx), or it did not answer in time.
+ */
+export class E2bPlacementUnavailable extends Error {
+  readonly failure: ProviderStartFailure;
+  constructor(message: string, failure: ProviderStartFailure, options?: ErrorOptions) {
+    super(message, options);
+    this.failure = failure;
+  }
+}
 
 export type E2bResumeDecision =
   | {
@@ -56,13 +66,25 @@ export async function connectResumingE2b<A>(
       if (cause instanceof ServiceBusyError)
         throw new E2bPlacementUnavailable(
           `E2B could not place sandbox ${sandboxId}: ${cause.message}`,
+          "provider-unavailable",
           { cause },
         );
       const decision = e2bResumeDecision(cause);
+      if (
+        decision.kind === "fail" &&
+        cause instanceof SandboxError &&
+        (cause.statusCode ?? 0) >= 500
+      )
+        throw new E2bPlacementUnavailable(
+          `E2B could not start sandbox ${sandboxId}: ${cause.message}`,
+          "provider-unavailable",
+          { cause },
+        );
       if (decision.kind === "fail") throw cause;
       if (attempt === E2B_RESUME_ATTEMPTS)
         throw new E2bPlacementUnavailable(
           `E2B could not resume sandbox ${sandboxId} after ${attempt} attempts: ${decision.message}`,
+          decision.code === "http_504" ? "provider-unavailable" : "provider-unreachable",
           { cause },
         );
       onRetry({ sandboxId, attempt, code: decision.code, message: decision.message });

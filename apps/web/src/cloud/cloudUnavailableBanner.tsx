@@ -98,8 +98,8 @@ export function useCloudMachine(environmentId: EnvironmentId | null): CloudMachi
 
 /**
  * What the composer's "unavailable" banner says for a cloud machine: one removed, with a way to
- * restore it while its host still can, one
- * waking or updating with the time its machine really takes, or a box named by its role, since
+ * restore it while its host still can, one waking or updating with the time its machine really
+ * takes, one its provider cannot start with when it last tried, or a box named by its role, since
  * its saved label names the machine it first ran on. Empty for any other environment.
  */
 export function cloudUnavailableBanner(
@@ -144,8 +144,8 @@ export function cloudUnavailableBanner(
         };
   }
   const status = isBox ? cloudMachineStatus(machine ?? undefined, state.connection.phase) : null;
-  if (status === "waking" || status === "updating") {
-    const { title, description } = cloudWakeNotice(status, machine?.machine);
+  if (status !== null && status !== "asleep") {
+    const { title, description } = cloudWakeNotice(status, machine);
     return { title, description };
   }
   return isBox ? { title: `${name} is ${reconnecting ? "reconnecting" : "offline"}` } : {};

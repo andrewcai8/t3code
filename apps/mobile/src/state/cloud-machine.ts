@@ -1,6 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { type CloudMachine, cloudMachineStatus } from "@t3tools/client-runtime/connection";
-import type { CloudMachineState, EnvironmentId } from "@t3tools/contracts";
+import {
+  type CloudMachine,
+  type CloudMachineStatus,
+  cloudMachineStatus,
+} from "@t3tools/client-runtime/connection";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
@@ -18,7 +22,7 @@ export function useCloudMachine(environmentId: EnvironmentId | null): CloudMachi
 }
 
 /** Whether a chat's cloud machine is asleep, waking or updating; null while awake or not a box. */
-export function useCloudMachineStatus(environmentId: EnvironmentId): CloudMachineState | null {
+export function useCloudMachineStatus(environmentId: EnvironmentId): CloudMachineStatus | null {
   const machine = useCloudMachine(environmentId);
   const presentation = useAtomValue(environmentPresentations.presentationAtom(environmentId));
   return cloudMachineStatus(machine ?? undefined, presentation?.connection.phase);

@@ -18,7 +18,8 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
-import type { CloudMachineState, EnvironmentMachineKind } from "@t3tools/contracts";
+import type { CloudMachineStatus } from "@t3tools/client-runtime/connection";
+import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
@@ -74,7 +75,8 @@ const STATUS_LABEL_BY_STATUS: Partial<
 };
 
 /** A cloud chat's machine, said when nothing about the chat itself is; waking outranks Done. */
-const MACHINE_LABEL_BY_STATE: Record<CloudMachineState, { label: string; className: string }> = {
+const MACHINE_LABEL_BY_STATE: Record<CloudMachineStatus, { label: string; className: string }> = {
+  unavailable: { label: "Retrying", className: "text-warning-foreground" },
   waking: { label: "Waking", className: "text-adaptive-sky-600-400" },
   updating: { label: "Updating", className: "text-adaptive-sky-600-400" },
   asleep: { label: "Asleep", className: "text-foreground-muted" },
