@@ -64,7 +64,7 @@ const ThreadWatchTool = Tool.make("t3_thread_watch", {
 const ForkRunTool = Tool.make("t3_fork_run", {
   ...shared,
   description:
-    "Top-level chats on a cloud sandbox machine only. Runs each job in its own throwaway copy of this machine as it is now: every file, install and build is there, but the T3 server and agents are stopped, so only the job runs. Use it for parallel or disk- and CPU-heavy work (eval replays, test shards, separate builds) instead of worktrees and installs on this machine. Nothing a job changes comes back except its logs and outputs: each job's stdout/stderr tails are returned, and its logs and listed outputs are uploaded and returned as an outputsUri. Pass copyBack:true to also copy outputs into this machine, under the folder each job's copiedTo names. Answers within about a minute; while jobs still run it returns state running and a batchId for t3_fork_status. Retrying the same call while it runs returns the same batch.",
+    "Top-level chats on a cloud sandbox machine only. Runs each job in its own throwaway copy of this machine as it is now: every file, install and build is there, but the T3 server and agents are stopped, so only the job runs. Use it for parallel or disk- and CPU-heavy work (eval replays, test shards, separate builds) instead of worktrees and installs on this machine. Nothing a job changes comes back except its logs and outputs: each job's stdout/stderr tails are returned, and its logs and listed outputs are uploaded and returned as an outputsUri. Pass copyBack:true to also copy outputs into this machine, under the folder each job's copiedTo names. It answers at once with a batchId and every job queued, then starts: the jobs run after the answer, so always follow with t3_fork_status (with waitSeconds) until state is finished. Starting briefly pauses this machine; a call made during the pause waits for it. Retrying the same call while its batch runs returns the same batch; one batch runs per chat at a time.",
   parameters: FleetForkRunInput,
   success: FleetForkBatch,
 }).annotate(Tool.Destructive, false);
@@ -72,7 +72,7 @@ const ForkRunTool = Tool.make("t3_fork_run", {
 const ForkStatusTool = Tool.make("t3_fork_status", {
   ...shared,
   description:
-    "Reports a t3_fork_run batch: each job's state, exit code, log tails and outputs. Pass waitSeconds to wait for the batch to finish first.",
+    "Reports a t3_fork_run batch: each job's state, exit code, log tails and outputs. Pass waitSeconds to wait for the batch to finish first; call it again until state is finished.",
   parameters: FleetForkStatusInput,
   success: FleetForkBatch,
 })

@@ -110,6 +110,8 @@ const setup = Effect.gen(function* () {
   const invoked: Array<[string, FleetInvokeInput]> = [];
   const opened: Array<string> = [];
   const forked: Array<[string, string, FleetInvokeInput["actor"], unknown]> = [];
+  const paused = new Set<string>();
+  const started: Array<string> = [];
   const registrations = new Map<string, Queue.Queue<FleetHostRegistration>>();
   const requests = new Map<string, Queue.Queue<FleetHostRequest>>();
   for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
@@ -141,7 +143,18 @@ const setup = Effect.gen(function* () {
                     Effect.as(Stream.fromQueue(requests.get(access.origin)!)),
                   ),
                 ),
-          respond: (response) => Queue.offer(responses, response).pipe(Effect.asVoid),
+          // A paused box's connection is gone, so an answer sent after the pause never arrives.
+          respond: (response) =>
+            Effect.suspend(() =>
+              paused.has(access.origin)
+                ? Effect.fail(
+                    new BoxFleetClient.BoxUnreachableError({
+                      origin: access.origin,
+                      cause: "paused",
+                    }),
+                  )
+                : Queue.offer(responses, response).pipe(Effect.asVoid),
+            ),
           invoke: (input) => {
             invoked.push([access.origin, input]);
             const launched = provisioned[0]?.chat?.threadId;
@@ -223,7 +236,14 @@ const setup = Effect.gen(function* () {
   const forks = Layer.mock(WorkerForks.WorkerForks)({
     run: (source, actor, input) => {
       forked.push([source.leaseId, source.sandboxId, actor, input]);
-      return Effect.succeed({ batchId: "batch-1", state: "running" as const, jobs: [] });
+      return Effect.succeed({
+        batch: { batchId: "batch-1", state: "running" as const, jobs: [] },
+        // Starting captures the chat's machine, which pauses it.
+        start: Effect.sync(() => {
+          started.push("batch-1");
+          paused.add(origin(1));
+        }),
+      });
     },
     sweep: Effect.void,
   });
@@ -274,6 +294,7 @@ const setup = Effect.gen(function* () {
     closed,
     oldBuilds,
     forked,
+    started,
   };
 });
 
@@ -703,8 +724,8 @@ it.effect("backs off from a box that refuses the fleet connection, doubling each
   ),
 );
 
-it.effect("runs a chat's forks for the box that relayed them, on no other box", () =>
-  withBoxes(({ relay, forked, invoked }) =>
+it.effect("answers a fork run before starting it, since starting pauses the chat's box", () =>
+  withBoxes(({ relay, forked, invoked, started }) =>
     Effect.gen(function* () {
       const jobs = [{ command: "pnpm test --shard 1/2" }];
       const response = yield* relay(CLOUD_FORKS_ENVIRONMENT_ID, {
@@ -718,6 +739,7 @@ it.effect("runs a chat's forks for the box that relayed them, on no other box", 
       expect(forked).toEqual([
         [id(1), "sandbox-1", { environmentId: "box-1", threadId: "chat-1" }, { jobs }],
       ]);
+      expect(started).toEqual(["batch-1"]);
       expect(invoked).toEqual([]);
     }),
   ),

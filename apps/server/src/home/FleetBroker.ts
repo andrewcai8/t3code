@@ -84,6 +84,15 @@ interface State {
   readonly pending: ReadonlyMap<string, Pending>;
 }
 
+const RELAY_DISCONNECTED = "The desktop window relaying Home's calls disconnected.";
+
+/**
+ * Whether a call failed because its relay went away while the call was out, so the same call can
+ * succeed once a relay registers again.
+ */
+export const isRelayLoss = (error: OrchestratorMcpFailure) =>
+  error.code === "environment_unavailable" && error.message === RELAY_DISCONNECTED;
+
 const unavailable = (message: string) =>
   new OrchestratorMcpFailure({ code: "environment_unavailable", message });
 
@@ -102,11 +111,7 @@ const make = Effect.gen(function* () {
         yield* Queue.shutdown(queue);
         yield* Effect.forEach(
           owed,
-          ([, entry]) =>
-            Deferred.fail(
-              entry.deferred,
-              unavailable("The desktop window relaying Home's calls disconnected."),
-            ),
+          ([, entry]) => Deferred.fail(entry.deferred, unavailable(RELAY_DISCONNECTED)),
           { discard: true },
         );
         return [undefined, { host, pending }] as const;

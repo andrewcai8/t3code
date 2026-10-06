@@ -159,6 +159,19 @@ function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegis
   };
 }
 
+/**
+ * A result whose follow-up must wait until the box has it: starting a fork batch captures the
+ * chat's machine, and the pause drops the connection the answer travels on.
+ */
+class StartAfterAnswer {
+  constructor(
+    readonly result: unknown,
+    readonly start: Effect.Effect<void>,
+  ) {}
+}
+
+type BoxConnection = BoxFleetClient.BoxFleetConnection;
+
 const decodeThreadList = Schema.decodeUnknownEffect(FleetResults["threads.list"]);
 const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -413,7 +426,10 @@ const make = Effect.gen(function* () {
           "Changing another cloud chat needs this chat in full-access/default mode.",
         );
       if (environmentId === CLOUD_FORKS_ENVIRONMENT_ID) {
-        if (request.op === "forks.run") return yield* forks.run(source, actor, request.input);
+        if (request.op === "forks.run") {
+          const reserved = yield* forks.run(source, actor, request.input);
+          return new StartAfterAnswer(reserved.batch, reserved.start);
+        }
         if (request.op === "forks.status") return yield* forks.status(source, request.input);
         return yield* failure(
           "invalid_request",
@@ -463,12 +479,25 @@ const make = Effect.gen(function* () {
       return yield* invokeOn(target.leaseId, boxName(target), invoke);
     });
 
-  const answer = (sourceLeaseId: string, request: FleetHostRequest) =>
+  /** Answers one relayed call, then does what had to wait until the box had the answer. */
+  const answer = (sourceLeaseId: string, request: FleetHostRequest, connection: BoxConnection) =>
     relay(sourceLeaseId, request).pipe(
       Effect.match({
-        onFailure: (error): FleetHostResponse => ({ requestId: request.requestId, failure: error }),
-        onSuccess: (result): FleetHostResponse => ({ requestId: request.requestId, result }),
+        onFailure: (error) => ({
+          response: { requestId: request.requestId, failure: error } satisfies FleetHostResponse,
+          after: Effect.void,
+        }),
+        onSuccess: (result) =>
+          result instanceof StartAfterAnswer
+            ? {
+                response: { requestId: request.requestId, result: result.result },
+                after: result.start,
+              }
+            : { response: { requestId: request.requestId, result }, after: Effect.void },
       }),
+      Effect.flatMap(({ response, after }) =>
+        connection.respond(response).pipe(Effect.ensuring(after)),
+      ),
     );
 
   const track = (leaseId: string, delta: number) =>
@@ -509,7 +538,7 @@ const make = Effect.gen(function* () {
           Stream.runForEach((request) =>
             Effect.acquireUseRelease(
               track(source.leaseId, 1),
-              () => answer(source.leaseId, request).pipe(Effect.flatMap(connection.respond)),
+              () => answer(source.leaseId, request, connection),
               () => track(source.leaseId, -1),
             ).pipe(Effect.ignore, Effect.forkScoped),
           ),

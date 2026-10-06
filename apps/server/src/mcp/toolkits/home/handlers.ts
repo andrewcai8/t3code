@@ -13,6 +13,28 @@ import {
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { HomeToolkit } from "./tools.ts";
 
+/** How long a fork call waits for this cloud machine's host to register again. */
+const HOST_RECONNECT_BUDGET_SECONDS = 45;
+
+/**
+ * Runs a fork call across a brief loss of this cloud machine's host. Starting a batch pauses the
+ * machine to capture it, which drops the host's connection until the host registers again on
+ * its next pass. Both fork calls are safe to repeat: the same run joins its batch.
+ */
+const acrossHostReconnect = <A, R>(call: Effect.Effect<A, OrchestratorMcpFailure, R>) =>
+  Effect.gen(function* () {
+    if (!(yield* HomeService.HomeService).available) {
+      const broker = yield* FleetBroker.FleetBroker;
+      for (
+        let waited = 0;
+        waited < HOST_RECONNECT_BUDGET_SECONDS && !(yield* broker.reach).hostConnected;
+        waited += 1
+      )
+        yield* Effect.sleep("1 second");
+    }
+    return yield* call;
+  }).pipe(Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }));
+
 export const HomeHandlersLive = HomeToolkit.toLayer({
   t3_environment_list: () =>
     Effect.gen(function* () {
@@ -88,7 +110,9 @@ export const HomeHandlersLive = HomeToolkit.toLayer({
       return { watchAll: next.watchAll, watches: next.watches };
     }),
 
-  t3_fork_run: (input) => runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input),
+  t3_fork_run: (input) =>
+    acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input)),
 
-  t3_fork_status: (input) => runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input),
+  t3_fork_status: (input) =>
+    acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input)),
 });
