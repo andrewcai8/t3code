@@ -76,7 +76,10 @@ export class ForkMachines extends Context.Service<
       forkId: string,
       job: { readonly command: string; readonly cwd: string; readonly timeoutMs: number },
     ) => Effect.Effect<ForkJobExit, ForkMachineError>;
-    /** Uploads the job's logs and outputs under `uri`; answers the outputs that did not exist. */
+    /**
+     * Uploads the job's logs under `<uri>logs/` and its outputs under `<uri>outputs/`, each at its
+     * path as given; answers the outputs that did not exist.
+     */
     readonly upload: (
       forkId: string,
       input: { readonly cwd: string; readonly paths: ReadonlyArray<string>; readonly uri: string },
@@ -229,8 +232,8 @@ env = json.load(open('${STATE}/env.json'))
 aws = shutil.which('aws', path=env.get('PATH')) or '/home/user/.local/bin/aws'
 def copy(source, key, recursive):
     subprocess.run([aws, 's3', 'cp', '--only-show-errors', *(['--recursive'] if recursive else []), source, spec['uri'] + key], env=env, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3600)
-copy('${STATE}/out/stdout.log', 'stdout.log', False)
-copy('${STATE}/out/stderr.log', 'stderr.log', False)
+copy('${STATE}/out/stdout.log', 'logs/stdout.log', False)
+copy('${STATE}/out/stderr.log', 'logs/stderr.log', False)
 missing = []
 for path in spec['paths']:
     full = os.path.join(spec['cwd'], path)

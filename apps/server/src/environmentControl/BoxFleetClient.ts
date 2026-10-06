@@ -11,6 +11,7 @@
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import {
   type FleetHostRegistration,
+  type ProvisionedChat,
   type FleetHostRequest,
   type FleetHostResponse,
   type FleetInvokeInput,
@@ -32,7 +33,9 @@ import * as RpcClient from "effect/rpc/RpcClient";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
+import { boxOrchestrationHeaders } from "./leaseActivity.ts";
 import type { RemoteAccess } from "./ProvisionedLeaseRegistry.ts";
+import { ownerChat } from "./provisionedChats.ts";
 
 export class BoxUnreachableError extends Schema.TaggedError<BoxUnreachableError>()(
   "BoxUnreachableError",
@@ -63,6 +66,14 @@ export class BoxFleetClient extends Context.Service<
     readonly open: (
       access: RemoteAccess,
     ) => Effect.Effect<BoxFleetConnection, BoxUnreachableError, Scope.Scope>;
+    /**
+     * The chat `ownerThreadId` as the box's shell shows it now. Null when the shell holds no such
+     * chat or cannot be read as one.
+     */
+    readonly readChat: (
+      access: RemoteAccess,
+      ownerThreadId: string,
+    ) => Effect.Effect<ProvisionedChat | null, BoxUnreachableError>;
   }
 >()("t3/environmentControl/BoxFleetClient") {}
 
@@ -123,7 +134,25 @@ const make = Effect.gen(function* () {
         ),
     } satisfies BoxFleetConnection;
   });
-  return BoxFleetClient.of({ open });
+  const readChat = Effect.fn("BoxFleetClient.readChat")(function* (
+    access: RemoteAccess,
+    ownerThreadId: string,
+  ) {
+    const body = yield* httpClient
+      .execute(
+        HttpClientRequest.get(`${access.origin}/api/orchestration/shell`).pipe(
+          HttpClientRequest.setHeaders(boxOrchestrationHeaders(access)),
+        ),
+      )
+      .pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.json),
+        Effect.timeout("10 seconds"),
+        Effect.mapError((cause) => new BoxUnreachableError({ origin: access.origin, cause })),
+      );
+    return ownerChat(body, ownerThreadId) ?? null;
+  });
+  return BoxFleetClient.of({ open, readChat });
 });
 
 export const layer = Layer.effect(BoxFleetClient, make);

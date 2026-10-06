@@ -189,6 +189,7 @@ const make = Effect.gen(function* () {
           );
           const durationMs = (yield* Clock.currentTimeMillis) - startedAt;
           const problems: Array<string> = [];
+          let logsUri: string | undefined;
           let outputsUri: string | undefined;
           let copiedTo: string | undefined;
           if (limits.outputsUri !== undefined) {
@@ -197,7 +198,8 @@ const make = Effect.gen(function* () {
               .upload(forkId, { cwd, paths: outputs, uri })
               .pipe(Effect.tapError(logStep), Effect.option);
             if (Option.isSome(uploaded)) {
-              outputsUri = uri;
+              logsUri = `${uri}logs/`;
+              if (outputs.length > 0) outputsUri = `${uri}outputs/`;
               if (uploaded.value.missing.length > 0)
                 problems.push(`Not found: ${uploaded.value.missing.join(", ")}.`);
             } else problems.push("Uploading the logs and outputs failed.");
@@ -229,6 +231,7 @@ const make = Effect.gen(function* () {
             state: "exited",
             ...exit,
             durationMs,
+            ...(logsUri === undefined ? {} : { logsUri }),
             ...(outputsUri === undefined ? {} : { outputsUri }),
             ...(copiedTo === undefined ? {} : { copiedTo }),
             ...(problems.length === 0 ? {} : { outputsProblem: problems.join(" ") }),
