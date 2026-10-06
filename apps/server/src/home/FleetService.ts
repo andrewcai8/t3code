@@ -204,7 +204,16 @@ const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError(threadManagementFailure));
 
+  // Forks run where the chat's machine is managed: its cloud host relays them, nothing runs here.
+  const hostOnly = () =>
+    Effect.fail(
+      failure("environment_unavailable", "Parallel forks run only through a cloud chat's host."),
+    );
+
   const handlers: Handlers = {
+    "forks.run": hostOnly,
+    "forks.status": hostOnly,
+
     capabilities: () =>
       Effect.gen(function* () {
         const providers = yield* providerRegistry.getProviders;

@@ -72,6 +72,8 @@ export const CHANGES_STATE = {
   "threads.organize": true,
   "threads.rename": true,
   "requests.respond": true,
+  "forks.run": true,
+  "forks.status": false,
 } satisfies Record<FleetOperation, boolean>;
 
 /**
