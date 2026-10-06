@@ -363,19 +363,113 @@ ${brokerTokenFunctions}
 /**
  * Keeps a full disk from stopping a box's T3 server, which must write to save the chat. On Linux
  * a reserve file holds space the guard gives back when the disk runs low; it also clears package
- * caches the agent can download again. `once` runs before the server starts: it frees room, or
- * sets the reserve aside when there is plenty. `watch` only gives room back, checking every 30
- * seconds for as long as the server runs, one watcher per box. Arguments: root, home, mode, and
- * for `watch` an open descriptor of the guard's lock. T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB
- * low-disk threshold.
+ * caches the agent can download again. While watching, below T3_DISK_GUARD_DEPS_BYTES (10 GiB), it
+ * deletes untracked node_modules from git checkouts under the root, oldest checkout first until
+ * there is room, skipping the chat's workspace, any checkout changed in the last hour, and any a
+ * process works in. Package stores that make installs cheap are only cleared with the other
+ * caches, below 1 GiB. `once` runs before the server starts: it frees room, or sets the reserve
+ * aside when there is plenty, and stays quick so a wake does not wait on it. `watch` only gives
+ * room back, checking every 30 seconds until it finds the server stopped, one watcher per box.
+ * Arguments: root, home, mode, and for `watch` an open descriptor of the guard's lock.
+ * T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB low-disk threshold.
  */
 export const diskGuardScript = String.raw`
-import fcntl,json,os,pathlib,shutil,sys,time
+import fcntl,json,os,pathlib,shutil,subprocess,sys,time
 root, home, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 reserve = root / 'disk-reserve'
 RESERVE = 256 << 20
 LOW = int(os.environ.get('T3_DISK_GUARD_LOW_BYTES', 1 << 30))
-CACHES = ['.npm/_cacache', '.cache/pnpm', '.cache/yarn', '.yarn/berry/cache', '.bun/install/cache', '.cache/pip', '.cache/uv', '.cache/go-build', 'Library/Caches/Yarn', 'Library/Caches/pip']
+DEPS = int(os.environ.get('T3_DISK_GUARD_DEPS_BYTES', 10 << 30))
+IDLE_SECONDS = 3600
+# A sweep that freed nothing waits longer: checkouts it skipped stay too recent or busy for a while.
+SWEEP_SECONDS, BACKOFF_SECONDS = 300, 1800
+CACHES = ['.npm/_cacache', '.cache/pnpm', '.cache/yarn', '.yarn/berry/cache', '.bun/install/cache', '.cache/pip', '.cache/uv', '.cache/go-build', 'Library/Caches/Yarn', 'Library/Caches/pip', 'Library/Caches/pnpm', 'Library/Caches/go-build']
+# Home directories that hold tools and stores, never an agent's checkout.
+HOME_SKIP = {os.path.realpath(home / name) for name in ['Library', '.cache', '.npm', '.bun', '.local', '.cargo', '.rustup', '.yarn', '.pnpm-store', '.gradle', '.m2', 'go']}
+SKIP_NAMES = {'.git', 'node_modules', 'target'}
+def checkouts():
+    # Each git checkout under the root: its node_modules and the newest change outside them.
+    device = os.stat(root).st_dev
+    found = {}
+    stack = [(os.path.realpath(root), None)]
+    while stack:
+        path, owner = stack.pop()
+        try:
+            entries = list(os.scandir(path))
+        except OSError:
+            continue
+        if any(entry.name == '.git' for entry in entries):
+            owner = found.setdefault(path, {'deps': [], 'newest': 0.0})
+        for entry in entries:
+            try:
+                if entry.name == '.git' or entry.path in HOME_SKIP:
+                    continue
+                directory = entry.is_dir(follow_symlinks=False)
+                if owner is not None or directory:
+                    info = entry.stat(follow_symlinks=False)
+                    if info.st_dev != device:
+                        continue
+                    if owner is not None:
+                        owner['newest'] = max(owner['newest'], info.st_mtime)
+                if not directory:
+                    continue
+                if entry.name == 'node_modules':
+                    if owner is not None:
+                        owner['deps'].append(entry.path)
+                elif entry.name not in SKIP_NAMES:
+                    stack.append((entry.path, owner))
+            except OSError:
+                continue
+    return found
+def open_paths():
+    # Every working directory and open file of other processes; raises when they cannot be listed.
+    paths = []
+    if os.path.isdir('/proc/self/fd'):
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit() or int(pid) == os.getpid():
+                continue
+            try:
+                links = ['cwd'] + ['fd/' + fd for fd in os.listdir('/proc/' + pid + '/fd')]
+            except OSError:
+                links = ['cwd']
+            for link in links:
+                try:
+                    paths.append(os.readlink('/proc/' + pid + '/' + link))
+                except OSError:
+                    pass
+        return paths
+    listed = subprocess.run(['lsof', '-n', '-P', '-w', '-F', 'n'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60, cwd='/')
+    own = False
+    for line in listed.stdout.splitlines():
+        if line.startswith('p'):
+            own = line[1:] == str(os.getpid())
+        elif line.startswith('n') and not own:
+            paths.append(line[1:])
+    if not paths:
+        raise OSError('lsof listed no open files')
+    return paths
+def untracked(checkout, dep):
+    listed = subprocess.run(['git', '-C', checkout, 'ls-files', '-z', '--', os.path.relpath(dep, checkout)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+    return listed.returncode == 0 and not listed.stdout
+def free_dependencies():
+    # Returns how many node_modules it removed.
+    # Sealing renames the workspace to workspace.partial, which is still the chat's own checkout.
+    workspaces = {os.path.realpath(root / 'workspace'), os.path.realpath(root / 'workspace.partial')}
+    cutoff = time.time() - IDLE_SECONDS
+    idle = sorted((checkout['newest'], path, checkout['deps']) for path, checkout in checkouts().items() if path not in workspaces and checkout['deps'] and checkout['newest'] < cutoff)
+    removed = 0
+    for _, path, deps in idle:
+        free = shutil.disk_usage(root).free
+        if free >= DEPS:
+            break
+        deps = [dep for dep in deps if untracked(path, dep)]
+        if not deps or any(open_path == path or open_path.startswith(path + '/') for open_path in open_paths()):
+            continue
+        for dep in deps:
+            shutil.rmtree(dep, ignore_errors=True)
+        removed += len(deps)
+        print('disk guard: removed', ', '.join(deps) + ', freed', max(0, shutil.disk_usage(root).free - free), 'bytes', flush=True)
+    return removed
 def headroom():
     free = shutil.disk_usage(root).free
     if free < LOW:
@@ -392,20 +486,29 @@ def headroom():
 if mode == 'once':
     headroom()
     sys.exit(0)
+if mode == 'sweep':
+    free_dependencies()
+    sys.exit(0)
 # The lock comes open from the preparer, so a watcher never creates a file in the root.
 with os.fdopen(int(sys.argv[4]), 'w') as lock:
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         sys.exit(0)
+    next_sweep = 0.0
     while True:
+        # Checked first: once the server stops, the box may be sealing or snapshotting its workspace.
         try:
             os.kill(json.loads((root / 'server.json').read_text())['pid'], 0)
         except (OSError, ValueError, KeyError):
             sys.exit(0)
         try:
             headroom()
-        except OSError as error:
+            if shutil.disk_usage(root).free < DEPS and time.monotonic() >= next_sweep:
+                next_sweep = time.monotonic() + BACKOFF_SECONDS
+                if free_dependencies():
+                    next_sweep = time.monotonic() + SWEEP_SECONDS
+        except (OSError, subprocess.SubprocessError) as error:
             print('disk guard:', error, flush=True)
         time.sleep(30)
 `;
