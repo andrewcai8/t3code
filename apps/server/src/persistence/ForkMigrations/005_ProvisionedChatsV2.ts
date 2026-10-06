@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Frozen with this migration: what a pre-V2 card needs for its V2 rewrite. It must not follow the
 // live contracts, or each later shell change would alter what this migration converts.

@@ -15,7 +15,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { makeE2bProvisionRuntime } from "./E2bProvisionRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
@@ -321,7 +321,7 @@ it.effect.each(["create", "fork"] as const)(
         Provisioning.layer.pipe(
           Layer.provideMerge(ProvisionOperationStore.layer),
           Layer.provide(Layer.succeed(ProvisionProviderPorts, ports)),
-          Layer.provide(makeSqlitePersistenceLive(file)),
+          Layer.provide(SqlitePersistence.layerFromPath(file)),
           Layer.provide(NodeServices.layer),
         );
       const ensure = Effect.gen(function* () {

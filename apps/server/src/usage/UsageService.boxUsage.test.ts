@@ -12,12 +12,12 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { BoxUsageStore, BoxUsageStoreError } from "./boxUsage.ts";
 import * as UsageService from "./UsageService.ts";
@@ -146,7 +146,7 @@ describe("UsageService with cloud box usage", () => {
       const { settings, home } = yield* setup;
       const boxHome = "/home/user/.claude/projects";
       const storage = yield* Layer.build(
-        BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+        BoxUsageStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
       );
       yield* Effect.gen(function* () {
         const registry = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);

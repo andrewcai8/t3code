@@ -18,8 +18,8 @@ import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { makeProvisionControl } from "./ProvisionControl.ts";
 import { ProvisionPreparationManifest, provisionDigest } from "./ProvisionPreparation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
@@ -293,7 +293,7 @@ const withHost = <A, E>(
     Effect.scoped,
     Effect.provide(
       ProvisionOperationStore.layer.pipe(
-        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
         Layer.provide(NodeServices.layer),
       ),
     ),

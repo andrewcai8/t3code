@@ -4,6 +4,14 @@ import type { RepositoryIdentity } from "./environment.ts";
 export function cloneRepository(
   identity: RepositoryIdentity | null | undefined,
 ): string | undefined {
-  const source = identity?.origin ?? identity;
-  return source?.owner && source.name ? `${source.owner}/${source.name}` : undefined;
+  if (identity?.origin) {
+    const segments = identity.origin.canonicalKey
+      .split("/")
+      .slice(1)
+      .filter((segment) => segment.length > 0);
+    const owner = segments[0];
+    const name = segments.at(-1);
+    return owner && name ? `${owner}/${name}` : undefined;
+  }
+  return identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : undefined;
 }

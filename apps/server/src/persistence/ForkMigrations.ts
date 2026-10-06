@@ -5,8 +5,8 @@
  * upstream's ledger, then lets upstream migrate, then runs the fork migrations below.
  */
 import * as Effect from "effect/Effect";
-import * as Migrator from "effect/unstable/sql/Migrator";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Migrator from "effect/sql/Migrator";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import type { RunMigrationsOptions } from "./Migrations.ts";
 import ProvisionOperations from "./ForkMigrations/001_ProvisionOperations.ts";

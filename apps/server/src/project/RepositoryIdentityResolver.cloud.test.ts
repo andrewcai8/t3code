@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { cloneRepository } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -59,8 +60,8 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolver for cloud clones", (it)
       // targets. A fork's commits only exist on its own remote, so anything
       // cloning this checkout has to be told about that one too.
       expect(identity?.canonicalKey).toBe("github.com/t3tools/t3code");
-      expect(identity?.origin?.owner).toBe("andrewcai8");
-      expect(identity?.origin?.name).toBe("t3code");
+      expect(identity?.origin?.canonicalKey).toBe("github.com/andrewcai8/t3code");
+      expect(cloneRepository(identity)).toBe("andrewcai8/t3code");
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 

@@ -72,7 +72,7 @@ import {
 } from "./presentation.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as EnvironmentRegistry from "./registry.ts";
-import { remoteHttpClientLayer } from "../rpc/http.ts";
+import * as RpcHttp from "../rpc/http.ts";
 import { connectionRouteId } from "./routes.ts";
 import * as RpcSession from "../rpc/session.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
@@ -510,7 +510,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     }),
     // Route checks find nothing, so each saved route is dialed as it would be after a check.
     Effect.provide(
-      remoteHttpClientLayer((() =>
+      RpcHttp.layerRemoteHttpClient((() =>
         Promise.reject(new TypeError("Route checks are not used."))) as typeof fetch),
     ),
     Effect.provideService(RpcSession.RpcSessionFactory, {

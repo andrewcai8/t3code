@@ -6,7 +6,7 @@ import {
   type ServerSettings,
 } from "@t3tools/contracts";
 
-import { deriveProviderInstanceConfigMap } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
+import { deriveProviderInstanceConfigMap } from "./provider/ProviderInstanceRegistryHydration.ts";
 
 /**
  * The bootstrap thread's model. A provisioned cloud box enables exactly one

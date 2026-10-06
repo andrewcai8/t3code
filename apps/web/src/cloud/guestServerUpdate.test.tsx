@@ -1,6 +1,6 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import type { ReactElement } from "react";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const testState = vi.hoisted(() => ({

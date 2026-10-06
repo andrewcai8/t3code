@@ -7,7 +7,7 @@ import {
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
-} from "effect/unstable/http";
+} from "effect/http";
 import { proxyWebSocket } from "../httpWebSocketProxy.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 

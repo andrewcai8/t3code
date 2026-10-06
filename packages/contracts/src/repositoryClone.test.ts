@@ -15,9 +15,8 @@ describe("cloneRepository", () => {
         owner: "pingdotgg",
         name: "t3code",
         origin: {
-          owner: "andrewcai8",
-          name: "t3code",
-          remoteUrl: "https://github.com/andrewcai8/t3code.git",
+          canonicalKey: "github.com/andrewcai8/t3code",
+          displayName: "andrewcai8/t3code",
         },
       }),
     ).toBe("andrewcai8/t3code");

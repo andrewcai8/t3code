@@ -1,6 +1,6 @@
 import { claimFirstTurnBox } from "@t3tools/client-runtime/cloud";
 import { connectionBox } from "@t3tools/client-runtime/connection";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { useCallback } from "react";
 
 import { environmentCatalog } from "../connection/catalog";

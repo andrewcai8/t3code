@@ -12,11 +12,11 @@ import { AccessMode } from "@namespacelabs/sdk/proto/namespace/private/devbox/de
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import { EnvironmentControl, layer } from "./EnvironmentControl.ts";
 import { makeNamespaceAccountSession } from "./NamespaceProvisionRuntime.ts";
 import { NamespaceProxyManager, type NamespaceProxyOpenInput } from "./namespaceProxy.ts";
@@ -288,9 +288,9 @@ it.effect(
       }).pipe(
         Effect.provide(
           Layer.merge(layer, ProvisionOperationStore.layer).pipe(
-            Layer.provideMerge(SqlitePersistenceMemory),
+            Layer.provideMerge(SqlitePersistence.layerMemory),
             Layer.provide(ServerSettings.layerTest()),
-            Layer.provide(makeProviderRegistryLayer()),
+            Layer.provide(ProviderRegistryMock.layer()),
             Layer.provideMerge(ServerConfig.layerTest(directory, directory)),
             Layer.provide(NodeServices.layer),
           ),

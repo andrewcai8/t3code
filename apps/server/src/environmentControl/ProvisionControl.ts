@@ -423,13 +423,11 @@ export function makeProvisionControl(
       }).pipe(
         timeProvisionPhase("freeze", { requestId: input.requestId, provider: input.provider }),
         Effect.tap((manifest) =>
-          store
-            .accept(manifest.request)
-            .pipe(
-              Effect.catchTag("ProvisionStoreError", (cause) =>
-                Effect.fail(new UnexpectedCause(cause)),
-              ),
-            ),
+          store.accept(manifest.request).pipe(
+            Effect.catchTags({
+              ProvisionStoreError: (cause) => Effect.fail(new UnexpectedCause(cause)),
+            }),
+          ),
         ),
         routing.withPermits(1),
         reportUnexpected,

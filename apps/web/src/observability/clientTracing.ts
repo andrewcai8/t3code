@@ -3,14 +3,14 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Scope from "effect/Scope";
-import { HttpClient } from "effect/unstable/http";
-import { OtlpExporter, OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
+import { HttpClient } from "effect/http";
+import { OtlpExporter, OtlpSerialization, OtlpTracer } from "effect/observability";
 
 import { settleAsyncResult, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary";
 import * as ClientTracer from "./clientTracer";
-import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
+import * as PrimaryEnvironmentHttpLayer from "../environments/primary/httpLayer";
 import { isElectron } from "../env";
 import { APP_VERSION } from "~/branding";
 
@@ -28,15 +28,15 @@ const CLIENT_TRACING_RESOURCE = {
 // The exporter never reads a response body, and the browser reports a fetch whose body is left
 // unread as aborted (net::ERR_ABORTED), though the server took the spans. Reading the empty body
 // ends each export cleanly.
-const exporterHttpLayer = Layer.effect(
+const layerExporterHttp = Layer.effect(
   HttpClient.HttpClient,
   Effect.map(HttpClient.HttpClient, (client) =>
     client.pipe(HttpClient.tap((response) => Effect.ignore(response.text))),
   ),
-).pipe(Layer.provideMerge(primaryEnvironmentHttpLayer));
+).pipe(Layer.provideMerge(PrimaryEnvironmentHttpLayer.layer));
 
-const delegateRuntimeLayer = Layer.mergeAll(
-  exporterHttpLayer,
+const layerDelegateRuntime = Layer.mergeAll(
+  layerExporterHttp,
   OtlpExporter.layerFlusher,
   OtlpSerialization.layerJson,
   Layer.succeed(HttpClient.TracerDisabledWhen, () => true),
@@ -81,7 +81,7 @@ async function applyClientTracingConfig(config: ClientTracingConfig): Promise<vo
 
   await disposeTracerRuntime(previousRuntime, previousScope);
 
-  const runtime = ManagedRuntime.make(delegateRuntimeLayer);
+  const runtime = ManagedRuntime.make(layerDelegateRuntime);
   const scope = runtime.runSync(Scope.make());
 
   const delegateResult = await settleAsyncResult(() =>

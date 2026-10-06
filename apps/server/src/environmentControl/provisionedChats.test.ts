@@ -1,10 +1,10 @@
 // @effect-diagnostics globalDate:off globalDateInEffect:off - these tests pin read times.
 import type { ProvisionedChat } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { createProvisionedChatStore, ownerChat } from "./provisionedChats.ts";
 import { boxThread as thread, boxShell as shellBody } from "./shellTestFixture.ts";
 
@@ -89,7 +89,7 @@ describe("ProvisionedChatStore", () => {
         ["lease-a", "thread-owner"],
         ["lease-b", "thread-owner"],
       ]);
-    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
   effectIt.effect("keeps a read of a new owner's chat even at the same sequence", () =>
@@ -120,7 +120,7 @@ describe("ProvisionedChatStore", () => {
       expect((yield* storedRows()).map(({ sequence, title }) => ({ sequence, title }))).toEqual([
         { sequence: 9, title: "Second owner" },
       ]);
-    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
   effectIt.effect("reads back the chat it keeps for a box, and none for an unknown one", () =>
@@ -134,6 +134,6 @@ describe("ProvisionedChatStore", () => {
       expect([kept?.sequence, kept?.thread.title]).toEqual([4, "Kept"]);
       expect(yield* Effect.promise(() => store.read("lease-b"))).toBeNull();
       expect(yield* Effect.promise(() => store.read("lease-c"))).toBeNull();
-    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 });

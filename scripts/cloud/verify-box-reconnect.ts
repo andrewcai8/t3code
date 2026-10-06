@@ -77,7 +77,8 @@ import {
   setRoutesInCatalog,
 } from "@t3tools/client-runtime/platform";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
-import { request, remoteHttpClientLayer, subscribe } from "@t3tools/client-runtime/rpc";
+import { request, subscribe } from "@t3tools/client-runtime/rpc";
+import * as RpcHttp from "@t3tools/client-runtime/rpc";
 import { provisionedBox } from "@t3tools/client-runtime/cloud";
 import { startThreadTurn } from "@t3tools/client-runtime/operations";
 import {
@@ -112,7 +113,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 
 import { advanceTurn, initialProgress } from "./turnProgress.ts";
 
@@ -994,9 +995,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       ),
       "send a turn",
     ).pipe(
-      Effect.catchTag("VerifyFailure", (failure) =>
-        checked("lease.dispatch", false, failure.message),
-      ),
+      Effect.catchTags({
+        VerifyFailure: (failure) => checked("lease.dispatch", false, failure.message),
+      }),
     );
     yield* checked("lease.dispatch", true, "message.dispatch");
 
@@ -1325,9 +1326,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           );
         }).pipe(
           Effect.as(true),
-          Effect.catchTag("VerifyFailure", (failure) =>
-            Effect.sync(() => ((error = failure.message), false)),
-          ),
+          Effect.catchTags({
+            VerifyFailure: (failure) => Effect.sync(() => ((error = failure.message), false)),
+          }),
         );
         outcome = came ? "reconnected" : "not-reconnected";
       }).pipe(Effect.scoped);
@@ -1508,7 +1509,9 @@ if (import.meta.main) {
   Command.run(command, { version: "0.0.0" }).pipe(
     // The runtime's own logs can carry socket URLs; the transition lines report what matters.
     Effect.provideService(References.MinimumLogLevel, "None"),
-    Effect.provide(Layer.mergeAll(NodeServices.layer, remoteHttpClientLayer(globalThis.fetch))),
+    Effect.provide(
+      Layer.mergeAll(NodeServices.layer, RpcHttp.layerRemoteHttpClient(globalThis.fetch)),
+    ),
     NodeRuntime.runMain,
   );
 }

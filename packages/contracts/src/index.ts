@@ -65,3 +65,4 @@ export * from "./repositoryClone.ts";
 export * from "./usageHistory.ts";
 export * from "./worktreeSetup.ts";
 export * from "./environmentProvisioning.ts";
+export * from "./secretRequest.ts";

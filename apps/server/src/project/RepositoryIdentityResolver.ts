@@ -11,7 +11,6 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { repositoryOrigin } from "./repositoryOrigin.ts";
 
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 // Background sweeps resolve every project each minute. A long TTL keeps them
@@ -72,17 +71,34 @@ function pickPrimaryRemote(
   return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
 }
 
+function repositoryPathOf(canonicalKey: string): string {
+  return canonicalKey.split("/").slice(1).join("/");
+}
+
+function buildRepositoryOrigin(
+  originUrl: string | undefined,
+  canonicalKey: string,
+): RepositoryIdentity["origin"] {
+  if (!originUrl) return undefined;
+  const originKey = normalizeGitRemoteUrl(originUrl);
+  if (originKey === canonicalKey) return undefined;
+  const displayName = repositoryPathOf(originKey);
+  return { canonicalKey: originKey, ...(displayName ? { displayName } : {}) };
+}
+
 function buildRepositoryIdentity(input: {
   readonly remoteName: string;
   readonly remoteUrl: string;
+  readonly originUrl: string | undefined;
   readonly rootPath: string;
 }): RepositoryIdentity {
   const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
-  const repositoryPath = canonicalKey.split("/").slice(1).join("/");
+  const repositoryPath = repositoryPathOf(canonicalKey);
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
+  const origin = buildRepositoryOrigin(input.originUrl, canonicalKey);
 
   return {
     canonicalKey,
@@ -96,6 +112,7 @@ function buildRepositoryIdentity(input: {
     ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
     ...(owner ? { owner } : {}),
     ...(repositoryName ? { name: repositoryName } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
 
@@ -140,12 +157,8 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
 
   const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
   const remote = pickPrimaryRemote(remotes);
-  const origin = remote && repositoryOrigin(remotes, remote.remoteName);
   return remote
-    ? {
-        ...buildRepositoryIdentity({ ...remote, rootPath: cacheKey }),
-        ...(origin ? { origin } : {}),
-      }
+    ? buildRepositoryIdentity({ ...remote, originUrl: remotes.get("origin"), rootPath: cacheKey })
     : null;
 });
 

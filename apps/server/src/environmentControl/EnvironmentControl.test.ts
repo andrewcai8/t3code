@@ -8,8 +8,8 @@ import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
 import { E2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { boxShell, boxThread } from "./shellTestFixture.ts";
@@ -23,12 +23,12 @@ import { boxShell, boxThread } from "./shellTestFixture.ts";
 const withSqlRegistry = (
   body: (registry: ReturnType<typeof createProvisionedLeaseRegistry>) => Promise<void>,
 ) =>
-  // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests
+  // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- the suite drives a Promise-facing service
   Effect.runPromise(
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* Effect.promise(() => body(createProvisionedLeaseRegistry(sql)));
-    }).pipe(Effect.provide(SqlitePersistenceMemory), Effect.scoped),
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory), Effect.scoped),
   );
 
 const target: ManagedTarget = {

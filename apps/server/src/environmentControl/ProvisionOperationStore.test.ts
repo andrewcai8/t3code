@@ -9,8 +9,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 
 const decodeRequest = Schema.decodeUnknownEffect(DurableProvisionRequest);
@@ -21,13 +21,13 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import * as Effect from 'effect/Effect';
 import * as Layer from 'effect/Layer';
 import * as Schema from 'effect/Schema';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import { createProvisionedLeaseRegistry } from './src/environmentControl/ProvisionedLeaseRegistry.ts';
 import { ProvisionRequestId } from '@t3tools/contracts';
 import { ProvisionOperationStore } from './src/environmentControl/ProvisionOperationStore.ts';
-import { makeSqlitePersistenceLive } from './src/persistence/Layers/Sqlite.ts';
+import * as SqlitePersistence from './src/persistence/Sqlite.ts';
 const layer = ProvisionOperationStore.layer.pipe(
-  Layer.provideMerge(makeSqlitePersistenceLive(process.argv[1])),
+  Layer.provideMerge(SqlitePersistence.layerFromPath(process.argv[1])),
   Layer.provide(NodeServices.layer),
 );
 NodeRuntime.runMain(Effect.gen(function* () {
@@ -98,7 +98,7 @@ it.effect("two server processes cannot both claim the same allocation effect", (
       strategy: "direct",
     });
     const storeLayer = ProvisionOperationStore.layer.pipe(
-      Layer.provide(makeSqlitePersistenceLive(file)),
+      Layer.provide(SqlitePersistence.layerFromPath(file)),
       Layer.provide(NodeServices.layer),
     );
     yield* Effect.gen(function* () {
@@ -128,7 +128,7 @@ it.effect("two server processes cannot both claim the same allocation effect", (
     const leaseCount = yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       return yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM provisioned_leases`;
-    }).pipe(Effect.provide(makeSqlitePersistenceLive(file)), Effect.scoped);
+    }).pipe(Effect.provide(SqlitePersistence.layerFromPath(file)), Effect.scoped);
     expect(leaseCount[0]?.count).toBe(41);
     const persisted = yield* Effect.gen(function* () {
       return yield* (yield* ProvisionOperationStore).get(request.requestId);

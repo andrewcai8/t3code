@@ -5,8 +5,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import {
   GuestNotServing,
   makeProvisionControl,
@@ -208,7 +208,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -253,7 +253,7 @@ it.effect("a request the host ended on its own tells the caller why", () =>
   }).pipe(
     Effect.provide(
       ProvisionOperationStore.layer.pipe(
-        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
         Layer.provide(NodeServices.layer),
       ),
     ),
@@ -362,7 +362,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -431,7 +431,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -504,7 +504,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -573,7 +573,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -641,7 +641,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -709,7 +709,7 @@ it.effect.each(["attach", "touch"] as const)(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -885,7 +885,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -1015,7 +1015,7 @@ it.effect(
     }).pipe(
       Effect.provide(
         ProvisionOperationStore.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
           Layer.provide(NodeServices.layer),
         ),
       ),
@@ -1087,7 +1087,7 @@ it.effect("saves each launch before the next one routes, so two at once take two
   }).pipe(
     Effect.provide(
       ProvisionOperationStore.layer.pipe(
-        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
         Layer.provide(NodeServices.layer),
       ),
     ),

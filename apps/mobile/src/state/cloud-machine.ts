@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { type CloudMachine, cloudMachineStatus } from "@t3tools/client-runtime/connection";
 import type { CloudMachineState, EnvironmentId } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { environmentPresentations } from "./presentation";

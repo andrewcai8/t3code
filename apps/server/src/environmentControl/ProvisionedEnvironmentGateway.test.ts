@@ -12,9 +12,9 @@ import {
   HttpServer,
   HttpServerRequest,
   HttpServerResponse,
-} from "effect/unstable/http";
-import * as NetAddress from "effect/unstable/net/NetAddress";
-import * as Socket from "effect/unstable/socket/Socket";
+} from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
+import * as Socket from "effect/socket/Socket";
 import { EnvironmentControl } from "./EnvironmentControl.ts";
 import {
   provisionedEnvironmentGatewayRouteLayer,

@@ -1,7 +1,7 @@
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { createRunningBoxDemandAtom } from "@t3tools/client-runtime/state/boxDemand";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import { useEffect, useMemo } from "react";
 
 import { environmentCatalog } from "../connection/catalog";

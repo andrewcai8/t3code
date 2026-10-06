@@ -7,7 +7,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { remoteHttpClientLayer } from "../rpc/http.ts";
+import * as RpcHttp from "../rpc/http.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import { preparePairingRegistration } from "./onboarding.ts";
 
@@ -38,7 +38,7 @@ function descriptorOnlyHttpLayer(calls: Array<string>) {
       }),
     );
   }) satisfies typeof fetch;
-  return remoteHttpClientLayer(fetchFn);
+  return RpcHttp.layerRemoteHttpClient(fetchFn);
 }
 
 describe("connection onboarding for cloud boxes", () => {

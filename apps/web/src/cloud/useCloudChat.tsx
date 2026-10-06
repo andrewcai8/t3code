@@ -33,7 +33,7 @@ import {
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@t3tools/shared/model";
 import { truncate } from "@t3tools/shared/String";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { SendIcon } from "lucide-react";
 import {
   type RefObject,

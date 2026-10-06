@@ -10,7 +10,7 @@ import {
 } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import type { ComposerBannerStackItem } from "../components/chat/ComposerBannerStack";
 import { Button } from "../components/ui/button";
