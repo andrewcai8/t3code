@@ -1,0 +1,12 @@
+{
+  "source": "https://github.com/cursor/plugins/tree/main/pstack",
+  "commit": "2b8ae2ee306f823d54879d3da7f8496b73c31d5d",
+  "version": "0.15.0",
+  "supplementarySource": "https://github.com/michael-denyer/pstack-claude",
+  "supplementaryCommit": "a0a531f0e341144d12f0a26218b295ad5e8453a1",
+  "adaptations": [
+    "Codex runtime mapping linked from each skill",
+    "Model preference path changed to ~/.codex/pstack-models.md",
+    "Cursor-only discovery frontmatter removed; Codex automatic discovery preserved"
+  ]
+}

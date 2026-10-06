@@ -1,0 +1,25 @@
+{
+  "name": "pstack",
+  "version": "0.15.0+codex.20260908182221",
+  "description": "Pstack 0.15.0 from cursor/plugins, adapted for Codex. Includes the existing port\u2019s supplementary skills.",
+  "author": {
+    "name": "Lauren Tan"
+  },
+  "homepage": "https://github.com/cursor/plugins/tree/main/pstack",
+  "repository": "https://github.com/cursor/plugins",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "pstack",
+    "shortDescription": "Engineering workflows, reviews, and verification.",
+    "developerName": "Lauren Tan; local Codex adaptation",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Work on this in poteto-mode.",
+      "Interrogate this diff with multiple models."
+    ],
+    "logo": "./assets/logo.png",
+    "longDescription": "Official pstack 0.15.0 skills and agents with Codex tool mappings, local model preferences, and the supplementary skills from the previous Codex port."
+  }
+}
