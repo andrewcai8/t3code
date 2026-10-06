@@ -14,6 +14,7 @@
  */
 import {
   type DiscoveredProvisionedEnvironment,
+  defaultInstanceIdForDriver,
   EnvironmentId,
   type FleetActor,
   type FleetEnvironment,
@@ -56,10 +57,22 @@ import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 /** The environment every box is offered for starting a chat on a fresh cloud machine. */
 export const NEW_CLOUD_CHAT_ENVIRONMENT_ID = EnvironmentId.make("cloud:new-chat");
 
+/**
+ * Every chat the host starts for another chat has an id that starts with this and names the
+ * starting chat's lease. Such a chat cannot start more, and one chat keeps at most
+ * MAX_STARTED_CHATS of them, so an agent cannot fan out paid machines without a person.
+ */
+const STARTED_CHAT_PREFIX = "cloud-started:";
+const MAX_STARTED_CHATS = 4;
+
 const RECONCILE_INTERVAL = Duration.seconds(15);
-// A box gives up on a relayed call after 90 seconds, so the host answers first.
-const WAKE_BUDGET = Duration.seconds(60);
-const LAUNCH_BUDGET = Duration.seconds(70);
+// A box gives up on a relayed call after 90 seconds. The host answers first, and once a wake or
+// launch has used RELAY_DEADLINE it says so rather than acting, so a late answer never makes the
+// agent repeat a change that went through.
+const WAKE_BUDGET = Duration.seconds(45);
+const LAUNCH_BUDGET = Duration.seconds(50);
+const RELAY_DEADLINE_MS = 55_000;
+const FOLLOW_UP_BUDGET = Duration.seconds(20);
 
 export class CloudFleetHost extends Context.Service<
   CloudFleetHost,
@@ -83,7 +96,10 @@ const unavailable = (message: string) => failure("environment_unavailable", mess
 
 const boxName = (box: Box) => box.chat?.thread.title ?? box.label;
 
-/** What one box is offered: every other cloud chat, then a new one. */
+const startedBy = (box: Box) => `${STARTED_CHAT_PREFIX}${box.leaseId}:`;
+const canStartChats = (box: Box) => !box.threadId?.startsWith(STARTED_CHAT_PREFIX);
+
+/** What one box is offered: every other cloud chat, then a new one unless a chat started it. */
 function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegistration {
   const siblings = boxes
     .filter((box) => box.environmentId !== source.environmentId)
@@ -109,17 +125,20 @@ function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegis
     clientId: "t3-cloud-host",
     environments: [
       ...siblings,
-      {
-        environmentId: NEW_CLOUD_CHAT_ENVIRONMENT_ID,
-        label: "New cloud chat on a fresh machine",
-        connected: true,
-      },
+      ...(canStartChats(source)
+        ? [
+            {
+              environmentId: NEW_CLOUD_CHAT_ENVIRONMENT_ID,
+              label: "New cloud chat on a fresh machine",
+              connected: true,
+            },
+          ]
+        : []),
     ],
   };
 }
 
 const decodeThreadList = Schema.decodeUnknownEffect(FleetResults["threads.list"]);
-const decodeRequestId = Schema.decodeUnknownOption(ProvisionRequestId);
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -197,6 +216,7 @@ const make = Effect.gen(function* () {
 
   const startChat = (
     source: Box | undefined,
+    boxes: ReadonlyArray<Box>,
     actor: FleetActor,
     input: FleetInput<"threads.launch">,
   ) =>
@@ -204,20 +224,37 @@ const make = Effect.gen(function* () {
       const message = input.message;
       if (message === undefined)
         return yield* failure("invalid_request", "A new cloud chat needs a first message.");
-      const requestId = decodeRequestId(source?.leaseId);
-      if (source === undefined || Option.isNone(requestId))
-        return yield* failure("invalid_request", "This chat's machine cannot start another.");
+      if (source === undefined || !canStartChats(source))
+        return yield* failure(
+          "capability_denied",
+          "A cloud chat another chat started cannot start more.",
+        );
+      const started = boxes.filter((box) => box.threadId?.startsWith(startedBy(source))).length;
+      if (started >= MAX_STARTED_CHATS)
+        return yield* failure(
+          "capability_denied",
+          `This chat already has ${MAX_STARTED_CHATS} cloud chats it started. Delete one of their machines first.`,
+        );
       const origin = (yield* operations
-        .get(requestId.value)
+        .get(source.requestId)
         .pipe(Effect.mapError(() => unavailable("The host could not read this chat's machine."))))
         .request;
       const modelSelection = input.modelSelection ?? source.chat?.thread.modelSelection;
       if (modelSelection === undefined)
         return yield* failure("invalid_request", "Pass modelSelection for the new chat.");
+      // The new machine runs the same agent as this one, under its driver's default instance.
+      if (
+        origin.agentDriver !== undefined &&
+        modelSelection.instanceId !== defaultInstanceIdForDriver(origin.agentDriver)
+      )
+        return yield* failure(
+          "invalid_request",
+          `A new cloud chat runs ${origin.agentDriver} like this one; pick one of its models.`,
+        );
       const stillStarting = unavailable(
         `The new cloud chat "${input.title}" was started and is still getting its machine ready, which can take a few minutes. Do not launch it again; t3_environment_list shows it once it is ready.`,
       );
-      const threadId = ThreadId.make(yield* uuid);
+      const threadId = ThreadId.make(`${startedBy(source)}${yield* uuid}`);
       const launch = yield* once(
         `launch:${actor.environmentId}:${actor.threadId}:${input.title}\u0000${message}`,
         Effect.gen(function* () {
@@ -264,8 +301,10 @@ const make = Effect.gen(function* () {
             Effect.mapError(() => unavailable("The new cloud chat answered in an unknown shape.")),
           ),
         ),
+        Effect.timeoutOption(FOLLOW_UP_BUDGET),
       );
-      const thread = listed.threads.find(
+      if (Option.isNone(listed)) return yield* stillStarting;
+      const thread = listed.value.threads.find(
         (candidate) => candidate.threadId === provisioned.value.threadId,
       );
       if (thread === undefined) return yield* stillStarting;
@@ -291,7 +330,7 @@ const make = Effect.gen(function* () {
             "Only t3_thread_launch works in the new cloud chat environment.",
           );
         const current = boxes.find((box) => box.leaseId === source.leaseId);
-        return yield* startChat(current, actor, request.input);
+        return yield* startChat(current, boxes, actor, request.input);
       }
       const target = boxes.find(
         (box) => box.environmentId === environmentId && box.leaseId !== source.leaseId,
@@ -312,7 +351,12 @@ const make = Effect.gen(function* () {
       }
       if (target.lifecycle === "missing")
         return yield* unavailable(`${boxName(target)} has no machine right now.`);
-      if (target.lifecycle === "paused") yield* wake(target);
+      if (target.lifecycle === "paused") {
+        const startedAt = yield* Clock.currentTimeMillis;
+        yield* wake(target);
+        if ((yield* Clock.currentTimeMillis) - startedAt > RELAY_DEADLINE_MS)
+          return yield* unavailable(`${boxName(target)} just woke up. Try again now.`);
+      }
       return yield* invokeOn(target.leaseId, boxName(target), invoke);
     });
 
@@ -366,7 +410,13 @@ const make = Effect.gen(function* () {
       if (access === null) continue;
       awake.add(box.leaseId);
       const registration = registrationFor(box, boxes);
-      const key = JSON.stringify(registration.environments);
+      // A card's updatedAt moves with every turn; re-registering for it alone would churn.
+      const key = JSON.stringify(
+        registration.environments.map(({ chat, ...environment }) => ({
+          ...environment,
+          chat: chat && { threadId: chat.threadId, title: chat.title, status: chat.status },
+        })),
+      );
       const current = registered.get(box.leaseId);
       if (current !== undefined && FiberMap.hasUnsafe(connections, box.leaseId)) {
         if (current.key === key || inFlight.has(box.leaseId)) continue;
