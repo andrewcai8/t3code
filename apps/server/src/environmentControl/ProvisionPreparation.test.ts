@@ -1129,6 +1129,35 @@ it("lands a plugin holding many skills flat, where the CLI will find each one", 
     await f.cleanup();
   }
 });
+it("provisions without a url bundle the manager has not downloaded yet", async () => {
+  const f = await fixture();
+  try {
+    const source = NodePath.join(f.root, "bundles/pstack-skills");
+    await NodeFSP.mkdir(NodePath.join(source, "why"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(source, "why", "SKILL.md"), "---\nname: why\n---\n");
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        skills: [
+          {
+            source: NodePath.join(f.root, "skill-bundles/0/skills"),
+            url: "https://example.com/pstack-skills.tgz",
+          },
+          { source },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
+    expect(
+      manifest.preparation.files
+        .filter((item) => item.destination.startsWith(".codex/skills/"))
+        .map((item) => item.destination),
+    ).toEqual([".codex/skills/why/SKILL.md"]);
+  } finally {
+    await f.cleanup();
+  }
+});
 it("keeps the /tmp root an existing E2B box froze before the root moved", async () => {
   const f = await fixture();
   try {

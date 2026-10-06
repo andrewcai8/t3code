@@ -238,6 +238,13 @@ const Provisioning = Schema.Struct({
          */
         name: Schema.optional(TrimmedNonEmptyString),
         /**
+         * An `https:` URL of a gzipped tarball whose root holds skill
+         * directories. A manager that runs no agents itself owns `source` and
+         * refreshes it from `url` at startup and hourly, so there `source` must
+         * be a path nothing else writes. Elsewhere `source` is used as is.
+         */
+        url: Schema.optional(TrimmedNonEmptyString),
+        /**
          * Drivers that receive this bundle. Omitted, every driver does. Two
          * bundles holding the same skill name collide in any root they share,
          * so ports of one bundle for different CLIs each name their drivers.
@@ -315,6 +322,10 @@ export async function readConfig(path: string): Promise<EnvironmentControlConfig
   for (const target of config.targets) {
     if (!/^[a-zA-Z0-9_-]+$/.test(target.hostId) || target.operatorToken.length < 32)
       throw new Error("Invalid controller identity");
+  }
+  for (const bundle of config.provisioning?.skills ?? []) {
+    if (bundle.url !== undefined && (new URL(bundle.url).protocol !== "https:" || bundle.name))
+      throw new Error("A skill bundle url must be HTTPS and publish a directory of skills");
   }
   for (const identity of [
     config.broker,

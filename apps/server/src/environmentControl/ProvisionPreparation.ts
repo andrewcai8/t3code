@@ -904,6 +904,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
             .map(({ kind }) => skillRoot(kind)),
         );
         if (skillRoots.size === 0) continue;
+        // A url bundle exists once the manager first downloads it; until then
+        // a chat starts without it rather than failing.
+        if (skill.url && !(await NodeFSP.stat(skill.source).catch(() => undefined))) continue;
         const prefix = skill.name ? `${relativePath(skill.name)}/` : "";
         for (const entry of await skillFiles(skill.source, skillLimit)) {
           for (const root of skillRoots)

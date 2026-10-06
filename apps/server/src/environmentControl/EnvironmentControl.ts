@@ -97,6 +97,7 @@ import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceReg
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { readAccountLoad } from "./accountLoad.ts";
 import { readProvisionedSkills } from "./provisionedSkills.ts";
+import { refreshSkillBundle } from "./skillBundleSync.ts";
 import {
   credentialVariables,
   ProvisionRefused,
@@ -2131,6 +2132,43 @@ export const layer = Layer.effect(
       Effect.repeat(Schedule.spaced(Duration.minutes(1))),
       Effect.forkScoped,
     );
+    // A server that runs agents itself reads `source` as an operator keeps it.
+    if (!localAgentRuns)
+      yield* Effect.tryPromise(resolve).pipe(
+        Effect.flatMap((manager) =>
+          Effect.forEach(
+            (manager?.config.provisioning?.skills ?? []).flatMap(({ source, url }) =>
+              url ? [{ source, url }] : [],
+            ),
+            (bundle) =>
+              Effect.tryPromise(() => refreshSkillBundle(bundle)).pipe(
+                Effect.flatMap((result) =>
+                  result === "updated" ? Effect.logInfo("skill bundle updated") : Effect.void,
+                ),
+                Effect.as(true),
+                Effect.catch((error) =>
+                  Effect.logWarning("skill bundle could not be refreshed", error).pipe(
+                    Effect.as(false),
+                  ),
+                ),
+                Effect.annotateLogs({ source: bundle.source }),
+              ),
+          ),
+        ),
+        Effect.flatMap((refreshed) =>
+          refreshed.every(Boolean)
+            ? Effect.void
+            : Effect.fail(
+                new EnvironmentControlError({ message: "A skill bundle could not be refreshed." }),
+              ),
+        ),
+        // Until a bundle's first download lands, new chats start without it,
+        // so a failed refresh retries within minutes before waiting the hour.
+        Effect.retry({ schedule: Schedule.exponential("1 minute"), times: 4 }),
+        Effect.ignore({ log: "Warn", message: "skill bundles could not be refreshed" }),
+        Effect.repeat(Schedule.spaced(Duration.hours(1))),
+        Effect.forkScoped,
+      );
     /**
      * Moves an idle box the reaper is about to put to sleep onto the pinned build. A wake or
      * another upgrade holding the box is waited out briefly; past that the next sweep decides.

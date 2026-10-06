@@ -1,0 +1,60 @@
+name: pstack skills
+
+# Publishes cursor/plugins pstack with this fork's overlay as the archives a
+# host's provisioning.skills `url` entries follow (scripts/pstack/README.md).
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pstack-skills
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish pstack skills
+    runs-on: ubuntu-24.04
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: pstack-skills
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          set -eu
+          pip install --quiet pyyaml
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/cursor/plugins.git "$RUNNER_TEMP/cursor-plugins"
+          built="$(scripts/pstack/build.sh "$RUNNER_TEMP/cursor-plugins" origin/main "$RUNNER_TEMP/build")"
+          read -r version commit <<<"$built"
+          mkdir -p "$RUNNER_TEMP/assets"
+          # Byte-identical archives for identical skills, so hosts swap only on a real change.
+          pack() { tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$1" . | gzip -n > "$2"; }
+          pack "$RUNNER_TEMP/build/pstack/skills" "$RUNNER_TEMP/assets/pstack-skills.tgz"
+          pack "$RUNNER_TEMP/build/codex/skills" "$RUNNER_TEMP/assets/pstack-codex-skills.tgz"
+          cd "$RUNNER_TEMP/assets"
+          jq -n --arg version "$version" --arg commit "$commit" --arg overlay "$GITHUB_SHA" \
+            --arg skills "$(sha256sum pstack-skills.tgz | cut -d' ' -f1)" \
+            --arg codex "$(sha256sum pstack-codex-skills.tgz | cut -d' ' -f1)" \
+            '{version: $version, upstreamCommit: $commit, overlayCommit: $overlay, sha256: {"pstack-skills.tgz": $skills, "pstack-codex-skills.tgz": $codex}}' \
+            > pstack-skills.json
+          cat pstack-skills.json
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "UPSTREAM=$commit" >> "$GITHUB_ENV"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          notes="$(printf 'pstack %s from cursor/plugins %s with scripts/pstack/overlay.patch at %s. Replaced by the pstack skills workflow.' "$VERSION" "$UPSTREAM" "$GITHUB_SHA")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --latest=false --title "pstack skills" --notes "$notes"
+          fi
+          gh release upload "$TAG" --clobber "$RUNNER_TEMP"/assets/*

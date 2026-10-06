@@ -322,6 +322,28 @@ describe("packHostState", () => {
     }
   });
 
+  it("carries a url bundle as its url, outside the seed-owned skills tree", async () => {
+    const url = "https://example.com/pstack-cursor.tar.gz";
+    const { home, packed } = await fixture({
+      skills: [
+        { source: "not-on-this-mac/skills", url, agents: ["cursor"] },
+        { source: "claude/pstack/skills", agents: ["claudeAgent", "codex"] },
+      ],
+    });
+    try {
+      assert.deepEqual(packed.config.provisioning.skills, [
+        { source: "/data/t3/skill-bundles/0/skills", url, agents: ["cursor"] },
+        { source: "/data/t3/skills/1/skills", agents: ["claudeAgent", "codex"] },
+      ]);
+      assert.deepEqual(
+        packed.skills.map((skill) => skill.directory),
+        ["/data/t3/skills/1"],
+      );
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("carries configured home and workspace files, leaving account logins to the host", async () => {
     const { home, packed } = await fixture({
       homeFiles: [
