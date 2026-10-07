@@ -80,6 +80,8 @@ vi.mock("./threads", async () => {
   };
 });
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
+// The fork's cloud chat delivery: no queued message waits on a cloud machine here.
+vi.mock("./cloud-chat-delivery", () => ({ useCloudChatDelivery: () => () => {} }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
 vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "abcd" }));
 vi.mock("../lib/attachmentUpload", () => ({ prepareTurnAttachments: state.prepare }));
