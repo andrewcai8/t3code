@@ -1352,8 +1352,11 @@ describe("Namespace runtime transport", () => {
       stateDir: f.directory,
     });
     expect(
-      await runtime.backUpWork(f.operation, resource, manifest, { branch: requestId, push: true }),
-    ).toEqual({ kind: "saved", branches: [`t3-backup/${requestId}`] });
+      await runtime.backUpWork(f.operation, resource, manifest, {
+        branch: requestId,
+        target: { kind: "origin" },
+      }),
+    ).toMatchObject({ kind: "saved", branches: [`t3-backup/${requestId}`] });
     expect(git(origin, "show", `t3-backup/${requestId}:notes.txt`)).toBe("unsaved");
   });
 });

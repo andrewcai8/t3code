@@ -8,13 +8,14 @@ import { createCleanupSweep } from "./cloudCleanup.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
 import { SandboxError } from "e2b";
-import { connectResumingE2b } from "./e2bResume.ts";
+import { connectResumingE2b, E2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { boxShell, boxThread } from "./shellTestFixture.ts";
+import type { BoxHealth } from "./boxHealth.ts";
 
 /**
  * Leases live in SQLite beside provision_operations, so tests need a client.
@@ -1553,5 +1554,598 @@ describe("a cloud box's cleanup", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("a cloud machine backed up before it sleeps", () => {
+  const saved = {
+    at: "2026-10-06T12:00:00.000Z",
+    branches: ["t3-backup/lease"],
+    sessionsUri: "s3://bucket/t3-agents/child/backups/latest/",
+    workFingerprint: "work-1",
+    sessionsFingerprint: "sessions-1",
+  };
+  async function withIdleBox(
+    boxBackup: Omit<
+      NonNullable<Parameters<typeof createEnvironmentControl>[1]["boxBackup"]>,
+      "turnBudgetMs"
+    >,
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      reports: string[];
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.markActive({
+        leaseId: "lease",
+        remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+      });
+      await registry.touch("lease", new Date("2026-01-01T00:00:00.000Z"), "host");
+      const calls: string[] = [];
+      const reports: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        calls.push(`pause:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          boxBackup: {
+            sleepBudgetMs: boxBackup.sleepBudgetMs,
+            turnBudgetMs: 30_000,
+            run: (lease, deadline) => {
+              calls.push(`backup:${lease.leaseId}`);
+              return boxBackup.run(lease, deadline);
+            },
+          },
+        },
+        registry,
+        async () => ({ activity: "idle" }),
+        async () => {},
+        (message, fields) => void reports.push(`${message}: ${String(fields.cause)}`),
+      );
+      await test({ registry, calls, reports, manager });
+    });
+  }
+
+  it("backs an idle box up before the reaper pauses it, and records the backup", async () => {
+    await withIdleBox(
+      { sleepBudgetMs: 45_000, run: async () => ({ backup: saved, problems: [] }) },
+      async ({ registry, calls, reports, manager }) => {
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
+        expect(await registry.findById("lease")).toMatchObject({ state: "paused", backup: saved });
+        expect(reports).toEqual([]);
+      },
+    );
+  });
+
+  it("backs a box up before a client's pause, and reports what it could not save", async () => {
+    await withIdleBox(
+      {
+        sleepBudgetMs: 45_000,
+        run: async () => ({ backup: saved, problems: ["The backup push failed."] }),
+      },
+      async ({ registry, calls, reports, manager }) => {
+        expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({ kind: "paused" });
+        expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
+        expect((await registry.findById("lease"))?.backup).toEqual(saved);
+        expect(reports).toEqual([
+          "cloud box backup before sleeping saved only part of its work: The backup push failed.",
+        ]);
+      },
+    );
+  });
+
+  it("pauses without the backup once its budget runs out", async () => {
+    await withIdleBox(
+      { sleepBudgetMs: 0, run: () => new Promise(() => {}) },
+      async ({ registry, calls, reports, manager }) => {
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
+        const lease = await registry.findById("lease");
+        expect(lease?.state).toBe("paused");
+        expect(lease?.backup).toBeUndefined();
+        expect(reports).toEqual(["cloud box backup before sleeping ran out of time: over 0 ms"]);
+      },
+    );
+  });
+
+  it("pauses when the backup fails outright", async () => {
+    await withIdleBox(
+      {
+        sleepBudgetMs: 45_000,
+        run: async () => {
+          throw new Error("E2B refused the connection");
+        },
+      },
+      async ({ registry, calls, reports, manager }) => {
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+        expect(reports).toEqual([
+          "cloud box could not be backed up before sleeping: Error: E2B refused the connection",
+        ]);
+      },
+    );
+  });
+});
+
+describe("a cloud machine checked before it sleeps", () => {
+  async function withIdleBox(
+    probes: Array<BoxHealth | null | "E2B API down">,
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      reports: string[];
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.markActive({
+        leaseId: "lease",
+        remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+      });
+      const calls: string[] = [];
+      const reports: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        calls.push(`pause:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          healthCheck: {
+            probe: async () => {
+              const health = probes.shift() ?? null;
+              if (health === "E2B API down") {
+                calls.push("probe:failed");
+                throw new Error(health);
+              }
+              calls.push(`probe:${health?.kind ?? "none"}`);
+              return health;
+            },
+            relieve: async () => {
+              calls.push("relieve");
+              return ["node vitest --watch (99% CPU)"];
+            },
+          },
+        },
+        registry,
+        async () => ({ activity: "idle" }),
+        async () => {},
+        (message, fields) => void reports.push(`${message}: ${String(fields.cause)}`),
+      );
+      await test({ registry, calls, reports, manager });
+    });
+  }
+  const expire = (registry: ReturnType<typeof createProvisionedLeaseRegistry>) =>
+    registry.touch("lease", new Date("2026-01-01T00:00:00.000Z"), "host");
+
+  it("leaves a box whose envd does not answer awake, and pauses it once it does", async () => {
+    await withIdleBox(
+      [{ kind: "unresponsive" }, { kind: "healthy" }],
+      async ({ registry, calls, reports, manager }) => {
+        await expire(registry);
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:unresponsive"]);
+        expect((await registry.findById("lease"))?.state).toBe("active");
+        expect(reports).toEqual([
+          "cloud box is unresponsive; not pausing it now: envd did not answer, attempt 1",
+        ]);
+
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:unresponsive", "probe:healthy", "pause:sandbox"]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+      },
+    );
+  });
+
+  it("stops a box's heaviest leftovers once it stays pinned, then pauses it", async () => {
+    const pinned = { kind: "pinned", cpuPercent: 99 } as const;
+    await withIdleBox(
+      [pinned, pinned, pinned, { kind: "healthy" }],
+      async ({ registry, calls, reports, manager }) => {
+        await expire(registry);
+        await manager.reapExpiredLeases();
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:pinned", "probe:pinned"]);
+
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual([
+          "probe:pinned",
+          "probe:pinned",
+          "probe:pinned",
+          "relieve",
+          "probe:healthy",
+          "pause:sandbox",
+        ]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+        expect(reports.at(-1)).toBe(
+          "cloud box stayed pinned; stopped its agents' heaviest leftovers to pause it: node vitest --watch (99% CPU)",
+        );
+      },
+    );
+  });
+
+  it("pauses a box whose health E2B's API could not report, since that says nothing of the box", async () => {
+    await withIdleBox(["E2B API down"], async ({ registry, calls, reports, manager }) => {
+      await expire(registry);
+      await manager.reapExpiredLeases();
+      expect(calls).toEqual(["probe:failed", "pause:sandbox"]);
+      expect(reports).toEqual(["cloud box health could not be read: Error: E2B API down"]);
+    });
+  });
+
+  it("refuses a client's pause of a box that is not responding", async () => {
+    await withIdleBox([{ kind: "unresponsive" }], async ({ registry, calls, manager }) => {
+      expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "This machine is not responding normally, so it is not paused yet. Retry shortly.",
+      });
+      expect(calls).toEqual(["probe:unresponsive"]);
+      expect((await registry.findById("lease"))?.state).toBe("active");
+    });
+  });
+});
+
+describe("a cloud machine saved after each turn", () => {
+  it("saves a box once after its owner's turn completes, and the pause flushes on top of it", async () => {
+    const chat = (latestRunId: string | null, latestRunCompletedAt: string | null) =>
+      ownerChat(
+        boxShell([
+          boxThread("thread", "project-app", "Chat", { latestRunId, latestRunCompletedAt }),
+        ]),
+        "thread",
+      )!;
+    let observed = chat("run-1", null);
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.markActive({
+        leaseId: "lease",
+        remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+      });
+      const runs: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async () => {
+        runs.push("pause");
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          boxBackup: {
+            sleepBudgetMs: 45_000,
+            turnBudgetMs: 30_000,
+            run: async (lease, deadline) => {
+              const budget = Math.round((deadline - Date.now()) / 1000);
+              runs.push(`backup:${budget}s:after ${lease.backup?.at ?? "none"}`);
+              return {
+                backup: { at: `saved-${runs.length}`, branches: ["t3-backup/lease"] },
+                problems: [],
+              };
+            },
+          },
+        },
+        registry,
+        async () => ({ activity: "idle", chat: observed }),
+      );
+
+      await manager.syncLeaseUsage();
+      expect(runs).toEqual([]);
+
+      observed = chat("run-1", "2026-10-06T12:00:00.000Z");
+      await manager.syncLeaseUsage();
+      await manager.syncLeaseUsage();
+      expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({ kind: "paused" });
+      expect(runs).toEqual(["backup:30s:after none", "backup:45s:after saved-1", "pause"]);
+      expect((await registry.findById("lease"))?.backup?.at).toBe("saved-2");
+    });
+  });
+});
+
+describe("a cloud chat whose box E2B cannot start", () => {
+  it("is rebuilt once on a new box after three failed resumes over ten minutes", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.recordBackup("lease", {
+        at: "2026-10-07T08:00:00.000Z",
+        branches: [],
+        sessionsUri: "s3://bucket/t3-agents/child/backups/latest/",
+      });
+      await registry.markPaused("lease");
+      const driver = setup().driver;
+      driver.resume = async () => {
+        throw new E2bPlacementUnavailable("504 placement", "provider-unavailable");
+      };
+      let recordDone: (() => void) | undefined;
+      const done = new Promise<void>((resolve) => (recordDone = resolve));
+      const watched = {
+        ...registry,
+        recordRebuild: async (...args: Parameters<typeof registry.recordRebuild>) => {
+          await registry.recordRebuild(...args);
+          if (args[1].status === "done") recordDone?.();
+        },
+      };
+      const rebuilds: string[] = [];
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          chatRebuild: {
+            run: async (lease) => {
+              rebuilds.push(lease.leaseId);
+              return { leaseId: "lease-2", environmentId: "child-2", threadId: "import:x" };
+            },
+          },
+        },
+        watched,
+      );
+      const resume = () =>
+        manager.resume({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          environmentId: EnvironmentId.make("child"),
+        });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-10-07T09:00:00.000Z"));
+        await resume();
+        vi.setSystemTime(new Date("2026-10-07T09:05:00.000Z"));
+        await resume();
+        await resume();
+        expect(rebuilds).toEqual([]);
+
+        vi.setSystemTime(new Date("2026-10-07T09:10:00.000Z"));
+        const refused = await resume();
+        await done;
+        expect(rebuilds).toEqual(["lease"]);
+        expect(refused).toMatchObject({
+          kind: "refused",
+          message:
+            "E2B couldn't start this machine yet. The problem is on E2B's side. Its chat is being rebuilt on a new machine from its last backup.",
+        });
+        expect((await registry.findById("lease"))?.rebuild).toEqual({
+          status: "done",
+          at: "2026-10-07T09:10:00.000Z",
+          leaseId: "lease-2",
+          environmentId: "child-2",
+          threadId: "import:x",
+        });
+
+        vi.setSystemTime(new Date("2026-10-07T10:00:00.000Z"));
+        expect((await resume()) as { message: string }).toMatchObject({
+          message:
+            "E2B couldn't start this machine yet. The problem is on E2B's side. Its chat was rebuilt on a new machine from its last backup; open it from your cloud machines.",
+        });
+        expect(rebuilds).toEqual(["lease"]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+});
+
+describe("recovering a cloud box E2B cannot resume", () => {
+  async function withUnresumableBox(
+    rebootBox: () => Promise<void>,
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      resume: () => Promise<unknown>;
+      told: Promise<string>;
+      rebuilt: Promise<void>;
+      fail: (failing: boolean) => void;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.recordBackup("lease", {
+        at: "2026-10-07T08:00:00.000Z",
+        branches: [],
+        sessionsUri: "s3://bucket/t3-agents/child/backups/latest/",
+      });
+      await registry.markPaused("lease");
+      const calls: string[] = [];
+      let failing = true;
+      let tell: ((text: string) => void) | undefined;
+      const told = new Promise<string>((resolve) => (tell = resolve));
+      let rebuildDone: (() => void) | undefined;
+      const rebuilt = new Promise<void>((resolve) => (rebuildDone = resolve));
+      const driver = setup().driver;
+      driver.resume = async () => {
+        calls.push(failing ? "resume:unplaceable" : "resume:ok");
+        if (failing) throw new E2bPlacementUnavailable("504 placement", "provider-unavailable");
+        return {};
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          rebootBox: async () => {
+            calls.push("reboot");
+            await rebootBox();
+          },
+          tellChat: async (_lease, text) => {
+            calls.push("tell");
+            tell?.(text);
+          },
+          chatRebuild: {
+            run: async () => {
+              calls.push("rebuild");
+              return { leaseId: "lease-2", environmentId: "child-2", threadId: "import:x" };
+            },
+          },
+        },
+        {
+          ...registry,
+          recordRebuild: async (...args: Parameters<typeof registry.recordRebuild>) => {
+            await registry.recordRebuild(...args);
+            if (args[1].status === "done") rebuildDone?.();
+          },
+        },
+      );
+      const resume = () =>
+        manager.resume({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          environmentId: EnvironmentId.make("child"),
+        });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-10-07T09:00:00.000Z"));
+        await resume();
+        vi.setSystemTime(new Date("2026-10-07T09:05:00.000Z"));
+        await resume();
+        vi.setSystemTime(new Date("2026-10-07T09:10:00.000Z"));
+        await test({
+          registry,
+          calls,
+          resume,
+          told,
+          rebuilt,
+          fail: (next) => {
+            failing = next;
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
+  it("boots it fresh once, holding off every other resume, then wakes it and tells its chat", async () => {
+    let boot: (() => void) | undefined;
+    const booted = new Promise<void>((resolve) => (boot = resolve));
+    let started: (() => void) | undefined;
+    const rebooting = new Promise<void>((resolve) => (started = resolve));
+    await withUnresumableBox(
+      () => {
+        started?.();
+        return booted;
+      },
+      async ({ registry, calls, resume, told, fail }) => {
+        expect(await resume()).toMatchObject({
+          message:
+            "E2B couldn't start this machine yet. The problem is on E2B's side. It is being started fresh from its disk.",
+        });
+        expect(await resume()).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          message:
+            "E2B couldn't resume this machine, so it is being started fresh from its disk. Open it again in a few minutes.",
+        });
+        await rebooting;
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "reboot",
+        ]);
+
+        fail(false);
+        boot?.();
+        expect(await told).toBe(
+          "This machine was restarted fresh from its disk because E2B could not resume it. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.",
+        );
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "reboot",
+          "resume:ok",
+          "tell",
+        ]);
+        const lease = await registry.findById("lease");
+        expect(lease?.state).toBe("active");
+        expect(lease?.reboot).toEqual({ status: "done", at: "2026-10-07T09:10:00.000Z" });
+        expect(lease?.rebuild).toBeUndefined();
+      },
+    );
+  });
+
+  it("rebuilds the chat when a host restart cut off its reboot", async () => {
+    await withUnresumableBox(
+      async () => {
+        throw new Error("not called");
+      },
+      async ({ registry, calls, resume, rebuilt }) => {
+        await registry.recordReboot("lease", { status: "started", at: "2026-10-07T08:30:00.000Z" });
+        await resume();
+        await rebuilt;
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "rebuild",
+        ]);
+        expect((await registry.findById("lease"))?.rebuild).toMatchObject({ status: "done" });
+      },
+    );
+  });
+
+  it("rebuilds the chat on a new box only once the fresh boot fails too", async () => {
+    await withUnresumableBox(
+      async () => {
+        throw new Error("E2B could not place the reboot either");
+      },
+      async ({ registry, calls, resume, rebuilt }) => {
+        await resume();
+        await rebuilt;
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "reboot",
+          "rebuild",
+        ]);
+        const lease = await registry.findById("lease");
+        expect(lease?.reboot).toEqual({
+          status: "failed",
+          at: "2026-10-07T09:10:00.000Z",
+          reason: "E2B could not place the reboot either",
+        });
+        expect(lease?.rebuild).toMatchObject({ status: "done", leaseId: "lease-2" });
+        expect(lease?.state).toBe("paused");
+      },
+    );
   });
 });

@@ -2,6 +2,10 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 
+import { githubRepository } from "@t3tools/shared/cloudRestore";
+
+export { githubRepository };
+
 /**
  * The directory Claude Code keeps a working directory's sessions in, under `<config>/projects`:
  * the absolute path with every character outside `[A-Za-z0-9]` replaced by `-`. Claude shortens
@@ -60,12 +64,6 @@ export function snapshotCheckout(cwd: string, message: string): string {
     env: { ...process.env, MOVE_CHAT_MESSAGE: message },
     encoding: "utf8",
   }).trim();
-}
-
-/** `owner/name` of a GitHub remote URL, or null for any other host. */
-export function githubRepository(remoteUrl: string): string | null {
-  const match = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remoteUrl.trim());
-  return match ? `${match[1]}/${match[2]}` : null;
 }
 
 const PATH_PATTERN = /(?<![\w.~$/-])(?:~|\$HOME|\$\{HOME\})?\/[\w.@%+~-]+(?:\/[\w.@%+~-]*)*/g;

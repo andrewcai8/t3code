@@ -18,6 +18,15 @@
  *
  * Both to-cloud (unless --no-carry) and carry also copy what the agent used outside its checkout,
  * found in its session record, to the same absolute paths on the box, plus the repo's Claude memory.
+ *
+ *   node scripts/cloud/move-chat.ts restore --environment <environment id> [--uri s3://bucket/prefix] \
+ *     [--account <host account>] [--message <extra text>] [--dry-run]
+ *
+ * restore brings back a cloud chat whose box is lost or will not resume, from the backup the host
+ * took before the box slept: it reads `<uri>/<environment>/backups/latest/` with this Mac's AWS
+ * credentials, provisions a fresh box on the backup branch (or the chat's branch when nothing was
+ * unsaved), imports the chat's Claude session there as to-cloud does, and tells the agent what came
+ * back. `--uri` defaults to the host config's workerForks.outputsUri.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -29,6 +38,8 @@ import * as NodeStream from "node:stream";
 import * as NodeUtil from "node:util";
 import * as NodeZlib from "node:zlib";
 import {
+  CloudBackupManifest,
+  cloudBackupUri,
   CommandId,
   defaultInstanceIdForDriver,
   MessageId,
@@ -60,6 +71,7 @@ import {
   SNAPSHOT_SCRIPT,
   snapshotCheckout,
 } from "./moveChat.ts";
+import { planCloudRestore } from "@t3tools/shared/cloudRestore";
 import { childPairingUrl, exchangePairingToken, type T3Client, withRpc } from "./t3Rpc.ts";
 import { advanceTurn, initialProgress, type TurnProgress } from "./turnProgress.ts";
 
@@ -69,6 +81,7 @@ const BOX_CARRY_TAR = "/tmp/move-chat-carry.tgz";
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 const BOX_INSTANCE = defaultInstanceIdForDriver(CLAUDE);
 const decodeModelSelection = Schema.decodeUnknownSync(ModelSelection);
+const decodeBackupManifest = Schema.decodeUnknownSync(Schema.fromJsonString(CloudBackupManifest));
 const STATE_DIR = NodePath.join(NodeOS.homedir(), ".t3", "move-chat");
 
 const sh = (cwd: string, command: string, ...args: ReadonlyArray<string>) =>
@@ -484,33 +497,91 @@ async function toCloud(flags: {
   if (extras && extras.byteLength > flags.includeCapBytes)
     throw new Error(`--include is ${extras.byteLength} bytes compressed, over the cap`);
 
-  const state = loadState(local.threadId);
-  saveState(local.threadId, state);
-  const boxThreadId = ThreadId.make(`import:${BOX_INSTANCE}:${local.sessionId}`);
-  const selection = { ...local.modelSelection, instanceId: BOX_INSTANCE };
-  const sessionText = NodeFS.readFileSync(sessionFile, "utf8");
-  const movedText = rewriteSessionCwd(sessionText, local.cwd, BOX_WORKSPACE);
+  await continueOnBox({
+    stateKey: local.threadId,
+    account: local.instanceId,
+    repository,
+    branch,
+    sessionId: local.sessionId,
+    sessionText: rewriteSessionCwd(
+      NodeFS.readFileSync(sessionFile, "utf8"),
+      local.cwd,
+      BOX_WORKSPACE,
+    ),
+    title: local.title,
+    modelSelection: local.modelSelection,
+    header: `Moved from the Mac: continues local thread "${local.title}" (${local.threadId}), Claude session ${local.sessionId}, checkout ${branch}. Reply with only: ok`,
+    text: carry ? `${flags.text}\n\n${carryNote(carry)}` : flags.text,
+    origin: flags.origin,
+    bearer: flags.bearer,
+    watchMinutes: flags.watchMinutes,
+    prepare: async (sandbox, { claudeDir }) => {
+      if (extras) {
+        await sandbox.files.write("/tmp/move-chat-extras.tgz", new Blob([extras]));
+        await sandbox.commands.run(`tar -xzf /tmp/move-chat-extras.tgz -C ${BOX_WORKSPACE}`);
+        log(`copied ${flags.include.join(", ")} into the box workspace`);
+      }
+      if (carry) await uploadCarry(sandbox, claudeDir, carry);
+    },
+  });
+}
+
+interface BoxMove {
+  /** Names the resumable state file, so a rerun picks up where an interrupted run stopped. */
+  readonly stateKey: string;
+  /** The host account the box runs the chat on. */
+  readonly account: string;
+  readonly repository: string;
+  readonly branch: string;
+  readonly sessionId: string;
+  /** The Claude transcript, its cwd already the box's workspace. */
+  readonly sessionText: string;
+  readonly title: string;
+  readonly modelSelection: ModelSelection;
+  /** The first turn, which opens the session on the box; it should ask for only "ok". */
+  readonly header: string;
+  readonly text: string;
+  readonly origin: string;
+  readonly bearer: string;
+  readonly watchMinutes: number;
+  /** Puts files on the box before the session is imported. */
+  readonly prepare?: (
+    sandbox: Sandbox,
+    runtime: { readonly env: Record<string, string>; readonly claudeDir: string },
+  ) => Promise<void>;
+}
+
+/**
+ * Provisions an E2B box on the manager for a checkout, imports a Claude session there with the
+ * box's own agent session importer, and sends the chat's next message.
+ */
+async function continueOnBox(move: BoxMove) {
+  const state = loadState(move.stateKey);
+  saveState(move.stateKey, state);
+  const boxThreadId = ThreadId.make(`import:${BOX_INSTANCE}:${move.sessionId}`);
+  const selection = { ...move.modelSelection, instanceId: BOX_INSTANCE };
+  const movedText = move.sessionText;
   const boxSession = (claudeDir: string) =>
-    claudeSessionPath({ configDir: claudeDir, cwd: BOX_WORKSPACE, sessionId: local.sessionId });
+    claudeSessionPath({ configDir: claudeDir, cwd: BOX_WORKSPACE, sessionId: move.sessionId });
   // The importer finds a session by the cwd inside it, from any project directory. Staging it
   // away from the workspace's own directory lets the first turn create a fresh session there.
   const stagedSession = (claudeDir: string) =>
-    `${claudeDir}/projects/t3-move-chat-staging/${local.sessionId}.jsonl`;
+    `${claudeDir}/projects/t3-move-chat-staging/${move.sessionId}.jsonl`;
 
   const program = Effect.gen(function* () {
-    const box = yield* withRpc(flags.origin, flags.bearer, (manager) =>
+    const box = yield* withRpc(move.origin, move.bearer, (manager) =>
       Effect.gen(function* () {
         const config = yield* manager["server.getConfig"]({});
-        if (!config.providers.some((provider) => provider.instanceId === local.instanceId))
-          return yield* Effect.fail(new Error(`the manager has no account ${local.instanceId}`));
+        if (!config.providers.some((provider) => provider.instanceId === move.account))
+          return yield* Effect.fail(new Error(`the manager has no account ${move.account}`));
         const ready = yield* manager["environmentControl.provision"]({
           requestId: ProvisionRequestId.make(state.requestId),
           provider: "e2b",
           agentDriver: CLAUDE,
-          providerInstanceId: local.instanceId,
+          providerInstanceId: move.account,
           pinAccount: true,
-          repository,
-          branch,
+          repository: move.repository,
+          branch: move.branch,
           chat: { threadId: boxThreadId },
         }).pipe(
           Effect.tap((result) => Effect.sync(() => log(`provision: ${result.kind}`))),
@@ -520,7 +591,7 @@ async function toCloud(flags: {
           }),
         );
         if (ready.kind !== "ready") {
-          retireState(local.threadId, state, "failed");
+          retireState(move.stateKey, state, "failed");
           return yield* Effect.fail(new Error(`provision ${ready.kind}: ${ready.message}`));
         }
         const attached = yield* manager["environmentControl.attach"]({
@@ -533,7 +604,7 @@ async function toCloud(flags: {
           attachedPairingUrl:
             URL.parse(attached.pairingUrl) ??
             (yield* Effect.fail(new Error("the host returned an unreadable pairing URL"))),
-          origin: flags.origin,
+          origin: move.origin,
           leaseId: ready.environment.leaseId,
         });
         const target = resolveRemotePairingTarget({ pairingUrl });
@@ -550,7 +621,7 @@ async function toCloud(flags: {
       }),
     );
     state.sandboxId = box.environment.sandboxId;
-    saveState(local.threadId, state);
+    saveState(move.stateKey, state);
     log(`box ${box.environment.sandboxId} (environment ${box.environment.environmentId})`);
 
     const sandbox = yield* Effect.promise(() =>
@@ -558,14 +629,8 @@ async function toCloud(flags: {
     );
     const runtime = yield* Effect.promise(() => boxRuntime(sandbox));
     log(`box Claude config ${runtime.claudeDir}`);
-    if (extras) {
-      yield* Effect.promise(async () => {
-        await sandbox.files.write("/tmp/move-chat-extras.tgz", new Blob([extras]));
-        await sandbox.commands.run(`tar -xzf /tmp/move-chat-extras.tgz -C ${BOX_WORKSPACE}`);
-      });
-      log(`copied ${flags.include.join(", ")} into the box workspace`);
-    }
-    if (carry) yield* Effect.promise(() => uploadCarry(sandbox, runtime.claudeDir, carry));
+    const { prepare } = move;
+    if (prepare) yield* Effect.promise(() => prepare(sandbox, runtime));
 
     yield* withRpc(box.httpBaseUrl, box.bearer, (client) =>
       Effect.gen(function* () {
@@ -603,13 +668,13 @@ async function toCloud(flags: {
           yield* Effect.promise(() => sandbox.files.remove(stagedSession(runtime.claudeDir)));
           if ((yield* projectionOf(client, boxThreadId)) === null)
             return yield* Effect.fail(
-              new Error(`the box did not import session ${local.sessionId}`),
+              new Error(`the box did not import session ${move.sessionId}`),
             );
           yield* client["orchestration.dispatchCommand"]({
             type: "thread.metadata.update",
             commandId: CommandId.make(NodeCrypto.randomUUID()),
             threadId: boxThreadId,
-            title: local.title,
+            title: move.title,
           });
           // The importer files history as settled; this chat is live.
           yield* client["orchestration.dispatchCommand"]({
@@ -631,7 +696,7 @@ async function toCloud(flags: {
             creationSource: "web",
             threadId: boxThreadId,
             messageId: MessageId.make(state.bootstrapMessageId),
-            text: `Moved from the Mac: continues local thread "${local.title}" (${local.threadId}), Claude session ${local.sessionId}, checkout ${branch}. Reply with only: ok`,
+            text: move.header,
             attachments: [],
             modelSelection: selection,
             deliveryIntent: "auto",
@@ -652,7 +717,7 @@ async function toCloud(flags: {
           yield* Effect.promise(async () => {
             for (let attempt = 0; attempt < 60; attempt += 1) {
               const alive = await sandbox.commands.run(
-                `ps -eo args= | grep -F -- '${local.sessionId}' | grep -vc grep || true`,
+                `ps -eo args= | grep -F -- '${move.sessionId}' | grep -vc grep || true`,
               );
               if (alive.stdout.trim() === "0") return;
               await new Promise((done) => setTimeout(done, 2000));
@@ -663,7 +728,7 @@ async function toCloud(flags: {
             sandbox.files.write(boxSession(runtime.claudeDir), movedText),
           );
           state.swapped = true;
-          saveState(local.threadId, state);
+          saveState(move.stateKey, state);
           log(`box session ${boxSession(runtime.claudeDir)} now holds the moved history`);
         }
 
@@ -674,13 +739,13 @@ async function toCloud(flags: {
           creationSource: "web",
           threadId: boxThreadId,
           messageId: MessageId.make(state.messageId),
-          text: carry ? `${flags.text}\n\n${carryNote(carry)}` : flags.text,
+          text: move.text,
           attachments: [],
           modelSelection: selection,
           deliveryIntent: "auto",
           dispatchMode: { type: "start_immediately" },
         });
-        const turn = yield* watchTurn(client, boxThreadId, state.messageId, flags.watchMinutes);
+        const turn = yield* watchTurn(client, boxThreadId, state.messageId, move.watchMinutes);
         const run = turn.projection?.runs.findLast(
           (candidate) => candidate.userMessageId === state.messageId,
         );
@@ -692,7 +757,7 @@ async function toCloud(flags: {
     );
   });
   await Effect.runPromise(program.pipe(Effect.provide(FetchHttpClient.layer)));
-  retireState(local.threadId, state, "done");
+  retireState(move.stateKey, state, "done");
 }
 
 async function toLocal(flags: {
@@ -748,6 +813,81 @@ async function toLocal(flags: {
   );
 }
 
+/** An S3 object, read with this Mac's AWS credentials. */
+const readS3Bytes = (uri: string) =>
+  NodeChildProcess.execFileSync("aws", ["s3", "cp", "--only-show-errors", uri, "-"], {
+    maxBuffer: 1024 * 1024 * 1024,
+  });
+const readS3 = (uri: string) => readS3Bytes(uri).toString("utf8");
+
+function configuredOutputsUri(): string | undefined {
+  const path = NodePath.join(NodeOS.homedir(), ".t3", "environment-control.json");
+  if (!NodeFS.existsSync(path)) return undefined;
+  return JSON.parse(NodeFS.readFileSync(path, "utf8")).provisioning?.workerForks?.outputsUri;
+}
+
+async function restore(flags: {
+  environment: string;
+  uri: string;
+  account: string | undefined;
+  message: string | undefined;
+  origin: string;
+  bearer: string;
+  watchMinutes: number;
+  dryRun: boolean;
+}) {
+  const prefix = cloudBackupUri(flags.uri, flags.environment);
+  const manifest = decodeBackupManifest(readS3(`${prefix}manifest.json`));
+  const plan = planCloudRestore(
+    manifest,
+    prefix,
+    "its old machine could not be resumed, so an operator restored it.",
+  );
+  log(
+    `backup of ${flags.environment}: ${plan.repository}@${plan.branch}, session ${plan.sessionId}`,
+  );
+  if (flags.dryRun) {
+    console.log(JSON.stringify(plan, null, 2));
+    return;
+  }
+  if (manifest.modelSelection === null) throw new Error("the backup records no model the chat ran");
+  await continueOnBox({
+    stateKey: `restore-${flags.environment}`,
+    account: flags.account ?? manifest.account,
+    repository: plan.repository,
+    branch: plan.branch,
+    sessionId: plan.sessionId,
+    sessionText: rewriteSessionCwd(
+      readS3(`${prefix}${plan.transcript}`),
+      manifest.workspace,
+      BOX_WORKSPACE,
+    ),
+    title: plan.title,
+    modelSelection: decodeModelSelection(manifest.modelSelection),
+    header: `Restored from the backup of environment ${flags.environment}: Claude session ${plan.sessionId}, checkout ${plan.branch}. Reply with only: ok`,
+    text: flags.message ? `${plan.message}\n\n${flags.message}` : plan.message,
+    origin: flags.origin,
+    bearer: flags.bearer,
+    watchMinutes: flags.watchMinutes,
+    prepare: async (sandbox, { env }) => {
+      if (!plan.bundle) return;
+      const bundle = readS3Bytes(`${prefix}${plan.bundle}`);
+      await sandbox.files.write("/tmp/move-chat-work.bundle", new Blob([bundle]));
+      // A shallow clone may lack the commits the bundle builds on.
+      await sandbox.commands.run(
+        [
+          "{ [ ! -f .git/shallow ] || git fetch -q --unshallow origin; }",
+          "git fetch -q /tmp/move-chat-work.bundle 'refs/t3-bundle/*:refs/heads/*'",
+          ...(plan.checkout !== plan.branch ? [`git switch -q ${plan.checkout}`] : []),
+          "rm -f /tmp/move-chat-work.bundle",
+        ].join(" && "),
+        { cwd: BOX_WORKSPACE, envs: env, timeoutMs: 0 },
+      );
+      log(`fetched the backup bundle and switched to ${plan.checkout}`);
+    },
+  });
+}
+
 const { positionals, values } = NodeUtil.parseArgs({
   allowPositionals: true,
   options: {
@@ -774,6 +914,9 @@ const { positionals, values } = NodeUtil.parseArgs({
     worktree: { type: "string" },
     "claude-config-dir": { type: "string", default: NodePath.join(NodeOS.homedir(), ".claude") },
     session: { type: "string" },
+    environment: { type: "string" },
+    uri: { type: "string" },
+    account: { type: "string" },
     "no-carry": { type: "boolean", default: false },
     "carry-item-cap-mb": { type: "string", default: "1024" },
     "carry-total-cap-mb": { type: "string", default: "2048" },
@@ -823,9 +966,29 @@ if (positionals[0] === "to-cloud") {
     const sandbox = await Sandbox.connect(values.sandbox, { apiKey: e2bApiKey() });
     await uploadCarry(sandbox, (await boxRuntime(sandbox)).claudeDir, carry);
   }
+} else if (positionals[0] === "restore") {
+  const uri = values.uri ?? configuredOutputsUri();
+  if (!values.environment || !uri)
+    throw new Error(
+      "restore needs --environment, and --uri when the host config has no outputsUri",
+    );
+  const bearer = JSON.parse(NodeFS.readFileSync(values["bearer-file"], "utf8")) as {
+    origin: string;
+    accessToken: string;
+  };
+  await restore({
+    environment: values.environment,
+    uri,
+    account: values.account,
+    message: values.message,
+    origin: values.origin ?? bearer.origin,
+    bearer: bearer.accessToken,
+    watchMinutes: Number(values["watch-minutes"]),
+    dryRun: values["dry-run"],
+  });
 } else {
   console.error(
-    "usage: move-chat.ts to-cloud --thread <id> --message-file <file> | to-local --sandbox <id> --worktree <dir> | carry --sandbox <id> --thread <id>",
+    "usage: move-chat.ts to-cloud --thread <id> --message-file <file> | to-local --sandbox <id> --worktree <dir> | carry --sandbox <id> --thread <id> | restore --environment <id>",
   );
   process.exitCode = 2;
 }

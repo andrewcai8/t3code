@@ -168,6 +168,14 @@ this off with **Remove unused cloud machines**. Before removal, unpushed work is
 **Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
 while paused, such as E2B sandboxes, are never removed.
 
+An E2B machine is backed up after each of its chat's turns and again before it sleeps. Its unpushed
+work goes to `t3-backup/<id>` branches when the repository is private. A public one's is never
+pushed; it stays in the host's private storage when the host has one. If E2B can't resume a machine
+for a long time, the host boots it fresh from its disk, which loses what was only in memory and
+`/tmp`, and the chat is told. If that fails too, the host rebuilds the chat on a new machine from
+the backup and the chat says what did not come back. The old machine is never deleted, so it can
+still be opened if E2B recovers it.
+
 Deleting a chat's cloud machine puts it to sleep instead of destroying it. For 30 days, select
 **Restore** on the chat or under **Settings → Connections** to bring it back. After that the host
 deletes it for good.

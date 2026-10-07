@@ -10,6 +10,10 @@
  * reads it from there, as the server does (serverSettings.ts). A variable whose secret is missing
  * is left out of `env`; `unresolved_env(t3_home, settings)` names them so a caller can say so.
  *
+ * `provider_home(env, settings, root, driver, instance_id)` answers where a Claude or Codex
+ * instance keeps its sessions: its `homePath`, else `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, else the
+ * folder under HOME.
+ *
  * Without a running server, as on a machine booted fresh from its disk, where the recorded pid may
  * belong to another process, `env` falls back to what remote preparation starts the server with:
  * its home, T3 home and the home's bin on PATH.
@@ -65,4 +69,12 @@ def agent_env(root):
                 env[name] = value
         break
     return env, server, home, settings
+
+def provider_home(env, settings, root, driver, instance_id):
+    instance = (settings.get('providerInstances') or {}).get(instance_id) or {}
+    home_path = (instance.get('config') or {}).get('homePath')
+    if home_path:
+        return pathlib.Path(home_path)
+    variable, folder = ('CLAUDE_CONFIG_DIR', '.claude') if driver == 'claudeAgent' else ('CODEX_HOME', '.codex')
+    return pathlib.Path(env.get(variable) or pathlib.Path(env.get('HOME', str(root / 'home'))) / folder)
 `;

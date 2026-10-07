@@ -2,6 +2,7 @@
 import { EnvironmentProvisionInput } from "@t3tools/contracts";
 import { retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/sql/SqlClient";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
@@ -60,6 +61,49 @@ const AccountLimit = Schema.Struct({
 });
 export type AccountLimit = typeof AccountLimit.Type;
 
+/**
+ * The box's latest backup, taken after a turn or before it slept: its unsaved work on `t3-backup/`
+ * branches or in a bundle, and its owner chat's provider sessions with a manifest restore reads
+ * under `sessionsUri`. A record this build cannot read is dropped rather than failing the lease.
+ */
+export const LeaseBackup = Schema.Struct({
+  /** When the backup that last changed this record finished. */
+  at: Schema.String,
+  /** Branches on a private origin holding work only the box had; empty when there were none. */
+  branches: Schema.Array(Schema.String),
+  sessionsUri: Schema.optional(Schema.String),
+  /** What each part held when saved, so a box unchanged since is not saved again. */
+  workFingerprint: Schema.optional(Schema.String),
+  sessionsFingerprint: Schema.optional(Schema.String),
+});
+export type LeaseBackup = typeof LeaseBackup.Type;
+
+/**
+ * The one rebuild of a chat whose box its provider could not start: `started`, then `done` with
+ * the lease, environment and thread that carry the chat on, or `failed`. A lease that has one is
+ * never rebuilt again; its own box is left paused.
+ */
+export const LeaseRebuild = Schema.Struct({
+  status: Schema.Literals(["started", "done", "failed"]),
+  at: Schema.String,
+  leaseId: Schema.optional(Schema.String),
+  environmentId: Schema.optional(Schema.String),
+  threadId: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+});
+export type LeaseRebuild = typeof LeaseRebuild.Type;
+
+/**
+ * The fresh boot of a box E2B could not resume, at most one per outage: a resume that succeeds
+ * ends the outage and clears it.
+ */
+export const LeaseReboot = Schema.Struct({
+  status: Schema.Literals(["started", "done", "failed"]),
+  at: Schema.String,
+  reason: Schema.optional(Schema.String),
+});
+export type LeaseReboot = typeof LeaseReboot.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -114,6 +158,15 @@ export const StoredProvisionedLease = Schema.Struct({
    * resume since the first of them. Absent means none.
    */
   unwatchedMoves: Schema.optional(Schema.Int),
+  backup: Schema.optional(
+    LeaseBackup.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
+  rebuild: Schema.optional(
+    LeaseRebuild.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
+  reboot: Schema.optional(
+    LeaseReboot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
   createdAt: Schema.String,
@@ -221,6 +274,10 @@ export interface ProvisionedLeaseRegistry {
   ) => Promise<ProvisionedLease | null>;
   /** Null when the lease is unknown. */
   readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<ProvisionedLease | null>;
+  readonly recordBackup: (leaseId: string, backup: LeaseBackup) => Promise<void>;
+  readonly recordRebuild: (leaseId: string, rebuild: LeaseRebuild) => Promise<void>;
+  /** Null clears it. */
+  readonly recordReboot: (leaseId: string, reboot: LeaseReboot | null) => Promise<void>;
 }
 
 function nowIso(now?: Date): string {
@@ -589,5 +646,24 @@ export function createProvisionedLeaseRegistry(
           value: updated,
         };
       }),
+    recordBackup: (leaseId, backup) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, backup } : lease)),
+        value: undefined,
+      })),
+    recordReboot: (leaseId, reboot) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => {
+          if (lease.leaseId !== leaseId) return lease;
+          const { reboot: _previous, ...rest } = lease;
+          return reboot === null ? rest : { ...rest, reboot };
+        }),
+        value: undefined,
+      })),
+    recordRebuild: (leaseId, rebuild) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, rebuild } : lease)),
+        value: undefined,
+      })),
   };
 }

@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off - Promise SDK adapters perform provider resolution and private remote HTTP.
+// @effect-diagnostics globalFetch:off globalDate:off globalTimers:off - Promise SDK adapters perform provider resolution and private remote HTTP, and bound their calls by wall-clock deadlines.
 // @effect-diagnostics nodeBuiltinImport:off - SDK transfers read immutable local artifacts at the provider boundary.
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
@@ -36,6 +36,8 @@ import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 import { GuestNotServing } from "./ProvisionControl.ts";
+import { backUpBox } from "./boxBackup.ts";
+import { heaviestAgentProcesses, judgeHealth } from "./boxHealth.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -201,19 +203,21 @@ function guestInput(
   );
 }
 
-function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
+function e2bPythonPort(sandbox: Sandbox, deadline?: number): RemotePreparationPort {
+  // A port bound to a deadline gives each command what is left of it, and each request no more.
+  const limits = () => {
+    if (deadline === undefined) return { timeoutMs: PREPARE_COMMAND_TIMEOUT_MS };
+    const left = Math.max(1_000, deadline - Date.now());
+    return { timeoutMs: left, requestTimeoutMs: left };
+  };
   return {
     executePython: async ({ script, stdin }) => {
       if (stdin.length === 0)
-        return e2bPythonResult(
-          sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
-            timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
-          }),
-        );
+        return e2bPythonResult(sandbox.commands.run(`python3 -c ${shellQuote(script)}`, limits()));
       const command = await sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
         background: true,
         stdin: true,
-        timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
+        ...limits(),
       });
       try {
         // Each chunk is a round trip: a 2.5 MB preparation spec took about 2.5 s
@@ -234,8 +238,15 @@ export function makeE2bProvisionRuntime(
   onResumeRetry?: (retry: E2bResumeRetry) => void,
 ) {
   const client = new E2B(connection);
-  const verify = async (operation: ProvisionOperation, sandboxId: string) => {
-    const info = await client.Sandbox.getInfo(sandboxId);
+  const verify = async (
+    operation: ProvisionOperation,
+    sandboxId: string,
+    requestTimeoutMs?: number,
+  ) => {
+    const info = await client.Sandbox.getInfo(
+      sandboxId,
+      requestTimeoutMs === undefined ? undefined : { requestTimeoutMs },
+    );
     if (
       operation.request.provider !== "e2b" ||
       info.templateId !== operation.request.templateId ||
@@ -263,6 +274,26 @@ export function makeE2bProvisionRuntime(
       shorten: (timeoutMs) => sandbox.setTimeout(timeoutMs),
     });
     return sandbox;
+  };
+  /**
+   * Connects to a box only while E2B reports it running, keeping the timeout it has, and with no
+   * retry; null for a box that is paused, about to time out, or past `deadline`. Unlike `connect`
+   * it can never wake a box a host paused meanwhile.
+   */
+  const connectAwake = async (
+    operation: ProvisionOperation,
+    sandboxId: string,
+    deadline: number,
+  ) => {
+    const requestTimeoutMs = () => Math.min(10_000, deadline - Date.now());
+    if (requestTimeoutMs() < 1_000) return null;
+    const info = await verify(operation, sandboxId, requestTimeoutMs());
+    const left = info.endAt.getTime() - Date.now();
+    if (info.state !== "running" || left < 60_000 || requestTimeoutMs() < 1_000) return null;
+    return client.Sandbox.connect(sandboxId, {
+      requestTimeoutMs: requestTimeoutMs(),
+      timeoutMs: left,
+    });
   };
   const prepare = async (
     operation: ProvisionOperation,
@@ -458,6 +489,109 @@ with urllib.request.urlopen(request, timeout=30) as response:
           return "in_use";
         throw error;
       }
+    },
+    /**
+     * Backs a box up while it is awake, or answers null when it is not. It never resumes a box
+     * and never extends its life: one look at its state, then one connection made with the
+     * timeout it already has, and every command on it ends by `deadline`. So once the backup
+     * returns, nothing of it can reach the box, and a pause after it stays paused.
+     */
+    backUp: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+      input: Omit<Parameters<typeof backUpBox>[1], "root" | "deadline">,
+      deadline: number,
+    ) => {
+      const sandbox = await connectAwake(operation, sandboxId, deadline);
+      if (!sandbox) return null;
+      return backUpBox(e2bPythonPort(sandbox, deadline), {
+        ...input,
+        root: manifest.preparation.root,
+        deadline,
+      });
+    },
+    /**
+     * Boots a paused box fresh from its saved disk, dropping the memory E2B captured, for a box
+     * whose restore E2B cannot place. E2B refuses that while another start of the box is in
+     * flight, so it first waits, up to five minutes, until E2B reports the box paused; a box that
+     * came up meanwhile is left as it is. One attempt, with a long timeout, and no retry.
+     */
+    reboot: async (operation: ProvisionOperation, sandboxId: string) => {
+      const settleBy = Date.now() + 5 * 60_000;
+      for (;;) {
+        const { state } = await verify(operation, sandboxId, 10_000);
+        if (state === "running") return;
+        if (state === "paused") break;
+        if (Date.now() > settleBy) throw new Error(`E2B still reports the box ${String(state)}.`);
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+      }
+      await client.Sandbox.connect(sandboxId, {
+        onResume: "reboot",
+        timeoutMs: retentionTimeoutMs(operation.request.retentionDeadline, 3_600_000),
+        requestTimeoutMs: 10 * 60_000,
+      });
+    },
+    /** Runs guest scripts on a box, resuming it first when it sleeps. */
+    guest: async (operation: ProvisionOperation, sandboxId: string) =>
+      e2bPythonPort(await connect(operation, sandboxId)),
+    /**
+     * Reads whether an awake box is safe to pause: E2B's CPU samples for the last minute and a
+     * trivial command envd must answer within five seconds. Null for a box that is not awake.
+     */
+    probeHealth: async (operation: ProvisionOperation, sandboxId: string) => {
+      const sandbox = await connectAwake(operation, sandboxId, Date.now() + 15_000).catch(
+        (error: unknown) => {
+          if (error instanceof SandboxNotFoundError) return null;
+          throw error;
+        },
+      );
+      if (!sandbox) return null;
+      const since = new Date(Date.now() - 60_000);
+      const [metrics, answer] = await Promise.all([
+        client.Sandbox.getMetrics(sandboxId, { start: since, requestTimeoutMs: 5_000 }).catch(
+          () => [],
+        ),
+        sandbox.commands
+          .run("cat /proc/loadavg; nproc", { timeoutMs: 5_000, requestTimeoutMs: 5_000 })
+          .then((result) => result.stdout)
+          .catch(() => null),
+      ]);
+      return judgeHealth({
+        answer,
+        cpuSamples: metrics
+          .filter((sample) => sample.timestamp >= since)
+          .map((sample) => sample.cpuUsedPct),
+      });
+    },
+    /**
+     * Stops the heaviest processes the chat's agents left running on a pinned box, never its T3
+     * server, and answers what it stopped.
+     */
+    relieve: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+    ) => {
+      const sandbox = await connectAwake(operation, sandboxId, Date.now() + 30_000);
+      if (!sandbox) return [];
+      const limits = { timeoutMs: 10_000, requestTimeoutMs: 10_000 };
+      const [ps, server] = await Promise.all([
+        sandbox.commands.run("ps -eo pid=,ppid=,pcpu=,args=", limits),
+        sandbox.files.read(`${manifest.preparation.root}/server.json`, {
+          requestTimeoutMs: 10_000,
+        }),
+      ]);
+      const serverPid = Number((JSON.parse(server) as { pid?: unknown }).pid);
+      if (!Number.isInteger(serverPid)) return [];
+      const heavy = heaviestAgentProcesses(ps.stdout, serverPid);
+      if (heavy.length === 0) return [];
+      const pids = heavy.map((process) => process.pid).join(" ");
+      await sandbox.commands.run(
+        `kill -TERM ${pids} 2>/dev/null; sleep 3; kill -KILL ${pids} 2>/dev/null; true`,
+        limits,
+      );
+      return heavy.map((process) => `${process.command} (${process.cpuPercent}% CPU)`);
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       try {
