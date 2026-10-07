@@ -59,6 +59,7 @@ import {
   Presence,
   Wakeups,
   provisionedGatewayPairingUrl,
+  connectionRoutes,
 } from "@t3tools/client-runtime/connection";
 import {
   deriveWsBaseUrl,
@@ -709,10 +710,16 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     const inputsB = yield* Queue.unbounded<void>();
     yield* Queue.offer(visibleB, true);
     const clientB = clientLayer(input.manager, input.bearer, visibleB, inputsB, storage);
+    // A box can be reached over several routes, each with its own saved pairing.
     const credentialToken = Effect.gen(function* () {
       const credentials = yield* CredentialStore.ConnectionCredentialStore;
-      const credential = yield* credentials.get(`bearer:${boxId}`);
-      return Option.getOrNull(Option.map(credential, ({ token }) => token));
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const entry = (yield* SubscriptionRef.get(registry.entries)).get(boxId);
+      for (const route of entry ? connectionRoutes(entry) : []) {
+        const credential = yield* credentials.get(route.target.connectionId);
+        if (Option.isSome(credential)) return credential.value.token;
+      }
+      return null;
     });
 
     const firstToken = yield* Effect.gen(function* () {
