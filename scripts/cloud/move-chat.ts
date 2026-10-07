@@ -842,6 +842,7 @@ async function restore(flags: {
     console.log(JSON.stringify(plan, null, 2));
     return;
   }
+  if (manifest.modelSelection === null) throw new Error("the backup records no model the chat ran");
   await continueOnBox({
     stateKey: `restore-${flags.environment}`,
     account: flags.account ?? manifest.account,

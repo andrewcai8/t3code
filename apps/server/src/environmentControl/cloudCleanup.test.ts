@@ -180,7 +180,11 @@ const asleep = { state: "paused", keep: null, awake: false, locked: false };
 
 describe("createCleanupSweep", () => {
   it("removes a due box whose work is backed up", async () => {
-    const host = fakeHost([lease()], () => ({ kind: "saved", branches: ["t3-backup/lease-1"] }));
+    const host = fakeHost([lease()], () => ({
+      kind: "saved",
+      branches: ["t3-backup/lease-1"],
+      fingerprint: "fp-1",
+    }));
     await createCleanupSweep(host.ports)();
     expect(host.state("lease-1")).toEqual({
       state: "disposed",

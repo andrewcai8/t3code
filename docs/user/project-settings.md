@@ -166,7 +166,9 @@ seven unused days, or an hour after it pauses once its chat is settled. Change t
 this off with **Remove unused cloud machines**. Before removal, unpushed work is pushed to
 `t3-backup/<id>` branches of the repository. A machine whose work can't be pushed is kept. Select
 **Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
-while paused, such as E2B sandboxes, are never removed.
+while paused, such as E2B sandboxes, are never removed. An E2B machine instead pushes its
+unpushed work to the same branches each time it goes to sleep, so the work survives a machine that
+can't be woken again.
 
 Deleting a chat's cloud machine puts it to sleep instead of destroying it. For 30 days, select
 **Restore** on the chat or under **Settings → Connections** to bring it back. After that the host
