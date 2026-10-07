@@ -220,3 +220,34 @@ it.effect("refuses a working chat, and tries an old box once per run", () =>
     ).toBe(false);
   }).pipe(Effect.provide(layer)),
 );
+
+it.effect(
+  "switches a chat whose next message is queued, and refuses one whose turn has started",
+  () =>
+    Effect.gen(function* () {
+      const leases = yield* registerBox;
+      const lease = yield* Effect.promise(() => leases.findById("lease-1"));
+      const outcomes = yield* Effect.promise(async () =>
+        Promise.all(
+          (["queued", "running"] as const).map((status) =>
+            switchLeaseAccount(
+              lease!,
+              threadId,
+              host(() => limitedChat("run-1", { status })).ports,
+              leases,
+              now,
+            ),
+          ),
+        ),
+      );
+
+      expect(outcomes).toEqual([
+        { kind: "switched", account: "Claude claude-b", continued: true },
+        {
+          kind: "refused",
+          reason: "busy",
+          message: "This chat is working. Switch accounts once its turn ends.",
+        },
+      ]);
+    }).pipe(Effect.provide(layer)),
+);
