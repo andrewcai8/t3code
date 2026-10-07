@@ -36,6 +36,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -164,11 +165,16 @@ const make = Effect.gen(function* () {
       });
     return Effect.acquireUseRelease(
       Effect.gen(function* () {
-        const forkId = yield* machines.start(
-          captureId,
-          tag,
-          Math.min(timeoutMs + AFTER_JOB_MS, MAX_LIFETIME_MS),
-        );
+        const forkId = yield* machines
+          .start(captureId, tag, Math.min(timeoutMs + AFTER_JOB_MS, MAX_LIFETIME_MS))
+          .pipe(
+            // A provider out of room for the moment usually has it again within seconds.
+            Effect.retry({
+              while: (error) => error.busy === true,
+              schedule: Schedule.exponential("5 seconds"),
+              times: 3,
+            }),
+          );
         batch.jobs[index] = { index, state: "running" };
         yield* Effect.logInfo("worker fork started", { ...fields, forkId });
         return { forkId, startedAt: yield* Clock.currentTimeMillis };

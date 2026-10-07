@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ForkMachines from "./ForkMachines.ts";
@@ -49,6 +50,7 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
     let mostRunning = 0;
     let providerWorks = true;
     let loseStartAnswer = false;
+    let busyStarts = 0;
     const machines = ForkMachines.ForkMachines.of({
       settings: Effect.succeed(settings),
       capture: (sandboxId, tag) =>
@@ -66,6 +68,12 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
         ),
       start: (_captureId, tag) =>
         Effect.suspend(() => {
+          if (busyStarts > 0) {
+            busyStarts -= 1;
+            return Effect.fail(
+              new ForkMachines.ForkMachineError({ step: "start", cause: "no room", busy: true }),
+            );
+          }
           started += 1;
           const forkId = `fork-${started}`;
           live.set(forkId, tag);
@@ -149,6 +157,9 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
       gate,
       loseStartAnswers: () => {
         loseStartAnswer = true;
+      },
+      busyFor: (starts: number) => {
+        busyStarts = starts;
       },
       breakProvider: (works: boolean) => {
         providerWorks = works;
@@ -396,6 +407,19 @@ it.effect("removes a copy whose start answer was lost when its batch ends", () =
         },
       ]);
       expect(fake.kills).toEqual([]);
+      expect(fake.live.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("starts a copy once the provider has room again after asking for a retry", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      fake.busyFor(2);
+      const batch = yield* run({ jobs: [{ command: "exit 0" }] }).pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 minute");
+      const finished = yield* Fiber.join(batch);
+      expect(finished.jobs.map((job) => job.state)).toEqual(["exited"]);
       expect(fake.live.size).toBe(0);
     }),
   ),
