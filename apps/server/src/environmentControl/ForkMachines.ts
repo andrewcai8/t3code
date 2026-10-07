@@ -17,6 +17,7 @@ import {
   type Sandbox,
   SandboxError,
   type SandboxNetworkUpdate,
+  ServiceBusyError,
 } from "e2b";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -34,6 +35,8 @@ export type WorkerForkSettings = NonNullable<
 export class ForkMachineError extends Schema.TaggedError<ForkMachineError>()("ForkMachineError", {
   step: Schema.Literals(["settings", "capture", "start", "run", "upload", "copy", "kill", "sweep"]),
   cause: Schema.Defect(),
+  /** The provider could not place the copy now and asked for a retry; nothing was left running. */
+  busy: Schema.optional(Schema.Boolean),
 }) {
   override get message(): string {
     return `A copy of the chat's machine failed at its ${this.step} step.`;
@@ -515,7 +518,16 @@ export const layerE2b = Layer.effect(
           }
           running.set(sandbox.sandboxId, sandbox);
           return sandbox.sandboxId;
-        }),
+        }).pipe(
+          // E2B answers a placement it could not make with a 5xx that asks for a retry. A copy that
+          // was created is killed above before the error leaves, so a retry never leaks one.
+          Effect.mapError((error) =>
+            error.cause instanceof ServiceBusyError ||
+            (error.cause instanceof SandboxError && (error.cause.statusCode ?? 0) >= 500)
+              ? new ForkMachineError({ step: error.step, cause: error.cause, busy: true })
+              : error,
+          ),
+        ),
 
       run: (forkId, job) =>
         copyOf("run", forkId).pipe(
