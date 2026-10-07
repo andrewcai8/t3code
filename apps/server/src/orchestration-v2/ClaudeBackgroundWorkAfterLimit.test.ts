@@ -253,6 +253,61 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
     ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
+  it.effect("Stop clears a shell list the thread kept after missing the shell's end", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("claude-background-after-limit-stale");
+        const cli = yield* Ref.make<FakeCli | undefined>(undefined);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const { messages } = yield* limitedChat(cli, cwd);
+          const ended = yield* watch(rosterCleared);
+          yield* Queue.offer(messages, backgroundTasks([]));
+          yield* ended;
+
+          // The run stopped reading just before the shell's end reached the
+          // thread, so the thread still lists the shell the CLI no longer runs.
+          const [providerThread] = (yield* orchestrator.getThreadProjection(threadId))
+            .providerThreads;
+          yield* sink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                type: "provider-thread.updated",
+                threadId,
+                driver: providerThread!.driver,
+                providerInstanceId: providerThread!.providerInstanceId,
+                occurredAt: providerThread!.updatedAt,
+                payload: { ...providerThread!, pendingBackgroundTasks: [devServer] },
+              },
+            ],
+          });
+          assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks, [
+            devServer,
+          ]);
+
+          const failedRun = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+          yield* orchestrator.dispatch({
+            type: "run.interrupt",
+            commandId: CommandId.make("stop"),
+            threadId,
+            runId: failedRun.id,
+            holdQueue: true,
+          });
+          yield* worker.drain();
+
+          assert.deepEqual(
+            (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks,
+            [],
+          );
+        }).pipe(Effect.provide(runtime(cli, cwd)));
+      }),
+    ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect("clears a background shell when switching accounts releases its session", () =>
     Effect.scoped(
       Effect.gen(function* () {

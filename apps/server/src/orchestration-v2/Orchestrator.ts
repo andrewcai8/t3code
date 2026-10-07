@@ -8103,11 +8103,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         });
       }
+      // A live process owns its roster and reports clearing it. A run can stop
+      // reading before that report lands, so a session that says it runs
+      // nothing more for the thread does not keep the list.
+      const liveSessionRunsWork = (providerThread: OrchestrationV2ProviderThread) =>
+        Effect.gen(function* () {
+          const sessionId = providerThread.providerSessionId;
+          if (sessionId === null || sessionId === undefined) return false;
+          const session = yield* providerSessions
+            .get(sessionId)
+            .pipe(Effect.orElseSucceed(() => Option.none()));
+          if (Option.isNone(session)) return false;
+          const probe = session.value.hasPendingBackgroundWorkForThread;
+          return probe === undefined || (yield* probe(providerThread));
+        });
       for (const providerThread of input.projection.providerThreads) {
-        // A live process owns its roster and reports clearing it.
         if (
           (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 ||
-          (yield* hasLiveSession(providerThread.id))
+          (yield* liveSessionRunsWork(providerThread))
         ) {
           continue;
         }

@@ -7239,9 +7239,10 @@ export function makeClaudeAdapterV2(
                   );
                 }
                 // The background shells this process ran ended with it, also
-                // when no turn was running to finalize.
-                if (ownsLiveQuery && !context.replaced) {
-                  yield* clearWakeStateForNativeThread(nativeThreadId);
+                // when no turn was running to finalize. Its buffered wake
+                // output stays for the continuation that drains it, and a
+                // process a queued turn opened meanwhile owns its own roster.
+                if (ownsLiveQuery && !context.replaced && (yield* Ref.get(queryContext)) === null) {
                   yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
                     status: "idle",
                   });
