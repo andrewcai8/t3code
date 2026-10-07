@@ -37,7 +37,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
-import * as Semaphore from "effect/Semaphore";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ForkMachines from "./ForkMachines.ts";
@@ -51,6 +50,7 @@ const AFTER_JOB_MS = 15 * 60_000;
 /** A job whose copy has not answered this long after its timeout has lost its copy. */
 const RUN_GRACE_MS = 5 * 60_000;
 const FINISHED_BATCH_TTL_MS = 6 * 3_600_000;
+const MAX_RUNNING_BATCHES_PER_CHAT = 4;
 /** E2B keeps no sandbox longer than a day. */
 const MAX_LIFETIME_MS = 86_400_000;
 
@@ -110,6 +110,65 @@ interface Batch {
   finishedAt: number | null;
 }
 
+/**
+ * Slots handed out first come, first served. Effect's Semaphore wakes its waiters on a later tick,
+ * so a batch that frees a slot and asks again at once keeps it ahead of another batch's job that
+ * was already waiting. Here a freed slot goes straight to the oldest waiter. Waiting can always be
+ * interrupted, even where the work itself cannot be, so a host shutting down never waits its turn.
+ */
+const makeSlots = (initial: number) => {
+  let size = initial;
+  let used = 0;
+  const waiting = new Set<Deferred.Deferred<void>>();
+  const handOut = () => {
+    for (const turn of waiting) {
+      if (used >= size) return;
+      waiting.delete(turn);
+      used += 1;
+      Deferred.doneUnsafe(turn, Effect.void);
+    }
+  };
+  const free = () => {
+    used -= 1;
+    handOut();
+  };
+  return {
+    resize: (next: number) =>
+      Effect.sync(() => {
+        size = next;
+        handOut();
+      }),
+    withSlot: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.suspend(() => {
+          if (waiting.size === 0 && used < size) {
+            used += 1;
+            return Effect.void;
+          }
+          const turn = Deferred.makeUnsafe<void>();
+          waiting.add(turn);
+          // A slot handed over just as the wait is interrupted goes to the next waiter.
+          return Effect.interruptible(Deferred.await(turn)).pipe(
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                if (!waiting.delete(turn)) free();
+              }),
+            ),
+          );
+        }).pipe(Effect.andThen(restore(effect).pipe(Effect.ensuring(Effect.sync(free))))),
+      ),
+  };
+};
+
+/**
+ * What a chat's running batches share: its copy slots (maxPerChat across all of them), and one
+ * capture at a time, since a capture pauses the chat's machine and stashes its /tmp in one place.
+ */
+interface Chat {
+  readonly copySlots: ReturnType<typeof makeSlots>;
+  readonly captureLock: ReturnType<typeof makeSlots>;
+}
+
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
 
@@ -129,12 +188,28 @@ const make = Effect.gen(function* () {
   const host = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor).environmentId;
   const scope = yield* Effect.scope;
   const batches = new Map<string, Batch>();
-  const hostSlots = yield* Semaphore.make(forkLimits({}).maxPerHost);
+  const hostSlots = makeSlots(forkLimits({}).maxPerHost);
+  const chats = new Map<string, Chat>();
+  const chatOf = (leaseId: string) => {
+    let chat = chats.get(leaseId);
+    if (chat === undefined) {
+      chat = {
+        copySlots: makeSlots(forkLimits({}).maxPerChat),
+        captureLock: makeSlots(1),
+      };
+      chats.set(leaseId, chat);
+    }
+    return chat;
+  };
+  const runningBatches = (leaseId: string) =>
+    [...batches.values()].filter((batch) => batch.leaseId === leaseId && batch.finishedAt === null);
   const prune = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     for (const [id, batch] of batches)
       if (batch.finishedAt !== null && now - batch.finishedAt > FINISHED_BATCH_TTL_MS)
         batches.delete(id);
+    for (const leaseId of chats.keys())
+      if (runningBatches(leaseId).length === 0) chats.delete(leaseId);
   });
 
   const runJob = (
@@ -276,6 +351,8 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       yield* hostSlots.resize(limits.maxPerHost);
+      const chat = chatOf(source.leaseId);
+      yield* chat.copySlots.resize(limits.maxPerChat);
       const tag = { host, batchId: batch.id, leaseId: source.leaseId };
       // At its end a batch deletes its capture and sweeps its tag, which also removes a copy whose
       // start answer was lost. Whatever fails here is left for the next periodic sweep.
@@ -300,12 +377,15 @@ const make = Effect.gen(function* () {
             ),
           );
       yield* Effect.acquireUseRelease(
-        machines.capture(source.sandboxId, tag),
+        chat.captureLock.withSlot(machines.capture(source.sandboxId, tag)),
         (captureId) =>
           Effect.forEach(
             input.jobs.map((_, index) => index),
+            // Every job takes its chat's slot before the host's, so no two jobs wait on each other.
             (index) =>
-              hostSlots.withPermit(runJob(batch, source, actor, input, limits, captureId, index)),
+              chat.copySlots.withSlot(
+                hostSlots.withSlot(runJob(batch, source, actor, input, limits, captureId, index)),
+              ),
             {
               concurrency: Math.min(input.concurrency ?? limits.maxPerChat, limits.maxPerChat),
               discard: true,
@@ -359,27 +439,27 @@ const make = Effect.gen(function* () {
       if (settings === null)
         return yield* failure("environment_unavailable", "This host has no cloud configuration.");
       const limits = forkLimits(settings);
+      const id = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const done = yield* Deferred.make<void>();
       yield* prune;
-      // One batch per chat at a time, so one snapshot and one pause of its machine. A retried call
-      // while its batch runs joins it rather than paying for a second one.
+      // A retried call while its batch runs joins it rather than paying for a second one. Nothing
+      // yields from this check until the new batch is recorded, so two calls cannot both miss.
       const key = encodeKey(input);
-      const running = [...batches.values()].find(
-        (batch) => batch.leaseId === source.leaseId && batch.finishedAt === null,
-      );
-      if (running !== undefined && running.key === key)
-        return { batch: view(running), start: running.start };
-      if (running !== undefined)
+      const running = runningBatches(source.leaseId);
+      const same = running.find((batch) => batch.key === key);
+      if (same !== undefined) return { batch: view(same), start: same.start };
+      if (running.length >= MAX_RUNNING_BATCHES_PER_CHAT)
         return yield* failure(
           "invalid_request",
-          `This chat already has fork batch ${running.id} running. Wait for it with t3_fork_status, then start the next.`,
+          `This chat already has ${running.length} fork batches running (${running.map((batch) => batch.id).join(", ")}). Wait for one with t3_fork_status, then start the next.`,
         );
       let started = false;
       const batch: Batch = {
-        id: yield* crypto.randomUUIDv4.pipe(Effect.orDie),
+        id,
         leaseId: source.leaseId,
         key,
         jobs: input.jobs.map((_, index) => ({ index, state: "queued" as const })),
-        done: yield* Deferred.make<void>(),
+        done,
         start: Effect.suspend(() => {
           if (started) return Effect.void;
           started = true;
