@@ -634,6 +634,37 @@ export const layerWithOptions = (
             type: "provider-session.updated",
             payload,
           });
+          // The released process took its background work with it, and nothing
+          // is left to report it ended. Startup recovery settles the rosters a
+          // server shutdown leaves.
+          if (input.reason === "server_shutdown") return;
+          const providerSessionId = input.entry.runtime.providerSessionId;
+          const events: Array<OrchestrationV2DomainEvent> = [];
+          for (const threadId of input.entry.attachedThreadIds) {
+            const { providerThreads } = yield* projectionStore.getThreadRecords(threadId, [
+              "providerThreads",
+            ]);
+            for (const providerThread of providerThreads) {
+              if (
+                providerThread.providerSessionId !== providerSessionId ||
+                (providerThread.pendingBackgroundTasks?.length ?? 0) === 0
+              ) {
+                continue;
+              }
+              events.push({
+                id: yield* idAllocator.allocate.event({ threadId, providerSessionId }),
+                type: "provider-thread.updated",
+                threadId,
+                driver: providerThread.driver,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: { ...providerThread, pendingBackgroundTasks: [], updatedAt: now },
+              });
+            }
+          }
+          if (events.length > 0) {
+            yield* eventSink.write({ events });
+          }
         });
 
       const writeReleasedRuntimeRequestEvents = (input: {

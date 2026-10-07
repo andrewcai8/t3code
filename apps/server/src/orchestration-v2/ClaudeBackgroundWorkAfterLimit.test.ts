@@ -15,11 +15,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ClaudeAdapterV2 from "./Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -27,6 +29,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 
@@ -108,21 +111,25 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
           }),
         ];
       }),
-    ),
+    ).pipe(Layer.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
-/** Waits in the background for the first domain event matching `predicate` from now on. */
+/**
+ * Starts waiting for the first domain event matching `predicate` from now on, and returns the
+ * wait. A missing event fails the wait within seconds instead of hanging the test.
+ */
 const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
   Effect.gen(function* () {
     const sink = yield* EventSink.EventSinkV2;
     const afterSequence = yield* sink.latestSequence();
-    return yield* sink.stream({ afterSequence }).pipe(
+    const seen = yield* sink.stream({ afterSequence }).pipe(
       Stream.map(({ event }) => event),
       Stream.filter(predicate),
       Stream.take(1),
       Stream.runDrain,
       Effect.forkScoped,
     );
+    return Fiber.join(seen).pipe(Effect.timeout("10 seconds"), TestClock.withLive);
   });
 
 const rosterCleared = (event: OrchestrationV2DomainEvent) =>
@@ -167,7 +174,7 @@ const limitedChat = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
       creationSource: "web",
     });
     yield* worker.drain();
-    yield* Fiber.join(running);
+    yield* running;
 
     const { messages } = (yield* Ref.get(cli))!;
     const failed = yield* watch(
@@ -178,7 +185,7 @@ const limitedChat = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
       backgroundTasks([{ task_id: devServer.taskId, description: devServer.description }]),
     );
     yield* Queue.offer(messages, usageLimitResult);
-    yield* Fiber.join(failed);
+    yield* failed;
     yield* worker.drain();
     return (yield* Ref.get(cli))!;
   });
@@ -208,7 +215,7 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
             holdQueue: true,
           });
           yield* worker.drain();
-          yield* Fiber.join(cleared);
+          yield* cleared;
 
           assert.isTrue(yield* Ref.get(closed));
           assert.deepEqual(
@@ -234,9 +241,38 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
 
           const cleared = yield* watch(rosterCleared);
           yield* Queue.offer(messages, backgroundTasks([]));
-          yield* Fiber.join(cleared);
+          yield* cleared;
 
           assert.isFalse(yield* Ref.get(closed));
+          assert.deepEqual(
+            (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks,
+            [],
+          );
+        }).pipe(Effect.provide(runtime(cli, cwd)));
+      }),
+    ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("clears a background shell when switching accounts releases its session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("claude-background-after-limit-release");
+        const cli = yield* Ref.make<FakeCli | undefined>(undefined);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          const { closed } = yield* limitedChat(cli, cwd);
+          const [session] = (yield* orchestrator.getThreadProjection(threadId)).providerSessions;
+
+          // As ProviderAccountSwitch releases the chat's session.
+          yield* sessions.release({
+            providerSessionId: session!.id,
+            reason: "manual_shutdown",
+            detail: "Provider account switched.",
+          });
+
+          assert.isTrue(yield* Ref.get(closed));
+          assert.isTrue(Option.isNone(yield* sessions.get(session!.id)));
           assert.deepEqual(
             (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks,
             [],

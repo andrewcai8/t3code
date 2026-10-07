@@ -4053,7 +4053,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("keeps the roster when the CLI reports a failed turn", () =>
+  it.effect("keeps the roster after a failed turn until the CLI exits", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
@@ -4110,6 +4110,19 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           { taskId: "bdqirlcyw", kind: "command", description: "Background sleep test" },
         ]);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+        // The CLI exits while no turn runs, and its shell ends with it.
+        const rosterEventsBeforeExit = providerThreadRosterEvents(harness.events).length;
+        yield* Queue.shutdown(harness.sdkMessages);
+        yield* awaitUntil(
+          () => providerThreadRosterEvents(harness.events).length > rosterEventsBeforeExit,
+          "roster after the CLI exits",
+        );
+        const afterExit = providerThreadRosterEvents(harness.events).at(-1)?.providerThread;
+        assert.deepEqual(afterExit?.pendingBackgroundTasks, []);
+        assert.equal(afterExit?.status, "idle");
+        assert.isFalse(yield* harness.runtime.hasPendingBackgroundWorkForThread!(afterExit!));
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
   );

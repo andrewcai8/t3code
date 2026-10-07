@@ -2797,6 +2797,9 @@ interface ClaudeLiveQueryContext {
   permissionMode: PermissionMode;
   // Stop, rollback or fork is closing this process; its work is ending.
   stopping: boolean;
+  // openQuery closed this process to open its replacement, which resets the
+  // native thread's Waiting and wake state itself.
+  replaced: boolean;
   // Registry entries still running when this process opened. Their process
   // is gone and never reports their end; any later task_started replaces the
   // entry, so an entry still in this set runs nowhere.
@@ -3645,7 +3648,7 @@ export function makeClaudeAdapterV2(
               updated.delete(nativeThreadId);
               return updated;
             });
-            // The thread's process died or its turn failed; those monitors never notify.
+            // The thread's process died, so those monitors never notify.
             yield* endClaudeMonitorTasks((_taskId, task) => task.nativeThreadId === nativeThreadId);
           });
 
@@ -7099,6 +7102,7 @@ export function makeClaudeAdapterV2(
           // the replacement open succeeds or fails below.
           const closedExistingNativeThreadId = existing !== null ? existing.nativeThreadId : null;
           if (existing !== null) {
+            existing.replaced = true;
             yield* existing.query.close.pipe(Effect.ignore);
             if (existing.nativeThreadId !== nativeThreadId) {
               yield* clearWakeStateForNativeThread(existing.nativeThreadId);
@@ -7193,6 +7197,7 @@ export function makeClaudeAdapterV2(
             openedPermissionMode: queryOptions.permissionMode,
             permissionMode: queryOptions.permissionMode,
             stopping: false,
+            replaced: false,
             subagentsFromEarlierProcesses: new Set(
               [...(yield* Ref.get(sessionSubagentsByTaskId)).values()].filter(
                 (subagent) => subagent.task.status === "running",
@@ -7232,6 +7237,14 @@ export function makeClaudeAdapterV2(
                   yield* finalizeActiveTurnAfterQueryExit(
                     exit._tag === "Failure" ? exit.cause : undefined,
                   );
+                }
+                // The background shells this process ran ended with it, also
+                // when no turn was running to finalize.
+                if (ownsLiveQuery && !context.replaced) {
+                  yield* clearWakeStateForNativeThread(nativeThreadId);
+                  yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
+                    status: "idle",
+                  });
                 }
               }),
             ),
