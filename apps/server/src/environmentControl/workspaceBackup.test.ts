@@ -120,17 +120,15 @@ describe("backUpWorkspace", () => {
     expect(await NodeFSP.readFile(NodePath.join(workspace, ".git", "index"))).toEqual(realIndex);
   });
 
-  it("reports a worktree that lives outside the chat's root", async () => {
+  it("pushes a worktree that lives outside the chat's root", async () => {
     const { root, workspace, origin } = await chatRoot();
     const outside = NodePath.join(NodePath.dirname(root), "outside");
     git(workspace, "worktree", "add", "-q", "-b", "outside", outside);
+    await NodeFSP.writeFile(NodePath.join(outside, "review.md"), "notes\n");
     expect(
       await backUpWorkspace(localPort, { root, branch: "lease-1", target: { kind: "origin" } }),
-    ).toEqual({
-      kind: "unsaved",
-      reason: "A worktree lives outside the chat's root.",
-    });
-    expect(backupRefs(origin)).toBe("");
+    ).toMatchObject({ kind: "saved", branches: ["t3-backup/lease-1-1"] });
+    expect(git(origin, "show", "t3-backup/lease-1-1:review.md")).toBe("notes");
   });
 
   it("reports changes in a tree with submodules", async () => {
