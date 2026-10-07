@@ -143,6 +143,7 @@ async function box() {
   return { root, workspace, origin, project, bucket, port, uploaded, awsCalls };
 }
 
+const decodeManifest = Schema.decodeUnknownSync(Schema.fromJsonString(BackupManifest));
 const URI = "s3://bucket/t3-agents/child/backups/latest/";
 const chat = {
   environmentId: "child",
@@ -177,7 +178,7 @@ describe("backUpSessions", () => {
       `${prefix}/codex/sessions/2026/10/06/rollout-2026-10-06T10-00-00-c-owner.jsonl`,
       `${prefix}/manifest.json`,
     ]);
-    const manifest = Schema.decodeUnknownSync(Schema.fromJsonString(BackupManifest))(
+    const manifest = decodeManifest(
       await NodeFSP.readFile(NodePath.join(f.bucket, prefix, "manifest.json"), "utf8"),
     );
     expect(manifest).toEqual({

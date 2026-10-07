@@ -2,6 +2,8 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 
+import type { BackupManifest } from "../../apps/server/src/environmentControl/boxBackup.ts";
+
 /**
  * The directory Claude Code keeps a working directory's sessions in, under `<config>/projects`:
  * the absolute path with every character outside `[A-Za-z0-9]` replaced by `-`. Claude shortens
@@ -195,4 +197,64 @@ export function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${Math.ceil(bytes / 1024)} KB`;
+}
+
+export interface RestorePlan {
+  readonly repository: string;
+  readonly branch: string;
+  readonly sessionId: string;
+  /** The session's transcript, as a key under the backup's prefix. */
+  readonly transcript: string;
+  readonly title: string;
+  /** The first message on the new box, telling the agent what came back and what did not. */
+  readonly message: string;
+}
+
+/**
+ * How a chat comes back on a fresh box from the backup its old box took before sleeping: on the
+ * backup branch of its main checkout when the old box had unsaved work there, otherwise on the
+ * branch it had checked out, with its latest Claude session. Throws when the backup cannot make
+ * the chat whole: no GitHub repository, no branch, or no Claude session.
+ */
+export function planRestore(manifest: BackupManifest, uri: string): RestorePlan {
+  const repository = manifest.repository && githubRepository(manifest.repository);
+  if (!repository)
+    throw new Error(`the backup names no GitHub repository (${manifest.repository})`);
+  const mainBackup = `t3-backup/${manifest.leaseId}`;
+  const branch = manifest.backupBranches.includes(mainBackup) ? mainBackup : manifest.branch;
+  if (!branch)
+    throw new Error("the backup has no branch: its checkout was detached and saved nothing");
+  const restorable = manifest.sessions
+    .filter((candidate) => candidate.driver === "claudeAgent")
+    .flatMap((candidate) => {
+      const transcript = candidate.files.find((file) =>
+        file.endsWith(`/${candidate.nativeId}.jsonl`),
+      );
+      return transcript ? [{ sessionId: candidate.nativeId, transcript }] : [];
+    })
+    .at(-1);
+  if (!restorable) {
+    const others = manifest.sessions.map((candidate) => candidate.driver).join(", ");
+    throw new Error(
+      `the backup holds no Claude session to restore${others ? ` (only ${others}, under ${uri})` : ""}`,
+    );
+  }
+  const otherBranches = manifest.backupBranches.filter((name) => name !== branch);
+  const title = manifest.title ?? `Restored ${manifest.environmentId}`;
+  return {
+    repository,
+    branch,
+    ...restorable,
+    title,
+    message: [
+      `This chat was restored on a fresh machine from the backup its old machine (environment ${manifest.environmentId}) took before it slept; that machine could not be resumed.`,
+      branch === mainBackup
+        ? `The checkout is ${branch}: the old machine's ${manifest.branch ?? "checkout"} with its unpushed commits, plus any uncommitted changes as one commit titled "T3 backup of unsaved work". Move that work back onto your own branch before you push.`
+        : `The checkout is ${branch}; the old machine had no unpushed work in it.`,
+      ...(otherBranches.length > 0
+        ? [`Other unsaved work is on: ${otherBranches.join(", ")}.`]
+        : []),
+      "Files outside the checkout, running processes and anything else on the old machine did not come back. Check `git status` and `git log -3`, then carry on where you left off.",
+    ].join("\n\n"),
+  };
 }
