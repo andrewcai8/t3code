@@ -30,6 +30,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -180,6 +181,24 @@ const boxRuntime = (
   );
 };
 
+/**
+ * Waits in the background for the first domain event matching `predicate` from now on. The start
+ * is read before the fiber forks: a fiber that first runs after the event commits would otherwise
+ * begin past it and wait forever.
+ */
+const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const afterSequence = yield* sink.latestSequence();
+    return yield* sink.stream({ afterSequence }).pipe(
+      Stream.map(({ event }) => event),
+      Stream.filter(predicate),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.forkScoped,
+    );
+  });
+
 const threadId = ThreadId.make("thread:account-switch");
 
 /** Saves an instance and waits until the registry runs it. */
@@ -233,13 +252,6 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
-            const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-              orchestrator.streamDomainEvents.pipe(
-                Stream.filter(predicate),
-                Stream.take(1),
-                Stream.runDrain,
-                Effect.forkScoped,
-              );
             const latestQuery = Ref.get(opened).pipe(Effect.map((all) => all.at(-1)!));
             const toSecondAccount = (continueRunId?: RunId) =>
               accounts.switchAccount({
@@ -346,13 +358,6 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
-            const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-              orchestrator.streamDomainEvents.pipe(
-                Stream.filter(predicate),
-                Stream.take(1),
-                Stream.runDrain,
-                Effect.forkScoped,
-              );
             const send = (id: string, text: string) =>
               orchestrator.dispatch({
                 type: "message.dispatch",
@@ -428,6 +433,108 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               ["token-a"],
             );
           }).pipe(Effect.provide(boxRuntime(opened, cwd, rebuild)));
+        }),
+      ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect(
+    "switches a limited chat with a message queued behind it, which then runs on the new login",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("provider-account-switch-queued");
+          const opened = yield* Ref.make<ReadonlyArray<OpenedQuery>>([]);
+
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
+            const send = (
+              id: string,
+              text: string,
+              dispatchMode: { readonly type: "start_immediately" | "queue_after_active" },
+            ) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(id),
+                threadId,
+                messageId: MessageId.make(id),
+                text,
+                attachments: [],
+                dispatchMode,
+                createdBy: "user",
+                creationSource: "web",
+              });
+            const latestQuery = Ref.get(opened).pipe(Effect.map((all) => all.at(-1)!));
+
+            yield* saveInstance(claudeInstanceId, {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-a", sensitive: true }],
+            });
+            yield* createThread(cwd);
+            const firstRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            );
+            yield* send("first", "Build it.", { type: "start_immediately" });
+            yield* worker.drain();
+            yield* Fiber.join(firstRunning);
+            yield* send("queued", "Then add tests.", { type: "queue_after_active" });
+            const limited = yield* watch(
+              (event) => event.type === "run.updated" && event.payload.status === "failed",
+            );
+            yield* Queue.offer((yield* latestQuery).messages, result("limited", true));
+            yield* Fiber.join(limited);
+            yield* worker.drain();
+            const before = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(
+              before.runs.map((run) => run.status),
+              ["failed", "queued"],
+            );
+
+            const continuationRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" &&
+                event.payload.status === "running" &&
+                event.payload.id !== before.providerTurns[0]!.id,
+            );
+            const switched = yield* accounts.switchAccount({
+              driver: "claudeAgent",
+              credential: {
+                kind: "environment",
+                variables: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-b" }],
+              },
+              threadId,
+              continueRunId: before.runs[0]!.id,
+            });
+            yield* worker.drain();
+            yield* Fiber.join(continuationRunning);
+            const continuing = yield* orchestrator.getThreadProjection(threadId);
+            const queuedRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" &&
+                event.payload.status === "running" &&
+                !continuing.providerTurns.some((turn) => turn.id === event.payload.id),
+            );
+            yield* Queue.offer((yield* latestQuery).messages, result("continued", false));
+            yield* worker.drain();
+            yield* Fiber.join(queuedRunning);
+
+            const after = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(switched, { kind: "switched", continued: true });
+            assert.deepEqual(
+              after.runs.map((run) => [run.status, run.ordinal]),
+              [
+                ["failed", 1],
+                ["running", 2],
+                ["completed", 3],
+              ],
+            );
+            assert.deepEqual(
+              (yield* Ref.get(opened)).map(({ token }) => token),
+              ["token-a", "token-b"],
+            );
+          }).pipe(Effect.provide(boxRuntime(opened, cwd)));
         }),
       ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );

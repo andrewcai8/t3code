@@ -55,13 +55,8 @@ export interface AccountSwitchPorts {
   ) => Promise<GuestAccountSwitchResult | "missing">;
 }
 
-const RUN_IN_FLIGHT: ReadonlySet<string> = new Set([
-  "preparing",
-  "queued",
-  "starting",
-  "running",
-  "waiting",
-]);
+/** Statuses of a chat whose turn has started. A queued one has not, and switches. */
+const RUN_IN_FLIGHT: ReadonlySet<string> = new Set(["preparing", "starting", "running", "waiting"]);
 /** How long an account that hit a limit without naming its reset is kept out of rotation. */
 const UNKNOWN_RESET_MS = 5 * 3_600_000;
 

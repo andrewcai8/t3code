@@ -58,14 +58,12 @@ export class ProviderAccountSwitchError extends Schema.TaggedError<ProviderAccou
   }
 }
 
-/** A run in one of these states has a live turn that releasing its session would cut. */
-const RUN_IN_FLIGHT: ReadonlySet<string> = new Set([
-  "preparing",
-  "queued",
-  "starting",
-  "running",
-  "waiting",
-]);
+/**
+ * A run in one of these states has started, and releasing its session would cut its turn or the
+ * background work a `waiting` run drains. A queued run, held or not, has not started: it is left
+ * to run on the new account.
+ */
+const RUN_IN_FLIGHT: ReadonlySet<string> = new Set(["preparing", "starting", "running", "waiting"]);
 
 /** How long a switch waits for the provider instance to be rebuilt on its new login. */
 const RELOAD_TIMEOUT = "30 seconds";
