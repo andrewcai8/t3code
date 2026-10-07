@@ -57,12 +57,11 @@ def list_trees():
             continue
         path = pathlib.Path(entry['worktree']) if entry.get('worktree') else None
         if path and 'prunable' not in entry and path.is_dir():
+            # Agents put review worktrees anywhere, /tmp included; each is still this checkout's.
             if path == main:
                 trees.insert(0, path)
-            elif root in path.parents:
-                trees.append(path)
             else:
-                finish({'kind': 'unsaved', 'reason': "A worktree lives outside the chat's root."})
+                trees.append(path)
         entry = {}
     return trees
 
@@ -201,8 +200,8 @@ export type WorkspaceBackupTarget =
  * when it does. Every tree with changes or unpushed commits goes to `t3-backup/<branch>`
  * (`-<n>` for the n-th worktree), every local branch with unpushed commits to
  * `t3-backup/<branch>-branch-<n>` (its position among the sorted branches), and every stash entry to
- * `t3-backup/<branch>-stash-<n>`. A worktree outside `root`, or a changed tree with submodules,
- * is `unsaved`. Pushed, `saved` means each branch was read back from origin at the pushed commit,
+ * `t3-backup/<branch>-stash-<n>`, wherever the worktree lives. A changed tree with submodules is
+ * `unsaved`. Pushed, `saved` means each branch was read back from origin at the pushed commit,
  * and origin keeps no other branch under the same name an earlier backup made; `stale` asks a
  * `clean` checkout to remove them too. Bundled, the branches are `refs/t3-bundle/<branch>` in the
  * bundle, which holds only what origin lacks. A rerun saves the same commits under the same names,
