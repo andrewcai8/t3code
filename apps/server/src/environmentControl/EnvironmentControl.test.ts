@@ -1566,7 +1566,10 @@ describe("a cloud machine backed up before it sleeps", () => {
     sessionsFingerprint: "sessions-1",
   };
   async function withIdleBox(
-    boxBackup: NonNullable<Parameters<typeof createEnvironmentControl>[1]["boxBackup"]>,
+    boxBackup: Omit<
+      NonNullable<Parameters<typeof createEnvironmentControl>[1]["boxBackup"]>,
+      "turnBudgetMs"
+    >,
     test: (context: {
       registry: ReturnType<typeof createProvisionedLeaseRegistry>;
       calls: string[];
@@ -1599,6 +1602,7 @@ describe("a cloud machine backed up before it sleeps", () => {
           ...driver,
           boxBackup: {
             sleepBudgetMs: boxBackup.sleepBudgetMs,
+            turnBudgetMs: 30_000,
             run: (lease, deadline) => {
               calls.push(`backup:${lease.leaseId}`);
               return boxBackup.run(lease, deadline);
@@ -1909,7 +1913,11 @@ describe("a cloud chat whose box E2B cannot start", () => {
         watched,
       );
       const resume = () =>
-        manager.resume({ leaseId: "lease", sandboxId: "sandbox", environmentId: "child" });
+        manager.resume({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          environmentId: EnvironmentId.make("child"),
+        });
       vi.useFakeTimers({ toFake: ["Date"] });
       try {
         vi.setSystemTime(new Date("2026-10-07T09:00:00.000Z"));

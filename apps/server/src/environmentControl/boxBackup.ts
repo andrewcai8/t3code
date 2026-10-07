@@ -1,4 +1,4 @@
-// @effect-diagnostics globalTimers:off globalFetch:off - the budget bounds a Promise-side backup, and GitHub is asked over plain HTTP.
+// @effect-diagnostics globalTimers:off globalFetch:off globalDate:off - the budget bounds a Promise-side backup, and GitHub is asked over plain HTTP.
 /**
  * Backs a cloud box up, so its chat can be restored on a fresh box if this one is lost or never
  * resumes: its unsaved git work goes to `t3-backup/` branches, pushed to a private origin or kept

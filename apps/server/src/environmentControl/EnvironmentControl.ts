@@ -1487,7 +1487,7 @@ export const layer = Layer.effect(
                   const box = await e2bBox(lease);
                   if (!box) return null;
                   const { operation } = box;
-                  const manifest = await manifests.load(lease.leaseId);
+                  const manifest = await manifests.load(operation.request.requestId);
                   const token = config.provisioning?.githubToken;
                   const outputsUri = config.provisioning?.workerForks?.outputsUri;
                   const sessions =
@@ -1539,7 +1539,7 @@ export const layer = Layer.effect(
                     ? makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).relieve(
                         box.operation,
                         box.sandboxId,
-                        await manifests.load(lease.leaseId),
+                        await manifests.load(box.operation.request.requestId),
                       )
                     : [];
                 },

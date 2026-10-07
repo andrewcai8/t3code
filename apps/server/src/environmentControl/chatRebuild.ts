@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off cryptoRandomUUID:off - a rebuild runs on the Promise side of the host and mints one-off command ids.
+// @effect-diagnostics globalDate:off cryptoRandomUUID:off cryptoRandomUUIDInEffect:off - a rebuild runs on the Promise side of the host and mints one-off command ids.
 /**
  * Rebuilds a cloud chat on a fresh box from its last backup when its own box cannot be started:
  * the box restores the work from the backup with its own AWS keys, the host imports the chat's
@@ -29,6 +29,14 @@ import { agentEnvironmentPython } from "./guestAgentEnvironment.ts";
 import type { RemotePreparationPort } from "./remotePreparation.ts";
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
+
+class ChatRebuildError extends Schema.TaggedError<ChatRebuildError>()("ChatRebuildError", {
+  reason: Schema.String,
+}) {
+  override get message(): string {
+    return this.reason;
+  }
+}
 /** The Claude instance a fresh box runs its chats on. */
 const BOX_CLAUDE_INSTANCE = defaultInstanceIdForDriver(CLAUDE);
 
@@ -264,7 +272,9 @@ export const continueChatOnBox = (
       Effect.map(Option.flatten),
     );
     if (Option.isNone(project))
-      return yield* Effect.fail(new Error(`The new box has no project at ${input.workspace}.`));
+      return yield* Effect.fail(
+        new ChatRebuildError({ reason: `The new box has no project at ${input.workspace}.` }),
+      );
     yield* rpc["server.getConfig"]({}).pipe(
       Effect.map((config) =>
         config.providers.some(
@@ -281,7 +291,9 @@ export const continueChatOnBox = (
     });
     yield* Effect.tryPromise(() => restore.unstage(input.files.staged));
     if ((yield* threadProjection(rpc, threadId)) === null)
-      return yield* Effect.fail(new Error(`The new box did not import session ${plan.sessionId}.`));
+      return yield* Effect.fail(
+        new ChatRebuildError({ reason: `The new box did not import session ${plan.sessionId}.` }),
+      );
     yield* rpc["orchestration.dispatchCommand"]({
       type: "thread.metadata.update",
       commandId: CommandId.make(crypto.randomUUID()),
@@ -301,7 +313,9 @@ export const continueChatOnBox = (
       modelSelection: selection,
     });
     if (header === null)
-      return yield* Effect.fail(new Error("The header turn on the new box did not settle."));
+      return yield* Effect.fail(
+        new ChatRebuildError({ reason: "The header turn on the new box did not settle." }),
+      );
     const sessions: ReadonlyArray<OrchestrationV2ProviderSession> =
       header.projection.providerSessions;
     for (const session of sessions.filter((candidate) => candidate.status !== "stopped"))

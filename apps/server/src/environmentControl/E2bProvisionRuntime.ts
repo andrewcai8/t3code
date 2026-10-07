@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off - Promise SDK adapters perform provider resolution and private remote HTTP.
+// @effect-diagnostics globalFetch:off globalDate:off - Promise SDK adapters perform provider resolution and private remote HTTP, and bound their calls by wall-clock deadlines.
 // @effect-diagnostics nodeBuiltinImport:off - SDK transfers read immutable local artifacts at the provider boundary.
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";

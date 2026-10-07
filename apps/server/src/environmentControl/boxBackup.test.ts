@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - these tests drive disposable Git repositories, SQLite files and Python.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off - these tests drive disposable Git repositories, SQLite files and Python.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
