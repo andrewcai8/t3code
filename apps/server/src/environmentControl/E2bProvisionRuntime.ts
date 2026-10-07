@@ -36,6 +36,7 @@ import { retentionTimeoutMs, verifyRetentionDeadline } from "./retention.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 import { GuestNotServing } from "./ProvisionControl.ts";
+import { backUpBox } from "./boxBackup.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -201,19 +202,20 @@ function guestInput(
   );
 }
 
-function e2bPythonPort(sandbox: Sandbox): RemotePreparationPort {
+function e2bPythonPort(
+  sandbox: Sandbox,
+  timeoutMs = PREPARE_COMMAND_TIMEOUT_MS,
+): RemotePreparationPort {
   return {
     executePython: async ({ script, stdin }) => {
       if (stdin.length === 0)
         return e2bPythonResult(
-          sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
-            timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
-          }),
+          sandbox.commands.run(`python3 -c ${shellQuote(script)}`, { timeoutMs }),
         );
       const command = await sandbox.commands.run(`python3 -c ${shellQuote(script)}`, {
         background: true,
         stdin: true,
-        timeoutMs: PREPARE_COMMAND_TIMEOUT_MS,
+        timeoutMs,
       });
       try {
         // Each chunk is a round trip: a 2.5 MB preparation spec took about 2.5 s
@@ -459,6 +461,22 @@ with urllib.request.urlopen(request, timeout=30) as response:
         throw error;
       }
     },
+    /**
+     * Backs an awake box up before it sleeps. Every command on the box ends by `budgetMs`, so a
+     * backup the host gave up on is not left pushing or uploading under the pause.
+     */
+    backUp: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+      input: Omit<Parameters<typeof backUpBox>[1], "root" | "timeoutSeconds">,
+      budgetMs: number,
+    ) =>
+      backUpBox(e2bPythonPort(await connect(operation, sandboxId), budgetMs), {
+        ...input,
+        root: manifest.preparation.root,
+        timeoutSeconds: Math.ceil(budgetMs / 1000),
+      }),
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       try {
         await connect(operation, sandboxId);

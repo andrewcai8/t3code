@@ -63,15 +63,17 @@ describe("backUpWorkspace", () => {
     await NodeFSP.writeFile(NodePath.join(tree, "feature.txt"), "feature work\n");
     const realIndex = await NodeFSP.readFile(NodePath.join(workspace, ".git", "index"));
 
-    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
-      kind: "saved",
-      branches: [
-        "t3-backup/lease-1",
-        "t3-backup/lease-1-1",
-        "t3-backup/lease-1-branch-0",
-        "t3-backup/lease-1-branch-1",
-      ],
-    });
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toMatchObject(
+      {
+        kind: "saved",
+        branches: [
+          "t3-backup/lease-1",
+          "t3-backup/lease-1-1",
+          "t3-backup/lease-1-branch-0",
+          "t3-backup/lease-1-branch-1",
+        ],
+      },
+    );
     expect(git(origin, "show", "t3-backup/lease-1:README.md")).toBe("edited");
     expect(git(origin, "show", "t3-backup/lease-1:untracked.txt")).toBe("new");
     expect(git(origin, "show", "t3-backup/lease-1:committed.txt")).toBe("not pushed");
@@ -89,10 +91,12 @@ describe("backUpWorkspace", () => {
     const tip = git(workspace, "rev-parse", "HEAD");
     git(workspace, "switch", "-q", "main");
 
-    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
-      kind: "saved",
-      branches: ["t3-backup/lease-1-branch-0"],
-    });
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toMatchObject(
+      {
+        kind: "saved",
+        branches: ["t3-backup/lease-1-branch-0"],
+      },
+    );
     expect(backupRefs(origin)).toBe(`refs/heads/t3-backup/lease-1-branch-0 ${tip}`);
   });
 
@@ -138,10 +142,12 @@ describe("backUpWorkspace", () => {
     const { root, workspace, origin } = await chatRoot();
     await NodeFSP.writeFile(NodePath.join(workspace, "README.md"), "stashed\n");
     git(workspace, "stash", "-q");
-    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
-      kind: "saved",
-      branches: ["t3-backup/lease-1-stash-0"],
-    });
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toMatchObject(
+      {
+        kind: "saved",
+        branches: ["t3-backup/lease-1-stash-0"],
+      },
+    );
     expect(git(origin, "show", "t3-backup/lease-1-stash-0:README.md")).toBe("stashed");
   });
 
@@ -150,11 +156,56 @@ describe("backUpWorkspace", () => {
     await NodeFSP.writeFile(NodePath.join(workspace, "untracked.txt"), "new\n");
     await backUpWorkspace(localPort, { root, branch: "lease-1", push: true });
     const first = backupRefs(origin);
-    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toEqual({
-      kind: "saved",
-      branches: ["t3-backup/lease-1"],
-    });
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toMatchObject(
+      {
+        kind: "saved",
+        branches: ["t3-backup/lease-1"],
+      },
+    );
     expect(backupRefs(origin)).toBe(first);
+  });
+
+  it("skips the push when the work is what the last backup saved, and pushes a change", async () => {
+    const { root, workspace, origin } = await chatRoot();
+    await NodeFSP.writeFile(NodePath.join(workspace, "untracked.txt"), "new\n");
+    const first = await backUpWorkspace(localPort, { root, branch: "lease-1", push: true });
+    if (first.kind !== "saved") throw new Error(`first backup was ${first.kind}`);
+    git(origin, "update-ref", "-d", "refs/heads/t3-backup/lease-1");
+
+    expect(
+      await backUpWorkspace(localPort, {
+        root,
+        branch: "lease-1",
+        push: true,
+        previous: first.fingerprint,
+      }),
+    ).toEqual({ kind: "unchanged" });
+    expect(backupRefs(origin)).toBe("");
+
+    await NodeFSP.writeFile(NodePath.join(workspace, "untracked.txt"), "changed\n");
+    expect(
+      await backUpWorkspace(localPort, {
+        root,
+        branch: "lease-1",
+        push: true,
+        previous: first.fingerprint,
+      }),
+    ).toMatchObject({ kind: "saved", branches: ["t3-backup/lease-1"] });
+    expect(git(origin, "show", "t3-backup/lease-1:untracked.txt")).toBe("changed");
+  });
+
+  it("still backs up a commit that only an earlier backup branch holds", async () => {
+    const { root, workspace } = await chatRoot();
+    await NodeFSP.writeFile(NodePath.join(workspace, "committed.txt"), "not pushed\n");
+    git(workspace, "add", ".");
+    git(workspace, "commit", "-qm", "local only");
+    await backUpWorkspace(localPort, { root, branch: "lease-1", push: true });
+    expect(await backUpWorkspace(localPort, { root, branch: "lease-1", push: true })).toMatchObject(
+      {
+        kind: "saved",
+        branches: ["t3-backup/lease-1", "t3-backup/lease-1-branch-0"],
+      },
+    );
   });
 
   it("reports pending work it may not push, and pushes nothing", async () => {

@@ -2,6 +2,7 @@
 import { EnvironmentProvisionInput } from "@t3tools/contracts";
 import { retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/sql/SqlClient";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
@@ -60,6 +61,23 @@ const AccountLimit = Schema.Struct({
 });
 export type AccountLimit = typeof AccountLimit.Type;
 
+/**
+ * The last backup taken before the box slept: its unsaved work on `t3-backup/` branches, and its
+ * owner chat's provider sessions with a manifest restore reads under `sessionsUri`. A record this
+ * build cannot read is dropped rather than failing the lease.
+ */
+export const LeaseBackup = Schema.Struct({
+  /** When the backup that last changed this record finished. */
+  at: Schema.String,
+  /** Branches on origin holding work only the box had; empty when it had none. */
+  branches: Schema.Array(Schema.String),
+  sessionsUri: Schema.optional(Schema.String),
+  /** What each part held when saved, so a box unchanged since is not saved again. */
+  workFingerprint: Schema.optional(Schema.String),
+  sessionsFingerprint: Schema.optional(Schema.String),
+});
+export type LeaseBackup = typeof LeaseBackup.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -114,6 +132,9 @@ export const StoredProvisionedLease = Schema.Struct({
    * resume since the first of them. Absent means none.
    */
   unwatchedMoves: Schema.optional(Schema.Int),
+  backup: Schema.optional(
+    LeaseBackup.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
   createdAt: Schema.String,
@@ -221,6 +242,7 @@ export interface ProvisionedLeaseRegistry {
   ) => Promise<ProvisionedLease | null>;
   /** Null when the lease is unknown. */
   readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<ProvisionedLease | null>;
+  readonly recordBackup: (leaseId: string, backup: LeaseBackup) => Promise<void>;
 }
 
 function nowIso(now?: Date): string {
@@ -589,5 +611,10 @@ export function createProvisionedLeaseRegistry(
           value: updated,
         };
       }),
+    recordBackup: (leaseId, backup) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, backup } : lease)),
+        value: undefined,
+      })),
   };
 }

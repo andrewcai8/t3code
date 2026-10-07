@@ -124,6 +124,7 @@ import {
   createProvisionedLeaseRegistry,
   decodeLegacyLeases,
   keepsRemovedBox,
+  leaseAccounts,
   restorableUntil,
   type ProvisionedLease,
   type ProvisionedLeaseRegistry,
@@ -141,6 +142,7 @@ import { makeWakeAhead } from "./wakeAhead.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
+import { backupUri, withinBudget, type BoxBackupResult } from "./boxBackup.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
@@ -197,6 +199,12 @@ const MAX_UNWATCHED_MOVES = 3;
 const MAX_IDLE_UPGRADES = 2;
 
 /**
+ * Longest a pause waits for the box's backup. Generous for a push and a few session files, short
+ * enough that a reaper sweep over several boxes is not held up for long.
+ */
+const SLEEP_BACKUP_BUDGET_MS = 45_000;
+
+/**
  * Moving an idle box onto the pinned build before it sleeps, so its next wake is not held up.
  * `due` names the build a box would move to, or null when it is on it. `start` runs in the
  * background under the box's own lock.
@@ -216,6 +224,16 @@ interface AccountRotation {
 }
 
 /**
+ * Backing a box up right before it sleeps. `run` answers the lease's next backup record and what
+ * could not be saved, or null for a box this host does not back up. A pause waits for it at most
+ * `budgetMs`, then sleeps the box without it.
+ */
+interface SleepBackup {
+  readonly budgetMs: number;
+  readonly run: (lease: ProvisionedLease) => Promise<BoxBackupResult | null>;
+}
+
+/**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
  * save, or a release ahead of its Mac's deadline. `reopen` when the chat is
  * off its Mac but must not sleep, such as one still working at the deadline,
@@ -232,6 +250,7 @@ export function createEnvironmentControl(
     readonly upkeepChat?: UpkeepChat;
     readonly idleUpgrade?: IdleUpgrade;
     readonly accountRotation?: AccountRotation;
+    readonly sleepBackup?: SleepBackup;
   },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
@@ -285,6 +304,38 @@ export function createEnvironmentControl(
     if (lease.state !== "active" || !lease.remoteAccess) return;
     await pullUsage(lease).catch(() => undefined);
   };
+  // A box that sleeps may never wake (E2B has failed to place one for hours), so its work and
+  // chat are saved first, within the backup's budget. A backup that fails or runs out of time is
+  // reported and never blocks the sleep.
+  const backUpBeforeSleep = async (lease: ProvisionedLease): Promise<void> => {
+    const backup = driver.sleepBackup;
+    if (!backup || !leaseRegistry || lease.state !== "active" || !lease.remoteAccess) return;
+    try {
+      const result = await withinBudget(backup.run(lease), backup.budgetMs);
+      if (result === "timeout") {
+        reportFailure("cloud box backup ran out of time; sleeping without it", {
+          chatId: lease.leaseId,
+          cause: `over ${backup.budgetMs} ms`,
+        });
+        return;
+      }
+      if (!result) return;
+      if (result.backup && result.backup !== lease.backup)
+        await leaseRegistry.recordBackup(lease.leaseId, result.backup);
+      if (result.problems.length > 0)
+        reportFailure("cloud box backup saved only part of its work", {
+          chatId: lease.leaseId,
+          cause: result.problems.join(" "),
+        });
+    } catch (cause) {
+      reportFailure("cloud box could not be backed up before sleeping", {
+        chatId: lease.leaseId,
+        cause,
+      });
+    }
+  };
+  const beforeSleep = (lease: ProvisionedLease) =>
+    Promise.all([pullBeforeStop(lease), backUpBeforeSleep(lease)]);
   /** Brings a lease's machine back and records it awake: a client's resume, or a moved chat's. */
   const wake = async (
     lease: ProvisionedLease,
@@ -425,7 +476,7 @@ export function createEnvironmentControl(
           current.expiresAt > new Date().toISOString()
         )
           continue;
-        await pullBeforeStop(lease);
+        await beforeSleep(lease);
         const result = await driver.pause({
           sandboxId: current.sandboxId,
           ...(current.namespaceResource ? { namespaceResource: current.namespaceResource } : {}),
@@ -537,7 +588,7 @@ export function createEnvironmentControl(
       leaseOperations.set(lease.sandboxId, { action: "dispose" });
       try {
         if (lease.state !== "paused") {
-          await pullBeforeStop(lease);
+          await beforeSleep(lease);
           const result = await driver.pause({
             sandboxId: lease.sandboxId,
             ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
@@ -593,7 +644,7 @@ export function createEnvironmentControl(
             reason: "unknown",
             message: "Another chat on this machine is still working.",
           };
-        await pullBeforeStop(lease);
+        await beforeSleep(lease);
         const result = await driver.pause({
           sandboxId: input.sandboxId,
           ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
@@ -1212,6 +1263,50 @@ export const layer = Layer.effect(
               accountRotation: {
                 due: (lease, chat) => accountRotation.due(lease, chat),
                 start: (lease) => void accountRotation.start(lease),
+              },
+              sleepBackup: {
+                budgetMs: SLEEP_BACKUP_BUDGET_MS,
+                run: async (lease) => {
+                  if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId))
+                    return null;
+                  const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(
+                    () => null,
+                  );
+                  if (
+                    !operation ||
+                    operation.state.kind !== "ready" ||
+                    operation.state.allocation.resource.provider !== "e2b"
+                  )
+                    return null;
+                  const token = config.provisioning?.githubToken;
+                  const outputsUri = config.provisioning?.workerForks?.outputsUri;
+                  return makeE2bProvisionRuntime(
+                    { apiKey: config.e2bApiKey },
+                    logE2bResumeRetry,
+                  ).backUp(
+                    operation,
+                    operation.state.allocation.resource.sandboxId,
+                    await manifests.load(lease.leaseId),
+                    {
+                      leaseId: lease.leaseId,
+                      push: token !== undefined,
+                      token,
+                      ...(outputsUri && lease.owner
+                        ? {
+                            sessions: {
+                              uri: backupUri(outputsUri, lease.owner.environmentId),
+                              environmentId: lease.owner.environmentId,
+                              account: leaseAccounts(lease)[0] ?? lease.providerInstanceId,
+                              threadId: lease.owner.threadId,
+                            },
+                          }
+                        : {}),
+                      previous: lease.backup,
+                      now: new Date().toISOString(),
+                    },
+                    SLEEP_BACKUP_BUDGET_MS,
+                  );
+                },
               },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and

@@ -11,7 +11,7 @@ import * as Schema from "effect/Schema";
 import type { RemotePreparationPort } from "./remotePreparation.ts";
 
 const workspaceBackupScript = String.raw`
-import base64, json, os, pathlib, subprocess, sys, tempfile
+import base64, hashlib, json, os, pathlib, subprocess, sys, tempfile
 
 request = json.load(sys.stdin)
 # Resolved, so it compares equal to the real paths git lists worktrees at.
@@ -83,8 +83,9 @@ def snapshot(tree, commit):
     parents = ['-p', commit] if commit else []
     return out(tree, 'commit-tree', written, *parents, '-m', 'T3 backup of unsaved work', extra={'GIT_AUTHOR_DATE': date, 'GIT_COMMITTER_DATE': date})
 
+# A backup branch is not the work's home, so a commit only a backup holds still counts as unpushed.
 def unpushed(commit):
-    return commit is not None and out(main, 'rev-list', '--count', commit, '--not', '--remotes') != '0'
+    return commit is not None and out(main, 'rev-list', '--count', commit, '--not', '--exclude=*/t3-backup/*', '--remotes') != '0'
 
 name = 't3-backup/' + request['branch']
 pending = []
@@ -115,6 +116,9 @@ for branch, tree, commit, dirty in pending:
     refs[branch] = snapshot(tree, commit) if dirty else commit
 for index, commit in enumerate(stashes):
     refs[name + '-stash-' + str(index)] = commit
+fingerprint = hashlib.sha256(json.dumps(sorted(refs.items())).encode()).hexdigest()
+if request.get('previous') == fingerprint:
+    finish({'kind': 'unchanged'})
 
 if git(main, 'push', '--force', '--no-verify', '--quiet', 'origin', *(commit + ':refs/heads/' + branch for branch, commit in refs.items())).returncode != 0:
     finish({'kind': 'unsaved', 'reason': 'The backup push failed.'})
@@ -125,12 +129,18 @@ for line in listed.stdout.decode().splitlines():
     remote[ref] = commit
 if listed.returncode != 0 or any(remote.get('refs/heads/' + branch) != commit for branch, commit in refs.items()):
     finish({'kind': 'unsaved', 'reason': 'The backup branches did not verify on origin.'})
-finish({'kind': 'saved', 'branches': list(refs)})
+finish({'kind': 'saved', 'branches': list(refs), 'fingerprint': fingerprint})
 `;
 
 export const WorkspaceBackup = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("clean") }),
-  Schema.Struct({ kind: Schema.Literal("saved"), branches: Schema.Array(Schema.String) }),
+  Schema.Struct({
+    kind: Schema.Literal("saved"),
+    branches: Schema.Array(Schema.String),
+    /** The pushed branches and commits, so a later backup with the same ones can skip the push. */
+    fingerprint: Schema.String,
+  }),
+  Schema.Struct({ kind: Schema.Literal("unchanged") }),
   Schema.Struct({ kind: Schema.Literal("unsaved"), reason: Schema.String }),
 ]);
 export type WorkspaceBackup = typeof WorkspaceBackup.Type;
@@ -143,7 +153,8 @@ const decodeBackup = Schema.decodeUnknownExit(Schema.fromJsonString(WorkspaceBac
  * `t3-backup/<branch>-branch-<n>` (its position among the sorted branches), and every stash entry to
  * `t3-backup/<branch>-stash-<n>`. A worktree outside `root`, or a changed tree with submodules,
  * is `unsaved`. `saved` means each branch was read back from origin at the pushed commit. A rerun
- * pushes the same commits to the same branches.
+ * pushes the same commits to the same branches, unless `previous` is the fingerprint of the last
+ * `saved` and they are unchanged since: then nothing is pushed and the answer is `unchanged`.
  */
 export async function backUpWorkspace(
   port: RemotePreparationPort,
@@ -152,6 +163,7 @@ export async function backUpWorkspace(
     readonly branch: string;
     readonly push: boolean;
     readonly token?: string | undefined;
+    readonly previous?: string | undefined;
   },
 ): Promise<WorkspaceBackup> {
   const result = await port.executePython({
