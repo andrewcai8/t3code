@@ -104,6 +104,17 @@ export const LeaseReboot = Schema.Struct({
 });
 export type LeaseReboot = typeof LeaseReboot.Type;
 
+/**
+ * A box booted fresh from its disk, or paused so that it will be, and `reason` why: a clause that
+ * finishes "restarted fresh from its disk because". Kept until a wake tells its chat what that
+ * lost; a notice that fails puts it back.
+ */
+export const LeaseFreshBoot = Schema.Struct({
+  at: Schema.String,
+  reason: Schema.String,
+});
+export type LeaseFreshBoot = typeof LeaseFreshBoot.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -166,6 +177,9 @@ export const StoredProvisionedLease = Schema.Struct({
   ),
   reboot: Schema.optional(
     LeaseReboot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
+  freshBoot: Schema.optional(
+    LeaseFreshBoot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
   ),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
@@ -278,6 +292,10 @@ export interface ProvisionedLeaseRegistry {
   readonly recordRebuild: (leaseId: string, rebuild: LeaseRebuild) => Promise<void>;
   /** Null clears it. */
   readonly recordReboot: (leaseId: string, reboot: LeaseReboot | null) => Promise<void>;
+  /** Keeps a fresh boot already recorded, so a chat not yet told gets one notice. */
+  readonly recordFreshBoot: (leaseId: string, freshBoot: LeaseFreshBoot) => Promise<void>;
+  /** Clears a lease's fresh boot and answers it, so only one caller ever tells its chat. */
+  readonly takeFreshBoot: (leaseId: string) => Promise<LeaseFreshBoot | null>;
 }
 
 function nowIso(now?: Date): string {
@@ -660,6 +678,25 @@ export function createProvisionedLeaseRegistry(
         }),
         value: undefined,
       })),
+    recordFreshBoot: (leaseId, freshBoot) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) =>
+          lease.leaseId === leaseId && !lease.freshBoot ? { ...lease, freshBoot } : lease,
+        ),
+        value: undefined,
+      })),
+    takeFreshBoot: (leaseId) =>
+      mutate((leases) => {
+        const taken = leases.find((lease) => lease.leaseId === leaseId)?.freshBoot ?? null;
+        return {
+          leases: leases.map((lease) => {
+            if (lease.leaseId !== leaseId) return lease;
+            const { freshBoot: _taken, ...rest } = lease;
+            return rest;
+          }),
+          value: taken,
+        };
+      }),
     recordRebuild: (leaseId, rebuild) =>
       mutate((leases) => ({
         leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, rebuild } : lease)),

@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - uploads are exercised against a real local HTTP server.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
@@ -6,7 +7,12 @@ import * as NodePath from "node:path";
 import { CommandExitError } from "e2b";
 import { describe, expect, it } from "vite-plus/test";
 
-import { e2bPythonResult, uploadFile, warmSealHomePaths } from "./E2bProvisionRuntime.ts";
+import {
+  e2bPythonResult,
+  protectEnvdCommand,
+  uploadFile,
+  warmSealHomePaths,
+} from "./E2bProvisionRuntime.ts";
 
 describe("e2bPythonResult", () => {
   it("returns a successful command as python stdout/stderr", async () => {
@@ -112,5 +118,47 @@ describe("warmSealHomePaths", () => {
         ".config/gh/hosts.yml",
       ].filter((path) => !paths.includes(path)),
     ).toEqual([]);
+  });
+});
+
+describe("protectEnvdCommand", () => {
+  it("writes E2B's envd drop-in and reloads systemd only when the file differs", async () => {
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "envd-protect-"));
+    const bin = NodePath.join(root, "bin");
+    const reloads = NodePath.join(root, "systemctl.log");
+    await NodeFSP.mkdir(bin);
+    await NodeFSP.writeFile(
+      NodePath.join(bin, "sudo"),
+      '#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n',
+      { mode: 0o755 },
+    );
+    await NodeFSP.writeFile(
+      NodePath.join(bin, "systemctl"),
+      `#!/bin/sh\necho "$@" >> '${reloads}'\n`,
+      { mode: 0o755 },
+    );
+    const directory = NodePath.join(root, "system.slice.d");
+    const dropIn = NodePath.join(directory, "10-e2b-envd.conf");
+    const run = () =>
+      NodeChildProcess.execFileSync("sh", ["-c", protectEnvdCommand(directory)], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      });
+    try {
+      run();
+      run();
+      expect(await NodeFSP.readFile(dropIn, "utf8")).toBe(
+        "[Slice]\nMemoryMin=128M\nMemoryLow=256M\n",
+      );
+      expect(await NodeFSP.readFile(reloads, "utf8")).toBe("daemon-reload\n");
+
+      await NodeFSP.writeFile(dropIn, "[Slice]\nMemoryMin=0\n");
+      run();
+      expect(await NodeFSP.readFile(dropIn, "utf8")).toBe(
+        "[Slice]\nMemoryMin=128M\nMemoryLow=256M\n",
+      );
+      expect(await NodeFSP.readFile(reloads, "utf8")).toBe("daemon-reload\ndaemon-reload\n");
+    } finally {
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
   });
 });

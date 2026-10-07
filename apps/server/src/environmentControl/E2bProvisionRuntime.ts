@@ -37,7 +37,7 @@ import { credentialDestinations } from "./credentialDestinations.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 import { GuestNotServing } from "./ProvisionControl.ts";
 import { backUpBox } from "./boxBackup.ts";
-import { heaviestAgentProcesses, judgeHealth } from "./boxHealth.ts";
+import { readBoxHealth } from "./boxHealth.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -132,6 +132,29 @@ import os, subprocess
 os.sync()
 subprocess.run(['sudo', '-n', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'], check=True, timeout=120)
 `;
+
+/**
+ * Lets envd keep the memory envd.service reserves for it. cgroup v2 protects a group only up to
+ * what its parent holds, and E2B leaves `system.slice` with none, so an agent that fills the box
+ * starves envd and the box stops answering. This is E2B's own drop-in, still behind its
+ * `build-envd-memory-protection` flag. It is written, and systemd reloaded, only when it differs,
+ * so it runs on every wake. Needs passwordless sudo, which the E2B template's user has.
+ */
+export const protectEnvdCommand = (directory = "/etc/systemd/system/system.slice.d") => {
+  const file = shellQuote(`${directory}/10-e2b-envd.conf`);
+  return `want='[Slice]
+MemoryMin=128M
+MemoryLow=256M'
+[ "$(cat ${file} 2>/dev/null)" = "$want" ] || { sudo -n mkdir -p ${shellQuote(directory)} && printf '%s\\n' "$want" | sudo -n tee ${file} > /dev/null && sudo -n systemctl daemon-reload; }`;
+};
+
+/** Why envd could not be protected, or null once it is. Never throws. */
+const protectEnvd = (sandbox: Sandbox) =>
+  e2bPythonResult(
+    sandbox.commands.run(protectEnvdCommand(), { timeoutMs: 30_000, requestTimeoutMs: 30_000 }),
+  )
+    .then(({ exitCode, stderr }) => (exitCode === 0 ? null : stderr.trim() || `exit ${exitCode}`))
+    .catch((error: unknown) => String(error));
 
 /** Freed pages keep their contents, and a snapshot stores only a zeroed page as nothing. */
 const zeroFreeMemoryScript = String.raw`
@@ -303,6 +326,9 @@ export function makeE2bProvisionRuntime(
     runtime: ProvisionRuntimeArtifact | null = null,
   ) => {
     const sandbox = await connect(operation, sandboxId);
+    const stopProtect = startProvisionPhase(record);
+    // Best effort: a box without it still works, and the next wake tries again.
+    stopProtect((await protectEnvd(sandbox)) === null ? "envd.protect" : "envd.protectFailed");
     const { local: desired, guest } = desiredRuntime(manifest, runtime);
     const stopDigest = startProvisionPhase(record);
     const { size } = await NodeFS.promises.stat(desired.path);
@@ -379,7 +405,8 @@ export function makeE2bProvisionRuntime(
      * Converges a woken box on its preparation. A box whose T3 server still
      * answers only fetches its followed branch. One whose server died while
      * the sandbox stayed up is prepared again, which restarts the server under
-     * the same environment identity.
+     * the same environment identity. `envdUnprotected` says why envd's memory
+     * could not be protected, or null.
      */
     resume: async (
       operation: ProvisionOperation,
@@ -387,13 +414,15 @@ export function makeE2bProvisionRuntime(
       manifest: ProvisionPreparationManifest,
       runtime: ProvisionRuntimeArtifact | null,
     ) => {
-      const checked = await checkRemoteHost(
-        e2bPythonPort(await connect(operation, sandboxId)),
-        guestInput(operation, sandboxId, manifest),
-      );
-      if (checked.serverReady) return { refreshError: checked.refreshError, restarted: false };
+      const sandbox = await connect(operation, sandboxId);
+      const [checked, envdUnprotected] = await Promise.all([
+        checkRemoteHost(e2bPythonPort(sandbox), guestInput(operation, sandboxId, manifest)),
+        protectEnvd(sandbox),
+      ]);
+      if (checked.serverReady)
+        return { refreshError: checked.refreshError, restarted: false, envdUnprotected };
       const ready = await prepare(operation, sandboxId, manifest, undefined, runtime);
-      return { refreshError: ready.refreshError ?? null, restarted: true };
+      return { refreshError: ready.refreshError ?? null, restarted: true, envdUnprotected };
     },
     attach: async (
       operation: ProvisionOperation,
@@ -535,10 +564,7 @@ with urllib.request.urlopen(request, timeout=30) as response:
     /** Runs guest scripts on a box, resuming it first when it sleeps. */
     guest: async (operation: ProvisionOperation, sandboxId: string) =>
       e2bPythonPort(await connect(operation, sandboxId)),
-    /**
-     * Reads whether an awake box is safe to pause: E2B's CPU samples for the last minute and a
-     * trivial command envd must answer within five seconds. Null for a box that is not awake.
-     */
+    /** Reads whether an awake box may keep its memory when it pauses. Null for a box not awake. */
     probeHealth: async (operation: ProvisionOperation, sandboxId: string) => {
       const sandbox = await connectAwake(operation, sandboxId, Date.now() + 15_000).catch(
         (error: unknown) => {
@@ -547,51 +573,12 @@ with urllib.request.urlopen(request, timeout=30) as response:
         },
       );
       if (!sandbox) return null;
-      const since = new Date(Date.now() - 60_000);
-      const [metrics, answer] = await Promise.all([
-        client.Sandbox.getMetrics(sandboxId, { start: since, requestTimeoutMs: 5_000 }).catch(
-          () => [],
-        ),
-        sandbox.commands
-          .run("cat /proc/loadavg; nproc", { timeoutMs: 5_000, requestTimeoutMs: 5_000 })
-          .then((result) => result.stdout)
-          .catch(() => null),
-      ]);
-      return judgeHealth({
-        answer,
-        cpuSamples: metrics
-          .filter((sample) => sample.timestamp >= since)
-          .map((sample) => sample.cpuUsedPct),
+      return readBoxHealth({
+        // Longer than the probe waits, so the probe's own limit is what calls envd unresponsive.
+        answered: sandbox.commands.run("true", { timeoutMs: 10_000, requestTimeoutMs: 10_000 }),
+        samples: (start) =>
+          client.Sandbox.getMetrics(sandboxId, { start, requestTimeoutMs: 5_000 }),
       });
-    },
-    /**
-     * Stops the heaviest processes the chat's agents left running on a pinned box, never its T3
-     * server, and answers what it stopped.
-     */
-    relieve: async (
-      operation: ProvisionOperation,
-      sandboxId: string,
-      manifest: ProvisionPreparationManifest,
-    ) => {
-      const sandbox = await connectAwake(operation, sandboxId, Date.now() + 30_000);
-      if (!sandbox) return [];
-      const limits = { timeoutMs: 10_000, requestTimeoutMs: 10_000 };
-      const [ps, server] = await Promise.all([
-        sandbox.commands.run("ps -eo pid=,ppid=,pcpu=,args=", limits),
-        sandbox.files.read(`${manifest.preparation.root}/server.json`, {
-          requestTimeoutMs: 10_000,
-        }),
-      ]);
-      const serverPid = Number((JSON.parse(server) as { pid?: unknown }).pid);
-      if (!Number.isInteger(serverPid)) return [];
-      const heavy = heaviestAgentProcesses(ps.stdout, serverPid);
-      if (heavy.length === 0) return [];
-      const pids = heavy.map((process) => process.pid).join(" ");
-      await sandbox.commands.run(
-        `kill -TERM ${pids} 2>/dev/null; sleep 3; kill -KILL ${pids} 2>/dev/null; true`,
-        limits,
-      );
-      return heavy.map((process) => `${process.command} (${process.cpuPercent}% CPU)`);
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       try {

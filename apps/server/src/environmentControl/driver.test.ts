@@ -488,10 +488,17 @@ describe("cloud SDK and controller boundary", () => {
     expect(sdk.kill.mock.calls).toEqual([]);
   });
 
+  it("pauses a sandbox from its disk alone only when asked to drop its memory", async () => {
+    sdk.pause.mockResolvedValue(true);
+    await createCloudDriver(config).pause({ sandboxId: "target" });
+    await createCloudDriver(config).pause({ sandboxId: "target", keepMemory: false });
+    expect(sdk.pause.mock.calls.map(([, opts]) => opts?.keepMemory)).toEqual([undefined, false]);
+  });
+
   it("pauses an already paused sandbox without waking it", async () => {
     sdk.pause.mockResolvedValue(false);
     sdk.getInfo.mockResolvedValue({ sandboxId: "target", state: "paused" });
-    expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBeUndefined();
+    expect(await createCloudDriver(config).pause({ sandboxId: "target" })).toBe("alreadyPaused");
     expect(sdk.pause.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["target"]);
     expect(sdk.getInfo.mock.calls.map(([sandboxId]) => sandboxId)).toEqual(["target"]);
     expect(sdk.connect.mock.calls).toEqual([]);

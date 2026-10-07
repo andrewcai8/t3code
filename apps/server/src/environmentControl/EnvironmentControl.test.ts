@@ -15,7 +15,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { boxShell, boxThread } from "./shellTestFixture.ts";
-import type { BoxHealth } from "./boxHealth.ts";
+import { readBoxHealth, type BoxHealth } from "./boxHealth.ts";
 
 /**
  * Leases live in SQLite beside provision_operations, so tests need a client.
@@ -1682,13 +1682,26 @@ describe("a cloud machine backed up before it sleeps", () => {
 });
 
 describe("a cloud machine checked before it sleeps", () => {
+  const pinned = { kind: "pinned", cpuPercent: 99, memoryPercent: 95 } as const;
+  /** Answers each probe in turn, then none. */
+  const answers =
+    (...queue: Array<BoxHealth | "E2B API down">) =>
+    () =>
+      queue.shift() ?? null;
   async function withIdleBox(
-    probes: Array<BoxHealth | null | "E2B API down">,
+    probe: (calls: ReadonlyArray<string>) => BoxHealth | null | "E2B API down" | Promise<BoxHealth>,
     test: (context: {
       registry: ReturnType<typeof createProvisionedLeaseRegistry>;
       calls: string[];
       reports: string[];
       manager: ReturnType<typeof createEnvironmentControl>;
+      told: Promise<string>;
+      /** Replaces how the chat answers a notice. */
+      answerChat: (answer: () => Promise<void>) => void;
+      /** Resolves on the next write of the lease's fresh boot record. */
+      nextRecord: () => Promise<void>;
+      /** Makes E2B have paused the box itself, with its memory, before the host's pause. */
+      pauseFirst: () => void;
     }) => Promise<void>,
   ) {
     await withSqlRegistry(async (registry) => {
@@ -1705,17 +1718,31 @@ describe("a cloud machine checked before it sleeps", () => {
       });
       const calls: string[] = [];
       const reports: string[] = [];
+      let tell: ((text: string) => void) | undefined;
+      const told = new Promise<string>((resolve) => (tell = resolve));
+      let answer = async () => {};
+      let recorded: (() => void) | undefined;
+      let pausedFirst = false;
       const driver = setup().driver;
-      driver.pause = async ({ sandboxId }) => {
-        calls.push(`pause:${sandboxId}`);
+      driver.pause = async ({ sandboxId, keepMemory }) => {
+        calls.push(`pause:${sandboxId}${keepMemory === false ? ":disk" : ""}`);
+        return pausedFirst ? "alreadyPaused" : undefined;
       };
       const manager = createEnvironmentControl(
         [],
         {
           ...driver,
+          boxBackup: {
+            sleepBudgetMs: 45_000,
+            turnBudgetMs: 30_000,
+            run: async () => {
+              calls.push("backup");
+              return null;
+            },
+          },
           healthCheck: {
             probe: async () => {
-              const health = probes.shift() ?? null;
+              const health = await probe(calls);
               if (health === "E2B API down") {
                 calls.push("probe:failed");
                 throw new Error(health);
@@ -1723,88 +1750,294 @@ describe("a cloud machine checked before it sleeps", () => {
               calls.push(`probe:${health?.kind ?? "none"}`);
               return health;
             },
-            relieve: async () => {
-              calls.push("relieve");
-              return ["node vitest --watch (99% CPU)"];
-            },
+          },
+          tellChat: async (_lease, text) => {
+            calls.push("tell");
+            await answer();
+            tell?.(text);
           },
         },
-        registry,
+        {
+          ...registry,
+          recordFreshBoot: async (...args: Parameters<typeof registry.recordFreshBoot>) => {
+            await registry.recordFreshBoot(...args);
+            recorded?.();
+          },
+        },
         async () => ({ activity: "idle" }),
         async () => {},
         (message, fields) => void reports.push(`${message}: ${String(fields.cause)}`),
       );
-      await test({ registry, calls, reports, manager });
+      await test({
+        registry,
+        calls,
+        reports,
+        manager,
+        told,
+        answerChat: (next) => {
+          answer = next;
+        },
+        nextRecord: () => new Promise<void>((resolve) => (recorded = resolve)),
+        pauseFirst: () => {
+          pausedFirst = true;
+        },
+      });
     });
   }
   const expire = (registry: ReturnType<typeof createProvisionedLeaseRegistry>) =>
     registry.touch("lease", new Date("2026-01-01T00:00:00.000Z"), "host");
+  const resume = (manager: ReturnType<typeof createEnvironmentControl>) =>
+    manager.resume({
+      leaseId: "lease",
+      sandboxId: "sandbox",
+      environmentId: EnvironmentId.make("child"),
+    });
+  /** Runs `work` on fake timers, moving them on until it settles, so the gap between probes costs nothing. */
+  async function withoutWaiting<A>(work: () => Promise<A>): Promise<A> {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const state = { settled: false };
+      const result = work().finally(() => (state.settled = true));
+      while (!state.settled) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      return await result;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+  const pinnedNotice =
+    "This machine was restarted fresh from its disk because it was paused while its CPU was pinned at 99% with its memory 95% full. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.";
 
-  it("leaves a box whose envd does not answer awake, and pauses it once it does", async () => {
+  it("pauses a box pinned on two probes from its disk, and tells its chat what that lost once it wakes", async () => {
     await withIdleBox(
-      [{ kind: "unresponsive" }, { kind: "healthy" }],
-      async ({ registry, calls, reports, manager }) => {
+      answers(pinned, pinned),
+      async ({ registry, calls, reports, manager, told }) => {
         await expire(registry);
-        await manager.reapExpiredLeases();
-        expect(calls).toEqual(["probe:unresponsive"]);
-        expect((await registry.findById("lease"))?.state).toBe("active");
+        await withoutWaiting(() => manager.reapExpiredLeases());
+        expect(calls).toEqual(["probe:pinned", "probe:pinned", "backup", "pause:sandbox:disk"]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
         expect(reports).toEqual([
-          "cloud box is unresponsive; not pausing it now: envd did not answer, attempt 1",
+          "cloud box paused from its disk, without its memory: its CPU was pinned at 99% with its memory 95% full",
         ]);
 
-        await manager.reapExpiredLeases();
-        expect(calls).toEqual(["probe:unresponsive", "probe:healthy", "pause:sandbox"]);
-        expect((await registry.findById("lease"))?.state).toBe("paused");
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        expect(await told).toBe(pinnedNotice);
+        expect((await registry.findById("lease"))?.freshBoot).toBeUndefined();
       },
     );
   });
 
-  it("stops a box's heaviest leftovers once it stays pinned, then pauses it", async () => {
-    const pinned = { kind: "pinned", cpuPercent: 99 } as const;
+  it("keeps the memory of a box only one probe found unhealthy", async () => {
     await withIdleBox(
-      [pinned, pinned, pinned, { kind: "healthy" }],
+      answers({ kind: "unresponsive" }, { kind: "healthy" }),
+      async ({ registry, calls, manager }) => {
+        await expire(registry);
+        await withoutWaiting(() => manager.reapExpiredLeases());
+        expect(calls).toEqual(["probe:unresponsive", "probe:healthy", "backup", "pause:sandbox"]);
+        expect((await registry.findById("lease"))?.freshBoot).toBeUndefined();
+      },
+    );
+  });
+
+  it("keeps the memory of a box that is hot only while it is saved", async () => {
+    await withIdleBox(
+      (calls) => (calls.includes("backup") ? pinned : { kind: "healthy" }),
+      async ({ registry, calls, manager }) => {
+        await expire(registry);
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:healthy", "backup", "pause:sandbox"]);
+      },
+    );
+  });
+
+  it("keeps a healthy box's memory, and wakes it without a word to its chat", async () => {
+    await withIdleBox(
+      answers({ kind: "healthy" }),
       async ({ registry, calls, reports, manager }) => {
         await expire(registry);
         await manager.reapExpiredLeases();
-        await manager.reapExpiredLeases();
-        expect(calls).toEqual(["probe:pinned", "probe:pinned"]);
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        expect(calls).toEqual(["probe:healthy", "backup", "pause:sandbox"]);
+        expect(reports).toEqual([]);
+      },
+    );
+  });
 
-        await manager.reapExpiredLeases();
+  it("keeps the memory of a box whose health E2B's API could not report, since that says nothing of the box", async () => {
+    await withIdleBox(
+      answers(pinned, "E2B API down"),
+      async ({ registry, calls, reports, manager }) => {
+        await expire(registry);
+        await withoutWaiting(() => manager.reapExpiredLeases());
+        expect(calls).toEqual(["probe:pinned", "probe:failed", "backup", "pause:sandbox"]);
+        expect(reports).toEqual(["cloud box health could not be read: Error: E2B API down"]);
+      },
+    );
+  });
+
+  it("pauses a box a client puts to sleep from its disk when envd stays silent", async () => {
+    await withIdleBox(
+      answers({ kind: "unresponsive" }, { kind: "unresponsive" }),
+      async ({ registry, calls, manager }) => {
+        expect(await withoutWaiting(() => manager.pause({ sandboxId: "sandbox" }))).toEqual({
+          kind: "paused",
+        });
         expect(calls).toEqual([
-          "probe:pinned",
-          "probe:pinned",
-          "probe:pinned",
-          "relieve",
-          "probe:healthy",
-          "pause:sandbox",
+          "probe:unresponsive",
+          "probe:unresponsive",
+          "backup",
+          "pause:sandbox:disk",
         ]);
-        expect((await registry.findById("lease"))?.state).toBe("paused");
-        expect(reports.at(-1)).toBe(
-          "cloud box stayed pinned; stopped its agents' heaviest leftovers to pause it: node vitest --watch (99% CPU)",
+        expect((await registry.findById("lease"))?.freshBoot?.reason).toBe(
+          "it was paused while it had stopped answering",
         );
       },
     );
   });
 
-  it("pauses a box whose health E2B's API could not report, since that says nothing of the box", async () => {
-    await withIdleBox(["E2B API down"], async ({ registry, calls, reports, manager }) => {
-      await expire(registry);
-      await manager.reapExpiredLeases();
-      expect(calls).toEqual(["probe:failed", "pause:sandbox"]);
-      expect(reports).toEqual(["cloud box health could not be read: Error: E2B API down"]);
-    });
+  /** An E2B metrics sample `seconds` old with this CPU and this share of memory in use. */
+  const sample = (seconds: number, cpuUsedPct: number, memoryShare: number) => ({
+    timestamp: new Date(Date.now() - seconds * 1_000),
+    cpuUsedPct,
+    memUsed: memoryShare * 1_000,
+    memTotal: 1_000,
+  });
+  const envdAnswers = () => Promise.resolve();
+  const keptMemory = ["probe:healthy", "backup", "pause:sandbox"];
+  it.each([
+    {
+      box: "whose metrics E2B fails to return",
+      answered: envdAnswers,
+      samples: async () => {
+        throw new Error("metrics unavailable");
+      },
+      expected: keptMemory,
+    },
+    {
+      box: "with no metrics from the last 15 s",
+      answered: envdAnswers,
+      samples: async () => [sample(30, 100, 0.95)],
+      expected: keptMemory,
+    },
+    {
+      box: "pinned with its memory at 60%",
+      answered: envdAnswers,
+      samples: async () => [sample(10, 98, 0.6), sample(5, 99, 0.6)],
+      expected: keptMemory,
+    },
+    {
+      box: "pinned with its memory at 93%",
+      answered: envdAnswers,
+      samples: async () => [sample(10, 98, 0.93), sample(5, 99, 0.93)],
+      expected: ["probe:pinned", "probe:pinned", "backup", "pause:sandbox:disk"],
+    },
+    {
+      box: "whose envd stays silent",
+      answered: () => new Promise<never>(() => {}),
+      samples: async () => [sample(5, 10, 0.2)],
+      expected: ["probe:unresponsive", "probe:unresponsive", "backup", "pause:sandbox:disk"],
+    },
+  ])(
+    "pauses a box $box as E2B's readings on each probe decide",
+    async ({ answered, samples, expected }) => {
+      await withIdleBox(
+        () => readBoxHealth({ answered: answered(), samples }),
+        async ({ registry, calls, manager }) => {
+          await expire(registry);
+          await withoutWaiting(() => manager.reapExpiredLeases());
+          expect(calls).toEqual(expected);
+        },
+      );
+    },
+  );
+
+  it("records nothing for a box E2B paused with its memory first", async () => {
+    await withIdleBox(
+      answers(pinned, pinned),
+      async ({ registry, calls, reports, manager, pauseFirst }) => {
+        pauseFirst();
+        expect(await withoutWaiting(() => manager.pause({ sandboxId: "sandbox" }))).toEqual({
+          kind: "paused",
+        });
+        expect(calls).toEqual(["probe:pinned", "probe:pinned", "backup", "pause:sandbox:disk"]);
+        expect((await registry.findById("lease"))?.freshBoot).toBeUndefined();
+        expect(reports).toEqual([]);
+      },
+    );
   });
 
-  it("refuses a client's pause of a box that is not responding", async () => {
-    await withIdleBox([{ kind: "unresponsive" }], async ({ registry, calls, manager }) => {
-      expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({
-        kind: "refused",
-        reason: "unknown",
-        message: "This machine is not responding normally, so it is not paused yet. Retry shortly.",
-      });
-      expect(calls).toEqual(["probe:unresponsive"]);
-      expect((await registry.findById("lease"))?.state).toBe("active");
-    });
+  it("tells a chat once when a second resume lands while the first notice is out", async () => {
+    await withIdleBox(
+      answers(pinned, pinned),
+      async ({ registry, calls, manager, told, answerChat }) => {
+        await withoutWaiting(() => manager.pause({ sandboxId: "sandbox" }));
+        let release: (() => void) | undefined;
+        let asked: (() => void) | undefined;
+        const asking = new Promise<void>((resolve) => (asked = resolve));
+        answerChat(() => {
+          asked?.();
+          return new Promise<void>((resolve) => (release = resolve));
+        });
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        await asking;
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        release?.();
+        expect(await told).toBe(pinnedNotice);
+        expect(calls.filter((call) => call === "tell")).toEqual(["tell"]);
+        expect((await registry.findById("lease"))?.freshBoot).toBeUndefined();
+      },
+    );
+  });
+
+  it("tells a chat on its next wake when the first notice failed", async () => {
+    await withIdleBox(
+      answers(pinned, pinned),
+      async ({ registry, calls, reports, manager, told, answerChat, nextRecord }) => {
+        await withoutWaiting(() => manager.pause({ sandboxId: "sandbox" }));
+        answerChat(async () => {
+          throw new Error("chat unreachable");
+        });
+        const restored = nextRecord();
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        await restored;
+        expect(reports.at(-1)).toBe(
+          "cloud chat was not told its box restarted: Error: chat unreachable",
+        );
+        expect((await registry.findById("lease"))?.freshBoot?.reason).toBe(
+          "it was paused while its CPU was pinned at 99% with its memory 95% full",
+        );
+
+        answerChat(async () => {});
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        expect(await told).toBe(pinnedNotice);
+        expect(calls.filter((call) => call === "tell")).toEqual(["tell", "tell"]);
+      },
+    );
+  });
+
+  it("keeps a newer fresh boot record when a failed notice is put back", async () => {
+    await withIdleBox(
+      answers(pinned, pinned),
+      async ({ registry, manager, answerChat, nextRecord }) => {
+        await withoutWaiting(() => manager.pause({ sandboxId: "sandbox" }));
+        answerChat(async () => {
+          await registry.recordFreshBoot("lease", {
+            at: "2026-10-07T09:00:00.000Z",
+            reason: "E2B could not resume it",
+          });
+          throw new Error("chat unreachable");
+        });
+        const restored = nextRecord();
+        expect(await resume(manager)).toEqual({ kind: "resumed" });
+        await restored;
+        expect((await registry.findById("lease"))?.freshBoot).toEqual({
+          at: "2026-10-07T09:00:00.000Z",
+          reason: "E2B could not resume it",
+        });
+      },
+    );
   });
 });
 
@@ -1967,8 +2200,11 @@ describe("recovering a cloud box E2B cannot resume", () => {
       resume: () => Promise<unknown>;
       told: Promise<string>;
       rebuilt: Promise<void>;
+      rebooted: Promise<void>;
       fail: (failing: boolean) => void;
     }) => Promise<void>,
+    /** Why the box was last paused from its disk, if it was. */
+    pausedFromDisk?: string,
   ) {
     await withSqlRegistry(async (registry) => {
       await registry.register({
@@ -1984,12 +2220,19 @@ describe("recovering a cloud box E2B cannot resume", () => {
         sessionsUri: "s3://bucket/t3-agents/child/backups/latest/",
       });
       await registry.markPaused("lease");
+      if (pausedFromDisk)
+        await registry.recordFreshBoot("lease", {
+          at: "2026-10-07T08:30:00.000Z",
+          reason: pausedFromDisk,
+        });
       const calls: string[] = [];
       let failing = true;
       let tell: ((text: string) => void) | undefined;
       const told = new Promise<string>((resolve) => (tell = resolve));
       let rebuildDone: (() => void) | undefined;
       const rebuilt = new Promise<void>((resolve) => (rebuildDone = resolve));
+      let rebootDone: (() => void) | undefined;
+      const rebooted = new Promise<void>((resolve) => (rebootDone = resolve));
       const driver = setup().driver;
       driver.resume = async () => {
         calls.push(failing ? "resume:unplaceable" : "resume:ok");
@@ -2021,6 +2264,10 @@ describe("recovering a cloud box E2B cannot resume", () => {
             await registry.recordRebuild(...args);
             if (args[1].status === "done") rebuildDone?.();
           },
+          recordReboot: async (...args: Parameters<typeof registry.recordReboot>) => {
+            await registry.recordReboot(...args);
+            if (args[1]?.status === "done") rebootDone?.();
+          },
         },
       );
       const resume = () =>
@@ -2042,6 +2289,7 @@ describe("recovering a cloud box E2B cannot resume", () => {
           resume,
           told,
           rebuilt,
+          rebooted,
           fail: (next) => {
             failing = next;
           },
@@ -2062,7 +2310,7 @@ describe("recovering a cloud box E2B cannot resume", () => {
         started?.();
         return booted;
       },
-      async ({ registry, calls, resume, told, fail }) => {
+      async ({ registry, calls, resume, told, rebooted, fail }) => {
         expect(await resume()).toMatchObject({
           message:
             "E2B couldn't start this machine yet. The problem is on E2B's side. It is being started fresh from its disk.",
@@ -2094,11 +2342,30 @@ describe("recovering a cloud box E2B cannot resume", () => {
           "resume:ok",
           "tell",
         ]);
+        await rebooted;
         const lease = await registry.findById("lease");
         expect(lease?.state).toBe("active");
+        expect(lease?.freshBoot).toBeUndefined();
         expect(lease?.reboot).toEqual({ status: "done", at: "2026-10-07T09:10:00.000Z" });
         expect(lease?.rebuild).toBeUndefined();
       },
+    );
+  });
+
+  it("tells the chat of a box paused from its disk once when it is also booted fresh", async () => {
+    await withUnresumableBox(
+      async () => {},
+      async ({ resume, calls, told, rebooted, fail }) => {
+        await resume();
+        // The resume let go of the box, so the reboot it started now wakes it.
+        fail(false);
+        await rebooted;
+        expect(await told).toBe(
+          "This machine was restarted fresh from its disk because it was paused while its CPU was pinned at 99%. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.",
+        );
+        expect(calls.slice(-3)).toEqual(["reboot", "resume:ok", "tell"]);
+      },
+      "it was paused while its CPU was pinned at 99%",
     );
   });
 

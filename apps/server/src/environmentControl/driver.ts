@@ -63,10 +63,15 @@ export interface CloudDriver {
   observeBroker(): Promise<Observation>;
   bootstrapBroker(): Promise<void>;
   wake(target: ManagedTarget): Promise<void>;
+  /**
+   * `keepMemory: false` saves only an E2B box's disk, so it resumes as a fresh boot.
+   * "alreadyPaused" is an E2B box something else paused first, kept as it was.
+   */
   pause(input: {
     readonly sandboxId: string;
     readonly namespaceResource?: NamespaceResource;
-  }): Promise<void | "missing">;
+    readonly keepMemory?: false;
+  }): Promise<void | "missing" | "alreadyPaused">;
   resume(input: {
     readonly leaseId: string;
     readonly sandboxId: string;
@@ -336,7 +341,7 @@ export function createCloudDriver(
         throw cause;
       }
     },
-    pause: async ({ sandboxId, namespaceResource }) => {
+    pause: async ({ sandboxId, namespaceResource, keepMemory }) => {
       if (namespaceResource) {
         if (!namespaceRunner) throw new Error("Namespace runner is unavailable");
         // Shutdown stops the active instance but retains the Devbox record and
@@ -346,10 +351,12 @@ export function createCloudDriver(
       try {
         // Pause by id so a paused box is not woken. E2B answers 409 both for a
         // paused box and for one another connect is resuming, so check which.
-        if (await Sandbox.pause(sandboxId, api)) return;
+        if (await Sandbox.pause(sandboxId, keepMemory === false ? { ...api, keepMemory } : api))
+          return;
         const info = await Sandbox.getInfo(sandboxId, api);
         if (info.state !== "paused")
           throw new Error(`E2B did not pause sandbox ${sandboxId}; it is ${info.state}`);
+        return "alreadyPaused";
       } catch (cause) {
         if (cause instanceof SandboxNotFoundError) return "missing";
         throw cause;

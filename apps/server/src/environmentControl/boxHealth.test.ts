@@ -1,57 +1,58 @@
-import { describe, expect, it } from "vite-plus/test";
+// @effect-diagnostics globalDate:off - samples are timestamped against the wall clock the probe reads.
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { heaviestAgentProcesses, judgeHealth } from "./boxHealth.ts";
+import { readBoxHealth } from "./boxHealth.ts";
 
-describe("judgeHealth", () => {
-  it("calls a box whose envd did not answer unresponsive", () => {
-    expect(judgeHealth({ answer: null, cpuSamples: [5] })).toEqual({ kind: "unresponsive" });
+describe("readBoxHealth", () => {
+  const answered = Promise.resolve();
+  const GB = 1024 ** 3;
+  /** A sample `seconds` old with this CPU and this share of an 8 GB box's memory in use. */
+  const sample = (seconds: number, cpuUsedPct: number, memoryShare: number) => ({
+    timestamp: new Date(Date.now() - seconds * 1_000),
+    cpuUsedPct,
+    memUsed: memoryShare * 8 * GB,
+    memTotal: 8 * GB,
   });
 
-  it("reads E2B's CPU samples over the load average", () => {
+  it("calls a box unresponsive only once envd has not answered for five seconds", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const health = readBoxHealth({
+        answered: new Promise(() => {}),
+        samples: async () => [sample(5, 10, 0.2)],
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      const early = await Promise.race([health, Promise.resolve("still waiting")]);
+      expect(early).toBe("still waiting");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await health).toEqual({ kind: "unresponsive" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throws when E2B fails the command, since that says nothing of the box", async () => {
+    await expect(
+      readBoxHealth({
+        answered: Promise.reject(new Error("502: sandbox proxy error")),
+        samples: async () => [],
+      }),
+    ).rejects.toThrow("502: sandbox proxy error");
+  });
+
+  it("judges only recent samples, so load that ended before the probe does not pin the box", async () => {
+    const earlier = [sample(40, 100, 0.95), sample(30, 100, 0.95)];
     expect(
-      judgeHealth({ answer: "0.10 0.20 0.30 1/200 999\n2\n", cpuSamples: [99, 97, 98] }),
-    ).toEqual({
-      kind: "pinned",
-      cpuPercent: 98,
-    });
-    expect(judgeHealth({ answer: "7.90 7.80 7.50 9/200 999\n2\n", cpuSamples: [12, 20] })).toEqual({
-      kind: "healthy",
-    });
-  });
-
-  it("falls back to the load per core without samples", () => {
-    expect(judgeHealth({ answer: "2.10 1.90 1.50 3/180 4242\n2\n", cpuSamples: [] })).toEqual({
-      kind: "pinned",
-      cpuPercent: 105,
-    });
-    expect(judgeHealth({ answer: "0.40 0.30 0.20 1/180 4242\n2\n", cpuSamples: [] })).toEqual({
-      kind: "healthy",
-    });
-  });
-});
-
-describe("heaviestAgentProcesses", () => {
-  const ps = [
-    "    1     0  0.0 /sbin/init",
-    "   50     1 30.0 /usr/bin/envd",
-    "  100     1 40.0 node /home/user/.t3-provision/runtime/dist/bin.mjs start",
-    "  200   100  0.5 claude --resume s-1",
-    "  300   200 99.0 node vitest --watch",
-    "  301   300 60.0 esbuild --service",
-    "  400   200 10.0 rg needle",
-    "  500   100 80.0 python3 train.py",
-    "  600   100 45.0 cargo build",
-  ].join("\n");
-
-  it("picks the heaviest processes under the T3 server, never the server or the system", () => {
-    expect(heaviestAgentProcesses(ps, 100)).toEqual([
-      { pid: 300, cpuPercent: 99, command: "node vitest --watch" },
-      { pid: 500, cpuPercent: 80, command: "python3 train.py" },
-      { pid: 301, cpuPercent: 60, command: "esbuild --service" },
-    ]);
-  });
-
-  it("finds nothing when the server is not in the table", () => {
-    expect(heaviestAgentProcesses(ps, 9999)).toEqual([]);
+      await readBoxHealth({
+        answered,
+        samples: async () => [...earlier, sample(10, 30, 0.5), sample(5, 20, 0.5)],
+      }),
+    ).toEqual({ kind: "healthy" });
+    expect(
+      await readBoxHealth({
+        answered,
+        samples: async () => [...earlier, sample(10, 96, 0.91), sample(5, 98, 0.91)],
+      }),
+    ).toEqual({ kind: "pinned", cpuPercent: 97, memoryPercent: 91 });
   });
 });
