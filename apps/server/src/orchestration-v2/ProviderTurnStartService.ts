@@ -1057,7 +1057,7 @@ export const layer: Layer.Layer<
           sameNativeThread &&
           !acceptedAttempts.some((source) => source.nativeThreadId !== undefined));
       // Sent with the user's text: work a restart cancelled, a disk about to fill, and a cloud
-      // machine's guidance at the start of each native conversation.
+      // machine's guidance at the start of each provider session.
       const restartNote = [
         restartCancelledWork.length === 0
           ? ""
@@ -1067,7 +1067,8 @@ export const layer: Layer.Layer<
           cwd: resolvedRuntimePolicy.cwd,
           subagent: projection.thread.lineage.relationshipToParent === "subagent",
           mcpTools: session.providerSession.capabilities.tools.supportsMcpTools,
-          nativeThreadHasTurns,
+          session,
+          nativeThreadId: runningProviderThread.nativeThreadRef?.nativeId ?? providerThread.id,
         }),
       ]
         .filter((note) => note !== "")
