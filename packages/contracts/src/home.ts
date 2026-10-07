@@ -288,7 +288,7 @@ export type FleetCapabilitiesResult = typeof FleetCapabilitiesResult.Type;
 
 /**
  * The environment a cloud chat's host offers for running jobs in throwaway copies of the chat's
- * machine. Only `forks.run` and `forks.status` work there.
+ * machine. Only `forks.run`, `forks.status` and `forks.cancel` work there.
  */
 export const CLOUD_FORKS_ENVIRONMENT_ID = EnvironmentId.make("cloud:forks");
 
@@ -340,8 +340,21 @@ export const FleetForkStatusInput = Schema.Struct({
 });
 export type FleetForkStatusInput = typeof FleetForkStatusInput.Type;
 
+export const FleetForkCancelInput = Schema.Struct({
+  batchId: TrimmedNonEmptyString,
+  jobs: Schema.optional(
+    Schema.Array(NonNegativeInt).check(Schema.isMinLength(1), Schema.isMaxLength(64)).annotate({
+      description: "Indexes of the jobs to cancel. Defaults to every unfinished job.",
+    }),
+  ),
+});
+export type FleetForkCancelInput = typeof FleetForkCancelInput.Type;
+
 export const FleetForkJobState = Schema.Union([
-  Schema.Struct({ index: NonNegativeInt, state: Schema.Literals(["queued", "running"]) }),
+  Schema.Struct({
+    index: NonNegativeInt,
+    state: Schema.Literals(["queued", "running", "cancelled"]),
+  }),
   Schema.Struct({
     index: NonNegativeInt,
     state: Schema.Literal("exited"),
@@ -389,6 +402,7 @@ export const FleetRequest = Schema.Union([
   operation("requests.respond", FleetRequestRespondInput),
   operation("forks.run", FleetForkRunInput),
   operation("forks.status", FleetForkStatusInput),
+  operation("forks.cancel", FleetForkCancelInput),
 ]);
 export type FleetRequest = typeof FleetRequest.Type;
 export type FleetOperation = FleetRequest["op"];
@@ -409,6 +423,7 @@ export const FleetResults = {
   "requests.respond": OrchestrationV2DispatchCommandResult,
   "forks.run": FleetForkBatch,
   "forks.status": FleetForkBatch,
+  "forks.cancel": FleetForkBatch,
 } satisfies Record<FleetOperation, Schema.Top>;
 export type FleetResult<Op extends FleetOperation> = (typeof FleetResults)[Op]["Type"];
 export type FleetInput<Op extends FleetOperation> = Extract<FleetRequest, { op: Op }>["input"];

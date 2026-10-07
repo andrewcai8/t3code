@@ -13,7 +13,8 @@
  *
  * A batch outlives the call that started it. Capturing the chat's machine pauses it, which drops
  * the fleet connection the call came in on, so `run` only reserves the batch and answers with its
- * id; its caller starts the batch once that answer is delivered, and `status` reports on it. Batches live in memory: a host
+ * id; its caller starts the batch once that answer is delivered, `status` reports on it, and
+ * `cancel` ends jobs that hang. Batches live in memory: a host
  * restart ends them, and the sweep at start, then every few minutes, removes what they left.
  *
  * @module WorkerForks
@@ -22,6 +23,7 @@ import {
   type DiscoveredProvisionedEnvironment,
   type FleetActor,
   type FleetForkBatch,
+  type FleetForkCancelInput,
   type FleetForkJobState,
   type FleetForkRunInput,
   type FleetForkStatusInput,
@@ -92,6 +94,11 @@ export class WorkerForks extends Context.Service<
       source: Box,
       input: FleetForkStatusInput,
     ) => Effect.Effect<FleetForkBatch, OrchestratorMcpFailure>;
+    /** Ends the batch's named jobs, or all of them; a job already finished stays as it ended. */
+    readonly cancel: (
+      source: Box,
+      input: FleetForkCancelInput,
+    ) => Effect.Effect<FleetForkBatch, OrchestratorMcpFailure>;
     /**
      * Removes this host's copies and captures that no running batch owns: what a previous run
      * left, and what a batch's own clean-up could not remove.
@@ -105,6 +112,8 @@ interface Batch {
   readonly leaseId: string;
   readonly key: string;
   readonly jobs: Array<FleetForkJobState>;
+  /** One per job, done when it is cancelled; a job running then is interrupted. */
+  readonly cancels: ReadonlyArray<Deferred.Deferred<void>>;
   readonly done: Deferred.Deferred<void>;
   readonly start: Effect.Effect<void>;
   finishedAt: number | null;
@@ -175,6 +184,13 @@ const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
 const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const hasParentSegment = (path: string) => path.split("/").includes("..");
+
+const unfinished = (job: FleetForkJobState) => job.state === "queued" || job.state === "running";
+
+/** Records a job's next state. Exited, failed and cancelled are final. */
+const setJob = (batch: Batch, next: FleetForkJobState) => {
+  if (unfinished(batch.jobs[next.index]!)) batch.jobs[next.index] = next;
+};
 
 const view = (batch: Batch): FleetForkBatch => ({
   batchId: batch.id,
@@ -250,7 +266,7 @@ const make = Effect.gen(function* () {
               times: 3,
             }),
           );
-        batch.jobs[index] = { index, state: "running" };
+        setJob(batch, { index, state: "running" });
         yield* Effect.logInfo("worker fork started", { ...fields, forkId });
         return { forkId, startedAt: yield* Clock.currentTimeMillis };
       }),
@@ -312,7 +328,7 @@ const make = Effect.gen(function* () {
                 `The outputs are ${Math.ceil(copied.value.bytes / 1048576)} MiB compressed, over the ${Math.floor(limits.maxCopyBackBytes / 1048576)} MiB copy-back limit.`,
               );
           }
-          batch.jobs[index] = {
+          setJob(batch, {
             index,
             state: "exited",
             ...exit,
@@ -321,7 +337,7 @@ const make = Effect.gen(function* () {
             ...(outputsUri === undefined ? {} : { outputsUri }),
             ...(copiedTo === undefined ? {} : { copiedTo }),
             ...(problems.length === 0 ? {} : { outputsProblem: problems.join(" ") }),
-          };
+          });
         }),
       ({ forkId, startedAt }) =>
         Effect.gen(function* () {
@@ -336,7 +352,7 @@ const make = Effect.gen(function* () {
       Effect.catchTags({
         ForkMachineError: (error) =>
           Effect.sync(() => {
-            batch.jobs[index] = { index, state: "failed", message: error.message };
+            setJob(batch, { index, state: "failed", message: error.message });
           }).pipe(Effect.andThen(logStep(error))),
       }),
     );
@@ -382,9 +398,20 @@ const make = Effect.gen(function* () {
           Effect.forEach(
             input.jobs.map((_, index) => index),
             // Every job takes its chat's slot before the host's, so no two jobs wait on each other.
+            // Cancelling a job interrupts its wait for a slot, or kills its copy as it ends. A job
+            // handed a slot as it is cancelled checks once more before starting a copy.
             (index) =>
-              chat.copySlots.withSlot(
-                hostSlots.withSlot(runJob(batch, source, actor, input, limits, captureId, index)),
+              Effect.raceFirst(
+                chat.copySlots.withSlot(
+                  hostSlots.withSlot(
+                    Effect.suspend(() =>
+                      batch.jobs[index]!.state === "cancelled"
+                        ? Effect.void
+                        : runJob(batch, source, actor, input, limits, captureId, index),
+                    ),
+                  ),
+                ),
+                Deferred.await(batch.cancels[index]!),
               ),
             {
               concurrency: Math.min(input.concurrency ?? limits.maxPerChat, limits.maxPerChat),
@@ -459,6 +486,7 @@ const make = Effect.gen(function* () {
         leaseId: source.leaseId,
         key,
         jobs: input.jobs.map((_, index) => ({ index, state: "queued" as const })),
+        cancels: input.jobs.map(() => Deferred.makeUnsafe<void>()),
         done,
         start: Effect.suspend(() => {
           if (started) return Effect.void;
@@ -474,21 +502,48 @@ const make = Effect.gen(function* () {
       return { batch: view(batch), start: batch.start };
     });
 
-  const status: WorkerForks["Service"]["status"] = (source, input) =>
+  /** The batch, when it belongs to `source`'s chat. */
+  const owned = (source: Box, batchId: string) =>
     Effect.gen(function* () {
       yield* prune;
-      const batch = batches.get(input.batchId);
+      const batch = batches.get(batchId);
       if (batch === undefined || batch.leaseId !== source.leaseId)
         return yield* failure(
           "invalid_request",
-          `No fork batch ${input.batchId} for this chat. Finished batches are kept six hours, and a host restart ends running ones.`,
+          `No fork batch ${batchId} for this chat. Finished batches are kept six hours, and a host restart ends running ones.`,
         );
-      return yield* answer(batch, Duration.seconds(input.waitSeconds ?? 0));
+      return batch;
+    });
+
+  const status: WorkerForks["Service"]["status"] = (source, input) =>
+    owned(source, input.batchId).pipe(
+      Effect.flatMap((batch) => answer(batch, Duration.seconds(input.waitSeconds ?? 0))),
+    );
+
+  const cancel: WorkerForks["Service"]["cancel"] = (source, input) =>
+    Effect.gen(function* () {
+      const batch = yield* owned(source, input.batchId);
+      const indexes = input.jobs ?? batch.jobs.map((job) => job.index);
+      const missing = indexes.find((index) => index >= batch.jobs.length);
+      if (missing !== undefined)
+        return yield* failure("invalid_request", `Fork batch ${batch.id} has no job ${missing}.`);
+      const ending = indexes.filter((index) => unfinished(batch.jobs[index]!));
+      // Every job is marked before any is interrupted, so a slot one frees cannot start another.
+      for (const index of ending) batch.jobs[index] = { index, state: "cancelled" };
+      for (const index of ending) yield* Deferred.succeed(batch.cancels[index]!, undefined);
+      if (ending.length > 0)
+        yield* Effect.logInfo("worker fork jobs cancelled", {
+          leaseId: source.leaseId,
+          batchId: batch.id,
+          jobs: ending,
+        });
+      return view(batch);
     });
 
   return WorkerForks.of({
     run,
     status,
+    cancel,
     sweep: Effect.suspend(() => {
       const live = new Set(
         [...batches.values()].filter((batch) => batch.finishedAt === null).map((batch) => batch.id),

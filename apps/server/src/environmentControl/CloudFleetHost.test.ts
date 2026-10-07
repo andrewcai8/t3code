@@ -9,6 +9,7 @@ import {
   type FleetHostRequest,
   type FleetHostResponse,
   type FleetInvokeInput,
+  OrchestratorMcpFailure,
   ProviderInstanceId,
   ProvisionRequestId,
   ThreadId,
@@ -110,6 +111,7 @@ const setup = Effect.gen(function* () {
   const invoked: Array<[string, FleetInvokeInput]> = [];
   const opened: Array<string> = [];
   const forked: Array<[string, string, FleetInvokeInput["actor"], unknown]> = [];
+  const cancelled: Array<[string, unknown]> = [];
   const paused = new Set<string>();
   /** Each box's chat fields as its shell shows them now, or that its shell cannot be read. */
   const liveChats = new Map<string, Record<string, unknown> | "unreachable">();
@@ -263,6 +265,22 @@ const setup = Effect.gen(function* () {
         }),
       });
     },
+    // Batch 1 is chat 1's, so only box 1's lease may cancel it, as WorkerForks decides.
+    cancel: (source, input) => {
+      cancelled.push([source.leaseId, input]);
+      return source.leaseId === id(1)
+        ? Effect.succeed({
+            batchId: "batch-1",
+            state: "finished" as const,
+            jobs: [{ index: 0, state: "cancelled" as const }],
+          })
+        : Effect.fail(
+            new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "No fork batch batch-1 for this chat.",
+            }),
+          );
+    },
     sweep: Effect.void,
   });
   const layer = CloudFleetHost.layer.pipe(
@@ -312,8 +330,10 @@ const setup = Effect.gen(function* () {
     closed,
     oldBuilds,
     forked,
+    cancelled,
     started,
     liveChats,
+    requests,
   };
 });
 
@@ -777,6 +797,42 @@ it.effect("starts forks only for a chat in full-access/default mode", () =>
         expect(forked).toEqual([]);
       }),
     { interactionMode: "plan" },
+  ),
+);
+
+it.effect("lets a chat in any mode cancel its own fork batch, and no other chat's", () =>
+  withBoxes(
+    ({ relay, requests, responses, registrations, cancelled }) =>
+      Effect.gen(function* () {
+        const input = { batchId: "batch-1" };
+        const own = yield* relay(CLOUD_FORKS_ENVIRONMENT_ID, { op: "forks.cancel", input });
+        expect(own).toEqual({
+          requestId: "request-1",
+          result: {
+            batchId: "batch-1",
+            state: "finished",
+            jobs: [{ index: 0, state: "cancelled" }],
+          },
+        });
+        yield* Queue.take(registrations.get(origin(4))!);
+        yield* Queue.offer(requests.get(origin(4))!, {
+          requestId: "request-4",
+          environmentId: CLOUD_FORKS_ENVIRONMENT_ID,
+          invoke: {
+            actor: { environmentId: environment(4), threadId: ThreadId.make("chat-4") },
+            request: { op: "forks.cancel", input },
+          },
+        });
+        expect(yield* Queue.take(responses)).toMatchObject({
+          requestId: "request-4",
+          failure: { code: "invalid_request", message: "No fork batch batch-1 for this chat." },
+        });
+        expect(cancelled).toEqual([
+          [id(1), input],
+          [id(4), input],
+        ]);
+      }),
+    { runtimeMode: "approval-required", interactionMode: "plan" },
   ),
 );
 
