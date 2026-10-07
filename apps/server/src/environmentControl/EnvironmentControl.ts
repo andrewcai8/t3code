@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off cryptoRandomUUID:off - provider control crosses a Promise boundary, and a rebuild mints its own request id.
+// @effect-diagnostics globalDate:off globalTimers:off cryptoRandomUUID:off - provider control crosses a Promise boundary, a box is probed twice a few seconds apart, and a rebuild mints its own request id.
 // @effect-diagnostics nodeBuiltinImport:off - provider control resolves state in a Node filesystem boundary.
 import { ProvisionRetentionError } from "./retention.ts";
 import * as NodeFSP from "node:fs/promises";
@@ -532,11 +532,10 @@ export function createEnvironmentControl(
         });
         await reboot(lease);
         // A box already paused from its disk keeps that reason, so its chat gets one notice.
-        if (!lease.freshBoot)
-          await leaseRegistry.recordFreshBoot(lease.leaseId, {
-            at: new Date().toISOString(),
-            reason: "E2B could not resume it",
-          });
+        await leaseRegistry.recordFreshBoot(lease.leaseId, {
+          at: new Date().toISOString(),
+          reason: "E2B could not resume it",
+        });
         await wake(lease, owner.environmentId);
         unplaceable.delete(lease.leaseId);
         await leaseRegistry.recordReboot(lease.leaseId, {
@@ -564,10 +563,11 @@ export function createEnvironmentControl(
     Promise.all([pullBeforeStop(lease), backUpBeforeSleep(lease)]);
   /**
    * Why an awake box must be paused without its memory, or null when it may keep it. E2B captures
-   * a box's memory on pause, and one captured pinned or with envd not answering could not be
-   * resumed again. Dropping the memory ends whatever the chat was running, so it takes two
-   * unhealthy probes CONFIRM_PROBE_MS apart. A probe E2B's API failed to answer says nothing of
-   * the box, so the box keeps its memory.
+   * a box's memory on pause, and boxes captured with envd not answering could not be resumed
+   * again. Dropping the memory ends whatever the chat was running, including a turn or a job left
+   * running after one, so it takes two probes CONFIRM_PROBE_MS apart that each find envd silent, or
+   * the CPU pinned with memory nearly full (see boxHealth). A probe E2B's API failed to answer says
+   * nothing of the box, so the box keeps its memory.
    */
   const memoryUnsafe = async (lease: ProvisionedLease): Promise<string | null> => {
     const check = driver.healthCheck;
@@ -584,7 +584,7 @@ export function createEnvironmentControl(
     const second = await probe();
     if (second === null || second.kind === "healthy") return null;
     return second.kind === "pinned"
-      ? `its CPU was pinned at ${second.cpuPercent}%`
+      ? `its CPU was pinned at ${second.cpuPercent}% with its memory ${second.memoryPercent}% full`
       : "it had stopped answering";
   };
   /**
@@ -619,7 +619,7 @@ export function createEnvironmentControl(
   /**
    * Tells a chat whose box was booted fresh what that lost, once it is awake again. The record is
    * taken first, so concurrent wakes tell it once; a notice that fails puts it back for the next
-   * wake.
+   * wake, unless a newer fresh boot was recorded meanwhile.
    */
   const tellFreshBoot = async (lease: ProvisionedLease) => {
     if (!driver.tellChat || !leaseRegistry) return;

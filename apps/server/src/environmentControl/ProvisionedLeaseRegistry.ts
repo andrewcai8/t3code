@@ -292,6 +292,7 @@ export interface ProvisionedLeaseRegistry {
   readonly recordRebuild: (leaseId: string, rebuild: LeaseRebuild) => Promise<void>;
   /** Null clears it. */
   readonly recordReboot: (leaseId: string, reboot: LeaseReboot | null) => Promise<void>;
+  /** Keeps a fresh boot already recorded, so a chat not yet told gets one notice. */
   readonly recordFreshBoot: (leaseId: string, freshBoot: LeaseFreshBoot) => Promise<void>;
   /** Clears a lease's fresh boot and answers it, so only one caller ever tells its chat. */
   readonly takeFreshBoot: (leaseId: string) => Promise<LeaseFreshBoot | null>;
@@ -680,7 +681,7 @@ export function createProvisionedLeaseRegistry(
     recordFreshBoot: (leaseId, freshBoot) =>
       mutate((leases) => ({
         leases: leases.map((lease) =>
-          lease.leaseId === leaseId ? { ...lease, freshBoot } : lease,
+          lease.leaseId === leaseId && !lease.freshBoot ? { ...lease, freshBoot } : lease,
         ),
         value: undefined,
       })),

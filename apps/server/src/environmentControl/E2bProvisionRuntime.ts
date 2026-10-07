@@ -575,10 +575,8 @@ with urllib.request.urlopen(request, timeout=30) as response:
       if (!sandbox) return null;
       return readBoxHealth({
         // Longer than the probe waits, so the probe's own limit is what calls envd unresponsive.
-        answer: sandbox.commands
-          .run("cat /proc/loadavg; nproc", { timeoutMs: 10_000, requestTimeoutMs: 10_000 })
-          .then((result) => result.stdout),
-        cpuSamples: (start) =>
+        answered: sandbox.commands.run("true", { timeoutMs: 10_000, requestTimeoutMs: 10_000 }),
+        samples: (start) =>
           client.Sandbox.getMetrics(sandboxId, { start, requestTimeoutMs: 5_000 }),
       });
     },
