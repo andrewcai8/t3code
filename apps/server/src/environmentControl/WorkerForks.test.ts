@@ -48,13 +48,22 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
     let started = 0;
     let running = 0;
     let mostRunning = 0;
+    const capturesEntered = yield* Queue.unbounded<string>();
+    let capturing = 0;
+    let mostCapturing = 0;
+    let captureGate: Deferred.Deferred<void> | null = null;
     let providerWorks = true;
     let loseStartAnswer = false;
     let busyStarts = 0;
     const machines = ForkMachines.ForkMachines.of({
       settings: Effect.succeed(settings),
       capture: (sandboxId, tag) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          capturing += 1;
+          mostCapturing = Math.max(mostCapturing, capturing);
+          yield* Queue.offer(capturesEntered, tag.batchId);
+          if (captureGate !== null) yield* Deferred.await(captureGate);
+          capturing -= 1;
           captures.push(`${sandboxId}@${tag.batchId}`);
           const captureId = `capture-${captures.length}`;
           stored.set(captureId, { host: tag.host, batchId: tag.batchId });
@@ -165,6 +174,11 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
         providerWorks = works;
       },
       mostRunning: () => mostRunning,
+      mostCapturing: () => mostCapturing,
+      capturesEntered,
+      holdCaptures: (gate: Deferred.Deferred<void>) => {
+        captureGate = gate;
+      },
     };
   });
 
@@ -447,17 +461,81 @@ it.effect("sweeps what batches left behind, sparing a running batch and other ho
   ),
 );
 
-it.effect("runs one batch per chat: another waits for it, the same one joins it", () =>
+it.effect("runs a short batch while a long one is still going, and joins a retried one", () =>
   withForks({}, (fake) =>
     Effect.gen(function* () {
-      const first = yield* run({ jobs: [{ command: "wait" }] }).pipe(Effect.forkChild);
+      const forks = yield* WorkerForks.WorkerForks;
+      const long = yield* forks.run(box(), actor, { jobs: [{ command: "wait" }] });
+      yield* long.start;
       yield* Queue.take(fake.entered);
-      const other = yield* run({ jobs: [{ command: "exit 0" }] }).pipe(Effect.flip);
-      expect(other.code).toBe("invalid_request");
-      expect(other.message).toMatch(/^This chat already has fork batch .+ running\./);
+      const short = yield* run({ jobs: [{ command: "exit 0" }] });
+      expect([short.state, short.jobs.map((job) => job.state)]).toEqual(["finished", ["exited"]]);
+      const retried = yield* forks.run(box(), actor, { jobs: [{ command: "wait" }] });
+      expect(retried.batch.batchId).toBe(long.batch.batchId);
       yield* Deferred.succeed(fake.gate, undefined);
-      yield* Fiber.join(first);
-      expect(fake.captures).toHaveLength(1);
+      const finished = yield* forks.status(box(), {
+        batchId: long.batch.batchId,
+        waitSeconds: 45,
+      });
+      expect(finished.state).toBe("finished");
+      expect(fake.captures).toEqual([
+        `sandbox-1@${long.batch.batchId}`,
+        `sandbox-1@${short.batchId}`,
+      ]);
+    }),
+  ),
+);
+
+it.effect("holds a chat's copy limit across its batches, and captures them one at a time", () =>
+  withForks({ maxPerChat: 2 }, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      const captured = yield* Deferred.make<void>();
+      fake.holdCaptures(captured);
+      const twoWaits = [{ command: "wait" }, { command: "wait" }];
+      const first = yield* forks.run(box(), actor, { jobs: twoWaits });
+      const second = yield* forks.run(box(), actor, { jobs: twoWaits, concurrency: 2 });
+      yield* first.start;
+      yield* second.start;
+      yield* Queue.take(fake.capturesEntered);
+      yield* Deferred.succeed(captured, undefined);
+      yield* Queue.take(fake.capturesEntered);
+      yield* Queue.take(fake.entered);
+      yield* Queue.take(fake.entered);
+      yield* Deferred.succeed(fake.gate, undefined);
+      const batches = yield* Effect.forEach([first, second], ({ batch }) =>
+        forks.status(box(), { batchId: batch.batchId, waitSeconds: 45 }),
+      );
+      expect(batches.flatMap((batch) => batch.jobs.map((job) => job.state))).toEqual([
+        "exited",
+        "exited",
+        "exited",
+        "exited",
+      ]);
+      expect(fake.mostRunning()).toBe(2);
+      expect(fake.captures).toHaveLength(2);
+      expect(fake.mostCapturing()).toBe(1);
+    }),
+  ),
+);
+
+it.effect("refuses a fifth running batch for one chat, naming the four it has", () =>
+  withForks({}, () =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      const reserved = yield* Effect.forEach([0, 1, 2, 3], (code) =>
+        forks.run(box(), actor, { jobs: [{ command: `exit ${code}` }] }),
+      );
+      const ids = reserved.map(({ batch }) => batch.batchId);
+      const fifth = yield* forks
+        .run(box(), actor, { jobs: [{ command: "exit 4" }] })
+        .pipe(Effect.flip);
+      expect([fifth.code, fifth.message]).toEqual([
+        "invalid_request",
+        `This chat already has 4 fork batches running (${ids.join(", ")}). Wait for one with t3_fork_status, then start the next.`,
+      ]);
+      const retried = yield* forks.run(box(), actor, { jobs: [{ command: "exit 2" }] });
+      expect(retried.batch.batchId).toBe(ids[2]);
     }),
   ),
 );
