@@ -37,6 +37,7 @@ import { credentialDestinations } from "./credentialDestinations.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 import { GuestNotServing } from "./ProvisionControl.ts";
 import { backUpBox } from "./boxBackup.ts";
+import { heaviestAgentProcesses, judgeHealth } from "./boxHealth.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -509,6 +510,64 @@ with urllib.request.urlopen(request, timeout=30) as response:
         root: manifest.preparation.root,
         deadline,
       });
+    },
+    /**
+     * Reads whether an awake box is safe to pause: E2B's CPU samples for the last minute and a
+     * trivial command envd must answer within five seconds. Null for a box that is not awake.
+     */
+    probeHealth: async (operation: ProvisionOperation, sandboxId: string) => {
+      const sandbox = await connectAwake(operation, sandboxId, Date.now() + 15_000).catch(
+        (error: unknown) => {
+          if (error instanceof SandboxNotFoundError) return null;
+          throw error;
+        },
+      );
+      if (!sandbox) return null;
+      const since = new Date(Date.now() - 60_000);
+      const [metrics, answer] = await Promise.all([
+        client.Sandbox.getMetrics(sandboxId, { start: since, requestTimeoutMs: 5_000 }).catch(
+          () => [],
+        ),
+        sandbox.commands
+          .run("cat /proc/loadavg; nproc", { timeoutMs: 5_000, requestTimeoutMs: 5_000 })
+          .then((result) => result.stdout)
+          .catch(() => null),
+      ]);
+      return judgeHealth({
+        answer,
+        cpuSamples: metrics
+          .filter((sample) => sample.timestamp >= since)
+          .map((sample) => sample.cpuUsedPct),
+      });
+    },
+    /**
+     * Stops the heaviest processes the chat's agents left running on a pinned box, never its T3
+     * server, and answers what it stopped.
+     */
+    relieve: async (
+      operation: ProvisionOperation,
+      sandboxId: string,
+      manifest: ProvisionPreparationManifest,
+    ) => {
+      const sandbox = await connectAwake(operation, sandboxId, Date.now() + 30_000);
+      if (!sandbox) return [];
+      const limits = { timeoutMs: 10_000, requestTimeoutMs: 10_000 };
+      const [ps, server] = await Promise.all([
+        sandbox.commands.run("ps -eo pid=,ppid=,pcpu=,args=", limits),
+        sandbox.files.read(`${manifest.preparation.root}/server.json`, {
+          requestTimeoutMs: 10_000,
+        }),
+      ]);
+      const serverPid = Number((JSON.parse(server) as { pid?: unknown }).pid);
+      if (!Number.isInteger(serverPid)) return [];
+      const heavy = heaviestAgentProcesses(ps.stdout, serverPid);
+      if (heavy.length === 0) return [];
+      const pids = heavy.map((process) => process.pid).join(" ");
+      await sandbox.commands.run(
+        `kill -TERM ${pids} 2>/dev/null; sleep 3; kill -KILL ${pids} 2>/dev/null; true`,
+        limits,
+      );
+      return heavy.map((process) => `${process.command} (${process.cpuPercent}% CPU)`);
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {
       try {

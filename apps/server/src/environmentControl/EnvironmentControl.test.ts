@@ -15,6 +15,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { createProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { boxShell, boxThread } from "./shellTestFixture.ts";
+import type { BoxHealth } from "./boxHealth.ts";
 
 /**
  * Leases live in SQLite beside provision_operations, so tests need a client.
@@ -1673,5 +1674,119 @@ describe("a cloud machine backed up before it sleeps", () => {
         ]);
       },
     );
+  });
+});
+
+describe("a cloud machine checked before it sleeps", () => {
+  async function withIdleBox(
+    probes: Array<BoxHealth | null>,
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      reports: string[];
+      manager: ReturnType<typeof createEnvironmentControl>;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.markActive({
+        leaseId: "lease",
+        remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+      });
+      const calls: string[] = [];
+      const reports: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async ({ sandboxId }) => {
+        calls.push(`pause:${sandboxId}`);
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          healthCheck: {
+            probe: async () => {
+              const health = probes.shift() ?? null;
+              calls.push(`probe:${health?.kind ?? "none"}`);
+              return health;
+            },
+            relieve: async () => {
+              calls.push("relieve");
+              return ["node vitest --watch (99% CPU)"];
+            },
+          },
+        },
+        registry,
+        async () => ({ activity: "idle" }),
+        async () => {},
+        (message, fields) => void reports.push(`${message}: ${String(fields.cause)}`),
+      );
+      await test({ registry, calls, reports, manager });
+    });
+  }
+  const expire = (registry: ReturnType<typeof createProvisionedLeaseRegistry>) =>
+    registry.touch("lease", new Date("2026-01-01T00:00:00.000Z"), "host");
+
+  it("leaves a box whose envd does not answer awake, and pauses it once it does", async () => {
+    await withIdleBox(
+      [{ kind: "unresponsive" }, { kind: "healthy" }],
+      async ({ registry, calls, reports, manager }) => {
+        await expire(registry);
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:unresponsive"]);
+        expect((await registry.findById("lease"))?.state).toBe("active");
+        expect(reports).toEqual([
+          "cloud box is unresponsive; not pausing it now: envd did not answer, attempt 1",
+        ]);
+
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:unresponsive", "probe:healthy", "pause:sandbox"]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+      },
+    );
+  });
+
+  it("stops a box's heaviest leftovers once it stays pinned, then pauses it", async () => {
+    const pinned = { kind: "pinned", cpuPercent: 99 } as const;
+    await withIdleBox(
+      [pinned, pinned, pinned, { kind: "healthy" }],
+      async ({ registry, calls, reports, manager }) => {
+        await expire(registry);
+        await manager.reapExpiredLeases();
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual(["probe:pinned", "probe:pinned"]);
+
+        await manager.reapExpiredLeases();
+        expect(calls).toEqual([
+          "probe:pinned",
+          "probe:pinned",
+          "probe:pinned",
+          "relieve",
+          "probe:healthy",
+          "pause:sandbox",
+        ]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+        expect(reports.at(-1)).toBe(
+          "cloud box stayed pinned; stopped its agents' heaviest leftovers to pause it: node vitest --watch (99% CPU)",
+        );
+      },
+    );
+  });
+
+  it("refuses a client's pause of a box that is not responding", async () => {
+    await withIdleBox([{ kind: "unresponsive" }], async ({ registry, calls, manager }) => {
+      expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({
+        kind: "refused",
+        reason: "unknown",
+        message: "This machine is not responding normally, so it is not paused yet. Retry shortly.",
+      });
+      expect(calls).toEqual(["probe:unresponsive"]);
+      expect((await registry.findById("lease"))?.state).toBe("active");
+    });
   });
 });

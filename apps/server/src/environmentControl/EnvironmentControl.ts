@@ -143,6 +143,7 @@ import { makeWakeAhead } from "./wakeAhead.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
+import type { BoxHealth } from "./boxHealth.ts";
 import {
   repositoryIsPrivate,
   withinBudget,
@@ -185,6 +186,12 @@ const refusalMessages = {
   unsupported: "The controller needs the manual Stop upgrade before this host can be stopped.",
   conflict: "Another compute command is in progress. Refresh and retry.",
 };
+/** A pause or removal of a box not safe to pause right now. */
+const unhealthyRefusal = {
+  kind: "refused",
+  reason: "unknown",
+  message: "This machine is not responding normally, so it is not paused yet. Retry shortly.",
+} as const;
 const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult => ({
   kind: "refused",
   reason,
@@ -243,6 +250,19 @@ interface BoxBackup {
 }
 
 /**
+ * Reading whether a box is safe to pause, and relieving one that stays pinned. `probe` answers
+ * null for a box it does not check, such as one not awake; `relieve` stops the heaviest processes
+ * the chat's agents left running, never the T3 server, and answers what it stopped.
+ */
+interface BoxHealthCheck {
+  readonly probe: (lease: ProvisionedLease) => Promise<BoxHealth | null>;
+  readonly relieve: (lease: ProvisionedLease) => Promise<ReadonlyArray<string>>;
+}
+
+/** Pause attempts in a row a pinned box waits through before its agents' leftovers are stopped. */
+const MAX_PINNED_PROBES = 3;
+
+/**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
  * save, or a release ahead of its Mac's deadline. `reopen` when the chat is
  * off its Mac but must not sleep, such as one still working at the deadline,
@@ -260,6 +280,7 @@ export function createEnvironmentControl(
     readonly idleUpgrade?: IdleUpgrade;
     readonly accountRotation?: AccountRotation;
     readonly boxBackup?: BoxBackup;
+    readonly healthCheck?: BoxHealthCheck;
   },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
@@ -349,6 +370,49 @@ export function createEnvironmentControl(
   const backUpBeforeSleep = async (lease: ProvisionedLease): Promise<void> => {
     if (!lease.remoteAccess || lease.state !== "active") return;
     await backUp(lease, driver.boxBackup?.sleepBudgetMs ?? 0, "before sleeping");
+  };
+  /** Unhealthy probes in a row per lease, reset by a healthy one. */
+  const unhealthyProbes = new Map<string, number>();
+  /**
+   * Whether an awake box may be paused now. E2B captures a box's memory on pause, and one paused
+   * pinned or with envd not answering could not be resumed again. Such a box waits for a later
+   * attempt; one pinned through MAX_PINNED_PROBES attempts has its agents' leftovers stopped and
+   * is paused if envd still answers.
+   */
+  const safeToSleep = async (lease: ProvisionedLease): Promise<boolean> => {
+    const check = driver.healthCheck;
+    if (!check || lease.state !== "active") return true;
+    const probe = () => check.probe(lease).catch((): BoxHealth => ({ kind: "unresponsive" }));
+    let health = await probe();
+    if (health === null || health.kind === "healthy") {
+      unhealthyProbes.delete(lease.leaseId);
+      return true;
+    }
+    const probes = (unhealthyProbes.get(lease.leaseId) ?? 0) + 1;
+    unhealthyProbes.set(lease.leaseId, probes);
+    if (health.kind === "pinned" && probes >= MAX_PINNED_PROBES) {
+      const stopped = await check.relieve(lease).catch((cause: unknown) => {
+        reportFailure("cloud box leftovers could not be stopped", { chatId: lease.leaseId, cause });
+        return [];
+      });
+      reportFailure("cloud box stayed pinned; stopped its agents' heaviest leftovers to pause it", {
+        chatId: lease.leaseId,
+        cause: stopped.length > 0 ? stopped.join("; ") : "none found",
+      });
+      health = await probe();
+      if (health === null || health.kind !== "unresponsive") {
+        unhealthyProbes.delete(lease.leaseId);
+        return true;
+      }
+    }
+    reportFailure(`cloud box is ${health.kind}; not pausing it now`, {
+      chatId: lease.leaseId,
+      cause:
+        health.kind === "pinned"
+          ? `CPU ${health.cpuPercent}%, attempt ${probes}`
+          : `envd did not answer, attempt ${probes}`,
+    });
+    return false;
   };
   const beforeSleep = (lease: ProvisionedLease) =>
     Promise.all([pullBeforeStop(lease), backUpBeforeSleep(lease)]);
@@ -475,6 +539,7 @@ export function createEnvironmentControl(
           upgrades.push(lease);
           continue;
         }
+        if (!(await safeToSleep(lease))) continue;
         const release =
           lease.state === "releasing"
             ? "started"
@@ -604,6 +669,7 @@ export function createEnvironmentControl(
       leaseOperations.set(lease.sandboxId, { action: "dispose" });
       try {
         if (lease.state !== "paused") {
+          if (!(await safeToSleep(lease))) return unhealthyRefusal;
           await beforeSleep(lease);
           const result = await driver.pause({
             sandboxId: lease.sandboxId,
@@ -660,6 +726,7 @@ export function createEnvironmentControl(
             reason: "unknown",
             message: "Another chat on this machine is still working.",
           };
+        if (!(await safeToSleep(lease))) return unhealthyRefusal;
         await beforeSleep(lease);
         const result = await driver.pause({
           sandboxId: input.sandboxId,
@@ -1283,17 +1350,9 @@ export const layer = Layer.effect(
               boxBackup: {
                 sleepBudgetMs: SLEEP_BACKUP_BUDGET_MS,
                 run: async (lease, deadline) => {
-                  if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId))
-                    return null;
-                  const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(
-                    () => null,
-                  );
-                  if (
-                    !operation ||
-                    operation.state.kind !== "ready" ||
-                    operation.state.allocation.resource.provider !== "e2b"
-                  )
-                    return null;
+                  const box = await e2bBox(lease);
+                  if (!box) return null;
+                  const { operation } = box;
                   const manifest = await manifests.load(lease.leaseId);
                   const token = config.provisioning?.githubToken;
                   const outputsUri = config.provisioning?.workerForks?.outputsUri;
@@ -1308,7 +1367,7 @@ export const layer = Layer.effect(
                       : undefined;
                   return makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).backUp(
                     operation,
-                    operation.state.allocation.resource.sandboxId,
+                    box.sandboxId,
                     manifest,
                     {
                       leaseId: lease.leaseId,
@@ -1328,6 +1387,27 @@ export const layer = Layer.effect(
                     },
                     deadline,
                   );
+                },
+              },
+              healthCheck: {
+                probe: async (lease) => {
+                  const box = await e2bBox(lease);
+                  return box
+                    ? makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).probeHealth(
+                        box.operation,
+                        box.sandboxId,
+                      )
+                    : null;
+                },
+                relieve: async (lease) => {
+                  const box = await e2bBox(lease);
+                  return box
+                    ? makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).relieve(
+                        box.operation,
+                        box.sandboxId,
+                        await manifests.load(lease.leaseId),
+                      )
+                    : [];
                 },
               },
               // A box this manager provisioned resumes through the runtime that
@@ -1511,6 +1591,18 @@ export const layer = Layer.effect(
       await reconnecting.get(lease.leaseId);
       if (!namespaceProxies.has(lease.namespaceProxy.proxyId))
         await reconnectProxy(lease, lease.namespaceProxy);
+    };
+    /** The ready E2B box this manager provisioned for a lease; null for any other lease. */
+    const e2bBox = async (lease: ProvisionedLease) => {
+      if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId)) return null;
+      const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(() => null);
+      if (
+        !operation ||
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "e2b"
+      )
+        return null;
+      return { operation, sandboxId: operation.state.allocation.resource.sandboxId };
     };
     /** The chat behind a lease, when it runs on the Namespace instance engine. */
     const instanceChat = async (sandboxId: string) => {
