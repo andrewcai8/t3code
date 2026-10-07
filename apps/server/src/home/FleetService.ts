@@ -260,13 +260,16 @@ const make = Effect.gen(function* () {
 
     "threads.read": (input) =>
       Effect.gen(function* () {
+        const shell = yield* threads
+          .getThreadShell(input.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        if (shell === null || shell.deletedAt !== null) {
+          return yield* failure("thread_not_found", `Thread ${input.threadId} was not found.`);
+        }
         const target = yield* threads
           .getThreadRecords(input.threadId, ["runs", "runtimeRequests", "contextTransfers"])
           .pipe(Effect.mapError(threadManagementFailure));
-        if (target.thread.deletedAt !== null) {
-          return yield* failure("thread_not_found", `Thread ${input.threadId} was not found.`);
-        }
-        return (yield* readThreadPage(threads, target, input, environmentId)).result;
+        return (yield* readThreadPage(threads, target, shell, input, environmentId)).result;
       }),
 
     "threads.launch": (input, actor) =>

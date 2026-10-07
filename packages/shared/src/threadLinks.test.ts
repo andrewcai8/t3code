@@ -6,14 +6,16 @@ describe("thread links", () => {
   it("round-trips ids that contain URL characters", () => {
     const link = formatThreadLink({
       environmentId: "studio mac",
-      threadId: "home-launched:mcp:1/2",
+      threadId: "mcp:(1)/2",
       title: "Fix [the] build\nnow",
     });
     const href = /\]\((.+)\)$/.exec(link)![1]!;
     expect(link.startsWith("[Fix the build now](")).toBe(true);
+    // A raw parenthesis would end the Markdown link early.
+    expect(href).not.toMatch(/[()]/);
     expect(parseThreadLinkHref(href)).toEqual({
       environmentId: "studio mac",
-      threadId: "home-launched:mcp:1/2",
+      threadId: "mcp:(1)/2",
     });
   });
 

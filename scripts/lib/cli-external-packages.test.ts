@@ -92,6 +92,7 @@ describe("selectCliRuntimeExternalDependencies", () => {
         "@ff-labs/fff-node",
         "@napi-rs/keyring",
         "node-pty",
+        "playwright-core",
         "undici",
       ],
     );

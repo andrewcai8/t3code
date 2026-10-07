@@ -14,7 +14,7 @@ import * as FleetService from "../home/FleetService.ts";
 import * as HomeService from "../home/HomeService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
-import { readCaller, readFullAccessCaller } from "./threadAccess.ts";
+import { assertFullAccess, assertLiveCaller, readCaller } from "./threadAccess.ts";
 
 /** Services a tool needs to declare when it routes Home calls. */
 export const homeRoutingDependencies = [
@@ -82,7 +82,10 @@ export const CHANGES_STATE = {
  * mode makes it read-only everywhere.
  */
 export const readHomeChangeCaller = Effect.fn("mcp.readHomeChangeCaller")(function* () {
-  return yield* readFullAccessCaller("Home makes changes only in full-access/default mode.");
+  const context = yield* readCaller();
+  yield* assertLiveCaller(context);
+  yield* assertFullAccess(context, "Home makes changes only in full-access/default mode.");
+  return context;
 });
 
 /** Runs a fleet operation as Home, here or in the environment it names. */

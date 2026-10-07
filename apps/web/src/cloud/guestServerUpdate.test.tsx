@@ -36,6 +36,13 @@ vi.mock("~/state/use-atom-command", () => ({
       ? testState.upgradeThroughManager
       : testState.updateServer,
 }));
+// The guest's own session grants nothing: a manager upgrade must not need it.
+const unauthorizedSession = AsyncResult.success({ authenticated: false });
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => unauthorizedSession }));
+vi.mock("~/state/session", () => ({
+  environmentSession: { sessionStateAtom: () => "session" },
+}));
+vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: { get: () => unauthorizedSession } }));
 vi.mock("~/cloud/provisionedSandboxLeases", () => ({
   provisionedSandboxOwnedByEnvironment: () => testState.lease,
 }));

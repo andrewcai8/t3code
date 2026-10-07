@@ -1,3 +1,11 @@
+import { useAtomValue } from "@effect/atom-react";
+import {
+  AuthEnvironmentMaintainScope,
+  type AuthSessionState,
+  sessionGrantsScope,
+} from "@t3tools/contracts";
+import type { AsyncResult } from "effect/reactivity";
+import { environmentSession } from "~/state/session";
 import type {
   EnvironmentId,
   ServerInstallation,
@@ -15,6 +23,7 @@ import { requestConfirmDialog } from "~/confirmDialog";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { serverEnvironment, updateOutdatedServer } from "~/state/server";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { manualServerUpdateCommand } from "~/versionSkew";
 import {
@@ -66,7 +75,16 @@ function useServerUpdate() {
   const upgradeGuest = useGuestServerUpgrade();
   return async (target: ServerUpdateTarget, failureTitle = "Server update failed") => {
     const { environmentId, serverLabel, selfUpdate, targetVersion } = target;
-    if (pendingUpdateEnvironmentIds.has(environmentId)) return;
+    // A guest upgraded through its manager is authorized there, not by the guest's own grant.
+    const viaManager = guestServerUpdateLabel(environmentId, selfUpdate) !== null;
+    if (
+      (!viaManager &&
+        !canUpdateServer(
+          appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId)),
+        )) ||
+      pendingUpdateEnvironmentIds.has(environmentId)
+    )
+      return;
     pendingUpdateEnvironmentIds.add(environmentId);
     try {
       const guestUpgrade = upgradeGuest(target);
@@ -155,6 +173,11 @@ export function ServerUpdatesAction({
   );
 }
 
+function canUpdateServer(result: AsyncResult.AsyncResult<AuthSessionState, unknown>): boolean {
+  if (result._tag !== "Success" || !result.value.authenticated) return false;
+  return sessionGrantsScope(result.value, AuthEnvironmentMaintainScope);
+}
+
 /**
  * One-row status for an in-flight server update: "Downloading…" then
  * "Restarting…". The update is a wait, not a warning: a single pulsing dot
@@ -208,6 +231,12 @@ export function ServerUpdateAction({
   appearance = "button",
 }: Omit<ServerUpdateTarget, "continueThreadsAfterServerUpdate"> & UpdateButtonProps) {
   const isDesktopAppUpdate = selfUpdate === "desktop-managed";
+  const sessionStateAtom = environmentSession.sessionStateAtom(environmentId);
+  const sessionState = useAtomValue(sessionStateAtom);
+  const guestLabel = guestServerUpdateLabel(environmentId, selfUpdate);
+  const mayUpdate = () =>
+    guestLabel !== null || canUpdateServer(appAtomRegistry.get(sessionStateAtom));
+  const canUpdate = guestLabel !== null || canUpdateServer(sessionState);
   const continueThreadsAfterServerUpdate = useEnvironmentSettings(
     environmentId,
     (settings) => settings.continueThreadsAfterServerUpdate,
@@ -236,7 +265,7 @@ export function ServerUpdateAction({
   });
 
   const handleUpdate = async () => {
-    if (pendingUpdateEnvironmentIds.has(environmentId)) {
+    if (!mayUpdate() || pendingUpdateEnvironmentIds.has(environmentId)) {
       return;
     }
     if (isDesktopAppUpdate) {
@@ -251,6 +280,7 @@ export function ServerUpdateAction({
         return;
       }
     }
+    if (!mayUpdate()) return;
     await update({
       environmentId,
       serverLabel,
@@ -270,7 +300,6 @@ export function ServerUpdateAction({
     );
   }
 
-  const guestLabel = guestServerUpdateLabel(environmentId, selfUpdate);
   const manualCommand =
     selfUpdate === null && guestLabel === null
       ? manualServerUpdateCommand(targetVersion, installation)
@@ -296,6 +325,7 @@ export function ServerUpdateAction({
               variant="ghost-muted"
               className={className}
               aria-label={`${actionLabel} for ${serverLabel}`}
+              disabled={manualCommand === null && !canUpdate}
               onClick={onClick}
             />
           }
@@ -308,7 +338,13 @@ export function ServerUpdateAction({
   }
 
   return (
-    <Button size={size} variant={variant} className={className} onClick={onClick}>
+    <Button
+      size={size}
+      variant={variant}
+      className={className}
+      disabled={manualCommand === null && !canUpdate}
+      onClick={onClick}
+    >
       {actionLabel}
     </Button>
   );
