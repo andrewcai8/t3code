@@ -6,6 +6,7 @@ import {
   ClaudeSettings,
   CommandId,
   MessageId,
+  OrchestrationV2ThreadShell,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -24,10 +25,15 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
+import { makeAccountRotation } from "../environmentControl/accountSwitch.ts";
+import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
+import { ownerChat } from "../environmentControl/provisionedChats.ts";
+import { boxShell } from "../environmentControl/shellTestFixture.ts";
 import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -48,6 +54,10 @@ const nativeSession = "native-session-1";
 const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
 const modelSelection = { instanceId: claudeInstanceId, model: "claude-sonnet-4-6" };
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const encodeShellThread = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2ThreadShell));
+/** A thread as a box's shell route sends it. */
+const shellThread = (shell: OrchestrationV2ThreadShell) =>
+  JSON.parse(JSON.stringify(encodeShellThread(shell))) as Record<string, unknown>;
 
 /** One Claude CLI process the adapter started: the login it ran with and the session it resumed. */
 interface OpenedQuery {
@@ -527,6 +537,172 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               [
                 ["failed", 1],
                 ["running", 2],
+                ["completed", 3],
+              ],
+            );
+            assert.deepEqual(
+              (yield* Ref.get(opened)).map(({ token }) => token),
+              ["token-a", "token-b"],
+            );
+          }).pipe(Effect.provide(boxRuntime(opened, cwd)));
+        }),
+      ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect(
+    "rotates a chat whose limit landed with a background wake queued behind it, then runs the wake",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("provider-account-switch-wake");
+          const opened = yield* Ref.make<ReadonlyArray<OpenedQuery>>([]);
+
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
+            const leases = createProvisionedLeaseRegistry(yield* SqlClient.SqlClient);
+            // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- the host's account rotation is Promise-facing, and reaches the box through this
+            const onBox = Effect.runPromiseWith(
+              yield* Effect.context<ProviderAccountSwitch.ProviderAccountSwitch>(),
+            );
+            const latestQuery = Ref.get(opened).pipe(Effect.map((all) => all.at(-1)!));
+
+            yield* saveInstance(claudeInstanceId, {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-a", sensitive: true }],
+            });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("create"),
+              threadId,
+              projectId: ProjectId.make("project-app"),
+              title: "Account switch",
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+              createdBy: "user",
+              creationSource: "web",
+            });
+            const firstRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            );
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("first"),
+              threadId,
+              messageId: MessageId.make("first"),
+              text: "Build it.",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            yield* worker.drain();
+            yield* Fiber.join(firstRunning);
+            // A background task ends while the turn that hits the limit is still settling: its
+            // wake queues behind that turn, as the provider continuation service sends it.
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("wake"),
+              threadId,
+              messageId: MessageId.make("wake"),
+              text: "Background task completed.",
+              attachments: [],
+              dispatchMode: { type: "queue_after_active" },
+              createdBy: "agent",
+              creationSource: "provider",
+            });
+            const limited = yield* watch(
+              (event) => event.type === "run.updated" && event.payload.status === "failed",
+            );
+            yield* Queue.offer((yield* latestQuery).messages, result("limited", true));
+            yield* Fiber.join(limited);
+            yield* worker.drain();
+            const before = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(
+              before.runs.map((run) => run.status),
+              ["failed", "queued"],
+            );
+
+            yield* Effect.promise(async () => {
+              await leases.register({
+                leaseId: "lease-1",
+                sandboxId: "box-1",
+                providerInstanceId: "claude-a",
+                owner: { environmentId: "box-env", threadId },
+              });
+              await leases.markActive({
+                leaseId: "lease-1",
+                remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+              });
+            });
+            const readShell = Effect.gen(function* () {
+              const shell = yield* orchestrator.getThreadShell(threadId);
+              return boxShell([shellThread(shell!)]);
+            });
+            const outcomes: Array<unknown> = [];
+            const rotation = makeAccountRotation({
+              ports: {
+                readShell: () => onBox(readShell),
+                accountDriver: async () => "claudeAgent",
+                pickAccount: async (_driver, exclude) =>
+                  exclude.has("claude-b")
+                    ? null
+                    : {
+                        instanceId: "claude-b",
+                        name: "Claude claude-b",
+                        credential: {
+                          kind: "environment",
+                          variables: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-b" }],
+                        },
+                      },
+                sendSwitch: (_lease, input) => onBox(accounts.switchAccount(input)),
+              },
+              leases,
+              enabled: async () => true,
+              holdBox: async () => () => {},
+              report: (_lease, outcome) => outcomes.push(outcome),
+            });
+            const lease = (yield* Effect.promise(() => leases.findById("lease-1")))!;
+            const chat = ownerChat(yield* readShell, threadId)!;
+            assert.isTrue(yield* Effect.promise(() => rotation.due(lease, chat)));
+
+            const continuationRunning = yield* watch(
+              (event) =>
+                event.type === "provider-turn.updated" &&
+                event.payload.status === "running" &&
+                event.payload.id !== before.providerTurns[0]!.id,
+            );
+            yield* Effect.promise(() => rotation.start(lease));
+            assert.deepEqual(outcomes, [
+              {
+                kind: "done",
+                result: { kind: "switched", account: "Claude claude-b", continued: true },
+              },
+            ]);
+            yield* worker.drain();
+            yield* Fiber.join(continuationRunning);
+
+            const wakeSettled = yield* watch(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === before.runs[1]!.id &&
+                event.payload.status === "completed",
+            );
+            yield* Queue.offer((yield* latestQuery).messages, result("continued", false));
+            yield* worker.drain();
+            yield* Fiber.join(wakeSettled);
+
+            const after = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(
+              after.runs.map((run) => [run.status, run.ordinal]),
+              [
+                ["failed", 1],
+                ["completed", 2],
                 ["completed", 3],
               ],
             );
