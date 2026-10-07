@@ -769,9 +769,13 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         Option.isSome(woken),
         "client B: the host did not wake the unsettled chat's box",
       );
+      // The box may already be active on B's first list, so watch B for a while after the wake
+      // before judging that it never dialed the chat it did not open.
+      yield* Effect.sleep(SECOND_CLIENT_IDLE);
       const idle = (yield* SubscriptionRef.get(log)).filter(
         (entry) => entry.environment === "second-box",
       );
+      yield* check(idle.length > 0, "client B recorded no state for the box it lists");
       yield* check(
         idle.every((entry) => entry.phase === "available"),
         `client B dialed a chat it did not open: ${idle.map((entry) => entry.phase).join(", ")}`,
