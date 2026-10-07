@@ -23,18 +23,10 @@ request = json.load(sys.stdin)
 root = pathlib.Path(request['root'])
 chat = request['chat']
 env, _server, t3home, settings = agent_env(root)
-instances = settings.get('providerInstances') or {}
 
 def finish(result):
     print(json.dumps(result))
     sys.exit(0)
-
-def config_dir(driver, instance):
-    home_path = ((instances.get(instance) or {}).get('config') or {}).get('homePath')
-    if home_path:
-        return pathlib.Path(home_path)
-    variable, folder = ('CLAUDE_CONFIG_DIR', '.claude') if driver == 'claudeAgent' else ('CODEX_HOME', '.codex')
-    return pathlib.Path(env.get(variable) or pathlib.Path(env.get('HOME', str(root / 'home'))) / folder)
 
 try:
     db = sqlite3.connect('file:' + str(t3home / 'userdata' / 'statev2.sqlite') + '?mode=ro', uri=True)
@@ -51,7 +43,7 @@ for driver, instance, payload in threads:
     native = (json.loads(payload).get('nativeThreadRef') or {}).get('nativeId')
     if not isinstance(native, str) or not native or any(c in native for c in '/*?['):
         continue
-    base = config_dir(driver, instance)
+    base = provider_home(env, settings, root, driver, instance)
     if driver == 'claudeAgent':
         # The transcript, and beside it the folder of its subagents' transcripts and tool outputs.
         found = []

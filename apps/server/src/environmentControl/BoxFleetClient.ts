@@ -80,50 +80,65 @@ export class BoxFleetClient extends Context.Service<
 const Ticket = Schema.Struct({ ticket: TrimmedNonEmptyString });
 const isMcpFailure = Schema.is(OrchestratorMcpFailure);
 
+const makeBoxRpc = RpcClient.make(WsRpcGroup);
+/** The full RPC client of a box's T3 server, as a desktop window has it. */
+export type BoxRpc = Effect.Success<typeof makeBoxRpc>;
+
+/**
+ * Opens an RPC connection to the box at `access` with its broker token; it closes with the scope.
+ * A dropped connection is not retried: the caller reconnects on its next pass.
+ */
+export const openBoxRpc = Effect.fn("openBoxRpc")(function* (access: RemoteAccess) {
+  const httpClient = yield* HttpClient.HttpClient;
+  const unreachable = (cause: unknown) => new BoxUnreachableError({ origin: access.origin, cause });
+  const { ticket } = yield* httpClient
+    .execute(
+      HttpClientRequest.post(`${access.origin}/api/auth/websocket-ticket`).pipe(
+        HttpClientRequest.bearerToken(access.brokerToken),
+      ),
+    )
+    .pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap(HttpClientResponse.schemaBodyJson(Ticket)),
+      Effect.timeout("10 seconds"),
+      Effect.mapError(unreachable),
+    );
+  const socketUrl = new URL("/ws", access.origin);
+  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+  socketUrl.searchParams.set("wsTicket", ticket);
+  socketUrl.searchParams.set(
+    ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+    String(ORCHESTRATION_PROTOCOL_VERSION),
+  );
+  const protocol = yield* Layer.build(
+    Layer.effect(
+      RpcClient.Protocol,
+      RpcClient.makeProtocolSocket({
+        retryTransientErrors: false,
+        retryPolicy: Schedule.recurs(0),
+      }),
+    ).pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Socket.layerWebSocket(socketUrl.toString(), { openTimeout: "15 seconds" }).pipe(
+            Layer.provide(NodeSocket.layerWebSocketConstructor),
+          ),
+          RpcSerialization.layerJson,
+        ),
+      ),
+    ),
+  );
+  return yield* makeBoxRpc.pipe(Effect.provide(protocol));
+});
+
 const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const open = Effect.fn("BoxFleetClient.open")(function* (access: RemoteAccess) {
     const unreachable = (cause: unknown) =>
       new BoxUnreachableError({ origin: access.origin, cause });
-    const { ticket } = yield* httpClient
-      .execute(
-        HttpClientRequest.post(`${access.origin}/api/auth/websocket-ticket`).pipe(
-          HttpClientRequest.bearerToken(access.brokerToken),
-        ),
-      )
-      .pipe(
-        Effect.flatMap(HttpClientResponse.filterStatusOk),
-        Effect.flatMap(HttpClientResponse.schemaBodyJson(Ticket)),
-        Effect.timeout("10 seconds"),
-        Effect.mapError(unreachable),
-      );
-    const socketUrl = new URL("/ws", access.origin);
-    socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
-    socketUrl.searchParams.set("wsTicket", ticket);
-    socketUrl.searchParams.set(
-      ORCHESTRATION_PROTOCOL_QUERY_PARAM,
-      String(ORCHESTRATION_PROTOCOL_VERSION),
+    const client = yield* openBoxRpc(access).pipe(
+      Effect.provideService(HttpClient.HttpClient, httpClient),
     );
-    // A dropped connection is not retried here: the host reconnects on its next pass.
-    const protocol = yield* Layer.build(
-      Layer.effect(
-        RpcClient.Protocol,
-        RpcClient.makeProtocolSocket({
-          retryTransientErrors: false,
-          retryPolicy: Schedule.recurs(0),
-        }),
-      ).pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            Socket.layerWebSocket(socketUrl.toString(), { openTimeout: "15 seconds" }).pipe(
-              Layer.provide(NodeSocket.layerWebSocketConstructor),
-            ),
-            RpcSerialization.layerJson,
-          ),
-        ),
-      ),
-    );
-    const client = yield* RpcClient.make(WsRpcGroup).pipe(Effect.provide(protocol));
     return {
       connect: (registration) =>
         client["fleet.connect"](registration).pipe(Stream.mapError(unreachable)),

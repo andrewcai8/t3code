@@ -78,6 +78,21 @@ export const LeaseBackup = Schema.Struct({
 });
 export type LeaseBackup = typeof LeaseBackup.Type;
 
+/**
+ * The one rebuild of a chat whose box its provider could not start: `started`, then `done` with
+ * the lease, environment and thread that carry the chat on, or `failed`. A lease that has one is
+ * never rebuilt again; its own box is left paused.
+ */
+export const LeaseRebuild = Schema.Struct({
+  status: Schema.Literals(["started", "done", "failed"]),
+  at: Schema.String,
+  leaseId: Schema.optional(Schema.String),
+  environmentId: Schema.optional(Schema.String),
+  threadId: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+});
+export type LeaseRebuild = typeof LeaseRebuild.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -134,6 +149,9 @@ export const StoredProvisionedLease = Schema.Struct({
   unwatchedMoves: Schema.optional(Schema.Int),
   backup: Schema.optional(
     LeaseBackup.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
+  rebuild: Schema.optional(
+    LeaseRebuild.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
   ),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
@@ -243,6 +261,7 @@ export interface ProvisionedLeaseRegistry {
   /** Null when the lease is unknown. */
   readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<ProvisionedLease | null>;
   readonly recordBackup: (leaseId: string, backup: LeaseBackup) => Promise<void>;
+  readonly recordRebuild: (leaseId: string, rebuild: LeaseRebuild) => Promise<void>;
 }
 
 function nowIso(now?: Date): string {
@@ -614,6 +633,11 @@ export function createProvisionedLeaseRegistry(
     recordBackup: (leaseId, backup) =>
       mutate((leases) => ({
         leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, backup } : lease)),
+        value: undefined,
+      })),
+    recordRebuild: (leaseId, rebuild) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, rebuild } : lease)),
         value: undefined,
       })),
   };

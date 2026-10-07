@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off - provider control crosses a Promise boundary.
+// @effect-diagnostics globalDate:off cryptoRandomUUID:off - provider control crosses a Promise boundary, and a rebuild mints its own request id.
 // @effect-diagnostics nodeBuiltinImport:off - provider control resolves state in a Node filesystem boundary.
 import { ProvisionRetentionError } from "./retention.ts";
 import * as NodeFSP from "node:fs/promises";
@@ -56,6 +56,7 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import { FetchHttpClient } from "effect/http";
 import { ALL_TRAFFIC } from "e2b";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderPorts, ProvisionProviderError } from "./Provisioning.ts";
@@ -144,6 +145,13 @@ import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisi
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
 import type { BoxHealth } from "./boxHealth.ts";
+import { openBoxRpc } from "./BoxFleetClient.ts";
+import {
+  continueChatOnBox,
+  decodeModelSelection as decodeRebuildModel,
+  makeBoxRestore,
+  planRebuild,
+} from "./chatRebuild.ts";
 import {
   repositoryIsPrivate,
   withinBudget,
@@ -263,6 +271,25 @@ interface BoxHealthCheck {
   readonly relieve: (lease: ProvisionedLease) => Promise<ReadonlyArray<string>>;
 }
 
+/**
+ * Rebuilding a chat on a fresh box from its last backup, once its own box could not be started
+ * for a while. `run` answers the lease, environment and thread that carry the chat on.
+ */
+interface ChatRebuild {
+  readonly run: (lease: ProvisionedLease) => Promise<{
+    readonly leaseId: string;
+    readonly environmentId: string;
+    readonly threadId: string;
+  }>;
+}
+
+/**
+ * A box E2B fails to place this many resumes in a row, over at least REBUILD_AFTER_MS, has its
+ * chat rebuilt. Each resume already retries for minutes, so this is a long outage, not a blip.
+ */
+const REBUILD_AFTER_FAILURES = 3;
+const REBUILD_AFTER_MS = 10 * 60_000;
+
 /** Pause attempts in a row a pinned box waits through before its agents' leftovers are stopped. */
 const MAX_PINNED_PROBES = 3;
 
@@ -285,6 +312,7 @@ export function createEnvironmentControl(
     readonly accountRotation?: AccountRotation;
     readonly boxBackup?: BoxBackup;
     readonly healthCheck?: BoxHealthCheck;
+    readonly chatRebuild?: ChatRebuild;
   },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
@@ -399,6 +427,58 @@ export function createEnvironmentControl(
     // A save still running from the last turn ends by its own budget; this one then flushes.
     await turnSaves.get(lease.leaseId);
     await backUp(lease, driver.boxBackup?.sleepBudgetMs ?? 0, "before sleeping");
+  };
+  /** Resumes in a row E2B could not place, per lease, and when the first of them failed. */
+  const unplaceable = new Map<string, { readonly first: number; readonly count: number }>();
+  /**
+   * Counts a resume E2B could not place, and rebuilds the chat on a fresh box once its box has
+   * failed REBUILD_AFTER_FAILURES times over REBUILD_AFTER_MS. Once per lease, ever: a rebuild is
+   * recorded as started before it runs, so neither a failure nor a host restart repeats it.
+   */
+  const noteUnplaceable = async (leaseId: string) => {
+    const now = Date.now();
+    const previous = unplaceable.get(leaseId);
+    const failures = { first: previous?.first ?? now, count: (previous?.count ?? 0) + 1 };
+    unplaceable.set(leaseId, failures);
+    const rebuild = driver.chatRebuild;
+    if (!rebuild || !leaseRegistry) return;
+    if (failures.count < REBUILD_AFTER_FAILURES || now - failures.first < REBUILD_AFTER_MS) return;
+    const lease = await leaseRegistry.findById(leaseId);
+    if (!lease || lease.rebuild || !lease.owner) return;
+    if (!lease.backup?.sessionsUri) {
+      reportFailure("cloud chat cannot be rebuilt: its box was never backed up", {
+        chatId: leaseId,
+        cause: `${failures.count} resumes failed`,
+      });
+      return;
+    }
+    await leaseRegistry.recordRebuild(leaseId, {
+      status: "started",
+      at: new Date(now).toISOString(),
+    });
+    reportFailure("cloud box cannot be started; rebuilding its chat on a new box", {
+      chatId: leaseId,
+      cause: `${failures.count} resumes failed over ${Math.round((now - failures.first) / 60_000)} min`,
+    });
+    void rebuild
+      .run(lease)
+      .then((rebuilt) =>
+        leaseRegistry.recordRebuild(leaseId, {
+          status: "done",
+          at: new Date().toISOString(),
+          ...rebuilt,
+        }),
+      )
+      .catch(async (cause: unknown) => {
+        reportFailure("cloud chat rebuild failed", { chatId: leaseId, cause });
+        await leaseRegistry
+          .recordRebuild(leaseId, {
+            status: "failed",
+            at: new Date().toISOString(),
+            reason: cause instanceof Error ? cause.message : String(cause),
+          })
+          .catch(() => undefined);
+      });
   };
   /** Unhealthy probes in a row per lease, reset by a healthy one. */
   const unhealthyProbes = new Map<string, number>();
@@ -822,6 +902,7 @@ export function createEnvironmentControl(
           };
         if (lease.state === "missing") throw new ProvisionedSandboxMissing();
         await wake(lease, input.environmentId);
+        unplaceable.delete(input.leaseId);
         return { kind: "resumed" };
       })()
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
@@ -829,15 +910,29 @@ export function createEnvironmentControl(
             await leaseRegistry?.markMissing(input.leaseId);
           if (cause instanceof ProvisionedSandboxMissing)
             return { kind: "refused", reason: "missing", message: cause.message };
+          if (cause instanceof E2bPlacementUnavailable && cause.failure === "provider-unavailable")
+            await noteUnplaceable(input.leaseId).catch((error: unknown) =>
+              reportFailure("cloud chat rebuild could not start", {
+                chatId: input.leaseId,
+                cause: error,
+              }),
+            );
+          const rebuild = (await leaseRegistry?.findById(input.leaseId).catch(() => null))?.rebuild;
+          const rebuilt =
+            rebuild?.status === "done"
+              ? " Its chat was rebuilt on a new machine from its last backup; open it from your cloud machines."
+              : rebuild?.status === "started"
+                ? " Its chat is being rebuilt on a new machine from its last backup."
+                : "";
           return cause instanceof E2bPlacementUnavailable
             ? {
                 kind: "refused",
                 reason: "unknown",
                 cause: cause.failure,
                 message:
-                  cause.failure === "provider-unavailable"
+                  (cause.failure === "provider-unavailable"
                     ? "E2B couldn't start this machine yet. The problem is on E2B's side."
-                    : "Couldn't reach E2B to start this machine yet.",
+                    : "Couldn't reach E2B to start this machine yet.") + rebuilt,
               }
             : {
                 kind: "refused",
@@ -1443,6 +1538,9 @@ export const layer = Layer.effect(
                     : [];
                 },
               },
+              chatRebuild: {
+                run: (lease) => rebuildChat(lease, config),
+              },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and
               // fetches its followed branch so the thread sees what was pushed
@@ -1624,6 +1722,83 @@ export const layer = Layer.effect(
       await reconnecting.get(lease.leaseId);
       if (!namespaceProxies.has(lease.namespaceProxy.proxyId))
         await reconnectProxy(lease, lease.namespaceProxy);
+    };
+    /**
+     * Rebuilds a chat whose box E2B cannot start on a fresh box from its last backup, through the
+     * same provisioning a client's request takes: provisioned on the old box's repository and
+     * branch, the backup restored by the new box with its own AWS keys, then the chat's Claude
+     * session imported and told why it moved. The old box is left as it is.
+     */
+    const rebuildChat = async (
+      lease: ProvisionedLease,
+      config: EnvironmentControlConfig,
+    ): Promise<{ leaseId: string; environmentId: string; threadId: string }> => {
+      const old = await e2bBox(lease);
+      const uri = lease.backup?.sessionsUri;
+      if (!old || !uri) throw new Error("The chat has no E2B box and backup this host made.");
+      const { request } = old.operation;
+      const requestId = ProvisionRequestId.make(crypto.randomUUID());
+      const ready = await runLogged(
+        provisionControl
+          .provision({
+            requestId,
+            provider: "e2b",
+            providerInstanceId: leaseAccounts(lease)[0] ?? lease.providerInstanceId,
+            pinAccount: true,
+            ...(request.agentDriver ? { agentDriver: request.agentDriver } : {}),
+            ...(request.repository ? { repository: request.repository } : {}),
+            ...(request.branch ? { branch: request.branch } : {}),
+          })
+          .pipe(
+            Effect.repeat({
+              while: (result) => result.kind === "pending" || result.kind === "allocation_unknown",
+              schedule: Schedule.spaced("10 seconds"),
+            }),
+            Effect.timeout("30 minutes"),
+          ),
+      );
+      if (ready.kind !== "ready")
+        throw new Error(`The new box was not provisioned: ${ready.kind}.`);
+      await runLogged(provisionControl.attach({ requestId }));
+      const remoteAccess = (await leaseRegistry.findById(requestId))?.remoteAccess;
+      const operation = await Effect.runPromise(store.get(requestId));
+      if (
+        !remoteAccess ||
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "e2b"
+      )
+        throw new Error("The new box is not reachable.");
+      const manifest = await manifests.load(requestId);
+      const restore = makeBoxRestore(
+        await makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).guest(
+          operation,
+          operation.state.allocation.resource.sandboxId,
+        ),
+        { root: manifest.preparation.root, uri, token: config.provisioning?.githubToken },
+      );
+      const backup = await restore.readManifest();
+      const plan = planRebuild(backup, uri);
+      if (backup.modelSelection === null) throw new Error("The backup records no model.");
+      const modelSelection = decodeRebuildModel(backup.modelSelection);
+      const files = await restore.restoreWork(plan, backup.workspace);
+      const threadId = await runLogged(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const rpc = yield* openBoxRpc(remoteAccess);
+            return yield* continueChatOnBox(rpc, restore, {
+              workspace: `${manifest.preparation.root}/workspace`,
+              plan,
+              files,
+              modelSelection,
+            });
+          }),
+        ).pipe(Effect.provide(FetchHttpClient.layer)),
+      );
+      await leaseRegistry.claim({
+        leaseId: requestId,
+        owner: { environmentId: ready.environment.environmentId, threadId },
+      });
+      return { leaseId: requestId, environmentId: ready.environment.environmentId, threadId };
     };
     /** The ready E2B box this manager provisioned for a lease; null for any other lease. */
     const e2bBox = async (lease: ProvisionedLease) => {

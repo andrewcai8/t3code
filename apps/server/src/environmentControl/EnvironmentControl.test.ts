@@ -8,7 +8,7 @@ import { createCleanupSweep } from "./cloudCleanup.ts";
 import type { ManagedTarget } from "./config.ts";
 import { ProvisionedSandboxMissing, type CloudDriver, type Observation } from "./driver.ts";
 import { SandboxError } from "e2b";
-import { connectResumingE2b } from "./e2bResume.ts";
+import { connectResumingE2b, E2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -1848,6 +1848,91 @@ describe("a cloud machine saved after each turn", () => {
       expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({ kind: "paused" });
       expect(runs).toEqual(["backup:30s:after none", "backup:45s:after saved-1", "pause"]);
       expect((await registry.findById("lease"))?.backup?.at).toBe("saved-2");
+    });
+  });
+});
+
+describe("a cloud chat whose box E2B cannot start", () => {
+  it("is rebuilt once on a new box after three failed resumes over ten minutes", async () => {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.recordBackup("lease", {
+        at: "2026-10-07T08:00:00.000Z",
+        branches: [],
+        sessionsUri: "s3://bucket/t3-agents/child/backups/latest/",
+      });
+      await registry.markPaused("lease");
+      const driver = setup().driver;
+      driver.resume = async () => {
+        throw new E2bPlacementUnavailable("504 placement", "provider-unavailable");
+      };
+      let recordDone: (() => void) | undefined;
+      const done = new Promise<void>((resolve) => (recordDone = resolve));
+      const watched = {
+        ...registry,
+        recordRebuild: async (...args: Parameters<typeof registry.recordRebuild>) => {
+          await registry.recordRebuild(...args);
+          if (args[1].status === "done") recordDone?.();
+        },
+      };
+      const rebuilds: string[] = [];
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          chatRebuild: {
+            run: async (lease) => {
+              rebuilds.push(lease.leaseId);
+              return { leaseId: "lease-2", environmentId: "child-2", threadId: "import:x" };
+            },
+          },
+        },
+        watched,
+      );
+      const resume = () =>
+        manager.resume({ leaseId: "lease", sandboxId: "sandbox", environmentId: "child" });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-10-07T09:00:00.000Z"));
+        await resume();
+        vi.setSystemTime(new Date("2026-10-07T09:05:00.000Z"));
+        await resume();
+        await resume();
+        expect(rebuilds).toEqual([]);
+
+        vi.setSystemTime(new Date("2026-10-07T09:10:00.000Z"));
+        const refused = await resume();
+        await done;
+        expect(rebuilds).toEqual(["lease"]);
+        expect(refused).toMatchObject({
+          kind: "refused",
+          message:
+            "E2B couldn't start this machine yet. The problem is on E2B's side. Its chat is being rebuilt on a new machine from its last backup.",
+        });
+        expect((await registry.findById("lease"))?.rebuild).toEqual({
+          status: "done",
+          at: "2026-10-07T09:10:00.000Z",
+          leaseId: "lease-2",
+          environmentId: "child-2",
+          threadId: "import:x",
+        });
+
+        vi.setSystemTime(new Date("2026-10-07T10:00:00.000Z"));
+        expect((await resume()) as { message: string }).toMatchObject({
+          message:
+            "E2B couldn't start this machine yet. The problem is on E2B's side. Its chat was rebuilt on a new machine from its last backup; open it from your cloud machines.",
+        });
+        expect(rebuilds).toEqual(["lease"]);
+        expect((await registry.findById("lease"))?.state).toBe("paused");
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

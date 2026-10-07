@@ -511,6 +511,9 @@ with urllib.request.urlopen(request, timeout=30) as response:
         deadline,
       });
     },
+    /** Runs guest scripts on a box, resuming it first when it sleeps. */
+    guest: async (operation: ProvisionOperation, sandboxId: string) =>
+      e2bPythonPort(await connect(operation, sandboxId)),
     /**
      * Reads whether an awake box is safe to pause: E2B's CPU samples for the last minute and a
      * trivial command envd must answer within five seconds. Null for a box that is not awake.

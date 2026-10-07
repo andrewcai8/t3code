@@ -66,12 +66,12 @@ import {
   formatBytes,
   githubRepository,
   planCarry,
-  planRestore,
   referencedPaths,
   rewriteSessionCwd,
   SNAPSHOT_SCRIPT,
   snapshotCheckout,
 } from "./moveChat.ts";
+import { planCloudRestore } from "@t3tools/shared/cloudRestore";
 import { childPairingUrl, exchangePairingToken, type T3Client, withRpc } from "./t3Rpc.ts";
 import { advanceTurn, initialProgress, type TurnProgress } from "./turnProgress.ts";
 
@@ -838,7 +838,11 @@ async function restore(flags: {
 }) {
   const prefix = cloudBackupUri(flags.uri, flags.environment);
   const manifest = decodeBackupManifest(readS3(`${prefix}manifest.json`));
-  const plan = planRestore(manifest, prefix);
+  const plan = planCloudRestore(
+    manifest,
+    prefix,
+    "its old machine could not be resumed, so an operator restored it.",
+  );
   log(
     `backup of ${flags.environment}: ${plan.repository}@${plan.branch}, session ${plan.sessionId}`,
   );
@@ -874,12 +878,12 @@ async function restore(flags: {
         [
           "{ [ ! -f .git/shallow ] || git fetch -q --unshallow origin; }",
           "git fetch -q /tmp/move-chat-work.bundle 'refs/t3-bundle/*:refs/heads/*'",
-          ...(plan.checkout ? [`git switch -q ${plan.checkout}`] : []),
+          ...(plan.checkout !== plan.branch ? [`git switch -q ${plan.checkout}`] : []),
           "rm -f /tmp/move-chat-work.bundle",
         ].join(" && "),
         { cwd: BOX_WORKSPACE, envs: env, timeoutMs: 0 },
       );
-      log(`fetched the backup bundle${plan.checkout ? ` and switched to ${plan.checkout}` : ""}`);
+      log(`fetched the backup bundle and switched to ${plan.checkout}`);
     },
   });
 }
