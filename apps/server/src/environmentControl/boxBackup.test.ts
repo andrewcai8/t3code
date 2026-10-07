@@ -6,7 +6,8 @@ import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { backUpBox, backUpSessions, BackupManifest } from "./boxBackup.ts";
+import { CloudBackupManifest } from "@t3tools/contracts";
+import { backUpBox, backUpSessions, workTarget } from "./boxBackup.ts";
 import { git, type Cleanups } from "./guestTestFixture.ts";
 import type { RemotePreparationPort } from "./remotePreparation.ts";
 import * as Schema from "effect/Schema";
@@ -24,7 +25,7 @@ assert args[:2] == ['s3', 'sync'], args
 source, uri = args[2], args[3]
 bucket = pathlib.Path(os.environ['FAKE_BUCKET'])
 with open(bucket.parent / 'aws-calls', 'a') as calls:
-    calls.write(uri + '\n')
+    calls.write(uri + ' ' + os.environ.get('AWS_ACCESS_KEY_ID', '-') + '\n')
 target = bucket / uri.removeprefix('s3://')
 shutil.rmtree(target, ignore_errors=True)
 shutil.copytree(source, target)
@@ -51,6 +52,7 @@ async function box() {
   git(workspace, "add", ".");
   git(workspace, "commit", "-qm", "base");
   git(workspace, "push", "-q", "origin", "HEAD:main");
+  git(workspace, "remote", "set-head", "origin", "main");
 
   const db = new NodeSqlite.DatabaseSync(NodePath.join(home, ".t3", "userdata", "statev2.sqlite"));
   db.exec(`
@@ -102,6 +104,23 @@ async function box() {
   await NodeFSP.writeFile(NodePath.join(day, "rollout-2026-10-06T10-00-00-c-owner.jsonl"), "{}\n");
   await NodeFSP.writeFile(NodePath.join(day, "rollout-2026-10-06T11-00-00-c-other.jsonl"), "{}\n");
 
+  // As a server that saved its settings keeps it: the value in its secret store, not the file.
+  await NodeFSP.writeFile(
+    NodePath.join(home, ".t3", "userdata", "settings.json"),
+    JSON.stringify({
+      providerInstances: {
+        claudeAgent: {
+          environment: [
+            { name: "AWS_ACCESS_KEY_ID", value: "", sensitive: true, valueRedacted: true },
+          ],
+        },
+      },
+    }),
+  );
+  const secrets = NodePath.join(home, ".t3", "userdata", "secrets");
+  await NodeFSP.mkdir(secrets);
+  const secretName = `provider-env-${Buffer.from("claudeAgent").toString("base64url")}-${Buffer.from("AWS_ACCESS_KEY_ID").toString("base64url")}`;
+  await NodeFSP.writeFile(NodePath.join(secrets, `${secretName}.bin`), "AKIA-FROM-SECRET-STORE");
   const bin = NodePath.join(base, "bin");
   await NodeFSP.mkdir(bin);
   await NodeFSP.writeFile(NodePath.join(bin, "aws"), fakeAws, { mode: 0o755 });
@@ -136,14 +155,15 @@ async function box() {
     await walk(bucket);
     return files.sort();
   };
-  const awsCalls = async () =>
+  const awsCallLines = async () =>
     (await NodeFSP.readFile(NodePath.join(base, "aws-calls"), "utf8").catch(() => ""))
       .split("\n")
-      .filter(Boolean).length;
-  return { root, workspace, origin, project, bucket, port, uploaded, awsCalls };
+      .filter(Boolean);
+  const awsCalls = async () => (await awsCallLines()).length;
+  return { root, workspace, origin, project, bucket, port, uploaded, awsCalls, awsCallLines };
 }
 
-const decodeManifest = Schema.decodeUnknownSync(Schema.fromJsonString(BackupManifest));
+const decodeManifest = Schema.decodeUnknownSync(Schema.fromJsonString(CloudBackupManifest));
 const URI = "s3://bucket/t3-agents/child/backups/latest/";
 const chat = {
   environmentId: "child",
@@ -190,7 +210,10 @@ describe("backUpSessions", () => {
       repository: f.origin,
       branch: "main",
       head: git(f.workspace, "rev-parse", "HEAD"),
+      branchOnOrigin: true,
+      defaultBranch: "main",
       backupBranches: ["t3-backup/lease-1"],
+      bundle: null,
       sessions: [
         {
           driver: "claudeAgent",
@@ -211,6 +234,18 @@ describe("backUpSessions", () => {
     });
   });
 
+  it("uploads with the AWS key the box's server keeps in its secret store", async () => {
+    const f = await box();
+    await backUpSessions(f.port, {
+      root: f.root,
+      uri: URI,
+      chat,
+      branches: [],
+      timeoutSeconds: 30,
+    });
+    expect(await f.awsCallLines()).toEqual([`${URI} AKIA-FROM-SECRET-STORE`]);
+  });
+
   it("skips an unchanged chat, and uploads again once its transcript grows", async () => {
     const f = await box();
     const input = { root: f.root, uri: URI, chat, branches: [], timeoutSeconds: 30 };
@@ -229,6 +264,23 @@ describe("backUpSessions", () => {
   });
 });
 
+describe("workTarget", () => {
+  it("pushes only to a private origin, and otherwise keeps the work in the private bucket", () => {
+    expect(workTarget({ originIsPrivate: true, token: "t", bundlePath: "/b" })).toEqual({
+      kind: "origin",
+      token: "t",
+    });
+    expect(workTarget({ originIsPrivate: false, token: "t", bundlePath: "/b" })).toEqual({
+      kind: "bundle",
+      path: "/b",
+    });
+    expect(workTarget({ originIsPrivate: false, token: "t", bundlePath: undefined })).toEqual({
+      kind: "none",
+      reason: "The repository may be public, and this host has no private bucket for the work.",
+    });
+  });
+});
+
 describe("backUpBox", () => {
   it("records the work's branches and the sessions, then leaves an unchanged box's record alone", async () => {
     const f = await box();
@@ -236,10 +288,10 @@ describe("backUpBox", () => {
     const input = {
       root: f.root,
       leaseId: "lease-1",
-      push: true,
+      target: { kind: "origin" as const },
       sessions: { uri: URI, environmentId: "child", account: "claude-a", threadId: "owner-thread" },
       now: "2026-10-06T12:00:00.000Z",
-      timeoutSeconds: 30,
+      deadline: Date.now() + 60_000,
     };
     const first = await backUpBox(f.port, { ...input, previous: undefined });
     expect(first).toMatchObject({
@@ -257,6 +309,36 @@ describe("backUpBox", () => {
     expect(await f.awsCalls()).toBe(1);
   });
 
+  it("stores a public repository's unsaved work as a bundle beside the sessions, never on origin", async () => {
+    const f = await box();
+    await NodeFSP.writeFile(NodePath.join(f.workspace, "notes.txt"), "unsaved\n");
+    const result = await backUpBox(f.port, {
+      root: f.root,
+      leaseId: "lease-1",
+      target: { kind: "bundle", path: NodePath.join(f.root, "backup", "work.bundle") },
+      sessions: { uri: URI, environmentId: "child", account: "claude-a", threadId: "owner-thread" },
+      previous: undefined,
+      now: "2026-10-06T12:00:00.000Z",
+      deadline: Date.now() + 60_000,
+    });
+    expect(result).toMatchObject({ backup: { branches: ["t3-backup/lease-1"] }, problems: [] });
+    expect(git(f.origin, "for-each-ref", "refs/heads/t3-backup/")).toBe("");
+    const prefix = NodePath.join(f.bucket, "bucket/t3-agents/child/backups/latest");
+    expect(
+      decodeManifest(await NodeFSP.readFile(NodePath.join(prefix, "manifest.json"), "utf8")),
+    ).toMatchObject({ backupBranches: ["t3-backup/lease-1"], bundle: "work.bundle" });
+    const restored = NodePath.join(f.root, "..", "restored");
+    git(f.root, "clone", "-q", f.origin, restored);
+    git(
+      restored,
+      "fetch",
+      "-q",
+      NodePath.join(prefix, "work.bundle"),
+      "refs/t3-bundle/*:refs/heads/*",
+    );
+    expect(git(restored, "show", "t3-backup/lease-1:notes.txt")).toBe("unsaved");
+  });
+
   it("keeps the last record's sessions when the upload fails, and says why", async () => {
     const f = await box();
     const previous = {
@@ -270,7 +352,7 @@ describe("backUpBox", () => {
       await backUpBox(f.port, {
         root: f.root,
         leaseId: "lease-1",
-        push: true,
+        target: { kind: "origin" as const },
         sessions: {
           uri: URI,
           environmentId: "child",
@@ -279,7 +361,7 @@ describe("backUpBox", () => {
         },
         previous,
         now: "2026-10-06T13:00:00.000Z",
-        timeoutSeconds: 30,
+        deadline: Date.now() + 60_000,
       }),
     ).toEqual({ backup: previous, problems: ["The chat's database could not be read."] });
   });

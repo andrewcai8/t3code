@@ -2,7 +2,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 
-import type { BackupManifest } from "../../apps/server/src/environmentControl/boxBackup.ts";
+import type { CloudBackupManifest } from "@t3tools/contracts";
 
 /**
  * The directory Claude Code keeps a working directory's sessions in, under `<config>/projects`:
@@ -201,7 +201,12 @@ export function formatBytes(bytes: number): string {
 
 export interface RestorePlan {
   readonly repository: string;
+  /** The branch the fresh box is provisioned on. */
   readonly branch: string;
+  /** The bundle key to fetch `refs/t3-bundle/*` from, when the work was kept out of origin. */
+  readonly bundle: string | null;
+  /** The backup branch to switch to once the bundle is fetched. */
+  readonly checkout: string | null;
   readonly sessionId: string;
   /** The session's transcript, as a key under the backup's prefix. */
   readonly transcript: string;
@@ -216,14 +221,23 @@ export interface RestorePlan {
  * branch it had checked out, with its latest Claude session. Throws when the backup cannot make
  * the chat whole: no GitHub repository, no branch, or no Claude session.
  */
-export function planRestore(manifest: BackupManifest, uri: string): RestorePlan {
+export function planRestore(manifest: CloudBackupManifest, uri: string): RestorePlan {
   const repository = manifest.repository && githubRepository(manifest.repository);
   if (!repository)
     throw new Error(`the backup names no GitHub repository (${manifest.repository})`);
   const mainBackup = `t3-backup/${manifest.leaseId}`;
-  const branch = manifest.backupBranches.includes(mainBackup) ? mainBackup : manifest.branch;
-  if (!branch)
-    throw new Error("the backup has no branch: its checkout was detached and saved nothing");
+  const saved = manifest.backupBranches.includes(mainBackup);
+  // Bundled work is fetched onto a box provisioned on a branch origin has.
+  const branch = manifest.bundle
+    ? manifest.branchOnOrigin
+      ? manifest.branch
+      : manifest.defaultBranch
+    : saved
+      ? mainBackup
+      : manifest.branch;
+  if (!branch) throw new Error("the backup names no branch origin has to start the box on");
+  const checkout = manifest.bundle && saved ? mainBackup : null;
+  const landed = checkout ?? branch;
   const restorable = manifest.sessions
     .filter((candidate) => candidate.driver === "claudeAgent")
     .flatMap((candidate) => {
@@ -239,20 +253,24 @@ export function planRestore(manifest: BackupManifest, uri: string): RestorePlan 
       `the backup holds no Claude session to restore${others ? ` (only ${others}, under ${uri})` : ""}`,
     );
   }
-  const otherBranches = manifest.backupBranches.filter((name) => name !== branch);
+  const otherBranches = manifest.backupBranches.filter((name) => name !== landed);
   const title = manifest.title ?? `Restored ${manifest.environmentId}`;
   return {
     repository,
     branch,
+    bundle: manifest.bundle,
+    checkout,
     ...restorable,
     title,
     message: [
       `This chat was restored on a fresh machine from the backup its old machine (environment ${manifest.environmentId}) took before it slept; that machine could not be resumed.`,
-      branch === mainBackup
-        ? `The checkout is ${branch}: the old machine's ${manifest.branch ?? "checkout"} with its unpushed commits, plus any uncommitted changes as one commit titled "T3 backup of unsaved work". Move that work back onto your own branch before you push.`
-        : `The checkout is ${branch}; the old machine had no unpushed work in it.`,
+      landed === mainBackup
+        ? `The checkout is ${landed}: the old machine's ${manifest.branch ?? "checkout"} with its unpushed commits, plus any uncommitted changes as one commit titled "T3 backup of unsaved work". Move that work back onto your own branch before you push.`
+        : `The checkout is ${landed}; the old machine had no unpushed work in it.`,
       ...(otherBranches.length > 0
-        ? [`Other unsaved work is on: ${otherBranches.join(", ")}.`]
+        ? [
+            `Other unsaved work is on: ${otherBranches.join(", ")}${manifest.bundle ? " (local branches, never pushed: the repository may be public)" : ""}.`,
+          ]
         : []),
       "Files outside the checkout, running processes and anything else on the old machine did not come back. Check `git status` and `git log -3`, then carry on where you left off.",
     ].join("\n\n"),

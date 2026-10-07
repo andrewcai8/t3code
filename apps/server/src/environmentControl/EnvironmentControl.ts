@@ -5,6 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import {
+  cloudBackupUri,
   EnvironmentControlError,
   ProviderInstanceId,
   ProvisionRequestId,
@@ -142,7 +143,12 @@ import { makeWakeAhead } from "./wakeAhead.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
-import { backupUri, withinBudget, type BoxBackupResult } from "./boxBackup.ts";
+import {
+  repositoryIsPrivate,
+  withinBudget,
+  workTarget,
+  type BoxBackupResult,
+} from "./boxBackup.ts";
 import { BoxUsageStore } from "../usage/boxUsage.ts";
 
 const isProvisionRequestId = Schema.is(ProvisionRequestId);
@@ -203,6 +209,8 @@ const MAX_IDLE_UPGRADES = 2;
  * enough that a reaper sweep over several boxes is not held up for long.
  */
 const SLEEP_BACKUP_BUDGET_MS = 45_000;
+/** Past its budget a backup's own deadline has passed; this covers an SDK call that ignores it. */
+const BACKUP_GRACE_MS = 10_000;
 
 /**
  * Moving an idle box onto the pinned build before it sleeps, so its next wake is not held up.
@@ -224,13 +232,14 @@ interface AccountRotation {
 }
 
 /**
- * Backing a box up right before it sleeps. `run` answers the lease's next backup record and what
- * could not be saved, or null for a box this host does not back up. A pause waits for it at most
- * `budgetMs`, then sleeps the box without it.
+ * Backs a box up while it is awake: answers the lease's next backup record and what could not be
+ * saved, or null for a box this host does not back up or that is not awake. Every command of it
+ * ends by `deadline`, epoch ms.
  */
-interface SleepBackup {
-  readonly budgetMs: number;
-  readonly run: (lease: ProvisionedLease) => Promise<BoxBackupResult | null>;
+interface BoxBackup {
+  readonly run: (lease: ProvisionedLease, deadline: number) => Promise<BoxBackupResult | null>;
+  /** How long a pause waits for the backup it takes first. */
+  readonly sleepBudgetMs: number;
 }
 
 /**
@@ -250,7 +259,7 @@ export function createEnvironmentControl(
     readonly upkeepChat?: UpkeepChat;
     readonly idleUpgrade?: IdleUpgrade;
     readonly accountRotation?: AccountRotation;
-    readonly sleepBackup?: SleepBackup;
+    readonly boxBackup?: BoxBackup;
   },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
@@ -304,18 +313,22 @@ export function createEnvironmentControl(
     if (lease.state !== "active" || !lease.remoteAccess) return;
     await pullUsage(lease).catch(() => undefined);
   };
-  // A box that sleeps may never wake (E2B has failed to place one for hours), so its work and
-  // chat are saved first, within the backup's budget. A backup that fails or runs out of time is
-  // reported and never blocks the sleep.
-  const backUpBeforeSleep = async (lease: ProvisionedLease): Promise<void> => {
-    const backup = driver.sleepBackup;
-    if (!backup || !leaseRegistry || lease.state !== "active" || !lease.remoteAccess) return;
+  /**
+   * Saves a box's work and chat within `budgetMs` and records what it saved. A backup that fails
+   * or runs out of time is reported, never thrown.
+   */
+  const backUp = async (lease: ProvisionedLease, budgetMs: number, when: string) => {
+    const backup = driver.boxBackup;
+    if (!backup || !leaseRegistry) return;
     try {
-      const result = await withinBudget(backup.run(lease), backup.budgetMs);
+      const result = await withinBudget(
+        backup.run(lease, Date.now() + budgetMs),
+        budgetMs + Math.min(BACKUP_GRACE_MS, budgetMs),
+      );
       if (result === "timeout") {
-        reportFailure("cloud box backup ran out of time; sleeping without it", {
+        reportFailure(`cloud box backup ${when} ran out of time`, {
           chatId: lease.leaseId,
-          cause: `over ${backup.budgetMs} ms`,
+          cause: `over ${budgetMs} ms`,
         });
         return;
       }
@@ -323,16 +336,19 @@ export function createEnvironmentControl(
       if (result.backup && result.backup !== lease.backup)
         await leaseRegistry.recordBackup(lease.leaseId, result.backup);
       if (result.problems.length > 0)
-        reportFailure("cloud box backup saved only part of its work", {
+        reportFailure(`cloud box backup ${when} saved only part of its work`, {
           chatId: lease.leaseId,
           cause: result.problems.join(" "),
         });
     } catch (cause) {
-      reportFailure("cloud box could not be backed up before sleeping", {
-        chatId: lease.leaseId,
-        cause,
-      });
+      reportFailure(`cloud box could not be backed up ${when}`, { chatId: lease.leaseId, cause });
     }
+  };
+  // A box that sleeps may never wake (E2B has failed to place one for hours), so its work and
+  // chat are saved first. A backup that fails or runs out of time never blocks the sleep.
+  const backUpBeforeSleep = async (lease: ProvisionedLease): Promise<void> => {
+    if (!lease.remoteAccess || lease.state !== "active") return;
+    await backUp(lease, driver.boxBackup?.sleepBudgetMs ?? 0, "before sleeping");
   };
   const beforeSleep = (lease: ProvisionedLease) =>
     Promise.all([pullBeforeStop(lease), backUpBeforeSleep(lease)]);
@@ -1264,9 +1280,9 @@ export const layer = Layer.effect(
                 due: (lease, chat) => accountRotation.due(lease, chat),
                 start: (lease) => void accountRotation.start(lease),
               },
-              sleepBackup: {
-                budgetMs: SLEEP_BACKUP_BUDGET_MS,
-                run: async (lease) => {
+              boxBackup: {
+                sleepBudgetMs: SLEEP_BACKUP_BUDGET_MS,
+                run: async (lease, deadline) => {
                   if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId))
                     return null;
                   const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(
@@ -1278,33 +1294,39 @@ export const layer = Layer.effect(
                     operation.state.allocation.resource.provider !== "e2b"
                   )
                     return null;
+                  const manifest = await manifests.load(lease.leaseId);
                   const token = config.provisioning?.githubToken;
                   const outputsUri = config.provisioning?.workerForks?.outputsUri;
-                  return makeE2bProvisionRuntime(
-                    { apiKey: config.e2bApiKey },
-                    logE2bResumeRetry,
-                  ).backUp(
+                  const sessions =
+                    outputsUri && lease.owner
+                      ? {
+                          uri: cloudBackupUri(outputsUri, lease.owner.environmentId),
+                          environmentId: lease.owner.environmentId,
+                          account: leaseAccounts(lease)[0] ?? lease.providerInstanceId,
+                          threadId: lease.owner.threadId,
+                        }
+                      : undefined;
+                  return makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).backUp(
                     operation,
                     operation.state.allocation.resource.sandboxId,
-                    await manifests.load(lease.leaseId),
+                    manifest,
                     {
                       leaseId: lease.leaseId,
-                      push: token !== undefined,
-                      token,
-                      ...(outputsUri && lease.owner
-                        ? {
-                            sessions: {
-                              uri: backupUri(outputsUri, lease.owner.environmentId),
-                              environmentId: lease.owner.environmentId,
-                              account: leaseAccounts(lease)[0] ?? lease.providerInstanceId,
-                              threadId: lease.owner.threadId,
-                            },
-                          }
-                        : {}),
+                      target: workTarget({
+                        originIsPrivate: await repositoryIsPrivate(
+                          operation.request.repository,
+                          token,
+                        ),
+                        token,
+                        bundlePath: sessions
+                          ? `${manifest.preparation.root}/backup/work.bundle`
+                          : undefined,
+                      }),
+                      ...(sessions ? { sessions } : {}),
                       previous: lease.backup,
                       now: new Date().toISOString(),
                     },
-                    SLEEP_BACKUP_BUDGET_MS,
+                    deadline,
                   );
                 },
               },
@@ -2191,7 +2213,17 @@ export const layer = Layer.effect(
           devbox.operation,
           devbox.resource,
           manifest,
-          { branch: lease.leaseId, push: token !== undefined, ...(token ? { token } : {}) },
+          {
+            branch: lease.leaseId,
+            target: workTarget({
+              originIsPrivate: await repositoryIsPrivate(
+                devbox.operation.request.repository,
+                token,
+              ),
+              token,
+              bundlePath: undefined,
+            }),
+          },
         );
       },
       setKeep: (leaseId, keep) => leaseRegistry.setKeep(leaseId, keep),

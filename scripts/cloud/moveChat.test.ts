@@ -238,7 +238,10 @@ describe("planRestore", () => {
     repository: "https://github.com/acme/app.git",
     branch: "fix-login",
     head: "abc123",
+    branchOnOrigin: true,
+    defaultBranch: "main",
     backupBranches: ["t3-backup/lease-1", "t3-backup/lease-1-stash-0"],
+    bundle: null,
     sessions: [
       {
         driver: "claudeAgent",
@@ -265,6 +268,8 @@ describe("planRestore", () => {
       {
         repository: "acme/app",
         branch: "t3-backup/lease-1",
+        bundle: null,
+        checkout: null,
         sessionId: "s-new",
         transcript: "claudeAgent/projects/-w/s-new.jsonl",
         title: "Fix the login page",
@@ -272,6 +277,19 @@ describe("planRestore", () => {
       },
     );
     assert.include(plan.message, "Other unsaved work is on: t3-backup/lease-1-stash-0.");
+  });
+
+  it("starts a bundled backup on a branch origin has, then switches to the backup", () => {
+    const bundled = { ...manifest, bundle: "work.bundle" };
+    assert.deepStrictEqual(
+      [planRestore(bundled, uri), planRestore({ ...bundled, branchOnOrigin: false }, uri)].map(
+        ({ branch, bundle, checkout }) => ({ branch, bundle, checkout }),
+      ),
+      [
+        { branch: "fix-login", bundle: "work.bundle", checkout: "t3-backup/lease-1" },
+        { branch: "main", bundle: "work.bundle", checkout: "t3-backup/lease-1" },
+      ],
+    );
   });
 
   it("restores on the chat's own branch when the box had nothing unsaved there", () => {
@@ -302,7 +320,7 @@ describe("planRestore", () => {
   it("refuses a detached checkout that saved nothing", () => {
     assert.throws(
       () => planRestore({ ...manifest, branch: null, backupBranches: [] }, uri),
-      /no branch/,
+      /names no branch/,
     );
   });
 });

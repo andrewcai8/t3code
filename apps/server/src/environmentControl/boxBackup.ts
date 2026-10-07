@@ -1,10 +1,10 @@
-// @effect-diagnostics globalTimers:off - the budget bounds a Promise-side backup the host does not own.
+// @effect-diagnostics globalTimers:off globalFetch:off - the budget bounds a Promise-side backup, and GitHub is asked over plain HTTP.
 /**
- * Backs a cloud box up before it sleeps, so its chat can be restored on a fresh box if this one is
- * lost or never resumes: its unsaved git work goes to `t3-backup/` branches on origin, and its
- * owner chat's provider sessions plus a restore manifest go to S3 with the AWS credentials the
- * chat's agent has. The host never holds AWS keys for it. Each part skips itself when the box
- * holds what it held at the last backup.
+ * Backs a cloud box up, so its chat can be restored on a fresh box if this one is lost or never
+ * resumes: its unsaved git work goes to `t3-backup/` branches, pushed to a private origin or kept
+ * in a git bundle, and its owner chat's provider sessions, the bundle and a restore manifest
+ * (`CloudBackupManifest`) go to S3 with the AWS credentials the chat's agent has. The host never
+ * holds AWS keys for it. Each part skips itself when the box holds what it held at the last backup.
  *
  * @module boxBackup
  */
@@ -13,35 +13,8 @@ import * as Schema from "effect/Schema";
 import { agentEnvironmentPython } from "./guestAgentEnvironment.ts";
 import type { LeaseBackup } from "./ProvisionedLeaseRegistry.ts";
 import type { RemotePreparationPort } from "./remotePreparation.ts";
-import { backUpWorkspace } from "./workspaceBackup.ts";
-
-/** The manifest restore reads; `version` changes only with a change restore cannot read. */
-export const BackupManifest = Schema.Struct({
-  version: Schema.Literal(1),
-  environmentId: Schema.String,
-  leaseId: Schema.String,
-  /** The host account the box ran its chat on. */
-  account: Schema.String,
-  threadId: Schema.String,
-  title: Schema.NullOr(Schema.String),
-  modelSelection: Schema.NullOr(Schema.Unknown),
-  workspace: Schema.String,
-  repository: Schema.NullOr(Schema.String),
-  /** The branch the workspace had checked out, and its commit. */
-  branch: Schema.NullOr(Schema.String),
-  head: Schema.NullOr(Schema.String),
-  backupBranches: Schema.Array(Schema.String),
-  /** The chat's provider sessions, oldest first, each with its files' keys under the backup. */
-  sessions: Schema.Array(
-    Schema.Struct({
-      driver: Schema.String,
-      instanceId: Schema.String,
-      nativeId: Schema.String,
-      files: Schema.Array(Schema.String),
-    }),
-  ),
-});
-export type BackupManifest = typeof BackupManifest.Type;
+import { canonicalRepository } from "./config.ts";
+import { backUpWorkspace, type WorkspaceBackupTarget } from "./workspaceBackup.ts";
 
 const sessionBackupScript = String.raw`
 import hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, tempfile
@@ -104,6 +77,7 @@ def git(*args):
     return (result.stdout.decode().strip() or None) if result.returncode == 0 else None
 has_git = (workspace / '.git').exists()
 origin = git('remote', 'get-url', 'origin') if has_git else None
+branch = git('symbolic-ref', '--short', '-q', 'HEAD') if has_git else None
 manifest = {
     'version': 1,
     'environmentId': chat['environmentId'],
@@ -115,11 +89,16 @@ manifest = {
     'workspace': str(workspace),
     # Without any credential a URL may carry.
     'repository': re.sub(r'^(https?://)[^/@]*@', r'\1', origin) if origin else None,
-    'branch': git('symbolic-ref', '--short', '-q', 'HEAD') if has_git else None,
+    'branch': branch,
     'head': git('rev-parse', '-q', '--verify', 'HEAD^{commit}') if has_git else None,
+    'branchOnOrigin': bool(branch and git('rev-parse', '-q', '--verify', 'refs/remotes/origin/' + branch)),
+    'defaultBranch': (git('symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD') or '').removeprefix('origin/') or None if has_git else None,
     'backupBranches': request['branches'],
     'sessions': sessions,
 }
+if request.get('bundle') and pathlib.Path(request['bundle']).is_file():
+    files['work.bundle'] = pathlib.Path(request['bundle'])
+manifest['bundle'] = 'work.bundle' if 'work.bundle' in files else None
 stats = []
 for key, path in sorted(files.items()):
     stat = path.stat()
@@ -159,14 +138,11 @@ const SessionBackup = Schema.Union([
 type SessionBackup = typeof SessionBackup.Type;
 const decodeSessionBackup = Schema.decodeUnknownExit(Schema.fromJsonString(SessionBackup));
 
-/** Where a box's latest backup lives under the host's outputs bucket. */
-export const backupUri = (outputsUri: string, environmentId: string) =>
-  `${outputsUri.replace(/\/+$/, "")}/${environmentId}/backups/latest/`;
-
 /**
  * Uploads the owner chat's provider session files and the restore manifest to `uri`, which then
- * holds exactly those: Claude's transcript with its subagent and tool-output folder, or Codex's
- * rollout file, of each provider thread the chat ran. Files of the box's other chats stay.
+ * holds exactly those, plus the work's bundle when there is one: Claude's transcript with its
+ * subagent and tool-output folder, or Codex's rollout file, of each provider thread the chat ran.
+ * Files of the box's other chats stay.
  */
 export async function backUpSessions(
   port: RemotePreparationPort,
@@ -180,6 +156,8 @@ export async function backUpSessions(
       readonly threadId: string;
     };
     readonly branches: ReadonlyArray<string>;
+    /** A bundle file on the box holding the branches, stored beside the sessions. */
+    readonly bundle?: string | undefined;
     readonly previous?: string | undefined;
     readonly timeoutSeconds: number;
   },
@@ -192,6 +170,56 @@ export async function backUpSessions(
   return decoded?._tag === "Success"
     ? decoded.value
     : { kind: "failed", reason: "The session backup did not finish." };
+}
+
+/**
+ * Whether GitHub says `repository` is private. False when it cannot tell, so work in progress is
+ * never pushed to a repository that might be public.
+ */
+export async function repositoryIsPrivate(
+  repository: string | undefined,
+  token: string | undefined,
+): Promise<boolean> {
+  if (!repository) return false;
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${canonicalRepository(repository)}`,
+      {
+        headers: {
+          accept: "application/vnd.github+json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      return false;
+    }
+    const body: unknown = await response.json();
+    return typeof body === "object" && body !== null && "private" in body && body.private === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where a box's unsaved work goes: its private origin when a token can push there, else a bundle
+ * at `bundlePath` that the backup stores in the private bucket, else nowhere.
+ */
+export function workTarget(input: {
+  readonly originIsPrivate: boolean;
+  readonly token: string | undefined;
+  readonly bundlePath: string | undefined;
+}): WorkspaceBackupTarget {
+  if (input.originIsPrivate && input.token) return { kind: "origin", token: input.token };
+  if (input.bundlePath) return { kind: "bundle", path: input.bundlePath };
+  return {
+    kind: "none",
+    reason: input.originIsPrivate
+      ? "No GitHub token can push the work to its origin."
+      : "The repository may be public, and this host has no private bucket for the work.",
+  };
 }
 
 /** A lease's next backup record, and what the backup could not save. */
@@ -222,15 +250,14 @@ export async function withinBudget<A>(work: Promise<A>, budgetMs: number): Promi
 /**
  * Runs both parts of a box's backup and answers the lease's next record, with what could not be
  * saved. A part that fails keeps what the previous record said of it; an unchanged box answers
- * `previous` itself.
+ * `previous` itself. Each part's commands end by `deadline`.
  */
 export async function backUpBox(
   port: RemotePreparationPort,
   input: {
     readonly root: string;
     readonly leaseId: string;
-    readonly push: boolean;
-    readonly token?: string | undefined;
+    readonly target: WorkspaceBackupTarget;
     /** The owner chat and where its sessions go; absent without an owner or outputs bucket. */
     readonly sessions?: {
       readonly uri: string;
@@ -240,17 +267,18 @@ export async function backUpBox(
     };
     readonly previous: LeaseBackup | undefined;
     readonly now: string;
-    readonly timeoutSeconds: number;
+    /** Epoch ms by which every command of the backup ends. */
+    readonly deadline: number;
   },
 ): Promise<BoxBackupResult> {
-  const { previous } = input;
+  const { previous, target } = input;
   const problems: Array<string> = [];
   const work = await backUpWorkspace(port, {
     root: input.root,
     branch: input.leaseId,
-    push: input.push,
-    token: input.token,
+    target,
     previous: previous?.workFingerprint,
+    stale: (previous?.branches.length ?? 0) > 0,
   });
   if (work.kind === "unsaved") problems.push(work.reason);
   const workPart =
@@ -270,8 +298,9 @@ export async function backUpBox(
       uri,
       chat: { ...chat, leaseId: input.leaseId },
       branches,
+      bundle: target.kind === "bundle" ? target.path : undefined,
       previous: previous?.sessionsUri === uri ? previous.sessionsFingerprint : undefined,
-      timeoutSeconds: input.timeoutSeconds,
+      timeoutSeconds: Math.max(1, Math.floor((input.deadline - Date.now()) / 1000)),
     });
     if (result.kind === "failed") problems.push(result.reason);
     else

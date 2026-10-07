@@ -38,6 +38,8 @@ import * as NodeStream from "node:stream";
 import * as NodeUtil from "node:util";
 import * as NodeZlib from "node:zlib";
 import {
+  CloudBackupManifest,
+  cloudBackupUri,
   CommandId,
   defaultInstanceIdForDriver,
   MessageId,
@@ -70,7 +72,6 @@ import {
   SNAPSHOT_SCRIPT,
   snapshotCheckout,
 } from "./moveChat.ts";
-import { BackupManifest, backupUri } from "../../apps/server/src/environmentControl/boxBackup.ts";
 import { childPairingUrl, exchangePairingToken, type T3Client, withRpc } from "./t3Rpc.ts";
 import { advanceTurn, initialProgress, type TurnProgress } from "./turnProgress.ts";
 
@@ -80,7 +81,7 @@ const BOX_CARRY_TAR = "/tmp/move-chat-carry.tgz";
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 const BOX_INSTANCE = defaultInstanceIdForDriver(CLAUDE);
 const decodeModelSelection = Schema.decodeUnknownSync(ModelSelection);
-const decodeBackupManifest = Schema.decodeUnknownSync(Schema.fromJsonString(BackupManifest));
+const decodeBackupManifest = Schema.decodeUnknownSync(Schema.fromJsonString(CloudBackupManifest));
 const STATE_DIR = NodePath.join(NodeOS.homedir(), ".t3", "move-chat");
 
 const sh = (cwd: string, command: string, ...args: ReadonlyArray<string>) =>
@@ -514,7 +515,7 @@ async function toCloud(flags: {
     origin: flags.origin,
     bearer: flags.bearer,
     watchMinutes: flags.watchMinutes,
-    prepare: async (sandbox, claudeDir) => {
+    prepare: async (sandbox, { claudeDir }) => {
       if (extras) {
         await sandbox.files.write("/tmp/move-chat-extras.tgz", new Blob([extras]));
         await sandbox.commands.run(`tar -xzf /tmp/move-chat-extras.tgz -C ${BOX_WORKSPACE}`);
@@ -544,7 +545,10 @@ interface BoxMove {
   readonly bearer: string;
   readonly watchMinutes: number;
   /** Puts files on the box before the session is imported. */
-  readonly prepare?: (sandbox: Sandbox, claudeDir: string) => Promise<void>;
+  readonly prepare?: (
+    sandbox: Sandbox,
+    runtime: { readonly env: Record<string, string>; readonly claudeDir: string },
+  ) => Promise<void>;
 }
 
 /**
@@ -626,7 +630,7 @@ async function continueOnBox(move: BoxMove) {
     const runtime = yield* Effect.promise(() => boxRuntime(sandbox));
     log(`box Claude config ${runtime.claudeDir}`);
     const { prepare } = move;
-    if (prepare) yield* Effect.promise(() => prepare(sandbox, runtime.claudeDir));
+    if (prepare) yield* Effect.promise(() => prepare(sandbox, runtime));
 
     yield* withRpc(box.httpBaseUrl, box.bearer, (client) =>
       Effect.gen(function* () {
@@ -809,12 +813,12 @@ async function toLocal(flags: {
   );
 }
 
-/** An S3 object's text, read with this Mac's AWS credentials. */
-const readS3 = (uri: string) =>
+/** An S3 object, read with this Mac's AWS credentials. */
+const readS3Bytes = (uri: string) =>
   NodeChildProcess.execFileSync("aws", ["s3", "cp", "--only-show-errors", uri, "-"], {
-    encoding: "utf8",
     maxBuffer: 1024 * 1024 * 1024,
   });
+const readS3 = (uri: string) => readS3Bytes(uri).toString("utf8");
 
 function configuredOutputsUri(): string | undefined {
   const path = NodePath.join(NodeOS.homedir(), ".t3", "environment-control.json");
@@ -832,7 +836,7 @@ async function restore(flags: {
   watchMinutes: number;
   dryRun: boolean;
 }) {
-  const prefix = backupUri(flags.uri, flags.environment);
+  const prefix = cloudBackupUri(flags.uri, flags.environment);
   const manifest = decodeBackupManifest(readS3(`${prefix}manifest.json`));
   const plan = planRestore(manifest, prefix);
   log(
@@ -861,6 +865,22 @@ async function restore(flags: {
     origin: flags.origin,
     bearer: flags.bearer,
     watchMinutes: flags.watchMinutes,
+    prepare: async (sandbox, { env }) => {
+      if (!plan.bundle) return;
+      const bundle = readS3Bytes(`${prefix}${plan.bundle}`);
+      await sandbox.files.write("/tmp/move-chat-work.bundle", new Blob([bundle]));
+      // A shallow clone may lack the commits the bundle builds on.
+      await sandbox.commands.run(
+        [
+          "{ [ ! -f .git/shallow ] || git fetch -q --unshallow origin; }",
+          "git fetch -q /tmp/move-chat-work.bundle 'refs/t3-bundle/*:refs/heads/*'",
+          ...(plan.checkout ? [`git switch -q ${plan.checkout}`] : []),
+          "rm -f /tmp/move-chat-work.bundle",
+        ].join(" && "),
+        { cwd: BOX_WORKSPACE, envs: env, timeoutMs: 0 },
+      );
+      log(`fetched the backup bundle${plan.checkout ? ` and switched to ${plan.checkout}` : ""}`);
+    },
   });
 }
 

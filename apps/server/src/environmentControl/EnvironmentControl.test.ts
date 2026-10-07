@@ -1565,7 +1565,7 @@ describe("a cloud machine backed up before it sleeps", () => {
     sessionsFingerprint: "sessions-1",
   };
   async function withIdleBox(
-    sleepBackup: NonNullable<Parameters<typeof createEnvironmentControl>[1]["sleepBackup"]>,
+    boxBackup: NonNullable<Parameters<typeof createEnvironmentControl>[1]["boxBackup"]>,
     test: (context: {
       registry: ReturnType<typeof createProvisionedLeaseRegistry>;
       calls: string[];
@@ -1596,11 +1596,11 @@ describe("a cloud machine backed up before it sleeps", () => {
         [],
         {
           ...driver,
-          sleepBackup: {
-            budgetMs: sleepBackup.budgetMs,
-            run: (lease) => {
+          boxBackup: {
+            sleepBudgetMs: boxBackup.sleepBudgetMs,
+            run: (lease, deadline) => {
               calls.push(`backup:${lease.leaseId}`);
-              return sleepBackup.run(lease);
+              return boxBackup.run(lease, deadline);
             },
           },
         },
@@ -1615,7 +1615,7 @@ describe("a cloud machine backed up before it sleeps", () => {
 
   it("backs an idle box up before the reaper pauses it, and records the backup", async () => {
     await withIdleBox(
-      { budgetMs: 45_000, run: async () => ({ backup: saved, problems: [] }) },
+      { sleepBudgetMs: 45_000, run: async () => ({ backup: saved, problems: [] }) },
       async ({ registry, calls, reports, manager }) => {
         await manager.reapExpiredLeases();
         expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
@@ -1628,7 +1628,7 @@ describe("a cloud machine backed up before it sleeps", () => {
   it("backs a box up before a client's pause, and reports what it could not save", async () => {
     await withIdleBox(
       {
-        budgetMs: 45_000,
+        sleepBudgetMs: 45_000,
         run: async () => ({ backup: saved, problems: ["The backup push failed."] }),
       },
       async ({ registry, calls, reports, manager }) => {
@@ -1636,7 +1636,7 @@ describe("a cloud machine backed up before it sleeps", () => {
         expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
         expect((await registry.findById("lease"))?.backup).toEqual(saved);
         expect(reports).toEqual([
-          "cloud box backup saved only part of its work: The backup push failed.",
+          "cloud box backup before sleeping saved only part of its work: The backup push failed.",
         ]);
       },
     );
@@ -1644,16 +1644,14 @@ describe("a cloud machine backed up before it sleeps", () => {
 
   it("pauses without the backup once its budget runs out", async () => {
     await withIdleBox(
-      { budgetMs: 0, run: () => new Promise(() => {}) },
+      { sleepBudgetMs: 0, run: () => new Promise(() => {}) },
       async ({ registry, calls, reports, manager }) => {
         await manager.reapExpiredLeases();
         expect(calls).toEqual(["backup:lease", "pause:sandbox"]);
         const lease = await registry.findById("lease");
         expect(lease?.state).toBe("paused");
         expect(lease?.backup).toBeUndefined();
-        expect(reports).toEqual([
-          "cloud box backup ran out of time; sleeping without it: over 0 ms",
-        ]);
+        expect(reports).toEqual(["cloud box backup before sleeping ran out of time: over 0 ms"]);
       },
     );
   });
@@ -1661,7 +1659,7 @@ describe("a cloud machine backed up before it sleeps", () => {
   it("pauses when the backup fails outright", async () => {
     await withIdleBox(
       {
-        budgetMs: 45_000,
+        sleepBudgetMs: 45_000,
         run: async () => {
           throw new Error("E2B refused the connection");
         },

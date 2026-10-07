@@ -29,7 +29,7 @@ import {
   sealWarmBase,
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
-import { backUpWorkspace } from "./workspaceBackup.ts";
+import { backUpWorkspace, type WorkspaceBackupTarget } from "./workspaceBackup.ts";
 import { warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 import { startProvisionPhase, type RecordProvisionPhase } from "./provisionTiming.ts";
 import type { ProvisionRuntimeArtifact } from "./config.ts";
@@ -825,7 +825,7 @@ except FileExistsError:
       operation: ProvisionOperation,
       resource: NamespaceResource,
       manifest: ProvisionPreparationManifest,
-      input: { readonly branch: string; readonly push: boolean; readonly token?: string },
+      input: { readonly branch: string; readonly target: WorkspaceBackupTarget },
     ) => {
       await wake(operation, resource);
       return backUpWorkspace(port(resource, manifest), {
