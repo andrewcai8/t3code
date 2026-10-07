@@ -216,6 +216,8 @@ const MAX_IDLE_UPGRADES = 2;
  * enough that a reaper sweep over several boxes is not held up for long.
  */
 const SLEEP_BACKUP_BUDGET_MS = 45_000;
+/** The backup after each turn runs in the background, so it only has to end well before a sweep. */
+const TURN_BACKUP_BUDGET_MS = 30_000;
 /** Past its budget a backup's own deadline has passed; this covers an SDK call that ignores it. */
 const BACKUP_GRACE_MS = 10_000;
 
@@ -247,6 +249,8 @@ interface BoxBackup {
   readonly run: (lease: ProvisionedLease, deadline: number) => Promise<BoxBackupResult | null>;
   /** How long a pause waits for the backup it takes first. */
   readonly sleepBudgetMs: number;
+  /** How long the backup after a turn may take; it runs in the background. */
+  readonly turnBudgetMs: number;
 }
 
 /**
@@ -342,8 +346,10 @@ export function createEnvironmentControl(
     const backup = driver.boxBackup;
     if (!backup || !leaseRegistry) return;
     try {
+      // The record another backup just wrote is what this one compares against.
+      const current = (await leaseRegistry.findById(lease.leaseId)) ?? lease;
       const result = await withinBudget(
-        backup.run(lease, Date.now() + budgetMs),
+        backup.run(current, Date.now() + budgetMs),
         budgetMs + Math.min(BACKUP_GRACE_MS, budgetMs),
       );
       if (result === "timeout") {
@@ -354,7 +360,7 @@ export function createEnvironmentControl(
         return;
       }
       if (!result) return;
-      if (result.backup && result.backup !== lease.backup)
+      if (result.backup && result.backup !== current.backup)
         await leaseRegistry.recordBackup(lease.leaseId, result.backup);
       if (result.problems.length > 0)
         reportFailure(`cloud box backup ${when} saved only part of its work`, {
@@ -367,8 +373,31 @@ export function createEnvironmentControl(
   };
   // A box that sleeps may never wake (E2B has failed to place one for hours), so its work and
   // chat are saved first. A backup that fails or runs out of time never blocks the sleep.
+  /** The owner's last turn each awake box was saved after, and the saves still running. */
+  const savedTurns = new Map<string, string>();
+  const turnSaves = new Map<string, Promise<void>>();
+  /**
+   * Saves a box in the background once its owner's latest turn has completed and nothing runs on
+   * it, so the box is never the only copy of a finished turn. A save that fails waits for the next
+   * turn or the save before sleep.
+   */
+  const saveAfterTurn = (lease: ProvisionedLease, observation: LeaseObservation) => {
+    const backup = driver.boxBackup;
+    const thread = observation.chat?.thread;
+    if (!backup || observation.activity !== "idle" || !thread?.latestRunId) return;
+    if (!thread.latestRunCompletedAt || savedTurns.get(lease.leaseId) === thread.latestRunId)
+      return;
+    if (turnSaves.has(lease.leaseId)) return;
+    const turn = thread.latestRunId;
+    const save = backUp(lease, backup.turnBudgetMs, "after a turn")
+      .then(() => void savedTurns.set(lease.leaseId, turn))
+      .finally(() => turnSaves.delete(lease.leaseId));
+    turnSaves.set(lease.leaseId, save);
+  };
   const backUpBeforeSleep = async (lease: ProvisionedLease): Promise<void> => {
     if (!lease.remoteAccess || lease.state !== "active") return;
+    // A save still running from the last turn ends by its own budget; this one then flushes.
+    await turnSaves.get(lease.leaseId);
     await backUp(lease, driver.boxBackup?.sleepBudgetMs ?? 0, "before sleeping");
   };
   /** Unhealthy probes in a row per lease, reset by a healthy one. */
@@ -1006,11 +1035,14 @@ export function createEnvironmentControl(
       const awakeIds = new Set(awake.map((lease) => lease.leaseId));
       for (const leaseId of settledActivity.keys())
         if (!awakeIds.has(leaseId)) settledActivity.delete(leaseId);
+      for (const leaseId of savedTurns.keys())
+        if (!awakeIds.has(leaseId)) savedTurns.delete(leaseId);
       const queue = [...awake];
       const sync = async () => {
         for (let lease = queue.shift(); lease; lease = queue.shift()) {
           const observation = await observeAndKeep(lease);
           if (await rotationDue(lease, observation)) driver.accountRotation?.start(lease);
+          saveAfterTurn(lease, observation);
           const current = observation.activity;
           if (current === "busy") settledActivity.set(lease.leaseId, "busy");
           else if (current === "idle" && settledActivity.get(lease.leaseId) !== "idle") {
@@ -1349,6 +1381,7 @@ export const layer = Layer.effect(
               },
               boxBackup: {
                 sleepBudgetMs: SLEEP_BACKUP_BUDGET_MS,
+                turnBudgetMs: TURN_BACKUP_BUDGET_MS,
                 run: async (lease, deadline) => {
                   const box = await e2bBox(lease);
                   if (!box) return null;

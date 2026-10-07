@@ -1790,3 +1790,64 @@ describe("a cloud machine checked before it sleeps", () => {
     });
   });
 });
+
+describe("a cloud machine saved after each turn", () => {
+  it("saves a box once after its owner's turn completes, and the pause flushes on top of it", async () => {
+    const chat = (latestRunId: string | null, latestRunCompletedAt: string | null) =>
+      ownerChat(
+        boxShell([
+          boxThread("thread", "project-app", "Chat", { latestRunId, latestRunCompletedAt }),
+        ]),
+        "thread",
+      )!;
+    let observed = chat("run-1", null);
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.markActive({
+        leaseId: "lease",
+        remoteAccess: { origin: "https://box.example", brokerToken: "broker" },
+      });
+      const runs: string[] = [];
+      const driver = setup().driver;
+      driver.pause = async () => {
+        runs.push("pause");
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          boxBackup: {
+            sleepBudgetMs: 45_000,
+            turnBudgetMs: 30_000,
+            run: async (lease, deadline) => {
+              const budget = Math.round((deadline - Date.now()) / 1000);
+              runs.push(`backup:${budget}s:after ${lease.backup?.at ?? "none"}`);
+              return {
+                backup: { at: `saved-${runs.length}`, branches: ["t3-backup/lease"] },
+                problems: [],
+              };
+            },
+          },
+        },
+        registry,
+        async () => ({ activity: "idle", chat: observed }),
+      );
+
+      await manager.syncLeaseUsage();
+      expect(runs).toEqual([]);
+
+      observed = chat("run-1", "2026-10-06T12:00:00.000Z");
+      await manager.syncLeaseUsage();
+      await manager.syncLeaseUsage();
+      expect(await manager.pause({ sandboxId: "sandbox" })).toEqual({ kind: "paused" });
+      expect(runs).toEqual(["backup:30s:after none", "backup:45s:after saved-1", "pause"]);
+      expect((await registry.findById("lease"))?.backup?.at).toBe("saved-2");
+    });
+  });
+});
