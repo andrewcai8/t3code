@@ -36,7 +36,11 @@ const count = Number(process.argv[4] ?? 4);
 const bytes = Number(process.argv[5] ?? 32768);
 const session = {
   driver: "codex",
-  providerSession: { id: "session", driver: "codex" },
+  providerSession: {
+    id: "session",
+    driver: "codex",
+    capabilities: { tools: { supportsMcpTools: true } },
+  },
   resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
   startTurn: () =>
     mode === "handoff-failure" ? Effect.fail("Synthetic startup failure") : Effect.void,
@@ -107,7 +111,13 @@ function fixture(index) {
   );
   refs.push(new WeakRef(history));
   return {
-    thread: { id: "thread", projectId: "project", branch: null, worktreePath: null },
+    thread: {
+      id: "thread",
+      projectId: "project",
+      branch: null,
+      worktreePath: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "thread" },
+    },
     runs: [
       {
         id: runId,
