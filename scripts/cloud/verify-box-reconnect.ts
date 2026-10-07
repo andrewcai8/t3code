@@ -23,10 +23,11 @@
  * `--second-client` proves a second device lists and opens a chat it never paired. Client A
  * provisions the box with a chat whose first turn the host starts, waits for the chat's thread,
  * closes it and pauses the box through the host. Client B, a fresh catalog paired only to the
- * host, follows the host's list: the chat is listed with A's thread and title, B has not dialed
- * the box, and the box is still paused. B then opens the chat: the box wakes, pairs once and
- * connects, and its thread loads. A fresh runtime over B's storage opens it again with the same
- * pairing, and after the box is disposed B's sync stops dialing it.
+ * host, follows the host's list: the chat is listed with A's thread and title. The chat is
+ * unsettled and its user present, so the host wakes the box ahead of them while B never dials
+ * it. B then opens the chat: it pairs once through the host and connects, and its thread loads.
+ * A fresh runtime over B's storage opens it again with the same pairing, and after the box is
+ * disposed B's sync stops dialing it.
  *
  * `--lease <leaseId>` runs client B against a chat that already exists, provisioning nothing and
  * disposing nothing. It finds the chat whose box is that lease in the host's list, checks it is
@@ -125,7 +126,7 @@ const DISPOSE_TIMEOUT = "3 minutes";
 const WAKE_AFTER_OPEN_TIMEOUT = "30 seconds";
 const CLIENT_METADATA = { label: "box reconnect verifier", deviceType: "bot" } as const;
 const SECOND_CLIENT_CHAT_TITLE = "Second client proof";
-/** How long client B waits without opening the chat, to show listing it dials nothing. */
+/** How long the `--lease` client waits without opening the chat, to show listing it dials nothing. */
 const SECOND_CLIENT_IDLE = "10 seconds";
 const LEASE_TURN_TIMEOUT = "10 minutes";
 const LEASE_TURN_PROMPT = "Reply with the single word: continued.";
@@ -687,9 +688,10 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     );
 
   /**
-   * Client B: a fresh catalog paired only to the host. It lists the chat from the host without
-   * dialing the paused box, opens it (wake, one pairing, connect), opens it again from a fresh
-   * runtime over the same storage with that pairing, and stops dialing it once it is disposed.
+   * Client B: a fresh catalog paired only to the host. It lists the chat from the host, leaves
+   * the box undialed while the host wakes it ahead of the present user, opens it (one pairing,
+   * connect), opens it again from a fresh runtime over the same storage with that pairing, and
+   * stops dialing it once it is disposed.
    */
   const verifySecondClient = Effect.fn("verifySecondClient")(function* (input: {
     readonly manager: PrimaryConnectionRegistration;
@@ -719,8 +721,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       yield* awaitManager(registry, managerId);
       const rows = yield* listOnHost(registry, managerId);
       const row = rows.find((candidate) => candidate.environmentId === boxId);
+      // The host may already be waking it for client A, who is still present.
       yield* check(
-        row?.lifecycle === "paused",
+        row?.lifecycle === "paused" || row?.lifecycle === "active",
         `client B: the host lists the box ${row?.lifecycle}`,
       );
       yield* check(
@@ -752,39 +755,41 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
         Stream.runForEach((state) => record("second-box", state)),
         Effect.forkScoped,
       );
+      const woken = yield* listOnHost(registry, managerId).pipe(
+        Effect.map(
+          (listed) => listed.find((candidate) => candidate.environmentId === boxId)?.lifecycle,
+        ),
+        Effect.repeat({
+          while: (lifecycle) => lifecycle !== "active",
+          schedule: Schedule.spaced("5 seconds"),
+        }),
+        Effect.timeoutOption(Duration.minutes(options.timeoutMinutes)),
+      );
+      yield* check(
+        Option.isSome(woken),
+        "client B: the host did not wake the unsettled chat's box",
+      );
+      // The box may already be active on B's first list, so watch B for a while after the wake
+      // before judging that it never dialed the chat it did not open.
       yield* Effect.sleep(SECOND_CLIENT_IDLE);
       const idle = (yield* SubscriptionRef.get(log)).filter(
         (entry) => entry.environment === "second-box",
       );
+      yield* check(idle.length > 0, "client B recorded no state for the box it lists");
       yield* check(
         idle.every((entry) => entry.phase === "available"),
         `client B dialed a chat it did not open: ${idle.map((entry) => entry.phase).join(", ")}`,
       );
-      const relisted = yield* listOnHost(registry, managerId);
-      yield* check(
-        relisted.find((candidate) => candidate.environmentId === boxId)?.lifecycle === "paused",
-        "client B: listing the chat woke its box",
-      );
+      yield* Console.log(`[${yield* elapsed}s] the host woke the chat's box ahead of client B`);
 
       const openedAt = (yield* SubscriptionRef.get(log)).length;
       yield* Queue.offer(inputsB, undefined);
       yield* registry.demand(boxId);
       yield* Console.log(`[${yield* elapsed}s] client B opens the chat`);
-      yield* waitFor(
-        "client B's box connected",
-        Duration.minutes(options.timeoutMinutes),
-        (entries) =>
-          entries
-            .slice(openedAt)
-            .some((entry) => entry.environment === "second-box" && entry.phase === "connected"),
-      );
-      const phases = (yield* SubscriptionRef.get(log))
-        .slice(openedAt)
-        .filter((entry) => entry.environment === "second-box")
-        .map((entry) => entry.phase);
-      yield* check(
-        phases.includes("waking") && phases.indexOf("waking") < phases.indexOf("connected"),
-        `client B: the box did not wake before it connected: ${phases.join(", ")}`,
+      yield* waitFor("client B's box connected", BOX_CONNECT_TIMEOUT, (entries) =>
+        entries
+          .slice(openedAt)
+          .some((entry) => entry.environment === "second-box" && entry.phase === "connected"),
       );
       yield* check(
         (yield* threadTitle(registry, boxId, threadId, "client B loads the chat")) === input.title,
@@ -1459,7 +1464,7 @@ const command = Command.make(
     ),
     secondClient: Flag.Boolean("second-client").pipe(
       Flag.withDescription(
-        "Pause the box with a chat on it, then prove a second client paired only to the host lists the chat without waking the box and opens it with one pairing.",
+        "Pause the box with a chat on it, then prove a second client paired only to the host lists the chat, leaves it undialed while the host wakes it, and opens it with one pairing.",
       ),
       Flag.withDefault(false),
     ),
