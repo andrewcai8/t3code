@@ -1957,3 +1957,175 @@ describe("a cloud chat whose box E2B cannot start", () => {
     });
   });
 });
+
+describe("recovering a cloud box E2B cannot resume", () => {
+  async function withUnresumableBox(
+    rebootBox: () => Promise<void>,
+    test: (context: {
+      registry: ReturnType<typeof createProvisionedLeaseRegistry>;
+      calls: string[];
+      resume: () => Promise<unknown>;
+      told: Promise<string>;
+      rebuilt: Promise<void>;
+      fail: (failing: boolean) => void;
+    }) => Promise<void>,
+  ) {
+    await withSqlRegistry(async (registry) => {
+      await registry.register({
+        leaseId: "lease",
+        sandboxId: "sandbox",
+        provider: "e2b",
+        providerInstanceId: "claude-a",
+        owner: { environmentId: "child", threadId: "thread" },
+      });
+      await registry.recordBackup("lease", {
+        at: "2026-10-07T08:00:00.000Z",
+        branches: [],
+        sessionsUri: "s3://bucket/t3-agents/child/backups/latest/",
+      });
+      await registry.markPaused("lease");
+      const calls: string[] = [];
+      let failing = true;
+      let tell: ((text: string) => void) | undefined;
+      const told = new Promise<string>((resolve) => (tell = resolve));
+      let rebuildDone: (() => void) | undefined;
+      const rebuilt = new Promise<void>((resolve) => (rebuildDone = resolve));
+      const driver = setup().driver;
+      driver.resume = async () => {
+        calls.push(failing ? "resume:unplaceable" : "resume:ok");
+        if (failing) throw new E2bPlacementUnavailable("504 placement", "provider-unavailable");
+        return {};
+      };
+      const manager = createEnvironmentControl(
+        [],
+        {
+          ...driver,
+          rebootBox: async () => {
+            calls.push("reboot");
+            await rebootBox();
+          },
+          tellChat: async (_lease, text) => {
+            calls.push("tell");
+            tell?.(text);
+          },
+          chatRebuild: {
+            run: async () => {
+              calls.push("rebuild");
+              return { leaseId: "lease-2", environmentId: "child-2", threadId: "import:x" };
+            },
+          },
+        },
+        {
+          ...registry,
+          recordRebuild: async (...args: Parameters<typeof registry.recordRebuild>) => {
+            await registry.recordRebuild(...args);
+            if (args[1].status === "done") rebuildDone?.();
+          },
+        },
+      );
+      const resume = () =>
+        manager.resume({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          environmentId: EnvironmentId.make("child"),
+        });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-10-07T09:00:00.000Z"));
+        await resume();
+        vi.setSystemTime(new Date("2026-10-07T09:05:00.000Z"));
+        await resume();
+        vi.setSystemTime(new Date("2026-10-07T09:10:00.000Z"));
+        await test({
+          registry,
+          calls,
+          resume,
+          told,
+          rebuilt,
+          fail: (next) => {
+            failing = next;
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
+  it("boots it fresh once, holding off every other resume, then wakes it and tells its chat", async () => {
+    let boot: (() => void) | undefined;
+    const booted = new Promise<void>((resolve) => (boot = resolve));
+    let started: (() => void) | undefined;
+    const rebooting = new Promise<void>((resolve) => (started = resolve));
+    await withUnresumableBox(
+      () => {
+        started?.();
+        return booted;
+      },
+      async ({ registry, calls, resume, told, fail }) => {
+        expect(await resume()).toMatchObject({
+          message:
+            "E2B couldn't start this machine yet. The problem is on E2B's side. It is being started fresh from its disk.",
+        });
+        expect(await resume()).toEqual({
+          kind: "refused",
+          reason: "unknown",
+          message:
+            "E2B couldn't resume this machine, so it is being started fresh from its disk. Open it again in a few minutes.",
+        });
+        await rebooting;
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "reboot",
+        ]);
+
+        fail(false);
+        boot?.();
+        expect(await told).toBe(
+          "This machine was restarted fresh from its disk because E2B could not resume it. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.",
+        );
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "reboot",
+          "resume:ok",
+          "tell",
+        ]);
+        const lease = await registry.findById("lease");
+        expect(lease?.state).toBe("active");
+        expect(lease?.reboot).toEqual({ status: "done", at: "2026-10-07T09:10:00.000Z" });
+        expect(lease?.rebuild).toBeUndefined();
+      },
+    );
+  });
+
+  it("rebuilds the chat on a new box only once the fresh boot fails too", async () => {
+    await withUnresumableBox(
+      async () => {
+        throw new Error("E2B could not place the reboot either");
+      },
+      async ({ registry, calls, resume, rebuilt }) => {
+        await resume();
+        await rebuilt;
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "reboot",
+          "rebuild",
+        ]);
+        const lease = await registry.findById("lease");
+        expect(lease?.reboot).toEqual({
+          status: "failed",
+          at: "2026-10-07T09:10:00.000Z",
+          reason: "E2B could not place the reboot either",
+        });
+        expect(lease?.rebuild).toMatchObject({ status: "done", leaseId: "lease-2" });
+        expect(lease?.state).toBe("paused");
+      },
+    );
+  });
+});

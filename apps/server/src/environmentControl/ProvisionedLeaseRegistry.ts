@@ -93,6 +93,17 @@ export const LeaseRebuild = Schema.Struct({
 });
 export type LeaseRebuild = typeof LeaseRebuild.Type;
 
+/**
+ * The fresh boot of a box E2B could not resume, at most one per outage: a resume that succeeds
+ * ends the outage and clears it.
+ */
+export const LeaseReboot = Schema.Struct({
+  status: Schema.Literals(["started", "done", "failed"]),
+  at: Schema.String,
+  reason: Schema.optional(Schema.String),
+});
+export type LeaseReboot = typeof LeaseReboot.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -152,6 +163,9 @@ export const StoredProvisionedLease = Schema.Struct({
   ),
   rebuild: Schema.optional(
     LeaseRebuild.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
+  reboot: Schema.optional(
+    LeaseReboot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
   ),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
@@ -262,6 +276,8 @@ export interface ProvisionedLeaseRegistry {
   readonly setKeep: (leaseId: string, keep: LeaseKeep | null) => Promise<ProvisionedLease | null>;
   readonly recordBackup: (leaseId: string, backup: LeaseBackup) => Promise<void>;
   readonly recordRebuild: (leaseId: string, rebuild: LeaseRebuild) => Promise<void>;
+  /** Null clears it. */
+  readonly recordReboot: (leaseId: string, reboot: LeaseReboot | null) => Promise<void>;
 }
 
 function nowIso(now?: Date): string {
@@ -633,6 +649,15 @@ export function createProvisionedLeaseRegistry(
     recordBackup: (leaseId, backup) =>
       mutate((leases) => ({
         leases: leases.map((lease) => (lease.leaseId === leaseId ? { ...lease, backup } : lease)),
+        value: undefined,
+      })),
+    recordReboot: (leaseId, reboot) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => {
+          if (lease.leaseId !== leaseId) return lease;
+          const { reboot: _previous, ...rest } = lease;
+          return reboot === null ? rest : { ...rest, reboot };
+        }),
         value: undefined,
       })),
     recordRebuild: (leaseId, rebuild) =>

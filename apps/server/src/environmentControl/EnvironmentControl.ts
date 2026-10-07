@@ -9,6 +9,7 @@ import {
   EnvironmentControlError,
   ProviderInstanceId,
   ProvisionRequestId,
+  ThreadId,
   type ComputeState,
   type EnvironmentId,
   type EnvironmentControlResult,
@@ -149,6 +150,7 @@ import { openBoxRpc } from "./BoxFleetClient.ts";
 import {
   continueChatOnBox,
   decodeModelSelection as decodeRebuildModel,
+  sendChatMessage,
   makeBoxRestore,
   planRebuild,
 } from "./chatRebuild.ts";
@@ -284,11 +286,16 @@ interface ChatRebuild {
 }
 
 /**
- * A box E2B fails to place this many resumes in a row, over at least REBUILD_AFTER_MS, has its
- * chat rebuilt. Each resume already retries for minutes, so this is a long outage, not a blip.
+ * A box E2B fails to place this many resumes in a row, over at least RECOVER_AFTER_MS, is booted
+ * fresh from its disk, and its chat rebuilt on a new box if that fails too. Each resume already
+ * retries for minutes, so this is a long outage, not a blip.
  */
-const REBUILD_AFTER_FAILURES = 3;
-const REBUILD_AFTER_MS = 10 * 60_000;
+const RECOVER_AFTER_FAILURES = 3;
+const RECOVER_AFTER_MS = 10 * 60_000;
+
+/** What a chat is told when its box was booted fresh because E2B could not resume it. */
+const REBOOT_NOTICE =
+  "This machine was restarted fresh from its disk because E2B could not resume it. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.";
 
 /** Pause attempts in a row a pinned box waits through before its agents' leftovers are stopped. */
 const MAX_PINNED_PROBES = 3;
@@ -313,6 +320,10 @@ export function createEnvironmentControl(
     readonly boxBackup?: BoxBackup;
     readonly healthCheck?: BoxHealthCheck;
     readonly chatRebuild?: ChatRebuild;
+    /** Boots a paused box fresh from its disk, once no other start of it is in flight. */
+    readonly rebootBox?: (lease: ProvisionedLease) => Promise<void>;
+    /** Sends a message into the box's chat, as its user. */
+    readonly tellChat?: (lease: ProvisionedLease, text: string) => Promise<void>;
   },
   leaseRegistry?: ProvisionedLeaseRegistry,
   observe: (lease: ProvisionedLease) => Promise<LeaseObservation> = observeLease,
@@ -331,7 +342,9 @@ export function createEnvironmentControl(
   >();
   const leaseOperations = new Map<
     string,
-    | { action: "pause" | "dispose" | "reap" | "renew" | "save" | "hold" | "clean" }
+    | {
+        action: "pause" | "dispose" | "reap" | "renew" | "save" | "hold" | "clean" | "reboot";
+      }
     | { action: "resume"; ownerKey: string; promise: Promise<EnvironmentProvisionResumeResult> }
   >();
   let bootstrapping: Promise<void> | undefined;
@@ -431,54 +444,117 @@ export function createEnvironmentControl(
   /** Resumes in a row E2B could not place, per lease, and when the first of them failed. */
   const unplaceable = new Map<string, { readonly first: number; readonly count: number }>();
   /**
-   * Counts a resume E2B could not place, and rebuilds the chat on a fresh box once its box has
-   * failed REBUILD_AFTER_FAILURES times over REBUILD_AFTER_MS. Once per lease, ever: a rebuild is
-   * recorded as started before it runs, so neither a failure nor a host restart repeats it.
+   * Counts a resume E2B could not place, and answers whether the box is now due its reboot: one
+   * that has failed RECOVER_AFTER_FAILURES times over RECOVER_AFTER_MS, has a chat, and has not
+   * been rebooted in this outage. A box whose reboot failed is due its chat's rebuild instead.
    */
-  const noteUnplaceable = async (leaseId: string) => {
+  const noteUnplaceable = async (leaseId: string): Promise<"reboot" | "rebuild" | null> => {
     const now = Date.now();
     const previous = unplaceable.get(leaseId);
     const failures = { first: previous?.first ?? now, count: (previous?.count ?? 0) + 1 };
     unplaceable.set(leaseId, failures);
-    const rebuild = driver.chatRebuild;
-    if (!rebuild || !leaseRegistry) return;
-    if (failures.count < REBUILD_AFTER_FAILURES || now - failures.first < REBUILD_AFTER_MS) return;
+    if (!leaseRegistry) return null;
+    if (failures.count < RECOVER_AFTER_FAILURES || now - failures.first < RECOVER_AFTER_MS)
+      return null;
     const lease = await leaseRegistry.findById(leaseId);
-    if (!lease || lease.rebuild || !lease.owner) return;
+    if (!lease?.owner) return null;
+    if (driver.rebootBox && !lease.reboot) return "reboot";
+    if (lease.reboot?.status === "started") return null;
+    return driver.chatRebuild && !lease.rebuild ? "rebuild" : null;
+  };
+  /**
+   * Rebuilds the chat of a box E2B cannot start on a fresh box from its last backup. Once per
+   * lease, ever: it is recorded as started before it runs, so neither a failure nor a host
+   * restart repeats it. The old box is never touched.
+   */
+  const startRebuild = async (lease: ProvisionedLease) => {
+    const rebuild = driver.chatRebuild;
+    if (!rebuild || !leaseRegistry || lease.rebuild) return;
+    const { leaseId } = lease;
     if (!lease.backup?.sessionsUri) {
       reportFailure("cloud chat cannot be rebuilt: its box was never backed up", {
         chatId: leaseId,
-        cause: `${failures.count} resumes failed`,
+        cause: "no backup",
       });
       return;
     }
-    await leaseRegistry.recordRebuild(leaseId, {
-      status: "started",
-      at: new Date(now).toISOString(),
-    });
+    await leaseRegistry.recordRebuild(leaseId, { status: "started", at: new Date().toISOString() });
     reportFailure("cloud box cannot be started; rebuilding its chat on a new box", {
       chatId: leaseId,
-      cause: `${failures.count} resumes failed over ${Math.round((now - failures.first) / 60_000)} min`,
+      cause: `${unplaceable.get(leaseId)?.count ?? 0} resumes failed`,
     });
-    void rebuild
-      .run(lease)
-      .then((rebuilt) =>
-        leaseRegistry.recordRebuild(leaseId, {
+    try {
+      const rebuilt = await rebuild.run(lease);
+      await leaseRegistry.recordRebuild(leaseId, {
+        status: "done",
+        at: new Date().toISOString(),
+        ...rebuilt,
+      });
+    } catch (cause) {
+      reportFailure("cloud chat rebuild failed", { chatId: leaseId, cause });
+      await leaseRegistry
+        .recordRebuild(leaseId, {
+          status: "failed",
+          at: new Date().toISOString(),
+          reason: cause instanceof Error ? cause.message : String(cause),
+        })
+        .catch(() => undefined);
+    }
+  };
+  /**
+   * The middle rung for a box E2B cannot resume: boot it fresh from its saved disk, which E2B can
+   * place when it cannot restore the memory it captured. Single-flight under the box's lock,
+   * which the caller takes in the same tick it releases its own, so no resume and no other start
+   * races it (E2B refuses a reboot while another start is in flight). Once booted the box is woken
+   * as any resume wakes it, which prepares its T3 server again, and its chat is told what was
+   * lost. A reboot that fails moves on to the rebuild.
+   */
+  const startReboot = (lease: ProvisionedLease) => {
+    const reboot = driver.rebootBox;
+    if (!reboot || !leaseRegistry || !lease.owner) return;
+    const { owner } = lease;
+    leaseOperations.set(lease.sandboxId, { action: "reboot" });
+    void (async () => {
+      try {
+        await leaseRegistry.recordReboot(lease.leaseId, {
+          status: "started",
+          at: new Date().toISOString(),
+        });
+        reportFailure("cloud box cannot be resumed; booting it fresh from its disk", {
+          chatId: lease.leaseId,
+          cause: `${unplaceable.get(lease.leaseId)?.count ?? 0} resumes failed`,
+        });
+        await reboot(lease);
+        await wake(lease, owner.environmentId);
+        unplaceable.delete(lease.leaseId);
+        await leaseRegistry.recordReboot(lease.leaseId, {
           status: "done",
           at: new Date().toISOString(),
-          ...rebuilt,
-        }),
-      )
-      .catch(async (cause: unknown) => {
-        reportFailure("cloud chat rebuild failed", { chatId: leaseId, cause });
+        });
+        const woken = await leaseRegistry.findById(lease.leaseId);
+        if (woken && driver.tellChat)
+          await driver.tellChat(woken, REBOOT_NOTICE).catch((cause: unknown) =>
+            reportFailure("cloud chat was not told its box restarted", {
+              chatId: lease.leaseId,
+              cause,
+            }),
+          );
+      } catch (cause) {
+        reportFailure("cloud box could not be booted fresh", { chatId: lease.leaseId, cause });
         await leaseRegistry
-          .recordRebuild(leaseId, {
+          .recordReboot(lease.leaseId, {
             status: "failed",
             at: new Date().toISOString(),
             reason: cause instanceof Error ? cause.message : String(cause),
           })
           .catch(() => undefined);
-      });
+        leaseOperations.delete(lease.sandboxId);
+        const current = await leaseRegistry.findById(lease.leaseId).catch(() => null);
+        if (current) await startRebuild(current);
+        return;
+      }
+      leaseOperations.delete(lease.sandboxId);
+    })();
   };
   /** Unhealthy probes in a row per lease, reset by a healthy one. */
   const unhealthyProbes = new Map<string, number>();
@@ -890,8 +966,16 @@ export function createEnvironmentControl(
           : Promise.resolve({
               kind: "refused",
               reason: "unknown",
-              message: "Another workspace operation is in progress. Retry shortly.",
+              message:
+                existing.action === "reboot"
+                  ? "E2B couldn't resume this machine, so it is being started fresh from its disk. Open it again in a few minutes."
+                  : "Another workspace operation is in progress. Retry shortly.",
             });
+      // The rung of recovery a failed resume made due, started once this resume lets go.
+      let recovery: {
+        readonly step: "reboot" | "rebuild";
+        readonly lease: ProvisionedLease;
+      } | null = null;
       const promise = (async (): Promise<EnvironmentProvisionResumeResult> => {
         const lease = await leaseRegistry?.findBySandbox(input.sandboxId);
         if (
@@ -909,6 +993,8 @@ export function createEnvironmentControl(
         if (lease.state === "missing") throw new ProvisionedSandboxMissing();
         await wake(lease, input.environmentId);
         unplaceable.delete(input.leaseId);
+        // The outage is over, so a later one may reboot the box again.
+        if (lease.reboot) await leaseRegistry.recordReboot(lease.leaseId, null);
         return { kind: "resumed" };
       })()
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
@@ -916,20 +1002,31 @@ export function createEnvironmentControl(
             await leaseRegistry?.markMissing(input.leaseId);
           if (cause instanceof ProvisionedSandboxMissing)
             return { kind: "refused", reason: "missing", message: cause.message };
-          if (cause instanceof E2bPlacementUnavailable && cause.failure === "provider-unavailable")
-            await noteUnplaceable(input.leaseId).catch((error: unknown) =>
-              reportFailure("cloud chat rebuild could not start", {
+          if (
+            cause instanceof E2bPlacementUnavailable &&
+            cause.failure === "provider-unavailable"
+          ) {
+            const step = await noteUnplaceable(input.leaseId).catch((error: unknown) => {
+              reportFailure("cloud box recovery could not start", {
                 chatId: input.leaseId,
                 cause: error,
-              }),
-            );
-          const rebuild = (await leaseRegistry?.findById(input.leaseId).catch(() => null))?.rebuild;
+              });
+              return null;
+            });
+            const lease = step ? await leaseRegistry?.findById(input.leaseId) : null;
+            if (step && lease) recovery = { step, lease };
+          }
+          const current = await leaseRegistry?.findById(input.leaseId).catch(() => null);
+          const rebuild =
+            current?.rebuild?.status ?? (recovery?.step === "rebuild" ? "started" : undefined);
           const rebuilt =
-            rebuild?.status === "done"
-              ? " Its chat was rebuilt on a new machine from its last backup; open it from your cloud machines."
-              : rebuild?.status === "started"
-                ? " Its chat is being rebuilt on a new machine from its last backup."
-                : "";
+            recovery?.step === "reboot"
+              ? " It is being started fresh from its disk."
+              : rebuild === "done"
+                ? " Its chat was rebuilt on a new machine from its last backup; open it from your cloud machines."
+                : rebuild === "started"
+                  ? " Its chat is being rebuilt on a new machine from its last backup."
+                  : "";
           return cause instanceof E2bPlacementUnavailable
             ? {
                 kind: "refused",
@@ -946,7 +1043,12 @@ export function createEnvironmentControl(
                 message: "The workspace could not be reconnected. Retry shortly.",
               };
         })
-        .finally(() => leaseOperations.delete(input.sandboxId));
+        .finally(() => {
+          leaseOperations.delete(input.sandboxId);
+          // In the same tick the resume lets go, so no other start of the box slips in between.
+          if (recovery?.step === "reboot") startReboot(recovery.lease);
+          else if (recovery?.step === "rebuild") void startRebuild(recovery.lease);
+        });
       leaseOperations.set(input.sandboxId, { action: "resume", ownerKey, promise });
       return promise;
     },
@@ -1546,6 +1648,26 @@ export const layer = Layer.effect(
               },
               chatRebuild: {
                 run: (lease) => rebuildChat(lease, config),
+              },
+              rebootBox: async (lease) => {
+                const box = await e2bBox(lease);
+                if (!box) throw new Error("The box is not an E2B box this host provisioned.");
+                await makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).reboot(
+                  box.operation,
+                  box.sandboxId,
+                );
+              },
+              tellChat: async (lease, text) => {
+                const access = lease.remoteAccess;
+                const threadId = lease.owner?.threadId;
+                if (!access || !threadId) throw new Error("The box has no chat to tell.");
+                await runLogged(
+                  Effect.scoped(
+                    Effect.flatMap(openBoxRpc(access), (rpc) =>
+                      sendChatMessage(rpc, ThreadId.make(threadId), text),
+                    ),
+                  ).pipe(Effect.provide(FetchHttpClient.layer)),
+                );
               },
               // A box this manager provisioned resumes through the runtime that
               // prepared it, which starts its T3 server again if it died and

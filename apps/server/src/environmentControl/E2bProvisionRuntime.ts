@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off globalDate:off - Promise SDK adapters perform provider resolution and private remote HTTP, and bound their calls by wall-clock deadlines.
+// @effect-diagnostics globalFetch:off globalDate:off globalTimers:off - Promise SDK adapters perform provider resolution and private remote HTTP, and bound their calls by wall-clock deadlines.
 // @effect-diagnostics nodeBuiltinImport:off - SDK transfers read immutable local artifacts at the provider boundary.
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
@@ -509,6 +509,27 @@ with urllib.request.urlopen(request, timeout=30) as response:
         ...input,
         root: manifest.preparation.root,
         deadline,
+      });
+    },
+    /**
+     * Boots a paused box fresh from its saved disk, dropping the memory E2B captured, for a box
+     * whose restore E2B cannot place. E2B refuses that while another start of the box is in
+     * flight, so it first waits, up to five minutes, until E2B reports the box paused; a box that
+     * came up meanwhile is left as it is. One attempt, with a long timeout, and no retry.
+     */
+    reboot: async (operation: ProvisionOperation, sandboxId: string) => {
+      const settleBy = Date.now() + 5 * 60_000;
+      for (;;) {
+        const { state } = await verify(operation, sandboxId, 10_000);
+        if (state === "running") return;
+        if (state === "paused") break;
+        if (Date.now() > settleBy) throw new Error(`E2B still reports the box ${String(state)}.`);
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+      }
+      await client.Sandbox.connect(sandboxId, {
+        onResume: "reboot",
+        timeoutMs: retentionTimeoutMs(operation.request.retentionDeadline, 3_600_000),
+        requestTimeoutMs: 10 * 60_000,
       });
     },
     /** Runs guest scripts on a box, resuming it first when it sleeps. */

@@ -343,6 +343,21 @@ export const continueChatOnBox = (
     return threadId;
   });
 
+/** Sends `text` into a chat on the box as its user, on the chat's own model. */
+export const sendChatMessage = (rpc: BoxRpc, threadId: ThreadId, text: string) =>
+  rpc["orchestration.dispatchCommand"]({
+    type: "message.dispatch",
+    commandId: CommandId.make(crypto.randomUUID()),
+    createdBy: "user",
+    creationSource: "web",
+    threadId,
+    messageId: MessageId.make(crypto.randomUUID()),
+    text,
+    attachments: [],
+    deliveryIntent: "auto",
+    dispatchMode: { type: "start_immediately" },
+  });
+
 export const decodeModelSelection = Schema.decodeUnknownSync(ModelSelection);
 
 /** Plans a chat's rebuild from its manifest; the why tells the agent its machine was replaced. */
