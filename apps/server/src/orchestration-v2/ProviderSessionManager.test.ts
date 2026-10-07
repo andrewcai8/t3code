@@ -82,6 +82,20 @@ const layerFailingReleaseEventSink = Layer.effect(
   }),
 ).pipe(Layer.provide(layerTestEventSink));
 
+const layerFailingAttachEventSink = Layer.effect(
+  EventSink.EventSinkV2,
+  Effect.gen(function* () {
+    const delegate = yield* EventSink.EventSinkV2;
+    return EventSink.EventSinkV2.of({
+      ...delegate,
+      write: (input) =>
+        input.events.some((event) => event.type === "provider-session.attached")
+          ? Effect.fail(new EventSink.EventSinkWriteError({ eventCount: input.events.length }))
+          : delegate.write(input),
+    });
+  }),
+).pipe(Layer.provide(layerTestEventSink));
+
 interface FlakyReleaseWrites {
   /** Which release writes fail right now. */
   readonly failing: Ref.Ref<"none" | "session" | "session-and-requests">;
@@ -294,6 +308,7 @@ function makeProviderAdapter(
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
+    readonly sessionScopeCloseGate?: Deferred.Deferred<void>;
     readonly beforeUnload?: Effect.Effect<void>;
   } = {},
 ): ProviderAdapterV2Shape {
@@ -340,6 +355,10 @@ function makeProviderAdapter(
           // close before the closeCount finalizer, like a provider process
           // that never yields its message stream.
           yield* Effect.addFinalizer(() => Effect.never);
+        }
+        const scopeCloseGate = options.sessionScopeCloseGate;
+        if (scopeCloseGate !== undefined) {
+          yield* Effect.addFinalizer(() => Deferred.await(scopeCloseGate));
         }
 
         return {
@@ -407,9 +426,11 @@ function layerTest(input: {
     readonly initialProviderItemIdentityVersion?: 2;
   }) => Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
+  readonly failAttachEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
+  readonly sessionScopeCloseGate?: Deferred.Deferred<void>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
@@ -419,7 +440,9 @@ function layerTest(input: {
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
       : input.failReleaseEventWrites
         ? layerFailingReleaseEventSink
-        : layerTestEventSink;
+        : input.failAttachEventWrites
+          ? layerFailingAttachEventSink
+          : layerTestEventSink;
   const layerRegistry = ProviderAdapterRegistry.layerSingle(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
@@ -432,6 +455,9 @@ function layerTest(input: {
       ...(input.hangSessionScopeClose === undefined
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
+      ...(input.sessionScopeCloseGate === undefined
+        ? {}
+        : { sessionScopeCloseGate: input.sessionScopeCloseGate }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
     }),
   );
@@ -1854,6 +1880,100 @@ it.effect("ProviderSessionManagerV2 persists release when session scope close ha
 
     yield* effect.pipe(
       Effect.provide(layerTest({ state, idleTimeoutMs: 1000, hangSessionScopeClose: true })),
+    );
+  }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 leaves a replacement's background work to it when a slow release records",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const oldProcessExited = yield* Deferred.make<void>();
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-slow-release");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const backgroundTask = {
+          taskId: "task-replacement",
+          kind: "command",
+          description: "bun run dev",
+        } as const;
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const released = yield* manager.close(providerSessionId).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+
+        // The old process is still closing when the thread's next turn opens
+        // the same session id and starts background work in it.
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: {
+                ...makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+                pendingBackgroundTasks: [backgroundTask],
+              },
+            },
+          ],
+        });
+
+        yield* Deferred.succeed(oldProcessExited, undefined);
+        yield* Fiber.join(released);
+
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        assert.deepEqual(projection.providerThreads.at(-1)?.pendingBackgroundTasks, [
+          backgroundTask,
+        ]);
+        assert.equal(projection.providerSessions.at(-1)?.status, "ready");
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60_000, sessionScopeCloseGate: oldProcessExited }),
+        ),
+      );
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 releases a session whose attachment fails to persist", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const threadId = ThreadId.make("thread-provider-session-manager-attach-fails");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+
+      const opened = yield* Effect.exit(
+        manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy }),
+      );
+
+      assert.isTrue(Exit.isFailure(opened));
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, failAttachEventWrites: true })),
     );
   }),
 );

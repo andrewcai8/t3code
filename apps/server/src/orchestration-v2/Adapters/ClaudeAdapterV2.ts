@@ -2797,6 +2797,9 @@ interface ClaudeLiveQueryContext {
   permissionMode: PermissionMode;
   // Stop, rollback or fork is closing this process; its work is ending.
   stopping: boolean;
+  // openQuery closed this process to open its replacement, which resets the
+  // native thread's Waiting and wake state itself.
+  replaced: boolean;
   // Registry entries still running when this process opened. Their process
   // is gone and never reports their end; any later task_started replaces the
   // entry, so an entry still in this set runs nowhere.
@@ -3129,10 +3132,16 @@ export function makeClaudeAdapterV2(
         const pendingSubagentFramesByToolUseId = yield* Ref.make(
           new Map<string, ReadonlyArray<SDKMessage>>(),
         );
+        // `processEnded`: the CLI that buffered these frames exited, so a wake
+        // turn they began never finishes.
         const wakeBuffers = yield* Ref.make(
           new Map<
             string,
-            { readonly messages: ReadonlyArray<SDKMessage>; readonly detail: string | null }
+            {
+              readonly messages: ReadonlyArray<SDKMessage>;
+              readonly detail: string | null;
+              readonly processEnded: boolean;
+            }
           >(),
         );
         // Background work that ended and has not been named by a wake offer yet,
@@ -3645,7 +3654,7 @@ export function makeClaudeAdapterV2(
               updated.delete(nativeThreadId);
               return updated;
             });
-            // The thread's process died or its turn failed; those monitors never notify.
+            // The thread's process died, so those monitors never notify.
             yield* endClaudeMonitorTasks((_taskId, task) => task.nativeThreadId === nativeThreadId);
           });
 
@@ -5047,13 +5056,17 @@ export function makeClaudeAdapterV2(
               // Surface this native thread's roster before the root turn
               // terminals so writeFinalRunEvents preserves it. Failed or
               // interrupted turns drop only this thread's roster so sibling
-              // native threads keep their Waiting state.
+              // native threads keep their Waiting state. A failure the CLI
+              // reports itself, such as a usage limit, leaves its process and
+              // background shells running, so their roster stays for Stop.
               Effect.gen(function* () {
                 const nativeThreadId =
                   input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
                 if (nativeThreadId !== null) {
                   if (input.status !== "completed") {
-                    yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
+                    if (input.result === undefined || input.status === "interrupted") {
+                      yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
+                    }
                     yield* clearNativeThreadTaskIdSet(
                       wakeEligibleBackgroundTasksByNativeThread,
                       nativeThreadId,
@@ -5350,6 +5363,7 @@ export function makeClaudeAdapterV2(
             updated.set(wakeInput.nativeThreadId, {
               messages: [...(existing?.messages ?? []), message],
               detail: notificationSummary ?? existing?.detail ?? null,
+              processEnded: false,
             });
             return updated;
           });
@@ -7095,6 +7109,7 @@ export function makeClaudeAdapterV2(
           // the replacement open succeeds or fails below.
           const closedExistingNativeThreadId = existing !== null ? existing.nativeThreadId : null;
           if (existing !== null) {
+            existing.replaced = true;
             yield* existing.query.close.pipe(Effect.ignore);
             if (existing.nativeThreadId !== nativeThreadId) {
               yield* clearWakeStateForNativeThread(existing.nativeThreadId);
@@ -7189,6 +7204,7 @@ export function makeClaudeAdapterV2(
             openedPermissionMode: queryOptions.permissionMode,
             permissionMode: queryOptions.permissionMode,
             stopping: false,
+            replaced: false,
             subagentsFromEarlierProcesses: new Set(
               [...(yield* Ref.get(sessionSubagentsByTaskId)).values()].filter(
                 (subagent) => subagent.task.status === "running",
@@ -7224,10 +7240,27 @@ export function makeClaudeAdapterV2(
                 const ownsLiveQuery = yield* Ref.modify(queryContext, (current) =>
                   current?.query === querySession ? [true, null] : [false, current],
                 );
+                if (ownsLiveQuery && !context.replaced) {
+                  yield* Ref.update(wakeBuffers, (current) => {
+                    const buffered = current.get(nativeThreadId);
+                    return buffered === undefined
+                      ? current
+                      : new Map(current).set(nativeThreadId, { ...buffered, processEnded: true });
+                  });
+                }
                 if (ownsLiveQuery) {
                   yield* finalizeActiveTurnAfterQueryExit(
                     exit._tag === "Failure" ? exit.cause : undefined,
                   );
+                }
+                // The background shells this process ran ended with it, also
+                // when no turn was running to finalize. Its buffered wake
+                // output stays for the continuation that drains it, and a
+                // process a queued turn opened meanwhile owns its own roster.
+                if (ownsLiveQuery && !context.replaced && (yield* Ref.get(queryContext)) === null) {
+                  yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
+                    status: "idle",
+                  });
                 }
               }),
             ),
@@ -7343,15 +7376,16 @@ export function makeClaudeAdapterV2(
               yield* querySession.query.offer(userMessage);
               return;
             }
-            const drained = yield* Ref.modify(wakeBuffers, (current) => {
+            const buffer = yield* Ref.modify(wakeBuffers, (current) => {
               const entry = current.get(nativeThreadId);
               if (entry === undefined) {
-                return [[] as ReadonlyArray<SDKMessage>, current] as const;
+                return [undefined, current] as const;
               }
               const updated = new Map(current);
               updated.delete(nativeThreadId);
-              return [entry.messages, updated] as const;
+              return [entry, updated] as const;
             });
+            const drained = buffer?.messages ?? [];
             yield* Ref.update(requestedContinuations, (current) => {
               const updated = new Set(current);
               updated.delete(nativeThreadId);
@@ -7390,14 +7424,18 @@ export function makeClaudeAdapterV2(
               return;
             }
             // A drained `init` means Claude began the wake turn, so its output
-            // may still be on the way: stay open for it.
+            // may still be on the way: stay open for it, unless the CLI that
+            // began it has exited.
             const hasNativeWakeFrame = drained.some(
               (entry) =>
                 entry.type === "user" ||
                 entry.type === "assistant" ||
                 isClaudeTurnStartMessage(entry),
             );
-            if (hasOpaqueTaskNotification && !hasNativeWakeFrame) {
+            if (
+              buffer?.processEnded === true ||
+              (hasOpaqueTaskNotification && !hasNativeWakeFrame)
+            ) {
               const completedAt = yield* DateTime.now;
               yield* finalizeActiveTurn({ context, status: "completed", completedAt });
             }

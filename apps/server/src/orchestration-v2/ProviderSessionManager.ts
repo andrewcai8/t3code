@@ -634,6 +634,37 @@ export const layerWithOptions = (
             type: "provider-session.updated",
             payload,
           });
+          // The released process took its background work with it, and nothing
+          // is left to report it ended. Startup recovery settles the rosters a
+          // server shutdown leaves.
+          if (input.reason === "server_shutdown") return;
+          const providerSessionId = input.entry.runtime.providerSessionId;
+          const events: Array<OrchestrationV2DomainEvent> = [];
+          for (const threadId of input.entry.attachedThreadIds) {
+            const { providerThreads } = yield* projectionStore.getThreadRecords(threadId, [
+              "providerThreads",
+            ]);
+            for (const providerThread of providerThreads) {
+              if (
+                providerThread.providerSessionId !== providerSessionId ||
+                (providerThread.pendingBackgroundTasks?.length ?? 0) === 0
+              ) {
+                continue;
+              }
+              events.push({
+                id: yield* idAllocator.allocate.event({ threadId, providerSessionId }),
+                type: "provider-thread.updated",
+                threadId,
+                driver: providerThread.driver,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: { ...providerThread, pendingBackgroundTasks: [], updatedAt: now },
+              });
+            }
+          }
+          if (events.length > 0) {
+            yield* eventSink.write({ events });
+          }
         });
 
       const writeReleasedRuntimeRequestEvents = (input: {
@@ -767,24 +798,30 @@ export const layerWithOptions = (
           { concurrency: 1 },
         ).pipe(Effect.flatMap(Exit.asVoidAll));
 
+      // Holds the session's open lock, so it sees a replacement that opened
+      // with the same id while the released process was still closing.
+      const writeReleaseRecordsUnlessReplaced = (
+        input: Omit<Parameters<typeof writeReleaseRecords>[0], "replaced">,
+      ) => {
+        const providerSessionId = input.entry.runtime.providerSessionId;
+        return sessionOpen.withLock(
+          providerSessionId,
+          Effect.gen(function* () {
+            const replaced = (yield* Ref.get(sessions)).has(sessionKey(providerSessionId));
+            yield* writeReleaseRecords({ ...input, replaced });
+          }),
+        );
+      };
+
       // The session already left the live map, so a later release finds
       // nothing to do. Without a retry the UI would keep a ready session and
-      // answerable approvals until a server restart. Each attempt holds the
-      // session's open lock, so it sees a replacement that opened meanwhile.
+      // answerable approvals until a server restart.
       const retryReleaseRecords = (
         input: Omit<Parameters<typeof writeReleaseRecords>[0], "replaced">,
       ) => {
         const providerSessionId = input.entry.runtime.providerSessionId;
         const attempt = Effect.gen(function* () {
-          const exit = yield* Effect.exit(
-            sessionOpen.withLock(
-              providerSessionId,
-              Effect.gen(function* () {
-                const replaced = (yield* Ref.get(sessions)).has(sessionKey(providerSessionId));
-                yield* writeReleaseRecords({ ...input, replaced });
-              }),
-            ),
-          );
+          const exit = yield* Effect.exit(writeReleaseRecordsUnlessReplaced(input));
           if (Exit.isSuccess(exit) || Cause.hasInterruptsOnly(exit.cause)) return yield* exit;
           yield* Effect.logWarning("orchestration-v2.provider-session-release-records-failed", {
             providerSessionId,
@@ -868,6 +905,9 @@ export const layerWithOptions = (
         readonly cancelIdleFiber?: boolean;
         readonly onlyIfIdleGeneration?: number;
         readonly gracefulSubscribers?: boolean;
+        // open releases the entry it failed to finish while holding this id's
+        // lock, so no replacement can exist and the lock is not taken again.
+        readonly holdsOpenLock?: boolean;
       }) =>
         Effect.acquireUseRelease(
           removeLiveEntry(input),
@@ -938,8 +978,12 @@ export const layerWithOptions = (
                     ...(input.detail === undefined ? {} : { detail: input.detail }),
                     releasedAt,
                   };
+                  // Waiting on the open lock can outlast an interrupted caller.
                   const recorded = yield* Effect.exit(
-                    writeReleaseRecords({ ...records, replaced: false }),
+                    (input.holdsOpenLock === true
+                      ? writeReleaseRecords({ ...records, replaced: false })
+                      : writeReleaseRecordsUnlessReplaced(records)
+                    ).pipe(Effect.onInterrupt(() => Effect.asVoid(retryReleaseRecords(records)))),
                   );
                   if (Exit.isFailure(recorded)) {
                     yield* retryReleaseRecords(records);
@@ -1881,6 +1925,7 @@ export const layerWithOptions = (
                     providerSessionId: input.providerSessionId,
                     reason: "runtime_error",
                     detail: "Failed to persist the provider-session attachment.",
+                    holdsOpenLock: true,
                   }).pipe(logReleaseFailure(input.providerSessionId)),
                 ),
               );
