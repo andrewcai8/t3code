@@ -33,6 +33,7 @@ import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 const nativeSession = "native-session-1";
 const instanceId = ProviderInstanceId.make("claudeAgent");
 const threadId = ThreadId.make("thread:background-after-limit");
+const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 /** The Claude CLI process the adapter opened, and whether it was closed. */
 interface FakeCli {
@@ -76,7 +77,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
         return [
           ClaudeAdapterV2.makeClaudeAdapterV2({
             instanceId,
-            settings: Schema.decodeSync(ClaudeSettings)({}),
+            settings: decodeClaudeSettings({}),
             environment: {},
             attachmentsDir: cwd,
             fileSystem: yield* FileSystem.FileSystem,

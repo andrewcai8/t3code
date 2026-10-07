@@ -5047,13 +5047,17 @@ export function makeClaudeAdapterV2(
               // Surface this native thread's roster before the root turn
               // terminals so writeFinalRunEvents preserves it. Failed or
               // interrupted turns drop only this thread's roster so sibling
-              // native threads keep their Waiting state.
+              // native threads keep their Waiting state. A failure the CLI
+              // reports itself, such as a usage limit, leaves its process and
+              // background shells running, so their roster stays for Stop.
               Effect.gen(function* () {
                 const nativeThreadId =
                   input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
                 if (nativeThreadId !== null) {
                   if (input.status !== "completed") {
-                    yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
+                    if (input.result === undefined || input.status === "interrupted") {
+                      yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
+                    }
                     yield* clearNativeThreadTaskIdSet(
                       wakeEligibleBackgroundTasksByNativeThread,
                       nativeThreadId,

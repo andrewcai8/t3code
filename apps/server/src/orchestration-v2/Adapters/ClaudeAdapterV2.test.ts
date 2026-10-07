@@ -4053,7 +4053,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("clears the roster when a turn fails", () =>
+  it.effect("keeps the roster when the CLI reports a failed turn", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
@@ -4104,9 +4104,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "failed");
 
+        // The CLI process lives on, and so does the background shell it runs.
         const afterFailure = providerThreadRosterEvents(harness.events).at(-1);
-        assert.deepEqual(afterFailure?.providerThread.pendingBackgroundTasks ?? [], []);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        assert.deepEqual(afterFailure?.providerThread.pendingBackgroundTasks, [
+          { taskId: "bdqirlcyw", kind: "command", description: "Background sleep test" },
+        ]);
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
   );
@@ -4364,10 +4367,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const rosterBAfterFail = providerThreadRosterEvents(events).findLast(
             (event) => event.providerThread.id === providerThreadB.id,
           )?.providerThread.pendingBackgroundTasks;
-          assert.deepEqual(rosterBAfterFail ?? [], []);
+          // B's process still runs its shell after the failure; A stays empty.
+          assert.deepEqual(rosterBAfterFail, [
+            { taskId: taskB, description: "work on B", kind: "command" },
+          ]);
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadA));
-          assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
-          assert.isFalse(yield* hasPendingBackgroundWork);
+          assert.isTrue(yield* hasPendingBackgroundWorkForThread(providerThreadB));
         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
       ),
   );
