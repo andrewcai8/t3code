@@ -170,8 +170,8 @@ while paused, such as E2B sandboxes, are never removed.
 
 An E2B machine is backed up after each of its chat's turns and again before it sleeps. Its unpushed
 work goes to `t3-backup/<id>` branches when the repository is private. A public one's is never
-pushed; it stays in the host's private storage when the host has one. A machine that is pinned at
-full CPU or not answering when it goes to sleep is saved without its memory, so it wakes fresh from
+pushed; it stays in the host's private storage when the host has one. A machine that stays pinned at
+full CPU or stops answering when it goes to sleep is saved without its memory, so it wakes fresh from
 its disk and its chat is told what was lost. If E2B can't resume a machine
 for a long time, the host boots it fresh from its disk, which loses what was only in memory and
 `/tmp`, and the chat is told. If that fails too, the host rebuilds the chat on a new machine from

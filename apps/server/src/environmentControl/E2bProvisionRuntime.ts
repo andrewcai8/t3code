@@ -37,7 +37,7 @@ import { credentialDestinations } from "./credentialDestinations.ts";
 import { connectResumingE2b, type E2bResumeRetry } from "./e2bResume.ts";
 import { GuestNotServing } from "./ProvisionControl.ts";
 import { backUpBox } from "./boxBackup.ts";
-import { judgeHealth } from "./boxHealth.ts";
+import { readBoxHealth } from "./boxHealth.ts";
 
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Whole-host prepare: npm install + shallow clone + start T3. */
@@ -564,11 +564,7 @@ with urllib.request.urlopen(request, timeout=30) as response:
     /** Runs guest scripts on a box, resuming it first when it sleeps. */
     guest: async (operation: ProvisionOperation, sandboxId: string) =>
       e2bPythonPort(await connect(operation, sandboxId)),
-    /**
-     * Reads whether an awake box may keep its memory when it pauses: E2B's CPU samples for the
-     * last minute and a trivial command envd must answer within five seconds. Null for a box that
-     * is not awake.
-     */
+    /** Reads whether an awake box may keep its memory when it pauses. Null for a box not awake. */
     probeHealth: async (operation: ProvisionOperation, sandboxId: string) => {
       const sandbox = await connectAwake(operation, sandboxId, Date.now() + 15_000).catch(
         (error: unknown) => {
@@ -577,21 +573,13 @@ with urllib.request.urlopen(request, timeout=30) as response:
         },
       );
       if (!sandbox) return null;
-      const since = new Date(Date.now() - 60_000);
-      const [metrics, answer] = await Promise.all([
-        client.Sandbox.getMetrics(sandboxId, { start: since, requestTimeoutMs: 5_000 }).catch(
-          () => [],
-        ),
-        sandbox.commands
-          .run("cat /proc/loadavg; nproc", { timeoutMs: 5_000, requestTimeoutMs: 5_000 })
-          .then((result) => result.stdout)
-          .catch(() => null),
-      ]);
-      return judgeHealth({
-        answer,
-        cpuSamples: metrics
-          .filter((sample) => sample.timestamp >= since)
-          .map((sample) => sample.cpuUsedPct),
+      return readBoxHealth({
+        // Longer than the probe waits, so the probe's own limit is what calls envd unresponsive.
+        answer: sandbox.commands
+          .run("cat /proc/loadavg; nproc", { timeoutMs: 10_000, requestTimeoutMs: 10_000 })
+          .then((result) => result.stdout),
+        cpuSamples: (start) =>
+          client.Sandbox.getMetrics(sandboxId, { start, requestTimeoutMs: 5_000 }),
       });
     },
     touch: async (operation: ProvisionOperation, sandboxId: string) => {

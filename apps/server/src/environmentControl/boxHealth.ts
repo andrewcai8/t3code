@@ -7,18 +7,27 @@
  * @module boxHealth
  */
 
+import { withinBudget } from "./boxBackup.ts";
+
 export type BoxHealth =
   | { readonly kind: "healthy" }
   | { readonly kind: "pinned"; readonly cpuPercent: number }
   | { readonly kind: "unresponsive" };
 
-/** A box whose CPU averaged this much over the last minute is pinned. */
+/** A box whose recent CPU samples average this much is pinned. */
 const PINNED_CPU_PERCENT = 90;
+/**
+ * How far back a probe reads E2B's CPU samples. Short, so that load which ended before the probe,
+ * such as a save, has mostly left them by the next one.
+ */
+const RECENT_CPU_MS = 15_000;
+/** How long envd has to answer a probe before its box is unresponsive. */
+const ANSWER_MS = 5_000;
 
 /**
  * Judges one probe: `answer` is what the box printed for `cat /proc/loadavg; nproc`, or null when
- * envd did not answer in time; `cpuSamples` are E2B's CPU percentages for the last minute. Without
- * samples, a one-minute load at or over the core count counts as pinned.
+ * envd did not answer in time; `cpuSamples` are E2B's recent CPU percentages. Without samples, a
+ * one-minute load at or over the core count counts as pinned.
  */
 export function judgeHealth(input: {
   readonly answer: string | null;
@@ -37,4 +46,28 @@ export function judgeHealth(input: {
   return cpuPercent >= PINNED_CPU_PERCENT
     ? { kind: "pinned", cpuPercent: Math.round(cpuPercent) }
     : { kind: "healthy" };
+}
+
+/**
+ * Probes a box once. `answer` is envd's reply to `cat /proc/loadavg; nproc`, and only one that has
+ * not come within ANSWER_MS makes the box unresponsive. Any other failure is thrown: an error from
+ * E2B's API or proxy says nothing of the box. `cpuSamples` reads E2B's samples since a time.
+ */
+export async function readBoxHealth(input: {
+  readonly answer: Promise<string>;
+  readonly cpuSamples: (
+    since: Date,
+  ) => Promise<ReadonlyArray<{ readonly timestamp: Date; readonly cpuUsedPct: number }>>;
+}): Promise<BoxHealth> {
+  const since = new Date(Date.now() - RECENT_CPU_MS);
+  const [answer, samples] = await Promise.all([
+    withinBudget(input.answer, ANSWER_MS),
+    input.cpuSamples(since).catch(() => []),
+  ]);
+  return judgeHealth({
+    answer: answer === "timeout" ? null : answer,
+    cpuSamples: samples
+      .filter((sample) => sample.timestamp >= since)
+      .map((sample) => sample.cpuUsedPct),
+  });
 }

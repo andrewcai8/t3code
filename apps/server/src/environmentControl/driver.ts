@@ -63,12 +63,15 @@ export interface CloudDriver {
   observeBroker(): Promise<Observation>;
   bootstrapBroker(): Promise<void>;
   wake(target: ManagedTarget): Promise<void>;
-  /** `keepMemory: false` saves only an E2B box's disk, so it resumes as a fresh boot. */
+  /**
+   * `keepMemory: false` saves only an E2B box's disk, so it resumes as a fresh boot.
+   * "alreadyPaused" is an E2B box something else paused first, kept as it was.
+   */
   pause(input: {
     readonly sandboxId: string;
     readonly namespaceResource?: NamespaceResource;
     readonly keepMemory?: false;
-  }): Promise<void | "missing">;
+  }): Promise<void | "missing" | "alreadyPaused">;
   resume(input: {
     readonly leaseId: string;
     readonly sandboxId: string;
@@ -353,6 +356,7 @@ export function createCloudDriver(
         const info = await Sandbox.getInfo(sandboxId, api);
         if (info.state !== "paused")
           throw new Error(`E2B did not pause sandbox ${sandboxId}; it is ${info.state}`);
+        return "alreadyPaused";
       } catch (cause) {
         if (cause instanceof SandboxNotFoundError) return "missing";
         throw cause;
