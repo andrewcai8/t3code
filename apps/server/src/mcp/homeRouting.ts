@@ -58,7 +58,10 @@ export const callerHasFleetReach = Effect.fn("mcp.callerHasFleetReach")(function
   return (yield* callerIsHome()) || (yield* callerHasCloudReach());
 });
 
-/** Whether each operation changes state. A new operation must pick a side. */
+/**
+ * Whether each operation needs the caller in full-access/default mode. A change does; reads, and
+ * cancelling a fork job, which only stops work, do not. A new operation must pick a side.
+ */
 export const CHANGES_STATE = {
   capabilities: false,
   "projects.list": false,
@@ -74,7 +77,7 @@ export const CHANGES_STATE = {
   "requests.respond": true,
   "forks.run": true,
   "forks.status": false,
-  "forks.cancel": true,
+  "forks.cancel": false,
 } satisfies Record<FleetOperation, boolean>;
 
 /**

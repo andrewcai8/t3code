@@ -38,7 +38,8 @@ const box = (
 
 /**
  * A provider where copies live until killed. A job's command picks its outcome: `exit N` exits
- * N, `hang` times out, `lose` loses its copy, `wait` holds until `gate` opens. Output paths
+ * N, `hang` times out, `lose` loses its copy, `wait` holds until `gate` opens. `holdStarts` makes
+ * each copy's start wait on its gate. Output paths
  * starting with `big` are over any copy-back cap; `gone` does not exist.
  */
 const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
@@ -58,6 +59,8 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
     let capturing = 0;
     let mostCapturing = 0;
     let captureGate: Deferred.Deferred<void> | null = null;
+    const startsEntered = yield* Queue.unbounded<string>();
+    let startGate: Deferred.Deferred<void> | null = null;
     let providerWorks = true;
     let loseStartAnswer = false;
     let busyStarts = 0;
@@ -82,20 +85,26 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
             : Effect.fail(new ForkMachines.ForkMachineError({ step: "capture", cause: "busy" })),
         ),
       start: (_captureId, tag) =>
-        Effect.suspend(() => {
+        Effect.gen(function* () {
           if (busyStarts > 0) {
             busyStarts -= 1;
-            return Effect.fail(
-              new ForkMachines.ForkMachineError({ step: "start", cause: "no room", busy: true }),
-            );
+            return yield* new ForkMachines.ForkMachineError({
+              step: "start",
+              cause: "no room",
+              busy: true,
+            });
+          }
+          if (startGate !== null) {
+            yield* Queue.offer(startsEntered, tag.batchId);
+            yield* Deferred.await(startGate);
           }
           started += 1;
           startedBatches.push(tag.batchId);
           const forkId = `fork-${started}`;
           live.set(forkId, tag);
-          return loseStartAnswer
-            ? Effect.fail(new ForkMachines.ForkMachineError({ step: "start", cause: "timed out" }))
-            : Effect.succeed(forkId);
+          if (loseStartAnswer)
+            return yield* new ForkMachines.ForkMachineError({ step: "start", cause: "timed out" });
+          return forkId;
         }),
       run: (forkId, job) =>
         Effect.gen(function* () {
@@ -186,6 +195,10 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
       capturesEntered,
       holdCaptures: (gate: Deferred.Deferred<void>) => {
         captureGate = gate;
+      },
+      startsEntered,
+      holdStarts: (gate: Deferred.Deferred<void>) => {
+        startGate = gate;
       },
     };
   });
@@ -629,6 +642,30 @@ it.effect("cancels a queued job so it never starts, and lets the running one fin
       ]);
       expect(fake.startedBatches).toEqual([batch.batchId]);
       expect(fake.kills).toEqual(["fork-1"]);
+    }),
+  ),
+);
+
+it.effect("keeps a job cancelled while its copy is starting, then kills that copy once", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      const starting = yield* Deferred.make<void>();
+      fake.holdStarts(starting);
+      const { batch, start } = yield* forks.run(box(), actor, { jobs: [{ command: "exit 0" }] });
+      yield* start;
+      yield* Queue.take(fake.startsEntered);
+      yield* forks.cancel(box(), { batchId: batch.batchId });
+      yield* Deferred.succeed(starting, undefined);
+      const ended = yield* forks.status(box(), { batchId: batch.batchId, waitSeconds: 45 });
+      expect(ended).toEqual({
+        batchId: batch.batchId,
+        state: "finished",
+        jobs: [{ index: 0, state: "cancelled" }],
+      });
+      expect(fake.kills).toEqual(["fork-1"]);
+      expect(fake.live.size).toBe(0);
+      expect(fake.stored.size).toBe(0);
     }),
   ),
 );

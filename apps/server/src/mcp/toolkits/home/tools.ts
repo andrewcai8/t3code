@@ -83,7 +83,7 @@ const ForkStatusTool = Tool.make("t3_fork_status", {
 const ForkCancelTool = Tool.make("t3_fork_cancel", {
   ...shared,
   description:
-    "Cancels jobs of a t3_fork_run batch, by default every unfinished one; pass jobs to name their indexes. A queued job never starts. A running job's copy is thrown away with nothing uploaded. Either becomes cancelled, and the batch finishes once no job runs. Cancelling a finished job or batch changes nothing. Answers with the batch like t3_fork_status.",
+    "Cancels jobs of a t3_fork_run batch, by default every unfinished one; pass jobs to name their indexes. A queued job never starts. A running job's copy is thrown away with nothing uploaded, though cancelling one that is copying back may leave partial files under /home/user/fork-results/<batchId>/job-<index> on this machine. Either becomes cancelled, and the batch finishes once no job runs. Cancelling a finished job or batch changes nothing. Answers with the batch like t3_fork_status.",
   parameters: FleetForkCancelInput,
   success: FleetForkBatch,
 }).annotate(Tool.Destructive, false);

@@ -437,7 +437,8 @@ const make = Effect.gen(function* () {
   /**
    * Runs one call a box relays. Only another cloud chat's box, or a new one, is a target. The host
    * decides who asks from its own records, never the box's claim: the box's own chat, with the
-   * modes on the host's card. Changes and wakes need that card to be full-access/default.
+   * modes on the host's card. Changes and wakes need that card to be full-access/default; reads and
+   * fork cancels, which only stop work, do not.
    */
   const relay = (sourceLeaseId: string, { environmentId, invoke }: FleetHostRequest) =>
     Effect.gen(function* () {
