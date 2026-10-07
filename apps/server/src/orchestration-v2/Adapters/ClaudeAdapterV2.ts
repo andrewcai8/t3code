@@ -3132,10 +3132,16 @@ export function makeClaudeAdapterV2(
         const pendingSubagentFramesByToolUseId = yield* Ref.make(
           new Map<string, ReadonlyArray<SDKMessage>>(),
         );
+        // `processEnded`: the CLI that buffered these frames exited, so a wake
+        // turn they began never finishes.
         const wakeBuffers = yield* Ref.make(
           new Map<
             string,
-            { readonly messages: ReadonlyArray<SDKMessage>; readonly detail: string | null }
+            {
+              readonly messages: ReadonlyArray<SDKMessage>;
+              readonly detail: string | null;
+              readonly processEnded: boolean;
+            }
           >(),
         );
         // Background work that ended and has not been named by a wake offer yet,
@@ -5357,6 +5363,7 @@ export function makeClaudeAdapterV2(
             updated.set(wakeInput.nativeThreadId, {
               messages: [...(existing?.messages ?? []), message],
               detail: notificationSummary ?? existing?.detail ?? null,
+              processEnded: false,
             });
             return updated;
           });
@@ -7233,6 +7240,14 @@ export function makeClaudeAdapterV2(
                 const ownsLiveQuery = yield* Ref.modify(queryContext, (current) =>
                   current?.query === querySession ? [true, null] : [false, current],
                 );
+                if (ownsLiveQuery && !context.replaced) {
+                  yield* Ref.update(wakeBuffers, (current) => {
+                    const buffered = current.get(nativeThreadId);
+                    return buffered === undefined
+                      ? current
+                      : new Map(current).set(nativeThreadId, { ...buffered, processEnded: true });
+                  });
+                }
                 if (ownsLiveQuery) {
                   yield* finalizeActiveTurnAfterQueryExit(
                     exit._tag === "Failure" ? exit.cause : undefined,
@@ -7361,15 +7376,16 @@ export function makeClaudeAdapterV2(
               yield* querySession.query.offer(userMessage);
               return;
             }
-            const drained = yield* Ref.modify(wakeBuffers, (current) => {
+            const buffer = yield* Ref.modify(wakeBuffers, (current) => {
               const entry = current.get(nativeThreadId);
               if (entry === undefined) {
-                return [[] as ReadonlyArray<SDKMessage>, current] as const;
+                return [undefined, current] as const;
               }
               const updated = new Map(current);
               updated.delete(nativeThreadId);
-              return [entry.messages, updated] as const;
+              return [entry, updated] as const;
             });
+            const drained = buffer?.messages ?? [];
             yield* Ref.update(requestedContinuations, (current) => {
               const updated = new Set(current);
               updated.delete(nativeThreadId);
@@ -7408,14 +7424,18 @@ export function makeClaudeAdapterV2(
               return;
             }
             // A drained `init` means Claude began the wake turn, so its output
-            // may still be on the way: stay open for it.
+            // may still be on the way: stay open for it, unless the CLI that
+            // began it has exited.
             const hasNativeWakeFrame = drained.some(
               (entry) =>
                 entry.type === "user" ||
                 entry.type === "assistant" ||
                 isClaudeTurnStartMessage(entry),
             );
-            if (hasOpaqueTaskNotification && !hasNativeWakeFrame) {
+            if (
+              buffer?.processEnded === true ||
+              (hasOpaqueTaskNotification && !hasNativeWakeFrame)
+            ) {
               const completedAt = yield* DateTime.now;
               yield* finalizeActiveTurn({ context, status: "completed", completedAt });
             }

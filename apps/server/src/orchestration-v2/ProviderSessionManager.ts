@@ -978,10 +978,12 @@ export const layerWithOptions = (
                     ...(input.detail === undefined ? {} : { detail: input.detail }),
                     releasedAt,
                   };
+                  // Waiting on the open lock can outlast an interrupted caller.
                   const recorded = yield* Effect.exit(
-                    input.holdsOpenLock === true
+                    (input.holdsOpenLock === true
                       ? writeReleaseRecords({ ...records, replaced: false })
-                      : writeReleaseRecordsUnlessReplaced(records),
+                      : writeReleaseRecordsUnlessReplaced(records)
+                    ).pipe(Effect.onInterrupt(() => Effect.asVoid(retryReleaseRecords(records)))),
                   );
                   if (Exit.isFailure(recorded)) {
                     yield* retryReleaseRecords(records);
