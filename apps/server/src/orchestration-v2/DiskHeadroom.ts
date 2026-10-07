@@ -62,18 +62,20 @@ export function cloudMachineNote(machine: CloudMachine): string {
 
 /**
  * The cloud machine note, sent once per native conversation: the first turn on a fresh one gets
- * it. Only a box's top-level chats reach t3_fork_run through their host, and forks copy only E2B
- * machines, so a Mac box's chats are not pointed at them.
+ * it. Only a box's top-level chats reach t3_fork_run through their host, and only when their
+ * provider exposes MCP tools. Forks copy only E2B machines, so a Mac box's chats are not pointed
+ * at them.
  */
 export const cloudMachineNoteFor = (input: {
   readonly cwd: string | null | undefined;
   readonly subagent: boolean;
+  readonly mcpTools: boolean;
   readonly nativeThreadHasTurns: boolean;
 }): Effect.Effect<string> =>
   Effect.gen(function* () {
     if (!input.cwd || input.subagent || input.nativeThreadHasTurns || !(yield* onCloudBox))
       return "";
-    const forks = (yield* HostProcessPlatform) !== "darwin";
+    const forks = input.mcpTools && (yield* HostProcessPlatform) !== "darwin";
     const cwd = input.cwd;
     return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
       Effect.map((stats) =>

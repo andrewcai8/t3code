@@ -7,6 +7,7 @@ import {
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
@@ -17,6 +18,8 @@ import {
   type OrchestrationV2ThreadProjection,
   OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
+import * as NodeOS from "node:os";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -178,6 +181,11 @@ function makeLocalCommandHarness(input: {
   readonly writeFailure?: unknown;
   /** Loads the thread and starts the run, then fails every later state read. */
   readonly failReadsAfterRunning?: boolean;
+  /**
+   * Starts a real provider turn whose text `deliveredTexts` records, in a temporary directory.
+   * `earlierTurn` gives the native conversation one accepted turn already.
+   */
+  readonly deliverTurn?: { readonly earlierTurn: boolean };
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -388,6 +396,55 @@ function makeLocalCommandHarness(input: {
             ],
     };
   }
+  if (input.deliverTurn?.earlierTurn === true) {
+    const earlierRunId = RunId.make("run-earlier-native-turn");
+    const earlierAttemptId = RunAttemptId.make("attempt-earlier-native-turn");
+    const nativeThreadRef = {
+      driver: providerThread.driver,
+      nativeId: "native-cloud-thread",
+      strength: "strong" as const,
+    };
+    projection = {
+      ...projection,
+      runs: [
+        {
+          ...run,
+          id: earlierRunId,
+          ordinal: 1,
+          status: "completed",
+          activeAttemptId: earlierAttemptId,
+        },
+        ...projection.runs,
+      ],
+      attempts: [
+        {
+          ...projection.attempts[0]!,
+          id: earlierAttemptId,
+          runId: earlierRunId,
+          status: "completed",
+          nativeThreadId: nativeThreadRef.nativeId,
+        },
+        ...projection.attempts,
+      ],
+      providerThreads: projection.providerThreads.map((candidate) =>
+        candidate.id === providerThreadId ? { ...candidate, nativeThreadRef } : candidate,
+      ),
+      providerTurns: [
+        {
+          id: ProviderTurnId.make("provider-turn-earlier-native-turn"),
+          providerThreadId,
+          nodeId: rootNodeId,
+          runAttemptId: earlierAttemptId,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      ],
+    };
+  }
+  const deliveredTexts: Array<string> = [];
   const resumedNativeIds: Array<string> = [];
   const events: Array<OrchestrationV2DomainEvent> = [];
   const interruptRun = () => {
@@ -433,52 +490,78 @@ function makeLocalCommandHarness(input: {
     ensureThread: () => Effect.succeed(providerThread),
     ...(input.pendingHandoff?.inject ? { injectHistory: () => Effect.succeed(true) } : {}),
   };
+  const deliverySession = {
+    driver: providerThread.driver,
+    providerSession: {
+      id: providerSessionId,
+      driver: providerThread.driver,
+      providerInstanceId: newInstanceId,
+      status: "ready",
+      cwd: NodeOS.tmpdir(),
+      model: null,
+      capabilities: CodexProviderCapabilitiesV2,
+      createdAt: now,
+      updatedAt: now,
+      lastError: null,
+    },
+    ensureThread: () => Effect.succeed(providerThread),
+    resumeThread: (resume: { readonly providerThread: typeof providerThread }) =>
+      Effect.succeed(resume.providerThread),
+    startTurn: (turn: { readonly message: { readonly text: string } }) =>
+      Effect.sync(() => {
+        deliveredTexts.push(turn.message.text);
+      }),
+  };
   const open = vi.fn(() =>
-    input.interruptOpen === true
-      ? Effect.interrupt
-      : "historyReadFailureAfterFallback" in input || input.pendingHandoff !== undefined
-        ? Effect.succeed(resumeFallbackSession as never)
-        : "ensureThreadFailure" in input
-          ? Effect.succeed({ driver: providerThread.driver, ensureThread } as never)
-          : "openFailure" in input
-            ? Effect.sync(() => {
-                if (input.interruptRunBeforeOpenFailure === true) interruptRun();
-              }).pipe(
-                Effect.andThen(
-                  Effect.fail(
-                    new ProviderSessionManager.ProviderSessionOpenError({
-                      instanceId: newInstanceId,
-                      providerSessionId,
-                      cause: input.openFailure,
-                    }),
+    input.deliverTurn !== undefined
+      ? Effect.succeed(deliverySession as never)
+      : input.interruptOpen === true
+        ? Effect.interrupt
+        : "historyReadFailureAfterFallback" in input || input.pendingHandoff !== undefined
+          ? Effect.succeed(resumeFallbackSession as never)
+          : "ensureThreadFailure" in input
+            ? Effect.succeed({ driver: providerThread.driver, ensureThread } as never)
+            : "openFailure" in input
+              ? Effect.sync(() => {
+                  if (input.interruptRunBeforeOpenFailure === true) interruptRun();
+                }).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      new ProviderSessionManager.ProviderSessionOpenError({
+                        instanceId: newInstanceId,
+                        providerSessionId,
+                        cause: input.openFailure,
+                      }),
+                    ),
                   ),
-                ),
-              )
-            : input.failReadsAfterRunning === true
-              ? Effect.succeed({
-                  driver: providerThread.driver,
-                  providerSession: {
-                    id: providerSessionId,
+                )
+              : input.failReadsAfterRunning === true
+                ? Effect.succeed({
                     driver: providerThread.driver,
-                    providerInstanceId: newInstanceId,
-                    status: "ready",
-                    cwd: "/tmp/native-account-command",
-                    model: null,
-                    capabilities: CodexProviderCapabilitiesV2,
-                    createdAt: now,
-                    updatedAt: now,
-                    lastError: null,
-                  },
-                  ensureThread: () => Effect.succeed(providerThread),
-                } as never)
-              : Effect.die("A local command must not open a native session."),
+                    providerSession: {
+                      id: providerSessionId,
+                      driver: providerThread.driver,
+                      providerInstanceId: newInstanceId,
+                      status: "ready",
+                      cwd: "/tmp/native-account-command",
+                      model: null,
+                      capabilities: CodexProviderCapabilitiesV2,
+                      createdAt: now,
+                      updatedAt: now,
+                      lastError: null,
+                    },
+                    ensureThread: () => Effect.succeed(providerThread),
+                  } as never)
+                : Effect.die("A local command must not open a native session."),
   );
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
-  >(() =>
-    input.failReadsAfterRunning === true
-      ? Effect.void
-      : Effect.die("A local command must not start a native turn."),
+  >((started) =>
+    input.deliverTurn !== undefined
+      ? started.session.startTurn(started as never).pipe(Effect.orDie)
+      : input.failReadsAfterRunning === true
+        ? Effect.void
+        : Effect.die("A local command must not start a native turn."),
   );
   const failReadIfRunning = Effect.suspend(() =>
     input.failReadsAfterRunning === true &&
@@ -584,7 +667,7 @@ function makeLocalCommandHarness(input: {
               ),
             }),
           getTurnStartHistory: () =>
-            input.pendingHandoff === undefined
+            input.pendingHandoff === undefined && input.deliverTurn === undefined
               ? Effect.fail(
                   new ProjectionStore.ProjectionStoreReadError({
                     threadId,
@@ -597,13 +680,17 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
-          resolve: () => Effect.succeed({} as never),
+          resolve: () =>
+            Effect.succeed(
+              (input.deliverTurn === undefined ? {} : { cwd: NodeOS.tmpdir() }) as never,
+            ),
         }),
       ),
     ),
   );
   return {
     open,
+    deliveredTexts,
     resumedNativeIds,
     writeIfRunCurrent,
     startRootRun,
@@ -872,6 +959,37 @@ effectIt.effect("does not mistake a failed state read for a superseded run", () 
     expect(startCheck._tag).toBe("ProjectionStoreReadError");
     expect(finalizeCheck._tag).toBe("ProjectionStoreReadError");
   }),
+);
+
+effectIt.effect(
+  "tells a cloud box's agent about forks on its native conversation's first turn only",
+  () =>
+    Effect.gen(function* () {
+      const onBox = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(
+          Effect.provideService(HostProcessEnvironment, { T3CODE_USAGE_HOST_ID: "request-1" }),
+          Effect.provideService(HostProcessPlatform, "linux"),
+        );
+      const first = makeLocalCommandHarness({
+        text: "Run the evals",
+        deliverTurn: { earlierTurn: false },
+      });
+      const later = makeLocalCommandHarness({
+        text: "Run the evals",
+        deliverTurn: { earlierTurn: true },
+      });
+
+      yield* onBox(first.start);
+      yield* onBox(later.start);
+
+      expect(first.deliveredTexts).toHaveLength(1);
+      expect(first.deliveredTexts[0]).toMatch(
+        /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* use t3_fork_run: .*\n\nUser message:\nRun the evals$/s,
+      );
+      expect(later.deliveredTexts).toHaveLength(1);
+      expect(later.deliveredTexts[0]).not.toContain("cloud machine");
+      expect(later.deliveredTexts[0]).toMatch(/(^|\n)Run the evals$/);
+    }),
 );
 
 effectIt.effect("does not overwrite a run interrupted while its thread loads", () =>

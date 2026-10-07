@@ -35,8 +35,9 @@ const noteOn = (
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
   thread: { readonly subagent: boolean; readonly nativeThreadHasTurns: boolean },
+  mcpTools = true,
 ) =>
-  cloudMachineNoteFor({ cwd: NodeOS.tmpdir(), ...thread }).pipe(
+  cloudMachineNoteFor({ cwd: NodeOS.tmpdir(), mcpTools, ...thread }).pipe(
     Effect.provideService(HostProcessEnvironment, environment),
     Effect.provideService(HostProcessPlatform, platform),
   );
@@ -62,11 +63,14 @@ effectIt.effect("leaves a user's own machine and a box's subagents alone", () =>
   }),
 );
 
-effectIt.effect("gives a Mac box's chat the note without forks", () =>
-  Effect.gen(function* () {
-    const mac = yield* noteOn(box, "darwin", firstTurn);
-    expect(mac).toMatch(/\. Keep large results in S3, not on this disk\.$/);
-    expect(mac).not.toContain("t3_fork_run");
-    expect(yield* noteOn(box, "linux", firstTurn)).toContain(forkSentence);
-  }),
+effectIt.effect(
+  "gives a Mac box's chat, or a provider without MCP tools, the note without forks",
+  () =>
+    Effect.gen(function* () {
+      const mac = yield* noteOn(box, "darwin", firstTurn);
+      expect(mac).toMatch(/\. Keep large results in S3, not on this disk\.$/);
+      expect(mac).not.toContain("t3_fork_run");
+      expect(yield* noteOn(box, "linux", firstTurn, false)).toBe(mac);
+      expect(yield* noteOn(box, "linux", firstTurn)).toContain(forkSentence);
+    }),
 );

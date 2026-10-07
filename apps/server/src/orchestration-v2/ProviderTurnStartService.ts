@@ -1066,6 +1066,7 @@ export const layer: Layer.Layer<
         yield* cloudMachineNoteFor({
           cwd: resolvedRuntimePolicy.cwd,
           subagent: projection.thread.lineage.relationshipToParent === "subagent",
+          mcpTools: session.providerSession.capabilities.tools.supportsMcpTools,
           nativeThreadHasTurns,
         }),
       ]
