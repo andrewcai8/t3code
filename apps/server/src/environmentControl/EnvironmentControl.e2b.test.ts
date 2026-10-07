@@ -66,6 +66,8 @@ vi.mock("e2b", async (importOriginal) => {
   const sandbox = {
     commands: {
       run: async (command: string, options?: { readonly background?: boolean }) => {
+        // The guest is this machine, whose systemd the envd drop-in must never touch.
+        if (command.includes("10-e2b-envd.conf")) return { exitCode: 0, stdout: "", stderr: "" };
         const { child, done } = start(command);
         if (!options?.background) {
           child.stdin.end();

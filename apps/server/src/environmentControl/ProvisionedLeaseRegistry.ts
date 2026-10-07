@@ -104,6 +104,16 @@ export const LeaseReboot = Schema.Struct({
 });
 export type LeaseReboot = typeof LeaseReboot.Type;
 
+/**
+ * A pause that saved only the box's disk, because its memory was unsafe to keep, so it wakes as a
+ * fresh boot. Kept until its chat is told what that lost.
+ */
+export const LeaseDiskPause = Schema.Struct({
+  at: Schema.String,
+  reason: Schema.String,
+});
+export type LeaseDiskPause = typeof LeaseDiskPause.Type;
+
 const ProvisionedLeaseOwner = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -166,6 +176,9 @@ export const StoredProvisionedLease = Schema.Struct({
   ),
   reboot: Schema.optional(
     LeaseReboot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
+  diskPause: Schema.optional(
+    LeaseDiskPause.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
   ),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
@@ -278,6 +291,8 @@ export interface ProvisionedLeaseRegistry {
   readonly recordRebuild: (leaseId: string, rebuild: LeaseRebuild) => Promise<void>;
   /** Null clears it. */
   readonly recordReboot: (leaseId: string, reboot: LeaseReboot | null) => Promise<void>;
+  /** Null clears it. */
+  readonly recordDiskPause: (leaseId: string, diskPause: LeaseDiskPause | null) => Promise<void>;
 }
 
 function nowIso(now?: Date): string {
@@ -657,6 +672,15 @@ export function createProvisionedLeaseRegistry(
           if (lease.leaseId !== leaseId) return lease;
           const { reboot: _previous, ...rest } = lease;
           return reboot === null ? rest : { ...rest, reboot };
+        }),
+        value: undefined,
+      })),
+    recordDiskPause: (leaseId, diskPause) =>
+      mutate((leases) => ({
+        leases: leases.map((lease) => {
+          if (lease.leaseId !== leaseId) return lease;
+          const { diskPause: _previous, ...rest } = lease;
+          return diskPause === null ? rest : { ...rest, diskPause };
         }),
         value: undefined,
       })),

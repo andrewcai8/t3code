@@ -196,12 +196,6 @@ const refusalMessages = {
   unsupported: "The controller needs the manual Stop upgrade before this host can be stopped.",
   conflict: "Another compute command is in progress. Refresh and retry.",
 };
-/** A pause or removal of a box not safe to pause right now. */
-const unhealthyRefusal = {
-  kind: "refused",
-  reason: "unknown",
-  message: "This machine is not responding normally, so it is not paused yet. Retry shortly.",
-} as const;
 const refused = (reason: keyof typeof refusalMessages): EnvironmentControlResult => ({
   kind: "refused",
   reason,
@@ -264,13 +258,11 @@ interface BoxBackup {
 }
 
 /**
- * Reading whether a box is safe to pause, and relieving one that stays pinned. `probe` answers
- * null for a box it does not check, such as one not awake; `relieve` stops the heaviest processes
- * the chat's agents left running, never the T3 server, and answers what it stopped.
+ * Reading whether a box may keep its memory when it pauses. `probe` answers null for a box it
+ * does not check, such as one not awake.
  */
 interface BoxHealthCheck {
   readonly probe: (lease: ProvisionedLease) => Promise<BoxHealth | null>;
-  readonly relieve: (lease: ProvisionedLease) => Promise<ReadonlyArray<string>>;
 }
 
 /**
@@ -301,12 +293,9 @@ const RECOVERY_STALL_MS = 30 * 60_000;
 const stalled = (record: { readonly status: string; readonly at: string } | undefined) =>
   record?.status === "started" && Date.now() - Date.parse(record.at) > RECOVERY_STALL_MS;
 
-/** What a chat is told when its box was booted fresh because E2B could not resume it. */
-const REBOOT_NOTICE =
-  "This machine was restarted fresh from its disk because E2B could not resume it. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.";
-
-/** Pause attempts in a row a pinned box waits through before its agents' leftovers are stopped. */
-const MAX_PINNED_PROBES = 3;
+/** What a chat is told when its box was booted fresh from its disk, and `why`. */
+const restartNotice = (why: string) =>
+  `This machine was restarted fresh from its disk because ${why}. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check \`git status\`, start again anything you had running, and carry on.`;
 
 /**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
@@ -546,12 +535,14 @@ export function createEnvironmentControl(
         });
         const woken = await leaseRegistry.findById(lease.leaseId);
         if (woken && driver.tellChat)
-          await driver.tellChat(woken, REBOOT_NOTICE).catch((cause: unknown) =>
-            reportFailure("cloud chat was not told its box restarted", {
-              chatId: lease.leaseId,
-              cause,
-            }),
-          );
+          await driver
+            .tellChat(woken, restartNotice("E2B could not resume it"))
+            .catch((cause: unknown) =>
+              reportFailure("cloud chat was not told its box restarted", {
+                chatId: lease.leaseId,
+                cause,
+              }),
+            );
       } catch (cause) {
         reportFailure("cloud box could not be booted fresh", { chatId: lease.leaseId, cause });
         await leaseRegistry
@@ -569,57 +560,63 @@ export function createEnvironmentControl(
       leaseOperations.delete(lease.sandboxId);
     })();
   };
-  /** Unhealthy probes in a row per lease, reset by a healthy one. */
-  const unhealthyProbes = new Map<string, number>();
-  /**
-   * Whether an awake box may be paused now. E2B captures a box's memory on pause, and one paused
-   * pinned or with envd not answering could not be resumed again. Such a box waits for a later
-   * attempt; one pinned through MAX_PINNED_PROBES attempts has its agents' leftovers stopped and
-   * is paused if envd still answers.
-   */
-  const safeToSleep = async (lease: ProvisionedLease): Promise<boolean> => {
-    const check = driver.healthCheck;
-    if (!check || lease.state !== "active") return true;
-    // A probe E2B's API failed to answer says nothing of the box itself, so it does not hold the
-    // pause; envd not answering is what the probe reports as unresponsive.
-    const probe = () =>
-      check.probe(lease).catch((cause: unknown) => {
-        reportFailure("cloud box health could not be read", { chatId: lease.leaseId, cause });
-        return null;
-      });
-    let health = await probe();
-    if (health === null || health.kind === "healthy") {
-      unhealthyProbes.delete(lease.leaseId);
-      return true;
-    }
-    const probes = (unhealthyProbes.get(lease.leaseId) ?? 0) + 1;
-    unhealthyProbes.set(lease.leaseId, probes);
-    if (health.kind === "pinned" && probes >= MAX_PINNED_PROBES) {
-      const stopped = await check.relieve(lease).catch((cause: unknown) => {
-        reportFailure("cloud box leftovers could not be stopped", { chatId: lease.leaseId, cause });
-        return [];
-      });
-      reportFailure("cloud box stayed pinned; stopped its agents' heaviest leftovers to pause it", {
-        chatId: lease.leaseId,
-        cause: stopped.length > 0 ? stopped.join("; ") : "none found",
-      });
-      health = await probe();
-      if (health === null || health.kind !== "unresponsive") {
-        unhealthyProbes.delete(lease.leaseId);
-        return true;
-      }
-    }
-    reportFailure(`cloud box is ${health.kind}; not pausing it now`, {
-      chatId: lease.leaseId,
-      cause:
-        health.kind === "pinned"
-          ? `CPU ${health.cpuPercent}%, attempt ${probes}`
-          : `envd did not answer, attempt ${probes}`,
-    });
-    return false;
-  };
   const beforeSleep = (lease: ProvisionedLease) =>
     Promise.all([pullBeforeStop(lease), backUpBeforeSleep(lease)]);
+  /**
+   * Why an awake box must be paused without its memory, or null when it may keep it. E2B captures
+   * a box's memory on pause, and one captured pinned or with envd not answering could not be
+   * resumed again. A probe E2B's API failed to answer says nothing of the box itself.
+   */
+  const memoryUnsafe = async (lease: ProvisionedLease): Promise<string | null> => {
+    const check = driver.healthCheck;
+    // A box still `releasing` is one whose last pause failed, so it is read again.
+    if (!check || lease.state === "paused") return null;
+    const health = await check.probe(lease).catch((cause: unknown) => {
+      reportFailure("cloud box health could not be read", { chatId: lease.leaseId, cause });
+      return null;
+    });
+    if (health === null || health.kind === "healthy") return null;
+    return health.kind === "pinned"
+      ? `its CPU was pinned at ${health.cpuPercent}%`
+      : "it had stopped answering";
+  };
+  /**
+   * Saves a box's work, then pauses it: from its disk alone when its memory is unsafe to keep,
+   * which is recorded so its chat is told what that lost once it wakes.
+   */
+  const pauseBox = async (lease: ProvisionedLease) => {
+    await beforeSleep(lease);
+    const unsafe = await memoryUnsafe(lease);
+    const result = await driver.pause({
+      sandboxId: lease.sandboxId,
+      ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
+      ...(unsafe ? { keepMemory: false } : {}),
+    });
+    if (unsafe && result !== "missing") {
+      reportFailure("cloud box paused from its disk, without its memory", {
+        chatId: lease.leaseId,
+        cause: unsafe,
+      });
+      await leaseRegistry?.recordDiskPause(lease.leaseId, {
+        at: new Date().toISOString(),
+        reason: unsafe,
+      });
+    }
+    return result;
+  };
+  /** Tells a chat whose box last paused from its disk what that lost, once it is awake again. */
+  const tellDiskPause = async (lease: ProvisionedLease) => {
+    if (!lease.diskPause || !driver.tellChat || !leaseRegistry) return;
+    await driver
+      .tellChat(lease, restartNotice(`it was paused while ${lease.diskPause.reason}`))
+      .catch((cause: unknown) =>
+        reportFailure("cloud chat was not told its box restarted", {
+          chatId: lease.leaseId,
+          cause,
+        }),
+      );
+    await leaseRegistry.recordDiskPause(lease.leaseId, null);
+  };
   /** Brings a lease's machine back and records it awake: a client's resume, or a moved chat's. */
   const wake = async (
     lease: ProvisionedLease,
@@ -634,8 +631,16 @@ export function createEnvironmentControl(
       ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
       ...(lease.namespaceProxy ? { namespaceProxy: lease.namespaceProxy } : {}),
     });
-    if (!(await leaseRegistry?.markActive({ leaseId: lease.leaseId, hostMove, ...resumed })))
-      throw new Error("Lease could not be resumed");
+    const woken = await leaseRegistry?.markActive({ leaseId: lease.leaseId, hostMove, ...resumed });
+    if (!woken) throw new Error("Lease could not be resumed");
+    // In the background, so a chat that does not answer never holds up its wake.
+    if (woken.diskPause)
+      void tellDiskPause(woken).catch((cause: unknown) =>
+        reportFailure("cloud box disk pause could not be cleared", {
+          chatId: lease.leaseId,
+          cause,
+        }),
+      );
   };
   const snapshot = async (target: ManagedTarget): Promise<ManagedEnvironment> => {
     let state: ComputeState;
@@ -743,7 +748,6 @@ export function createEnvironmentControl(
           upgrades.push(lease);
           continue;
         }
-        if (!(await safeToSleep(lease))) continue;
         const release =
           lease.state === "releasing"
             ? "started"
@@ -761,11 +765,7 @@ export function createEnvironmentControl(
           current.expiresAt > new Date().toISOString()
         )
           continue;
-        await beforeSleep(lease);
-        const result = await driver.pause({
-          sandboxId: current.sandboxId,
-          ...(current.namespaceResource ? { namespaceResource: current.namespaceResource } : {}),
-        });
+        const result = await pauseBox(lease);
         if (result === "missing") await leaseRegistry.markMissing(lease.leaseId);
         else await leaseRegistry.markPaused(lease.leaseId);
       } catch (cause) {
@@ -873,13 +873,7 @@ export function createEnvironmentControl(
       leaseOperations.set(lease.sandboxId, { action: "dispose" });
       try {
         if (lease.state !== "paused") {
-          if (!(await safeToSleep(lease))) return unhealthyRefusal;
-          await beforeSleep(lease);
-          const result = await driver.pause({
-            sandboxId: lease.sandboxId,
-            ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
-          });
-          if (result === "missing") return { kind: "missing" };
+          if ((await pauseBox(lease)) === "missing") return { kind: "missing" };
         }
         const removed = await leaseRegistry.markRemoved(lease.leaseId);
         const until = removed ? restorableUntil(removed) : null;
@@ -930,12 +924,7 @@ export function createEnvironmentControl(
             reason: "unknown",
             message: "Another chat on this machine is still working.",
           };
-        if (!(await safeToSleep(lease))) return unhealthyRefusal;
-        await beforeSleep(lease);
-        const result = await driver.pause({
-          sandboxId: input.sandboxId,
-          ...(lease.namespaceResource ? { namespaceResource: lease.namespaceResource } : {}),
-        });
+        const result = await pauseBox(lease);
         if (result === "missing") {
           await leaseRegistry.markMissing(lease.leaseId);
           return { kind: "missing" };
@@ -1650,16 +1639,6 @@ export const layer = Layer.effect(
                       )
                     : null;
                 },
-                relieve: async (lease) => {
-                  const box = await e2bBox(lease);
-                  return box
-                    ? makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).relieve(
-                        box.operation,
-                        box.sandboxId,
-                        await manifests.load(box.operation.request.requestId),
-                      )
-                    : [];
-                },
               },
               chatRebuild: {
                 run: (lease) => rebuildChat(lease, config),
@@ -1977,7 +1956,7 @@ export const layer = Layer.effect(
         operation.state.allocation.resource.provider !== "e2b"
       )
         throw new Error("No ready E2B runtime");
-      const { refreshError, restarted } = await makeE2bProvisionRuntime(
+      const { refreshError, restarted, envdUnprotected } = await makeE2bProvisionRuntime(
         { apiKey },
         logE2bResumeRetry,
       ).resume(
@@ -1990,6 +1969,13 @@ export const layer = Layer.effect(
         await runLogged(
           Effect.logWarning("cloud workspace server was down; prepared it again", {
             leaseId: requestId,
+          }),
+        );
+      if (envdUnprotected)
+        await runLogged(
+          Effect.logWarning("cloud workspace envd memory could not be protected", {
+            leaseId: requestId,
+            cause: envdUnprotected,
           }),
         );
       await runLogged(logRefresh(requestId, refreshError));
