@@ -30,7 +30,7 @@ import type { RemotePreparationPort } from "./remotePreparation.ts";
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 /** The Claude instance a fresh box runs its chats on. */
-export const BOX_CLAUDE_INSTANCE = defaultInstanceIdForDriver(CLAUDE);
+const BOX_CLAUDE_INSTANCE = defaultInstanceIdForDriver(CLAUDE);
 
 const restoreScript = String.raw`
 import base64, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
