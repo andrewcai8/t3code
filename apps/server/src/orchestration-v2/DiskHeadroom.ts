@@ -55,26 +55,35 @@ export function cloudMachineNote(machine: CloudMachine): string {
       ? "For parallel or heavy jobs (eval replays, test shards, separate builds) use t3_fork_run: each job runs in a throwaway copy of this machine and its outputs go to S3 under outputsUri. Don't create extra worktrees and installs here."
       : "",
     "Keep large results in S3, not on this disk.",
+    "Remove worktrees, installs and /tmp data you created once you no longer need them.",
   ]
     .filter((sentence) => sentence !== "")
     .join(" ");
 }
 
+/** The native threads each live provider session has told, forgotten with the session. */
+const toldBySession = new WeakMap<object, Set<string>>();
+
 /**
- * The cloud machine note, sent once per native conversation: the first turn on a fresh one gets
- * it. Only a box's top-level chats reach t3_fork_run through their host, and only when their
- * provider exposes MCP tools. Forks copy only E2B machines, so a Mac box's chats are not pointed
- * at them.
+ * The cloud machine note, sent on the first turn of each provider session for a native thread: a
+ * new chat, and also a chat resumed after a wake, a restart or an account switch, since a chat
+ * that began before the note existed, or lost it to compaction, would otherwise never hear it.
+ * `session` is the live provider session runtime. Only a box's top-level chats reach t3_fork_run
+ * through their host, and only when their provider exposes MCP tools. Forks copy only E2B
+ * machines, so a Mac box's chats are not pointed at them.
  */
 export const cloudMachineNoteFor = (input: {
   readonly cwd: string | null | undefined;
   readonly subagent: boolean;
   readonly mcpTools: boolean;
-  readonly nativeThreadHasTurns: boolean;
+  readonly session: object;
+  readonly nativeThreadId: string;
 }): Effect.Effect<string> =>
   Effect.gen(function* () {
-    if (!input.cwd || input.subagent || input.nativeThreadHasTurns || !(yield* onCloudBox))
-      return "";
+    if (!input.cwd || input.subagent || !(yield* onCloudBox)) return "";
+    const told = toldBySession.get(input.session) ?? new Set<string>();
+    if (told.has(input.nativeThreadId)) return "";
+    toldBySession.set(input.session, told.add(input.nativeThreadId));
     const forks = input.mcpTools && (yield* HostProcessPlatform) !== "darwin";
     const cwd = input.cwd;
     return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
