@@ -20,7 +20,8 @@ const HOST_RECONNECT_BUDGET_SECONDS = 45;
 /**
  * Runs a fork call across a brief loss of this cloud machine's host. Starting a batch pauses the
  * machine to capture it, which drops the host's connection until the host registers again on
- * its next pass. Both fork calls are safe to repeat: the same run joins its batch.
+ * its next pass. Every fork call is safe to repeat: the same run joins its batch, and a cancel
+ * changes nothing the second time.
  */
 const acrossHostReconnect = <A, R>(call: Effect.Effect<A, OrchestratorMcpFailure, R>) =>
   Effect.gen(function* () {
@@ -119,5 +120,9 @@ export const layer = McpToolAccess.toLayer(HomeToolkit, {
 
   t3_fork_status: McpToolAccess.readsAsCaller((input) =>
     acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input)),
+  ),
+
+  t3_fork_cancel: McpToolAccess.actsAsCaller((input) =>
+    acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.cancel", input)),
   ),
 });

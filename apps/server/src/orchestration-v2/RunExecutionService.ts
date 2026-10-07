@@ -1126,25 +1126,22 @@ export const layer: Layer.Layer<
             if (!(yield* Ref.get(rootTerminalSeen))) {
               return false;
             }
-            const terminal = yield* Ref.get(terminalEvent);
-            // Non-completed terminals drop background tracking immediately.
-            if (terminal !== null && terminal.status !== "completed") {
-              return true;
-            }
+            // Interrupted/failed turns drop child and item tracking rather than
+            // pinning the stream open. Only the provider-thread probe below,
+            // which the adapter clears when the work ends, still holds them.
+            const completed = (yield* Ref.get(terminalEvent))?.status === "completed";
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
-            if (childProviderTurns.size > 0) {
+            if (completed && childProviderTurns.size > 0) {
               return false;
             }
             const childSubagents = yield* Ref.get(activeChildSubagents);
-            if (childSubagents.size > 0) {
+            if (completed && childSubagents.size > 0) {
               return false;
             }
             // Keep ingesting past root settlement while background-capable
             // items owned by this run (or an owned child thread) are still
             // non-terminal, so their late completion events reach the
-            // projection (stuck-spinner fix). Only for completed runs:
-            // interrupted/failed turns intentionally drop background tracking
-            // rather than pinning the stream open. Newly owned items depend on
+            // projection (stuck-spinner fix). Newly owned items depend on
             // adapters emitting a non-terminal event before the root terminal.
             // Exact inherited items are seeded from their selected durable rows.
             //
@@ -1152,7 +1149,7 @@ export const layer: Layer.Layer<
             // this stream while these sets are non-empty: turn_item.updated
             // writes are not ownership-gated, so late completions still land.
             const backgroundItems = yield* Ref.get(activeBackgroundTurnItems);
-            if (backgroundItems.size > 0) {
+            if (completed && backgroundItems.size > 0) {
               return false;
             }
             // Owner loss means do not hold the stream open solely for the

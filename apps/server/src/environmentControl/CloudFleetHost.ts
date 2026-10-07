@@ -437,7 +437,8 @@ const make = Effect.gen(function* () {
   /**
    * Runs one call a box relays. Only another cloud chat's box, or a new one, is a target. The host
    * decides who asks from its own records, never the box's claim: the box's own chat, with the
-   * modes on the host's card. Changes and wakes need that card to be full-access/default.
+   * modes on the host's card. Changes and wakes need that card to be full-access/default; reads and
+   * fork cancels, which only stop work, do not.
    */
   const relay = (sourceLeaseId: string, { environmentId, invoke }: FleetHostRequest) =>
     Effect.gen(function* () {
@@ -469,12 +470,13 @@ const make = Effect.gen(function* () {
           return new StartAfterAnswer(reserved.batch, reserved.start);
         }
         if (request.op === "forks.status") return yield* forks.status(source, request.input);
+        if (request.op === "forks.cancel") return yield* forks.cancel(source, request.input);
         return yield* failure(
           "invalid_request",
-          "Only t3_fork_run and t3_fork_status work in the forks environment.",
+          "Only t3_fork_run, t3_fork_status and t3_fork_cancel work in the forks environment.",
         );
       }
-      if (request.op === "forks.run" || request.op === "forks.status")
+      if (request.op.startsWith("forks."))
         return yield* failure("invalid_request", "Forks run only in the forks environment.");
       if (environmentId === NEW_CLOUD_CHAT_ENVIRONMENT_ID) {
         if (request.op !== "threads.launch")
