@@ -1576,6 +1576,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       schedule: { type: "webhook", signature: null },
       projectId,
       threadId: null,
+      target: "local",
       workspaceStrategy: { type: "root" },
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
       runtimeMode: "approval-required",

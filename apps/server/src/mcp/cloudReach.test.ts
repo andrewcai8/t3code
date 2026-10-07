@@ -26,6 +26,7 @@ import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Project from "../project/ProjectService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { routeHome, runAsHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
@@ -166,6 +167,7 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
     Layer.mock(Project.ProjectService)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+    Layer.mock(GitVcsDriver.GitVcsDriver)({}),
     NodeServices.layer,
     ServerConfig.layerTest(process.cwd(), { prefix: "t3-cloud-reach-" }).pipe(
       Layer.provide(NodeServices.layer),

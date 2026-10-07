@@ -277,6 +277,7 @@ it.effect("makes Home name a project and watches the thread before launching it"
         namedProjectsRoot: "/projects",
         isInHomeFolder: (candidate) => Effect.succeed(candidate.startsWith("/data/home")),
       }),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-home-launch-" }).pipe(
         Layer.provide(NodeServices.layer),
