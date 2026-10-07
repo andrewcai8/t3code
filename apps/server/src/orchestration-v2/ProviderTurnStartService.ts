@@ -36,7 +36,7 @@ import {
   latestNativeContextUsage,
 } from "./ContextHandoffBudget.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
-import { lowDiskNoteFor } from "./DiskHeadroom.ts";
+import { cloudMachineNoteFor, lowDiskNoteFor } from "./DiskHeadroom.ts";
 import {
   ProviderAdapterTurnStartError,
   type ProviderAdapterV2Error,
@@ -1012,15 +1012,6 @@ export const layer: Layer.Layer<
         run,
         attempts: projection.attempts,
       });
-      // Sent with the user's text: work a restart cancelled, and a disk about to fill.
-      const restartNote = [
-        restartCancelledWork.length === 0
-          ? ""
-          : restartCancelledBackgroundWorkNote(restartCancelledWork),
-        yield* lowDiskNoteFor(resolvedRuntimePolicy.cwd),
-      ]
-        .filter((note) => note !== "")
-        .join("\n\n");
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );
@@ -1058,6 +1049,28 @@ export const layer: Layer.Layer<
           .filter((source) => source.nativeThreadId === undefined)
           .map((source) => source.runId),
       );
+      // Legacy accepted attempts have no native id. They count only before
+      // a replacement, while no accepted attempt records a native identity.
+      const nativeThreadHasTurns =
+        nativeInputRunIds.size > 0 ||
+        (legacyInputRunIds.size > 0 &&
+          sameNativeThread &&
+          !acceptedAttempts.some((source) => source.nativeThreadId !== undefined));
+      // Sent with the user's text: work a restart cancelled, a disk about to fill, and a cloud
+      // machine's guidance at the start of each native conversation.
+      const restartNote = [
+        restartCancelledWork.length === 0
+          ? ""
+          : restartCancelledBackgroundWorkNote(restartCancelledWork),
+        yield* lowDiskNoteFor(resolvedRuntimePolicy.cwd),
+        yield* cloudMachineNoteFor({
+          cwd: resolvedRuntimePolicy.cwd,
+          subagent: projection.thread.lineage.relationshipToParent === "subagent",
+          nativeThreadHasTurns,
+        }),
+      ]
+        .filter((note) => note !== "")
+        .join("\n\n");
       const legacyRecoveredRunIds = new Set(
         projection.runs
           .filter(
@@ -1278,13 +1291,7 @@ export const layer: Layer.Layer<
               .filter((turn) => turn.providerThreadId === providerThread.id)
               .map((turn) => turn.ordinal),
           ) + 1,
-        // Legacy accepted attempts have no native id. They count only before
-        // a replacement, while no accepted attempt records a native identity.
-        nativeThreadHasTurns:
-          nativeInputRunIds.size > 0 ||
-          (legacyInputRunIds.size > 0 &&
-            sameNativeThread &&
-            !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
+        nativeThreadHasTurns,
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,

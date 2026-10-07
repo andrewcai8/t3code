@@ -107,7 +107,13 @@ function fixture(index) {
   );
   refs.push(new WeakRef(history));
   return {
-    thread: { id: "thread", projectId: "project", branch: null, worktreePath: null },
+    thread: {
+      id: "thread",
+      projectId: "project",
+      branch: null,
+      worktreePath: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "thread" },
+    },
     runs: [
       {
         id: runId,

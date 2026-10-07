@@ -1,7 +1,13 @@
-// @effect-diagnostics nodeBuiltinImport:off - Effect has no free-space query.
+// @effect-diagnostics nodeBuiltinImport:off - Effect has no free-space or machine-size query.
 import * as NodeFSP from "node:fs/promises";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as NodeOS from "node:os";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+
+/** Only a box's preparation names its host for usage. */
+const onCloudBox = Effect.map(HostProcessEnvironment, (environment) =>
+  Boolean(environment.T3CODE_USAGE_HOST_ID?.trim()),
+);
 
 /**
  * Below this much free space an agent is told to clean up after itself. A cloud box warns early
@@ -24,10 +30,60 @@ export function lowDiskNote(freeBytes: number, box: boolean): string {
 export const lowDiskNoteFor = (cwd: string | null | undefined): Effect.Effect<string> =>
   Effect.gen(function* () {
     if (!cwd) return "";
-    // Only a box's preparation names its host for usage.
-    const box = Boolean((yield* HostProcessEnvironment).T3CODE_USAGE_HOST_ID?.trim());
+    const box = yield* onCloudBox;
     return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
       Effect.map((stats) => lowDiskNote(stats.bavail * stats.bsize, box)),
+      Effect.orElseSucceed(() => ""),
+    );
+  });
+
+export interface CloudMachine {
+  readonly cpus: number;
+  readonly memoryBytes: number;
+  readonly diskBytes: number;
+  /** Whether t3_fork_run can copy this machine. */
+  readonly forks: boolean;
+}
+
+const roundedGb = (bytes: number) => `${Math.round(bytes / 1024 ** 3)} GB`;
+
+/** What a top-level chat on a cloud box is told about where heavy work belongs. */
+export function cloudMachineNote(machine: CloudMachine): string {
+  return [
+    `Note: you are on a cloud machine used only by this chat (${machine.cpus} CPUs, ${roundedGb(machine.memoryBytes)} RAM, ${roundedGb(machine.diskBytes)} disk).`,
+    machine.forks
+      ? "For parallel or heavy jobs (eval replays, test shards, separate builds) use t3_fork_run: each job runs in a throwaway copy of this machine and its outputs go to S3 under outputsUri. Don't create extra worktrees and installs here."
+      : "",
+    "Keep large results in S3, not on this disk.",
+  ]
+    .filter((sentence) => sentence !== "")
+    .join(" ");
+}
+
+/**
+ * The cloud machine note, sent once per native conversation: the first turn on a fresh one gets
+ * it. Only a box's top-level chats reach t3_fork_run through their host, and forks copy only E2B
+ * machines, so a Mac box's chats are not pointed at them.
+ */
+export const cloudMachineNoteFor = (input: {
+  readonly cwd: string | null | undefined;
+  readonly subagent: boolean;
+  readonly nativeThreadHasTurns: boolean;
+}): Effect.Effect<string> =>
+  Effect.gen(function* () {
+    if (!input.cwd || input.subagent || input.nativeThreadHasTurns || !(yield* onCloudBox))
+      return "";
+    const forks = (yield* HostProcessPlatform) !== "darwin";
+    const cwd = input.cwd;
+    return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
+      Effect.map((stats) =>
+        cloudMachineNote({
+          cpus: NodeOS.availableParallelism(),
+          memoryBytes: NodeOS.totalmem(),
+          diskBytes: stats.blocks * stats.bsize,
+          forks,
+        }),
+      ),
       Effect.orElseSucceed(() => ""),
     );
   });
