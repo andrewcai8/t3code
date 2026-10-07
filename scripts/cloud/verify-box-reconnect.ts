@@ -716,6 +716,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
       const entry = (yield* SubscriptionRef.get(registry.entries)).get(boxId);
       for (const route of entry ? connectionRoutes(entry) : []) {
+        if (!("connectionId" in route.target)) continue;
         const credential = yield* credentials.get(route.target.connectionId);
         if (Option.isSome(credential)) return credential.value.token;
       }
