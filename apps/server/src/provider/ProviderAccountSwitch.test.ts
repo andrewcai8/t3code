@@ -30,6 +30,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -180,6 +181,24 @@ const boxRuntime = (
   );
 };
 
+/**
+ * Waits in the background for the first domain event matching `predicate` from now on. The start
+ * is read before the fiber forks: a fiber that first runs after the event commits would otherwise
+ * begin past it and wait forever.
+ */
+const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const afterSequence = yield* sink.latestSequence();
+    return yield* sink.stream({ afterSequence }).pipe(
+      Stream.map(({ event }) => event),
+      Stream.filter(predicate),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.forkScoped,
+    );
+  });
+
 const threadId = ThreadId.make("thread:account-switch");
 
 /** Saves an instance and waits until the registry runs it. */
@@ -233,13 +252,6 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
-            const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-              orchestrator.streamDomainEvents.pipe(
-                Stream.filter(predicate),
-                Stream.take(1),
-                Stream.runDrain,
-                Effect.forkScoped,
-              );
             const latestQuery = Ref.get(opened).pipe(Effect.map((all) => all.at(-1)!));
             const toSecondAccount = (continueRunId?: RunId) =>
               accounts.switchAccount({
@@ -346,13 +358,6 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
-            const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-              orchestrator.streamDomainEvents.pipe(
-                Stream.filter(predicate),
-                Stream.take(1),
-                Stream.runDrain,
-                Effect.forkScoped,
-              );
             const send = (id: string, text: string) =>
               orchestrator.dispatch({
                 type: "message.dispatch",
@@ -444,13 +449,6 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
-            const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-              orchestrator.streamDomainEvents.pipe(
-                Stream.filter(predicate),
-                Stream.take(1),
-                Stream.runDrain,
-                Effect.forkScoped,
-              );
             const send = (
               id: string,
               text: string,
