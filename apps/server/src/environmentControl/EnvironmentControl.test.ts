@@ -1679,7 +1679,7 @@ describe("a cloud machine backed up before it sleeps", () => {
 
 describe("a cloud machine checked before it sleeps", () => {
   async function withIdleBox(
-    probes: Array<BoxHealth | null>,
+    probes: Array<BoxHealth | null | "E2B API down">,
     test: (context: {
       registry: ReturnType<typeof createProvisionedLeaseRegistry>;
       calls: string[];
@@ -1712,6 +1712,10 @@ describe("a cloud machine checked before it sleeps", () => {
           healthCheck: {
             probe: async () => {
               const health = probes.shift() ?? null;
+              if (health === "E2B API down") {
+                calls.push("probe:failed");
+                throw new Error(health);
+              }
               calls.push(`probe:${health?.kind ?? "none"}`);
               return health;
             },
@@ -1776,6 +1780,15 @@ describe("a cloud machine checked before it sleeps", () => {
         );
       },
     );
+  });
+
+  it("pauses a box whose health E2B's API could not report, since that says nothing of the box", async () => {
+    await withIdleBox(["E2B API down"], async ({ registry, calls, reports, manager }) => {
+      await expire(registry);
+      await manager.reapExpiredLeases();
+      expect(calls).toEqual(["probe:failed", "pause:sandbox"]);
+      expect(reports).toEqual(["cloud box health could not be read: Error: E2B API down"]);
+    });
   });
 
   it("refuses a client's pause of a box that is not responding", async () => {

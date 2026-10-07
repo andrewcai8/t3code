@@ -96,6 +96,7 @@ describe("planCloudRestore", () => {
             ],
           },
           uri,
+          WHY,
         ),
       `the backup holds no Claude session to restore (only codex, under ${uri})`,
     );

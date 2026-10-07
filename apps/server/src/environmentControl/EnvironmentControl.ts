@@ -491,7 +491,13 @@ export function createEnvironmentControl(
   const safeToSleep = async (lease: ProvisionedLease): Promise<boolean> => {
     const check = driver.healthCheck;
     if (!check || lease.state !== "active") return true;
-    const probe = () => check.probe(lease).catch((): BoxHealth => ({ kind: "unresponsive" }));
+    // A probe E2B's API failed to answer says nothing of the box itself, so it does not hold the
+    // pause; envd not answering is what the probe reports as unresponsive.
+    const probe = () =>
+      check.probe(lease).catch((cause: unknown) => {
+        reportFailure("cloud box health could not be read", { chatId: lease.leaseId, cause });
+        return null;
+      });
     let health = await probe();
     if (health === null || health.kind === "healthy") {
       unhealthyProbes.delete(lease.leaseId);
