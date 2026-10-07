@@ -293,6 +293,14 @@ interface ChatRebuild {
 const RECOVER_AFTER_FAILURES = 3;
 const RECOVER_AFTER_MS = 10 * 60_000;
 
+/**
+ * A reboot or rebuild recorded as started this long ago is not running: a reboot ends within
+ * about 15 minutes, so one this old was cut off by a host restart.
+ */
+const RECOVERY_STALL_MS = 30 * 60_000;
+const stalled = (record: { readonly status: string; readonly at: string } | undefined) =>
+  record?.status === "started" && Date.now() - Date.parse(record.at) > RECOVERY_STALL_MS;
+
 /** What a chat is told when its box was booted fresh because E2B could not resume it. */
 const REBOOT_NOTICE =
   "This machine was restarted fresh from its disk because E2B could not resume it. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check `git status`, start again anything you had running, and carry on.";
@@ -459,7 +467,12 @@ export function createEnvironmentControl(
     const lease = await leaseRegistry.findById(leaseId);
     if (!lease?.owner) return null;
     if (driver.rebootBox && !lease.reboot) return "reboot";
-    if (lease.reboot?.status === "started") return null;
+    // A reboot a host restart cut off counts as failed, so the chat moves on to its rebuild.
+    if (
+      lease.reboot?.status === "started" &&
+      (leaseOperations.get(lease.sandboxId)?.action === "reboot" || !stalled(lease.reboot))
+    )
+      return null;
     return driver.chatRebuild && !lease.rebuild ? "rebuild" : null;
   };
   /**
@@ -1017,8 +1030,10 @@ export function createEnvironmentControl(
             if (step && lease) recovery = { step, lease };
           }
           const current = await leaseRegistry?.findById(input.leaseId).catch(() => null);
-          const rebuild =
-            current?.rebuild?.status ?? (recovery?.step === "rebuild" ? "started" : undefined);
+          // A rebuild a host restart cut off is never repeated, since it may have made a box.
+          const rebuild = stalled(current?.rebuild)
+            ? "failed"
+            : (current?.rebuild?.status ?? (recovery?.step === "rebuild" ? "started" : undefined));
           const rebuilt =
             recovery?.step === "reboot"
               ? " It is being started fresh from its disk."

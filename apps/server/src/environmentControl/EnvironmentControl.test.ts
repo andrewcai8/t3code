@@ -2102,6 +2102,26 @@ describe("recovering a cloud box E2B cannot resume", () => {
     );
   });
 
+  it("rebuilds the chat when a host restart cut off its reboot", async () => {
+    await withUnresumableBox(
+      async () => {
+        throw new Error("not called");
+      },
+      async ({ registry, calls, resume, rebuilt }) => {
+        await registry.recordReboot("lease", { status: "started", at: "2026-10-07T08:30:00.000Z" });
+        await resume();
+        await rebuilt;
+        expect(calls).toEqual([
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "resume:unplaceable",
+          "rebuild",
+        ]);
+        expect((await registry.findById("lease"))?.rebuild).toMatchObject({ status: "done" });
+      },
+    );
+  });
+
   it("rebuilds the chat on a new box only once the fresh boot fails too", async () => {
     await withUnresumableBox(
       async () => {

@@ -62,14 +62,14 @@ const AccountLimit = Schema.Struct({
 export type AccountLimit = typeof AccountLimit.Type;
 
 /**
- * The last backup taken before the box slept: its unsaved work on `t3-backup/` branches, and its
- * owner chat's provider sessions with a manifest restore reads under `sessionsUri`. A record this
- * build cannot read is dropped rather than failing the lease.
+ * The box's latest backup, taken after a turn or before it slept: its unsaved work on `t3-backup/`
+ * branches or in a bundle, and its owner chat's provider sessions with a manifest restore reads
+ * under `sessionsUri`. A record this build cannot read is dropped rather than failing the lease.
  */
 export const LeaseBackup = Schema.Struct({
   /** When the backup that last changed this record finished. */
   at: Schema.String,
-  /** Branches on origin holding work only the box had; empty when it had none. */
+  /** Branches on a private origin holding work only the box had; empty when there were none. */
   branches: Schema.Array(Schema.String),
   sessionsUri: Schema.optional(Schema.String),
   /** What each part held when saved, so a box unchanged since is not saved again. */
