@@ -1,4 +1,5 @@
 // @effect-diagnostics globalTimers:off - the E2B adapter waits between retries inside Promise SDK calls.
+// @effect-diagnostics globalFetch:off - E2B's disk capture is an API call its SDK does not expose yet.
 /**
  * ForkMachines - the cloud provider side of t3_fork_run: copies of a chat's machine.
  *
@@ -9,13 +10,21 @@
  *
  * @module ForkMachines
  */
-import { CommandExitError, E2B, type Sandbox, SandboxError, type SandboxNetworkUpdate } from "e2b";
+import {
+  CommandExitError,
+  ConnectionConfig,
+  E2B,
+  type Sandbox,
+  SandboxError,
+  type SandboxNetworkUpdate,
+} from "e2b";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import type { EnvironmentControlConfig } from "./config.ts";
+import { agentEnvironmentPython } from "./guestAgentEnvironment.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
 
 export type WorkerForkSettings = NonNullable<
@@ -45,6 +54,11 @@ export interface ForkJobExit {
   readonly stdoutTail: string;
   readonly stderrTail: string;
 }
+
+export type ForkUpload =
+  | { readonly kind: "uploaded"; readonly missing: ReadonlyArray<string> }
+  /** The chat's settings name these credentials, but the machine's secret store lacks them. */
+  | { readonly kind: "no_credentials"; readonly unresolved: ReadonlyArray<string> };
 
 export type ForkCopyBack =
   | { readonly kind: "copied" }
@@ -78,12 +92,13 @@ export class ForkMachines extends Context.Service<
     ) => Effect.Effect<ForkJobExit, ForkMachineError>;
     /**
      * Uploads the job's logs under `<uri>logs/` and its outputs under `<uri>outputs/`, each at its
-     * path as given; answers the outputs that did not exist.
+     * path as given, with the chat agent's AWS credentials; answers the outputs that did not
+     * exist. Uploads nothing when those credentials are set but cannot be read on the machine.
      */
     readonly upload: (
       forkId: string,
       input: { readonly cwd: string; readonly paths: ReadonlyArray<string>; readonly uri: string },
-    ) => Effect.Effect<{ readonly missing: ReadonlyArray<string> }, ForkMachineError>;
+    ) => Effect.Effect<ForkUpload, ForkMachineError>;
     /** Copies the job's outputs into the chat's machine at `destination`, within `maxBytes`. */
     readonly copyBack: (
       forkId: string,
@@ -114,6 +129,7 @@ export class ForkMachines extends Context.Service<
 
 const COPY_PURPOSE = "t3-worker-fork";
 const STATE = "/tmp/t3-fork";
+const TMP_STASH = "/home/user/.t3-fork-tmp";
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 const encodeSpec = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const python = (script: string, spec?: unknown) =>
@@ -142,41 +158,24 @@ export const captureBatch = (host: string, snapshotName: string): string | null 
 };
 
 /**
- * Makes a fresh copy run nothing but the job. A copy is the chat's whole machine, memory
- * included: its T3 server, its agents, and the provider credentials they use. Left running, the
- * copy's server would answer as the chat and its agents would keep working and billing the
- * provider. So before any job runs, the copy records the environment the chat's agent sees (the
- * T3 server's, plus each provider instance's variables, such as the AWS keys outputs upload with)
- * and then kills every process its user owns. The server runs as that user, and the check below
- * refuses a copy where it survived. The copy starts with no network and gets it back only after
- * this, so nothing it inherited can reach the host, GitHub or a provider before it dies.
+ * Makes a fresh copy run nothing but the job. A copy from a full capture is the chat's whole
+ * machine, memory included: its T3 server and agents, running. Left running, the copy's server
+ * would answer as the chat and its agents would keep working and billing the provider. So before
+ * any job runs, the copy records the environment the chat's agent sees (see
+ * guestAgentEnvironment.ts) and kills every process its user owns. The server runs as that user,
+ * and the check below refuses a copy where it survived. A copy booted from a disk capture has
+ * nothing to kill, and this only confirms it. Either way the copy starts with no network and gets
+ * it back only after this, so nothing it inherited can reach the host, GitHub or a provider.
  */
 const QUIET = String.raw`
-import json, os, pathlib, signal, time
-root = pathlib.Path('/home/user/.t3-provision')
-server = None
-env = dict(os.environ)
-try:
-    server = json.loads((root / 'server.json').read_text())['pid']
-    raw = pathlib.Path('/proc/%d/environ' % server).read_bytes().decode(errors='replace')
-    env = dict(item.split('=', 1) for item in raw.split('\0') if '=' in item)
-except (OSError, ValueError, KeyError):
-    pass
-home = pathlib.Path(env.get('T3CODE_HOME', str(root / 'home' / '.t3')))
-for path in (home / 'userdata' / 'settings.json', home / 'settings.json'):
-    try:
-        settings = json.loads(path.read_text())
-    except (OSError, ValueError):
-        continue
-    for instance in (settings.get('providerInstances') or {}).values():
-        for variable in (instance or {}).get('environment') or []:
-            if isinstance(variable, dict) and isinstance(variable.get('name'), str) and isinstance(variable.get('value'), str):
-                env[variable['name']] = variable['value']
-    break
+import json, os, pathlib, shutil, signal, time
+${agentEnvironmentPython}
+env, server, home, settings = agent_env(pathlib.Path('/home/user/.t3-provision'))
 state = pathlib.Path('${STATE}')
 (state / 'out').mkdir(parents=True, exist_ok=True)
 os.umask(0o077)
 (state / 'env.json').write_text(json.dumps(env))
+(state / 'unresolved.json').write_text(json.dumps(unresolved_env(home, settings)))
 def alive(pid):
     try:
         return '\nState:\tZ' not in '\n' + pathlib.Path('/proc/%d/status' % pid).read_text()
@@ -194,6 +193,50 @@ while True:
     if time.monotonic() > deadline:
         raise SystemExit('the copied T3 server is still running')
     time.sleep(0.05)
+# A copy booted from disk starts with an empty /tmp; put back what the chat had there.
+stash = pathlib.Path('${TMP_STASH}')
+for batch in stash.glob('*'):
+    for entry in batch.iterdir():
+        target = pathlib.Path('/tmp') / entry.name
+        if not target.exists() and not target.is_symlink():
+            os.rename(entry, target)
+shutil.rmtree(stash, ignore_errors=True)
+`;
+
+/**
+ * Keeps the chat's /tmp for a copy booted from disk, whose boot empties /tmp. Run on the chat's
+ * machine just before its capture: it hardlinks every file under /tmp into the stash, which sits
+ * on the same disk and so takes no space, and the capture carries it. The stash is removed from
+ * the chat's machine right after the capture, and any older one first. Files the chat's user
+ * cannot link, such as other users', are left out and counted.
+ */
+const STASH = String.raw`
+import json, os, shutil, sys
+target = os.path.join('${TMP_STASH}', json.loads(sys.argv[1]))
+shutil.rmtree('${TMP_STASH}', ignore_errors=True)
+skipped = 0
+for path, directories, files in os.walk('/tmp'):
+    relative = os.path.relpath(path, '/tmp')
+    if relative.split(os.sep)[0].startswith('systemd-private-'):
+        directories[:] = []
+        continue
+    destination = os.path.normpath(os.path.join(target, relative))
+    os.makedirs(destination, exist_ok=True)
+    try:
+        shutil.copymode(path, destination)
+    except OSError:
+        pass
+    for name in files + [name for name in directories if os.path.islink(os.path.join(path, name))]:
+        source = os.path.join(path, name)
+        try:
+            if os.path.islink(source):
+                os.symlink(os.readlink(source), os.path.join(destination, name))
+            else:
+                os.link(source, os.path.join(destination, name))
+        except OSError:
+            skipped += 1
+    directories[:] = [name for name in directories if not os.path.islink(os.path.join(path, name))]
+print(json.dumps({'skipped': skipped}))
 `;
 
 const RUN = String.raw`
@@ -229,6 +272,10 @@ const UPLOAD = String.raw`
 import json, os, shutil, subprocess, sys
 spec = json.loads(sys.argv[1])
 env = json.load(open('${STATE}/env.json'))
+unresolved = [name for name in json.load(open('${STATE}/unresolved.json')) if name.startswith('AWS_')]
+if unresolved:
+    print(json.dumps({'kind': 'no_credentials', 'unresolved': unresolved}))
+    sys.exit(0)
 aws = shutil.which('aws', path=env.get('PATH')) or '/home/user/.local/bin/aws'
 def copy(source, key, recursive):
     subprocess.run([aws, 's3', 'cp', '--only-show-errors', *(['--recursive'] if recursive else []), source, spec['uri'] + key], env=env, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3600)
@@ -244,7 +291,7 @@ for path in spec['paths']:
         copy(full, key, False)
     else:
         missing.append(path)
-print(json.dumps({'missing': missing}))
+print(json.dumps({'kind': 'uploaded', 'missing': missing}))
 `;
 
 const PACK = String.raw`
@@ -268,8 +315,16 @@ const decodeExit = Schema.decodeUnknownSync(
     }),
   ),
 );
-const decodeMissing = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ missing: Schema.Array(Schema.String) })),
+const decodeUpload = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Struct({ kind: Schema.Literal("uploaded"), missing: Schema.Array(Schema.String) }),
+      Schema.Struct({
+        kind: Schema.Literal("no_credentials"),
+        unresolved: Schema.Array(Schema.String),
+      }),
+    ]),
+  ),
 );
 
 /** Runs a step's command, with a non-zero exit as the step's failure. */
@@ -296,6 +351,41 @@ async function deleteSnapshot(e2b: E2B, snapshotId: string) {
       await new Promise((resolve) => setTimeout(resolve, 2_000 * attempt));
     }
   }
+}
+
+const decodeDiskCapture = Schema.decodeUnknownSync(
+  Schema.Union([
+    Schema.Struct({ snapshotID: Schema.String }),
+    Schema.Struct({ error_code: Schema.String }),
+  ]),
+);
+
+/**
+ * Captures only a sandbox's disk, so copies boot fresh from it rather than resuming its memory.
+ * Copies need nothing from memory: everything they would inherit there is killed anyway. And a
+ * memory image saved while the box was pinned at full CPU can be impossible to place, which
+ * fails every copy. E2B offers this per team (`memory: false`, which its SDK does not expose yet);
+ * answers null where the team does not have it, and the caller takes a full snapshot.
+ */
+async function captureDisk(apiKey: string, sandboxId: string, name: string, signal: AbortSignal) {
+  const response = await fetch(
+    `${new ConnectionConfig({ apiKey }).apiUrl}/sandboxes/${encodeURIComponent(sandboxId)}/snapshots`,
+    {
+      method: "POST",
+      headers: { "X-API-Key": apiKey, "content-type": "application/json" },
+      body: encodeSpec({ name, memory: false }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]),
+    },
+  );
+  const body = decodeDiskCapture(await response.json());
+  if (response.ok && "snapshotID" in body) return body.snapshotID;
+  if (
+    response.status === 400 &&
+    "error_code" in body &&
+    body.error_code === "snapshot_filesystem_only_disabled"
+  )
+    return null;
+  throw new Error(`E2B refused a disk capture with status ${response.status}`);
 }
 
 /** Reads a file from a copy, giving up past `maxBytes` whatever the copy claims its size is. */
@@ -332,17 +422,20 @@ export const layerE2b = Layer.effect(
             ? Effect.fail(
                 new ForkMachineError({ step, cause: new Error("No cloud configuration") }),
               )
-            : Effect.succeed(new E2B({ apiKey: config.e2bApiKey })),
+            : Effect.succeed({
+                e2b: new E2B({ apiKey: config.e2bApiKey }),
+                apiKey: config.e2bApiKey,
+              }),
         ),
       );
     const attempt = <A>(
       step: ForkMachineError["step"],
-      body: (e2b: E2B, signal: AbortSignal) => Promise<A>,
+      body: (e2b: E2B, signal: AbortSignal, apiKey: string) => Promise<A>,
     ) =>
       client(step).pipe(
-        Effect.flatMap((e2b) =>
+        Effect.flatMap(({ e2b, apiKey }) =>
           Effect.tryPromise({
-            try: (signal) => body(e2b, signal),
+            try: (signal) => body(e2b, signal, apiKey),
             catch: (cause) => new ForkMachineError({ step, cause }),
           }),
         ),
@@ -357,13 +450,32 @@ export const layerE2b = Layer.effect(
       ),
 
       capture: (sandboxId, tag) =>
-        attempt("capture", async (e2b, signal) => {
-          const { network } = await e2b.Sandbox.getInfo(sandboxId, { signal });
-          const { snapshotId } = await e2b.Sandbox.createSnapshot(sandboxId, {
-            name: `${capturePrefix(tag.host)}${tag.batchId}`,
-            requestTimeoutMs: 300_000,
-            signal,
-          });
+        attempt("capture", async (e2b, signal, apiKey) => {
+          const { network, state } = await e2b.Sandbox.getInfo(sandboxId, { signal });
+          if (state !== "running") throw new Error("The chat's machine is not running");
+          const name = `${capturePrefix(tag.host)}${tag.batchId}`;
+          // Never extends the chat's own timeout: a running sandbox keeps the longer one.
+          const source = await e2b.Sandbox.connect(sandboxId, { timeoutMs: 1_000 });
+          // Without its /tmp a disk capture would lose the chat's working data, so a chat whose
+          // /tmp cannot be stashed gets a full capture, which keeps /tmp with the rest of memory.
+          const stashed = await exec(source, python(STASH, tag.batchId), 120_000).then(
+            () => true,
+            () => false,
+          );
+          let snapshotId: string;
+          try {
+            snapshotId =
+              (stashed ? await captureDisk(apiKey, sandboxId, name, signal) : null) ??
+              (
+                await e2b.Sandbox.createSnapshot(sandboxId, {
+                  name,
+                  requestTimeoutMs: 300_000,
+                  signal,
+                })
+              ).snapshotId;
+          } finally {
+            await exec(source, `rm -rf ${TMP_STASH}`, 120_000).catch(() => undefined);
+          }
           networks.set(snapshotId, {
             ...(network?.allowOut ? { allowOut: network.allowOut } : {}),
             ...(network?.denyOut ? { denyOut: network.denyOut } : {}),
@@ -420,7 +532,7 @@ export const layerE2b = Layer.effect(
         copyOf("upload", forkId).pipe(
           Effect.flatMap((sandbox) =>
             Effect.tryPromise({
-              try: async () => decodeMissing(await exec(sandbox, python(UPLOAD, input), 3_700_000)),
+              try: async () => decodeUpload(await exec(sandbox, python(UPLOAD, input), 3_700_000)),
               catch: (cause) => new ForkMachineError({ step: "upload", cause }),
             }),
           ),

@@ -197,12 +197,17 @@ const make = Effect.gen(function* () {
             const uploaded = yield* machines
               .upload(forkId, { cwd, paths: outputs, uri })
               .pipe(Effect.tapError(logStep), Effect.option);
-            if (Option.isSome(uploaded)) {
+            if (Option.isNone(uploaded)) problems.push("Uploading the logs and outputs failed.");
+            else if (uploaded.value.kind === "no_credentials")
+              problems.push(
+                `Nothing was uploaded: this chat's ${uploaded.value.unresolved.join(", ")} could not be read from its machine's secret store.`,
+              );
+            else {
               logsUri = `${uri}logs/`;
               if (outputs.length > 0) outputsUri = `${uri}outputs/`;
               if (uploaded.value.missing.length > 0)
                 problems.push(`Not found: ${uploaded.value.missing.join(", ")}.`);
-            } else problems.push("Uploading the logs and outputs failed.");
+            }
           } else if (outputs.length > 0 && input.copyBack !== true) {
             problems.push("This host has no outputs bucket; pass copyBack:true to keep outputs.");
           }

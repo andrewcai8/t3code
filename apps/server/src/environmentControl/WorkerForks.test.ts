@@ -90,8 +90,19 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
             stderrTail: "",
           };
         }),
+      // A job run in /sealed is on a machine whose AWS keys sit unreadable in its secret store.
       upload: (_forkId, input) =>
-        Effect.succeed({ missing: input.paths.filter((path) => path.startsWith("gone")) }),
+        Effect.succeed(
+          input.cwd === "/sealed"
+            ? {
+                kind: "no_credentials" as const,
+                unresolved: ["AWS_REGION", "AWS_SECRET_ACCESS_KEY"],
+              }
+            : {
+                kind: "uploaded" as const,
+                missing: input.paths.filter((path) => path.startsWith("gone")),
+              },
+        ),
       copyBack: (forkId, input) =>
         input.paths.some((path) => path.startsWith("big"))
           ? Effect.succeed({ kind: "too_large" as const, bytes: input.maxBytes + 1 })
@@ -253,6 +264,25 @@ it.effect("runs each job in its own copy and removes every copy once, however it
       expect(fake.live.size).toBe(0);
       expect(fake.captures).toEqual([`sandbox-1@${batch.batchId}`]);
       expect(fake.stored.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("says the chat's AWS keys could not be read instead of uploading without them", () =>
+  withForks({ outputsUri: "s3://traces/t3-agents" }, () =>
+    Effect.gen(function* () {
+      const batch = yield* run({ jobs: [{ command: "exit 0", cwd: "/sealed", outputs: ["out"] }] });
+      expect(batch.jobs[0]).toEqual({
+        index: 0,
+        state: "exited",
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 0,
+        stdoutTail: "ran in /sealed for at most 7200000ms",
+        stderrTail: "",
+        outputsProblem:
+          "Nothing was uploaded: this chat's AWS_REGION, AWS_SECRET_ACCESS_KEY could not be read from its machine's secret store.",
+      });
     }),
   ),
 );
