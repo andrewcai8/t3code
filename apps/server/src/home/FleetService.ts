@@ -213,6 +213,7 @@ const make = Effect.gen(function* () {
   const handlers: Handlers = {
     "forks.run": hostOnly,
     "forks.status": hostOnly,
+    "forks.cancel": hostOnly,
 
     capabilities: () =>
       Effect.gen(function* () {

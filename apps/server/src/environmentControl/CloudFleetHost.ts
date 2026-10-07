@@ -469,12 +469,13 @@ const make = Effect.gen(function* () {
           return new StartAfterAnswer(reserved.batch, reserved.start);
         }
         if (request.op === "forks.status") return yield* forks.status(source, request.input);
+        if (request.op === "forks.cancel") return yield* forks.cancel(source, request.input);
         return yield* failure(
           "invalid_request",
-          "Only t3_fork_run and t3_fork_status work in the forks environment.",
+          "Only t3_fork_run, t3_fork_status and t3_fork_cancel work in the forks environment.",
         );
       }
-      if (request.op === "forks.run" || request.op === "forks.status")
+      if (request.op.startsWith("forks."))
         return yield* failure("invalid_request", "Forks run only in the forks environment.");
       if (environmentId === NEW_CLOUD_CHAT_ENVIRONMENT_ID) {
         if (request.op !== "threads.launch")

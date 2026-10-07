@@ -74,6 +74,7 @@ export const CHANGES_STATE = {
   "requests.respond": true,
   "forks.run": true,
   "forks.status": false,
+  "forks.cancel": true,
 } satisfies Record<FleetOperation, boolean>;
 
 /**
