@@ -82,7 +82,7 @@ export interface RemotePreparationInput {
 export const RemotePreparationReady = Schema.Struct({
   ...ProvisionReadiness.fields,
   headRevision: ProvisionReadiness.fields.t3Revision,
-  /** Why this open could not fetch the followed branch. */
+  /** Why this open could not fetch the followed branch or rerun the setup of a box that served before. */
   refreshError: Schema.optional(Schema.NullOr(Schema.String)),
   artifactSha256: ProvisionReadiness.fields.preparationHash,
   runtimeVersion: Schema.String,
@@ -1037,17 +1037,25 @@ def prepare(spec):
                 raise RuntimeError('Invalid tool install command')
             tooling = (time.monotonic(), start(['sh', '-c', tools], home, env))
         prepare = spec.get('prepareCommands') or []
-        if prepare:
-            if not isinstance(prepare, list):
-                raise RuntimeError('Invalid prepare commands')
-            with step('prepareCommands'):
-                for index, command_line in enumerate(prepare):
-                    if not isinstance(command_line, str) or not command_line.strip() or '\0' in command_line:
-                        raise RuntimeError('Invalid prepare command')
-                    with step('prepareCommand.' + str(index)):
-                        run(['sh', '-lc', command_line], project, env, timeout=1800)
-        broker_issue = {'argv': broker_issue_argv(command, t3home, spec['brokerTtl']), 'cwd': str(project), 'env': env}
         server_path = root / 'server.json'
+        if prepare:
+            if not isinstance(prepare, list) or not all(isinstance(line, str) and line.strip() and '\0' not in line for line in prepare):
+                raise RuntimeError('Invalid prepare commands')
+            # A chat that finished preparing once has a checkout it works in.
+            # Its setup failing again on the chat's own branch is reported, not
+            # allowed to keep it off a new build. A root prepared before the
+            # journal recorded this shows it by a server having started.
+            prepared = journal.get('prepared') or server_path.exists()
+            with step('prepareCommands'):
+                try:
+                    for index, command_line in enumerate(prepare):
+                        with step('prepareCommand.' + str(index)):
+                            run(['sh', '-lc', command_line], project, env, timeout=1800)
+                except RuntimeError as error:
+                    if not prepared:
+                        raise
+                    refresh_error = '\n'.join(filter(None, [refresh_error, str(error)]))
+        broker_issue = {'argv': broker_issue_argv(command, t3home, spec['brokerTtl']), 'cwd': str(project), 'env': env}
         def server_process():
             try:
                 process = json.loads(server_path.read_text())
@@ -1130,6 +1138,9 @@ def prepare(spec):
         process = server_process()
         if process is None or process['sha256'] != runtime['sha256']:
             raise RuntimeError('Prepared server is not running the requested build')
+        if not journal.get('prepared'):
+            journal['prepared'] = True
+            atomic(journal_path, json.dumps(journal))
         guard_lock = os.open(root / 'disk-guard.lock', os.O_WRONLY | os.O_CREAT, 0o600)
         with open(root / 'disk-guard.log', 'a') as log:
             subprocess.Popen([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'watch', str(guard_lock)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, pass_fds=(guard_lock,))

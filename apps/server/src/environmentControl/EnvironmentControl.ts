@@ -1497,7 +1497,7 @@ export const layer = Layer.effect(
     };
     const logRefresh = (leaseId: string, refreshError: string | null | undefined) =>
       refreshError
-        ? Effect.logWarning("cloud checkout could not fetch its branch", {
+        ? Effect.logWarning("cloud checkout could not refresh its branch or rerun its setup", {
             leaseId,
             cause: refreshError,
           })
