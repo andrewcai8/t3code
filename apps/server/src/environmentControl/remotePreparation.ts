@@ -48,9 +48,11 @@ export interface RemotePreparationInput {
    */
   readonly prepareCommands?: ReadonlyArray<string> | undefined;
   /**
-   * The operator's shell environment, added to `prepareCommands`' environment
-   * only. Excluded from the intent hash like `toolInstall`, so a changed value
-   * reaches the next open instead of conflicting with the journal.
+   * The operator's shell environment when the request was frozen, added to
+   * `prepareCommands`' environment only. A frozen manifest keeps these values;
+   * current ones arrive through `setup`. Excluded from the intent hash like
+   * `toolInstall`. Any value of 8 or more characters, here or in `setup`, is
+   * replaced by `***` in the failures setup reports.
    */
   readonly prepareEnvironment?:
     | ReadonlyArray<{ readonly name: string; readonly value: string }>
@@ -94,6 +96,8 @@ export interface RemotePreparationInput {
     | {
         readonly commands: ReadonlyArray<string>;
         readonly environment: NonNullable<RemotePreparationInput["prepareEnvironment"]>;
+        /** `shellEnvironment` names whose source could not be read, reported instead of failing. */
+        readonly unreadable?: ReadonlyArray<string> | undefined;
       }
     | undefined;
 }
@@ -239,6 +243,9 @@ export async function sealWarmBase(
 
 /** Runs one preparation command, killing its whole process group on timeout. Needs `contextlib`, `os` and `subprocess`. */
 export const boundedRunScript = String.raw`
+class CommandTimeout(RuntimeError):
+    pass
+
 def run_bounded(args, cwd, env, timeout, pass_fds=()):
     # Its own process group, so a timeout reaches every descendant: one left
     # behind would hold the output pipes and the preparation lock.
@@ -257,7 +264,7 @@ def run_bounded(args, cwd, env, timeout, pass_fds=()):
         child.wait()
         child.stdout.close()
         child.stderr.close()
-        raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
+        raise CommandTimeout('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
     if child.returncode != 0:
         detail = (stderr or stdout or '').strip()
         raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
@@ -550,6 +557,7 @@ STARTUP = []
 # Children preparation started without waiting on; stopped if it fails first.
 BACKGROUND = []
 TOOL_INSTALL_SECONDS = 180
+PREPARE_COMMAND_SECONDS = 1800
 WARM_KEYS = ${JSON.stringify(warmJournalKeys)}
 os.umask(0o077)
 
@@ -622,7 +630,7 @@ def prepare(spec):
             try:
                 code = child.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                raise RuntimeError('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
+                raise CommandTimeout('Preparation command timed out: ' + ' '.join(str(part) for part in args[:8]))
             BACKGROUND.remove(child)
             if code != 0:
                 log.seek(0)
@@ -1068,6 +1076,16 @@ def prepare(spec):
                 if not isinstance(name, str) or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', name) or name in ('HOME', 'T3CODE_HOME') or not isinstance(value, str) or '\0' in value:
                     raise RuntimeError('Invalid prepare environment')
                 prepare_env[name] = value
+            unreadable = (setup or {}).get('unreadable') or []
+            if not isinstance(unreadable, list) or not all(isinstance(name, str) and re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', name) for name in unreadable):
+                raise RuntimeError('Invalid prepare environment')
+            setup_failures.extend((None, 'Setup ran without ' + name + ': its configured source could not be read') for name in unreadable)
+            # Longest first, so a value containing another is hidden whole.
+            secrets = sorted({variable.get('value') for variable in ((setup or {}).get('environment') or []) + (spec.get('prepareEnvironment') or []) if isinstance(variable.get('value'), str) and len(variable.get('value')) >= 8}, key=len, reverse=True)
+            def redact(text):
+                for secret in secrets:
+                    text = text.replace(secret, '***')
+                return text
             # A chat that finished preparing once has a checkout it works in.
             # Its setup failing again on the chat's own branch is reported, not
             # allowed to keep it off a new build, and the commands after it
@@ -1079,16 +1097,24 @@ def prepare(spec):
                 for index, command_line in enumerate(prepare):
                     try:
                         with step('prepareCommand.' + str(index)):
-                            run(['sh', '-lc', command_line], project, prepare_env, timeout=1800)
+                            run(['sh', '-lc', command_line], project, prepare_env, timeout=PREPARE_COMMAND_SECONDS)
                     except RuntimeError as error:
+                        failure = redact(str(error))
                         if not prepared:
-                            raise
-                        setup_failures.append((command_line, str(error)))
+                            raise RuntimeError(failure) from None
+                        # A timeout is usually an outage the later commands
+                        # would each wait out too, holding a reopen for hours.
+                        later = len(prepare) - index - 1
+                        if isinstance(error, CommandTimeout) and later:
+                            failure += '\nSkipped the ' + str(later) + ' setup command' + ('s' if later > 1 else '') + ' after it'
+                        setup_failures.append((command_line, failure))
+                        if isinstance(error, CommandTimeout):
+                            break
         # The chat's agent is pointed here at the start of each session.
         setup_failure_log = t3home / 'setup-failure.log'
         if setup_failures:
             refresh_error = '\n'.join(filter(None, [refresh_error] + [error for _, error in setup_failures]))
-            atomic(setup_failure_log, ''.join(error + '\n$ ' + command_line + '\n\n' for command_line, error in setup_failures))
+            atomic(setup_failure_log, ''.join(error + ('\n$ ' + command_line if command_line else '') + '\n\n' for command_line, error in setup_failures))
         else:
             setup_failure_log.unlink(missing_ok=True)
         broker_issue = {'argv': broker_issue_argv(command, t3home, spec['brokerTtl']), 'cwd': str(project), 'env': env}

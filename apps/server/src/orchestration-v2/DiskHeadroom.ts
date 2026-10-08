@@ -96,7 +96,10 @@ export const cloudMachineNoteFor = (input: {
     const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
     const setupFailure = log
       ? yield* Effect.tryPromise(() => NodeFSP.readFile(log, "utf8")).pipe(
-          Effect.map((text) => ({ log, summary: text.split("\n", 1)[0]! })),
+          Effect.map((text) => {
+            const line = text.split("\n", 1)[0]!;
+            return { log, summary: line.length > 200 ? `${line.slice(0, 199)}…` : line };
+          }),
           Effect.orElseSucceed(() => undefined),
         )
       : undefined;

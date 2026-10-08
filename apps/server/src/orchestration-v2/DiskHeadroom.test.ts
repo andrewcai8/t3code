@@ -108,6 +108,8 @@ effectIt.effect("tells a box's chat when the project setup failed and where its 
     expect(yield* noteOn(onBox, "darwin")).toBe(
       `${healthy} This machine's project setup failed when it was last prepared (Preparation command failed: missing MIND_BEDROCK_AUTH_URL), so dependencies or services it sets up may be missing. The failed commands and their output are in ${log}; fix the cause and rerun them.`,
     );
+    yield* Effect.promise(() => NodeFSP.writeFile(log, `${"x".repeat(300)}\nmore\n`));
+    expect(yield* noteOn(onBox, "darwin")).toContain(`(${"x".repeat(199)}…), so`);
     yield* Effect.promise(() => NodeFSP.rm(t3home, { recursive: true }));
   }),
 );

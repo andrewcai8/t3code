@@ -2020,3 +2020,40 @@ it("hands a chat frozen earlier the setup the manager is configured with now, wi
     await f.cleanup();
   }
 });
+
+it("hands a chat frozen earlier its current setup without a variable whose source is gone", async () => {
+  const f = await fixture();
+  try {
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [
+          { repository: "example/repo", e2b: { prepareCommands: ["node prepare.mjs"] } },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
+    await NodeFSP.writeFile(NodePath.join(f.root, "bedrock-url"), "https://auth.example\n");
+    const current = await withCurrentSetup(
+      {
+        ...config,
+        provisioning: {
+          ...config.provisioning,
+          shellEnvironment: [
+            { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(f.root, "bedrock-url") },
+            { name: "MIND_KEY", source: NodePath.join(f.root, "gone") },
+          ],
+        },
+      },
+      manifest,
+    );
+    expect(current.setup).toEqual({
+      commands: ["node prepare.mjs"],
+      environment: [{ name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" }],
+      unreadable: ["MIND_KEY"],
+    });
+  } finally {
+    await f.cleanup();
+  }
+});

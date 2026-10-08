@@ -111,6 +111,7 @@ export const ProvisionPreparationManifest = Schema.Struct({
     Schema.Struct({
       commands: Schema.Array(Schema.String),
       environment: Schema.Array(Schema.Struct({ name: Schema.String, value: Schema.String })),
+      unreadable: Schema.optional(Schema.Array(Schema.String)),
     }),
   ),
 });
@@ -227,8 +228,15 @@ function configuredPrepareCommands(
   );
 }
 
-/** The `shellEnvironment` variables `keep` accepts, read from their sources. */
-async function shellVariables(provisioning: ProvisioningSettings, keep: (name: string) => boolean) {
+/**
+ * The `shellEnvironment` variables `keep` accepts, read from their sources. A
+ * source that cannot be read throws, or goes to `onUnreadable` when given.
+ */
+async function shellVariables(
+  provisioning: ProvisioningSettings,
+  keep: (name: string) => boolean,
+  onUnreadable?: (name: string) => void,
+) {
   const variables: Array<{ name: string; value: string }> = [];
   for (const variable of provisioning.shellEnvironment ?? []) {
     if (
@@ -240,10 +248,14 @@ async function shellVariables(provisioning: ProvisioningSettings, keep: (name: s
         message: "A configured environment variable would change the isolated home.",
       });
     if (!keep(variable.name)) continue;
-    variables.push({
-      name: variable.name,
-      value: (await NodeFSP.readFile(variable.source, "utf8")).trim(),
-    });
+    const read = NodeFSP.readFile(variable.source, "utf8");
+    const value = onUnreadable
+      ? await read.catch(() => {
+          onUnreadable(variable.name);
+          return undefined;
+        })
+      : await read;
+    if (value !== undefined) variables.push({ name: variable.name, value: value.trim() });
   }
   return variables;
 }
@@ -261,15 +273,19 @@ export async function withCurrentSetup(
   const provisioning = config.provisioning;
   if (!provisioning) return manifest;
   const { repository, provider } = manifest.input;
+  // A source gone since the chat was made leaves its setup short one value, not its update stuck.
+  const unreadable: Array<string> = [];
   const variables = await shellVariables(
     provisioning,
     (name) => !isForeignCredentialVariable([], name),
+    (name) => void unreadable.push(name),
   );
   return {
     ...manifest,
     setup: {
       commands: configuredPrepareCommands(provisioning, repository, provider).map(commandLine),
       environment: variables,
+      ...(unreadable.length ? { unreadable } : {}),
     },
   };
 }
