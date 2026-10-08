@@ -228,6 +228,20 @@ function configuredPrepareCommands(
   );
 }
 
+/** The files a checkout of `repository` receives: its entry's own list, else the global one. */
+function configuredWorkspaceFiles(
+  provisioning: ProvisioningSettings,
+  repository: string | undefined,
+) {
+  const entry = repository
+    ? provisioning.repositories?.find(
+        (candidate) =>
+          canonicalRepository(candidate.repository) === canonicalRepository(repository),
+      )
+    : undefined;
+  return entry?.workspaceFiles ?? provisioning.workspaceFiles ?? [];
+}
+
 /**
  * The `shellEnvironment` variables `keep` accepts, read from their sources. A
  * source that cannot be read throws, or goes to `onUnreadable` when given.
@@ -684,12 +698,10 @@ export interface ProvisionPreparationResolver {
   readonly revision: (repository: string, branch?: string) => Promise<string>;
 }
 
-/** Digests of the files every checkout receives, which a prepared tree may have consumed. */
-async function workspaceFileDigests(
-  provisioning: NonNullable<EnvironmentControlConfig["provisioning"]>,
-) {
+/** Digests of the files a repository's checkouts receive, which a prepared tree may have consumed. */
+async function workspaceFileDigests(provisioning: ProvisioningSettings, repository: string) {
   const digests = [];
-  for (const configured of provisioning.workspaceFiles ?? [])
+  for (const configured of configuredWorkspaceFiles(provisioning, repository))
     digests.push({
       destination: configured.destination,
       sha256: provisionDigest(await NodeFSP.readFile(configured.source)),
@@ -728,7 +740,7 @@ export async function warmBaseKey(
       root: E2B_ROOT,
       prepareCommands,
       egressAllow: provisioning.egressAllow ?? [],
-      workspaceFiles: await workspaceFileDigests(provisioning),
+      workspaceFiles: await workspaceFileDigests(provisioning, repository),
     }),
   );
 }
@@ -780,7 +792,7 @@ export async function spareKey(
       runtime: runtime.sha256,
       prepareCommands,
       artifacts: setup.artifacts ?? provisioning.namespace.artifacts ?? [],
-      workspaceFiles: await workspaceFileDigests(provisioning),
+      workspaceFiles: await workspaceFileDigests(provisioning, repository),
     }),
   );
 }
@@ -985,8 +997,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const localArtifact = await storeArtifact(artifact);
       let files: Array<typeof File.Type> = [...submitted];
       for (const scope of ["home", "workspace"] as const) {
-        for (const configured of provisioning[scope === "home" ? "homeFiles" : "workspaceFiles"] ??
-          []) {
+        for (const configured of scope === "home"
+          ? (provisioning.homeFiles ?? [])
+          : configuredWorkspaceFiles(provisioning, input.repository)) {
           const read = () => NodeFSP.readFile(configured.source);
           files.push(
             file(
