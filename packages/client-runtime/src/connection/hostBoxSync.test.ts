@@ -5,14 +5,21 @@ import {
   ProjectId,
   type ProvisionedChat,
   ThreadId,
+  type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./catalog.ts";
-import { chatShellSnapshot, planHostBoxSync, withHostChat } from "./hostBoxSync.ts";
+import {
+  chatShellSnapshot,
+  planHostBoxSync,
+  withHostChat,
+  withPullRequestsLoaded,
+} from "./hostBoxSync.ts";
 import { BearerConnectionTarget } from "./model.ts";
 import { v2ShellSnapshot, v2ThreadShell } from "../state/orchestrationV2TestFixtures.ts";
 
@@ -297,4 +304,40 @@ describe("withHostChat", () => {
   it("is the chat alone when nothing is cached", () => {
     expect(withHostChat(Option.none(), chat(3))).toEqual(chatShellSnapshot(chat(3)));
   });
+});
+
+describe("withPullRequestsLoaded", () => {
+  const link: ThreadPullRequestLink = {
+    host: "github.com",
+    repository: "pingdotgg/t3code",
+    number: 3,
+    url: "https://github.com/pingdotgg/t3code/pull/3",
+    source: "agent",
+    linkedAt: "2026-06-20T00:00:00.000Z",
+    snapshot: null,
+    stack: null,
+  };
+  const otherThread = { ...THREAD, id: ThreadId.make("thread-other"), title: "Other" };
+  const cached = { ...v2ShellSnapshot, snapshotSequence: 5, threads: [THREAD, otherThread] };
+
+  it.effect("fills a cached shell's deferred links so saving it back keeps them", () =>
+    Effect.gen(function* () {
+      const loaded = yield* withPullRequestsLoaded(
+        Option.some({
+          ...cached,
+          loadPullRequests: Effect.succeed(new Map([[THREAD.id, [link]]])),
+        }),
+      );
+      expect(loaded).toEqual(
+        Option.some({ ...cached, threads: [{ ...THREAD, pullRequests: [link] }, otherThread] }),
+      );
+    }),
+  );
+
+  it.effect("passes a shell without deferred links through", () =>
+    Effect.gen(function* () {
+      expect(yield* withPullRequestsLoaded(Option.some(cached))).toEqual(Option.some(cached));
+      expect(yield* withPullRequestsLoaded(Option.none())).toEqual(Option.none());
+    }),
+  );
 });

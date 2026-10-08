@@ -186,7 +186,6 @@ const setup = Effect.gen(function* () {
                     threads: [
                       {
                         threadId: launched,
-                        link: `[Profile the build](t3-thread://v1/box-3/${launched})`,
                         projectId: "project-app",
                         title: "Profile the build",
                         createdBy: "user",
@@ -421,7 +420,6 @@ it.effect("lists a sleeping chat from its card without waking it", () =>
               title: "Write docs",
               status: "idle",
               projectId: "project-app",
-              link: "[Write docs](t3-thread://v1/box-2/chat-2)",
             },
           ],
         },
@@ -505,7 +503,6 @@ it.effect("starts a new cloud chat with one provision like this chat's machine",
         requestId: "request-1",
         result: {
           threadId,
-          link: `[Profile the build](t3-thread://v1/box-3/${threadId})`,
           projectId: "project-app",
           modelSelection,
           runId: "run-1",

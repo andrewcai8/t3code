@@ -21,6 +21,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { BoxUsageStore } from "./boxUsage.ts";
+import * as CursorUsageReader from "./cursorUsageReader.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -63,11 +64,12 @@ const readSummary = (
 ) =>
   Effect.gen(function* () {
     const service = yield* UsageService.make;
-    return yield* service.readSummary(WINDOW);
+    return yield* service.readSummary({ ...WINDOW, awaitRefresh: true });
   }).pipe(
     Effect.provide(
       ServerConfig.layerTest(process.cwd(), { prefix }).pipe(
         Layer.provideMerge(NodeServices.layer),
+        Layer.provideMerge(CursorUsageReader.layer),
         Layer.provideMerge(
           Layer.succeed(
             BoxUsageStore,

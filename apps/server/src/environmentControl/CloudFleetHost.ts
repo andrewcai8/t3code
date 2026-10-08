@@ -400,7 +400,6 @@ const make = Effect.gen(function* () {
       if (thread === undefined) return yield* stillStarting;
       return {
         threadId: thread.threadId,
-        link: thread.link,
         projectId: thread.projectId,
         modelSelection,
         runId: thread.latestRunId,
@@ -499,7 +498,6 @@ const make = Effect.gen(function* () {
             : [];
         return listThreadPage(shells, request.input, {
           actor,
-          environmentId: target.environmentId,
           nowMs: yield* Clock.currentTimeMillis,
         });
       }

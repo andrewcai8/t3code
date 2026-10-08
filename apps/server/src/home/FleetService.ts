@@ -10,7 +10,6 @@
  */
 import {
   CommandId,
-  type EnvironmentId,
   type FleetActor,
   type FleetInput,
   type FleetInvokeInput,
@@ -26,7 +25,6 @@ import {
   OrchestratorMcpFailure,
   ThreadId,
 } from "@t3tools/contracts";
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -51,7 +49,6 @@ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
-import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -113,11 +110,10 @@ export function listThreadPage(
   input: FleetInput<"threads.list">,
   context: {
     readonly actor: FleetActor;
-    readonly environmentId: EnvironmentId;
     readonly nowMs: number;
   },
 ): FleetResult<"threads.list"> {
-  const { actor, environmentId, nowMs } = context;
+  const { actor, nowMs } = context;
   const statuses = input.statuses === undefined ? null : new Set(input.statuses);
   const titleContains = input.titleContains?.toLocaleLowerCase();
   const filtered = shells.filter(
@@ -136,7 +132,7 @@ export function listThreadPage(
     currentThreadId: filtered.some((thread) => thread.id === actor.threadId)
       ? actor.threadId
       : null,
-    threads: page.map((shell) => listItemFromShell(shell, { environmentId, nowMs })),
+    threads: page.map((shell) => listItemFromShell(shell, nowMs)),
     nextCursor: next < filtered.length ? next : null,
     total: filtered.length,
   };
@@ -157,10 +153,7 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const settings = yield* ServerSettings.ServerSettingsService;
-  const environment = yield* ServerEnvironment.ServerEnvironment;
   const crypto = yield* Crypto.Crypto;
-  // Links in results point at this environment, wherever the call came from.
-  const environmentId = (yield* environment.getDescriptor).environmentId;
 
   // A retried request with the same clientRequestId maps to the same command
   // for the same target thread; another target gets its own command.
@@ -256,7 +249,7 @@ const make = Effect.gen(function* () {
                 .listProjectThreads({ projectId: input.projectId, includeSubagents })
                 .pipe(Effect.mapError(threadManagementFailure));
         const nowMs = yield* Clock.currentTimeMillis;
-        return listThreadPage(shells, input, { actor, environmentId, nowMs });
+        return listThreadPage(shells, input, { actor, nowMs });
       }),
 
     "threads.read": (input) =>
@@ -270,7 +263,7 @@ const make = Effect.gen(function* () {
         const target = yield* threads
           .getThreadRecords(input.threadId, ["runs", "runtimeRequests", "contextTransfers"])
           .pipe(Effect.mapError(threadManagementFailure));
-        return (yield* readThreadPage(threads, target, shell, input, environmentId)).result;
+        return (yield* readThreadPage(threads, target, shell, input)).result;
       }),
 
     "threads.launch": (input, actor) =>
@@ -343,7 +336,6 @@ const make = Effect.gen(function* () {
         );
         return {
           threadId: thread.id,
-          link: formatThreadLink({ environmentId, threadId: thread.id, title: thread.title }),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
