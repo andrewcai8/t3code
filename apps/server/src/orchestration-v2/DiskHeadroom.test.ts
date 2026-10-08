@@ -21,45 +21,57 @@ it("waits until a user's own machine is under 2 GB", () => {
 });
 
 const E2B_NOTE =
-  "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk). For parallel or heavy jobs (eval replays, test shards, separate builds) use t3_fork_run: each job runs in a throwaway copy of this machine and its outputs go to S3 under outputsUri. Don't create extra worktrees and installs here. Keep large results in S3, not on this disk.";
+  "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk). For parallel or heavy jobs (eval replays, test shards, separate builds) use t3_fork_run: each job runs in a throwaway copy of this machine and its outputs go to S3 under outputsUri. Don't create extra worktrees and installs here. Keep large results in S3, not on this disk. Remove worktrees, installs and /tmp data you created once you no longer need them.";
 
 it("points an E2B box's chat at forks and S3, and a Mac box's chat only at S3", () => {
   const machine = { cpus: 8, memoryBytes: 7.8 * 1024 ** 3, diskBytes: 49.6 * 1024 ** 3 };
   expect(cloudMachineNote({ ...machine, forks: true })).toBe(E2B_NOTE);
   expect(cloudMachineNote({ ...machine, forks: false })).toBe(
-    "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk). Keep large results in S3, not on this disk.",
+    "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk). Keep large results in S3, not on this disk. Remove worktrees, installs and /tmp data you created once you no longer need them.",
   );
 });
 
 const noteOn = (
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
-  thread: { readonly subagent: boolean; readonly nativeThreadHasTurns: boolean },
+  turn: {
+    readonly subagent?: boolean;
+    readonly session?: object;
+    readonly nativeThreadId?: string;
+  } = {},
   mcpTools = true,
 ) =>
-  cloudMachineNoteFor({ cwd: NodeOS.tmpdir(), mcpTools, ...thread }).pipe(
+  cloudMachineNoteFor({
+    cwd: NodeOS.tmpdir(),
+    mcpTools,
+    subagent: turn.subagent ?? false,
+    session: turn.session ?? {},
+    nativeThreadId: turn.nativeThreadId ?? "native-1",
+  }).pipe(
     Effect.provideService(HostProcessEnvironment, environment),
     Effect.provideService(HostProcessPlatform, platform),
   );
 const box = { T3CODE_USAGE_HOST_ID: "request-1" };
-const firstTurn = { subagent: false, nativeThreadHasTurns: false };
 const forkSentence = "use t3_fork_run: each job runs in a throwaway copy of this machine";
 
-effectIt.effect("tells a box's top-level chat once per native conversation", () =>
+effectIt.effect("tells a box's top-level chat on the first turn of each provider session", () =>
   Effect.gen(function* () {
-    const first = yield* noteOn(box, "linux", firstTurn);
+    const session = {};
+    const first = yield* noteOn(box, "linux", { session });
     expect(first).toMatch(/^Note: you are on a cloud machine used only by this chat \(\d+ CPUs, /);
     expect(first).toContain(forkSentence);
-    expect(yield* noteOn(box, "linux", { subagent: false, nativeThreadHasTurns: true })).toBe("");
+    expect(yield* noteOn(box, "linux", { session })).toBe("");
+    expect(yield* noteOn(box, "linux", { session, nativeThreadId: "native-2" })).toBe(first);
+    expect(yield* noteOn(box, "linux", { session: {} })).toBe(first);
   }),
 );
 
 effectIt.effect("leaves a user's own machine and a box's subagents alone", () =>
   Effect.gen(function* () {
-    expect(yield* noteOn(box, "linux", firstTurn)).toContain(forkSentence);
-    expect(yield* noteOn({}, "linux", firstTurn)).toBe("");
-    expect(yield* noteOn({ T3CODE_USAGE_HOST_ID: " " }, "linux", firstTurn)).toBe("");
-    expect(yield* noteOn(box, "linux", { subagent: true, nativeThreadHasTurns: false })).toBe("");
+    expect(yield* noteOn(box, "linux")).toContain(forkSentence);
+    expect(yield* noteOn({}, "linux")).toBe("");
+    expect(yield* noteOn({ T3CODE_USAGE_HOST_ID: " " }, "linux")).toBe("");
+    expect(yield* noteOn(box, "linux", { subagent: true })).toBe("");
   }),
 );
 
@@ -67,10 +79,12 @@ effectIt.effect(
   "gives a Mac box's chat, or a provider without MCP tools, the note without forks",
   () =>
     Effect.gen(function* () {
-      const mac = yield* noteOn(box, "darwin", firstTurn);
-      expect(mac).toMatch(/\. Keep large results in S3, not on this disk\.$/);
+      const mac = yield* noteOn(box, "darwin");
+      expect(mac).toMatch(
+        /\. Keep large results in S3, not on this disk\. Remove worktrees, installs and \/tmp data you created once you no longer need them\.$/,
+      );
       expect(mac).not.toContain("t3_fork_run");
-      expect(yield* noteOn(box, "linux", firstTurn, false)).toBe(mac);
-      expect(yield* noteOn(box, "linux", firstTurn)).toContain(forkSentence);
+      expect(yield* noteOn(box, "linux", {}, false)).toBe(mac);
+      expect(yield* noteOn(box, "linux")).toContain(forkSentence);
     }),
 );

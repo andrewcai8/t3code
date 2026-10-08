@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   e2bPythonResult,
+  guardMemoryCommand,
   protectEnvdCommand,
   uploadFile,
   warmSealHomePaths,
@@ -157,6 +158,69 @@ describe("protectEnvdCommand", () => {
         "[Slice]\nMemoryMin=128M\nMemoryLow=256M\n",
       );
       expect(await NodeFSP.readFile(reloads, "utf8")).toBe("daemon-reload\ndaemon-reload\n");
+    } finally {
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("guardMemoryCommand", () => {
+  it("installs and starts earlyoom once, and leaves a running one with these settings alone", async () => {
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "earlyoom-guard-"));
+    const bin = NodePath.join(root, "bin");
+    const calls = NodePath.join(root, "calls.log");
+    const active = NodePath.join(root, "active");
+    const script = (body: string) => `#!/bin/sh\n${body}\n`;
+    await NodeFSP.mkdir(bin);
+    const tools: Record<string, string> = {
+      sudo: script('[ "$1" = -n ] && shift\nexec "$@"'),
+      // Runs the unit's command in place of systemd's transient service.
+      "systemd-run": script(
+        `printf '%s\\n' "systemd-run $*" >> '${calls}'\nwhile [ "$1" != sh ]; do shift; done\nexec "$@"`,
+      ),
+      "apt-get": script(
+        `echo "apt-get $*" >> '${calls}'\nprintf '#!/bin/sh\\n' > '${bin}/earlyoom'\nchmod +x '${bin}/earlyoom'`,
+      ),
+      systemctl: script(
+        `echo "systemctl $*" >> '${calls}'\ncase "$1" in\n  restart) touch '${active}' ;;\n  is-active) [ -f '${active}' ] ;;\nesac`,
+      ),
+    };
+    for (const [name, body] of Object.entries(tools))
+      await NodeFSP.writeFile(NodePath.join(bin, name), body, { mode: 0o755 });
+    const defaults = NodePath.join(root, "earlyoom");
+    const run = () =>
+      NodeChildProcess.execFileSync("sh", ["-c", guardMemoryCommand(defaults)], {
+        env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      });
+    const callLog = async () =>
+      (await NodeFSP.readFile(calls, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => line.split(" ").slice(0, 2).join(" "));
+    try {
+      run();
+      expect(await callLog()).toEqual([
+        "systemd-run --quiet",
+        "apt-get install",
+        "systemctl enable",
+        "systemctl restart",
+      ]);
+      expect(await NodeFSP.readFile(defaults, "utf8")).toBe(
+        'EARLYOOM_ARGS="-m 8 -s 100 -r 0 --avoid (^|/)(envd|systemd|sshd|claude|codex|node)$ --prefer (^|/)(bun|python3|vitest|tsc|esbuild)$"\n',
+      );
+
+      await NodeFSP.writeFile(calls, "");
+      run();
+      expect(await callLog()).toEqual(["systemctl is-active"]);
+
+      await NodeFSP.writeFile(defaults, 'EARLYOOM_ARGS="-m 2"\n');
+      await NodeFSP.writeFile(calls, "");
+      run();
+      expect(await callLog()).toEqual([
+        "systemd-run --quiet",
+        "systemctl enable",
+        "systemctl restart",
+      ]);
     } finally {
       await NodeFSP.rm(root, { recursive: true, force: true });
     }

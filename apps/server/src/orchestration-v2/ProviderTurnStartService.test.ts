@@ -962,7 +962,7 @@ effectIt.effect("does not mistake a failed state read for a superseded run", () 
 );
 
 effectIt.effect(
-  "tells a cloud box's agent about forks on its native conversation's first turn only",
+  "tells a cloud box's agent about forks when a new provider session starts, even mid-conversation",
   () =>
     Effect.gen(function* () {
       const onBox = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -987,8 +987,9 @@ effectIt.effect(
         /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* use t3_fork_run: .*\n\nUser message:\nRun the evals$/s,
       );
       expect(later.deliveredTexts).toHaveLength(1);
-      expect(later.deliveredTexts[0]).not.toContain("cloud machine");
-      expect(later.deliveredTexts[0]).toMatch(/(^|\n)Run the evals$/);
+      expect(later.deliveredTexts[0]).toMatch(
+        /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* use t3_fork_run: .*\n\nUser message:\nRun the evals$/s,
+      );
     }),
 );
 
