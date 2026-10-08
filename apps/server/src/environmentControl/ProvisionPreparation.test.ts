@@ -1980,6 +1980,89 @@ it("keeps a spare only for a repository that opts in, keyed on the machine and w
   }
 });
 
+/** A repository entry that names its own workspace file, beside a global one it overrides. */
+async function scopedFilesConfig(f: Awaited<ReturnType<typeof fixture>>) {
+  const globalSource = NodePath.join(f.root, "global.env");
+  const repositorySource = NodePath.join(f.root, "repository.env");
+  await NodeFSP.writeFile(globalSource, "GLOBAL=1");
+  await NodeFSP.writeFile(repositorySource, "SECRET=1");
+  const config = {
+    ...f.config,
+    namespaceToken,
+    provisioning: {
+      ...f.config.provisioning!,
+      namespace: { size: "m", prepareCommands: ["make setup"] },
+      workspaceFiles: [{ source: globalSource, destination: "global.env" }],
+      repositories: [
+        {
+          repository: "example/repo",
+          workspaceFiles: [{ source: repositorySource, destination: "api/.env" }],
+          e2b: { prepareCommands: ["npm ci"], warm: true },
+          namespace: { spare: true },
+        },
+      ],
+    },
+  };
+  return { config, globalSource, repositorySource };
+}
+
+it("installs a repository entry's workspace files in place of the global ones, in chats and base builds alike", async () => {
+  const f = await fixture();
+  try {
+    const { config } = await scopedFilesConfig(f);
+    const workspaceFiles = async (repository: string) =>
+      (
+        await makeProvisionPreparationStore(NodePath.join(f.root, repository)).freeze(
+          { ...input, repository },
+          config,
+          f.resolver,
+          [f.profile],
+        )
+      ).preparation.files.flatMap((item) =>
+        item.scope === "workspace"
+          ? [[item.destination, Buffer.from(item.contentsBase64, "base64").toString()]]
+          : [],
+      );
+    expect([await workspaceFiles("example/repo"), await workspaceFiles("example/other")]).toEqual([
+      [
+        [".repair/evidence.txt", "evidence"],
+        ["api/.env", "SECRET=1"],
+      ],
+      [
+        [".repair/evidence.txt", "evidence"],
+        ["global.env", "GLOBAL=1"],
+      ],
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("keys a repository's warm base and spare on its entry's workspace files, not the global ones it overrides", async () => {
+  const f = await fixture();
+  try {
+    const { config, globalSource, repositorySource } = await scopedFilesConfig(f);
+    const keys = async () => [
+      await warmBaseKey(config, "example/repo", f.resolver),
+      await spareKey(config, "example/repo"),
+    ];
+    const base = await keys();
+    await NodeFSP.writeFile(globalSource, "GLOBAL=2");
+    const globalChanged = await keys();
+    await NodeFSP.writeFile(repositorySource, "SECRET=2");
+    const repositoryChanged = await keys();
+    expect(base.every((key) => key !== null)).toBe(true);
+    expect(
+      [globalChanged, repositoryChanged].map((next) => next.map((key, i) => key === base[i])),
+    ).toEqual([
+      [true, true],
+      [false, false],
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("hands a chat frozen earlier the setup the manager is configured with now, without agent logins", async () => {
   const f = await fixture();
   try {
