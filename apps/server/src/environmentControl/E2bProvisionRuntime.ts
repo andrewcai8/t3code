@@ -148,10 +148,37 @@ MemoryLow=256M'
 [ "$(cat ${file} 2>/dev/null)" = "$want" ] || { sudo -n mkdir -p ${shellQuote(directory)} && printf '%s\\n' "$want" | sudo -n tee ${file} > /dev/null && sudo -n systemctl daemon-reload; }`;
 };
 
-/** Why envd could not be protected, or null once it is. Never throws. */
+/**
+ * earlyoom's settings. When free memory falls to 8% it stops the process with the highest score,
+ * preferring test runners and builds, and avoiding envd and the agents. Measured on this template
+ * with 32 bun workers filling memory over a 1.5 GB file corpus: without it envd stopped answering
+ * for half a minute; with it envd answered within a second, earlyoom stopped only bun workers, and
+ * the T3 server and claude kept running. The T3 server runs as `node`, so it is avoided too; a
+ * runaway node test worker is still stopped, as the biggest process left.
+ */
+const EARLYOOM_ARGS =
+  "-m 8 -s 100 -r 0 --avoid (^|/)(envd|systemd|sshd|claude|codex|node)$ --prefer (^|/)(bun|python3|vitest|tsc|esbuild)$";
+
+/**
+ * Keeps one runaway job from freezing the whole box: the kernel only kills a process once memory
+ * is gone, and a box thrashing until then stops answering, envd included. Nothing runs when
+ * earlyoom already runs with these settings; otherwise its install and setup start as a
+ * transient unit, so a slow apt never holds up a wake, and the next wake tries again if it failed.
+ */
+export const guardMemoryCommand = (defaults = "/etc/default/earlyoom") => {
+  const file = shellQuote(defaults);
+  const want = shellQuote(`EARLYOOM_ARGS="${EARLYOOM_ARGS}"`);
+  const setup = `command -v earlyoom >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q earlyoom || { apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q earlyoom; }; printf '%s\\n' ${want} > ${file} && systemctl enable earlyoom && systemctl restart earlyoom`;
+  return `{ [ "$(cat ${file} 2>/dev/null)" = ${want} ] && systemctl is-active --quiet earlyoom; } || sudo -n systemd-run --quiet --collect --unit=t3-earlyoom-setup sh -c ${shellQuote(setup)}`;
+};
+
+/** Why envd or the box's memory could not be protected, or null once both are. Never throws. */
 const protectEnvd = (sandbox: Sandbox) =>
   e2bPythonResult(
-    sandbox.commands.run(protectEnvdCommand(), { timeoutMs: 30_000, requestTimeoutMs: 30_000 }),
+    sandbox.commands.run(
+      `{ ${protectEnvdCommand()}\n}; envd=$?; ${guardMemoryCommand()}; memory=$?; exit $((envd | memory))`,
+      { timeoutMs: 30_000, requestTimeoutMs: 30_000 },
+    ),
   )
     .then(({ exitCode, stderr }) => (exitCode === 0 ? null : stderr.trim() || `exit ${exitCode}`))
     .catch((error: unknown) => String(error));
