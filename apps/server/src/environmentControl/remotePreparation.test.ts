@@ -310,6 +310,32 @@ describe("remote preparation subprocess", () => {
     );
   });
 
+  it("runs the manager's current setup on a root frozen with other commands, with its variables", async () => {
+    const input = {
+      ...(await fixture()),
+      prepareCommands: ["echo frozen > setup.txt"],
+      prepareEnvironment: [{ name: "MIND_KEY", value: "frozen" }],
+    };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const again = await prepareRemoteHost(localPort, {
+      ...input,
+      setup: {
+        commands: ['printf "%s %s" "$MIND_KEY" "$HOME" > setup.txt'],
+        environment: [{ name: "MIND_KEY", value: "from-the-manager" }],
+      },
+    });
+    expect([
+      again.environmentId,
+      again.refreshError,
+      await NodeFSP.readFile(NodePath.join(first.projectDir, "setup.txt"), "utf8"),
+    ]).toEqual([
+      first.environmentId,
+      null,
+      `from-the-manager ${NodePath.join(input.root, "home")}`,
+    ]);
+  });
+
   it("refuses to call a box ready when its setup failed, on every retry", async () => {
     const input = { ...(await fixture()), prepareCommands: ["exit 3", "touch ../ran-after"] };
     await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);

@@ -26,6 +26,7 @@ import {
   provisionDigest,
   provisionProviders,
   warmBaseKey,
+  withCurrentSetup,
 } from "./ProvisionPreparation.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
@@ -1974,6 +1975,47 @@ it("keeps a spare only for a repository that opts in, keyed on the machine and w
         "example/repo",
       ),
     ]).toEqual([null, null, null]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("hands a chat frozen earlier the setup the manager is configured with now, without agent logins", async () => {
+  const f = await fixture();
+  try {
+    const configured = (
+      prepareCommands: Array<string>,
+      shellEnvironment: Array<{ name: string; source: string }> = [],
+    ) => ({
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [{ repository: "example/repo", e2b: { prepareCommands } }],
+        shellEnvironment,
+      },
+    });
+    const manifest = await f.store.freeze(input, configured(["node prepare.mjs"]), f.resolver, [
+      f.profile,
+    ]);
+    await NodeFSP.writeFile(NodePath.join(f.root, "bedrock-url"), "https://auth.example\n");
+    await NodeFSP.writeFile(NodePath.join(f.root, "anthropic-key"), "anthropic-api-key\n");
+    const current = await withCurrentSetup(
+      configured(
+        ["node --env-file-if-exists=.env prepare.mjs"],
+        [
+          { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(f.root, "bedrock-url") },
+          { name: "ANTHROPIC_API_KEY", source: NodePath.join(f.root, "anthropic-key") },
+        ],
+      ),
+      manifest,
+    );
+    expect([current.preparation.prepareCommands, current.setup]).toEqual([
+      ["node prepare.mjs"],
+      {
+        commands: ["node --env-file-if-exists=.env prepare.mjs"],
+        environment: [{ name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" }],
+      },
+    ]);
   } finally {
     await f.cleanup();
   }
