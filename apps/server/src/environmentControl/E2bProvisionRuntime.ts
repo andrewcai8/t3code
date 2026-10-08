@@ -248,6 +248,7 @@ function guestInput(
       preparationHash: operation.request.preparationHash,
       ...extra,
       ...(follow ? { follow } : {}),
+      ...(manifest.setup ? { setup: manifest.setup } : {}),
     },
     operation.request.agentDriver,
   );

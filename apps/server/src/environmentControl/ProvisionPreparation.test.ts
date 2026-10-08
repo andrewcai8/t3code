@@ -26,6 +26,7 @@ import {
   provisionDigest,
   provisionProviders,
   warmBaseKey,
+  withCurrentSetup,
 } from "./ProvisionPreparation.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import type { EnvironmentControlConfig } from "./config.ts";
@@ -1002,6 +1003,32 @@ it("hands a cloud box the setup its repository needs", async () => {
   }
 });
 
+it("hands the repository's setup the operator's shell environment, minus other drivers' keys", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.writeFile(NodePath.join(f.root, "auth-url"), "https://auth.example\n");
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [{ repository: "example/repo", e2b: { prepareCommands: ["make setup"] } }],
+        shellEnvironment: [
+          { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(f.root, "auth-url") },
+          { name: "ANTHROPIC_API_KEY", source: NodePath.join(f.root, "missing") },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(inputFor("codex", "codex"), config, f.resolver, [
+      f.profile,
+    ]);
+    expect(manifest.preparation.prepareEnvironment).toEqual([
+      { name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" },
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("refuses a skill bundle that links out of itself", async () => {
   const f = await fixture();
   try {
@@ -1948,6 +1975,84 @@ it("keeps a spare only for a repository that opts in, keyed on the machine and w
         "example/repo",
       ),
     ]).toEqual([null, null, null]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("hands a chat frozen earlier the setup the manager is configured with now, without agent logins", async () => {
+  const f = await fixture();
+  try {
+    const configured = (
+      prepareCommands: Array<string>,
+      shellEnvironment: Array<{ name: string; source: string }> = [],
+    ) => ({
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [{ repository: "example/repo", e2b: { prepareCommands } }],
+        shellEnvironment,
+      },
+    });
+    const manifest = await f.store.freeze(input, configured(["node prepare.mjs"]), f.resolver, [
+      f.profile,
+    ]);
+    await NodeFSP.writeFile(NodePath.join(f.root, "bedrock-url"), "https://auth.example\n");
+    await NodeFSP.writeFile(NodePath.join(f.root, "anthropic-key"), "anthropic-api-key\n");
+    const current = await withCurrentSetup(
+      configured(
+        ["node --env-file-if-exists=.env prepare.mjs"],
+        [
+          { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(f.root, "bedrock-url") },
+          { name: "ANTHROPIC_API_KEY", source: NodePath.join(f.root, "anthropic-key") },
+        ],
+      ),
+      manifest,
+    );
+    expect([current.preparation.prepareCommands, current.setup]).toEqual([
+      ["node prepare.mjs"],
+      {
+        commands: ["node --env-file-if-exists=.env prepare.mjs"],
+        environment: [{ name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" }],
+      },
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("hands a chat frozen earlier its current setup without a variable whose source is gone", async () => {
+  const f = await fixture();
+  try {
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [
+          { repository: "example/repo", e2b: { prepareCommands: ["node prepare.mjs"] } },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(input, config, f.resolver, [f.profile]);
+    await NodeFSP.writeFile(NodePath.join(f.root, "bedrock-url"), "https://auth.example\n");
+    const current = await withCurrentSetup(
+      {
+        ...config,
+        provisioning: {
+          ...config.provisioning,
+          shellEnvironment: [
+            { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(f.root, "bedrock-url") },
+            { name: "MIND_KEY", source: NodePath.join(f.root, "gone") },
+          ],
+        },
+      },
+      manifest,
+    );
+    expect(current.setup).toEqual({
+      commands: ["node prepare.mjs"],
+      environment: [{ name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" }],
+      unreadable: ["MIND_KEY"],
+    });
   } finally {
     await f.cleanup();
   }

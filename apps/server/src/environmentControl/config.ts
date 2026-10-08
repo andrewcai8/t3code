@@ -131,7 +131,9 @@ const Provisioning = Schema.Struct({
    */
   egressAllow: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   /**
-   * Environment variables written into a new environment's shell profile.
+   * Environment variables an environment's agents run with, and its repository's prepare commands
+   * too, minus any agent login. Prepare commands see the values configured when they run, so a
+   * change reaches environments that already exist on their next preparation.
    *
    * Some agents read their credential from the environment rather than a file,
    * and a sandbox command does not inherit anything the template was built

@@ -217,6 +217,7 @@ async function setup(
     readonly derivedHomePaths?: ReadonlyArray<string>;
     /** Prepare commands a builder runs instead of the chat's, as a `background` marker freezes. */
     readonly buildPrepareCommands?: (chatCommands: ReadonlyArray<string>) => ReadonlyArray<string>;
+    readonly prepareEnvironment?: ReadonlyArray<{ readonly name: string; readonly value: string }>;
     /** The template current config names, by how many times it was asked; the chat's by default. */
     readonly current?: (frozen: MacTemplateIdentity, asked: number) => MacTemplateIdentity | null;
     /** Runs before the runtime starts, as Namespace stood when the manager came up. */
@@ -294,6 +295,7 @@ async function setup(
       brokerTtl: "1h",
       prepareCommands,
       files: prepared.files,
+      ...(options.prepareEnvironment ? { prepareEnvironment: options.prepareEnvironment } : {}),
     },
     localArtifact: {
       path: w.archivePath,
@@ -441,6 +443,27 @@ describe("Namespace Mac runtime", () => {
     expect(t.w.committedVolume(), "the chat that adopted it leaves the cache as it was").toBe(
       committed,
     );
+  });
+
+  it("builds a template without the chat's shell environment", async () => {
+    const t = await setup({
+      prepareEnvironment: [{ name: "MIND_KEY", value: "sk-bedrock-0123456789" }],
+      buildPrepareCommands: (commands) => [
+        ...commands.slice(0, -1),
+        'printf %s "${MIND_KEY-unset}" > key.bin',
+      ],
+    });
+    const ready = await t.runtime.prepare(t.operation("pending"), t.manifest);
+    expect(await t.runtime.release(t.operation(ready.environmentId), t.manifest)).toBe("released");
+    await t.runBuilds();
+    const committed = t.w.committedVolume();
+    if (committed === null) throw new Error("expected a committed volume");
+    expect(
+      await NodeFSP.readFile(
+        NodePath.join(committed, "template", "workspace.partial", "key.bin"),
+        "utf8",
+      ),
+    ).toBe("unset");
   });
 
   it("leaves a current template alone and never commits a build that failed", async () => {

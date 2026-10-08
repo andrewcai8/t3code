@@ -310,12 +310,198 @@ describe("remote preparation subprocess", () => {
     );
   });
 
-  it("refuses to call a box ready when its setup failed", async () => {
-    const input = await fixture();
-    await expect(
-      prepareRemoteHost(localPort, { ...input, prepareCommands: ["exit 3"] }),
-    ).rejects.toThrow(/Preparation command failed/);
+  it("runs the manager's current setup on a root frozen with other commands, with its variables", async () => {
+    const input = {
+      ...(await fixture()),
+      prepareCommands: ["echo frozen > setup.txt"],
+      prepareEnvironment: [{ name: "MIND_KEY", value: "frozen" }],
+    };
+    const first = await prepareRemoteHost(localPort, input);
+    pids.add(first.serverPid);
+    const again = await prepareRemoteHost(localPort, {
+      ...input,
+      setup: {
+        commands: ['printf "%s %s" "$MIND_KEY" "$HOME" > setup.txt'],
+        environment: [{ name: "MIND_KEY", value: "from-the-manager" }],
+      },
+    });
+    expect([
+      again.environmentId,
+      again.refreshError,
+      await NodeFSP.readFile(NodePath.join(first.projectDir, "setup.txt"), "utf8"),
+    ]).toEqual([
+      first.environmentId,
+      null,
+      `from-the-manager ${NodePath.join(input.root, "home")}`,
+    ]);
   });
+
+  it("refuses to call a box ready when its setup failed, on every retry", async () => {
+    const input = { ...(await fixture()), prepareCommands: ["exit 3", "touch ../ran-after"] };
+    await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);
+    await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);
+    await expect(NodeFSP.access(NodePath.join(input.root, "ran-after"))).rejects.toThrow();
+  });
+
+  const restoreOntoNewBox = async (root: string, port: number, pid: number) => {
+    await fetch(`http://127.0.0.1:${port}/stop`);
+    await localPort.executePython({
+      script:
+        "import fcntl,sys\nwith open(sys.stdin.read(), 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+      stdin: NodePath.join(root, "server.lock"),
+    });
+    pids.delete(pid);
+    await NodeFSP.rm(NodePath.join(root, "server.json"));
+  };
+  const dropPreparedFlag = async (root: string) => {
+    const journal = NodePath.join(root, "preparation.json");
+    const { prepared: _, ...older } = JSON.parse(await NodeFSP.readFile(journal, "utf8"));
+    await NodeFSP.writeFile(journal, JSON.stringify(older));
+  };
+
+  it.each([
+    ["it prepared", async () => {}],
+    ["an older build prepared", dropPreparedFlag],
+    ["a new box restored from", restoreOntoNewBox],
+    [
+      "an older build prepared, restored onto a new box from a snapshot without server.json,",
+      async (root: string, port: number, pid: number) => {
+        await dropPreparedFlag(root);
+        await restoreOntoNewBox(root, port, pid);
+        await NodeFSP.writeFile(NodePath.join(root, "home/.t3/userdata/statev2.sqlite"), "");
+      },
+    ],
+  ] as const)(
+    "upgrades a root %s whose setup now fails, reporting the failure",
+    async (_, earlier) => {
+      const input = {
+        ...(await fixture()),
+        prepareCommands: ["test ! -e ../setup-broken || { echo setup broke >&2; exit 3; }"],
+      };
+      const first = await prepareRemoteHost(localPort, input);
+      pids.add(first.serverPid);
+      await earlier(input.root, input.port, first.serverPid);
+      await NodeFSP.writeFile(NodePath.join(input.root, "setup-broken"), "");
+      const runtime = await secondBuild(input);
+      const upgraded = await prepareRemoteHost(localPort, { ...input, runtime });
+      pids.add(upgraded.serverPid);
+      expect([upgraded.artifactSha256, upgraded.environmentId, upgraded.refreshError]).toEqual([
+        runtime.sha256,
+        first.environmentId,
+        "Preparation command failed: setup broke",
+      ]);
+      expect(exited(first.serverPid)).toBe(true);
+    },
+  );
+
+  it("keeps running a prepared root's setup past a failing command and tells the chat where to look", async () => {
+    const broken = (name: string) =>
+      `test ! -e ../setup-broken || { echo ${name} broke >&2; exit 3; }`;
+    const input = {
+      ...(await fixture()),
+      prepareCommands: [broken("deps"), "echo ran >> ../services-started", broken("seed")],
+    };
+    const failureLog = NodePath.join(input.root, "home/.t3/setup-failure.log");
+    pids.add((await prepareRemoteHost(localPort, input)).serverPid);
+    await NodeFSP.writeFile(NodePath.join(input.root, "setup-broken"), "");
+    const reopened = await prepareRemoteHost(localPort, input);
+    expect(reopened.refreshError).toBe(
+      "Preparation command failed: deps broke\nPreparation command failed: seed broke",
+    );
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "services-started"), "utf8")).toBe(
+      "ran\nran\n",
+    );
+    expect(await NodeFSP.readFile(failureLog, "utf8")).toBe(
+      `Preparation command failed: deps broke\n$ ${broken("deps")}\n\n` +
+        `Preparation command failed: seed broke\n$ ${broken("seed")}\n\n`,
+    );
+    await NodeFSP.rm(NodePath.join(input.root, "setup-broken"));
+    expect((await prepareRemoteHost(localPort, input)).refreshError).toBeNull();
+    await expect(NodeFSP.access(failureLog)).rejects.toThrow();
+  });
+
+  it("gives the repository's setup the operator's shell environment, which may change between opens", async () => {
+    const input = {
+      ...(await fixture()),
+      prepareCommands: ['printf %s "$MIND_BEDROCK_AUTH_URL" > ../setup-saw'],
+    };
+    const seen = () => NodeFSP.readFile(NodePath.join(input.root, "setup-saw"), "utf8");
+    const withValue = (value: string) => ({
+      ...input,
+      prepareEnvironment: [{ name: "MIND_BEDROCK_AUTH_URL", value }],
+    });
+    pids.add((await prepareRemoteHost(localPort, withValue("https://auth.one"))).serverPid);
+    expect(await seen()).toBe("https://auth.one");
+    await prepareRemoteHost(localPort, withValue("https://auth.two"));
+    expect(await seen()).toBe("https://auth.two");
+    await expect(
+      prepareRemoteHost(localPort, {
+        ...input,
+        prepareEnvironment: [{ name: "HOME", value: "/elsewhere" }],
+      }),
+    ).rejects.toThrow(/Invalid prepare environment/);
+  });
+
+  it("keeps the operator's environment values out of everything a failed setup reports", async () => {
+    const secret = "sk-bedrock-0123456789";
+    const prepareEnvironment = [{ name: "MIND_KEY", value: secret }];
+    const leak = 'echo "key $MIND_KEY rejected" >&2; exit 3';
+    const reopening = await fixture();
+    pids.add((await prepareRemoteHost(localPort, reopening)).serverPid);
+    const reopened = await prepareRemoteHost(localPort, {
+      ...reopening,
+      setup: { commands: [leak], environment: prepareEnvironment },
+    });
+    expect(reopened.refreshError).toBe("Preparation command failed: key *** rejected");
+    expect(
+      await NodeFSP.readFile(NodePath.join(reopening.root, "home/.t3/setup-failure.log"), "utf8"),
+    ).toBe(`Preparation command failed: key *** rejected\n$ ${leak}\n\n`);
+
+    const fresh = { ...(await fixture()), prepareCommands: [leak], prepareEnvironment };
+    const failure = await prepareRemoteHost(localPort, fresh).then(
+      () => "",
+      (error: Error) => error.message,
+    );
+    expect(failure).toContain("Preparation command failed: key *** rejected");
+    expect(failure).not.toContain(secret);
+  });
+
+  it("reports a setup variable the manager could not read, by name, and runs setup without it", async () => {
+    const input = { ...(await fixture()), prepareCommands: ["echo ran >> ../setup-ran"] };
+    pids.add((await prepareRemoteHost(localPort, input)).serverPid);
+    const reopened = await prepareRemoteHost(localPort, {
+      ...input,
+      setup: { commands: input.prepareCommands, environment: [], unreadable: ["MIND_KEY"] },
+    });
+    const warning = "Setup ran without MIND_KEY: its configured source could not be read";
+    expect([
+      reopened.refreshError,
+      await NodeFSP.readFile(NodePath.join(input.root, "home/.t3/setup-failure.log"), "utf8"),
+      await NodeFSP.readFile(NodePath.join(input.root, "setup-ran"), "utf8"),
+    ]).toEqual([warning, `${warning}\n\n`, "ran\nran\n"]);
+  });
+
+  it("skips a prepared root's remaining setup once a command times out", async () => {
+    const capped: RemotePreparationPort = {
+      executePython: ({ script, stdin }) =>
+        localPort.executePython({
+          script: script.replace("PREPARE_COMMAND_SECONDS = 1800", "PREPARE_COMMAND_SECONDS = 1"),
+          stdin,
+        }),
+    };
+    const stall = "test ! -e ../setup-stalls || sleep 30";
+    const input = {
+      ...(await fixture()),
+      prepareCommands: [stall, "echo ran >> ../after-stall"],
+    };
+    pids.add((await prepareRemoteHost(capped, input)).serverPid);
+    await NodeFSP.writeFile(NodePath.join(input.root, "setup-stalls"), "");
+    const reopened = await prepareRemoteHost(capped, input);
+    expect(reopened.refreshError).toBe(
+      `Preparation command timed out: sh -lc ${stall}\nSkipped the 1 setup command after it`,
+    );
+    expect(await NodeFSP.readFile(NodePath.join(input.root, "after-stall"), "utf8")).toBe("ran\n");
+  }, 45_000);
 
   it("serializes concurrent retries and preserves agent commits, credentials and environment identity", async () => {
     const input = await fixture();

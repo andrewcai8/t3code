@@ -292,13 +292,16 @@ export function makeNamespaceMacRuntime(config: {
             ...manifest.preparation,
             // The chat, not the machine: its Macs change and its identity must not.
             resourceIdentity: builder ? `namespace-builder:${cacheTag}` : `namespace:${chatId}`,
-            ...(builder ? { prepareCommands: buildCommands } : {}),
+            // A template is shared by every chat of the repo, so no operator secrets.
+            ...(builder ? { prepareCommands: buildCommands, prepareEnvironment: undefined } : {}),
             requestHash: operation.requestHash,
             preparationHash: operation.request.preparationHash,
             ...(artifactSources.length ? { artifactSources } : {}),
             ...(build ? { runtime: guest } : {}),
             ...(follow ? { follow } : {}),
             toolInstall,
+            // A builder makes a template, not a chat, so it runs only the build commands.
+            ...(!builder && manifest.setup ? { setup: manifest.setup } : {}),
           },
           operation.request.agentDriver,
         ),

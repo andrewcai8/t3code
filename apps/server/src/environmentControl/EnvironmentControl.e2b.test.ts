@@ -141,6 +141,8 @@ const pausedPreparedBox = (input: {
   readonly owned?: boolean;
   /** The host pins a newer build than the one the box was made with. */
   readonly pinnedRevision?: string;
+  /** More provisioning settings the host has now, given the directory the box's fixtures live in. */
+  readonly provisioning?: (base: string) => Record<string, unknown>;
 }) =>
   Effect.gen(function* () {
     const cleanups: Cleanups = [];
@@ -190,7 +192,14 @@ const pausedPreparedBox = (input: {
             ingressKey: "unused",
           },
           targets: [],
-          ...(pinned ? { provisioning: { runtimeArtifacts: { linux: pinned } } } : {}),
+          ...(pinned || input.provisioning
+            ? {
+                provisioning: {
+                  ...(pinned ? { runtimeArtifacts: { linux: pinned } } : {}),
+                  ...input.provisioning?.(w.base),
+                },
+              }
+            : {}),
         }),
       ),
     );
@@ -498,6 +507,45 @@ it.effect("moves a woken box onto the build the host pins before anyone connects
       expect(yield* box.answeringEnvironment()).toBe(box.environmentId);
     }),
   ),
+);
+
+it.effect(
+  "upgrades a box made before its repository's setup changed with the setup the host has now",
+  () =>
+    withManager(
+      Effect.gen(function* () {
+        const pinnedRevision = "e".repeat(40);
+        const box = yield* pausedPreparedBox({
+          follow: false,
+          pinnedRevision,
+          provisioning: (base) => ({
+            repositories: [
+              {
+                repository: "owner/repo",
+                e2b: { prepareCommands: ['printf "%s" "$MIND_BEDROCK_AUTH_URL" > ../setup-saw'] },
+              },
+            ],
+            shellEnvironment: [
+              { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(base, "bedrock-url") },
+            ],
+          }),
+        });
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(NodePath.join(box.w.base, "bedrock-url"), "https://auth.example\n"),
+        );
+        const manager = yield* EnvironmentControl;
+
+        expect(yield* manager.resume({ environmentId: box.environmentId })).toEqual({
+          kind: "resumed",
+        });
+        expect([
+          yield* box.runningRevision(),
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(box.w.root, "setup-saw"), "utf8"),
+          ),
+        ]).toEqual([pinnedRevision, "https://auth.example"]);
+      }),
+    ),
 );
 
 it.effect("connects a woken box on its own build when it speaks the host's protocol", () =>
