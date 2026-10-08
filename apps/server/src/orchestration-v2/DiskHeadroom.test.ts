@@ -1,4 +1,6 @@
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import { it as effectIt } from "@effect/vitest";
@@ -87,4 +89,25 @@ effectIt.effect(
       expect(yield* noteOn(box, "linux", {}, false)).toBe(mac);
       expect(yield* noteOn(box, "linux")).toContain(forkSentence);
     }),
+);
+
+effectIt.effect("tells a box's chat when the project setup failed and where its output is", () =>
+  Effect.gen(function* () {
+    const t3home = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-setup-note-")),
+    );
+    const log = NodePath.join(t3home, "setup-failure.log");
+    const onBox = { ...box, T3CODE_HOME: t3home };
+    const healthy = yield* noteOn(onBox, "darwin");
+    yield* Effect.promise(() =>
+      NodeFSP.writeFile(
+        log,
+        "Preparation command failed: missing MIND_BEDROCK_AUTH_URL\n$ node prepare.mjs\n\n",
+      ),
+    );
+    expect(yield* noteOn(onBox, "darwin")).toBe(
+      `${healthy} This machine's project setup failed when it was last prepared (Preparation command failed: missing MIND_BEDROCK_AUTH_URL), so dependencies or services it sets up may be missing. The failed commands and their output are in ${log}; fix the cause and rerun them.`,
+    );
+    yield* Effect.promise(() => NodeFSP.rm(t3home, { recursive: true }));
+  }),
 );

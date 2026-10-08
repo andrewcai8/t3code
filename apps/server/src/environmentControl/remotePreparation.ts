@@ -47,6 +47,14 @@ export interface RemotePreparationInput {
    * otherwise, so the first thing every agent does is install one.
    */
   readonly prepareCommands?: ReadonlyArray<string> | undefined;
+  /**
+   * The operator's shell environment, added to `prepareCommands`' environment
+   * only. Excluded from the intent hash like `toolInstall`, so a changed value
+   * reaches the next open instead of conflicting with the journal.
+   */
+  readonly prepareEnvironment?:
+    | ReadonlyArray<{ readonly name: string; readonly value: string }>
+    | undefined;
   /** Artifacts fetched by the guest into the isolated home before setup runs. */
   readonly artifacts?:
     | ReadonlyArray<{
@@ -661,7 +669,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall', 'prepareEnvironment')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         adopted = False
         if journal_path.exists():
@@ -1038,23 +1046,39 @@ def prepare(spec):
             tooling = (time.monotonic(), start(['sh', '-c', tools], home, env))
         prepare = spec.get('prepareCommands') or []
         server_path = root / 'server.json'
+        setup_failures = []
         if prepare:
             if not isinstance(prepare, list) or not all(isinstance(line, str) and line.strip() and '\0' not in line for line in prepare):
                 raise RuntimeError('Invalid prepare commands')
+            prepare_env = dict(env)
+            for variable in spec.get('prepareEnvironment') or []:
+                name, value = variable.get('name'), variable.get('value')
+                if not isinstance(name, str) or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', name) or name in ('HOME', 'T3CODE_HOME') or not isinstance(value, str) or '\0' in value:
+                    raise RuntimeError('Invalid prepare environment')
+                prepare_env[name] = value
             # A chat that finished preparing once has a checkout it works in.
             # Its setup failing again on the chat's own branch is reported, not
-            # allowed to keep it off a new build. A root prepared before the
-            # journal recorded this shows it by a server having started.
-            prepared = journal.get('prepared') or server_path.exists()
+            # allowed to keep it off a new build, and the commands after it
+            # still run so the services they start come up. A root prepared
+            # before the journal recorded this shows it by a server having
+            # started, or by the chat database a snapshot carries.
+            prepared = journal.get('prepared') or server_path.exists() or (t3home / 'userdata' / 'statev2.sqlite').exists()
             with step('prepareCommands'):
-                try:
-                    for index, command_line in enumerate(prepare):
+                for index, command_line in enumerate(prepare):
+                    try:
                         with step('prepareCommand.' + str(index)):
-                            run(['sh', '-lc', command_line], project, env, timeout=1800)
-                except RuntimeError as error:
-                    if not prepared:
-                        raise
-                    refresh_error = '\n'.join(filter(None, [refresh_error, str(error)]))
+                            run(['sh', '-lc', command_line], project, prepare_env, timeout=1800)
+                    except RuntimeError as error:
+                        if not prepared:
+                            raise
+                        setup_failures.append((command_line, str(error)))
+        # The chat's agent is pointed here at the start of each session.
+        setup_failure_log = t3home / 'setup-failure.log'
+        if setup_failures:
+            refresh_error = '\n'.join(filter(None, [refresh_error] + [error for _, error in setup_failures]))
+            atomic(setup_failure_log, ''.join(error + '\n$ ' + command_line + '\n\n' for command_line, error in setup_failures))
+        else:
+            setup_failure_log.unlink(missing_ok=True)
         broker_issue = {'argv': broker_issue_argv(command, t3home, spec['brokerTtl']), 'cwd': str(project), 'env': env}
         def server_process():
             try:

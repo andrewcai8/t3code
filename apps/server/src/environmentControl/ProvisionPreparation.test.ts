@@ -1002,6 +1002,32 @@ it("hands a cloud box the setup its repository needs", async () => {
   }
 });
 
+it("hands the repository's setup the operator's shell environment, minus other drivers' keys", async () => {
+  const f = await fixture();
+  try {
+    await NodeFSP.writeFile(NodePath.join(f.root, "auth-url"), "https://auth.example\n");
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [{ repository: "example/repo", e2b: { prepareCommands: ["make setup"] } }],
+        shellEnvironment: [
+          { name: "MIND_BEDROCK_AUTH_URL", source: NodePath.join(f.root, "auth-url") },
+          { name: "ANTHROPIC_API_KEY", source: NodePath.join(f.root, "missing") },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(inputFor("codex", "codex"), config, f.resolver, [
+      f.profile,
+    ]);
+    expect(manifest.preparation.prepareEnvironment).toEqual([
+      { name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" },
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("refuses a skill bundle that links out of itself", async () => {
   const f = await fixture();
   try {

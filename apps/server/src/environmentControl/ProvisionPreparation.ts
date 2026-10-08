@@ -69,6 +69,9 @@ const Preparation = Schema.Struct({
   readinessTimeoutSeconds: Schema.Int,
   brokerTtl: Schema.String,
   prepareCommands: Schema.optional(Schema.Array(Schema.String)),
+  prepareEnvironment: Schema.optional(
+    Schema.Array(Schema.Struct({ name: Schema.String, value: Schema.String })),
+  ),
   providerInstall: Schema.optional(Schema.String),
   artifacts: Schema.optional(
     Schema.Array(
@@ -1115,6 +1118,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
         requestId: input.requestId,
         root,
         files,
+        // The same values the providers get. Outside `build`: secrets are this
+        // request's, not the machine's.
+        ...(prepareCommands.length && environment.length
+          ? { prepareEnvironment: environment.map(({ name, value }) => ({ name, value })) }
+          : {}),
       };
       const common = {
         requestId: input.requestId,

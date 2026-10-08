@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no free-space or machine-size query.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
@@ -43,6 +44,8 @@ export interface CloudMachine {
   readonly diskBytes: number;
   /** Whether t3_fork_run can copy this machine. */
   readonly forks: boolean;
+  /** The log a reopen whose project setup failed left, and its first line. */
+  readonly setupFailure?: { readonly log: string; readonly summary: string } | undefined;
 }
 
 const roundedGb = (bytes: number) => `${Math.round(bytes / 1024 ** 3)} GB`;
@@ -56,6 +59,9 @@ export function cloudMachineNote(machine: CloudMachine): string {
       : "",
     "Keep large results in S3, not on this disk.",
     "Remove worktrees, installs and /tmp data you created once you no longer need them.",
+    machine.setupFailure
+      ? `This machine's project setup failed when it was last prepared (${machine.setupFailure.summary}), so dependencies or services it sets up may be missing. The failed commands and their output are in ${machine.setupFailure.log}; fix the cause and rerun them.`
+      : "",
   ]
     .filter((sentence) => sentence !== "")
     .join(" ");
@@ -85,6 +91,15 @@ export const cloudMachineNoteFor = (input: {
     if (told.has(input.nativeThreadId)) return "";
     toldBySession.set(input.session, told.add(input.nativeThreadId));
     const forks = input.mcpTools && (yield* HostProcessPlatform) !== "darwin";
+    const t3home = (yield* HostProcessEnvironment).T3CODE_HOME;
+    // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
+    const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
+    const setupFailure = log
+      ? yield* Effect.tryPromise(() => NodeFSP.readFile(log, "utf8")).pipe(
+          Effect.map((text) => ({ log, summary: text.split("\n", 1)[0]! })),
+          Effect.orElseSucceed(() => undefined),
+        )
+      : undefined;
     const cwd = input.cwd;
     return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
       Effect.map((stats) =>
@@ -93,6 +108,7 @@ export const cloudMachineNoteFor = (input: {
           memoryBytes: NodeOS.totalmem(),
           diskBytes: stats.blocks * stats.bsize,
           forks,
+          setupFailure,
         }),
       ),
       Effect.orElseSucceed(() => ""),
