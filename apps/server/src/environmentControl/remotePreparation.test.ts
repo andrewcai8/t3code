@@ -310,12 +310,57 @@ describe("remote preparation subprocess", () => {
     );
   });
 
-  it("refuses to call a box ready when its setup failed", async () => {
-    const input = await fixture();
-    await expect(
-      prepareRemoteHost(localPort, { ...input, prepareCommands: ["exit 3"] }),
-    ).rejects.toThrow(/Preparation command failed/);
+  it("refuses to call a box ready when its setup failed, on every retry", async () => {
+    const input = { ...(await fixture()), prepareCommands: ["exit 3"] };
+    await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);
+    await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);
   });
+
+  it.each([
+    ["it prepared", async () => {}],
+    [
+      "an older build prepared",
+      async (root: string) => {
+        const journal = NodePath.join(root, "preparation.json");
+        const { prepared: _, ...older } = JSON.parse(await NodeFSP.readFile(journal, "utf8"));
+        await NodeFSP.writeFile(journal, JSON.stringify(older));
+      },
+    ],
+    [
+      "a new box restored from",
+      async (root: string, port: number, pid: number) => {
+        await fetch(`http://127.0.0.1:${port}/stop`);
+        await localPort.executePython({
+          script:
+            "import fcntl,sys\nwith open(sys.stdin.read(), 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+          stdin: NodePath.join(root, "server.lock"),
+        });
+        pids.delete(pid);
+        await NodeFSP.rm(NodePath.join(root, "server.json"));
+      },
+    ],
+  ] as const)(
+    "upgrades a root %s whose setup now fails, reporting the failure",
+    async (_, earlier) => {
+      const input = {
+        ...(await fixture()),
+        prepareCommands: ["test ! -e ../setup-broken || { echo setup broke >&2; exit 3; }"],
+      };
+      const first = await prepareRemoteHost(localPort, input);
+      pids.add(first.serverPid);
+      await earlier(input.root, input.port, first.serverPid);
+      await NodeFSP.writeFile(NodePath.join(input.root, "setup-broken"), "");
+      const runtime = await secondBuild(input);
+      const upgraded = await prepareRemoteHost(localPort, { ...input, runtime });
+      pids.add(upgraded.serverPid);
+      expect([upgraded.artifactSha256, upgraded.environmentId, upgraded.refreshError]).toEqual([
+        runtime.sha256,
+        first.environmentId,
+        "Preparation command failed: setup broke",
+      ]);
+      expect(exited(first.serverPid)).toBe(true);
+    },
+  );
 
   it("serializes concurrent retries and preserves agent commits, credentials and environment identity", async () => {
     const input = await fixture();
