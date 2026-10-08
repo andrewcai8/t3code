@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { connectionBox } from "@t3tools/client-runtime/connection";
 import { sessionHasLegacyPermissions } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import * as SecureStore from "expo-secure-store";
@@ -20,7 +21,9 @@ export function PermissionUpdateNotice() {
     useMemo(
       () =>
         Atom.make((get) =>
-          environments.filter(({ environmentId }) => {
+          environments.filter(({ environmentId, entry }) => {
+            // A cloud chat's machine pairs again by itself when its grant is the old one.
+            if (connectionBox(entry.target) !== null) return false;
             const session = get(environmentSession.sessionStateAtom(environmentId));
             return (
               session._tag === "Success" &&

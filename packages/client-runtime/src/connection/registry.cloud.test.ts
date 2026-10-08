@@ -1,4 +1,6 @@
 import {
+  type AuthEnvironmentScope,
+  AuthStandardClientScopes,
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
   DiscoveredProvisionedEnvironment,
@@ -270,6 +272,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     readonly initialDisabled?: ReadonlyArray<EnvironmentId>;
     /** Runs as the cache is read, holding whoever reads it. */
     readonly beforeLoadShell?: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /** The permissions a server grants a bearer token; the standard client grant by default. */
+    readonly grant?: (token: string) => ReadonlyArray<AuthEnvironmentScope>;
   },
 ) {
   const storedTargets = yield* Ref.make<ReadonlyMap<EnvironmentId, ConnectionTarget>>(
@@ -608,6 +612,21 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
                     }),
                     credential: new BearerConnectionCredential({ token: `box-token-${count}` }),
                   });
+                }),
+              ),
+            sessionGrant: (prepared) =>
+              Ref.get(storedCredentials).pipe(
+                Effect.map((current) => {
+                  const credential =
+                    prepared.target._tag === "BearerConnectionTarget"
+                      ? current.get(prepared.target.connectionId)
+                      : undefined;
+                  return credential === undefined
+                    ? Option.none()
+                    : Option.some({
+                        authenticated: true,
+                        permissions: options?.grant?.(credential.token) ?? AuthStandardClientScopes,
+                      });
                 }),
               ),
           }),
@@ -1815,6 +1834,121 @@ describe("EnvironmentRegistry", () => {
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }).pipe(Effect.provide(TestClock.layer())),
   );
+
+  describe("a box paired before granular permissions", () => {
+    const LEGACY_GRANT: ReadonlyArray<AuthEnvironmentScope> = [
+      "orchestration:read",
+      "orchestration:operate",
+      "terminal:operate",
+      "review:write",
+      "relay:read",
+    ];
+    const legacyBox = (grant: (token: string) => ReadonlyArray<AuthEnvironmentScope>) =>
+      makeHarness(
+        [TARGET, HOST_BOX],
+        [HOST_BOX_PROFILE],
+        [[HOST_BOX.connectionId, BEARER_CREDENTIAL]],
+        { listProvisioned: [LISTED_HOST_BOX], grant },
+      );
+    const openBox = Effect.fn("TestEnvironmentRegistry.openBox")(function* (
+      registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
+    ) {
+      const chat = yield* Scope.make();
+      yield* registry.demand(HOST_BOX.environmentId).pipe(Scope.provide(chat));
+      yield* awaitConnectionState(registry, HOST_BOX.environmentId, (s) => s.phase === "connected");
+      yield* Scope.close(chat, Exit.void);
+      yield* awaitConnectionState(registry, HOST_BOX.environmentId, (s) => s.phase === "available");
+    });
+
+    it.effect("pairs again through its host once and connects with the standard grant", () =>
+      Effect.gen(function* () {
+        const harness = yield* legacyBox((token) =>
+          token === BEARER_CREDENTIAL.token ? LEGACY_GRANT : AuthStandardClientScopes,
+        );
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          const chat = yield* Scope.make();
+          yield* registry.demand(HOST_BOX.environmentId).pipe(Scope.provide(chat));
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (s) => s.phase === "connected",
+          );
+          // The legacy session closed as soon as the new pairing took over.
+          expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
+          yield* Scope.close(chat, Exit.void);
+          yield* awaitConnectionState(
+            registry,
+            HOST_BOX.environmentId,
+            (s) => s.phase === "available",
+          );
+          yield* openBox(registry);
+
+          expect(yield* Ref.get(harness.attaches)).toEqual([LISTED_HOST_BOX.requestId]);
+          expect((yield* Ref.get(harness.storedCredentials)).get(HOST_BOX.connectionId)).toEqual(
+            new BearerConnectionCredential({ token: "box-token-1" }),
+          );
+          expect((yield* Ref.get(harness.storedTargets)).get(HOST_BOX.environmentId)).toEqual(
+            HOST_BOX,
+          );
+          // The legacy dial, its replacement, and the reopen.
+          expect(
+            (yield* Ref.get(harness.dialed)).filter((id) => id === HOST_BOX.environmentId),
+          ).toHaveLength(3);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("is paired again at most once when its host still mints the old grant", () =>
+      Effect.gen(function* () {
+        const harness = yield* legacyBox(() => LEGACY_GRANT);
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* openBox(registry);
+          yield* openBox(registry);
+          yield* openBox(registry);
+
+          expect(yield* Ref.get(harness.attaches)).toEqual([LISTED_HOST_BOX.requestId]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("is not paired again once it holds the standard grant", () =>
+      Effect.gen(function* () {
+        const harness = yield* legacyBox(() => AuthStandardClientScopes);
+
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            TARGET.environmentId,
+            (s) => s.phase === "connected",
+          );
+          yield* openBox(registry);
+
+          expect(yield* Ref.get(harness.attaches)).toEqual([]);
+          expect((yield* Ref.get(harness.storedCredentials)).get(HOST_BOX.connectionId)).toEqual(
+            BEARER_CREDENTIAL,
+          );
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+  });
 
   it.effect("stops dialing and offering the saved boxes a host reports gone", () =>
     Effect.gen(function* () {

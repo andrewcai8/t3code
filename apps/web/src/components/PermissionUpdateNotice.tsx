@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { connectionBox } from "@t3tools/client-runtime/connection";
 import { sessionHasLegacyPermissions, type EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
@@ -72,7 +73,14 @@ function EnvironmentPermissionNotice({
 
 export function PermissionUpdateNotice() {
   const { environments } = useEnvironments();
-  return environments.map(({ environmentId, label }) => (
-    <EnvironmentPermissionNotice key={environmentId} environmentId={environmentId} label={label} />
-  ));
+  // A cloud chat's machine pairs again by itself when its grant is the old one.
+  return environments
+    .filter(({ entry }) => connectionBox(entry.target) === null)
+    .map(({ environmentId, label }) => (
+      <EnvironmentPermissionNotice
+        key={environmentId}
+        environmentId={environmentId}
+        label={label}
+      />
+    ));
 }

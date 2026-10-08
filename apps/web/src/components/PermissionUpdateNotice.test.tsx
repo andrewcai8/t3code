@@ -4,6 +4,7 @@ import { beforeEach, afterEach, expect, it, vi } from "vite-plus/test";
 const state = vi.hoisted(() => ({
   id: 0,
   saved: false,
+  box: undefined as { managerId: string } | undefined,
   session: {
     _tag: "Success",
     waiting: false,
@@ -18,7 +19,13 @@ vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.session }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../state/environments", () => ({
   useEnvironments: () => ({
-    environments: [{ environmentId: `env-${state.id}`, label: "Work laptop" }],
+    environments: [
+      {
+        environmentId: `env-${state.id}`,
+        label: "Work laptop",
+        entry: { target: { _tag: "BearerConnectionTarget", box: state.box } },
+      },
+    ],
   }),
 }));
 vi.mock("../state/session", () => ({ environmentSession: { sessionStateAtom: () => null } }));
@@ -33,6 +40,7 @@ let renderer: ReactTestRenderer;
 beforeEach(() => {
   state.id++;
   state.saved = false;
+  state.box = undefined;
   state.session = {
     _tag: "Success",
     waiting: false,
@@ -89,6 +97,11 @@ it("waits for a successful, settled session check", async () => {
   state.session = { ...state.session, waiting: false };
   await act(async () => renderer.update(<PermissionUpdateNotice />));
   expect(state.add).toHaveBeenCalledTimes(1);
+});
+it("does not warn for a cloud chat's machine, which pairs again by itself", async () => {
+  state.box = { managerId: "env-host" };
+  await render();
+  expect(state.add).not.toHaveBeenCalled();
 });
 it("does not warn for a granular grant", async () => {
   state.session.value.permissions.push("filesystem:read");
