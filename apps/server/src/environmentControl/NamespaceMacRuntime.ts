@@ -299,6 +299,8 @@ export function makeNamespaceMacRuntime(config: {
             ...(build ? { runtime: guest } : {}),
             ...(follow ? { follow } : {}),
             toolInstall,
+            // A builder makes a template, not a chat, so it runs only the build commands.
+            ...(!builder && manifest.setup ? { setup: manifest.setup } : {}),
           },
           operation.request.agentDriver,
         ),

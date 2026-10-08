@@ -678,6 +678,7 @@ except FileExistsError:
           ...(runtime ? { runtime: guest } : {}),
           ...(follow ? { follow } : {}),
           toolInstall,
+          ...(manifest.setup ? { setup: manifest.setup } : {}),
         },
         operation.request.agentDriver,
       ),

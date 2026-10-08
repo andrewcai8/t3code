@@ -85,6 +85,17 @@ export interface RemotePreparationInput {
    * the first prepare. Excluded from the intent hash like `runtime`.
    */
   readonly follow?: string | undefined;
+  /**
+   * The setup the manager is configured with now, run in place of
+   * `prepareCommands` and `prepareEnvironment`. Excluded from the
+   * intent hash like `runtime`, so a settings change reaches a root that exists.
+   */
+  readonly setup?:
+    | {
+        readonly commands: ReadonlyArray<string>;
+        readonly environment: NonNullable<RemotePreparationInput["prepareEnvironment"]>;
+      }
+    | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
@@ -669,7 +680,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall', 'prepareEnvironment')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall', 'prepareEnvironment', 'setup')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         adopted = False
         if journal_path.exists():
@@ -1044,14 +1055,15 @@ def prepare(spec):
             if not isinstance(tools, str) or not tools.strip() or '\0' in tools:
                 raise RuntimeError('Invalid tool install command')
             tooling = (time.monotonic(), start(['sh', '-c', tools], home, env))
-        prepare = spec.get('prepareCommands') or []
+        setup = spec.get('setup')
+        prepare = setup['commands'] if setup else spec.get('prepareCommands') or []
         server_path = root / 'server.json'
         setup_failures = []
         if prepare:
             if not isinstance(prepare, list) or not all(isinstance(line, str) and line.strip() and '\0' not in line for line in prepare):
                 raise RuntimeError('Invalid prepare commands')
             prepare_env = dict(env)
-            for variable in spec.get('prepareEnvironment') or []:
+            for variable in (setup['environment'] if setup else spec.get('prepareEnvironment')) or []:
                 name, value = variable.get('name'), variable.get('value')
                 if not isinstance(name, str) or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', name) or name in ('HOME', 'T3CODE_HOME') or not isinstance(value, str) or '\0' in value:
                     raise RuntimeError('Invalid prepare environment')

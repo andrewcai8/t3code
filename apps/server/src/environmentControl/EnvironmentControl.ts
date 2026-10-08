@@ -69,6 +69,8 @@ import {
   makeProvisionPreparationStore,
   spareKey,
   warmBaseKey,
+  type ProvisionPreparationManifest,
+  withCurrentSetup,
 } from "./ProvisionPreparation.ts";
 import {
   makeSpareClaims,
@@ -1525,6 +1527,11 @@ export const layer = Layer.effect(
             });
       return result.profile;
     };
+    /** A chat's manifest to prepare it from, with the setup this manager is configured with now. */
+    const preparing = async (manifest: ProvisionPreparationManifest) => {
+      const manager = await resolve();
+      return manager ? withCurrentSetup(manager.config, manifest) : manifest;
+    };
     const resolve = () =>
       (async () => {
         const path = await resolveControlConfigPath({
@@ -1790,7 +1797,7 @@ export const layer = Layer.effect(
         operation.state.allocation.resource.provider !== "namespace"
       )
         throw new Error("No ready Namespace runtime");
-      const manifest = await manifests.load(requestId);
+      const manifest = await preparing(await manifests.load(requestId));
       const build = await manifests.readRuntime(requestId);
       const { runtime, mac } = await resolveNamespace();
       const resource = operation.state.allocation.resource;
@@ -1977,7 +1984,7 @@ export const layer = Layer.effect(
       ).resume(
         operation,
         operation.state.allocation.resource.sandboxId,
-        await manifests.load(requestId),
+        await preparing(await manifests.load(requestId)),
         await manifests.readRuntime(requestId),
       );
       if (restarted)
@@ -2090,7 +2097,14 @@ export const layer = Layer.effect(
           phases.push(phase);
         };
         return Effect.gen(function* () {
-          const { runtime, manifest, namespace, build } = yield* provider(operation);
+          const { runtime, manifest: frozen, namespace, build } = yield* provider(operation);
+          const manifest = yield* Effect.tryPromise({
+            try: () => preparing(frozen),
+            catch: (error) =>
+              new ProvisionProviderError({
+                message: provisionFailureMessage(error, "The configured setup could not be read."),
+              }),
+          });
           const resource = allocation.resource;
           const request = operation.request;
           if (resource.provider === "namespace")

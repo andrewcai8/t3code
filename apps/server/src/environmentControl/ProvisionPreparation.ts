@@ -102,6 +102,17 @@ export const ProvisionPreparationManifest = Schema.Struct({
    * `background`. Absent, it runs them all. Outside `preparation`: chats run every command.
    */
   buildPrepareCommands: Schema.optional(Schema.Array(Schema.String)),
+  /**
+   * Never stored: `withCurrentSetup` attaches it each time the manager prepares a chat. The guest
+   * runs these in place of the frozen `prepareCommands` and `prepareEnvironment`, so a setup
+   * change reaches chats that already exist without touching their identity.
+   */
+  setup: Schema.optional(
+    Schema.Struct({
+      commands: Schema.Array(Schema.String),
+      environment: Schema.Array(Schema.Struct({ name: Schema.String, value: Schema.String })),
+    }),
+  ),
 });
 export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(
@@ -189,6 +200,77 @@ export function currentMacTemplate(
       setup?.artifacts ?? provisioning.namespace.artifacts ?? [],
     ),
     runtimeSha256: runtime.sha256,
+  };
+}
+
+type ProvisioningSettings = NonNullable<EnvironmentControlConfig["provisioning"]>;
+
+/**
+ * What an operator configured for a repository on a platform: a repository
+ * entry replaces the platform default rather than adding to it.
+ */
+function configuredPrepareCommands(
+  provisioning: ProvisioningSettings,
+  repository: string | undefined,
+  provider: EnvironmentProvisionInput["provider"],
+): ReadonlyArray<NamespacePrepareCommand> {
+  const entry = repository
+    ? provisioning.repositories?.find(
+        (candidate) =>
+          canonicalRepository(candidate.repository) === canonicalRepository(repository),
+      )
+    : undefined;
+  return (
+    entry?.[provider]?.prepareCommands ??
+    (provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
+    []
+  );
+}
+
+/** The `shellEnvironment` variables `keep` accepts, read from their sources. */
+async function shellVariables(provisioning: ProvisioningSettings, keep: (name: string) => boolean) {
+  const variables: Array<{ name: string; value: string }> = [];
+  for (const variable of provisioning.shellEnvironment ?? []) {
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name) ||
+      ["HOME", "T3CODE_HOME"].includes(variable.name)
+    )
+      throw new ProvisionRefused({
+        reason: "unconfigured",
+        message: "A configured environment variable would change the isolated home.",
+      });
+    if (!keep(variable.name)) continue;
+    variables.push({
+      name: variable.name,
+      value: (await NodeFSP.readFile(variable.source, "utf8")).trim(),
+    });
+  }
+  return variables;
+}
+
+/**
+ * A chat's manifest with the setup this manager is configured with now: its
+ * repository's prepare commands, and the `shellEnvironment` without any agent
+ * login, since setup is the project's and each agent gets its login through
+ * its provider settings.
+ */
+export async function withCurrentSetup(
+  config: EnvironmentControlConfig,
+  manifest: ProvisionPreparationManifest,
+): Promise<ProvisionPreparationManifest> {
+  const provisioning = config.provisioning;
+  if (!provisioning) return manifest;
+  const { repository, provider } = manifest.input;
+  const variables = await shellVariables(
+    provisioning,
+    (name) => !isForeignCredentialVariable([], name),
+  );
+  return {
+    ...manifest,
+    setup: {
+      commands: configuredPrepareCommands(provisioning, repository, provider).map(commandLine),
+      environment: variables,
+    },
   };
 }
 
@@ -953,23 +1035,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
       );
       const parsedSettings = decodeSettings(configuredSettings);
       const kinds = profiles.map(({ kind }) => kind);
-      const environment: Array<{ name: string; value: string; sensitive: boolean }> = [];
-      for (const variable of provisioning.shellEnvironment ?? []) {
-        if (
-          !/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name) ||
-          ["HOME", "T3CODE_HOME"].includes(variable.name)
-        )
-          throw new ProvisionRefused({
-            reason: "unconfigured",
-            message: "A configured environment variable would change the isolated home.",
-          });
-        if (isForeignCredentialVariable(kinds, variable.name)) continue;
-        environment.push({
-          name: variable.name,
-          value: (await NodeFSP.readFile(variable.source, "utf8")).trim(),
-          sensitive: true,
-        });
-      }
+      const environment = (
+        await shellVariables(provisioning, (name) => !isForeignCredentialVariable(kinds, name))
+      ).map((variable) => ({ ...variable, sensitive: true }));
       const accounts = profiles.map((profile) => {
         const credentials =
           profile.credential.kind === "environment"
@@ -1062,20 +1130,17 @@ export function makeProvisionPreparationStore(stateDir: string) {
       // named after it, and the files it carries. Those are why every request
       // currently hashes differently even when the machine is the same, and
       // why nothing prepared can be shared yet.
-      // What an operator configured for this repository on this platform, the
-      // same precedence the direct preparation path applies: a repository
-      // entry replaces the platform default rather than adding to it.
       const repositoryEntry = input.repository
         ? provisioning.repositories?.find(
             (entry) =>
               canonicalRepository(entry.repository) === canonicalRepository(input.repository!),
           )
         : undefined;
-      const repositorySetup = repositoryEntry?.[input.provider];
-      const configuredCommands: ReadonlyArray<NamespacePrepareCommand> =
-        repositorySetup?.prepareCommands ??
-        (input.provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
-        [];
+      const configuredCommands = configuredPrepareCommands(
+        provisioning,
+        input.repository,
+        input.provider,
+      );
       const prepareCommands = configuredCommands.map(commandLine);
       // What a template builder runs: no chat, so none of the services one would use.
       const buildPrepareCommands = configuredCommands
