@@ -17,6 +17,9 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Option from "effect/Option";
 import {
+  AuthOrchestrationOperateScope,
+  AuthTerminalOperateScope,
+  AuthTerminalReadScope,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ThreadId,
@@ -48,6 +51,8 @@ import {
   useRemoteEnvironmentRuntime,
 } from "../../state/use-remote-environment-registry";
 import { useKnownTerminalSessions } from "../../state/use-terminal-session";
+import { uuidv4 } from "../../lib/uuid";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
@@ -119,7 +124,7 @@ function ThreadHeader(
         onPress: filesVisible ? toggleAuxiliaryPane : props.onOpenFilesInspector,
       });
     }
-    if (props.hasWorkspaceRoot) {
+    if (props.hasWorkspaceRoot && props.gitControls.canOpenTerminal) {
       actions.push({
         accessibilityLabel: "Open terminal",
         icon: "terminal",
@@ -150,6 +155,7 @@ function ThreadHeader(
     props.onReturnToThread,
     props.hasThreadCwd,
     props.hasWorkspaceRoot,
+    props.gitControls.canOpenTerminal,
   ]);
 
   return (
@@ -337,6 +343,18 @@ function ThreadRouteContent(
     selectedThreadProject,
     selectedEnvironmentConnection,
   } = useThreadSelection();
+  const canOperateThread = useEnvironmentScope(
+    selectedThread?.environmentId ?? null,
+    AuthOrchestrationOperateScope,
+  );
+  const canReadTerminal = useEnvironmentScope(
+    selectedThread?.environmentId ?? null,
+    AuthTerminalReadScope,
+  );
+  const canOperateTerminal = useEnvironmentScope(
+    selectedThread?.environmentId ?? null,
+    AuthTerminalOperateScope,
+  );
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const { selectedThreadCwd } = useSelectedThreadWorktree();
@@ -506,14 +524,14 @@ function ThreadRouteContent(
         })
       : null,
   );
-  const knownTerminalSessions = useKnownTerminalSessions({
+  const { sessions: knownTerminalSessions } = useKnownTerminalSessions({
     environmentId: selectedThread?.environmentId ?? null,
     threadId: selectedThread?.id ?? null,
   });
   const terminalMenuSessions = useMemo(
     () =>
       buildTerminalMenuSessions({
-        knownSessions: knownTerminalSessions,
+        knownSessions: knownTerminalSessions ?? [],
         workspaceRoot: selectedThreadProject?.workspaceRoot ?? null,
       }),
     [knownTerminalSessions, selectedThreadProject?.workspaceRoot],
@@ -681,7 +699,11 @@ function ThreadRouteContent(
     void navigation.navigate("Connections");
   }, [navigation]);
   const handleStopThread = useCallback(() => {
-    if (!selectedThread || composer.interruptibleRunId === null) {
+    if (
+      !selectedThread ||
+      !readEnvironmentScope(selectedThread.environmentId, AuthOrchestrationOperateScope) ||
+      composer.interruptibleRunId === null
+    ) {
       return;
     }
     return interruptThreadTurn({
@@ -701,7 +723,12 @@ function ThreadRouteContent(
         hasWorkspaceRoot: Boolean(selectedThreadProject?.workspaceRoot),
       });
 
-      if (!selectedThread || !selectedThreadProject?.workspaceRoot) {
+      if (
+        !selectedThread ||
+        !selectedThreadProject?.workspaceRoot ||
+        (!readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope) &&
+          !readEnvironmentScope(selectedThread.environmentId, AuthTerminalOperateScope))
+      ) {
         return;
       }
 
@@ -721,19 +748,33 @@ function ThreadRouteContent(
       listedTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
     });
 
-    if (!selectedThread || !selectedThreadProject?.workspaceRoot) {
+    if (
+      !selectedThread ||
+      !selectedThreadProject?.workspaceRoot ||
+      !readEnvironmentScope(selectedThread.environmentId, AuthTerminalOperateScope)
+    ) {
       return;
     }
 
     const nextId = nextOpenTerminalId({
       listedTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
+      ...(knownTerminalSessions === null ||
+      !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
+        ? { uniqueSuffix: uuidv4() }
+        : {}),
     });
     void navigation.navigate("ThreadTerminal", {
       environmentId: String(selectedThread.environmentId),
       threadId: String(selectedThread.id),
       terminalId: nextId,
     });
-  }, [navigation, selectedThread, selectedThreadProject?.workspaceRoot, terminalMenuSessions]);
+  }, [
+    knownTerminalSessions,
+    navigation,
+    selectedThread,
+    selectedThreadProject?.workspaceRoot,
+    terminalMenuSessions,
+  ]);
 
   const handleRunProjectScript = useCallback(
     async (script: ProjectScript) => {
@@ -744,16 +785,24 @@ function ThreadRouteContent(
         hasWorkspaceRoot: Boolean(selectedThreadProject?.workspaceRoot),
       });
 
-      if (!selectedThread || !selectedThreadProject?.workspaceRoot) {
+      if (
+        !selectedThread ||
+        !selectedThreadProject?.workspaceRoot ||
+        !readEnvironmentScope(selectedThread.environmentId, AuthTerminalOperateScope)
+      ) {
         terminalDebugLog("project-script:abort", {
           scriptId: script.id,
-          reason: "no-thread-or-workspace",
+          reason: "no-thread-workspace-or-terminal-access",
         });
         return;
       }
 
       const targetTerminalId = resolveProjectScriptTerminalId({
         existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
+        ...(knownTerminalSessions === null ||
+        !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
+          ? { uniqueSuffix: uuidv4() }
+          : {}),
         hasRunningTerminal: terminalMenuSessions.some(
           (session) => session.status === "running" || session.status === "starting",
         ),
@@ -802,6 +851,7 @@ function ThreadRouteContent(
       selectedThreadDetailWorktreePath,
       selectedThreadProject,
       terminalMenuSessions,
+      knownTerminalSessions,
     ],
   );
   const threadGitControlProps = {
@@ -824,7 +874,9 @@ function ThreadRouteContent(
     currentBranch: selectedThread?.branch ?? null,
     gitStatus: gitStatus.data,
     gitOperationLabel: gitState.gitOperationLabel,
-    canOpenTerminal: Boolean(selectedThreadProject?.workspaceRoot),
+    canOpenTerminal:
+      Boolean(selectedThreadProject?.workspaceRoot) && (canReadTerminal || canOperateTerminal),
+    canOperateTerminal,
     canOpenFiles: Boolean(selectedThreadProject?.workspaceRoot),
     projectScripts: selectedThreadProject
       ? resolveProjectScripts(
@@ -996,6 +1048,7 @@ function ThreadRouteContent(
 
       <View className="flex-1 bg-screen android:overflow-hidden android:rounded-t-[28px] android:bg-thread-canvas">
         <ThreadDetailScreen
+          canOperateThread={canOperateThread}
           selectedThread={selectedThreadWithDraftSettings ?? selectedThread}
           contentPresentation={contentPresentation}
           screenTone={connectionTone(routeConnectionState)}

@@ -1,4 +1,5 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -11,6 +12,7 @@ import {
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -85,6 +87,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
             attachmentsDir: cwd,
             fileSystem: yield* FileSystem.FileSystem,
             path: yield* Path.Path,
+            crypto: yield* Crypto.Crypto,
             idAllocator: yield* IdAllocator.IdAllocatorV2,
             queryRunner: {
               allocateSessionId: Effect.succeed(nativeSession),
@@ -111,7 +114,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
           }),
         ];
       }),
-    ).pipe(Layer.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ).pipe(Layer.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer, NodeCrypto.layer))),
   );
 
 /**

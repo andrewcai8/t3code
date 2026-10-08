@@ -26,11 +26,13 @@ import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Project from "../project/ProjectService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { routeHome, runAsHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
-import { HomeHandlersLive } from "./toolkits/home/handlers.ts";
+import * as HomeHandlers from "./toolkits/home/handlers.ts";
+import * as McpToolAccess from "./McpToolAccess.ts";
 import { HomeToolkit } from "./toolkits/home/tools.ts";
 
 const box = EnvironmentId.make("box-a");
@@ -165,6 +167,7 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
     Layer.mock(Project.ProjectService)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+    Layer.mock(GitVcsDriver.GitVcsDriver)({}),
     NodeServices.layer,
     ServerConfig.layerTest(process.cwd(), { prefix: "t3-cloud-reach-" }).pipe(
       Layer.provide(NodeServices.layer),
@@ -172,7 +175,9 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
   );
   return Effect.gen(function* () {
     const toolkit = yield* ProjectToolkit.pipe(
-      Effect.provide(ProjectHandlers.layer.pipe(Layer.provide(dependencies))),
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
     );
     const result = yield* toolkit
       .handle("t3_thread_launch", {
@@ -243,7 +248,9 @@ it.effect("waits out the pause a fork batch causes and asks the host again", () 
   return Effect.gen(function* () {
     const broker = yield* FleetBroker.FleetBroker;
     const toolkit = yield* HomeToolkit.pipe(
-      Effect.provide(HomeHandlersLive.pipe(Layer.provide(dependencies))),
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(HomeHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
     );
     const first = yield* broker.connect(registration);
     const host = yield* Stream.take(first, 1).pipe(Stream.runCollect, Effect.forkChild);

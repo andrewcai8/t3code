@@ -3,6 +3,7 @@ import type {
   EnvironmentId,
   EnvironmentProvisionAttachResult,
   ProvisionRequestId,
+  SessionGrantInput,
 } from "@t3tools/contracts";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import * as Context from "effect/Context";
@@ -16,6 +17,7 @@ import {
   type ConnectionAttemptError,
   ConnectionBlockedError,
   ConnectionTransientError,
+  type PreparedConnection,
 } from "./model.ts";
 import type { PairingConnectionInput } from "./onboarding.ts";
 import { provisionedGatewayPairingUrl } from "./provisioned.ts";
@@ -25,23 +27,28 @@ type RedeemPairing = (
 ) => Effect.Effect<BearerConnectionRegistration, ConnectionAttemptError>;
 
 /**
- * Turns a minted pairing URL into this device's registration for the server behind it. The
- * connection layer provides it; a registry built without it cannot pair a box.
+ * Turns a minted pairing URL into this device's registration for the server behind it, and reads
+ * the grant a saved pairing holds there. The connection layer provides it; a registry built
+ * without it cannot pair a box.
  */
-export class PairingRedemption extends Context.Reference<{ readonly redeem: RedeemPairing }>(
-  "@t3tools/client-runtime/connection/boxPairing/PairingRedemption",
-  {
-    defaultValue: () => ({
-      redeem: () =>
-        Effect.fail(
-          new ConnectionBlockedError({
-            reason: "configuration",
-            detail: "This client cannot pair with a cloud chat's machine.",
-          }),
-        ),
-    }),
-  },
-) {}
+export class PairingRedemption extends Context.Reference<{
+  readonly redeem: RedeemPairing;
+  /** The grant behind a connected pairing; none when the server could not say. */
+  readonly sessionGrant: (
+    prepared: PreparedConnection,
+  ) => Effect.Effect<Option.Option<SessionGrantInput>>;
+}>("@t3tools/client-runtime/connection/boxPairing/PairingRedemption", {
+  defaultValue: () => ({
+    redeem: () =>
+      Effect.fail(
+        new ConnectionBlockedError({
+          reason: "configuration",
+          detail: "This client cannot pair with a cloud chat's machine.",
+        }),
+      ),
+    sessionGrant: () => Effect.succeedNone,
+  }),
+}) {}
 
 export interface BoxPairingPorts {
   /** How the box's host lists it now; none when the host does not list it. */

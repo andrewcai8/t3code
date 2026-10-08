@@ -1,3 +1,6 @@
+import { useAtomValue } from "@effect/atom-react";
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { readEnvironmentScope } from "../../state/session";
 import type {
   EnvironmentId,
   ProjectId,
@@ -583,6 +586,9 @@ function TaskForm({
   const modelOptions = useMemo(() => buildModelOptions(config, null), [config]);
   const cloudProviders = offeredProvisionProviders(config);
   const cloud = draft.target !== "local";
+  const canOperate = useAtomValue(
+    serverEnvironment.upsertScheduledTask.permissionAtom(environmentId),
+  );
   const upsert = useAtomCommand(serverEnvironment.upsertScheduledTask, {
     label: "scheduled task upsert",
     reportFailure: false,
@@ -605,6 +611,7 @@ function TaskForm({
 
   const save = async () => {
     if (
+      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
       submissionPending.current ||
       saving ||
       dictationPending ||
@@ -965,7 +972,7 @@ function TaskForm({
                   : draft.task
               }
               signatureConfigured={draft.schedule.signature !== null}
-              disabled={saving || environmentUnavailable}
+              disabled={!canOperate || saving || environmentUnavailable}
             />
             <FormField
               label="Skip requests older than (minutes)"
@@ -1022,7 +1029,9 @@ function TaskForm({
         accessibilityState={{
           disabled: saving || dictationPending || taskMissing || environmentUnavailable,
         }}
-        disabled={saving || dictationPending || taskMissing || environmentUnavailable}
+        disabled={
+          !canOperate || saving || dictationPending || taskMissing || environmentUnavailable
+        }
         onPress={() => void save()}
         className="min-h-12 items-center justify-center rounded-[14px] bg-primary px-4 disabled:opacity-50"
       >
@@ -1146,6 +1155,9 @@ function EnvironmentTasks({
   const visibleTasks = tasks.data?.tasks.filter(
     (task) => projectIds === null || projectIds.includes(task.projectId),
   );
+  const canOperate = useAtomValue(
+    serverEnvironment.upsertScheduledTask.permissionAtom(environmentId),
+  );
   const setEnabled = useAtomCommand(serverEnvironment.setScheduledTaskEnabled, {
     label: "scheduled task enabled",
     reportFailure: false,
@@ -1165,6 +1177,7 @@ function EnvironmentTasks({
   };
 
   const act = async (task: ScheduledTask, action: "run" | "toggle" | "delete") => {
+    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     const result =
       action === "run"
         ? await runNow({ environmentId, input: { id: task.id } })
@@ -1234,10 +1247,19 @@ function EnvironmentTasks({
             <ControlPillMenu
               actions={[
                 { id: "edit", title: "Edit" },
-                { id: "toggle", title: task.enabled ? "Pause" : "Resume" },
-                // A webhook task has no request to run without.
-                ...(task.schedule.type === "webhook" ? [] : [{ id: "run", title: "Run now" }]),
-                { id: "delete", title: "Delete", attributes: { destructive: true } },
+                {
+                  id: "toggle",
+                  title: task.enabled ? "Pause" : "Resume",
+                  attributes: { disabled: !canOperate },
+                },
+                ...(task.schedule.type === "webhook"
+                  ? []
+                  : [{ id: "run", title: "Run now", attributes: { disabled: !canOperate } }]),
+                {
+                  id: "delete",
+                  title: "Delete",
+                  attributes: { destructive: true, disabled: !canOperate },
+                },
               ]}
               onPressAction={({ nativeEvent }) => {
                 const action = nativeEvent.event;

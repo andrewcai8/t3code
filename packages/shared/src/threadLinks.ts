@@ -15,8 +15,13 @@ const LINK_LABEL_MAX_CHARS = 120;
 const decodeEnvironmentId = Schema.decodeUnknownOption(EnvironmentId);
 const decodeThreadId = Schema.decodeUnknownOption(ThreadId);
 
+// encodeURIComponent keeps parentheses, and a raw `)` would end the Markdown link early.
+function encodeIdSegment(id: string): string {
+  return encodeURIComponent(id).replace(/\(/g, "%28").replace(/\)/g, "%29");
+}
+
 function formatThreadLinkHref(environmentId: string, threadId: string): string {
-  return `${THREAD_LINK_HREF_PREFIX}${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`;
+  return `${THREAD_LINK_HREF_PREFIX}${encodeIdSegment(environmentId)}/${encodeIdSegment(threadId)}`;
 }
 
 /** A Markdown link to the thread, labeled with its title. */

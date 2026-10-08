@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../../../home/FleetBroker.ts";
 import * as HomeService from "../../../home/HomeService.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   callerHasFleetReach,
   callerIsHome,
@@ -36,8 +37,8 @@ const acrossHostReconnect = <A, R>(call: Effect.Effect<A, OrchestratorMcpFailure
     return yield* call;
   }).pipe(Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }));
 
-export const HomeHandlersLive = HomeToolkit.toLayer({
-  t3_environment_list: () =>
+export const layer = McpToolAccess.toLayer(HomeToolkit, {
+  t3_environment_list: McpToolAccess.reads(() =>
     Effect.gen(function* () {
       const { scope } = yield* readCaller();
       const environment = yield* ServerEnvironment.ServerEnvironment;
@@ -67,8 +68,9 @@ export const HomeHandlersLive = HomeToolkit.toLayer({
         ],
       };
     }),
+  ),
 
-  t3_thread_watch: (input) =>
+  t3_thread_watch: McpToolAccess.writes((input) =>
     Effect.gen(function* () {
       if (!(yield* callerIsHome()))
         return yield* new OrchestratorMcpFailure({
@@ -110,13 +112,17 @@ export const HomeHandlersLive = HomeToolkit.toLayer({
         .pipe(Effect.mapError(unavailable));
       return { watchAll: next.watchAll, watches: next.watches };
     }),
+  ),
 
-  t3_fork_run: (input) =>
+  t3_fork_run: McpToolAccess.actsAsCaller((input) =>
     acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input)),
+  ),
 
-  t3_fork_status: (input) =>
+  t3_fork_status: McpToolAccess.readsAsCaller((input) =>
     acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input)),
+  ),
 
-  t3_fork_cancel: (input) =>
+  t3_fork_cancel: McpToolAccess.actsAsCaller((input) =>
     acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.cancel", input)),
+  ),
 });

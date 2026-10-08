@@ -1,8 +1,9 @@
-import type {
-  ServerProvider,
-  ServerProviderSkill,
-  ServerProvisionedSkills,
-  ServerProviderSlashCommand,
+import {
+  isProviderWorkspaceSnapshotCurrent,
+  type ServerProvider,
+  type ServerProviderSkill,
+  type ServerProvisionedSkills,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 
 export type ProviderSkillSourceKind = "app" | "repo" | "project" | "personal" | "system" | "other";
@@ -118,6 +119,20 @@ export function hasCompleteProviderWorkspaceSnapshot(
 ): boolean {
   const snapshot = provider && resolveProviderWorkspaceSnapshot(provider, cwd);
   return Boolean(snapshot && !snapshot.slashCommandsPending);
+}
+
+/** A complete snapshot young enough that opening a composer need not rescan. */
+export function hasCurrentProviderWorkspaceSnapshot(
+  provider: ServerProvider | null | undefined,
+  cwd: string | null | undefined,
+  nowMs: number,
+): boolean {
+  const snapshot = provider && resolveProviderWorkspaceSnapshot(provider, cwd);
+  return Boolean(
+    snapshot &&
+    !snapshot.slashCommandsPending &&
+    isProviderWorkspaceSnapshotCurrent(snapshot, nowMs),
+  );
 }
 
 /**

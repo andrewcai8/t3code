@@ -15,6 +15,7 @@ import {
   ThreadId,
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -119,6 +120,7 @@ const claudeDriver = (
           attachmentsDir: cwd,
           fileSystem: yield* FileSystem.FileSystem,
           path: yield* Path.Path,
+          crypto: yield* Crypto.Crypto,
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           queryRunner: {
             allocateSessionId: Effect.succeed(nativeSession),
@@ -157,7 +159,7 @@ const claudeDriver = (
       }),
   }) satisfies ProviderDriver<
     ClaudeSettings,
-    IdAllocator.IdAllocatorV2 | FileSystem.FileSystem | Path.Path
+    IdAllocator.IdAllocatorV2 | FileSystem.FileSystem | Path.Path | Crypto.Crypto
   >;
 
 /**
@@ -179,7 +181,7 @@ const boxRuntime = (
     claudeDriver(opened, cwd, rebuild),
   ]).pipe(
     Layer.provideMerge(settingsLayer),
-    Layer.provide(Layer.merge(IdAllocator.layer, NodeServices.layer)),
+    Layer.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer, NodeCrypto.layer)),
   );
   const runtime = ProviderReplayHarness.layerWithRegistry(
     { name: "provider-account-switch" },

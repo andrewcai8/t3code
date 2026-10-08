@@ -1,8 +1,4 @@
-import {
-  AuthStandardClientScopes,
-  EnvironmentId,
-  ORCHESTRATION_PROTOCOL_VERSION,
-} from "@t3tools/contracts";
+import { EnvironmentId, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -15,7 +11,6 @@ const CLIENT_PRESENTATION_LAYER = Layer.succeed(
   ClientCapabilities.ClientPresentation,
   ClientCapabilities.ClientPresentation.of({
     metadata: { label: "T3 Code Test", deviceType: "desktop", os: "Test OS" },
-    scopes: AuthStandardClientScopes,
   }),
 );
 

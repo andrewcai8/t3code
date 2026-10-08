@@ -5,16 +5,18 @@ import {
   type OrchestrationV2ShellSnapshot,
   type ProviderStartFailure,
   type ProvisionedChat,
+  sessionHasLegacyPermissions,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
-import type * as Scope from "effect/Scope";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
@@ -259,6 +261,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   const cloudMachines = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, CloudMachine>>(
     new Map(),
   );
+  // Boxes whose saved grant this launch has read, so each pairs again for it at most once.
+  const grantsChecked = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
 
   // Swaps a changed entry in without replacing its supervisor, so its socket and durable streams
   // stay; `installEntryLocked` would tear them down. Run under the entry's lease lock.
@@ -663,14 +667,22 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   });
 
   // Saves the pairing a box's dial obtained into its entry in place, keeping the host's label
-  // for it, so the same attempt dials with it and no replacement supervisor pairs again.
-  const savePairing = (environmentId: EnvironmentId, registration: BearerConnectionRegistration) =>
+  // for it, so the same attempt dials with it and no replacement supervisor pairs again. Only a
+  // `replacing` save overwrites a pairing the box already holds.
+  const savePairing = (
+    environmentId: EnvironmentId,
+    registration: BearerConnectionRegistration,
+    replacing = false,
+  ) =>
     withLeaseLock(
       environmentId,
       Effect.gen(function* () {
         const current = (yield* SubscriptionRef.get(entries)).get(environmentId);
         if (current === undefined) return yield* workspaceMissingError();
-        if (current.target._tag !== "BearerConnectionTarget" || !isUnpairedBox(current))
+        if (
+          current.target._tag !== "BearerConnectionTarget" ||
+          (!replacing && !isUnpairedBox(current))
+        )
           return current;
         const target = new BearerConnectionTarget({
           ...current.target,
@@ -709,6 +721,9 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
 
   // A box this device never paired pairs through its host inside its dial, so a paused one wakes
   // first and the pairing happens at most once per device: every later dial finds it saved.
+  // Servers never widen a stored grant, so a box paired before granular permissions keeps its
+  // narrow one after it upgrades. Its first dial in a launch reads the grant and, if it is that
+  // legacy one, pairs once more for the standard grant and dials with it instead.
   const boxDriver = (environmentId: EnvironmentId, managerId: EnvironmentId) =>
     ConnectionDriver.ConnectionDriver.of({
       ...driver,
@@ -716,20 +731,39 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         Effect.gen(function* () {
           const entry = (yield* SubscriptionRef.get(entries)).get(environmentId) ?? captured;
           if (
-            !isUnpairedBox(entry) ||
-            (entry.target._tag === "BearerConnectionTarget" &&
-              entry.target.workspaceStatus === "missing")
+            entry.target._tag === "BearerConnectionTarget" &&
+            entry.target.workspaceStatus === "missing"
           )
             return yield* driver.connect(entry, reportProgress);
-          yield* reportProgress({ stage: "preparing" });
-          const registration = yield* pairBoxThroughHost(
+          const pairThroughHost = pairBoxThroughHost(
             { environmentId, managerId },
             hostPairingPorts(environmentId, managerId),
           );
-          return yield* driver.connect(
-            yield* savePairing(environmentId, registration),
-            reportProgress,
+          if (isUnpairedBox(entry)) {
+            yield* reportProgress({ stage: "preparing" });
+            return yield* driver.connect(
+              yield* savePairing(environmentId, yield* pairThroughHost),
+              reportProgress,
+            );
+          }
+          if ((yield* Ref.get(grantsChecked)).has(environmentId))
+            return yield* driver.connect(entry, reportProgress);
+          const legacyDial = yield* Scope.fork(yield* Scope.Scope);
+          const lease = yield* driver
+            .connect(entry, reportProgress)
+            .pipe(Scope.provide(legacyDial));
+          const grant = yield* pairing.sessionGrant(lease.prepared);
+          if (Option.isNone(grant)) return lease;
+          // Checked before pairing again, so a host that still mints the legacy grant is asked once.
+          yield* Ref.update(grantsChecked, (checked) => new Set(checked).add(environmentId));
+          if (!sessionHasLegacyPermissions(grant.value)) return lease;
+          const repaired = yield* pairThroughHost.pipe(
+            Effect.flatMap((registration) => savePairing(environmentId, registration, true)),
+            Effect.option,
           );
+          if (Option.isNone(repaired)) return lease;
+          yield* Scope.close(legacyDial, Exit.void);
+          return yield* driver.connect(repaired.value, reportProgress);
         }),
     });
 

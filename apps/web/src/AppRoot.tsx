@@ -2,7 +2,6 @@ import { RouterProvider } from "@tanstack/react-router";
 
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { HomeFleetHost } from "./components/home/HomeFleetHost";
-import { PreviewAutomationHosts } from "./components/preview/PreviewAutomationHosts";
 import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
 import { CloudBoxes } from "./cloud/CloudBoxes";
 import { ProvisionCancellations } from "./cloud/ProvisionCancellations";
@@ -20,7 +19,6 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
       <RouterProvider router={router} />
       <ProvisionCancellations />
       <CloudBoxes />
-      <PreviewAutomationHosts />
       <HomeFleetHost />
       <ElectronBrowserHost />
       <QuitHoldOverlay />

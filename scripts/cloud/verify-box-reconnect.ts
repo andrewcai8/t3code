@@ -84,7 +84,6 @@ import * as RpcHttp from "@t3tools/client-runtime/rpc";
 import { provisionedBox } from "@t3tools/client-runtime/cloud";
 import { startThreadTurn } from "@t3tools/client-runtime/operations";
 import {
-  AuthStandardClientScopes,
   type EnvironmentId,
   MessageId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -450,7 +449,6 @@ const platformLayer = (
       ClientCapabilities.ClientPresentation,
       ClientCapabilities.ClientPresentation.of({
         metadata: CLIENT_METADATA,
-        scopes: AuthStandardClientScopes,
       }),
     ),
     Layer.succeed(
