@@ -66,6 +66,9 @@ const readSummary = (
     const service = yield* UsageService.make;
     return yield* service.readSummary({ ...WINDOW, awaitRefresh: true });
   }).pipe(
+    // Scoped inside the state directory, so the Cursor account cache write
+    // lands before the directory is removed.
+    Effect.scoped,
     Effect.provide(
       ServerConfig.layerTest(process.cwd(), { prefix }).pipe(
         Layer.provideMerge(NodeServices.layer),

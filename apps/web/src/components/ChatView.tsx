@@ -11234,6 +11234,7 @@ export default function ChatView(props: ChatViewProps) {
         ? onAutoEnvironment
         : undefined,
     onEnvironmentChange,
+    cloudRunOn: cloud.runOn,
     onEnvModeChange,
     envMode,
     ...(canOverrideServerThreadEnvMode

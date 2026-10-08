@@ -10,6 +10,7 @@ import type { DraftId } from "../../composerDraftStore";
 import { useT3ProjectFileScripts } from "../../hooks/useT3ProjectFileScripts";
 import { type EnvMode, type EnvironmentOption } from "../BranchToolbar.logic";
 import { BranchToolbar } from "../BranchToolbar";
+import type { CloudRunOn } from "../CloudRunOn";
 import GitActionsControl from "../GitActionsControl";
 import ProjectScriptsControl, {
   type NewProjectScriptInput,
@@ -43,6 +44,7 @@ export interface ThreadDetailsPanelProps extends Pick<
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange: (environmentId: EnvironmentId) => void;
+  cloudRunOn?: CloudRunOn | undefined;
   onEnvModeChange: (mode: EnvMode) => void;
   /** The thread's env mode as ChatView resolves it. */
   envMode: EnvMode;
@@ -114,6 +116,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   onEnvironmentChange={props.onEnvironmentChange}
                   autoEnvironmentLabel={props.autoEnvironmentLabel}
                   onAutoEnvironment={props.onAutoEnvironment}
+                  cloudRunOn={props.cloudRunOn}
                   {...branchToolbarProps}
                 />
               ) : null}
