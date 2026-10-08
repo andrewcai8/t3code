@@ -9,10 +9,25 @@ import {
   type FleetHostRequest,
   type FleetHostResponse,
   type FleetInvokeInput,
+  IsoDateTime,
+  ModelSelection,
+  NonNegativeInt,
+  OrchestrationV2Actor,
+  OrchestrationV2CreationSource,
+  OrchestrationV2RunStatus,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadRun,
+  OrchestratorMcpThreadStatus,
+  OrchestratorMcpThreadTimelineItem,
+  ProjectId,
   ProviderInstanceId,
+  ProviderInteractionMode,
   ProvisionRequestId,
+  RunId,
+  RuntimeMode,
   ThreadId,
+  ThreadLinkedPullRequest,
+  ThreadTitleRegeneration,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -128,6 +143,8 @@ const setup = Effect.gen(function* () {
   /** Origins that refuse fleet.connect, as a box on an older build does. */
   const oldBuilds = new Set<string>();
   const provisioning = { hangs: false };
+  /** What a box answers for an op, in place of the defaults below. */
+  const answers = new Map<string, unknown>();
 
   const boxes = Layer.succeed(BoxFleetClient.BoxFleetClient, {
     readChat: (access, ownerThreadId) => {
@@ -178,6 +195,7 @@ const setup = Effect.gen(function* () {
           invoke: (input) => {
             invoked.push([access.origin, input]);
             const launched = provisioned[0]?.chat?.threadId;
+            if (answers.has(input.request.op)) return Effect.succeed(answers.get(input.request.op));
             return Effect.succeed(
               input.request.op === "threads.list" && launched !== undefined
                 ? {
@@ -323,6 +341,7 @@ const setup = Effect.gen(function* () {
     provisioned,
     provisionCalls,
     provisioning,
+    answers,
     invoked,
     registrations,
     opened,
@@ -507,9 +526,161 @@ it.effect("starts a new cloud chat with one provision like this chat's machine",
           modelSelection,
           runId: "run-1",
           status: "running",
+          link: `[Profile the build](t3-thread://v1/box-3/${encodeURIComponent(threadId)})`,
         },
       });
       expect(resumed).toEqual([]);
+    }),
+  ),
+);
+
+// The thread answers as contracts defined them before #200, which each required a `link`.
+const LegacyThreadListItem = Schema.Struct({
+  threadId: ThreadId,
+  link: Schema.String,
+  projectId: ProjectId,
+  title: Schema.String,
+  createdBy: OrchestrationV2Actor,
+  creationSource: OrchestrationV2CreationSource,
+  status: OrchestratorMcpThreadStatus,
+  latestRunId: Schema.NullOr(RunId),
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.String,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
+  settled: Schema.Boolean,
+  settledAt: Schema.NullOr(IsoDateTime),
+  snoozed: Schema.Boolean,
+  snoozedUntil: Schema.NullOr(IsoDateTime),
+  parentThreadId: Schema.NullOr(ThreadId),
+  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  itemCount: NonNegativeInt,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+const LegacyThreadDetail = Schema.Struct({
+  threadId: ThreadId,
+  link: Schema.String,
+  projectId: ProjectId,
+  title: Schema.String,
+  createdBy: OrchestrationV2Actor,
+  creationSource: OrchestrationV2CreationSource,
+  status: OrchestratorMcpThreadStatus,
+  latestRunId: Schema.NullOr(RunId),
+  activeRunId: Schema.NullOr(RunId),
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.String,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
+  titleRegeneration: Schema.NullOr(ThreadTitleRegeneration),
+  branch: Schema.NullOr(Schema.String),
+  worktreePath: Schema.NullOr(Schema.String),
+  parentThreadId: Schema.NullOr(ThreadId),
+  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  runCount: NonNegativeInt,
+  itemCount: NonNegativeInt,
+  pendingRequestCount: NonNegativeInt,
+  archived: Schema.Boolean,
+  settled: Schema.Boolean,
+  settledAt: Schema.NullOr(IsoDateTime),
+  snoozed: Schema.Boolean,
+  snoozedUntil: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+const decodeLegacyList = Schema.decodeUnknownSync(
+  Schema.Struct({
+    projectId: Schema.NullOr(ProjectId),
+    currentThreadId: Schema.NullOr(ThreadId),
+    threads: Schema.Array(LegacyThreadListItem),
+    nextCursor: Schema.NullOr(NonNegativeInt),
+    total: NonNegativeInt,
+  }),
+);
+const decodeLegacyRead = Schema.decodeUnknownSync(
+  Schema.Struct({
+    thread: LegacyThreadDetail,
+    recentRuns: Schema.Array(OrchestratorMcpThreadRun),
+    items: Schema.Array(OrchestratorMcpThreadTimelineItem),
+    nextPosition: Schema.NullOr(NonNegativeInt),
+    hasMore: Schema.Boolean,
+  }),
+);
+const decodeLegacyLaunch = Schema.decodeUnknownSync(
+  Schema.Struct({
+    threadId: ThreadId,
+    link: Schema.String,
+    projectId: ProjectId,
+    modelSelection: ModelSelection,
+    runId: Schema.NullOr(RunId),
+    status: Schema.NullOr(OrchestrationV2RunStatus),
+  }),
+);
+const resultOf = (response: FleetHostResponse) =>
+  "result" in response ? response.result : response;
+
+it.effect("answers with the thread links boxes on builds before #200 still require", () =>
+  withBoxes(({ relay, send, responses, answers, provisioned }) =>
+    Effect.gen(function* () {
+      const listed = yield* relay(environment(2), { op: "threads.list", input: {} });
+      expect(decodeLegacyList(resultOf(listed)).threads.map((thread) => thread.link)).toEqual([
+        "[Write docs](t3-thread://v1/box-2/chat-2)",
+      ]);
+
+      answers.set("threads.read", {
+        thread: {
+          threadId: "chat-4",
+          projectId: "project-app",
+          title: "Ship release",
+          createdBy: "user",
+          creationSource: "server",
+          status: "idle",
+          latestRunId: null,
+          activeRunId: null,
+          providerInstanceId: "codex",
+          model: "gpt-5.5",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          linkedPullRequest: null,
+          titleRegeneration: null,
+          branch: null,
+          worktreePath: null,
+          parentThreadId: null,
+          relationshipToParent: null,
+          runCount: 0,
+          itemCount: 0,
+          pendingRequestCount: 0,
+          archived: false,
+          settled: false,
+          settledAt: null,
+          snoozed: false,
+          snoozedUntil: null,
+          createdAt: "2026-10-05T10:00:00.000Z",
+          updatedAt: "2026-10-05T10:00:00.000Z",
+        },
+        recentRuns: [],
+        items: [],
+        nextPosition: null,
+        hasMore: false,
+      });
+      yield* send("read", environment(4), {
+        op: "threads.read",
+        input: { threadId: ThreadId.make("chat-4") },
+      });
+      expect(decodeLegacyRead(resultOf(yield* Queue.take(responses))).thread.link).toBe(
+        "[Ship release](t3-thread://v1/box-4/chat-4)",
+      );
+
+      yield* send("launch", CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, {
+        op: "threads.launch",
+        input: { title: "Profile the build", message: "Find the slowest step." },
+      });
+      const launched = decodeLegacyLaunch(resultOf(yield* Queue.take(responses)));
+      expect(launched.link).toBe(
+        `[Profile the build](t3-thread://v1/box-3/${encodeURIComponent(provisioned[0]!.chat!.threadId)})`,
+      );
     }),
   ),
 );
