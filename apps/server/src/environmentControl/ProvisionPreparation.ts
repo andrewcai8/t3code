@@ -114,6 +114,11 @@ export const ProvisionPreparationManifest = Schema.Struct({
       unreadable: Schema.optional(Schema.Array(Schema.String)),
     }),
   ),
+  /**
+   * Never stored, like `setup`: the manager sets it when it prepares a box for a chat rather than
+   * a warm base or spare build. A chat opens when its setup fails; a build must not.
+   */
+  forChat: Schema.optional(Schema.Boolean),
 });
 export type ProvisionPreparationManifest = typeof ProvisionPreparationManifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(
