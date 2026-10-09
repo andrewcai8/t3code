@@ -1537,9 +1537,12 @@ export const layer = Layer.effect(
     const preparing = async (manifest: ProvisionPreparationManifest) => {
       const manager = await resolve();
       const current = manager ? await withCurrentSetup(manager.config, manifest) : manifest;
-      return (await isBaseBuild({ warmBases: warmStore, spares: spareStore }, manifest.request))
-        ? current
-        : { ...current, forChat: true };
+      // A build record that cannot be read keeps the strict default rather than failing the open.
+      const build = await isBaseBuild(
+        { warmBases: warmStore, spares: spareStore },
+        manifest.request,
+      ).catch(() => true);
+      return build ? current : { ...current, forChat: true };
     };
     const resolve = () =>
       (async () => {
