@@ -73,6 +73,7 @@ import {
   withCurrentSetup,
 } from "./ProvisionPreparation.ts";
 import {
+  isBaseBuild,
   makeSpareClaims,
   makeWarmBaseStore,
   makeWarmBaseUpkeep,
@@ -1434,6 +1435,8 @@ export const layer = Layer.effect(
     const store = yield* ProvisionOperationStore;
     const boxUsage = yield* BoxUsageStore;
     const manifests = makeProvisionPreparationStore(stateDir);
+    const warmStore = makeWarmBaseStore(stateDir);
+    const spareStore = makeWarmBaseStore(stateDir, "spares");
     const legacyLeases = yield* Effect.tryPromise({
       try: () =>
         NodeFSP.readFile(NodePath.join(stateDir, "provisioned-sandbox-leases.json"), "utf8").catch(
@@ -1527,10 +1530,16 @@ export const layer = Layer.effect(
             });
       return result.profile;
     };
-    /** A chat's manifest to prepare it from, with the setup this manager is configured with now. */
+    /**
+     * A manifest to prepare from, with the setup this manager is configured with now, marked
+     * `forChat` unless it is a warm base or spare build.
+     */
     const preparing = async (manifest: ProvisionPreparationManifest) => {
       const manager = await resolve();
-      return manager ? withCurrentSetup(manager.config, manifest) : manifest;
+      const current = manager ? await withCurrentSetup(manager.config, manifest) : manifest;
+      return (await isBaseBuild({ warmBases: warmStore, spares: spareStore }, manifest.request))
+        ? current
+        : { ...current, forChat: true };
     };
     const resolve = () =>
       (async () => {
@@ -2278,7 +2287,6 @@ export const layer = Layer.effect(
         spareClaim,
       );
     };
-    const warmStore = makeWarmBaseStore(stateDir);
     const readyE2bBuild = async (operation: ProvisionOperation) => {
       const manager = await requireManager();
       if (
@@ -2353,7 +2361,6 @@ export const layer = Layer.effect(
           apiKey: (await requireManager()).config.e2bApiKey,
         }).deleteSnapshot(snapshotId),
     });
-    const spareStore = makeWarmBaseStore(stateDir, "spares");
     const spareClaims = makeSpareClaims(stateDir);
     const spares = makeWarmBaseUpkeep({
       ...buildPorts,

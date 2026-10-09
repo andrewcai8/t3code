@@ -302,6 +302,7 @@ export function makeNamespaceMacRuntime(config: {
             toolInstall,
             // A builder makes a template, not a chat, so it runs only the build commands.
             ...(!builder && manifest.setup ? { setup: manifest.setup } : {}),
+            ...(!builder && manifest.forChat ? { forChat: true } : {}),
           },
           operation.request.agentDriver,
         ),

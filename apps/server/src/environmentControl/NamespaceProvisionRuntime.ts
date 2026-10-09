@@ -679,6 +679,7 @@ except FileExistsError:
           ...(follow ? { follow } : {}),
           toolInstall,
           ...(manifest.setup ? { setup: manifest.setup } : {}),
+          ...(manifest.forChat ? { forChat: true } : {}),
         },
         operation.request.agentDriver,
       ),

@@ -249,6 +249,7 @@ function guestInput(
       ...extra,
       ...(follow ? { follow } : {}),
       ...(manifest.setup ? { setup: manifest.setup } : {}),
+      ...(manifest.forChat ? { forChat: true } : {}),
     },
     operation.request.agentDriver,
   );

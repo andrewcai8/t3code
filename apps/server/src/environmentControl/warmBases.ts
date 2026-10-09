@@ -340,6 +340,19 @@ export function makeWarmBaseStore(stateDir: string, kind: "warm-bases" | "spares
 }
 export type WarmBaseStore = ReturnType<typeof makeWarmBaseStore>;
 
+/**
+ * Whether a request is its repository's warm base (E2B) or spare (Namespace) build in progress.
+ * Snapshots and chats share what a build leaves, so unlike a chat it must not open on a failed setup.
+ */
+export async function isBaseBuild(
+  stores: { readonly warmBases: WarmBaseStore; readonly spares: WarmBaseStore },
+  request: Pick<ProvisionOperation["request"], "provider" | "requestId" | "repository">,
+) {
+  if (!request.repository) return false;
+  const store = request.provider === "e2b" ? stores.warmBases : stores.spares;
+  return (await store.read(request.repository))?.build?.requestId === request.requestId;
+}
+
 const SpareClaim = Schema.Struct({ by: Schema.String, at: IsoDateTime });
 const decodeClaim = Schema.decodeUnknownSync(Schema.fromJsonString(SpareClaim));
 /** The claimant the upkeep uses to take a spare out of the pool before disposing it. */

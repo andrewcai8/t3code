@@ -100,12 +100,19 @@ export interface RemotePreparationInput {
         readonly unreadable?: ReadonlyArray<string> | undefined;
       }
     | undefined;
+  /**
+   * The box serves a chat, not a warm base or spare build that others will
+   * share. A failing prepare command is then reported in `refreshError` and
+   * `setup-failure.log` instead of failing preparation. Excluded from the
+   * intent hash like `setup`.
+   */
+  readonly forChat?: boolean | undefined;
 }
 
 export const RemotePreparationReady = Schema.Struct({
   ...ProvisionReadiness.fields,
   headRevision: ProvisionReadiness.fields.t3Revision,
-  /** Why this open could not fetch the followed branch or rerun the setup of a box that served before. */
+  /** Why this open could not fetch the followed branch, or which of a chat's setup commands failed. */
   refreshError: Schema.optional(Schema.NullOr(Schema.String)),
   artifactSha256: ProvisionReadiness.fields.preparationHash,
   runtimeVersion: Schema.String,
@@ -688,7 +695,7 @@ def prepare(spec):
         for value, length in hashes:
             if not re.fullmatch('[0-9a-f]{' + str(length) + '}', value):
                 raise RuntimeError('Expected an exact revision or hash')
-        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall', 'prepareEnvironment', 'setup')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps({key: value for key, value in spec.items() if key not in ('artifactSources', 'runtime', 'follow', 'checkOnly', 'toolInstall', 'prepareEnvironment', 'setup', 'forChat')}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         journal_path = root / 'preparation.json'
         adopted = False
         if journal_path.exists():
@@ -1086,13 +1093,13 @@ def prepare(spec):
                 for secret in secrets:
                     text = text.replace(secret, '***')
                 return text
-            # A chat that finished preparing once has a checkout it works in.
-            # Its setup failing again on the chat's own branch is reported, not
-            # allowed to keep it off a new build, and the commands after it
-            # still run so the services they start come up. A root prepared
-            # before the journal recorded this shows it by a server having
-            # started, or by the chat database a snapshot carries.
-            prepared = journal.get('prepared') or server_path.exists() or (t3home / 'userdata' / 'statev2.sqlite').exists()
+            # A chat's setup failing is reported, not allowed to keep the chat
+            # closed or off a new build, and the commands after it still run so
+            # the services they start come up. Only a base that a snapshot or a
+            # spare will share, which never sends forChat, fails on it. A root
+            # that already served a chat is a chat's too, known by its journal,
+            # a server having started, or the chat database a snapshot carries.
+            tolerated = spec.get('forChat') is True or journal.get('prepared') or server_path.exists() or (t3home / 'userdata' / 'statev2.sqlite').exists()
             with step('prepareCommands'):
                 for index, command_line in enumerate(prepare):
                     try:
@@ -1100,10 +1107,10 @@ def prepare(spec):
                             run(['sh', '-lc', command_line], project, prepare_env, timeout=PREPARE_COMMAND_SECONDS)
                     except RuntimeError as error:
                         failure = redact(str(error))
-                        if not prepared:
+                        if not tolerated:
                             raise RuntimeError(failure) from None
                         # A timeout is usually an outage the later commands
-                        # would each wait out too, holding a reopen for hours.
+                        # would each wait out too, holding an open for hours.
                         later = len(prepare) - index - 1
                         if isinstance(error, CommandTimeout) and later:
                             failure += '\nSkipped the ' + str(later) + ' setup command' + ('s' if later > 1 else '') + ' after it'

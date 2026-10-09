@@ -44,7 +44,7 @@ export interface CloudMachine {
   readonly diskBytes: number;
   /** Whether t3_fork_run can copy this machine. */
   readonly forks: boolean;
-  /** The log a reopen whose project setup failed left, and its first line. */
+  /** The log a preparation whose project setup failed left, and its first line. */
   readonly setupFailure?: { readonly log: string; readonly summary: string } | undefined;
 }
 
@@ -92,7 +92,7 @@ export const cloudMachineNoteFor = (input: {
     toldBySession.set(input.session, told.add(input.nativeThreadId));
     const forks = input.mcpTools && (yield* HostProcessPlatform) !== "darwin";
     const t3home = (yield* HostProcessEnvironment).T3CODE_HOME;
-    // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
+    // Written by the box's preparation when its project setup fails, removed when it passes.
     const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
     const setupFailure = log
       ? yield* Effect.tryPromise(() => NodeFSP.readFile(log, "utf8")).pipe(

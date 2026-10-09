@@ -7,6 +7,7 @@ import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import {
+  isBaseBuild,
   makeSpareClaims,
   makeWarmBaseStore,
   makeWarmBaseUpkeep,
@@ -747,6 +748,37 @@ describe("a repository with a warm base and a spare", () => {
         spareRecord?.ready?.key,
         spareRecord?.ready && "requestId" in spareRecord.ready,
       ]).toEqual([OLD_KEY, true, KEY, true]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("telling a base build from a chat", () => {
+  it("knows each repository's build in progress by its request, on its own provider", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-base-build-"));
+    try {
+      const stores = {
+        warmBases: makeWarmBaseStore(directory),
+        spares: makeWarmBaseStore(directory, "spares"),
+      };
+      await stores.spares.write(
+        record({ build: { key: KEY, requestId: buildId, startedAt: iso(NOW) } }),
+      );
+      const chatId = ProvisionRequestId.make("11111111-1111-4111-a111-000000000002");
+      const request = (provider: "e2b" | "namespace", requestId: ProvisionRequestId) => ({
+        provider,
+        requestId,
+        repository: "example/repo",
+      });
+      expect(
+        await Promise.all([
+          isBaseBuild(stores, request("namespace", buildId)),
+          isBaseBuild(stores, request("namespace", chatId)),
+          isBaseBuild(stores, request("e2b", buildId)),
+          isBaseBuild(stores, { provider: "namespace", requestId: buildId }),
+        ]),
+      ).toEqual([true, false, false, false]);
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
