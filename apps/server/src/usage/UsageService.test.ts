@@ -1166,6 +1166,7 @@ describe("UsageService", () => {
             legacy,
           );
         }).pipe(
+          Effect.scoped,
           Effect.provide(
             layerService({
               prefix: "usage-service-v4-upgrade-test",
