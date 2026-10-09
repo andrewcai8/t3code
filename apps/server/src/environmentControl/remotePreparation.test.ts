@@ -336,7 +336,27 @@ describe("remote preparation subprocess", () => {
     ]);
   });
 
-  it("refuses to call a box ready when its setup failed, on every retry", async () => {
+  it("opens a new chat whose setup fails, running the rest and telling the chat where to look", async () => {
+    const input = {
+      ...(await fixture()),
+      prepareCommands: ["echo deps broke >&2; exit 3", "touch ../ran-after"],
+      forChat: true,
+    };
+    const ready = await prepareRemoteHost(localPort, input);
+    pids.add(ready.serverPid);
+    expect([
+      ready.refreshError,
+      await NodeFSP.readFile(NodePath.join(input.root, "home/.t3/setup-failure.log"), "utf8"),
+      exited(ready.serverPid),
+    ]).toEqual([
+      "Preparation command failed: deps broke",
+      "Preparation command failed: deps broke\n$ echo deps broke >&2; exit 3\n\n",
+      false,
+    ]);
+    await NodeFSP.access(NodePath.join(input.root, "ran-after"));
+  });
+
+  it("refuses to call a warm base or spare build ready when its setup failed, on every retry", async () => {
     const input = { ...(await fixture()), prepareCommands: ["exit 3", "touch ../ran-after"] };
     await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);
     await expect(prepareRemoteHost(localPort, input)).rejects.toThrow(/Preparation command failed/);
