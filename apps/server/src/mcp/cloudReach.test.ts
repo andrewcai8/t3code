@@ -43,7 +43,6 @@ const codex = ProviderInstanceId.make("codex");
 
 const launched = {
   threadId: ThreadId.make("chat-c"),
-  link: "[Profile the build](t3-thread://v1/box-c/chat-c)",
   projectId: ProjectId.make("project-app"),
   modelSelection: { instanceId: codex, model: "gpt-5.5" },
   runId: null,

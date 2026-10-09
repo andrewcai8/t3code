@@ -41,6 +41,7 @@ import {
   chatShellSnapshot,
   planHostBoxSync,
   withHostChat,
+  withPullRequestsLoaded,
 } from "./hostBoxSync.ts";
 import {
   BearerConnectionTarget,
@@ -1041,6 +1042,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         return relabelBox(step.environmentId, step.label);
       case "Reseed":
         return cache.loadShell(step.environmentId).pipe(
+          Effect.flatMap(withPullRequestsLoaded),
           Effect.flatMap((cached) => {
             const reseeded = withHostChat(cached, step.chat);
             return reseeded === null ? Effect.void : cache.saveShell(step.environmentId, reseeded);

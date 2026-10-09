@@ -101,6 +101,7 @@ import {
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
+  readonly throughEntryId?: string;
 };
 
 export type {
@@ -391,6 +392,7 @@ export function createThreadEnvironmentAtoms<R, E>(
           return yield* controller.value.loadEarlier(
             supervisor.target.environmentId,
             input.threadId,
+            input.throughEntryId,
           );
         }),
       scheduler,

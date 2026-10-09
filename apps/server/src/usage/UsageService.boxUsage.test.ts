@@ -20,6 +20,7 @@ import { createProvisionedLeaseRegistry } from "../environmentControl/Provisione
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { BoxUsageStore, BoxUsageStoreError } from "./boxUsage.ts";
+import * as CursorUsageReader from "./cursorUsageReader.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -78,6 +79,7 @@ const serviceLayers = (input: {
 }) =>
   ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(CursorUsageReader.layer),
     Layer.provideMerge(
       input.boxUsage ??
         Layer.succeed(

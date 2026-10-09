@@ -44,6 +44,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import * as ServerConfig from "../src/config.ts";
 import * as ServerSettingsService from "../src/serverSettings.ts";
 import { BoxUsageStore } from "../src/usage/boxUsage.ts";
+import * as CursorUsageReader from "../src/usage/cursorUsageReader.ts";
 import * as UsageService from "../src/usage/UsageService.ts";
 
 class ImportFailure extends Schema.TaggedError<ImportFailure>()("ImportFailure", {
@@ -119,11 +120,12 @@ const scanHistory = (input: {
               prune: () => Effect.void,
             }),
           ),
+          CursorUsageReader.layer,
         ),
       ),
     );
     return yield* usage.readHistory({ sinceTime: input.sinceTime });
-  });
+  }).pipe(Effect.scoped);
 
 const tokens = (bucket: UsageSummary["buckets"][number]) =>
   bucket.totals.uncachedInputTokens +

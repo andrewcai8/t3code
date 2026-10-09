@@ -92,6 +92,8 @@ const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [56, "RemoveRedundantProjectionIndexes"],
   [57, "ScheduledTaskWebhooks"],
   [58, "WebhookRelayDeliveries"],
+  [59, "McpAppModelContext"],
+  [60, "ThreadSnapshotWindowIndexes"],
 ];
 /** Upstream migrations newer than any fork-era ledger, which a moved ledger still runs. */
 const upstreamAfterForkEra = expectedUpstreamAbove51.filter(([id]) => id > 56);
