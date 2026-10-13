@@ -13,7 +13,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Option from "effect/Option";
 import {
   resolveProvisioningProfiles,
@@ -25,9 +25,9 @@ import { credentialSecretName } from "../provider/providerCredentialName.ts";
 const decodeSettings = Schema.decodeSync(ServerSettings);
 let directory: string;
 const cursorAuthRelative =
-  HostProcessPlatform.defaultValue() === "win32"
+  HostProcess.Platform.defaultValue() === "win32"
     ? "AppData/Roaming/Cursor/auth.json"
-    : HostProcessPlatform.defaultValue() === "darwin"
+    : HostProcess.Platform.defaultValue() === "darwin"
       ? ".cursor/auth.json"
       : ".config/cursor/auth.json";
 const cursorEnvironment = () => [
@@ -128,7 +128,9 @@ it.layer(NodeServices.layer)("selected provisioning account", (it) => {
     Effect.gen(function* () {
       const source = yield* file("custom/auth.json");
       const settings = decodeSettings({
-        providers: { codex: { homePath: NodePath.dirname(source) } },
+        providerInstances: {
+          codex: { driver: "codex", config: { homePath: NodePath.dirname(source) } },
+        },
       });
       expect((yield* resolve(settings, "codex")).credential).toEqual({
         kind: "file",
@@ -333,8 +335,8 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     Effect.gen(function* () {
       const codex = yield* file("codex/auth.json");
       const settings = decodeSettings({
-        providers: { codex: { homePath: NodePath.dirname(codex) } },
         providerInstances: {
+          codex: { driver: "codex", config: { homePath: NodePath.dirname(codex) } },
           selected: { driver: "claudeAgent", config: { homePath: directory } },
           cursor: {
             driver: "cursor",
@@ -395,8 +397,9 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
   });
   const routedSettings = () =>
     decodeSettings({
-      providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
       providerInstances: {
+        claudeAgent: { driver: "claudeAgent", enabled: false },
+        codex: { driver: "codex", enabled: false },
         selected: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "selected-key"),
         claudeSpare: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "spare-key"),
         cursor: { driver: "cursor", enabled: false },
@@ -493,8 +496,9 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       });
       const profiles = yield* resolveProvisioningProfiles(
         decodeSettings({
-          providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
           providerInstances: {
+            claudeAgent: { driver: "claudeAgent", enabled: false },
+            codex: { driver: "codex", enabled: false },
             claude_work: tokenAccount("sk-ant-oat01-work", "work@example.com"),
             claude_home: tokenAccount("sk-ant-oat01-home", "home@example.com"),
           },
@@ -524,8 +528,9 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
   it.effect("counts a busy account's sessions on every instance that shares its email", () =>
     Effect.gen(function* () {
       const settings = decodeSettings({
-        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
         providerInstances: {
+          claudeAgent: { driver: "claudeAgent", enabled: false },
+          codex: { driver: "codex", enabled: false },
           work: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "work-key"),
           workAgain: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "work-key-2"),
           home: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "home-key"),
@@ -559,11 +564,12 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       yield* file("codex-default/auth.json", "default-login");
       yield* file("codex-spare/auth.json", "spare-login");
       const settings = decodeSettings({
-        providers: {
-          claudeAgent: { enabled: false },
-          codex: { homePath: NodePath.join(directory, "codex-default") },
-        },
         providerInstances: {
+          claudeAgent: { driver: "claudeAgent", enabled: false },
+          codex: {
+            driver: "codex",
+            config: { homePath: NodePath.join(directory, "codex-default") },
+          },
           selected: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "selected-key"),
           codex_ac1: {
             driver: "codex",
@@ -622,8 +628,9 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       yield* file("codex-spare/auth.json", codexLogin(1789041600));
       const settings = (spareHome: string) =>
         decodeSettings({
-          providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
           providerInstances: {
+            claudeAgent: { driver: "claudeAgent", enabled: false },
+            codex: { driver: "codex", enabled: false },
             roomy: {
               driver: "codex",
               displayName: "Codex · roomy",
@@ -652,8 +659,9 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       yield* TestClock.setTime(Date.parse("2026-09-03T12:00:00.000Z"));
       yield* file("codex-host/auth.json", revokedHostLogin);
       const settings = decodeSettings({
-        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
         providerInstances: {
+          claudeAgent: { driver: "claudeAgent", enabled: false },
+          codex: { driver: "codex", enabled: false },
           codex_uci: {
             driver: "codex",
             config: { homePath: NodePath.join(directory, "codex-host") },
@@ -693,8 +701,9 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
   it.effect("falls through to the next account when the best login is not portable", () =>
     Effect.gen(function* () {
       const settings = decodeSettings({
-        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
         providerInstances: {
+          claudeAgent: { driver: "claudeAgent", enabled: false },
+          codex: { driver: "codex", enabled: false },
           selected: apiKeyAccount("claudeAgent", "ANTHROPIC_API_KEY", "selected-key"),
           keychain: { driver: "claudeAgent", config: { homePath: directory } },
           cursor: { driver: "cursor", enabled: false },
@@ -716,8 +725,8 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
     Effect.gen(function* () {
       yield* file("codex/auth.json");
       const settings = decodeSettings({
-        providers: { codex: { homePath: NodePath.join(directory, "codex") } },
         providerInstances: {
+          codex: { driver: "codex", config: { homePath: NodePath.join(directory, "codex") } },
           selected: { driver: "claudeAgent", config: { homePath: directory } },
           cursor: { driver: "cursor", enabled: false },
         },
@@ -735,8 +744,8 @@ it.layer(NodeServices.layer)("provisioned accounts", (it) => {
       environment: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: `${name}-token`, sensitive: true }],
     });
     const settings = decodeSettings({
-      providers: { claudeAgent: { enabled: false } },
       providerInstances: {
+        claudeAgent: { driver: "claudeAgent", enabled: false },
         claude_work: token("work"),
         claude_spare: token("spare"),
         claude_roomy: token("roomy"),

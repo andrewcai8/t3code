@@ -6,24 +6,27 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
   UsageDay,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import type { UsageRecord } from "@t3tools/provider-core/server/usage";
+import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
+import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
+import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { BoxUsageStore } from "./boxUsage.ts";
 import * as UsageService from "./UsageService.ts";
-
-const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const WINDOW: UsageSummaryInput = {
   timeZone: "UTC",
@@ -31,8 +34,39 @@ const WINDOW: UsageSummaryInput = {
   untilDay: UsageDay.make("2026-08-02"),
 };
 
-const token = (subject: string) =>
-  `h.${Buffer.from(JSON.stringify({ sub: subject })).toString("base64url")}.s`;
+const OUTPUT_BY_ACCOUNT: Record<string, number> = { user_a: 3, user_b: 5 };
+
+/** Stands in for Cursor's dashboard API: a login file names its account. */
+const readAccount: CursorAccountReader.CursorAccountReader["Service"]["read"] = (credential) =>
+  Effect.promise(async () => {
+    const accountKey =
+      typeof credential === "string" ? (await NodeFSP.readFile(credential, "utf8")).trim() : "";
+    if (!(accountKey in OUTPUT_BY_ACCOUNT)) {
+      return {
+        accountKey: null,
+        records: [],
+        missing: false,
+        error: "Cursor credentials could not be read.",
+      };
+    }
+    const record: UsageRecord = {
+      provider: "cursor",
+      timestampMs: Date.parse("2026-08-01T10:00:00Z"),
+      model: "auto",
+      sessionId: "conversation-1",
+      totals: {
+        uncachedInputTokens: 1,
+        cachedInputTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: OUTPUT_BY_ACCOUNT[accountKey] ?? 0,
+        reasoningTokens: 0,
+      },
+      reportedCostUsd: null,
+      speed: "standard",
+      dedupeKey: `cursor-account:${accountKey}:1`,
+    };
+    return { accountKey, records: [record], missing: false, error: null };
+  });
 
 const makeHome = Effect.gen(function* () {
   const home = yield* Effect.promise(() =>
@@ -63,28 +97,23 @@ const readSummary = (
 ) =>
   Effect.gen(function* () {
     const service = yield* UsageService.make;
-    return yield* service.readSummary(WINDOW);
+    return yield* service.readSummary({ ...WINDOW, awaitRefresh: true });
   }).pipe(
+    Effect.scoped,
     Effect.provide(
-      ServerConfig.layerTest(process.cwd(), { prefix }).pipe(
-        Layer.provideMerge(NodeServices.layer),
-        Layer.provideMerge(
-          Layer.succeed(
-            BoxUsageStore,
-            BoxUsageStore.of({
-              replace: () => Effect.void,
-              list: () => Effect.succeed([]),
-              prune: () => Effect.void,
-            }),
-          ),
+      Layer.fresh(CursorUsageAccounts.layer).pipe(
+        Layer.provide(
+          Layer.succeed(CursorAccountReader.CursorAccountReader, { read: readAccount }),
         ),
-        Layer.provideMerge(Layer.succeed(HostProcessPlatform, "linux")),
+        Layer.provideMerge(AntigravityUsage.layer),
+        Layer.provideMerge(ProviderHostLive.layer),
+        Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
+        Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), NodePath.join(home, prefix))),
+        Layer.provideMerge(NodeServices.layer),
+        Layer.provideMerge(Layer.succeed(HostProcess.Platform, "linux")),
         Layer.provideMerge(
           ServerSettings.layerTest({
-            providers: {
-              claudeAgent: { homePath: NodePath.join(home, "claude") },
-              codex: { homePath: NodePath.join(home, "codex") },
-            },
             providerInstances: Object.fromEntries(
               Object.entries(providerInstances).map(([id, instance]) => [
                 ProviderInstanceId.make(id),
@@ -102,9 +131,10 @@ const readSummary = (
           ),
         ),
         Layer.provideMerge(
-          Layer.succeed(HostProcessEnvironment, {
+          Layer.succeed(HostProcess.Environment, {
             HOME: home,
             GROK_HOME: NodePath.join(home, "grok"),
+            PI_CODING_AGENT_DIR: NodePath.join(home, "pi"),
             OPENCODE_DATA_DIR: NodePath.join(home, "opencode"),
             ANTIGRAVITY_DATA_DIR: NodePath.join(home, "antigravity"),
             XDG_CONFIG_HOME: NodePath.join(home, "config"),
@@ -119,39 +149,14 @@ describe("UsageService with several Cursor logins", () => {
     Effect.gen(function* () {
       const home = yield* makeHome;
       // The host's default login and two instance logins share user_a.
-      const logins = [
-        { config: "config", subject: "auth0|user_a" },
-        { config: "config-a", subject: "auth0|user_a" },
-        { config: "config-b", subject: "auth0|user_b" },
-        { config: "config-c", subject: "auth0|user_a" },
-      ];
-      for (const { config, subject } of logins) {
-        yield* writeLogin(home, config, encodeUnknownJsonString({ accessToken: token(subject) }));
+      for (const [config, account] of [
+        ["config", "user_a"],
+        ["config-a", "user_a"],
+        ["config-b", "user_b"],
+        ["config-c", "user_a"],
+      ] as const) {
+        yield* writeLogin(home, config, account);
       }
-      const outputByUser: Record<string, number> = { user_a: 3, user_b: 5 };
-      const realFetch = globalThis.fetch;
-      yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          globalThis.fetch = (async (_url: string, init: RequestInit) => {
-            const cookie = new Headers(init.headers).get("Cookie") ?? "";
-            const user = decodeURIComponent(cookie).split("=")[1]?.split("::")[0] ?? "";
-            return Response.json({
-              totalUsageEventsCount: 1,
-              usageEventsDisplay: [
-                {
-                  timestamp: String(Date.parse("2026-08-01T10:00:00Z")),
-                  model: "auto",
-                  tokenUsage: { inputTokens: 1, outputTokens: outputByUser[user] ?? 0 },
-                },
-              ],
-            });
-          }) as typeof fetch;
-        }),
-        () =>
-          Effect.sync(() => {
-            globalThis.fetch = realFetch;
-          }),
-      );
 
       const summary = yield* readSummary(home, "usage-service-cursor-instances", {
         cursor: cursorInstance(home, "config-a"),
@@ -159,11 +164,10 @@ describe("UsageService with several Cursor logins", () => {
         "cursor-alias": cursorInstance(home, "config-c"),
       });
 
-      const cursorSources = summary.sources.filter(
-        (source) => source.fingerprint.provider === "cursor",
-      );
       assert.deepStrictEqual(
-        cursorSources.map((source) => [source.fingerprint.hostId, source.status]),
+        summary.sources
+          .filter((source) => source.fingerprint.provider === "cursor")
+          .map((source) => [source.fingerprint.hostId, source.status]),
         [
           ["cursor.com", "ok"],
           ["cursor.com", "ok"],

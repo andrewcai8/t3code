@@ -26,6 +26,7 @@ import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Project from "../project/ProjectService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { routeHome, runAsHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -43,7 +44,6 @@ const codex = ProviderInstanceId.make("codex");
 
 const launched = {
   threadId: ThreadId.make("chat-c"),
-  link: "[Profile the build](t3-thread://v1/box-c/chat-c)",
   projectId: ProjectId.make("project-app"),
   modelSelection: { instanceId: codex, model: "gpt-5.5" },
   runId: null,
@@ -163,6 +163,7 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
   const { layer, relayed } = onBox();
   const dependencies = Layer.mergeAll(
     layer,
+    ServerSettings.layerTest(),
     NodeCrypto.layer,
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
     Layer.mock(Project.ProjectService)({}),

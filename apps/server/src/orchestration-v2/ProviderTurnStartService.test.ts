@@ -19,7 +19,7 @@ import {
   OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import * as NodeOS from "node:os";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -33,10 +33,10 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
-import * as IdAllocator from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import { ProviderAdapterEventStreamError } from "./ProviderAdapter.ts";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -463,7 +463,7 @@ function makeLocalCommandHarness(input: {
     }).pipe(
       Effect.andThen(
         Effect.fail(
-          new ProviderAdapterEventStreamError({
+          new ProviderAdapter.ProviderAdapterEventStreamError({
             driver: providerThread.driver,
             providerSessionId,
             cause: input.ensureThreadFailure,
@@ -477,7 +477,7 @@ function makeLocalCommandHarness(input: {
     resumeThread: (resume: { readonly providerThread: typeof providerThread }) =>
       input.pendingHandoff === undefined
         ? Effect.fail(
-            new ProviderAdapterEventStreamError({
+            new ProviderAdapter.ProviderAdapterEventStreamError({
               driver: providerThread.driver,
               providerSessionId,
               cause: "native thread is gone",
@@ -967,8 +967,8 @@ effectIt.effect(
     Effect.gen(function* () {
       const onBox = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(
-          Effect.provideService(HostProcessEnvironment, { T3CODE_USAGE_HOST_ID: "request-1" }),
-          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(HostProcess.Environment, { T3CODE_USAGE_HOST_ID: "request-1" }),
+          Effect.provideService(HostProcess.Platform, "linux"),
         );
       const first = makeLocalCommandHarness({
         text: "Run the evals",

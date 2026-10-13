@@ -6,8 +6,17 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { UsageDay, type UsageBucket, type UsageSummaryInput } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  UsageDay,
+  type UsageBucket,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
+import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
+import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -15,9 +24,13 @@ import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
 import { createProvisionedLeaseRegistry } from "../environmentControl/ProvisionedLeaseRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
+import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { BoxUsageStore, BoxUsageStoreError } from "./boxUsage.ts";
 import * as UsageService from "./UsageService.ts";
@@ -57,9 +70,15 @@ const setup = Effect.gen(function* () {
     home,
     transcript: NodePath.join(transcriptDir, "session.jsonl"),
     settings: {
-      providers: {
-        claudeAgent: { homePath: NodePath.join(home, "claude") },
-        codex: { homePath: NodePath.join(home, "codex") },
+      providerInstances: {
+        [ProviderInstanceId.make("claudeAgent")]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          config: { homePath: NodePath.join(home, "claude") },
+        },
+        [ProviderInstanceId.make("codex")]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { homePath: NodePath.join(home, "codex") },
+        },
       },
     },
   };
@@ -76,7 +95,13 @@ const serviceLayers = (input: {
   /** Defaults to a store with no cloud box usage. */
   readonly boxUsage?: Layer.Layer<BoxUsageStore>;
 }) =>
-  ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
+  Layer.fresh(CursorUsageAccounts.layer).pipe(
+    Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
+    Layer.provideMerge(AntigravityUsage.layer),
+    Layer.provideMerge(ProviderHostLive.layer),
+    Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
+    Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: input.prefix })),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(
       input.boxUsage ??
@@ -89,7 +114,7 @@ const serviceLayers = (input: {
           }),
         ),
     ),
-    Layer.provideMerge(Layer.succeed(HostProcessPlatform, "linux")),
+    Layer.provideMerge(Layer.succeed(HostProcess.Platform, "linux")),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
       Layer.succeed(
@@ -100,9 +125,10 @@ const serviceLayers = (input: {
       ),
     ),
     Layer.provideMerge(
-      Layer.succeed(HostProcessEnvironment, {
+      Layer.succeed(HostProcess.Environment, {
         HOME: input.home,
         GROK_HOME: NodePath.join(input.home, "grok"),
+        PI_CODING_AGENT_DIR: NodePath.join(input.home, "pi"),
         OPENCODE_DATA_DIR: NodePath.join(input.home, "opencode"),
         ANTIGRAVITY_DATA_DIR: NodePath.join(input.home, "antigravity"),
         XDG_CONFIG_HOME: NodePath.join(input.home, "config"),
@@ -299,26 +325,6 @@ describe("UsageService with cloud box usage", () => {
           }),
         );
       });
-      const realFetch = globalThis.fetch;
-      yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          globalThis.fetch = (async () =>
-            Response.json({
-              totalUsageEventsCount: 1,
-              usageEventsDisplay: [
-                {
-                  timestamp: String(Date.parse("2026-08-01T10:00:00Z")),
-                  model: "auto",
-                  tokenUsage: { inputTokens: 1, outputTokens: 3 },
-                },
-              ],
-            })) as typeof fetch;
-        }),
-        () =>
-          Effect.sync(() => {
-            globalThis.fetch = realFetch;
-          }),
-      );
       yield* TestClock.setTime(Date.parse("2026-08-01T12:30:00Z"));
       const service = yield* UsageService.make.pipe(
         Effect.provide(serviceLayers({ prefix: "usage-service-history", home, settings })),

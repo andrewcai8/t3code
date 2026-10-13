@@ -28,6 +28,11 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
+import type { ProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -38,16 +43,12 @@ import { boxShell } from "../environmentControl/shellTestFixture.ts";
 import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
-import { checkpointWorkspace } from "../orchestration-v2/testkit/ReplayFixtureWorkspace.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettingsModule from "../serverSettings.ts";
 import * as ProviderAccountSwitch from "./ProviderAccountSwitch.ts";
-import type { ProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
-import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryHydration from "./ProviderInstanceRegistryHydration.ts";
 
@@ -108,12 +109,12 @@ const claudeDriver = (
     defaultConfig: () => decodeClaudeSettings({}),
     create: ({ instanceId, environment, enabled, config }) =>
       Effect.gen(function* () {
-        const env = mergeProviderInstanceEnvironment(environment);
+        const env = yield* mergeProviderInstanceEnvironment(environment);
         if (rebuild && env.CLAUDE_CODE_OAUTH_TOKEN === "token-b") {
           yield* Deferred.succeed(rebuild.started, undefined);
           yield* Deferred.await(rebuild.release);
         }
-        const orchestrationAdapter = ClaudeAdapterV2.makeClaudeAdapterV2({
+        const orchestrationAdapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
           instanceId,
           settings: config,
           environment: env,
@@ -136,6 +137,7 @@ const claudeDriver = (
                   offer: () => Effect.void,
                   setModel: () => Effect.void,
                   setPermissionMode: () => Effect.void,
+                  stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Effect.void,
                 };
@@ -159,7 +161,11 @@ const claudeDriver = (
       }),
   }) satisfies ProviderDriver<
     ClaudeSettings,
-    IdAllocator.IdAllocatorV2 | FileSystem.FileSystem | Path.Path | Crypto.Crypto
+    | IdAllocator.IdAllocatorV2
+    | McpProviderSessions.McpProviderSessions
+    | FileSystem.FileSystem
+    | Path.Path
+    | Crypto.Crypto
   >;
 
 /**
@@ -181,7 +187,14 @@ const boxRuntime = (
     claudeDriver(opened, cwd, rebuild),
   ]).pipe(
     Layer.provideMerge(settingsLayer),
-    Layer.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer, NodeCrypto.layer)),
+    Layer.provide(
+      Layer.mergeAll(
+        IdAllocator.layer,
+        McpProviderSessions.layer,
+        NodeServices.layer,
+        NodeCrypto.layer,
+      ),
+    ),
   );
   const runtime = ProviderReplayHarness.layerWithRegistry(
     { name: "provider-account-switch" },

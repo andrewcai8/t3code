@@ -1,5 +1,6 @@
 import { RouterProvider } from "@tanstack/react-router";
 
+import { BrowserProfileReporter } from "./browser/BrowserProfileReporter";
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { HomeFleetHost } from "./components/home/HomeFleetHost";
 import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
@@ -21,6 +22,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
       <CloudBoxes />
       <HomeFleetHost />
       <ElectronBrowserHost />
+      <BrowserProfileReporter />
       <QuitHoldOverlay />
     </AppAtomRegistryProvider>
   );

@@ -2,7 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import { it as effectIt } from "@effect/vitest";
 import { expect, it } from "vite-plus/test";
@@ -51,8 +51,8 @@ const noteOn = (
     session: turn.session ?? {},
     nativeThreadId: turn.nativeThreadId ?? "native-1",
   }).pipe(
-    Effect.provideService(HostProcessEnvironment, environment),
-    Effect.provideService(HostProcessPlatform, platform),
+    Effect.provideService(HostProcess.Environment, environment),
+    Effect.provideService(HostProcess.Platform, platform),
   );
 const box = { T3CODE_USAGE_HOST_ID: "request-1" };
 const forkSentence = "use t3_fork_run: each job runs in a throwaway copy of this machine";

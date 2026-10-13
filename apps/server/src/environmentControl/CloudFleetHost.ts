@@ -31,6 +31,7 @@ import {
   ProvisionRequestId,
   ThreadId,
 } from "@t3tools/contracts";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -176,6 +177,37 @@ class StartAfterAnswer {
 }
 
 type BoxConnection = BoxFleetClient.BoxFleetConnection;
+
+/**
+ * Boxes on builds before #200 decode thread answers with a required `link`, which upstream #17017
+ * dropped, so a launch that went through would read as a failure there and be retried. The host
+ * adds the old link to each thread it answers with. Delete once every cloud box runs #200 or later.
+ * A link the answer already has wins: an older box's own, or a new chat's from startChat.
+ */
+const legacySegment = (id: string) =>
+  encodeURIComponent(id).replace(/\(/g, "%28").replace(/\)/g, "%29");
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+const withLegacyLink = (environmentId: string, thread: unknown, title?: string): unknown => {
+  if (!isRecord(thread) || typeof thread.threadId !== "string") return thread;
+  const label = title ?? (typeof thread.title === "string" ? thread.title : "");
+  const href = `${legacySegment(environmentId)}/${legacySegment(thread.threadId)}`;
+  return { link: formatThreadLink(href, label), ...thread };
+};
+const withLegacyLinks = ({ environmentId, invoke }: FleetHostRequest, result: unknown) => {
+  if (!isRecord(result)) return result;
+  const { request } = invoke;
+  if (request.op === "threads.launch")
+    return withLegacyLink(environmentId, result, request.input.title);
+  if (request.op === "threads.read" && isRecord(result.thread))
+    return { ...result, thread: withLegacyLink(environmentId, result.thread) };
+  if (request.op === "threads.list" && Array.isArray(result.threads))
+    return {
+      ...result,
+      threads: result.threads.map((thread: unknown) => withLegacyLink(environmentId, thread)),
+    };
+  return result;
+};
 
 const decodeThreadList = Schema.decodeUnknownEffect(FleetResults["threads.list"]);
 const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -398,14 +430,14 @@ const make = Effect.gen(function* () {
         (candidate) => candidate.threadId === provisioned.value.threadId,
       );
       if (thread === undefined) return yield* stillStarting;
-      return {
+      const launched = {
         threadId: thread.threadId,
-        link: thread.link,
         projectId: thread.projectId,
         modelSelection,
         runId: thread.latestRunId,
         status: thread.status === "idle" ? null : thread.status,
       } satisfies FleetResult<"threads.launch">;
+      return withLegacyLink(result.environment.environmentId, launched, input.title);
     });
 
   /**
@@ -499,7 +531,6 @@ const make = Effect.gen(function* () {
             : [];
         return listThreadPage(shells, request.input, {
           actor,
-          environmentId: target.environmentId,
           nowMs: yield* Clock.currentTimeMillis,
         });
       }
@@ -533,7 +564,13 @@ const make = Effect.gen(function* () {
                 response: { requestId: request.requestId, result: result.result },
                 after: result.start,
               }
-            : { response: { requestId: request.requestId, result }, after: Effect.void },
+            : {
+                response: {
+                  requestId: request.requestId,
+                  result: withLegacyLinks(request, result),
+                },
+                after: Effect.void,
+              },
       }),
       Effect.flatMap(({ response, after }) =>
         connection.respond(response).pipe(Effect.ensuring(after)),

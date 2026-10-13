@@ -16,7 +16,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { ServerSettings } from "@t3tools/contracts";
+import { resolveProviderInstanceEnabled, ServerSettings } from "@t3tools/contracts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
 import {
   makeProvisionPreparationStore,
@@ -481,8 +481,9 @@ const hostOwnedCopy = (localAgentRuns: boolean) =>
         NodeFSP.writeFile(authPath, hostLogin(now / 1000 + 20 * 3600, "rt_host")),
       );
       const settings = decodeServerSettings({
-        providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
         providerInstances: {
+          claudeAgent: { driver: "claudeAgent", enabled: false },
+          codex: { driver: "codex", enabled: false },
           codex_host: { driver: "codex", config: { homePath: NodePath.join(f.root, ".codex") } },
           cursor: { driver: "cursor", enabled: false },
         },
@@ -1349,9 +1350,7 @@ function guestAccounts(
   );
   return Object.entries(deriveProviderInstanceConfigMap(settings))
     .filter(
-      ([, instance]) =>
-        instance.driver === driver &&
-        (instance.enabled ?? (instance.config as { enabled?: boolean } | undefined)?.enabled),
+      ([, instance]) => instance.driver === driver && resolveProviderInstanceEnabled(instance),
     )
     .map(([instanceId, instance]) => ({
       instanceId,

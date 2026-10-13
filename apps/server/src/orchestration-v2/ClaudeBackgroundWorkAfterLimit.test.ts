@@ -24,16 +24,16 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 
 import * as ClaudeAdapterV2 from "./Adapters/ClaudeAdapterV2.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
-import * as IdAllocator from "./IdAllocator.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
-import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 
 const nativeSession = "native-session-1";
 const instanceId = ProviderInstanceId.make("claudeAgent");
@@ -80,7 +80,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
     ProviderAdapterRegistry.layerFromAdaptersEffect(
       Effect.gen(function* () {
         return [
-          ClaudeAdapterV2.makeClaudeAdapterV2({
+          yield* ClaudeAdapterV2.makeClaudeAdapterV2({
             instanceId,
             settings: decodeClaudeSettings({}),
             environment: {},
@@ -103,6 +103,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
                     offer: () => Effect.void,
                     setModel: () => Effect.void,
                     setPermissionMode: () => Effect.void,
+                    stopTask: () => Effect.void,
                     interrupt: Effect.void,
                     close: Effect.asVoid(close),
                   };

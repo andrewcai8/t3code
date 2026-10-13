@@ -5,7 +5,6 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import {
-  DEFAULT_SERVER_SETTINGS,
   DurableProvisionRequest,
   defaultInstanceIdForDriver,
   EnvironmentProvisionInput,
@@ -28,6 +27,7 @@ import {
 } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
+import { BUILT_IN_DRIVERS } from "../provider/builtInDrivers.ts";
 import { stripCodexRefreshToken } from "../provider/codexLoginCopy.ts";
 import {
   credentialVariables,
@@ -340,7 +340,6 @@ export function provisionProviders(
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 const decodeSettings = Schema.decodeUnknownSync(
   Schema.Struct({
-    providers: Schema.Record(Schema.String, Schema.Unknown),
     providerInstances: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)),
   }),
 );
@@ -400,7 +399,6 @@ function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
 }
 
 type ChildSettings = {
-  providers?: Record<string, Record<string, unknown>>;
   providerInstances?: Record<string, ChildProviderInstanceSettings>;
   [key: string]: unknown;
 };
@@ -434,7 +432,6 @@ function enableChildProvider(
       settings = parsed as ChildSettings;
     }
   } catch {}
-  const providers = settings.providers ?? {};
   const providerInstances = settings.providerInstances ?? {};
   const accounts = profiles.map(({ kind: agentDriver, displayName, accountEmail }) => {
     const instanceId = guestInstanceId(agentDriver);
@@ -480,7 +477,14 @@ function enableChildProvider(
       },
     ] as const;
   });
-  const enabled = new Set<string>(profiles.map(({ kind }) => kind));
+  const provisioned = new Set<string>(profiles.map(({ kind }) => kind));
+  // Only the provisioned drivers' CLIs are installed here, so every other
+  // driver's default instance offers an account no turn can run on.
+  const unprovisioned = BUILT_IN_DRIVERS.flatMap(({ driverKind, metadata }) => {
+    if (metadata.hasDefaultInstance === false || provisioned.has(driverKind)) return [];
+    const instanceId = defaultInstanceIdForDriver(driverKind);
+    return [[instanceId, { ...providerInstances[instanceId], driver: driverKind, enabled: false }]];
+  });
   return `${JSON.stringify({
     ...settings,
     // Namespace children are macOS Macs used for iOS work; nobody opens
@@ -488,17 +492,11 @@ function enableChildProvider(
     ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
     // An upgrade restarts the guest's server; nobody is there to resume its runs by hand.
     continueThreadsAfterServerUpdate: true,
-    providers: {
-      ...providers,
-      // Only the provisioned drivers' CLIs are installed here, so every other
-      // driver offers an account no turn can run on.
-      ...Object.fromEntries(
-        [...new Set([...Object.keys(DEFAULT_SERVER_SETTINGS.providers), ...enabled])].map(
-          (driver) => [driver, { ...providers[driver], enabled: enabled.has(driver) }],
-        ),
-      ),
+    providerInstances: {
+      ...providerInstances,
+      ...Object.fromEntries(unprovisioned),
+      ...Object.fromEntries(accounts),
     },
-    providerInstances: { ...providerInstances, ...Object.fromEntries(accounts) },
   })}\n`;
 }
 

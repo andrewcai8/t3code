@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
-import { AUTH_PROBE_TIMEOUT_MS } from "./providerSnapshot.ts";
+import { AUTH_PROBE_TIMEOUT_MS } from "@t3tools/provider-core/server/snapshotProbe";
 
 // `get_usage` is a network round trip on the CLI the probe just spawned. The
 // generic 4 s CLI budget expires after a cold init and the UI then shows
@@ -73,6 +73,7 @@ export interface ClaudeAuthStatusProbe {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource: string | undefined;
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 }
@@ -105,6 +106,7 @@ export const orClaudeAuthStatus =
               email: status.email,
               subscriptionType: status.subscriptionType,
               tokenSource: status.authMethod,
+              apiKeySource: undefined,
               apiProvider: status.apiProvider,
               slashCommands: [],
             } satisfies ClaudeAuthStatusProbe;

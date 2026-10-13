@@ -3,7 +3,7 @@ import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { CodexSettings, ProviderSessionId, ThreadId } from "@t3tools/contracts";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -13,9 +13,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../../config.ts";
 import { resolveCodexProviderEnvironment } from "../../provider/codexProviderEnvironment.ts";
-import * as ProviderEventLoggers from "../../provider/ProviderEventLoggers.ts";
-import * as IdAllocator from "../IdAllocator.ts";
-import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { ProviderAdapterV2RuntimePolicy } from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 
 const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
@@ -72,34 +73,40 @@ describe("Codex instance home", () => {
 
       assert.deepEqual(spawnedCodexHomes, [path.join(NodeOS.homedir(), ".codex")]);
     }).pipe(
-      Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer)),
-      Effect.provideService(HostProcessPlatform, "linux"),
-      Effect.provideService(HostProcessEnvironment, {
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+      Effect.provideService(HostProcess.Platform, "linux"),
+      Effect.provideService(HostProcess.Environment, {
         CODEX_HOME: "/ambient/.codex_other",
         PATH: "/usr/bin",
       }),
     ),
   );
 
-  it("runs an instance in its configured home, then its own CODEX_HOME, then the shared home", () => {
-    const ambient = { CODEX_HOME: "/Users/andrew/.codex_ac3", PATH: "/usr/bin" };
-    const instanceHome = [
-      { name: "CODEX_HOME", value: "/Users/andrew/.codex_work", sensitive: false },
-    ];
-    const shared = { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: undefined };
-    const resolveHome = (...args: Parameters<typeof resolveCodexProviderEnvironment>) =>
-      resolveCodexProviderEnvironment(...args).CODEX_HOME;
+  it.effect(
+    "runs an instance in its configured home, then its own CODEX_HOME, then the shared home",
+    () =>
+      Effect.gen(function* () {
+        const ambient = { CODEX_HOME: "/Users/andrew/.codex_ac3", PATH: "/usr/bin" };
+        const instanceHome = [
+          { name: "CODEX_HOME", value: "/Users/andrew/.codex_work", sensitive: false },
+        ];
+        const shared = { sharedHomePath: "/Users/andrew/.codex", effectiveHomePath: undefined };
+        const resolveHome = (...args: Parameters<typeof resolveCodexProviderEnvironment>) =>
+          resolveCodexProviderEnvironment(...args).pipe(Effect.map((env) => env.CODEX_HOME));
 
-    assert.deepEqual(
-      [
-        resolveHome(instanceHome, ambient, {
-          ...shared,
-          effectiveHomePath: "/Users/andrew/.codex_ac2",
-        }),
-        resolveHome(instanceHome, ambient, shared),
-        resolveHome([], ambient, shared),
-      ],
-      ["/Users/andrew/.codex_ac2", "/Users/andrew/.codex_work", "/Users/andrew/.codex"],
-    );
-  });
+        assert.deepEqual(
+          [
+            yield* resolveHome(instanceHome, ambient, {
+              ...shared,
+              effectiveHomePath: "/Users/andrew/.codex_ac2",
+            }),
+            yield* resolveHome(instanceHome, ambient, shared),
+            yield* resolveHome([], ambient, shared),
+          ],
+          ["/Users/andrew/.codex_ac2", "/Users/andrew/.codex_work", "/Users/andrew/.codex"],
+        );
+      }),
+  );
 });

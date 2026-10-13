@@ -27,7 +27,7 @@ import {
   type UsageProviderKind,
   type UsageSummary,
 } from "@t3tools/contracts";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
@@ -41,7 +41,15 @@ import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
+import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
+import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+
+import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
+import * as BackgroundPolicy from "../src/background/BackgroundPolicy.ts";
 import * as ServerConfig from "../src/config.ts";
+import * as AntigravityUsage from "../src/provider/Drivers/AntigravityUsage.ts";
+import * as ProviderHostLive from "../src/provider/ProviderHostLive.ts";
 import * as ServerSettingsService from "../src/serverSettings.ts";
 import { BoxUsageStore } from "../src/usage/boxUsage.ts";
 import * as UsageService from "../src/usage/UsageService.ts";
@@ -93,24 +101,32 @@ const scanHistory = (input: {
         ([, instance]) => instance.driver !== "cursor",
       ),
     );
-    const environment = yield* HostProcessEnvironment;
+    const environment = yield* HostProcess.Environment;
+    const settingsLayer = ServerSettingsService.layerTest({
+      ...settings,
+      providerInstances,
+      cursorKeychainUsageEnabled: false,
+    });
+    // The scanner reads only its cache directory from the config and its homes from
+    // settings, so the in-memory layers stand in for a server without starting one.
+    const configLayer = ServerConfig.layerTest(input.cacheDir, input.cacheDir);
     const usage = yield* UsageService.make.pipe(
-      Effect.provideService(
-        HostProcessEnvironment,
-        Object.fromEntries(
-          Object.entries(environment).filter(([key]) => !SERVER_ONLY_VARIABLES.has(key)),
-        ),
-      ),
       Effect.provide(
         Layer.mergeAll(
-          // The scanner reads only its cache directory from the config and its homes from
-          // settings, so the in-memory layers stand in for a server without starting one.
-          ServerConfig.layerTest(input.cacheDir, input.cacheDir),
-          ServerSettingsService.layerTest({
-            ...settings,
-            providerInstances,
-            cursorKeychainUsageEnabled: false,
-          }),
+          configLayer,
+          settingsLayer,
+          Layer.mergeAll(
+            AntigravityUsage.layer,
+            CursorUsageAccounts.layer.pipe(
+              Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
+            ),
+          ).pipe(
+            Layer.provide(ProviderHostLive.layer),
+            // Usage scans never ask the host for background work or stored credentials.
+            Layer.provide(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
+            Layer.provide(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+            Layer.provide(Layer.merge(configLayer, settingsLayer)),
+          ),
           Layer.succeed(
             BoxUsageStore,
             BoxUsageStore.of({
@@ -121,9 +137,15 @@ const scanHistory = (input: {
           ),
         ),
       ),
+      Effect.provideService(
+        HostProcess.Environment,
+        Object.fromEntries(
+          Object.entries(environment).filter(([key]) => !SERVER_ONLY_VARIABLES.has(key)),
+        ),
+      ),
     );
     return yield* usage.readHistory({ sinceTime: input.sinceTime });
-  });
+  }).pipe(Effect.scoped);
 
 const tokens = (bucket: UsageSummary["buckets"][number]) =>
   bucket.totals.uncachedInputTokens +

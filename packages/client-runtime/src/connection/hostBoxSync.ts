@@ -3,9 +3,11 @@ import type {
   OrchestrationV2ShellSnapshot,
   ProvisionedChat,
 } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
+import type { DeferredShellSnapshot } from "../state/shellPullRequests.ts";
 import { type ConnectionCatalogEntry, isUnpairedBox } from "./catalog.ts";
 import { type BoxAttachment, BearerConnectionTarget, connectionBox } from "./model.ts";
 
@@ -141,6 +143,30 @@ export function chatShellSnapshot(chat: ProvisionedChat): OrchestrationV2ShellSn
     threads: chat.thread.archivedAt === null ? [chat.thread] : [],
     archivedThreads: [],
   };
+}
+
+/**
+ * A cached shell with its deferred pull request links filled in, so a shell saved back keeps
+ * them. The cache defers decoding those links, and a saved row without them loses them.
+ */
+export function withPullRequestsLoaded(
+  cached: Option.Option<DeferredShellSnapshot>,
+): Effect.Effect<Option.Option<OrchestrationV2ShellSnapshot>> {
+  if (Option.isNone(cached) || cached.value.loadPullRequests === undefined) {
+    return Effect.succeed(cached);
+  }
+  const { loadPullRequests, ...snapshot } = cached.value;
+  return loadPullRequests.pipe(
+    Effect.map((linksByThreadId) =>
+      Option.some({
+        ...snapshot,
+        threads: snapshot.threads.map((thread) => {
+          const pullRequests = linksByThreadId.get(thread.id);
+          return pullRequests === undefined ? thread : { ...thread, pullRequests };
+        }),
+      }),
+    ),
+  );
 }
 
 /**

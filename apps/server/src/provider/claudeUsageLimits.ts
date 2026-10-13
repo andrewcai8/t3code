@@ -25,7 +25,7 @@ import {
   clampPercent,
   makeUnavailableUsageLimits,
   makeUsageLimits,
-} from "./providerUsageLimits.ts";
+} from "@t3tools/provider-core/server/usageLimits";
 import { unifiedWindowEvents } from "./claudeSetupTokenUsage.ts";
 
 const SESSION_MINS = 5 * 60;

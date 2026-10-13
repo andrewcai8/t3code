@@ -19,7 +19,7 @@ import {
   codexLoginSignedOut,
   parseCodexLogin,
 } from "../codexLoginCopy.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
 
 export const makeCodexHostLogin = Effect.fn("makeCodexHostLogin")(function* (input: {
   readonly authPath: string;

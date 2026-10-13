@@ -95,7 +95,7 @@ function HomeOffRows({ environmentId }: { environmentId: EnvironmentId }) {
   const [pending, setPending] = useState(false);
 
   const entries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings),
+    applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings, null),
   );
   const usable = (instanceId: string) =>
     entries.some((entry) => entry.instanceId === instanceId && entry.enabled && entry.isAvailable);
@@ -136,6 +136,7 @@ function HomeOffRows({ environmentId }: { environmentId: EnvironmentId }) {
         ) : (
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             <ProviderModelPicker
+              environmentId={environmentId}
               activeInstanceId={selection.instanceId}
               model={selection.model}
               lockedProvider={null}

@@ -25,7 +25,7 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { usageSourcePath } from "@t3tools/shared/usageMerge";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -510,7 +510,7 @@ export const makeBoxUsageReads = Effect.fn("makeBoxUsageReads")(function* (
   const boxUsage = yield* Effect.serviceOption(BoxUsageStore);
   const config = yield* ServerConfig.ServerConfig;
   const path = yield* Path.Path;
-  const hostId = usageHostId(yield* HostProcessEnvironment);
+  const hostId = usageHostId(yield* HostProcess.Environment);
 
   const readSummary = Effect.fn("UsageService.readSummaryWithBoxUsage")(function* (
     input: UsageSummaryInput,

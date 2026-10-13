@@ -3,13 +3,13 @@ import * as NodePath from "node:path";
 import {
   ClaudeSettings,
   CodexSettings,
-  CursorSettings,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderInstanceEnvironment,
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
+import { CursorSettings } from "@t3tools/provider-cursor/settings";
 import { isAccountSpent, rankAccounts, type AccountLoad } from "@t3tools/shared/usageLimits";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -26,7 +26,7 @@ import {
 } from "../provider/codexLoginCopy.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { credentialSecretName } from "../provider/providerCredentialName.ts";
 import type { Provisioning } from "./config.ts";
 import { cursorGuestLoginDestination } from "./credentialDestinations.ts";
@@ -100,8 +100,8 @@ export const resolveProvisioningProviderProfile = Effect.fn("resolveProvisioning
     const environment = instance.environment ?? [];
     let named: Pick<ProvisioningProviderProfile, "displayName" | "accountEmail"> =
       instance.displayName ? { displayName: instance.displayName } : {};
-    const selectedEnvironment = mergeProviderInstanceEnvironment(environment, {});
-    const effectiveEnvironment = mergeProviderInstanceEnvironment(environment);
+    const selectedEnvironment = yield* mergeProviderInstanceEnvironment(environment, {});
+    const effectiveEnvironment = yield* mergeProviderInstanceEnvironment(environment);
     const invalidConfig = () =>
       new ProvisionRefused({
         reason: "unconfigured",

@@ -11,7 +11,13 @@
  *
  * @module ManagedProjectFolders
  */
-import { CommandId, ProjectId, type ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type GitManagerServiceError,
+  ProjectId,
+  type ThreadId,
+  VcsProcessSpawnError,
+} from "@t3tools/contracts";
 import { newProjectFolderName } from "@t3tools/shared/path";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -233,7 +239,7 @@ You are Home, the user's agent for their whole T3 Code fleet. The user talks to 
 
 - \`t3_environment_list\` lists the environments you can reach. Pass \`environmentId\` to \`orchestrator_capabilities\`, \`t3_project_list\`, \`t3_thread_list\`, \`t3_thread_read\`, \`t3_thread_launch\`, \`t3_thread_send\`, \`t3_thread_interrupt\`, \`t3_thread_organize\`, \`t3_thread_update\` (rename only) and the \`t3_pending_request_*\` tools to act in another environment. Omit it to act in this one.
 - To start work, launch a normal thread with \`t3_thread_launch\` and pass a \`projectId\` from \`t3_project_list\`, or \`scratch:true\`. It shows in the user's sidebar and they can steer it. Use \`delegate_task\` only for short helper work of your own.
-- Link every thread you mention. Thread tools and watch reports give each thread a ready \`link\`, like \`[Fix the build](t3-thread://v1/...)\`. Paste it as is, so the user can click to open the thread. Never name a thread without its link, and never show raw ids in place of one.
+- Link every thread in this environment that you mention as \`[title](t3-thread://v1/<threadId>)\`, with the threadId exactly as returned, so the user can click to open it. A link only opens threads in this environment, so name a thread in another environment by its title and environment. Never show raw ids in place of a title.
 - Threads you launch are watched for you. When a watched thread completes, fails, asks a question or needs an approval, you get a short report in this thread. Use \`t3_thread_watch\` to watch other threads or every thread. Rely on these reports instead of polling with \`t3_thread_wait\`.
 - Leave the user's own threads alone unless they ask you to act on them or to watch them. Never race the user on a thread they are working in.
 - You can answer questions and approval requests in other threads. Read the request before you answer it.
@@ -276,6 +282,15 @@ function describeCommitFailure(stderr: string): string {
   return lines.at(-1) ?? "Git could not make the first commit.";
 }
 
+const isVcsProcessSpawnError = Schema.is(VcsProcessSpawnError);
+
+// Spawning a `git` that is not on PATH fails with NotFound, on Windows too.
+const isGitMissing = (error: GitManagerServiceError) =>
+  error._tag === "GitManagerError" &&
+  isVcsProcessSpawnError(error.cause) &&
+  PlatformError.isPlatformError(error.cause.cause) &&
+  error.cause.cause.reason._tag === "NotFound";
+
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -314,11 +329,13 @@ const make = Effect.gen(function* () {
 
   // Inside a checkout (a dev worktree's .t3, a dotfiles home) the folder would
   // inherit the repo's git status and checkpoints, so Scratch is offered only
-  // when the data dir is outside any work tree. Probed once; detection
+  // when the data dir is outside any work tree. With no Git installed nothing
+  // can see a checkout, so Scratch is offered. Probed once; other detection
   // failures hide Scratch rather than failing callers. An interrupted probe
   // invalidates the cache so the next caller probes again.
   const [probe, invalidate] = yield* Effect.cachedInvalidateWithTTL(
     gitWorkflow.isRepository(config.baseDir).pipe(
+      Effect.catchIf(isGitMissing, () => Effect.succeed(false)),
       Effect.map((isRepository) =>
         isRepository ? Option.none<string>() : Option.some(path.resolve(config.baseDir, "scratch")),
       ),
