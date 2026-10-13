@@ -9,6 +9,9 @@ import {
   ThreadId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as DateTime from "effect/DateTime";
@@ -61,13 +64,18 @@ const shell = (
     ...overrides,
   }) as unknown as OrchestrationV2ThreadShell;
 
-const setup = () => {
+const setup = (
+  options: {
+    readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+    readonly providers?: ReadonlyArray<ServerProvider>;
+  } = {},
+) => {
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
   const layer = FleetService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         NodeCrypto.layer,
-        ServerSettings.layerTest(),
+        ServerSettings.layerTest(options.settings),
         Layer.mock(ServerEnvironment.ServerEnvironment)({
           getDescriptor: Effect.succeed({
             environmentId: EnvironmentId.make("studio"),
@@ -86,8 +94,12 @@ const setup = () => {
             Effect.succeed(candidate === "/home" || candidate.startsWith("/home/")),
         }),
         Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
-        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed(options.providers ?? []),
+        }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed((options.providers ?? []).map(({ instanceId }) => instanceId)),
+        }),
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getThreadShell: (id) => Effect.succeed(shell(id, "a", 1)),
           getShellSnapshot: () =>
@@ -148,6 +160,52 @@ it.effect("lists threads from every project, newest first, with snooze state", (
       request: { op: "threads.list", input: { snoozed: true } },
     });
     expect(snoozed).toMatchObject({ total: 1, threads: [{ threadId: "snoozed" }] });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("leaves models the user hid out of the capabilities Home reads", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const { layer } = setup({
+    settings: {
+      providerModelPreferences: {
+        [codex]: { hiddenModels: ["gpt-5.4-mini", "my-model"], modelOrder: [] },
+      },
+    },
+    providers: [
+      {
+        instanceId: codex,
+        driver: ProviderDriverKind.make("codex"),
+        enabled: true,
+        installed: true,
+        version: "test",
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-10-13T00:00:00.000Z",
+        models: [
+          { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null },
+          { slug: "gpt-5.4-mini", name: "Mini", isCustom: false, capabilities: null },
+          // Custom models cannot be hidden, matching the client pickers.
+          { slug: "my-model", name: "Mine", isCustom: true, capabilities: null },
+        ],
+        slashCommands: [],
+        skills: [],
+      },
+    ],
+  });
+  return Effect.gen(function* () {
+    const fleet = yield* FleetService.FleetService;
+    const result = yield* fleet.execute({ actor, request: { op: "capabilities", input: {} } });
+    expect(result).toEqual({
+      providers: [
+        expect.objectContaining({
+          providerInstanceId: "codex",
+          models: [
+            { id: "gpt-5.4", label: "GPT-5.4" },
+            { id: "my-model", label: "Mine" },
+          ],
+        }),
+      ],
+    });
   }).pipe(Effect.provide(layer));
 });
 

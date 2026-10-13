@@ -8,7 +8,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { ProvisionOperation, ProvisionResource } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -97,7 +97,7 @@ async function fixture(
   cleanups.push(() => NodeFSP.rm(directory, { recursive: true, force: true }));
   const applications = NodePath.join(directory, "Applications");
   const hostDeveloper =
-    HostProcessPlatform.defaultValue() === "darwin"
+    HostProcess.Platform.defaultValue() === "darwin"
       ? NodeChildProcess.execFileSync("xcode-select", ["-p"], { encoding: "utf8" }).trim()
       : undefined;
   for (const version of ["26.4", "26.4.1", "26.4.9-Beta", "27.1-Beta"]) {
@@ -855,7 +855,7 @@ describe("Namespace runtime transport", () => {
     // Guards the developer's real credential: the SDK must resolve the stubbed home.
     expect(NodeOS.homedir()).toBe(home);
     const userTokenFile =
-      HostProcessPlatform.defaultValue() === "darwin"
+      HostProcess.Platform.defaultValue() === "darwin"
         ? NodePath.join(home, "Library/Application Support/ns/token.json")
         : NodePath.join(home, ".config/ns/token.json");
     await NodeFSP.mkdir(NodePath.dirname(userTokenFile), { recursive: true });

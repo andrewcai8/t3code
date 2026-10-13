@@ -86,7 +86,7 @@ import { type EnvironmentPresentation, useEnvironment } from "../state/environme
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import type { ChatMessage } from "../types";
-import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "../components/chat/composerPromptHistory";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import { useBoxDemand } from "./CloudBoxes";
 import { cloudProviderEntries } from "./cloudProviderEntries";
 import {

@@ -41,8 +41,8 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ServerSettingsModule from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "./Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
-import type { ProviderInstance } from "./ProviderDriver.ts";
-import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
 
@@ -100,7 +100,7 @@ const make = Effect.gen(function* () {
     const config = yield* decodeClaudeSettings(instance.config ?? {});
     const configDir = yield* resolveClaudeHomePath(
       config,
-      mergeProviderInstanceEnvironment(instance.environment ?? []),
+      yield* mergeProviderInstanceEnvironment(instance.environment ?? []),
     );
     return path.join(configDir, ".credentials.json");
   });

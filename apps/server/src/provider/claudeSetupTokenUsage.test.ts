@@ -283,6 +283,7 @@ const statusWithAccountEmail = Effect.fn(function* (
         email: probed.email,
         subscriptionType: undefined,
         tokenSource: probed.tokenSource,
+        apiKeySource: undefined,
         apiProvider: undefined,
         slashCommands: [],
       }),

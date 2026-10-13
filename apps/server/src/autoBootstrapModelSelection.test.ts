@@ -20,9 +20,11 @@ it("uses the canonical Codex model for auto-bootstrap when Codex is enabled", ()
 it("bootstraps a provisioned box on the one provider it enabled", () => {
   const claudeOnlySettings = {
     ...DEFAULT_SERVER_SETTINGS,
-    providers: {
-      ...DEFAULT_SERVER_SETTINGS.providers,
-      codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+    providerInstances: {
+      [ProviderInstanceId.make("codex")]: {
+        driver: ProviderDriverKind.make("codex"),
+        enabled: false,
+      },
     },
   };
   assert.deepEqual(

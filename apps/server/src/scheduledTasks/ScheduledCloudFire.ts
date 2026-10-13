@@ -22,6 +22,7 @@ import * as Option from "effect/Option";
 
 import { EnvironmentControl } from "../environmentControl/EnvironmentControl.ts";
 import type * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import type { ThreadManagementProviderInstanceDisabledError } from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { RepositoryIdentityResolver } from "../project/RepositoryIdentityResolver.ts";
 
@@ -114,7 +115,12 @@ export const launchFire =
     task: ScheduledTask,
     startedAt: DateTime.DateTime,
     input: Parameters<ThreadLaunchService.ThreadLaunchService["Service"]["launch"]>[0],
-  ): Effect.Effect<unknown, ThreadLaunchService.ThreadLaunchError | ScheduledTaskError> =>
+  ): Effect.Effect<
+    unknown,
+    | ThreadLaunchService.ThreadLaunchError
+    | ThreadManagementProviderInstanceDisabledError
+    | ScheduledTaskError
+  > =>
     task.target === "local"
       ? threadLaunch.launch(input)
       : cloudFire.fire({

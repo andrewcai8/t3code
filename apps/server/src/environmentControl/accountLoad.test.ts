@@ -214,7 +214,6 @@ it.effect("spreads back-to-back launches over the accounts with the most usage l
       return { driver: "codex", enabled: true, config: { homePath: `${homes}/${home}` } };
     });
     const settings = decodeSettings({
-      providers: { claudeAgent: { enabled: false }, codex: { enabled: false } },
       providerInstances: {
         claudeAgent: claude,
         claude_xdrandom3316: claude,

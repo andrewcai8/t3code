@@ -212,7 +212,12 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const providers = yield* providerRegistry.getProviders;
         const capable = new Set<string>(yield* adapters.list());
-        return { providers: providerCapabilities(providers, capable) };
+        const { providerModelPreferences } = yield* settings.getSettings.pipe(
+          Effect.mapError(orchestrationError),
+        );
+        return {
+          providers: providerCapabilities(providers, capable, providerModelPreferences ?? {}),
+        };
       }),
 
     "projects.list": (input) =>

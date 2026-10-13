@@ -57,6 +57,7 @@ import {
   classifyToolActivity,
   collectToolFilePaths,
   dynamicToolTitle,
+  isJavaScriptReplTool,
   formatReadToolLabel,
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
@@ -97,6 +98,7 @@ export interface ThreadFeedActivity {
     | "alert"
     | "browser"
     | "computer"
+    | "code"
     | "check"
     | "command"
     | "edit"
@@ -399,8 +401,12 @@ function resolvePendingUserInputAnswer(
 ): string | ReadonlyArray<string> | null {
   if (draft?.attachmentsBlocked) return null;
   const customAnswer =
-    question.allowCustomAnswer === false ? null : normalizeDraftAnswer(draft?.customAnswer);
-  if (customAnswer) {
+    question.allowCustomAnswer === false
+      ? null
+      : question.initialAnswer !== undefined
+        ? (draft?.customAnswer ?? null)
+        : normalizeDraftAnswer(draft?.customAnswer);
+  if (customAnswer !== null && customAnswer.length > 0) {
     return customAnswer;
   }
 
@@ -408,12 +414,12 @@ function resolvePendingUserInputAnswer(
   if (question.multiSelect) {
     return selectedOptionValues.length > 0
       ? selectedOptionValues
-      : question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0
-        ? ""
-        : null;
+      : (customAnswer ??
+          (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null));
   }
   return (
     selectedOptionValues[0] ??
+    customAnswer ??
     (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null)
   );
 }
@@ -517,6 +523,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
       case "monitor":
         return "eye";
       case "background_task":
+      case "system":
         return "zap";
       default:
         source satisfies never;
@@ -551,7 +558,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "assistant_message":
       return "message";
     case "dynamic_tool":
-      return "wrench";
+      return isJavaScriptReplTool(item.toolName) ? "code" : "wrench";
     case "subagent":
       return "hammer";
     case "run_interrupt_request":
@@ -593,8 +600,9 @@ function itemSummary(
   if (item.type === "system_notice") return item.message;
   if (item.type === "compaction") return contextCompactionLabel(item);
   const title =
-    (item.type === "dynamic_tool" ? dynamicToolTitle(item.toolName, item.input) : undefined) ??
-    item.title?.trim();
+    (item.type === "dynamic_tool"
+      ? dynamicToolTitle(item.toolName, item.input, item.title)
+      : undefined) ?? item.title?.trim();
   if (item.type === "subagent") return formatSubagentDisplayTitle(title || "Subagent");
   if (title) return toolPresentation?.displayName ?? capitalizePhrase(title);
   switch (item.type) {
@@ -810,7 +818,11 @@ function toFeedActivity(
       ? collectToolFilePaths(item)
       : null;
   const getFullDetail = memoizeValue(() =>
-    readPaths ? readPaths.join("\n") || null : formatItemFullDetail(row, item),
+    readPaths
+      ? readPaths.join("\n") || null
+      : item.type === "notification"
+        ? item.detail?.trim() || null
+        : formatItemFullDetail(row, item),
   );
   const getCopyText = memoizeValue(() =>
     [summary, detail, getFullDetail()]
@@ -1633,7 +1645,7 @@ export function setPendingUserInputCustomAnswer(
   }
 
   const selectedOptionValues =
-    customAnswer.trim().length > 0
+    question.initialAnswer !== undefined || customAnswer.trim().length > 0
       ? undefined
       : normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
   return {

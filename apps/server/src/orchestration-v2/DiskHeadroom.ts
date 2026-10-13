@@ -2,11 +2,11 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 
 /** Only a box's preparation names its host for usage. */
-const onCloudBox = Effect.map(HostProcessEnvironment, (environment) =>
+const onCloudBox = Effect.map(HostProcess.Environment, (environment) =>
   Boolean(environment.T3CODE_USAGE_HOST_ID?.trim()),
 );
 
@@ -90,8 +90,8 @@ export const cloudMachineNoteFor = (input: {
     const told = toldBySession.get(input.session) ?? new Set<string>();
     if (told.has(input.nativeThreadId)) return "";
     toldBySession.set(input.session, told.add(input.nativeThreadId));
-    const forks = input.mcpTools && (yield* HostProcessPlatform) !== "darwin";
-    const t3home = (yield* HostProcessEnvironment).T3CODE_HOME;
+    const forks = input.mcpTools && (yield* HostProcess.Platform) !== "darwin";
+    const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
     // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
     const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
     const setupFailure = log

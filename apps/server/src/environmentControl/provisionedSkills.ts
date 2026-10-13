@@ -6,7 +6,7 @@ import type { ServerProvisionedSkill, ServerProvisionedSkills } from "@t3tools/c
 import {
   parseSkillFrontmatter,
   type CursorSkillFrontmatter,
-} from "../provider/Drivers/CursorSkills.ts";
+} from "@t3tools/provider-cursor/server/skills";
 import type { Provisioning } from "./config.ts";
 
 type SkillBundle = NonNullable<Provisioning["skills"]>[number];
