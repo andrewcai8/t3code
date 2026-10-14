@@ -192,6 +192,10 @@ vi.mock("../logicalProject", () => ({
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => ({
+  readProject: (ref: { environmentId: string; projectId: string }) =>
+    testState.projects.find(
+      (project) => project.environmentId === ref.environmentId && project.id === ref.projectId,
+    ) ?? null,
   readProjects: () => testState.projects,
   readThreadShell: () => null,
   readThreadShells: () => [],

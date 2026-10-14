@@ -990,7 +990,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       },
     );
 
-    const messageId = MessageId.make(yield* crypto.randomUUIDv4);
+    const messageId = MessageId.make(yield* crypto.randomUUIDv4());
     const sentAt = yield* Clock.currentTimeMillis;
     yield* bounded(
       registry.run(
@@ -1115,9 +1115,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       const instance = config.providers.find((provider) => provider.enabled);
       if (instance === undefined)
         return yield* new VerifyFailure({ message: "the manager has no enabled provider account" });
-      const requestId = ProvisionRequestId.make(yield* crypto.randomUUIDv4);
+      const requestId = ProvisionRequestId.make(yield* crypto.randomUUIDv4());
       created.requestId = requestId;
-      const threadId = ThreadId.make(yield* crypto.randomUUIDv4);
+      const threadId = ThreadId.make(yield* crypto.randomUUIDv4());
       const model =
         instance.models.find((candidate) => candidate.isDefault === true) ?? instance.models[0];
       if (options.secondClient && model === undefined)
@@ -1128,7 +1128,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           ? {
               threadId,
               firstTurn: {
-                messageId: MessageId.make(yield* crypto.randomUUIDv4),
+                messageId: MessageId.make(yield* crypto.randomUUIDv4()),
                 text: "Reply with the single word: ready.",
                 title: SECOND_CLIENT_CHAT_TITLE,
                 modelSelection: { instanceId: instance.instanceId, model: model.slug },

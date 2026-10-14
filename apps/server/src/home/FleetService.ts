@@ -163,7 +163,7 @@ const make = Effect.gen(function* () {
     target?: { readonly threadId: ThreadId; readonly clientRequestId?: string | undefined },
   ) =>
     (target?.clientRequestId === undefined
-      ? crypto.randomUUIDv4.pipe(Effect.orDie)
+      ? crypto.randomUUIDv4().pipe(Effect.orDie)
       : Effect.succeed(
           `${actor.environmentId}:${actor.threadId}:${target.threadId}:${target.clientRequestId}`,
         )

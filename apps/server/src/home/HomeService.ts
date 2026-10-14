@@ -152,7 +152,7 @@ const make = Effect.gen(function* () {
       const { projectId } = yield* folders.ensureHomeProject.pipe(
         Effect.mapError((error) => fail(error.message)),
       );
-      const id = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const result = yield* launches
         .launch({
           commandId: CommandId.make(`${HOME_THREAD_ID_PREFIX}${id}`),
@@ -184,7 +184,7 @@ const make = Effect.gen(function* () {
   const stopFormerHome = (threadId: ThreadId) =>
     Effect.gen(function* () {
       if ((yield* liveShell(threadId)) === null) return;
-      const commandId = crypto.randomUUIDv4.pipe(
+      const commandId = crypto.randomUUIDv4().pipe(
         Effect.orDie,
         Effect.map((id) => CommandId.make(`home-stop:${id}`)),
       );
@@ -216,7 +216,7 @@ const make = Effect.gen(function* () {
         .getThreadShell(homeThreadId)
         .pipe(Effect.mapError(() => fail("Home could not be read.")));
       if (shell === null || shell.deletedAt !== null || shell.archivedAt !== null) return;
-      const id = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       yield* threads
         .sendToThread({
           projectId: shell.projectId,
@@ -270,7 +270,7 @@ const make = Effect.gen(function* () {
         yield* stopFormerHome(current.id);
         // The old Home stays in history, out of the active list. Settling can
         // fail while its interrupted run is still ending; it is then left active.
-        const id = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+        const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
         yield* threads
           .dispatch({
             type: "thread.settle",

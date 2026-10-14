@@ -263,7 +263,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     record(name, false, null, { error: message, ...(evidence ? { detail: evidence } : {}) }).pipe(
       Effect.andThen(Effect.fail(new SmokeFailure({ message: `${name}: ${message}` }))),
     );
-  const uuid = crypto.randomUUIDv4;
+  const uuid = crypto.randomUUIDv4();
   const sha256 = (value: string) =>
     crypto
       .digest("SHA-256", new TextEncoder().encode(value))

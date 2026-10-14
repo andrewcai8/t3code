@@ -185,7 +185,7 @@ const seconds = (from: number, to: number) => Math.round((to - from) / 100) / 10
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const uuid = (yield* Crypto.Crypto).randomUUIDv4;
+  const uuid = (yield* Crypto.Crypto).randomUUIDv4();
   let state: State = (yield* fs.exists(statePath))
     ? yield* decodeState(yield* fs.readFileString(statePath))
     : { boxes: [], checks: [] };
