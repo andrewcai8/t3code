@@ -372,6 +372,27 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
     ),
   );
 
+  it.effect("verifies issued tokens against the stored grant", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const sql = yield* SqlClient.SqlClient;
+      const issued = yield* sessions.issue({ scopes: ["orchestration:read"] });
+      const upgraded = ["orchestration:read", "diagnostics:read"] as const;
+      yield* sql`UPDATE auth_sessions SET scopes = ${JSON.stringify(upgraded)}`;
+
+      expect((yield* sessions.verify(issued.token)).scopes).toEqual(upgraded);
+    }).pipe(
+      Effect.provide(
+        SessionStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistence.layerMemory),
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(layerServerEnvironment(EnvironmentId.make("test-environment"))),
+          Layer.provide(layerServerConfig()),
+        ),
+      ),
+    ),
+  );
+
   it.effect("rejects malformed session tokens", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;

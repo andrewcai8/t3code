@@ -106,6 +106,7 @@ const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [4, "ProvisionedChats"],
   [5, "ProvisionedChatsV2"],
   [6, "ScheduledTaskTarget"],
+  [7, "DiagnosticsReadGrants"],
 ];
 
 /** Replaces the ledger above upstream's shared 51 with what an older fork build recorded. */
@@ -365,6 +366,48 @@ it.layer(NodeServices.layer)("fork migrations", (it) => {
       assert.deepStrictEqual(yield* tableNames(["provision_operations", "provisioned_chats"]), [
         "provision_operations",
         "provisioned_chats",
+      ]);
+    }).pipe(Effect.provide(memory)),
+  );
+
+  it.effect("grants stored before the diagnostics split gain diagnostics:read once", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 56 });
+      const stored = {
+        reader: ["orchestration:read", "terminal:operate"],
+        upgraded: ["orchestration:read", "diagnostics:read"],
+        terminal: ["terminal:operate"],
+      };
+      for (const [id, scopes] of Object.entries(stored)) {
+        yield* sql`
+          INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
+          VALUES (${id}, 'client', ${JSON.stringify(scopes)}, 'browser-session-cookie', '', '')
+        `;
+      }
+      yield* sql`
+        INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+        VALUES ('link', 'secret', 'one-time-token', '["orchestration:read"]', 'client', '', '')
+      `;
+      const [, , migration] = forkMigrationEntries[6];
+      yield* migration;
+      yield* migration;
+
+      const sessions = yield* sql<{ readonly session_id: string; readonly scopes: string }>`
+        SELECT session_id, scopes FROM auth_sessions ORDER BY session_id
+      `;
+      assert.deepStrictEqual(
+        Object.fromEntries(sessions.map((row) => [row.session_id, JSON.parse(row.scopes)])),
+        {
+          reader: ["orchestration:read", "terminal:operate", "diagnostics:read"],
+          terminal: ["terminal:operate"],
+          upgraded: ["orchestration:read", "diagnostics:read"],
+        },
+      );
+      const links = yield* sql<{ readonly scopes: string }>`SELECT scopes FROM auth_pairing_links`;
+      assert.deepStrictEqual(JSON.parse(links[0]!.scopes), [
+        "orchestration:read",
+        "diagnostics:read",
       ]);
     }).pipe(Effect.provide(memory)),
   );
