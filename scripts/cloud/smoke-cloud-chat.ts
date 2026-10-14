@@ -64,8 +64,8 @@ const SKILL_ROOT = {
  * checkout-relative for Cursor, whose CLI reads rules only from the checkout and its parents.
  */
 const MODEL_SHEET = {
-  codex: "$HOME/.codex/pstack-models.md",
-  claudeAgent: "$HOME/.claude/pstack-models.md",
+  codex: "$HOME/.config/t3-pstack/models.md",
+  claudeAgent: "$HOME/.config/t3-pstack/models.md",
   cursor: ".cursor/rules/pstack-models.mdc",
 };
 type Agent = keyof typeof SKILL_ROOT;
@@ -622,11 +622,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
       `h=$(git rev-parse HEAD); b=$(git rev-parse --abbrev-ref HEAD); s=missing`,
       `o=$(git rev-parse -q --verify refs/remotes/origin/${created.branch} || echo missing)`,
       `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/SKILL.md" && s=present`,
-      `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/references/codex-tools.md" && f=codex-adapted`,
-      `test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/scripts/github-merge-queue-label.sh" || f=$f-no-overlay`,
-      ...(agent === "claudeAgent"
-        ? [`test -f "$HOME/.claude/agents/poteto-agent.md" || f=$f-no-agent`]
-        : []),
+      `f=cursor; test -f "$HOME/${SKILL_ROOT[agent]}/poteto-mode/agents/poteto-agent.md" && f=t3-pstack`,
       `m=missing; test -f "${MODEL_SHEET[agent]}" && m=present; git check-ignore -q "${MODEL_SHEET[agent]}" 2>/dev/null && m=$m-ignored`,
       // The account AWS answers for, and whether Cloudflare accepts the box's token.
       `a=no-cli; command -v aws >/dev/null && a=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo no-auth)`,
