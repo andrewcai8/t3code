@@ -364,9 +364,9 @@ const make = Effect.gen(function* () {
       );
       // Re-made on every call, so a deleted Scratch folder still runs threads.
       yield* makeScratchFolder(workspaceRoot);
-      const id = yield* crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
-      );
+      const id = yield* crypto
+        .randomUUIDv4()
+        .pipe(Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })));
       const bootstrapped = yield* projects
         .bootstrap({
           commandId: CommandId.make(`scratch-project:${id}`),
@@ -435,7 +435,7 @@ const make = Effect.gen(function* () {
           ? Effect.succeed(Option.some(folderFor(id.slice(-8))))
           : attempt === 2
             ? Effect.succeed(Option.some(fullFolder))
-            : crypto.randomUUIDv4.pipe(
+            : crypto.randomUUIDv4().pipe(
                 Effect.map((uuid) => Option.some(`${fullFolder}-${uuid.slice(0, 8)}`)),
                 Effect.mapError((cause) => new ScratchFolderError({ folder: fullFolder, cause })),
               ),
@@ -536,9 +536,9 @@ const make = Effect.gen(function* () {
       scaffoldRepository(workspaceRoot, input.name).pipe(
         Effect.mapError((cause) => new NamedProjectFolderError({ folder: workspaceRoot, cause })),
       ),
-      crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause })),
-      ),
+      crypto
+        .randomUUIDv4()
+        .pipe(Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause }))),
     ]).pipe(Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : removeFolder)));
     const [commitError, id] = prepared;
     const project = yield* projects
@@ -618,9 +618,9 @@ const make = Effect.gen(function* () {
           .writeFileString(claudePath, "@AGENTS.md\n")
           .pipe(Effect.mapError(folderError));
       }
-      const id = yield* crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause })),
-      );
+      const id = yield* crypto
+        .randomUUIDv4()
+        .pipe(Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause })));
       const bootstrapped = yield* projects
         .bootstrap({
           commandId: CommandId.make(`home-project:${id}`),

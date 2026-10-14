@@ -240,7 +240,7 @@ const make = Effect.gen(function* () {
   const retries = new Map<string, { readonly failures: number; readonly retryAt: number }>();
   // The one launch each chat may have in flight, by what it asked for.
   const launching = new Map<string, string>();
-  const uuid = crypto.randomUUIDv4.pipe(Effect.orDie);
+  const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
 
   /** Every cloud chat's box this host holds that is not removed. */
   const chatBoxes = listProvisionedEnvironments(sql, [], [], []).pipe(

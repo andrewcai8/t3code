@@ -102,6 +102,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
                     messages: Stream.fromQueue(messages),
                     offer: () => Effect.void,
                     setModel: () => Effect.void,
+                    applyFlagSettings: () => Effect.void,
                     setPermissionMode: () => Effect.void,
                     stopTask: () => Effect.void,
                     interrupt: Effect.void,

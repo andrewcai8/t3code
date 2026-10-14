@@ -168,7 +168,7 @@ const make = Effect.gen(function* () {
 
     invoke: (environmentId, invoke) =>
       Effect.gen(function* () {
-        const requestId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+        const requestId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
         const deferred = yield* Deferred.make<unknown, OrchestratorMcpFailure>();
         const offered = yield* SynchronizedRef.modifyEffect(state, (current) => {
           const host = current.host;

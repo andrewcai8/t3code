@@ -117,14 +117,12 @@ it.effect("two server processes cannot both claim the same allocation effect", (
       Promise.all(contenders.map((entry) => entry.completed)),
     );
     for (const result of results) expect(result.code, result.error).toBe(0);
-    expect(results.map((result) => result.output.split("\n")[1]).toSorted()).toEqual([
-      "observed",
-      "winner",
-    ]);
-    expect(results.map((result) => result.output.split("\n")[2]).toSorted()).toEqual([
-      "lease-observed",
-      "lease-winner",
-    ]);
+    // The runtime's logger shares stdout, so read only the contenders' own lines.
+    const reports = results.map((result) =>
+      result.output.split("\n").filter((line) => /^(lease-)?(winner|observed)$/.test(line)),
+    );
+    expect(reports.map((lines) => lines[0]).toSorted()).toEqual(["observed", "winner"]);
+    expect(reports.map((lines) => lines[1]).toSorted()).toEqual(["lease-observed", "lease-winner"]);
     const leaseCount = yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       return yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM provisioned_leases`;

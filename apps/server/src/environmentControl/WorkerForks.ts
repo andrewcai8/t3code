@@ -466,7 +466,7 @@ const make = Effect.gen(function* () {
       if (settings === null)
         return yield* failure("environment_unavailable", "This host has no cloud configuration.");
       const limits = forkLimits(settings);
-      const id = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const done = yield* Deferred.make<void>();
       yield* prune;
       // A retried call while its batch runs joins it rather than paying for a second one. Nothing

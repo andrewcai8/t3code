@@ -9,6 +9,7 @@ import type {
   ServerSelfUpdateCapability,
 } from "@t3tools/contracts";
 
+import type { ServerUpdateOutcome } from "../components/ServerUpdateAction";
 import { toastManager } from "../components/ui/toast";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -103,29 +104,36 @@ export function describeUpgradeResult(
 
 /**
  * Updates a provisioned guest through the manager that owns its lease, or returns null, doing
- * nothing, for any other server. The update throws the manager's failure for the caller to report.
+ * nothing, for any other server. Toasts the manager's verdict unless `quiet`. The update throws the
+ * manager's failure for the caller to report.
  */
 export function useGuestServerUpgrade() {
   const upgradeThroughManager = useAtomCommand(serverEnvironment.upgradeProvisionedEnvironment, {
     reportFailure: false,
   });
-  return (target: {
-    readonly environmentId: EnvironmentId;
-    readonly serverLabel: string;
-    readonly selfUpdate: ServerSelfUpdateCapability | null;
-  }): Promise<void> | null => {
+  return (
+    target: {
+      readonly environmentId: EnvironmentId;
+      readonly serverLabel: string;
+      readonly selfUpdate: ServerSelfUpdateCapability | null;
+    },
+    quiet = false,
+  ): Promise<ServerUpdateOutcome> | null => {
     const path = resolveEnvironmentServerUpdatePath(target.environmentId, target.selfUpdate);
     if (path.kind !== "manager-upgrade") return null;
     const { leaseId, sandboxId, managerEnvironmentId } = path.lease;
     return upgradeThroughManager({
       environmentId: managerEnvironmentId,
       input: { leaseId, sandboxId, environmentId: target.environmentId },
-    }).then((result) => {
+    }).then((result): ServerUpdateOutcome => {
       if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) return;
+        if (isAtomCommandInterrupted(result)) return { status: "skipped" };
         throw squashAtomCommandFailure(result);
       }
-      toastManager.add(describeUpgradeResult(result.value, target.serverLabel));
+      if (!quiet) toastManager.add(describeUpgradeResult(result.value, target.serverLabel));
+      return result.value.kind === "refused"
+        ? { status: "failed", message: result.value.message }
+        : { status: "updated" };
     });
   };
 }

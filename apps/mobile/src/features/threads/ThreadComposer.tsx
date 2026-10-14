@@ -502,6 +502,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ? (project?.id ?? null)
       : null,
     pullRequestRepository: project?.repositoryIdentity?.displayName ?? null,
+    threadPullRequests: props.selectedThread.pullRequests,
     selectedProviderStatus,
     provisionedSkills: props.serverConfig?.provisionedSkills,
     hasThread: true,
