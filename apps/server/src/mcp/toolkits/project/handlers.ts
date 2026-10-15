@@ -11,7 +11,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import { refuseHomeFolder } from "../../../home/FleetService.ts";
 import * as HomeService from "../../../home/HomeService.ts";
-import { callerHasFleetReach, callerIsHome, routeHome, runAsHome } from "../../homeRouting.ts";
+import {
+  callerHasFleetReach,
+  callerIsHome,
+  failFleetReach,
+  routeHome,
+  runAsHome,
+} from "../../homeRouting.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
@@ -105,10 +111,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               "Home must pass projectId or scratch:true. Threads never launch in Home's folder.",
           });
         if (remote && !isHome && !(yield* callerHasFleetReach()))
-          return yield* new OrchestratorMcpFailure({
-            code: "capability_denied",
-            message: "Only Home can act in another environment.",
-          });
+          return yield* failFleetReach("Only Home can act in another environment.");
         const attachments = input.attachments ?? [];
         if (remote && attachments.length > 0)
           return yield* new OrchestratorMcpFailure({

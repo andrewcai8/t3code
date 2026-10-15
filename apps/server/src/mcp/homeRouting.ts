@@ -37,25 +37,45 @@ export const callerIsHome = Effect.fn("mcp.callerIsHome")(function* () {
 });
 
 /**
- * Whether the caller is a cloud chat whose host relays for it. Where the
- * desktop app does not host the server, the only fleet host ws.ts admits is
- * the cloud host that provisioned this box, and it reaches the user's other
- * cloud chats. The box's top-level chats act through it; subagents do not.
+ * Whether the caller is a cloud chat whose host relays for it, and whether that host is connected
+ * now. Where the desktop app does not host the server, the only fleet host ws.ts admits is the
+ * cloud host that provisioned this box, and it reaches the user's other cloud chats. The box's
+ * top-level chats act through it; subagents do not.
  */
-const callerHasCloudReach = Effect.fn("mcp.callerHasCloudReach")(function* () {
+const callerCloudReach = Effect.fn("mcp.callerCloudReach")(function* () {
   const scope = yield* McpInvocationContext.McpInvocationContext;
-  if (!scope.capabilities.has("orchestration") || scope.thread === undefined) return false;
-  if ((yield* HomeService.HomeService).available) return false;
-  if (!(yield* (yield* FleetBroker.FleetBroker).reach).hostConnected) return false;
+  if (!scope.capabilities.has("orchestration") || scope.thread === undefined) return "none";
+  if ((yield* HomeService.HomeService).available) return "none";
   const caller = yield* (yield* ThreadManagement.ThreadManagementService)
     .getThreadShell(scope.thread.threadId)
     .pipe(Effect.orElseSucceed(() => null));
-  return caller !== null && caller.lineage.relationshipToParent !== "subagent";
+  if (caller === null || caller.lineage.relationshipToParent === "subagent") return "none";
+  return (yield* (yield* FleetBroker.FleetBroker).reach).hostConnected
+    ? "connected"
+    : "reconnecting";
+});
+
+const callerHasCloudReach = Effect.fn("mcp.callerHasCloudReach")(function* () {
+  return (yield* callerCloudReach()) === "connected";
 });
 
 /** Whether the caller may act in other environments: Home, or a cloud chat its host relays for. */
 export const callerHasFleetReach = Effect.fn("mcp.callerHasFleetReach")(function* () {
   return (yield* callerIsHome()) || (yield* callerHasCloudReach());
+});
+
+/**
+ * Fails a caller without fleet reach. A cloud chat whose host is between connections is told to
+ * retry, so an agent does not conclude it lacks the capability.
+ */
+export const failFleetReach = Effect.fn("mcp.failFleetReach")(function* (message: string) {
+  return yield* (yield* callerCloudReach()) === "reconnecting"
+    ? new OrchestratorMcpFailure({
+        code: "environment_unavailable",
+        message:
+          "This cloud machine is reconnecting to its host. Retry in a minute; nothing about this call was refused.",
+      })
+    : new OrchestratorMcpFailure({ code: "capability_denied", message });
 });
 
 /**
@@ -102,10 +122,7 @@ export const runAsHome = Effect.fn("mcp.runAsHome")(function* <Op extends FleetO
   // Checked again here, right before acting: Home may have been turned off or
   // started fresh while the tool did earlier work.
   if (scope.thread === undefined || !(yield* callerHasFleetReach())) {
-    return yield* new OrchestratorMcpFailure({
-      code: "capability_denied",
-      message: "Only Home can act with the user's reach.",
-    });
+    return yield* failFleetReach("Only Home can act with the user's reach.");
   }
   const invoke = {
     actor: { environmentId: scope.environmentId, threadId: scope.thread.threadId },
@@ -138,10 +155,7 @@ export const routeHome = Effect.fn("mcp.routeHome")(function* <Op extends FleetO
   if (environmentId !== undefined && environmentId !== scope.environmentId) {
     if (yield* callerHasCloudReach())
       return Option.some(yield* runAsHome(environmentId, op, input));
-    return yield* new OrchestratorMcpFailure({
-      code: "capability_denied",
-      message: "Only Home can act in another environment.",
-    });
+    return yield* failFleetReach("Only Home can act in another environment.");
   }
   return Option.none<FleetResult<Op>>();
 });

@@ -145,19 +145,32 @@ it.effect("lets a cloud chat outside full-access read other chats but not change
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("gives no reach without a host, or to a thread the desktop relays for", () =>
-  Effect.gen(function* () {
-    for (const options of [{ hostConnected: false }, { desktop: true }]) {
-      const { layer, relayed } = onBox({}, options);
-      const error = yield* routeHome(sibling, "threads.read", { threadId: target }).pipe(
-        Effect.flip,
-        Effect.provide(layer),
-      );
-      expect(error.code).toBe("capability_denied");
-      expect(relayed).toEqual([]);
-    }
-  }),
-);
+it.effect("gives no reach to a thread the desktop relays for", () => {
+  const { layer, relayed } = onBox({}, { desktop: true });
+  return Effect.gen(function* () {
+    const error = yield* routeHome(sibling, "threads.read", { threadId: target }).pipe(Effect.flip);
+    expect(error.code).toBe("capability_denied");
+    expect(relayed).toEqual([]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("tells a cloud chat to retry while its host is reconnecting", () => {
+  const { layer, relayed } = onBox({}, { hostConnected: false });
+  return Effect.gen(function* () {
+    const errors = [
+      yield* routeHome(sibling, "threads.read", { threadId: target }).pipe(Effect.flip),
+      yield* runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", {
+        jobs: [{ command: "pnpm test" }],
+      }).pipe(Effect.flip),
+    ];
+    expect(errors.map((error) => error.code)).toEqual([
+      "environment_unavailable",
+      "environment_unavailable",
+    ]);
+    expect(errors[0]?.message).toContain("Retry");
+    expect(relayed).toEqual([]);
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("hands a cloud chat's launch elsewhere to its host, which picks the thread id", () => {
   const { layer, relayed } = onBox();
