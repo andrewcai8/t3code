@@ -65,11 +65,11 @@ export const callerHasFleetReach = Effect.fn("mcp.callerHasFleetReach")(function
 });
 
 /**
- * The failure for a caller without fleet reach. A cloud chat whose host is between connections
- * is told to retry, so an agent does not conclude it lacks the capability.
+ * Fails a caller without fleet reach. A cloud chat whose host is between connections is told to
+ * retry, so an agent does not conclude it lacks the capability.
  */
-export const fleetReachDenial = Effect.fn("mcp.fleetReachDenial")(function* (message: string) {
-  return (yield* callerCloudReach()) === "reconnecting"
+export const failFleetReach = Effect.fn("mcp.failFleetReach")(function* (message: string) {
+  return yield* (yield* callerCloudReach()) === "reconnecting"
     ? new OrchestratorMcpFailure({
         code: "environment_unavailable",
         message:
@@ -122,7 +122,7 @@ export const runAsHome = Effect.fn("mcp.runAsHome")(function* <Op extends FleetO
   // Checked again here, right before acting: Home may have been turned off or
   // started fresh while the tool did earlier work.
   if (scope.thread === undefined || !(yield* callerHasFleetReach())) {
-    return yield* yield* fleetReachDenial("Only Home can act with the user's reach.");
+    return yield* failFleetReach("Only Home can act with the user's reach.");
   }
   const invoke = {
     actor: { environmentId: scope.environmentId, threadId: scope.thread.threadId },
@@ -155,7 +155,7 @@ export const routeHome = Effect.fn("mcp.routeHome")(function* <Op extends FleetO
   if (environmentId !== undefined && environmentId !== scope.environmentId) {
     if (yield* callerHasCloudReach())
       return Option.some(yield* runAsHome(environmentId, op, input));
-    return yield* yield* fleetReachDenial("Only Home can act in another environment.");
+    return yield* failFleetReach("Only Home can act in another environment.");
   }
   return Option.none<FleetResult<Op>>();
 });

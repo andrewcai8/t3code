@@ -14,7 +14,7 @@ import * as HomeService from "../../../home/HomeService.ts";
 import {
   callerHasFleetReach,
   callerIsHome,
-  fleetReachDenial,
+  failFleetReach,
   routeHome,
   runAsHome,
 } from "../../homeRouting.ts";
@@ -111,7 +111,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               "Home must pass projectId or scratch:true. Threads never launch in Home's folder.",
           });
         if (remote && !isHome && !(yield* callerHasFleetReach()))
-          return yield* yield* fleetReachDenial("Only Home can act in another environment.");
+          return yield* failFleetReach("Only Home can act in another environment.");
         const attachments = input.attachments ?? [];
         if (remote && attachments.length > 0)
           return yield* new OrchestratorMcpFailure({
