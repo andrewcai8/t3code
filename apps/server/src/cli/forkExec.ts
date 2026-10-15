@@ -7,6 +7,7 @@
  * copy could start, so a wrapper can run the command here instead.
  */
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -29,6 +30,19 @@ const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ForkExecEvent
 
 const quote = (word: string) =>
   /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+
+/** The shell's own variables are left to the copy's shell. */
+const SHELL_OWNED = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
+
+/** `export` lines that recreate `environment` in a shell. */
+export const exportsOf = (environment: NodeJS.ProcessEnv) =>
+  Object.entries(environment)
+    .flatMap(([name, value]) =>
+      value === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || SHELL_OWNED.has(name)
+        ? []
+        : [`export ${name}=${quote(value)}\n`],
+    )
+    .join("");
 
 /** One argument is a shell command as given; several are a command and its arguments. */
 export function parseForkExecArgs(args: ReadonlyArray<string>) {
@@ -91,17 +105,25 @@ export async function runForkExec(args: ReadonlyArray<string>): Promise<number> 
     return 2;
   }
   const home = process.env.T3CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".t3");
+  // The copy starts from this machine's disk, so the command picks up this process's environment
+  // from a file written before the copy is taken.
+  const environmentFile = NodePath.join(home, "fork-exec", `${process.pid}.env`);
+  NodeFS.mkdirSync(NodePath.dirname(environmentFile), { recursive: true, mode: 0o700 });
+  NodeFS.writeFileSync(environmentFile, exportsOf(process.env), { mode: 0o600 });
+  const request = { ...parsed, command: `. ${quote(environmentFile)} && ${parsed.command}` };
   const socket = NodeNet.createConnection(forkExecSocketPath(home));
+  const removeEnvironment = () => NodeFS.rmSync(environmentFile, { force: true });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
     process.once(signal, () => {
       socket.destroy();
+      removeEnvironment();
       process.exit(130);
     });
-  return new Promise((resolve) => {
+  return new Promise<number>((resolve) => {
     let buffered = "";
     let exitCode: number | null = null;
     socket.on("connect", () =>
-      socket.write(`${JSON.stringify({ ...parsed, cwd: process.cwd() })}\n`),
+      socket.write(`${JSON.stringify({ ...request, cwd: process.cwd() })}\n`),
     );
     socket.on("data", (chunk) => {
       buffered += chunk.toString("utf8");
@@ -116,5 +138,5 @@ export async function runForkExec(args: ReadonlyArray<string>): Promise<number> 
       exitCode ??= FORK_UNAVAILABLE_EXIT;
     });
     socket.on("close", () => resolve(exitCode ?? FORK_LOST_EXIT));
-  });
+  }).finally(removeEnvironment);
 }
