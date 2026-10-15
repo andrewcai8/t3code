@@ -85,6 +85,7 @@ beforeEach(() => {
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
+      cloudMachinesAfterDays: null,
     },
     projectSettingsOverrides: {},
   };
