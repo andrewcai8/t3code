@@ -57,6 +57,9 @@ jobs:
       - name: Check case-only module collisions
         run: vp run case:check
 
+      - name: Check generated GitHub GraphQL operations
+        run: vp run --filter @t3tools/source-control-github generate --check
+
       - name: Check
         run: vp check
 
