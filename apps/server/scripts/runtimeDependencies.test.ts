@@ -91,10 +91,10 @@ it("fails when pnpm-lock.yaml is missing a package in the closure", () => {
   );
 });
 
-// The bundle inlines e2b, but its `import("undici")` resolves from the runtime's node_modules.
-// With only Cursor's undici 5 there, HTTP/2 never ended a body-less DELETE, so E2B refused
-// every sandbox kill and snapshot delete after a 10 s read timeout.
-it("installs the undici major the bundled E2B SDK was built against", () => {
+// The bundle inlines e2b, but its `import("undici8")` and `import("undici")` resolve from the
+// runtime's node_modules. With only Cursor's undici 5 there, HTTP/2 never ended a body-less
+// DELETE, so E2B refused every sandbox kill and snapshot delete after a 10 s read timeout.
+it("installs an undici major the bundled E2B SDK was built against", () => {
   const { dependencies, overrides } = resolveRuntimeDependencies(
     Schema.decodeUnknownSync(fromYaml(PnpmLock))(
       NodeFS.readFileSync(new URL("../../../pnpm-lock.yaml", import.meta.url), "utf8"),
@@ -103,8 +103,8 @@ it("installs the undici major the bundled E2B SDK was built against", () => {
   );
   const major = (version: string | undefined) => version?.replace(/^\D*/, "").split(".")[0];
 
-  assert.deepStrictEqual(
-    { installed: major(dependencies.undici ?? overrides.undici) },
-    { installed: major(e2bPackage.dependencies.undici) },
+  const supported = [e2bPackage.dependencies.undici, e2bPackage.optionalDependencies.undici8].map(
+    (range) => major(range?.replace(/^npm:undici@/, "")),
   );
+  assert.include(supported, major(dependencies.undici ?? overrides.undici));
 });
