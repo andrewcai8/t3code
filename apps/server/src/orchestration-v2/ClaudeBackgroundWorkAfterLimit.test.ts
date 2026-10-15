@@ -104,6 +104,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
                     setModel: () => Effect.void,
                     applyFlagSettings: () => Effect.void,
                     setPermissionMode: () => Effect.void,
+                    backgroundTasks: () => Effect.succeed(false),
                     stopTask: () => Effect.void,
                     interrupt: Effect.void,
                     close: Effect.asVoid(close),
