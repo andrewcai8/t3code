@@ -70,9 +70,8 @@ const versionViaBuiltinFetch = () =>
 
 describe("installHttp1FetchDispatcher", () => {
   it("makes the global dispatcher negotiate HTTP/1.1 and keeps the env proxy agent", async () => {
-    // An h2 agent like undici 8's default, the one Node 26's fetch uses. The fork ships undici 7,
-    // the major the bundled E2B SDK is built for, whose default agent stays on HTTP/1.1.
-    Undici.setGlobalDispatcher(new Undici.Agent({ allowH2: true }));
+    // undici 8's default agent, the one Node 26's fetch uses.
+    Undici.setGlobalDispatcher(new Undici.Agent());
     expect(await versionViaGlobalDispatcher()).toBe("2.0");
 
     installHttp1FetchDispatcher();
