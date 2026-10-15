@@ -23,14 +23,25 @@ it("waits until a user's own machine is under 2 GB", () => {
   expect(lowDiskNote(1.9 * 1024 ** 3, false)).toContain("with 1.9 GB free.");
 });
 
-const E2B_NOTE =
-  "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk). For parallel or heavy jobs (eval replays, test shards, separate builds) use t3_fork_run: each job runs in a throwaway copy of this machine and its outputs go to S3 under outputsUri. Don't create extra worktrees and installs here. Keep large results in S3, not on this disk. Remove worktrees, installs and /tmp data you created once you no longer need them.";
+const MACHINE =
+  "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk).";
+const FORK_EXEC =
+  "Run whole-repo checks, full test suites and builds as `t3 fork-exec -- <command>`: the command runs in a throwaway copy of this machine with your uncommitted changes, and its output and exit code come back here while this machine stays fast. Don't create extra worktrees and installs here.";
+const FORK_RUN =
+  "To run several such jobs at once (test shards, eval replays), use t3_fork_run; their outputs go to S3 under outputsUri.";
+const CLEANUP =
+  "Keep large results in S3, not on this disk. Remove worktrees, installs and /tmp data you created once you no longer need them.";
 
-it("points an E2B box's chat at forks and S3, and a Mac box's chat only at S3", () => {
+it("points an E2B box's agents at fork-exec, its chats also at t3_fork_run, and a Mac box at S3", () => {
   const machine = { cpus: 8, memoryBytes: 7.8 * 1024 ** 3, diskBytes: 49.6 * 1024 ** 3 };
-  expect(cloudMachineNote({ ...machine, forks: true })).toBe(E2B_NOTE);
-  expect(cloudMachineNote({ ...machine, forks: false })).toBe(
-    "Note: you are on a cloud machine used only by this chat (8 CPUs, 8 GB RAM, 50 GB disk). Keep large results in S3, not on this disk. Remove worktrees, installs and /tmp data you created once you no longer need them.",
+  expect(cloudMachineNote({ ...machine, forkExec: true, forkRun: true })).toBe(
+    `${MACHINE} ${FORK_EXEC} ${FORK_RUN} ${CLEANUP}`,
+  );
+  expect(cloudMachineNote({ ...machine, forkExec: true, forkRun: false })).toBe(
+    `${MACHINE} ${FORK_EXEC} ${CLEANUP}`,
+  );
+  expect(cloudMachineNote({ ...machine, forkExec: false, forkRun: true })).toBe(
+    `${MACHINE} ${CLEANUP}`,
   );
 });
 
@@ -55,7 +66,8 @@ const noteOn = (
     Effect.provideService(HostProcess.Platform, platform),
   );
 const box = { T3CODE_USAGE_HOST_ID: "request-1" };
-const forkSentence = "use t3_fork_run: each job runs in a throwaway copy of this machine";
+const forkSentence = "use t3_fork_run; their outputs go to S3";
+const forkExecSentence = "as `t3 fork-exec -- <command>`";
 
 effectIt.effect("tells a box's top-level chat on the first turn of each provider session", () =>
   Effect.gen(function* () {
@@ -69,17 +81,21 @@ effectIt.effect("tells a box's top-level chat on the first turn of each provider
   }),
 );
 
-effectIt.effect("leaves a user's own machine and a box's subagents alone", () =>
-  Effect.gen(function* () {
-    expect(yield* noteOn(box, "linux")).toContain(forkSentence);
-    expect(yield* noteOn({}, "linux")).toBe("");
-    expect(yield* noteOn({ T3CODE_USAGE_HOST_ID: " " }, "linux")).toBe("");
-    expect(yield* noteOn(box, "linux", { subagent: true })).toBe("");
-  }),
+effectIt.effect(
+  "leaves a user's own machine alone and tells a box's subagents only fork-exec",
+  () =>
+    Effect.gen(function* () {
+      expect(yield* noteOn(box, "linux")).toContain(forkSentence);
+      expect(yield* noteOn({}, "linux")).toBe("");
+      expect(yield* noteOn({ T3CODE_USAGE_HOST_ID: " " }, "linux")).toBe("");
+      const subagent = yield* noteOn(box, "linux", { subagent: true });
+      expect(subagent).toContain(forkExecSentence);
+      expect(subagent).not.toContain("t3_fork_run");
+    }),
 );
 
 effectIt.effect(
-  "gives a Mac box's chat, or a provider without MCP tools, the note without forks",
+  "gives a Mac box's chat the note without forks, and a provider without MCP tools only fork-exec",
   () =>
     Effect.gen(function* () {
       const mac = yield* noteOn(box, "darwin");
@@ -87,7 +103,10 @@ effectIt.effect(
         /\. Keep large results in S3, not on this disk\. Remove worktrees, installs and \/tmp data you created once you no longer need them\.$/,
       );
       expect(mac).not.toContain("t3_fork_run");
-      expect(yield* noteOn(box, "linux", {}, false)).toBe(mac);
+      expect(mac).not.toContain("fork-exec");
+      const withoutMcp = yield* noteOn(box, "linux", {}, false);
+      expect(withoutMcp).toContain(forkExecSentence);
+      expect(withoutMcp).not.toContain("t3_fork_run");
       expect(yield* noteOn(box, "linux")).toContain(forkSentence);
     }),
 );
