@@ -20,7 +20,7 @@ import {
   forkExecSocketPath,
 } from "../home/forkExecProtocol.ts";
 
-export const FORK_UNAVAILABLE_EXIT = 75;
+const FORK_UNAVAILABLE_EXIT = 75;
 const FORK_LOST_EXIT = 70;
 const TIMED_OUT_EXIT = 124;
 /** A copy reports the last 4,000 bytes of each stream. */

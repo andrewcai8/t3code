@@ -1182,11 +1182,11 @@ effectIt.effect(
 
       expect(first.deliveredTexts).toHaveLength(1);
       expect(first.deliveredTexts[0]).toMatch(
-        /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* use t3_fork_run: .*\n\nUser message:\nRun the evals$/s,
+        /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* `t3 fork-exec -- <command>`.* use t3_fork_run; .*\n\nUser message:\nRun the evals$/s,
       );
       expect(later.deliveredTexts).toHaveLength(1);
       expect(later.deliveredTexts[0]).toMatch(
-        /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* use t3_fork_run: .*\n\nUser message:\nRun the evals$/s,
+        /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* `t3 fork-exec -- <command>`.* use t3_fork_run; .*\n\nUser message:\nRun the evals$/s,
       );
     }),
 );
