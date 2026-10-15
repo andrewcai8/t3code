@@ -378,48 +378,56 @@ const withBoxes = <A, E>(
     }).pipe(Effect.provide(context.layer));
   });
 
-it.effect("offers each awake chat the other chats with their cards, waking none", () =>
-  withBoxes(({ registrations, resumed }) =>
-    Effect.gen(function* () {
-      yield* (yield* CloudFleetHost.CloudFleetHost).reconcile;
-      const registration = yield* Queue.take(registrations.get(origin(1))!);
-      expect(registration.environments).toEqual([
-        {
-          environmentId: "box-2",
-          label: "Write docs",
-          connected: true,
-          chat: {
-            threadId: "chat-2",
-            title: "Write docs",
-            status: "idle",
-            updatedAt: "2026-09-30T10:05:00.000Z",
+it.effect(
+  "offers each awake chat the other chats with their cards and its own forks, waking none",
+  () =>
+    withBoxes(({ registrations, resumed }) =>
+      Effect.gen(function* () {
+        yield* (yield* CloudFleetHost.CloudFleetHost).reconcile;
+        const registration = yield* Queue.take(registrations.get(origin(1))!);
+        expect(registration.environments).toEqual([
+          {
+            environmentId: "box-2",
+            label: "Write docs",
+            connected: true,
+            chat: {
+              threadId: "chat-2",
+              title: "Write docs",
+              status: "idle",
+              updatedAt: "2026-09-30T10:05:00.000Z",
+            },
           },
-        },
-        {
-          environmentId: "box-4",
-          label: "Ship release",
-          connected: true,
-          chat: {
-            threadId: "chat-4",
-            title: "Ship release",
-            status: "idle",
-            updatedAt: "2026-09-30T10:05:00.000Z",
+          {
+            environmentId: "box-4",
+            label: "Ship release",
+            connected: true,
+            chat: {
+              threadId: "chat-4",
+              title: "Ship release",
+              status: "idle",
+              updatedAt: "2026-09-30T10:05:00.000Z",
+            },
           },
-        },
-        {
-          environmentId: "cloud:new-chat",
-          label: "New cloud chat on a fresh machine",
-          connected: true,
-        },
-        {
-          environmentId: "cloud:forks",
-          label: "Throwaway copies of this machine, for t3_fork_run",
-          connected: true,
-        },
-      ]);
-      expect(resumed).toEqual([]);
-    }),
-  ),
+          {
+            environmentId: "cloud:new-chat",
+            label: "New cloud chat on a fresh machine",
+            connected: true,
+          },
+          {
+            environmentId: "cloud:forks",
+            label: "Throwaway copies of this machine, for t3_fork_run",
+            connected: true,
+            chat: {
+              threadId: "chat-1",
+              title: "Fix login",
+              status: "idle",
+              updatedAt: "2026-09-30T10:05:00.000Z",
+            },
+          },
+        ]);
+        expect(resumed).toEqual([]);
+      }),
+    ),
 );
 
 it.effect("lists a sleeping chat from its card without waking it", () =>

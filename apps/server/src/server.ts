@@ -73,6 +73,7 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ForkExec from "./home/ForkExec.ts";
 import { HomeLayer } from "./home/HomeLayer.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -757,6 +758,8 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
+  // On a cloud box, `t3 fork-exec` runs a heavy command in a copy of the machine through its host.
+  ForkExec.layer,
 ).pipe(
   // Guides read through the same pull request service as every other surface.
   Layer.provide(

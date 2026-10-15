@@ -116,31 +116,35 @@ const boxName = (box: Box) => box.chat?.thread.title ?? box.label;
 const startedBy = (box: Box) => `${STARTED_CHAT_PREFIX}${box.leaseId}:`;
 const canStartChats = (box: Box) => !box.threadId?.startsWith(STARTED_CHAT_PREFIX);
 
+/** A box's chat as the environment list shows it, when the host has its card. */
+const chatCard = (box: Box): Pick<FleetEnvironment, "chat"> => {
+  const thread = box.chat?.thread;
+  return thread === undefined
+    ? {}
+    : {
+        chat: {
+          threadId: thread.id,
+          title: thread.title,
+          status: thread.activityRunStatus ?? thread.status,
+          updatedAt: DateTime.formatIso(thread.updatedAt),
+        },
+      };
+};
+
 /**
  * What one box is offered: every other cloud chat, a new one unless a chat started it, and
- * copies of its own machine for t3_fork_run.
+ * copies of its own machine for t3_fork_run. The copies carry the box's own chat, the only actor
+ * the host accepts for forks, so the box can start them for a process that is not a chat.
  */
 function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegistration {
   const siblings = boxes
     .filter((box) => box.environmentId !== source.environmentId)
-    .map((box): FleetEnvironment => {
-      const thread = box.chat?.thread;
-      return {
-        environmentId: box.environmentId,
-        label: boxName(box),
-        connected: box.lifecycle !== "missing",
-        ...(thread === undefined
-          ? {}
-          : {
-              chat: {
-                threadId: thread.id,
-                title: thread.title,
-                status: thread.activityRunStatus ?? thread.status,
-                updatedAt: DateTime.formatIso(thread.updatedAt),
-              },
-            }),
-      };
-    });
+    .map((box): FleetEnvironment => ({
+      environmentId: box.environmentId,
+      label: boxName(box),
+      connected: box.lifecycle !== "missing",
+      ...chatCard(box),
+    }));
   return {
     clientId: "t3-cloud-host",
     environments: [
@@ -158,6 +162,7 @@ function registrationFor(source: Box, boxes: ReadonlyArray<Box>): FleetHostRegis
         environmentId: CLOUD_FORKS_ENVIRONMENT_ID,
         label: "Throwaway copies of this machine, for t3_fork_run",
         connected: true,
+        ...chatCard(source),
       },
     ],
   };

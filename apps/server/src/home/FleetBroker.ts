@@ -96,6 +96,23 @@ export const isRelayLoss = (error: OrchestratorMcpFailure) =>
 const unavailable = (message: string) =>
   new OrchestratorMcpFailure({ code: "environment_unavailable", message });
 
+/** How long a cloud machine's fork call waits for its host to register again. */
+const HOST_RECONNECT_BUDGET_SECONDS = 45;
+
+/**
+ * Waits for a cloud machine's host to register again, up to a bound. Starting a fork batch pauses
+ * the machine to capture it, which drops the host's connection until its next pass.
+ */
+export const awaitHostReconnect = Effect.gen(function* () {
+  const broker = yield* FleetBroker;
+  for (
+    let waited = 0;
+    waited < HOST_RECONNECT_BUDGET_SECONDS && !(yield* broker.reach).hostConnected;
+    waited += 1
+  )
+    yield* Effect.sleep("1 second");
+});
+
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const state = yield* SynchronizedRef.make<State>({ host: null, pending: new Map() });

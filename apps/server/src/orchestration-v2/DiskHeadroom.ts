@@ -42,20 +42,25 @@ export interface CloudMachine {
   readonly cpus: number;
   readonly memoryBytes: number;
   readonly diskBytes: number;
-  /** Whether t3_fork_run can copy this machine. */
-  readonly forks: boolean;
+  /** Whether `t3 fork-exec` can run a command in a copy of this machine. */
+  readonly forkExec: boolean;
+  /** Whether this agent can call t3_fork_run. */
+  readonly forkRun: boolean;
   /** The log a reopen whose project setup failed left, and its first line. */
   readonly setupFailure?: { readonly log: string; readonly summary: string } | undefined;
 }
 
 const roundedGb = (bytes: number) => `${Math.round(bytes / 1024 ** 3)} GB`;
 
-/** What a top-level chat on a cloud box is told about where heavy work belongs. */
+/** What an agent on a cloud box is told about where heavy work belongs. */
 export function cloudMachineNote(machine: CloudMachine): string {
   return [
     `Note: you are on a cloud machine used only by this chat (${machine.cpus} CPUs, ${roundedGb(machine.memoryBytes)} RAM, ${roundedGb(machine.diskBytes)} disk).`,
-    machine.forks
-      ? "For parallel or heavy jobs (eval replays, test shards, separate builds) use t3_fork_run: each job runs in a throwaway copy of this machine and its outputs go to S3 under outputsUri. Don't create extra worktrees and installs here."
+    machine.forkExec
+      ? "Run whole-repo checks, full test suites and builds as `t3 fork-exec -- <command>`: the command runs in a throwaway copy of this machine with your uncommitted changes, and its output and exit code come back here while this machine stays fast. Don't create extra worktrees and installs here."
+      : "",
+    machine.forkExec && machine.forkRun
+      ? "To run several such jobs at once (test shards, eval replays), use t3_fork_run; their outputs go to S3 under outputsUri."
       : "",
     "Keep large results in S3, not on this disk.",
     "Remove worktrees, installs and /tmp data you created once you no longer need them.",
@@ -74,9 +79,9 @@ const toldBySession = new WeakMap<object, Set<string>>();
  * The cloud machine note, sent on the first turn of each provider session for a native thread: a
  * new chat, and also a chat resumed after a wake, a restart or an account switch, since a chat
  * that began before the note existed, or lost it to compaction, would otherwise never hear it.
- * `session` is the live provider session runtime. Only a box's top-level chats reach t3_fork_run
- * through their host, and only when their provider exposes MCP tools. Forks copy only E2B
- * machines, so a Mac box's chats are not pointed at them.
+ * `session` is the live provider session runtime. Forks copy only E2B machines, so a Mac box's
+ * agents are not pointed at them. Any agent can run `t3 fork-exec`, a shell command; only a box's
+ * top-level chats reach t3_fork_run, and only when their provider exposes MCP tools.
  */
 export const cloudMachineNoteFor = (input: {
   readonly cwd: string | null | undefined;
@@ -86,11 +91,12 @@ export const cloudMachineNoteFor = (input: {
   readonly nativeThreadId: string;
 }): Effect.Effect<string> =>
   Effect.gen(function* () {
-    if (!input.cwd || input.subagent || !(yield* onCloudBox)) return "";
+    if (!input.cwd || !(yield* onCloudBox)) return "";
     const told = toldBySession.get(input.session) ?? new Set<string>();
     if (told.has(input.nativeThreadId)) return "";
     toldBySession.set(input.session, told.add(input.nativeThreadId));
-    const forks = input.mcpTools && (yield* HostProcess.Platform) !== "darwin";
+    const forkExec = (yield* HostProcess.Platform) === "linux";
+    const forkRun = input.mcpTools && !input.subagent;
     const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
     // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
     const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
@@ -110,7 +116,8 @@ export const cloudMachineNoteFor = (input: {
           cpus: NodeOS.availableParallelism(),
           memoryBytes: NodeOS.totalmem(),
           diskBytes: stats.blocks * stats.bsize,
-          forks,
+          forkExec,
+          forkRun,
           setupFailure,
         }),
       ),
