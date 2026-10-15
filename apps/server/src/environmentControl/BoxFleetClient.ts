@@ -78,6 +78,10 @@ export class BoxFleetClient extends Context.Service<
 >()("t3/environmentControl/BoxFleetClient") {}
 
 const Ticket = Schema.Struct({ ticket: TrimmedNonEmptyString });
+
+// Pings go out every 5 seconds. Effect's default timeout equals that interval, so a ping tick that
+// runs a little late drops a healthy socket, and a box busy for a few seconds stops answering.
+const PING_TIMEOUT = "15 seconds";
 const isMcpFailure = Schema.is(OrchestratorMcpFailure);
 
 const makeBoxRpc = RpcClient.make(WsRpcGroup);
@@ -114,6 +118,7 @@ export const openBoxRpc = Effect.fn("openBoxRpc")(function* (access: RemoteAcces
     Layer.effect(
       RpcClient.Protocol,
       RpcClient.makeProtocolSocket({
+        pingTimeout: PING_TIMEOUT,
         retryTransientErrors: false,
         retryPolicy: Schedule.recurs(0),
       }),
