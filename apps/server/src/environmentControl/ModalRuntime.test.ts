@@ -29,16 +29,17 @@ afterEach(async () => {
  * under the same name. Each box serves its T3 port on a local server that says which box it is.
  */
 async function fakeModal() {
-  const boxes = new Map<string, { name: string; alive: boolean; origin?: string }>();
+  const boxes = new Map<string, { name: string; alive: boolean; image: string; origin?: string }>();
   const snapshots = new Map<string, string>();
+  const images = new Set<string>();
   const calls: string[] = [];
   let next = 0;
   const running = (name: string) =>
     [...boxes].find(([, box]) => box.alive && box.name === name)?.[0] ?? null;
-  const start = (name: string) => {
+  const start = (name: string, image: string) => {
     if (running(name)) return "exists" as const;
     const sandboxId = `sb-${++next}`;
-    boxes.set(sandboxId, { name, alive: true });
+    boxes.set(sandboxId, { name, alive: true, image });
     return sandboxId;
   };
   const serve = async (sandboxId: string) => {
@@ -59,13 +60,13 @@ async function fakeModal() {
   const api: ModalBoxes = {
     find: async (_app, name) => running(name),
     create: async (spec) => {
-      calls.push("create");
-      return start(spec.name);
+      calls.push(`create ${spec.imageId}`);
+      return start(spec.name, spec.imageId);
     },
     restore: async (snapshotId) => {
       calls.push("restore");
       const name = snapshots.get(snapshotId);
-      return name === undefined ? "expired" : start(name);
+      return name === undefined ? "expired" : start(name, snapshotId);
     },
     snapshot: async (sandboxId) => {
       calls.push("snapshot");
@@ -102,8 +103,22 @@ async function fakeModal() {
       return { exitCode: 1, stdout: "", stderr: `unexpected exec ${argv.join(" ")}` };
     },
     upload: async () => {},
+    download: async () => {},
+    saveDisk: async (sandboxId) => {
+      if (!boxes.get(sandboxId)?.alive) throw new Error("not running");
+      calls.push("saveDisk");
+      const imageId = `im-${++next}`;
+      images.add(imageId);
+      return imageId;
+    },
+    deleteImage: async (imageId) => {
+      calls.push(`deleteImage ${imageId}`);
+      images.delete(imageId);
+    },
+    createCopy: async () => `sb-${++next}`,
+    list: async () => [],
   };
-  return { api, boxes, calls, running };
+  return { api, boxes, calls, images, running };
 }
 
 async function setup(options: { readonly now?: number } = {}) {
@@ -315,7 +330,7 @@ describe("Modal runtime", () => {
 
     await expect(t.runtime.resume(preparing, t.manifest)).rejects.toThrow("not ready");
 
-    expect(t.modal.calls).toEqual(["create"]);
+    expect(t.modal.calls).toEqual(["create im-1"]);
     expect(await t.record()).toMatchObject({
       kind: "awake",
       sandboxId: "sb-2",
@@ -329,6 +344,92 @@ describe("Modal runtime", () => {
     t.modal.boxes.get(sandboxId)!.alive = false;
     expect(await t.runtime.upkeep(t.operation, async () => true)).toBe("missing");
     expect(await t.runtime.release(t.operation)).toBe("missing");
+  });
+
+  const backUp = (t: Awaited<ReturnType<typeof setup>>) =>
+    t.runtime.backUp(
+      t.operation,
+      t.manifest,
+      {
+        leaseId: chatId,
+        target: { kind: "none", reason: "No origin in this test." },
+        previous: undefined,
+        now: "2026-10-01T00:00:00Z",
+      },
+      Date.now() + 60_000,
+    );
+
+  it("keeps one disk save per chat, replacing the one before", async () => {
+    const t = await setup();
+    await t.awakeOn();
+    await backUp(t);
+    await backUp(t);
+    expect(t.modal.calls).toEqual(["saveDisk", "saveDisk", "deleteImage im-2"]);
+    expect([...t.modal.images]).toEqual(["im-3"]);
+    expect((await t.record())?.disk?.imageId).toBe("im-3");
+  });
+
+  it("boots a chat fresh from its disk save once its memory snapshot expires", async () => {
+    const t = await setup();
+    await t.awakeOn();
+    await backUp(t);
+    await t.runtime.release(t.operation);
+    expect(await t.record()).toMatchObject({ kind: "asleep", disk: { imageId: "im-2" } });
+
+    t.advance(8 * 86_400_000);
+    expect(await t.runtime.touch(t.operation)).toBe("released");
+    const resumed = await t.runtime.resume(t.operation, t.manifest);
+
+    expect(resumed).toMatchObject({ freshBoot: expect.stringContaining("seven days") });
+    const box = t.modal.running(`t3-chat-${chatId}`);
+    expect(box && t.modal.boxes.get(box)?.image).toBe("im-2");
+    expect(await t.record()).toMatchObject({
+      kind: "awake",
+      chainStartedAt: null,
+      disk: { imageId: "im-2" },
+    });
+  });
+
+  it("ends a box on a fresh disk save when its memory must not be kept, and wakes it from that", async () => {
+    const t = await setup();
+    const first = await t.awakeOn();
+    await backUp(t);
+    expect(await t.runtime.release(t.operation, false)).toBe("released");
+    expect(t.modal.calls).toEqual([
+      "saveDisk",
+      "saveDisk",
+      `terminate ${first}`,
+      "deleteImage im-2",
+    ]);
+    expect(await t.record()).toMatchObject({ kind: "stopped", disk: { imageId: "im-3" } });
+    expect(await t.runtime.touch(t.operation)).toBe("released");
+
+    const resumed = await t.runtime.resume(t.operation, t.manifest);
+    expect(resumed).toMatchObject({ freshBoot: "it was paused without its memory" });
+    const box = t.modal.running(`t3-chat-${chatId}`);
+    expect(box && t.modal.boxes.get(box)?.image).toBe("im-3");
+  });
+
+  it("sleeps a chat whose box Modal ended on its disk save, and wakes it from there", async () => {
+    const t = await setup();
+    const first = await t.awakeOn();
+    await backUp(t);
+    t.modal.boxes.get(first)!.alive = false;
+    expect(await t.runtime.touch(t.operation)).toBe("released");
+    expect(await t.runtime.upkeep(t.operation, async () => false)).toBe("released");
+    expect(await t.record()).toMatchObject({ kind: "stopped", disk: { imageId: "im-2" } });
+
+    const resumed = await t.runtime.resume(t.operation, t.manifest);
+    expect(resumed).toMatchObject({ freshBoot: expect.stringContaining("ended the machine") });
+  });
+
+  it("deletes the chat's disk save when it is disposed", async () => {
+    const t = await setup();
+    await t.awakeOn();
+    await backUp(t);
+    await t.runtime.dispose(t.operation);
+    expect(t.modal.images.size).toBe(0);
+    expect(await t.record()).toBe(null);
   });
 
   it("disposes the running box and forgets the chat", async () => {

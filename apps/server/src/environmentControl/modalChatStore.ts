@@ -5,11 +5,16 @@ import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Schema from "effect/Schema";
 import { writeReplace } from "./ProvisionPreparation.ts";
 
+/** A filesystem snapshot of a chat's box, which a fresh box boots from when its memory is gone. */
+const ModalDiskSave = Schema.Struct({ imageId: Schema.String, at: Schema.Number });
+export type ModalDiskSave = typeof ModalDiskSave.Type;
+
 /**
  * Where a Modal chat is. `awake` runs on a sandbox; `saving` is written before that sandbox's
- * memory snapshot, which ends it, and `asleep` records the snapshot it wakes from.
- * `chainStartedAt` is when the first snapshot this chat's memory descends from was taken, since a
- * restored box's snapshot expires with that one; null on a box that was never snapshotted.
+ * memory snapshot, which ends it, and `asleep` records the snapshot it wakes from. `stopped` kept
+ * only its disk, so it wakes as a fresh boot. `chainStartedAt` is when the first snapshot this
+ * chat's memory descends from was taken, since a restored box's snapshot expires with that one;
+ * null on a box that was never snapshotted. `disk` is the chat's latest disk save, if any.
  */
 export const ModalChatRecord = Schema.Union([
   Schema.Struct({
@@ -17,12 +22,16 @@ export const ModalChatRecord = Schema.Union([
     sandboxId: Schema.String,
     startedAt: Schema.Number,
     chainStartedAt: Schema.NullOr(Schema.Number),
+    disk: Schema.optional(ModalDiskSave),
   }),
   Schema.Struct({
     kind: Schema.Literal("asleep"),
     snapshotId: Schema.String,
     chainStartedAt: Schema.Number,
+    disk: Schema.optional(ModalDiskSave),
   }),
+  /** `reason` completes "booted fresh because ...", as the chat is told when it wakes. */
+  Schema.Struct({ kind: Schema.Literal("stopped"), disk: ModalDiskSave, reason: Schema.String }),
 ]);
 export type ModalChatRecord = typeof ModalChatRecord.Type;
 

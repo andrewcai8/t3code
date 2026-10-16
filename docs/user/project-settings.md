@@ -185,10 +185,12 @@ this off with **Remove unused cloud machines**. Before removal, unpushed work is
 **Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
 while paused, such as E2B sandboxes, are never removed.
 
-A Modal machine wakes with its processes still running. Modal keeps a paused machine for seven
-days from its first pause, so a Modal chat first paused longer ago than that can't be woken.
+A Modal machine wakes with its processes still running. Modal keeps a paused machine's memory for
+seven days from its first pause. After that, or if Modal ends a machine while it runs, the machine
+wakes fresh from its last saved disk, without the processes that were running, and its chat is told
+what was lost.
 
-An E2B machine is backed up after each of its chat's turns and again before it sleeps. Its unpushed
+An E2B or Modal machine is backed up after each of its chat's turns and again before it sleeps. Its unpushed
 work goes to `t3-backup/<id>` branches when the repository is private. A public one's is never
 pushed; it stays in the host's private storage when the host has one. A machine going to sleep that has
 stopped answering, or is at full CPU with its memory nearly full, is saved without its memory, so it
