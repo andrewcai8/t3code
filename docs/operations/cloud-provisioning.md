@@ -1,6 +1,6 @@
 # Cloud provisioning
 
-A chat can create its own cloud environment instead of attaching to one an operator declared ahead of time. E2B gives Linux containers that start in seconds. Namespace gives real Macs running an Xcode image, which is what iOS work needs.
+A chat can create its own cloud environment instead of attaching to one an operator declared ahead of time. E2B gives Linux containers that start in seconds. Modal gives larger Linux boxes, 8 vCPU and 32 GiB by default, from the same image. Namespace gives real Macs running an Xcode image, which is what iOS work needs.
 
 A provisioning manager is a T3 server that owns that lifecycle. It allocates the machine, prepares it, and hands back a pairing URL. The desktop app talks to a manager; it does not talk to E2B directly.
 
@@ -13,7 +13,7 @@ Provisioning reads `~/.t3/environment-control.json`. Four things matter:
 - `provisioning.runtimeArtifacts.linux`, the pinned build a new environment runs. Without it provisioning refuses with `unconfigured` rather than failing, because an install that only manages named targets is an ordinary configuration state.
 - `provisioning.githubToken`, required only for cloning a private repository.
 
-Clients offer only what a manager can provision. E2B appears when `provisioning.runtimeArtifacts.linux` is set. Namespace Mac appears when both `provisioning.runtimeArtifacts.macos` and `provisioning.namespace` are set.
+Clients offer only what a manager can provision. E2B appears when `provisioning.runtimeArtifacts.linux` is set. Modal appears when `provisioning.runtimeArtifacts.linux`, `provisioning.modal`, `modalTokenId` and `modalTokenSecret` are set. Namespace Mac appears when both `provisioning.runtimeArtifacts.macos` and `provisioning.namespace` are set.
 
 `provisioning.skills` is optional and names skill bundles copied into every new environment. Each entry has a `source` directory on the manager. Give it a `name` when the source is one skill; omit `name` when the source is a directory of skills, because every supported CLI resolves a skill as `<root>/<directory>/SKILL.md` and looks no deeper. An entry's `url` names an HTTPS gzipped tarball whose root holds skill directories; a manager that runs no agents itself (`T3CODE_LOCAL_AGENT_RUNS=false`) refreshes `source` from it at startup and hourly, and other servers use `source` as is. `pack-host-state.ts` carries such an entry as its `url` and points `source` at `<base-dir>/skill-bundles/<i>`, outside the seed, so a reseed or reboot keeps the downloaded copy. Environments that already started keep the skills they started with.
 
@@ -98,6 +98,12 @@ node apps/server/scripts/mac-chat-e2e.ts --origin http://127.0.0.1:$(cat .t3/man
 ```
 
 It needs `nsc login` on the machine running it, and it disposes what it made and releases the repository's cache volume at the end.
+
+## Run Linux chats on Modal
+
+Build the box image once with `node scripts/cloud/build-modal-image.mjs --app t3-cloud-chats`. It renders the E2B template's steps for Modal and prints the image id for `provisioning.modal.imageId`. Its credentials come from `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or from the config file. `provisioning.modal` also takes `app`, `cpu`, `cpuLimit`, `memoryMiB` and `memoryLimitMiB`. A Modal vm box's RAM is its `memoryMiB` reservation and does not burst toward the limit, which is why the reservation defaults to the full 32 GiB. A chat keeps the sizing and image it was frozen with, and it runs a repository's `e2b` prepare commands.
+
+A Modal chat names no box. Its box is the running sandbox named `t3-chat-<requestId>` in the app, which is how a manager that crashed mid-step finds it again. A pause takes a memory snapshot, which ends the box, and a resume restores it onto a new box in about two seconds with its processes still running, behind the same loopback proxy origin. Modal ends a box 24 hours after it starts without saving it, so the manager snapshots one before then: an idle one sleeps and a busy one moves to a new box. A memory snapshot expires seven days after the first snapshot it descends from, and a chat past that is reported missing. Modal chats get no E2B backups, health probes or worker forks. The manager's records live in `<state>/modal-chats`.
 
 ## Waking and updating boxes
 
