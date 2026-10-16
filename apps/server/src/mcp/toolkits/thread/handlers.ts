@@ -74,6 +74,7 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
+
 /** Home's thread when it names none in its own environment; another environment needs one. */
 const defaultThreadId = Effect.fn("mcp.defaultThreadId")(function* (input: {
   readonly environmentId?: EnvironmentId | undefined;
@@ -86,7 +87,6 @@ const defaultThreadId = Effect.fn("mcp.defaultThreadId")(function* (input: {
     : undefined;
 });
 
-/** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
@@ -117,8 +117,6 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     Effect.gen(function* () {
       const { caller } = yield* readCaller();
       const { projectId: requested, ...query } = input;
-      // Like the other project tools, an omitted project means the caller's own; a client
-      // outside a thread, or Home, searches every project.
       const projectId = requested ?? ((yield* callerIsHome()) ? undefined : caller?.projectId);
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const result = yield* threadSearch.search(query).pipe(Effect.mapError(unavailable));

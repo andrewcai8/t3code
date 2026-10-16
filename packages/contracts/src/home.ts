@@ -116,10 +116,6 @@ export class HomeUnavailableError extends Schema.TaggedError<HomeUnavailableErro
   { message: Schema.String },
 ) {}
 
-// ---------------------------------------------------------------------------
-// Fleet operations: what Home can do in any environment.
-// ---------------------------------------------------------------------------
-
 /** The Home thread that asked, recorded as the sender of messages it causes. */
 export const FleetActor = Schema.Struct({
   environmentId: EnvironmentId,
@@ -430,10 +426,6 @@ export type FleetInput<Op extends FleetOperation> = Extract<FleetRequest, { op: 
 /** Runs one fleet operation on the environment that receives it. */
 export const FleetInvokeInput = Schema.Struct({ actor: FleetActor, request: FleetRequest });
 export type FleetInvokeInput = typeof FleetInvokeInput.Type;
-
-// ---------------------------------------------------------------------------
-// Hub <-> desktop renderer relay.
-// ---------------------------------------------------------------------------
 
 /**
  * The chat an environment holds when it is one chat's own machine, as its
