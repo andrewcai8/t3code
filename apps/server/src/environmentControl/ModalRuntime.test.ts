@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off - a local stand-in serves each fake box's T3 port.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalDate:off - a local stand-in serves each fake box's T3 port, and a backup's deadline is wall-clock time.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
@@ -255,7 +255,7 @@ describe("Modal runtime", () => {
     t.advance(2 * 86_400_000);
     await t.runtime.resume(t.operation, t.manifest);
     expect(await t.runtime.release(t.operation)).toBe("released");
-    expect((await t.record())?.chainStartedAt).toBe(1_000_000);
+    expect(await t.record()).toMatchObject({ kind: "asleep", chainStartedAt: 1_000_000 });
 
     t.advance(5 * 86_400_000);
     expect(await t.runtime.touch(t.operation)).toBe("missing");
