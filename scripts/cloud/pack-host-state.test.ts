@@ -20,7 +20,7 @@ const fixture = async (
     workspaceFiles,
     githubToken,
     ...extra
-  }: Pick<HostConfig, "namespaceToken"> &
+  }: Pick<HostConfig, "namespaceToken" | "modalTokenId" | "modalTokenSecret"> &
     Pick<
       NonNullable<HostConfig["provisioning"]>,
       "skills" | "homeFiles" | "workspaceFiles" | "githubToken"
@@ -65,6 +65,7 @@ const fixture = async (
         },
         egressAllow: ["registry.npmjs.org"],
         namespace: { size: "m" },
+        modal: { imageId: "im-fixture", environment: "t3-sandboxes" },
         repositories: [
           {
             repository: "acme/ios",
@@ -222,6 +223,27 @@ describe("packHostState", () => {
       });
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("carries Modal settings only with both Modal token halves", async () => {
+    const { home, packed } = await fixture({
+      modalTokenId: "ak-modal",
+      modalTokenSecret: "as-modal",
+    });
+    const half = await fixture({ modalTokenId: "ak-modal" });
+    try {
+      assert.equal(packed.config.modalTokenId, "ak-modal");
+      assert.equal(packed.config.modalTokenSecret, "as-modal");
+      assert.deepEqual(packed.config.provisioning.modal, {
+        imageId: "im-fixture",
+        environment: "t3-sandboxes",
+      });
+      assert.isUndefined(half.packed.config.modalTokenId);
+      assert.isUndefined(half.packed.config.provisioning.modal);
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+      await NodeFSP.rm(half.home, { recursive: true, force: true });
     }
   });
 

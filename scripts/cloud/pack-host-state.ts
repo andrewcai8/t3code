@@ -28,11 +28,14 @@ interface ConfiguredFile {
 export interface HostConfig {
   readonly e2bApiKey?: string;
   readonly namespaceToken?: string;
+  readonly modalTokenId?: string;
+  readonly modalTokenSecret?: string;
   readonly provisioning?: PlanInput["provisioning"] & {
     readonly templateId?: string;
     readonly runtimeArtifacts?: unknown;
     readonly githubToken?: string;
     readonly namespace?: unknown;
+    readonly modal?: unknown;
     readonly repositories?: ReadonlyArray<{
       readonly repository: string;
       readonly workspaceFiles?: unknown;
@@ -99,11 +102,13 @@ export interface HostState {
    * `provisioning.runtimeArtifacts`, which a host pins itself. Namespace
    * settings travel only with a `namespaceToken` or a Namespace session: a host
    * has no `nsc login` of its own, so without one it could not start the Macs
-   * it offers.
+   * it offers. Modal settings travel only with both Modal token halves, for the same reason.
    */
   readonly config: {
     readonly e2bApiKey: string;
     readonly namespaceToken?: string;
+    readonly modalTokenId?: string;
+    readonly modalTokenSecret?: string;
     readonly targets: readonly [];
     readonly provisioning: Record<string, unknown> & { readonly templateId: string };
   };
@@ -269,6 +274,8 @@ export async function packHostState(input: PackInput): Promise<HostState> {
   const namespaceAuthorized = Boolean(
     namespaceToken || input.namespaceSession || input.namespaceFederated,
   );
+  const { modalTokenId, modalTokenSecret } = config;
+  const modalAuthorized = Boolean(modalTokenId && modalTokenSecret);
   // A repository entry's `workspaceFiles` name paths on this machine, so only
   // its E2B and Namespace settings travel. Namespace artifact paths live in
   // Namespace's storage, not on disk.
@@ -292,6 +299,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
     config: {
       e2bApiKey,
       ...(namespaceToken ? { namespaceToken } : {}),
+      ...(modalAuthorized ? { modalTokenId, modalTokenSecret } : {}),
       targets: [],
       provisioning: {
         templateId,
@@ -311,6 +319,7 @@ export async function packHostState(input: PackInput): Promise<HostState> {
         ...(namespaceAuthorized && provisioning?.namespace
           ? { namespace: provisioning.namespace }
           : {}),
+        ...(modalAuthorized && provisioning?.modal ? { modal: provisioning.modal } : {}),
         ...(repositories.length ? { repositories } : {}),
       },
     },
