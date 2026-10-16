@@ -223,7 +223,12 @@ export function makeModalBoxes(credentials: {
       return tunnel.url;
     },
     exec: async (sandboxId, argv, { stdin, timeoutMs }) => {
-      const child = await (await box(sandboxId)).exec([...argv], { timeoutMs });
+      // Modal takes an exec's timeout in whole seconds only.
+      const child = await (
+        await box(sandboxId)
+      ).exec([...argv], {
+        timeoutMs: Math.max(1_000, Math.floor(timeoutMs / 1_000) * 1_000),
+      });
       if (stdin) await child.stdin.writeText(stdin);
       await child.stdin.close();
       const [stdout, stderr, exitCode] = await Promise.all([
