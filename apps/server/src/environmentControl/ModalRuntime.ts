@@ -12,7 +12,7 @@ import type { ProvisionOperation } from "@t3tools/contracts";
 
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import { ProvisionedSandboxMissing } from "./driver.ts";
-import { backUpBox } from "./boxBackup.ts";
+import { backUpBox, withinBudget } from "./boxBackup.ts";
 import { readBoxHealth } from "./boxHealth.ts";
 import { GUEST_INIT_SOCKET, guestInitScript } from "./guestInit.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
@@ -223,7 +223,12 @@ export function makeModalBoxes(credentials: {
       return tunnel.url;
     },
     exec: async (sandboxId, argv, { stdin, timeoutMs }) => {
-      const child = await (await box(sandboxId)).exec([...argv], { timeoutMs });
+      // Modal takes an exec's timeout in whole seconds only.
+      const child = await (
+        await box(sandboxId)
+      ).exec([...argv], {
+        timeoutMs: Math.max(1_000, Math.floor(timeoutMs / 1_000) * 1_000),
+      });
       if (stdin) await child.stdin.writeText(stdin);
       await child.stdin.close();
       const [stdout, stderr, exitCode] = await Promise.all([
@@ -342,6 +347,7 @@ export function makeModalRuntime(config: {
    * Runs guest work beside a chat's steps, such as a backup, which must not hold up a wake. Modal
    * refuses a memory snapshot while an exec runs, so a sleep marks the chat `saving` and then
    * waits for this work; work that starts after the mark finds the chat not awake and does nothing.
+   * A fork capture counts too, so a pause never cuts off a batch's capture.
    */
   const alongside = <A>(chatId: string, run: () => Promise<A>): Promise<A> => {
     const running = work.get(chatId) ?? new Set();
@@ -356,6 +362,38 @@ export function makeModalRuntime(config: {
     return result;
   };
   const settle = (chatId: string) => Promise.all(work.get(chatId) ?? []);
+  /** Deletes a disk save no record names any more. One that cannot be deleted is logged. */
+  const dropDisk = async (disk: ModalDiskSave) =>
+    boxes
+      .deleteImage(disk.imageId)
+      .catch((cause: unknown) =>
+        log("modal disk save could not be deleted", { imageId: disk.imageId, cause }),
+      );
+  const writes = new Map<string, Promise<unknown>>();
+  /**
+   * Changes a chat's record from its latest value, one change per chat at a time, since a disk
+   * save records itself beside the chat's steps. A disk save the new record no longer names is
+   * deleted once the record is written.
+   */
+  const update = (
+    id: string,
+    change: (latest: ModalChatRecord | null) => ModalChatRecord | null,
+  ): Promise<ModalChatRecord | null> => {
+    const result = (writes.get(id) ?? Promise.resolve()).then(async () => {
+      const before = await store.read(id);
+      const next = change(before);
+      if (next === before) return next;
+      await store.write(id, next);
+      if (before?.disk && before.disk.imageId !== next?.disk?.imageId) await dropDisk(before.disk);
+      return next;
+    });
+    const settled = result.catch(() => undefined);
+    writes.set(id, settled);
+    void settled.then(() => {
+      if (writes.get(id) === settled) writes.delete(id);
+    });
+    return result;
+  };
   const request = (operation: ProvisionOperation) => {
     if (operation.request.provider !== "modal") throw new Error("Not a Modal chat");
     return operation.request;
@@ -448,19 +486,22 @@ export function makeModalRuntime(config: {
       const stop = startProvisionPhase(record);
       const sandboxId = await createBox(operation, manifest, disk.imageId);
       stop("modal.freshBoot");
-      await store.write(id, {
+      await update(id, () => ({
         kind: "awake",
         sandboxId,
         startedAt: now(),
         chainStartedAt: null,
         disk,
-      });
+      }));
       log("modal chat booted fresh from its disk", { chatId: id, sandboxId, why });
       return { sandboxId, freshBoot: why };
     };
     if (current?.kind === "awake" || current?.kind === "saving") {
       if (await boxes.alive(current.sandboxId)) {
-        if (current.kind === "saving") await store.write(id, { ...current, kind: "awake" });
+        if (current.kind === "saving")
+          await update(id, (latest) =>
+            latest?.kind === "saving" ? { ...latest, kind: "awake" } : latest,
+          );
         return { sandboxId: current.sandboxId };
       }
       // Modal ended it without a snapshot this manager recorded. A box that died before its chat
@@ -483,20 +524,20 @@ export function makeModalRuntime(config: {
           : restored;
       if (sandboxId === null || sandboxId === "expired") return fromDisk(current.disk, EXPIRED);
       stop("modal.restore");
-      await store.write(id, {
+      await update(id, (latest) => ({
         kind: "awake",
         sandboxId,
         startedAt: now(),
         chainStartedAt: current.chainStartedAt,
-        ...(current.disk ? { disk: current.disk } : {}),
-      });
+        ...(latest?.disk ? { disk: latest.disk } : {}),
+      }));
       log("modal chat restored", { chatId: id, sandboxId });
       return { sandboxId };
     }
     const stop = startProvisionPhase(record);
     const sandboxId = await createBox(operation, manifest, modal.imageId);
     stop("modal.create");
-    await store.write(id, { kind: "awake", sandboxId, startedAt: now(), chainStartedAt: null });
+    await update(id, () => ({ kind: "awake", sandboxId, startedAt: now(), chainStartedAt: null }));
     log("modal chat created", { chatId: id, sandboxId });
     return { sandboxId };
   };
@@ -588,48 +629,47 @@ export function makeModalRuntime(config: {
     });
   };
 
-  /** Deletes a disk save once a newer one is recorded. One that cannot be deleted is logged. */
-  const dropDisk = async (disk: ModalDiskSave) =>
-    boxes
-      .deleteImage(disk.imageId)
-      .catch((cause: unknown) =>
-        log("modal disk save could not be deleted", { imageId: disk.imageId, cause }),
-      );
   const diskSaves = new Map<string, Promise<ModalDiskSave | null>>();
   /**
    * Saves an awake chat's disk as its latest save, replacing the one before, and answers it; null
-   * when the chat is not awake. A save already running for the chat is joined.
+   * when the chat is not awake. A save already running for the chat is joined. A pause does not
+   * wait for one: Modal takes a memory snapshot during a disk save and abandons the save.
    */
   const saveDisk = (id: string): Promise<ModalDiskSave | null> => {
     const running = diskSaves.get(id);
     if (running) return running;
-    const saving = alongside(id, async () => {
+    const saving = (async () => {
       const current = await store.read(id);
       if (current?.kind !== "awake" || !(await boxes.alive(current.sandboxId))) return null;
       const at = now();
       const disk = { imageId: await boxes.saveDisk(current.sandboxId, null), at };
-      const latest = await store.read(id);
-      if (
-        (latest?.kind !== "awake" && latest?.kind !== "saving") ||
-        latest.sandboxId !== current.sandboxId
-      ) {
+      let recorded = false;
+      await update(id, (latest) => {
+        if (
+          (latest?.kind !== "awake" && latest?.kind !== "saving") ||
+          latest.sandboxId !== current.sandboxId
+        )
+          return latest;
+        recorded = true;
+        return { ...latest, disk };
+      });
+      if (!recorded) {
         await dropDisk(disk);
         return null;
       }
-      await store.write(id, { ...latest, disk });
-      if (latest.disk && latest.disk.imageId !== disk.imageId) await dropDisk(latest.disk);
       log("modal chat disk saved", { chatId: id, durationMs: now() - at });
       return disk;
-    }).finally(() => diskSaves.delete(id));
+    })().finally(() => diskSaves.delete(id));
     diskSaves.set(id, saving);
     return saving;
   };
 
   /** A chat whose box Modal ended while it was awake sleeps on its disk save, if it has one. */
-  const lost = async (id: string, disk: ModalDiskSave | undefined): Promise<ChatOutcome> => {
-    if (!disk) return "missing";
-    await store.write(id, { kind: "stopped", disk, reason: LOST });
-    return "released";
+  const lost = async (id: string): Promise<ChatOutcome> => {
+    const next = await update(id, (latest) =>
+      latest?.disk ? { kind: "stopped", disk: latest.disk, reason: LOST } : latest,
+    );
+    return next?.kind === "stopped" ? "released" : "missing";
   };
 
   /**
@@ -644,28 +684,29 @@ export function makeModalRuntime(config: {
     if (current.kind === "stopped") return "released";
     if (current.kind === "asleep")
       return expired(current.chainStartedAt) && !current.disk ? "missing" : "released";
-    if (!(await boxes.alive(current.sandboxId))) return lost(id, current.disk);
-    await store.write(id, { ...current, kind: "saving" });
+    if (!(await boxes.alive(current.sandboxId))) return lost(id);
+    await update(id, (latest) =>
+      latest?.kind === "awake" || latest?.kind === "saving"
+        ? { ...latest, kind: "saving" }
+        : latest,
+    );
     await settle(id);
-    // A disk save that finished while this waited recorded itself on the `saving` record.
-    const latest = await store.read(id);
-    const disk = latest?.kind === "saving" ? latest.disk : current.disk;
     const started = now();
     if (!keepMemory) {
       const saved = { imageId: await boxes.saveDisk(current.sandboxId, null), at: started };
       await boxes.terminate(current.sandboxId);
-      await store.write(id, { kind: "stopped", disk: saved, reason: DROPPED });
-      if (disk) await dropDisk(disk);
+      await update(id, () => ({ kind: "stopped", disk: saved, reason: DROPPED }));
       log("modal chat stopped on its disk", { chatId: id, durationMs: now() - started });
       return "released";
     }
     const snapshotId = await boxes.snapshot(current.sandboxId);
-    await store.write(id, {
+    // Taken from the record as it is now, which a disk save may have updated meanwhile.
+    await update(id, (latest) => ({
       kind: "asleep",
       snapshotId,
       chainStartedAt: current.chainStartedAt ?? started,
-      ...(disk ? { disk } : {}),
-    });
+      ...(latest?.disk ? { disk: latest.disk } : {}),
+    }));
     log("modal chat snapshotted", { chatId: id, durationMs: now() - started });
     return "released";
   };
@@ -775,7 +816,7 @@ export function makeModalRuntime(config: {
         if (current.kind === "stopped") return "reopen";
         if (current.kind === "asleep")
           return expired(current.chainStartedAt) && !current.disk ? "missing" : "reopen";
-        if (!(await boxes.alive(current.sandboxId))) return lost(id, current.disk);
+        if (!(await boxes.alive(current.sandboxId))) return lost(id);
         const age = now() - current.startedAt;
         if (age < ROTATE_IDLE_MS) return "kept";
         const asleep = await idle();
@@ -786,7 +827,8 @@ export function makeModalRuntime(config: {
       }),
     /**
      * Backs an awake chat up by `deadline`: its disk, which a fresh boot starts from, and its
-     * work and sessions as an E2B box's are (see boxBackup). Null when it is not awake.
+     * work and sessions as an E2B box's are (see boxBackup). Null when it is not awake. A disk
+     * save still running at the deadline finishes on its own.
      */
     backUp: (
       operation: ProvisionOperation,
@@ -797,20 +839,20 @@ export function makeModalRuntime(config: {
       alongside(chatId(operation), async () => {
         const sandboxId = await runningBox(chatId(operation));
         if (sandboxId === null) return null;
-        const [disk, work] = await Promise.allSettled([
-          saveDisk(chatId(operation)),
-          backUpBox(guestPort(sandboxId, deadline), {
-            ...input,
-            root: manifest.preparation.root,
-            deadline,
-          }),
-        ]);
-        if (work.status === "rejected") throw work.reason;
-        if (disk.status === "fulfilled") return work.value;
-        const reason = disk.reason instanceof Error ? disk.reason.message : String(disk.reason);
+        const disk = saveDisk(chatId(operation)).then(
+          () => null,
+          (cause: unknown) => ({ failed: cause instanceof Error ? cause.message : String(cause) }),
+        );
+        const work = await backUpBox(guestPort(sandboxId, deadline), {
+          ...input,
+          root: manifest.preparation.root,
+          deadline,
+        });
+        const saved = await withinBudget(disk, Math.max(0, deadline - Date.now()));
+        if (saved === null || saved === "timeout") return work;
         return {
-          ...work.value,
-          problems: [...work.value.problems, `The box's disk could not be saved: ${reason}`],
+          ...work,
+          problems: [...work.problems, `The box's disk could not be saved: ${saved.failed}`],
         };
       }),
     /**
@@ -885,9 +927,9 @@ export function makeModalRuntime(config: {
           ...(named ? [named] : []),
         ]))
           if (await boxes.alive(sandboxId)) await boxes.terminate(sandboxId);
-        // A memory snapshot cannot be deleted; it expires on its own.
-        if (current?.disk) await dropDisk(current.disk);
-        await store.write(id, null);
+        // A memory snapshot cannot be deleted; it expires on its own. The disk save goes with
+        // the record.
+        await update(id, () => null);
       });
     },
   };

@@ -32,6 +32,8 @@ async function fakeModal() {
   const boxes = new Map<string, { name: string; alive: boolean; image: string; origin?: string }>();
   const snapshots = new Map<string, string>();
   const images = new Set<string>();
+  /** Holds every disk save until it resolves, as a long save of a big box does. */
+  const gate: { disk?: Promise<void>; deleted?: (imageId: string) => void } = {};
   const calls: string[] = [];
   let next = 0;
   const running = (name: string) =>
@@ -107,6 +109,7 @@ async function fakeModal() {
     saveDisk: async (sandboxId) => {
       if (!boxes.get(sandboxId)?.alive) throw new Error("not running");
       calls.push("saveDisk");
+      await gate.disk;
       const imageId = `im-${++next}`;
       images.add(imageId);
       return imageId;
@@ -114,11 +117,12 @@ async function fakeModal() {
     deleteImage: async (imageId) => {
       calls.push(`deleteImage ${imageId}`);
       images.delete(imageId);
+      gate.deleted?.(imageId);
     },
     createCopy: async () => `sb-${++next}`,
     list: async () => [],
   };
-  return { api, boxes, calls, images, running };
+  return { api, boxes, calls, gate, images, running };
 }
 
 async function setup(options: { readonly now?: number } = {}) {
@@ -421,6 +425,34 @@ describe("Modal runtime", () => {
 
     const resumed = await t.runtime.resume(t.operation, t.manifest);
     expect(resumed).toMatchObject({ freshBoot: expect.stringContaining("ended the machine") });
+  });
+
+  it("pauses without waiting for a disk save, and drops a save that ends after the pause", async () => {
+    const t = await setup();
+    await t.awakeOn();
+    let finish = () => {};
+    t.modal.gate.disk = new Promise((resolve) => (finish = resolve));
+    const deleted = new Promise<string>((resolve) => (t.modal.gate.deleted = resolve));
+    // Past its deadline, the backup returns while its disk save keeps running.
+    await t.runtime.backUp(
+      t.operation,
+      t.manifest,
+      {
+        leaseId: chatId,
+        target: { kind: "none", reason: "No origin in this test." },
+        previous: undefined,
+        now: "2026-10-01T00:00:00Z",
+      },
+      Date.now() - 1,
+    );
+
+    expect(await t.runtime.release(t.operation)).toBe("released");
+    expect(await t.record()).toMatchObject({ kind: "asleep" });
+    expect((await t.record())?.disk).toBeUndefined();
+
+    finish();
+    expect(await deleted).toMatch(/^im-/);
+    expect(t.modal.images.size).toBe(0);
   });
 
   it("deletes the chat's disk save when it is disposed", async () => {
