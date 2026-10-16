@@ -86,14 +86,25 @@ while True:
 `;
 
 /**
- * Defines `spawn_detached(argv, env, cwd, log_path)`, which starts a process that outlives the
- * guest script and returns its pid: through the box's entrypoint when it serves
- * `T3_INIT_SOCKET` (default `GUEST_INIT_SOCKET`), otherwise detached here, as on E2B.
+ * Defines `init_served()`, whether the box's entrypoint serves `T3_INIT_SOCKET` (default
+ * `GUEST_INIT_SOCKET`); `spawn_detached(argv, env, cwd, log_path)`, which starts a process that
+ * outlives the guest script and returns its pid, through the entrypoint when it serves the socket
+ * and detached here otherwise, as on E2B; and `run_attached(argv, cwd, env, timeout)`, which runs a
+ * command through the entrypoint and returns its output once it exits, so whatever it leaves
+ * running descends from the entrypoint. `run_attached` needs `CommandTimeout`.
  */
 export const spawnDetachedScript = String.raw`
+def init_socket():
+    import os as _os
+    return _os.environ.get('T3_INIT_SOCKET', ${JSON.stringify(GUEST_INIT_SOCKET)})
+
+def init_served():
+    import os as _os
+    return _os.path.exists(init_socket())
+
 def spawn_detached(argv, env, cwd, log_path):
     import json as _json, os as _os, socket as _socket, subprocess as _subprocess
-    path = _os.environ.get('T3_INIT_SOCKET', ${JSON.stringify(GUEST_INIT_SOCKET)})
+    path = init_socket()
     if _os.path.exists(path):
         with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as conn:
             conn.settimeout(30)
@@ -105,4 +116,34 @@ def spawn_detached(argv, env, cwd, log_path):
         return reply['pid']
     with open(log_path, 'a') as log:
         return _subprocess.Popen(argv, cwd=cwd, env=env, stdin=_subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True).pid
+
+def run_attached(argv, cwd, env, timeout):
+    import contextlib as _contextlib, os as _os, tempfile as _tempfile, time as _time
+    with _tempfile.TemporaryDirectory() as scratch:
+        output_path = _os.path.join(scratch, 'output.log')
+        status_path = _os.path.join(scratch, 'status')
+        # The exit code lands in a file once the command exits, without waiting on the output of
+        # anything it left running.
+        pid = spawn_detached(['sh', '-c', '"$@"; echo $? > "$0.tmp" && mv "$0.tmp" "$0"', status_path] + [str(part) for part in argv], env, cwd, output_path)
+        deadline = _time.monotonic() + timeout
+        while not _os.path.exists(status_path):
+            if _time.monotonic() >= deadline:
+                # The entrypoint gave the command a session of its own, so this reaches every descendant.
+                with _contextlib.suppress(ProcessLookupError):
+                    _os.killpg(pid, 15)
+                    grace = _time.monotonic() + 10
+                    while _time.monotonic() < grace:
+                        _os.killpg(pid, 0)
+                        _time.sleep(0.1)
+                with _contextlib.suppress(ProcessLookupError):
+                    _os.killpg(pid, 9)
+                raise CommandTimeout('Preparation command timed out: ' + ' '.join(str(part) for part in argv[:8]))
+            _time.sleep(0.1)
+        with open(status_path) as status:
+            code = int(status.read())
+        with open(output_path) as output:
+            detail = output.read().strip()
+    if code != 0:
+        raise RuntimeError('Preparation command failed' + ((': ' + detail[-1500:]) if detail else ''))
+    return detail
 `;

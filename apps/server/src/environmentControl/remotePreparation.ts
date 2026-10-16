@@ -1100,11 +1100,14 @@ def prepare(spec):
             # before the journal recorded this shows it by a server having
             # started, or by the chat database a snapshot carries.
             prepared = journal.get('prepared') or server_path.exists() or (t3home / 'userdata' / 'statev2.sqlite').exists()
+            # A service a command starts, in the background or daemonized, outlives a Modal box's
+            # memory snapshot only as a descendant of its entrypoint.
+            run_prepare = run_attached if init_served() else run
             with step('prepareCommands'):
                 for index, command_line in enumerate(prepare):
                     try:
                         with step('prepareCommand.' + str(index)):
-                            run(['sh', '-lc', command_line], project, prepare_env, timeout=PREPARE_COMMAND_SECONDS)
+                            run_prepare(['sh', '-lc', command_line], project, prepare_env, timeout=PREPARE_COMMAND_SECONDS)
                     except RuntimeError as error:
                         failure = redact(str(error))
                         if not prepared:
