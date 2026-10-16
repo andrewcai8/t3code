@@ -308,9 +308,12 @@ const stalled = (record: { readonly status: string; readonly at: string } | unde
  */
 const CONFIRM_PROBE_MS = 10_000;
 
-/** What a chat is told when its box was booted fresh from its disk, and `why`. */
-const restartNotice = (why: string) =>
-  `This machine was restarted fresh from its disk because ${why}. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check \`git status\`, start again anything you had running, and carry on.`;
+/**
+ * What a chat is told when its box was booted fresh from its disk, and `why`. A Modal disk save
+ * keeps /tmp; an E2B boot from disk empties it.
+ */
+const restartNotice = (why: string, keepsTmp: boolean) =>
+  `This machine was restarted fresh from its disk because ${why}. What was only in memory${keepsTmp ? " and any processes that were running were" : ", any processes that were running, and /tmp were"} lost; the checkout and this conversation are intact. Check \`git status\`, start again anything you had running, and carry on.`;
 
 /**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
@@ -635,7 +638,7 @@ export function createEnvironmentControl(
     const freshBoot = await leaseRegistry.takeFreshBoot(lease.leaseId);
     if (!freshBoot) return;
     try {
-      await driver.tellChat(lease, restartNotice(freshBoot.reason));
+      await driver.tellChat(lease, restartNotice(freshBoot.reason, lease.provider === "modal"));
     } catch (cause) {
       reportFailure("cloud chat was not told its box restarted", { chatId: lease.leaseId, cause });
       await leaseRegistry.recordFreshBoot(lease.leaseId, freshBoot);

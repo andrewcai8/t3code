@@ -515,17 +515,18 @@ export function makeModalRuntime(config: {
       guest.sha256 === manifest.preparation.artifact.sha256 ? "artifact" : `runtime/${guest.sha256}`
     }`;
     // Started before the entrypoint listens, the server would run outside it and stop for good
-    // at the box's first snapshot.
+    // at the box's first snapshot. A box booted from a disk save has the old box's socket file
+    // until its entrypoint replaces it, so the wait is for one that answers.
     const listening = await boxes.exec(
       sandboxId,
       [
         "sh",
         "-c",
-        'for _ in $(seq 300); do [ -S "$1" ] && exit 0; sleep 0.1; done; exit 1',
+        'for _ in $(seq 300); do python3 -c "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])" "$1" 2>/dev/null && exit 0; sleep 0.1; done; exit 1',
         "sh",
         GUEST_INIT_SOCKET,
       ],
-      { timeoutMs: 60_000 },
+      { timeoutMs: 90_000 },
     );
     if (listening.exitCode !== 0) throw new Error("The Modal box's entrypoint is not listening");
     const stopPresence = startProvisionPhase(record);
