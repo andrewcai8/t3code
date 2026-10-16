@@ -11,6 +11,8 @@ packages:
 allowBuilds:
   browser-tabs-lock: false
   bufferutil: false
+  # Optional native decoder; cbor-x falls back to JavaScript.
+  cbor-extract: false
   core-js: false
   electron: true
   electron-winstaller: false
@@ -20,6 +22,8 @@ allowBuilds:
   node-pty: true
   # Ships N-API prebuilds; its install script only rebuilds from source.
   objc-js: false
+  # Its postinstall only prints a version notice.
+  protobufjs: false
   "react-native-enriched-markdown@file:apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.12.tgz": true
   sharp: true
   tsc-rs: true

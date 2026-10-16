@@ -6,6 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
+import { COMMON_TOOLS_BASE, COMMON_TOOLS_STEPS } from "./common-tools-image.mjs";
 
 const require = NodeModule.createRequire(
   new URL("../../apps/server/package.json", import.meta.url),
@@ -37,45 +38,18 @@ const cpuCount = Number(values["cpu-count"]);
 if (!Number.isInteger(cpuCount) || cpuCount < 1)
   throw new Error("--cpu-count must be a positive integer");
 
-const template = Template({
-  fileContextPath: NodeURL.fileURLToPath(new URL("./", import.meta.url)),
-})
-  .fromImage("ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254")
-  .setUser("root")
-  .copy("e2b-common-tools.sh", "/opt/t3-common-tools.sh", { mode: 0o755 })
-  .runCmd("bash /opt/t3-common-tools.sh system")
-  .runCmd("bash /opt/t3-common-tools.sh runtimes")
-  .setEnvs({
-    HOME: "/home/user",
-    NPM_CONFIG_PREFIX: "/home/user/.local",
-    BUN_INSTALL: "/home/user/.bun",
-    SWIFTLY_HOME_DIR: "/home/user/.local/share/swiftly",
-    SWIFTLY_BIN_DIR: "/home/user/.local/bin",
-    BROWSER_EXECUTABLE: "/usr/local/bin/chromium-headless",
-    PATH: "/home/user/.local/bin:/home/user/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-  })
-  .setUser("user")
-  .setWorkdir("/home/user")
-  .runCmd("bash /opt/t3-common-tools.sh tools")
-  .runCmd("bash /opt/t3-common-tools.sh swift")
-  .runCmd(String.raw`cat > /home/user/.profile.d-common-tools.sh <<'PROFILE'
-export NPM_CONFIG_PREFIX="$HOME/.local"
-export NODE_OPTIONS=--max-old-space-size=4096
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
-PROFILE
-printf '%s\n' '. "$HOME/.profile.d-common-tools.sh"' >> /home/user/.profile
-printf '%s\n' '. "$HOME/.profile.d-common-tools.sh"' >> /home/user/.bashrc`)
-  .runCmd(String.raw`set -eu
-temporary=$(mktemp -d)
-trap 'rm -rf "$temporary"' EXIT
-curl -fsSL --retry 3 https://go.dev/dl/go1.26.4.linux-amd64.tar.gz -o "$temporary/go.tar.gz"
-printf '%s  %s\n' 1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f "$temporary/go.tar.gz" | sha256sum --check --status
-sudo tar -xzf "$temporary/go.tar.gz" -C /usr/local
-sudo ln -sfn /usr/local/go/bin/go /usr/local/bin/go
-sudo ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
-sudo systemctl disable redis-server.service
-test "$(go version)" = 'go version go1.26.4 linux/amd64'`)
-  .runCmd("bash /opt/t3-common-tools.sh verify && ruby --version")
+const template = COMMON_TOOLS_STEPS.reduce(
+  (built, step) => {
+    if ("user" in step) return built.setUser(step.user);
+    if ("copy" in step) return built.copy(step.copy, step.to, { mode: step.mode });
+    if ("env" in step) return built.setEnvs(step.env);
+    if ("workdir" in step) return built.setWorkdir(step.workdir);
+    return built.runCmd(step.run);
+  },
+  Template({
+    fileContextPath: NodeURL.fileURLToPath(new URL("./", import.meta.url)),
+  }).fromImage(COMMON_TOOLS_BASE),
+)
   // Sandboxes resume from the VM that ran the start command, not the build-step VM,
   // so the swapon belongs in the start command.
   .runCmd("sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile")
