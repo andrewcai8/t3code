@@ -16,6 +16,7 @@ const { values } = NodeUtil.parseArgs({
   options: {
     name: { type: "string", default: "t3-common-tools-node24-bun140-v8" },
     "cpu-count": { type: "string", default: "8" },
+    "memory-mb": { type: "string", default: "16384" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -27,16 +28,19 @@ const { values } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(
-    "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--cpu-count N] [--config FILE] [--print-dockerfile]",
+    "Usage: node scripts/cloud/build-e2b-common-template.mjs --output DIRECTORY [--name NAME] [--cpu-count N] [--memory-mb N] [--config FILE] [--print-dockerfile]",
   );
   console.log(
-    "Builds a clean private E2B template with --cpu-count vCPUs (default 8, the E2B Pro maximum), 8 GiB RAM, 8 GiB swap and 50 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
+    "Builds a clean private E2B template with --cpu-count vCPUs (default 8, the E2B Pro maximum), --memory-mb of RAM (default 16384, the limit E2B set for this team), 8 GiB swap and 50 GiB free disk. Copies only the public installer recipe. Does not change environment-control configuration.",
   );
   process.exit(0);
 }
 const cpuCount = Number(values["cpu-count"]);
 if (!Number.isInteger(cpuCount) || cpuCount < 1)
   throw new Error("--cpu-count must be a positive integer");
+const memoryMB = Number(values["memory-mb"]);
+if (!Number.isInteger(memoryMB) || memoryMB < 1)
+  throw new Error("--memory-mb must be a positive integer");
 
 const template = COMMON_TOOLS_STEPS.reduce(
   (built, step) => {
@@ -74,7 +78,7 @@ try {
   const result = await Template.build(template, values.name, {
     apiKey,
     cpuCount,
-    memoryMB: 8192,
+    memoryMB,
     minFreeDiskMb: 51200,
     onBuildLogs: (entry) => {
       const line = JSON.stringify(entry).replaceAll(apiKey, "[redacted]");
@@ -90,7 +94,7 @@ try {
     startedAt,
     durationMs: Math.round(performance.now() - started),
     cpuCount,
-    memoryMB: 8192,
+    memoryMB,
   };
   await NodeFSP.writeFile(NodePath.join(output, "build.json"), JSON.stringify(evidence, null, 2), {
     mode: 0o600,
