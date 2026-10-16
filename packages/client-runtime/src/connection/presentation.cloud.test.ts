@@ -158,6 +158,12 @@ describe("a cloud chat's machine", () => {
     expect(cloudWakeNotice("unavailable", machine("mac", "provider-unavailable")).title).toBe(
       "Namespace couldn't start this chat's cloud machine yet",
     );
+    expect(
+      cloudWakeNotice("unavailable", {
+        ...machine("sandbox", "provider-unavailable"),
+        provider: "modal",
+      }).title,
+    ).toBe("Modal couldn't start this chat's cloud machine yet");
   });
 
   it("says how long the machine it runs on takes to wake", () => {

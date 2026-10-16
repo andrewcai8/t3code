@@ -1,6 +1,6 @@
 # Cloud provisioning
 
-A chat can create its own cloud environment instead of attaching to one an operator declared ahead of time. E2B gives Linux containers that start in seconds. Namespace gives real Macs running an Xcode image, which is what iOS work needs.
+A chat can create its own cloud environment instead of attaching to one an operator declared ahead of time. E2B gives Linux containers that start in seconds. Modal gives larger Linux boxes, 8 vCPU and 32 GiB by default, from the same image. Namespace gives real Macs running an Xcode image, which is what iOS work needs.
 
 A provisioning manager is a T3 server that owns that lifecycle. It allocates the machine, prepares it, and hands back a pairing URL. The desktop app talks to a manager; it does not talk to E2B directly.
 
@@ -13,7 +13,7 @@ Provisioning reads `~/.t3/environment-control.json`. Four things matter:
 - `provisioning.runtimeArtifacts.linux`, the pinned build a new environment runs. Without it provisioning refuses with `unconfigured` rather than failing, because an install that only manages named targets is an ordinary configuration state.
 - `provisioning.githubToken`, required only for cloning a private repository.
 
-Clients offer only what a manager can provision. E2B appears when `provisioning.runtimeArtifacts.linux` is set. Namespace Mac appears when both `provisioning.runtimeArtifacts.macos` and `provisioning.namespace` are set.
+Clients offer only what a manager can provision. E2B appears when `provisioning.runtimeArtifacts.linux` is set. Modal appears when `provisioning.runtimeArtifacts.linux`, `provisioning.modal`, `modalTokenId` and `modalTokenSecret` are set. Namespace Mac appears when both `provisioning.runtimeArtifacts.macos` and `provisioning.namespace` are set.
 
 `provisioning.skills` is optional and names skill bundles copied into every new environment. Each entry has a `source` directory on the manager. Give it a `name` when the source is one skill; omit `name` when the source is a directory of skills, because every supported CLI resolves a skill as `<root>/<directory>/SKILL.md` and looks no deeper. An entry's `url` names an HTTPS gzipped tarball whose root holds skill directories; a manager that runs no agents itself (`T3CODE_LOCAL_AGENT_RUNS=false`) refreshes `source` from it at startup and hourly, and other servers use `source` as is. `pack-host-state.ts` carries such an entry as its `url` and points `source` at `<base-dir>/skill-bundles/<i>`, outside the seed, so a reseed or reboot keeps the downloaded copy. Environments that already started keep the skills they started with.
 
@@ -98,6 +98,14 @@ node apps/server/scripts/mac-chat-e2e.ts --origin http://127.0.0.1:$(cat .t3/man
 ```
 
 It needs `nsc login` on the machine running it, and it disposes what it made and releases the repository's cache volume at the end.
+
+## Run Linux chats on Modal
+
+Keep T3's boxes in a Modal environment of their own (`modal environment create t3-sandboxes`), apart from any other apps in the workspace. Build the box image once with `node scripts/cloud/build-modal-image.mjs --app t3-cloud-chats --environment t3-sandboxes`. It renders the E2B template's steps for Modal, one cached layer per step, and prints the image id for `provisioning.modal.imageId`. Its credentials come from `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or from the config file. `provisioning.modal` also takes `app`, `environment`, `inboundCidrs`, `runtime`, `cpu`, `cpuLimit`, `memoryMiB` and `memoryLimitMiB`. Set `inboundCidrs` to the manager's egress addresses: otherwise a box's tunnel answers anyone, with only its bearer token as the gate. A box runs on gVisor by default and bursts from a small reservation (0.125 CPU and 2 GiB) to its limits (8 CPUs and 32 GiB). Modal bills the larger of the reservation and the use, and may evict a box using more memory than it reserved, so `memoryMiB` should cover what a chat usually holds. `runtime: "vm"` boxes can run Docker, but a vm box that can be snapshotted has only its `memoryMiB` as RAM, so it needs that much reserved. gVisor installs packages about two to three times slower than a vm box; builds and tests run about as fast. A chat keeps the runtime, sizing and image it was frozen with, and it runs a repository's `e2b` prepare commands.
+
+A memory snapshot of a gVisor box keeps only the processes descended from the box's entrypoint. The entrypoint therefore listens on `/run/t3-init.sock` and starts what a guest asks for as its own children, as the user who asked; the guest starts the T3 server and the disk guard through it, and runs each prepare command through it, so a service a prepare command leaves running, in the background or daemonized, survives a pause. Anything else started from a command run on the box stops for good at its next pause, and a resume does not prepare again. Everything on a Modal box runs as root, in the template's `/home/user`: gVisor sets no_new_privs, so only root's `sudo` works, and agents install packages with it. `IS_SANDBOX=1` lets Claude Code bypass permissions as root. Modal's domain allowlist passes HTTPS only, so the image fetches apt over HTTPS, and with `egressAllow` set, agents install packages only once it lists `archive.ubuntu.com` and `security.ubuntu.com`.
+
+A Modal chat names no box. Its box is the running sandbox named `t3-chat-<requestId>` in the app, which is how a manager that crashed mid-step finds it again. A pause takes a memory snapshot, which ends the box, and a resume restores it onto a new box in about two seconds with its processes still running, behind the same loopback proxy origin. Modal ends a box 24 hours after it starts without saving it, so the manager snapshots one before then: an idle one sleeps and a busy one moves to a new box. A memory snapshot expires seven days after the first snapshot it descends from, and a chat past that is reported missing. Modal chats get no E2B backups, health probes or worker forks. The manager's records live in `<state>/modal-chats`.
 
 ## Waking and updating boxes
 

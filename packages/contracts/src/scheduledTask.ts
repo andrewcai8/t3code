@@ -159,10 +159,10 @@ export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succ
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
 /**
- * Where a fire runs: on this server, or in a fresh E2B box or Namespace Mac this server
- * provisions for it. A cloud fire always starts a new chat on its own machine.
+ * Where a fire runs: on this server, or in a fresh E2B or Modal box or Namespace Mac this
+ * server provisions for it. A cloud fire always starts a new chat on its own machine.
  */
-export const ScheduledTaskTarget = Schema.Literals(["local", "e2b", "namespace"]);
+export const ScheduledTaskTarget = Schema.Literals(["local", "e2b", "namespace", "modal"]);
 export type ScheduledTaskTarget = typeof ScheduledTaskTarget.Type;
 
 export const ScheduledTaskWebhookEndpoint = Schema.Struct({

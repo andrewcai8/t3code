@@ -1646,6 +1646,75 @@ it("offers each cloud platform only when its runtime and defaults are configured
       }),
     ),
   ).toEqual(["e2b", "namespace"]);
+  const modal = { imageId: "im-1" };
+  expect(
+    provisionProviders(
+      configWith({ templateId: "t3", runtimeArtifacts: { linux: runtime }, modal }),
+    ),
+  ).toEqual(["e2b"]);
+  expect(
+    provisionProviders({
+      ...configWith({ runtimeArtifacts: { linux: runtime }, modal }),
+      modalTokenId: "ak-1",
+      modalTokenSecret: "as-1",
+    }),
+  ).toEqual(["modal"]);
+});
+
+it("freezes a Modal chat on the E2B box's root and setup, with the configured image and sizing", async () => {
+  const f = await fixture();
+  try {
+    const config = {
+      ...f.config,
+      modalTokenId: "ak-1",
+      modalTokenSecret: "as-1",
+      provisioning: {
+        ...f.config.provisioning,
+        modal: { imageId: "im-1", cpu: 4, memoryMiB: 16_384 },
+        repositories: [
+          { repository: "example/repo", e2b: { prepareCommands: ["npm ci"], warm: true } },
+        ],
+      },
+    };
+    const manifest = await f.store.freeze(
+      decodeProvisionInput({ ...input, provider: "modal", repository: "example/repo" }),
+      config,
+      f.resolver,
+      [f.profile],
+      async () => {
+        throw new Error("a Modal chat never starts from a warm E2B base");
+      },
+    );
+    expect([
+      manifest.request,
+      manifest.preparation.root,
+      manifest.preparation.artifact.archivePath,
+      manifest.preparation.prepareCommands,
+      manifest.warmKey,
+    ]).toEqual([
+      expect.objectContaining({
+        provider: "modal",
+        app: "t3-cloud-chats",
+        imageId: "im-1",
+        sizing: { cpu: 4, cpuLimit: 8, memoryMiB: 16_384, memoryLimitMiB: 32_768 },
+      }),
+      "/home/user/.t3-provision",
+      `/tmp/t3-runtime-${manifest.preparation.artifact.sha256}.tar`,
+      ["npm ci"],
+      undefined,
+    ]);
+    await expect(
+      makeProvisionPreparationStore(f.root + "-unconfigured").freeze(
+        decodeProvisionInput({ ...input, provider: "modal" }),
+        f.config,
+        f.resolver,
+        [f.profile],
+      ),
+    ).rejects.toThrow("Configure Modal credentials");
+  } finally {
+    await NodeFSP.rm(f.root + "-unconfigured", { recursive: true, force: true });
+    await f.cleanup();
+  }
 });
 
 function warmConfig(

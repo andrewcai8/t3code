@@ -1,5 +1,5 @@
-import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import type { EnvironmentId, ProvisionProvider } from "@t3tools/contracts";
 import { type ReactNode, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 
@@ -8,7 +8,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
 import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
 import {
-  CLOUD_MACHINE_PROVIDER_LABELS,
+  CLOUD_MACHINE_PLATFORMS,
   cloudMachineAccountDetail,
   cloudMachineAccountOptions,
   cloudMachineBlockReason,
@@ -16,7 +16,6 @@ import {
   defaultCloudMachineAccount,
   defaultCloudMachineRepository,
   type CloudMachineAccountOption,
-  type CloudMachineProvider,
 } from "./cloudMachineOptions";
 import { createCloudMachineProgressText, useCreateCloudMachine } from "./useCreateCloudMachine";
 
@@ -47,7 +46,7 @@ export function NewCloudMachineForm(props: {
   );
   const [repository, setRepository] = useState<string | null>(props.initialRepository ?? null);
   const providers = offeredProvisionProviders(serverConfig);
-  const [provider, setProvider] = useState<CloudMachineProvider | null>(null);
+  const [provider, setProvider] = useState<ProvisionProvider | null>(null);
   const [account, setAccount] = useState<CloudMachineAccountOption | null>(null);
   const selectedAccount = account ?? defaultCloudMachineAccount(accounts);
   const selectedRepository = repository ?? defaultCloudMachineRepository(repositories);
@@ -91,8 +90,8 @@ export function NewCloudMachineForm(props: {
           {providers.map((candidate, index) => (
             <Choice
               key={candidate}
-              title={CLOUD_MACHINE_PROVIDER_LABELS[candidate]}
-              subtitle={candidate === "namespace" ? "macOS, for Apple builds" : "Linux"}
+              title={cloudEnvironmentLabel(candidate)}
+              subtitle={CLOUD_MACHINE_PLATFORMS[candidate]}
               selected={selectedProvider === candidate}
               borderTop={index !== 0}
               disabled={working}

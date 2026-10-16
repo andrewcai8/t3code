@@ -122,7 +122,7 @@ const ProvisionedLeaseOwner = Schema.Struct({
 export const StoredProvisionedLease = Schema.Struct({
   leaseId: Schema.String,
   sandboxId: Schema.String,
-  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  provider: Schema.optional(Schema.Literals(["e2b", "namespace", "modal"])),
   namespaceProxy: Schema.optional(
     Schema.Struct({ proxyId: Schema.String, proxyOrigin: Schema.String }),
   ),
@@ -209,7 +209,7 @@ export interface ProvisionedLeaseRegistry {
     readonly sandboxId: string;
     readonly providerInstanceId: string;
     readonly companionInstanceIds?: ReadonlyArray<string>;
-    readonly provider?: "e2b" | "namespace";
+    readonly provider?: "e2b" | "namespace" | "modal";
     readonly namespaceProxy?: { readonly proxyId: string; readonly proxyOrigin: string };
     readonly namespaceResource?: NamespaceResource;
     readonly retentionDeadline?: string;

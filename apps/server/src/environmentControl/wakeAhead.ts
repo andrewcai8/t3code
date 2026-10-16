@@ -156,27 +156,36 @@ export function makeWakeAhead(deps: {
   const machines = (
     boxes: ReadonlyArray<DiscoveredProvisionedEnvironment>,
     now: number,
-  ): EnvironmentControlPresenceResult["machines"] => [
-    ...[...tracked].map(([environmentId, entries]) => {
-      const wakes = [...entries.values()];
-      return {
-        environmentId,
-        state: wakes.some((entry) => entry.wake === "updating")
-          ? ("updating" as const)
-          : ("waking" as const),
-        machine: wakes[0]!.machine,
-        ...providerFailure(environmentId, true, now),
-      };
-    }),
-    ...boxes
-      .filter((box) => box.lifecycle === "paused" && !tracked.has(box.environmentId))
-      .map((box) => ({
-        environmentId: box.environmentId,
-        state: "asleep" as const,
-        machine: box.machine ?? "sandbox",
-        ...providerFailure(box.environmentId, unsettledSince(box, now) !== null, now),
-      })),
-  ];
+  ): EnvironmentControlPresenceResult["machines"] => {
+    const providers = new Map(boxes.map((box) => [box.environmentId, box.provider]));
+    const provider = (environmentId: EnvironmentId) => {
+      const known = providers.get(environmentId);
+      return known === undefined ? {} : { provider: known };
+    };
+    return [
+      ...[...tracked].map(([environmentId, entries]) => {
+        const wakes = [...entries.values()];
+        return {
+          environmentId,
+          state: wakes.some((entry) => entry.wake === "updating")
+            ? ("updating" as const)
+            : ("waking" as const),
+          machine: wakes[0]!.machine,
+          ...provider(environmentId),
+          ...providerFailure(environmentId, true, now),
+        };
+      }),
+      ...boxes
+        .filter((box) => box.lifecycle === "paused" && !tracked.has(box.environmentId))
+        .map((box) => ({
+          environmentId: box.environmentId,
+          state: "asleep" as const,
+          machine: box.machine ?? "sandbox",
+          provider: box.provider,
+          ...providerFailure(box.environmentId, unsettledSince(box, now) !== null, now),
+        })),
+    ];
+  };
 
   const wakeBox = Effect.fn("wakeAhead.wake")(function* (box: DiscoveredProvisionedEnvironment) {
     const startedAt = yield* Clock.currentTimeMillis;

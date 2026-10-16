@@ -286,6 +286,40 @@ const Provisioning = Schema.Struct({
       outputsUri: Schema.optional(TrimmedNonEmptyString.check(Schema.isPattern(/^s3:\/\/[^/]+/))),
     }),
   ),
+  /**
+   * Modal box defaults. Present, with Modal credentials, only when on-demand Modal provisioning
+   * is enabled. A box reserves `cpu` and `memoryMiB` and bursts to the limits; Modal bills the
+   * larger of the reservation and the use, and may evict a box using more memory than it
+   * reserved. A chat keeps the values it was frozen with.
+   */
+  modal: Schema.optional(
+    Schema.Struct({
+      /** From `scripts/cloud/build-modal-image.mjs`, built in `app`. */
+      imageId: TrimmedNonEmptyString,
+      /** Default `t3-cloud-chats`. */
+      app: Schema.optional(TrimmedNonEmptyString),
+      /** The Modal environment the app lives in, apart from other apps. Default the workspace's. */
+      environment: Schema.optional(TrimmedNonEmptyString),
+      /**
+       * CIDRs allowed to reach a box's tunnel: the manager's egress. Absent, any address can,
+       * and the box's bearer token is the only gate.
+       */
+      inboundCidrs: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+      /**
+       * Default `gvisor`. A `vm` box can run Docker, but a vm box that can be snapshotted has only
+       * its `memoryMiB` reservation as RAM, so it needs the memory it will use reserved.
+       */
+      runtime: Schema.optional(Schema.Literals(["gvisor", "vm"])),
+      /** Default 0.125. */
+      cpu: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
+      /** Default 8. */
+      cpuLimit: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
+      /** Default 2048, about what a box running its T3 server and an agent uses, since memory above the reservation risks eviction. */
+      memoryMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /** Default 32768. */
+      memoryLimitMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+    }),
+  ),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
   namespace: Schema.optional(
     Schema.Struct({
@@ -303,6 +337,8 @@ export const EnvironmentControlConfig = Schema.Struct({
   e2bApiKey: TrimmedNonEmptyString,
   provisioning: Schema.optional(Provisioning),
   namespaceToken: Schema.optional(TrimmedNonEmptyString),
+  modalTokenId: Schema.optional(TrimmedNonEmptyString),
+  modalTokenSecret: Schema.optional(TrimmedNonEmptyString),
   broker: Schema.Struct({
     ...E2bIdentity.fields,
     url: TrimmedNonEmptyString,

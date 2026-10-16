@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   claimProvisionedBox,
+  cloudEnvironmentLabel,
   draftBoxLease,
   leaseReachesBox,
   newChatProject,
@@ -440,7 +441,7 @@ export function useCloudChat(input: {
       if (!canCreate) return;
       setChoice(provider);
       setReadyEnvironmentId(null);
-      const label = provider === "namespace" ? "Namespace Mac" : "E2B";
+      const label = cloudEnvironmentLabel(provider);
       toastManager.add({
         type: "info",
         title: `${label} selected`,

@@ -70,7 +70,7 @@ export const environmentControlHttpApiLayer = HttpApiBuilder.group(
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
           return yield* control
-            .listProvisioned()
+            .listProvisioned(undefined, undefined, undefined, args.payload.providers)
             .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
         }),
       )

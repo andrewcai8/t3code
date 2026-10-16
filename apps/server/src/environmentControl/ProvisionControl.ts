@@ -14,6 +14,7 @@ import {
   type EnvironmentProvisionUpgradeResult,
   type ProvisionFirstTurn,
   type ProvisionOperation,
+  type ProvisionProvider,
   provisionSandboxId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -72,9 +73,7 @@ export interface ProvisionControlPorts {
    */
   readonly touch: (operation: ProvisionOperation) => Promise<"running" | "released" | "missing">;
   /** The build this manager currently pins for a provider, or null when none is configured. */
-  readonly pinnedRuntime: (
-    provider: "e2b" | "namespace",
-  ) => Promise<ProvisionRuntimeArtifact | null>;
+  readonly pinnedRuntime: (provider: ProvisionProvider) => Promise<ProvisionRuntimeArtifact | null>;
   /** Records the build a guest should run next. `prepare` then converges the guest on it. */
   readonly setRuntime: (
     id: ProvisionRequestId,
@@ -652,9 +651,9 @@ export function makeProvisionControl(
           } satisfies EnvironmentProvisionUpgradeResult;
         if (pinned.sha256 === state.readiness.artifactSha256)
           return { kind: "current" as const, t3Revision: state.readiness.t3Revision };
-        // Preparing a released instance-engine chat would open a Mac that nothing upkeeps or
-        // releases; the client's resume is what brings it back.
-        if ("engine" in state.allocation.resource && lease.state !== "active")
+        // Preparing a released instance-engine or Modal chat would open a machine that nothing
+        // upkeeps or releases; the client's resume is what brings it back.
+        if ("chatId" in state.allocation.resource && lease.state !== "active")
           return {
             kind: "refused",
             reason: "unknown",

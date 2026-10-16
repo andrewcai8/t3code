@@ -2,6 +2,7 @@ import {
   cloneRepository,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  type ProvisionProvider,
   type ServerProvider,
 } from "@t3tools/contracts";
 
@@ -11,11 +12,11 @@ import {
  * signs in as. Kept separate from the sheet so the narrowing rules are testable.
  */
 
-export type CloudMachineProvider = "e2b" | "namespace";
-
-export const CLOUD_MACHINE_PROVIDER_LABELS: Readonly<Record<CloudMachineProvider, string>> = {
-  e2b: "E2B",
-  namespace: "Namespace Mac",
+/** What each cloud kind runs, under its name in the picker. */
+export const CLOUD_MACHINE_PLATFORMS: Readonly<Record<ProvisionProvider, string>> = {
+  e2b: "Linux",
+  modal: "Linux",
+  namespace: "macOS, for Apple builds",
 };
 
 export interface CloudMachineRepositoryOption {
@@ -126,7 +127,7 @@ export function defaultCloudMachineRepository(
 export interface CloudMachineSelection {
   readonly repository: string | null;
   /** Null when the manager can provision no cloud platform. */
-  readonly provider: CloudMachineProvider | null;
+  readonly provider: ProvisionProvider | null;
   readonly account: CloudMachineAccountOption | null;
 }
 

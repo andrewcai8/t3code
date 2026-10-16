@@ -70,6 +70,27 @@ export const DurableProvisionRequest = Schema.Union([
      */
     engine: Schema.optional(Schema.Literal("instance")),
   }),
+  Schema.Struct({
+    ...requestFields,
+    provider: Schema.Literal("modal"),
+    /** The Modal app a chat's boxes run in, where its box is found by name. */
+    app: TrimmedNonEmptyString,
+    /** The app's Modal environment. Absent, the workspace's default one. */
+    environment: Schema.optional(TrimmedNonEmptyString),
+    /** CIDRs allowed to reach the box's tunnel. Absent, any address can. */
+    inboundCidrs: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+    /** The image every fresh box of this chat starts from. */
+    imageId: TrimmedNonEmptyString,
+    /** Absent, gVisor. `vm` boxes can run Docker, but with snapshots their RAM is `memoryMiB`. */
+    runtime: Schema.optional(Schema.Literal("vm")),
+    /** Reservations and limits; a box bursts from one to the other. */
+    sizing: Schema.Struct({
+      cpu: Schema.Number.check(Schema.isGreaterThan(0)),
+      cpuLimit: Schema.Number.check(Schema.isGreaterThan(0)),
+      memoryMiB: Schema.Int.check(Schema.isGreaterThan(0)),
+      memoryLimitMiB: Schema.Int.check(Schema.isGreaterThan(0)),
+    }),
+  }),
 ]);
 export type DurableProvisionRequest = typeof DurableProvisionRequest.Type;
 
@@ -88,6 +109,15 @@ export const NamespaceChatResource = Schema.Struct({
   chatId: TrimmedNonEmptyString,
 });
 export type NamespaceChatResource = typeof NamespaceChatResource.Type;
+/**
+ * A chat on Modal. Like an instance-engine chat it names no box: each wake
+ * restores its memory snapshot onto a new sandbox, found by the chat's name.
+ */
+export const ModalChatResource = Schema.Struct({
+  provider: Schema.Literal("modal"),
+  chatId: TrimmedNonEmptyString,
+});
+export type ModalChatResource = typeof ModalChatResource.Type;
 export const ProvisionResource = Schema.Union([
   E2bProvisionResource,
   Schema.Struct({
@@ -99,6 +129,7 @@ export const ProvisionResource = Schema.Union([
     workspaceDir: TrimmedNonEmptyString,
   }),
   NamespaceChatResource,
+  ModalChatResource,
 ]);
 export type ProvisionResource = typeof ProvisionResource.Type;
 export type NamespaceDevboxResource = Extract<ProvisionResource, { devboxId: string }>;
@@ -107,7 +138,7 @@ export type NamespaceDevboxResource = Extract<ProvisionResource, { devboxId: str
 export const provisionSandboxId = (resource: ProvisionResource): string =>
   resource.provider === "e2b"
     ? resource.sandboxId
-    : "engine" in resource
+    : "chatId" in resource
       ? resource.chatId
       : resource.devboxId;
 export const ProvisionAllocation = Schema.Union([

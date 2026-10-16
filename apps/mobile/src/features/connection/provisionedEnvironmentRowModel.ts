@@ -1,4 +1,8 @@
-import { describeCloudCleanup, describeRestorable } from "@t3tools/client-runtime/cloud";
+import {
+  cloudProviderVendor,
+  describeCloudCleanup,
+  describeRestorable,
+} from "@t3tools/client-runtime/cloud";
 import type { DiscoveredProvisionedEnvironment } from "@t3tools/contracts";
 
 /** What a row is doing on the user's behalf. */
@@ -18,7 +22,6 @@ export interface ProvisionedEnvironmentPresentation {
   readonly restorable: boolean;
 }
 
-const PROVIDER_LABELS = { e2b: "E2B", namespace: "Namespace" } as const;
 const LIFECYCLE_LABELS: Record<DiscoveredProvisionedEnvironment["lifecycle"], string> = {
   active: "Running",
   paused: "Paused",
@@ -38,7 +41,7 @@ export function presentProvisionedEnvironment(input: {
   const restorable = describeRestorable(environment.restorableUntil, input.now);
   return {
     title: input.threadTitle ?? environment.label,
-    detail: `${PROVIDER_LABELS[environment.provider]} · ${environment.repository ?? environment.projectDir}`,
+    detail: `${cloudProviderVendor(environment.provider)} · ${environment.repository ?? environment.projectDir}`,
     status:
       action.kind === "working"
         ? action.label

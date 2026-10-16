@@ -73,8 +73,8 @@ Webhook tasks only run when their URL is called, so they can't be run
 immediately.
 Leaving an edited form asks before discarding unsaved changes.
 
-On a server that can start cloud machines, **Run on** can send each run to a fresh E2B box or
-Namespace Mac instead. Every run clones the project's repository at the base branch and starts a
+On a server that can start cloud machines, **Run on** can send each run to a fresh E2B box, Modal
+box or Namespace Mac instead. Every run clones the project's repository at the base branch and starts a
 new chat there, on the account for the task's model with the most usage left. The chat shows in
 the sidebar like any cloud chat. The machine and its chat are removed a day after the run.
 
@@ -184,6 +184,9 @@ this off with **Remove unused cloud machines**. Before removal, unpushed work is
 `t3-backup/<id>` branches of the repository. A machine whose work can't be pushed is kept. Select
 **Keep** on a machine under **Settings → Connections** to exempt it. Machines that cost nothing
 while paused, such as E2B sandboxes, are never removed.
+
+A Modal machine wakes with its processes still running. Modal keeps a paused machine for seven
+days from its first pause, so a Modal chat first paused longer ago than that can't be woken.
 
 An E2B machine is backed up after each of its chat's turns and again before it sleeps. Its unpushed
 work goes to `t3-backup/<id>` branches when the repository is private. A public one's is never

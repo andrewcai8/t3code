@@ -28,7 +28,12 @@ export const environmentControlWsHandlers = (environmentControl: EnvironmentCont
   // `any`, which spreads into the server's whole RPC layer.
   ({
     [WS_METHODS.environmentControlListProvisioned]: (input) =>
-      environmentControl.listProvisioned(input.environmentIds, input.addresses, input.chats),
+      environmentControl.listProvisioned(
+        input.environmentIds,
+        input.addresses,
+        input.chats,
+        input.providers,
+      ),
     [WS_METHODS.environmentControlList]: () => environmentControl.list,
     [WS_METHODS.environmentControlStart]: (input) => environmentControl.start(input.environmentId),
     [WS_METHODS.environmentControlStop]: (input) => environmentControl.stop(input.environmentId),

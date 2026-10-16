@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
+  ForwardCompatibleArray,
   IsoDateTime,
   MessageId,
   NonNegativeInt,
@@ -47,9 +48,16 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
   { message: Schema.String },
 ) {}
 
-/** Where a provisioned environment runs: an E2B Linux sandbox or a Namespace Mac. */
-export const ProvisionProvider = Schema.Literals(["e2b", "namespace"]);
+/** Where a provisioned environment runs: an E2B or Modal Linux sandbox, or a Namespace Mac. */
+export const ProvisionProvider = Schema.Literals(["e2b", "namespace", "modal"]);
 export type ProvisionProvider = typeof ProvisionProvider.Type;
+/**
+ * The providers a client lists boxes of. A client names those it can decode; one that names none
+ * predates Modal and decodes a list strictly, so a single Modal box would fail its whole list.
+ */
+export const readableProvisionProviders = (
+  named: ReadonlyArray<string> | undefined,
+): ReadonlyArray<string> => named ?? ["e2b", "namespace"];
 
 export const ProvisionRequestId = Schema.String.check(
   Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
@@ -107,7 +115,7 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
    */
   lifecycle: Schema.Literals(["active", "paused", "missing", "disposed"]),
   environmentId: EnvironmentId,
-  provider: Schema.Literals(["e2b", "namespace"]),
+  provider: ProvisionProvider,
   /**
    * What the box runs on, which sets how long waking it takes: an E2B sandbox resumes in seconds,
    * a Namespace Devbox boots, and a Namespace Mac is restored onto a new machine. Absent from
@@ -131,7 +139,7 @@ export const DiscoveredProvisionedEnvironment = Schema.Struct({
   expiresAt: Schema.String,
 });
 export type DiscoveredProvisionedEnvironment = typeof DiscoveredProvisionedEnvironment.Type;
-export const ProvisionedEnvironmentList = Schema.Array(DiscoveredProvisionedEnvironment);
+export const ProvisionedEnvironmentList = ForwardCompatibleArray(DiscoveredProvisionedEnvironment);
 
 /** Where a client dials one of its saved environments. */
 export const SavedEnvironmentAddress = Schema.Struct({
@@ -182,7 +190,7 @@ export const EnvironmentProvisionInput = Schema.Struct({
       }),
     ),
   ),
-  provider: Schema.Literals(["e2b", "namespace"]),
+  provider: ProvisionProvider,
   /** Provider driver selected in the local composer. */
   agentDriver: Schema.optional(ProviderDriverKind),
   /** Which provider account the environment should run its agent on. */
@@ -220,7 +228,7 @@ export type ProvisionFirstTurnStatus = typeof ProvisionFirstTurnStatus.Type;
 export const ProvisionedEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   leaseId: TrimmedNonEmptyString,
-  provider: Schema.Literals(["e2b", "namespace"]),
+  provider: ProvisionProvider,
   sandboxId: TrimmedNonEmptyString,
   projectDir: TrimmedNonEmptyString,
   providerInstanceId: TrimmedNonEmptyString,
@@ -292,7 +300,7 @@ export const EnvironmentProvisionDisposeInput = Schema.Union([
   Schema.Struct({ requestId: ProvisionRequestId }),
   Schema.Struct({
     leaseId: Schema.optional(TrimmedNonEmptyString),
-    provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+    provider: Schema.optional(ProvisionProvider),
     sandboxId: TrimmedNonEmptyString,
   }),
 ]);
@@ -311,7 +319,7 @@ export type EnvironmentProvisionDisposeResult = typeof EnvironmentProvisionDispo
 /** Pause a provisioned workspace while retaining its provider resource. */
 export const EnvironmentProvisionPauseInput = Schema.Struct({
   leaseId: Schema.optional(TrimmedNonEmptyString),
-  provider: Schema.optional(Schema.Literals(["e2b", "namespace"])),
+  provider: Schema.optional(ProvisionProvider),
   sandboxId: TrimmedNonEmptyString,
 });
 export type EnvironmentProvisionPauseInput = typeof EnvironmentProvisionPauseInput.Type;
@@ -508,6 +516,10 @@ export const EnvironmentControlPresenceResult = Schema.Struct({
       environmentId: EnvironmentId,
       state: CloudMachineState,
       machine: CloudMachineKind,
+      /** Who runs the machine, which `machine` alone cannot say for a sandbox. Absent from older hosts. */
+      provider: Schema.optional(ProvisionProvider).pipe(
+        Schema.catchDecoding(() => Effect.succeedNone),
+      ),
       /**
        * Why and when its provider last could not start it, while the host still retries it.
        * Absent from hosts that predate it.

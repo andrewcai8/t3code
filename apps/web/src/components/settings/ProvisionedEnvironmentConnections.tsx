@@ -1,4 +1,8 @@
-import { describeCloudCleanup, describeRestorable } from "@t3tools/client-runtime/cloud";
+import {
+  cloudProviderVendor,
+  describeCloudCleanup,
+  describeRestorable,
+} from "@t3tools/client-runtime/cloud";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -57,8 +61,7 @@ function ProvisionedEnvironmentRow({
         <p className="truncate text-sm">{title}</p>
         <p className="truncate text-xs text-muted-foreground">
           {environment.repository ?? environment.projectDir} ·{" "}
-          {environment.provider === "e2b" ? "E2B" : "Namespace"} ·{" "}
-          {LIFECYCLE_LABELS[environment.lifecycle]}
+          {cloudProviderVendor(environment.provider)} · {LIFECYCLE_LABELS[environment.lifecycle]}
           {cleanup ? ` · ${cleanup.text}` : null}
           {restorable ? ` · ${restorable}` : null}
         </p>

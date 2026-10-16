@@ -1,5 +1,6 @@
 import type { CloudMachineKind, CloudMachineState } from "@t3tools/contracts";
 
+import { cloudProviderVendor } from "../cloud/provisioning.ts";
 import { workspaceMissingError } from "./boxErrors.ts";
 import { type ConnectionTarget, connectionBox } from "./model.ts";
 import type { EnvironmentConnectionPresentation } from "./presentation.ts";
@@ -69,7 +70,11 @@ export function cloudWakeNotice(
 ): { readonly title: string; readonly description: string; readonly eta: string | null } {
   const machine = cloudMachine?.machine;
   if (state === "unavailable") {
-    const provider = machine === undefined ? "The cloud provider" : PROVIDER_BY_MACHINE[machine];
+    const provider = cloudMachine?.provider
+      ? cloudProviderVendor(cloudMachine.provider)
+      : machine === undefined
+        ? "The cloud provider"
+        : PROVIDER_BY_MACHINE[machine];
     const failure = cloudMachine?.providerFailure;
     // @effect-diagnostics-next-line globalDate:off - the host's ISO time, said in local time.
     const lastTried = failure && new Date(failure.at);

@@ -1,4 +1,4 @@
-import { ModelSelection } from "@t3tools/contracts";
+import { ModelSelection, ProvisionProvider } from "@t3tools/contracts";
 import * as Equal from "effect/Equal";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
  * its cloud machine's setup stands. Persisted with the draft, so a reload picks the send back up.
  */
 export const PendingCloudEnvironmentSend = Schema.Struct({
-  provider: Schema.Literals(["e2b", "namespace"]),
+  provider: ProvisionProvider,
   preview: Schema.String,
   messageId: Schema.String,
   createdAt: Schema.String,
@@ -29,6 +29,7 @@ export const PendingCloudEnvironmentSend = Schema.Struct({
 });
 export type PendingCloudEnvironmentSend = typeof PendingCloudEnvironmentSend.Type;
 const decodeModelSelectionOption = Schema.decodeUnknownOption(ModelSelection);
+const isProvisionProvider = Schema.is(ProvisionProvider);
 
 export function pendingEnvironmentSendsEqual(
   left: PendingCloudEnvironmentSend | null | undefined,
@@ -67,7 +68,7 @@ export function parsePendingEnvironmentSend(
     return undefined;
   }
   const pending = value as Record<string, unknown>;
-  if (pending.provider !== "e2b" && pending.provider !== "namespace") {
+  if (!isProvisionProvider(pending.provider)) {
     return undefined;
   }
   if (typeof pending.preview !== "string") {

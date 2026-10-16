@@ -1,3 +1,5 @@
+import { cloudEnvironmentLabel } from "@t3tools/client-runtime/cloud";
+import type { ProvisionProvider } from "@t3tools/contracts";
 import { CloudIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -15,7 +17,7 @@ export type CloudEnvironmentSetupPhase =
   | "failed";
 
 export interface CloudEnvironmentSetupSnapshot {
-  readonly provider: "e2b" | "namespace";
+  readonly provider: ProvisionProvider;
   readonly phase: CloudEnvironmentSetupPhase;
   readonly startedAt: string;
   readonly endedAt?: string;
@@ -81,7 +83,7 @@ function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps)
     return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
   })();
   const failed = snapshot.phase === "failed";
-  const providerLabel = snapshot.provider === "namespace" ? "Namespace Mac" : "E2B";
+  const providerLabel = cloudEnvironmentLabel(snapshot.provider);
 
   return (
     <section

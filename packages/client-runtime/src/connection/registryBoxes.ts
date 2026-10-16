@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ShellSnapshot,
   type ProviderStartFailure,
   type ProvisionedChat,
+  ProvisionProvider,
   sessionHasLegacyPermissions,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -77,6 +78,8 @@ const PRESENCE_REPORT_MS = 4 * 60_000;
 export interface CloudMachine {
   readonly state: CloudMachineState;
   readonly machine: CloudMachineKind;
+  /** Who runs it. Absent from hosts that predate it. */
+  readonly provider?: ProvisionProvider | undefined;
   /** Why and when its provider last could not start it, while the host still retries it. */
   readonly providerFailure?:
     | { readonly cause: ProviderStartFailure; readonly at: string }
@@ -402,6 +405,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlListProvisioned, {
           environmentIds: [environmentId],
+          providers: ProvisionProvider.literals,
         }),
       );
       const lease = listed.find(
@@ -520,6 +524,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
             environmentId,
             previous?.state === answered.state &&
               previous.machine === answered.machine &&
+              previous.provider === answered.provider &&
               previous.providerFailure?.cause === answered.providerFailure?.cause &&
               previous.providerFailure?.at === answered.providerFailure?.at
               ? previous
@@ -646,6 +651,7 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlListProvisioned, {
           environmentIds: [environmentId],
+          providers: ProvisionProvider.literals,
         }),
       ).pipe(Effect.mapError(hostFailure));
       return Option.fromUndefinedOr(listed.find((row) => row.environmentId === environmentId));
