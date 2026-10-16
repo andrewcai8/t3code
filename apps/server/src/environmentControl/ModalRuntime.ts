@@ -37,18 +37,12 @@ const ROTATE_FORCE_MS = BOX_LIFETIME_MS - 20 * 60_000;
 /** A memory snapshot, and every snapshot restored from it, expires this long after it was taken. */
 const SNAPSHOT_LIFETIME_MS = 7 * 86_400_000;
 const PREPARE_TIMEOUT_MS = 1_200_000;
-/** The image's user, as the E2B template has it; Modal runs every exec as root. */
-const AS_USER = [
-  "setpriv",
-  "--reuid=user",
-  "--regid=user",
-  "--init-groups",
-  "--",
-  "env",
-  "HOME=/home/user",
-  "USER=user",
-  "LOGNAME=user",
-];
+/**
+ * How guest scripts run: as root, Modal's user, since gVisor sets no_new_privs and only root's
+ * sudo works there, in the E2B template's home. Claude Code bypasses permissions as root only
+ * when told it runs in a sandbox, and the T3 server and its agents inherit that.
+ */
+const AS_GUEST = ["env", "HOME=/home/user", "USER=root", "LOGNAME=root", "IS_SANDBOX=1"];
 
 export interface ModalBoxSpec {
   readonly app: string;
@@ -272,7 +266,7 @@ export function makeModalRuntime(config: {
 
   const guestPort = (sandboxId: string): RemotePreparationPort => ({
     executePython: ({ script, stdin }) =>
-      boxes.exec(sandboxId, [...AS_USER, "python3", "-c", script], {
+      boxes.exec(sandboxId, [...AS_GUEST, "python3", "-c", script], {
         stdin,
         timeoutMs: PREPARE_TIMEOUT_MS,
       }),
@@ -401,7 +395,7 @@ export function makeModalRuntime(config: {
     const staged = await boxes.exec(
       sandboxId,
       [
-        ...AS_USER,
+        ...AS_GUEST,
         "sh",
         "-c",
         'test -d "$1" || sha256sum "$2"',
