@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 /** Only a box's preparation names its host for usage. */
 const onCloudBox = Effect.map(HostProcess.Environment, (environment) =>
@@ -17,14 +18,15 @@ const onCloudBox = Effect.map(HostProcess.Environment, (environment) =>
  */
 const lowDiskBytes = (box: boolean) => (box ? 10 : 2) * 1024 ** 3;
 
+const sizeLabel = (bytes: number) =>
+  bytes >= 1024 ** 3
+    ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
+    : `${Math.max(0, Math.floor(bytes / 1024 ** 2))} MB`;
+
 /** What an agent is told when its working directory's disk is running low; empty otherwise. */
 export function lowDiskNote(freeBytes: number, box: boolean): string {
   if (freeBytes >= lowDiskBytes(box)) return "";
-  const free =
-    freeBytes >= 1024 ** 3
-      ? `${(freeBytes / 1024 ** 3).toFixed(1)} GB`
-      : `${Math.max(0, Math.floor(freeBytes / 1024 ** 2))} MB`;
-  return `Note: this machine's disk is running low, with ${free} free. Remove worktrees, dependency installs and build outputs you created and no longer need before installing or writing more; a full disk stops this chat from saving its work.`;
+  return `Note: this machine's disk is running low, with ${sizeLabel(freeBytes)} free. Remove worktrees, dependency installs and build outputs you created and no longer need before installing or writing more; a full disk stops this chat from saving its work.`;
 }
 
 /** The note for `cwd`'s disk, or empty when it has room or cannot be read. */
@@ -123,4 +125,42 @@ export const cloudMachineNoteFor = (input: {
       ),
       Effect.orElseSucceed(() => ""),
     );
+  });
+
+/** Written under T3 home by a Mac chat's save that would carry more than its limit. */
+const SaveFailure = Schema.Struct({
+  limit: Schema.Finite,
+  largest: Schema.Array(Schema.Struct({ path: Schema.String, bytes: Schema.Finite })),
+});
+type SaveFailure = typeof SaveFailure.Type;
+const decodeSaveFailure = Schema.decodeUnknownEffect(Schema.fromJsonString(SaveFailure));
+
+/** What an agent is told when its chat's work no longer fits in a save. */
+export function saveFailureNote(failure: SaveFailure): string {
+  const largest = failure.largest.map(({ path, bytes }) => `${path} (${sizeLabel(bytes)})`);
+  return `Note: this chat's work no longer fits in a save off this machine, which holds at most ${sizeLabel(failure.limit)}. The largest saved paths are ${largest.join(", ")}. Delete what you no longer need or move it to S3; dependency installs and build outputs in a checkout's ignored directories are not saved. Until a save fits, work since the last one is lost when this machine is replaced.`;
+}
+
+/** Per native thread, the paths it was last told about, so each thread hears of a change once. */
+const toldSaveFailure = new Map<string, string>();
+
+/** The save failure note for a native thread not yet told of these paths; empty otherwise. */
+export const saveFailureNoteFor = (nativeThreadId: string): Effect.Effect<string> =>
+  Effect.gen(function* () {
+    const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
+    if (!t3home || !(yield* onCloudBox)) return "";
+    const failure = yield* Effect.tryPromise(() =>
+      NodeFSP.readFile(NodePath.join(t3home, "save-failure.json"), "utf8"),
+    ).pipe(
+      Effect.flatMap(decodeSaveFailure),
+      Effect.orElseSucceed(() => null),
+    );
+    if (failure === null) {
+      toldSaveFailure.delete(nativeThreadId);
+      return "";
+    }
+    const paths = failure.largest.map(({ path }) => path).join("\n");
+    if (toldSaveFailure.get(nativeThreadId) === paths) return "";
+    toldSaveFailure.set(nativeThreadId, paths);
+    return saveFailureNote(failure);
   });
