@@ -283,6 +283,28 @@ const Provisioning = Schema.Struct({
       outputsUri: Schema.optional(TrimmedNonEmptyString.check(Schema.isPattern(/^s3:\/\/[^/]+/))),
     }),
   ),
+  /**
+   * Modal box defaults. Present, with Modal credentials, only when on-demand Modal provisioning
+   * is enabled. A box reserves `cpu` and `memoryMiB` and may use up to the limits, but a vm
+   * sandbox's RAM is its `memoryMiB` reservation, which is why that defaults to the full 32 GiB;
+   * `nproc` reports `cpu`. A chat keeps the values it was frozen with.
+   */
+  modal: Schema.optional(
+    Schema.Struct({
+      /** From `scripts/cloud/build-modal-image.mjs`, built in `app`. */
+      imageId: TrimmedNonEmptyString,
+      /** Default `t3-cloud-chats`. */
+      app: Schema.optional(TrimmedNonEmptyString),
+      /** Default 8. */
+      cpu: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
+      /** Default 8. */
+      cpuLimit: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
+      /** Default 32768. */
+      memoryMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /** Default 32768. */
+      memoryLimitMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+    }),
+  ),
   /** Namespace Devbox defaults. Present only when on-demand Mac provisioning is enabled. */
   namespace: Schema.optional(
     Schema.Struct({
@@ -300,6 +322,8 @@ export const EnvironmentControlConfig = Schema.Struct({
   e2bApiKey: TrimmedNonEmptyString,
   provisioning: Schema.optional(Provisioning),
   namespaceToken: Schema.optional(TrimmedNonEmptyString),
+  modalTokenId: Schema.optional(TrimmedNonEmptyString),
+  modalTokenSecret: Schema.optional(TrimmedNonEmptyString),
   broker: Schema.Struct({
     ...E2bIdentity.fields,
     url: TrimmedNonEmptyString,

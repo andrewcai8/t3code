@@ -90,6 +90,7 @@ import {
   makeNamespaceProvisionRuntime,
 } from "./NamespaceProvisionRuntime.ts";
 import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
+import { makeModalBoxes, makeModalRuntime } from "./ModalRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
 import { E2bPlacementUnavailable, type E2bResumeRetry } from "./e2bResume.ts";
@@ -1468,6 +1469,7 @@ export const layer = Layer.effect(
           mac: ReturnType<typeof makeNamespaceMacRuntime>;
         }>
       | undefined;
+    let modal: ReturnType<typeof makeModalRuntime> | undefined;
     let scannedSkills:
       | {
           readonly service: ManagerService;
@@ -1542,6 +1544,7 @@ export const layer = Layer.effect(
         if (!path) {
           loaded = undefined;
           namespace = undefined;
+          modal = undefined;
           return null;
         }
         const mtimeMs = await NodeFSP.stat(path)
@@ -1550,6 +1553,7 @@ export const layer = Layer.effect(
         if (mtimeMs === null) return null;
         if (loaded?.path === path && loaded.mtimeMs === mtimeMs) return loaded.service;
         namespace = undefined;
+        modal = undefined;
         const service = (async () => {
           const config = await readConfig(path);
           const cloud = createCloudDriver(config, logE2bResumeRetry);
@@ -1560,6 +1564,11 @@ export const layer = Layer.effect(
               // A chat on the instance engine owns no Devbox or sandbox: its Mac is
               // released, renewed and disposed through the runtime that keeps its snapshot.
               pause: async (input) => {
+                const onModal = await modalChat(input.sandboxId);
+                if (onModal)
+                  return (await onModal.modal.release(onModal.operation)) === "missing"
+                    ? "missing"
+                    : undefined;
                 const chat = await instanceChat(input.sandboxId);
                 if (!chat) return cloud.pause(input);
                 return (await chat.mac.release(chat.operation, chat.manifest)) === "missing"
@@ -1567,17 +1576,26 @@ export const layer = Layer.effect(
                   : undefined;
               },
               dispose: async (input) => {
+                const onModal = await modalChat(input.sandboxId);
+                if (onModal) return onModal.modal.dispose(onModal.operation);
                 const chat = await instanceChat(input.sandboxId);
                 if (!chat) return cloud.dispose(input);
                 await chat.mac.dispose(chat.operation, chat.manifest);
               },
               renew: async (input) => {
-                const chat = await instanceChat(input.sandboxId);
-                if (!chat) return cloud.renew(input);
-                const state = await chat.mac.touch(chat.operation);
+                const onModal = await modalChat(input.sandboxId);
+                const chat = onModal ? null : await instanceChat(input.sandboxId);
+                const state = onModal
+                  ? await onModal.modal.touch(onModal.operation)
+                  : chat
+                    ? await chat.mac.touch(chat.operation)
+                    : null;
+                if (state === null) return cloud.renew(input);
                 return state === "released" ? "paused" : state;
               },
               upkeepChat: async ({ sandboxId, idle }) => {
+                const onModal = await modalChat(sandboxId);
+                if (onModal) return onModal.modal.upkeep(onModal.operation, idle);
                 const chat = await instanceChat(sandboxId);
                 return chat ? chat.mac.upkeep(chat.operation, chat.manifest, idle) : null;
               },
@@ -1693,6 +1711,8 @@ export const layer = Layer.effect(
                 try {
                   if (importedLeases.has(input.leaseId) || !isProvisionRequestId(input.leaseId))
                     return await cloud.resume(input);
+                  if (await modalChat(input.sandboxId))
+                    return await resumeProvisionedModal(input.leaseId, input.namespaceProxy);
                   if (input.namespaceResource || (await instanceChat(input.sandboxId)))
                     return await resumeProvisionedNamespace(input.leaseId, input.namespaceProxy);
                   const resumed = await cloud.resume(input);
@@ -1787,6 +1807,51 @@ export const layer = Layer.effect(
       });
       return namespace;
     };
+    /** The Modal runtime of the configuration loaded now, built once per load. */
+    const resolveModal = async () => {
+      const manager = await resolve();
+      const { modalTokenId: tokenId, modalTokenSecret: tokenSecret } = manager?.config ?? {};
+      if (!tokenId || !tokenSecret)
+        throw new ProvisionRefused({
+          reason: "unconfigured",
+          message: "Set modalTokenId and modalTokenSecret in environment-control.json.",
+        });
+      modal ??= makeModalRuntime({
+        boxes: makeModalBoxes({ tokenId, tokenSecret }),
+        stateDir,
+        proxies: namespaceProxies,
+        log: (message, fields) =>
+          void runLogged(Effect.logInfo(message).pipe(Effect.annotateLogs(fields))),
+      });
+      return modal;
+    };
+    const resumeProvisionedModal = async (
+      requestId: ProvisionRequestId,
+      recordedProxy?: NamespaceProxyLease,
+    ) => {
+      const operation = await Effect.runPromise(store.get(requestId));
+      if (
+        operation.state.kind !== "ready" ||
+        operation.state.allocation.resource.provider !== "modal"
+      )
+        throw new Error("No ready Modal runtime");
+      const { namespaceProxy, refreshError, restarted } = await (
+        await resolveModal()
+      ).resume(
+        operation,
+        await preparing(await manifests.load(requestId)),
+        recordedProxy,
+        await manifests.readRuntime(requestId),
+      );
+      if (restarted)
+        await runLogged(
+          Effect.logWarning("cloud workspace server was down; prepared it again", {
+            leaseId: requestId,
+          }),
+        );
+      await runLogged(logRefresh(requestId, refreshError));
+      return { namespaceProxy };
+    };
     const resumeProvisionedNamespace = async (
       requestId: ProvisionRequestId,
       recordedProxy?: NamespaceProxyLease,
@@ -1827,17 +1892,18 @@ export const layer = Layer.effect(
         reconnecting.get(requestId) ??
         (async () => {
           const operation = await Effect.runPromise(store.get(requestId));
-          if (
-            operation.state.kind !== "ready" ||
-            operation.state.allocation.resource.provider !== "namespace"
-          )
-            return;
+          if (operation.state.kind !== "ready") return;
           const manifest = await manifests.load(requestId);
-          const { runtime, mac } = await resolveNamespace();
           const resource = operation.state.allocation.resource;
-          await ("engine" in resource
-            ? mac.reconnect(operation, manifest, recorded)
-            : runtime.reconnect(operation, resource, manifest, recorded));
+          if (resource.provider === "e2b") return;
+          if (resource.provider === "modal")
+            await (await resolveModal()).reconnect(operation, manifest, recorded);
+          else {
+            const { runtime, mac } = await resolveNamespace();
+            await ("engine" in resource
+              ? mac.reconnect(operation, manifest, recorded)
+              : runtime.reconnect(operation, resource, manifest, recorded));
+          }
           reconnectFailedAt.delete(requestId);
           await runLogged(
             Effect.logInfo("cloud workspace proxy reconnected", {
@@ -1956,6 +2022,17 @@ export const layer = Layer.effect(
         return null;
       return { operation, sandboxId: operation.state.allocation.resource.sandboxId };
     };
+    /** The chat behind a lease, when it runs on Modal. */
+    const modalChat = async (sandboxId: string) => {
+      if (!isProvisionRequestId(sandboxId) || importedLeases.has(sandboxId)) return null;
+      const operation = await Effect.runPromise(store.get(sandboxId)).catch(() => null);
+      if (
+        !operation ||
+        !allocatedResources(operation.state).some((resource) => resource.provider === "modal")
+      )
+        return null;
+      return { operation, modal: await resolveModal() };
+    };
     /** The chat behind a lease, when it runs on the Namespace instance engine. */
     const instanceChat = async (sandboxId: string) => {
       if (!isProvisionRequestId(sandboxId) || importedLeases.has(sandboxId)) return null;
@@ -2013,6 +2090,7 @@ export const layer = Layer.effect(
           manifest,
           build,
           namespace: operation.request.provider === "namespace" ? await resolveNamespace() : null,
+          modal: operation.request.provider === "modal" ? await resolveModal() : null,
           runtime: makeE2bProvisionRuntime(connection, logE2bResumeRetry),
           allocator: makeE2bAllocationPorts({
             connection,
@@ -2034,15 +2112,20 @@ export const layer = Layer.effect(
             }),
         ),
       );
-    /** An instance-engine chat names no machine, so allocating it calls no provider. */
+    /**
+     * An instance-engine or Modal chat names no machine, so allocating it calls no provider: its
+     * machine is made when it prepares.
+     */
     const chatResource = (operation: ProvisionOperation) =>
-      operation.request.provider === "namespace" && operation.request.engine === "instance"
-        ? ({
-            provider: "namespace",
-            engine: "instance",
-            chatId: operation.request.requestId,
-          } as const)
-        : null;
+      operation.request.provider === "modal"
+        ? ({ provider: "modal", chatId: operation.request.requestId } as const)
+        : operation.request.provider === "namespace" && operation.request.engine === "instance"
+          ? ({
+              provider: "namespace",
+              engine: "instance",
+              chatId: operation.request.requestId,
+            } as const)
+          : null;
     const ports: ProvisionProviderPorts["Service"] = {
       create: (operation) => {
         const chat = chatResource(operation);
@@ -2066,7 +2149,16 @@ export const layer = Layer.effect(
         ),
       dispose: (operation, resource) =>
         Effect.gen(function* () {
-          const { runtime, namespace, manifest } = yield* provider(operation);
+          const { runtime, namespace, modal, manifest } = yield* provider(operation);
+          if (resource.provider === "modal")
+            return yield* Effect.tryPromise({
+              try: async () => {
+                if (!modal) throw new Error("Modal unavailable");
+                await modal.dispose(operation);
+              },
+              catch: () =>
+                new ProvisionProviderError({ message: "Modal cleanup could not be confirmed." }),
+            });
           if (resource.provider === "namespace")
             return yield* Effect.tryPromise({
               try: async () => {
@@ -2097,7 +2189,7 @@ export const layer = Layer.effect(
           phases.push(phase);
         };
         return Effect.gen(function* () {
-          const { runtime, manifest: frozen, namespace, build } = yield* provider(operation);
+          const { runtime, manifest: frozen, namespace, modal, build } = yield* provider(operation);
           const manifest = yield* Effect.tryPromise({
             try: () => preparing(frozen),
             catch: (error) =>
@@ -2107,6 +2199,21 @@ export const layer = Layer.effect(
           });
           const resource = allocation.resource;
           const request = operation.request;
+          if (resource.provider === "modal")
+            return yield* Effect.tryPromise({
+              try: async () => {
+                if (!modal) throw new Error("Modal unavailable");
+                return modal.prepare(operation, manifest, record, build);
+              },
+              catch: (error) =>
+                new ProvisionProviderError({
+                  ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+                  message: provisionFailureMessage(
+                    error,
+                    "Modal preparation did not finish. Retry the same request.",
+                  ),
+                }),
+            });
           if (resource.provider === "namespace")
             return yield* Effect.tryPromise({
               try: async () => {
@@ -2470,6 +2577,8 @@ export const layer = Layer.effect(
           const manager = await resolve();
           if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
           const resource = operation.state.allocation.resource;
+          if (resource.provider === "modal")
+            return (await resolveModal()).attach(operation, manifest, recordedProxy, record);
           if (resource.provider === "namespace") {
             const namespace = await resolveNamespace();
             return "engine" in resource
@@ -2485,6 +2594,7 @@ export const layer = Layer.effect(
           const manager = await resolve();
           if (!manager || operation.state.kind !== "ready") throw new Error("No ready runtime");
           const resource = operation.state.allocation.resource;
+          if (resource.provider === "modal") return (await resolveModal()).touch(operation);
           if (resource.provider === "namespace") {
             const namespace = await resolveNamespace();
             return "engine" in resource

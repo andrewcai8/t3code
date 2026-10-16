@@ -52,14 +52,14 @@ function savedBoxAddresses(addresses: ReadonlyArray<SavedEnvironmentAddress>) {
 
 /** A box's name in client lists: its repository's name and where it runs, as "Run on" names it. */
 export function boxLabel(request: DurableProvisionRequest): string {
-  const where = request.provider === "e2b" ? "E2B" : "Namespace Mac";
+  const where = { e2b: "E2B", modal: "Modal", namespace: "Namespace Mac" }[request.provider];
   const name = request.repository?.split("/").findLast((segment) => segment !== "");
   return name === undefined ? where : `${name} · ${where}`;
 }
 
 /** What a box runs on, which sets how long it takes to wake. */
 export function boxMachine(request: DurableProvisionRequest): CloudMachineKind {
-  if (request.provider === "e2b") return "sandbox";
+  if (request.provider !== "namespace") return "sandbox";
   return request.engine === "instance" ? "mac" : "devbox";
 }
 

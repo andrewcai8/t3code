@@ -221,8 +221,9 @@ function configuredPrepareCommands(
           canonicalRepository(candidate.repository) === canonicalRepository(repository),
       )
     : undefined;
+  // A Modal box runs the E2B box's image, so it runs the repository's E2B setup too.
   return (
-    entry?.[provider]?.prepareCommands ??
+    entry?.[provider === "modal" ? "e2b" : provider]?.prepareCommands ??
     (provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
     []
   );
@@ -315,9 +316,11 @@ export function followedBranch(manifest: ProvisionPreparationManifest): string |
 /** The build this manager currently pins for a provider's guests, or null when none is configured. */
 export function configuredRuntimeArtifact(
   config: EnvironmentControlConfig,
-  provider: "e2b" | "namespace",
+  provider: ProvisionProvider,
 ): ProvisionRuntimeArtifact | null {
-  return config.provisioning?.runtimeArtifacts?.[provider === "e2b" ? "linux" : "macos"] ?? null;
+  return (
+    config.provisioning?.runtimeArtifacts?.[provider === "namespace" ? "macos" : "linux"] ?? null
+  );
 }
 /**
  * The cloud environments this configuration can provision. Each needs its
@@ -334,7 +337,9 @@ export function provisionProviders(
       configuredRuntimeArtifact(config, provider) !== null &&
       (provider === "e2b"
         ? Boolean(config.provisioning?.templateId)
-        : config.provisioning?.namespace !== undefined),
+        : provider === "modal"
+          ? Boolean(config.modalTokenId && config.modalTokenSecret && config.provisioning?.modal)
+          : config.provisioning?.namespace !== undefined),
   );
 }
 const decodeSettingsRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
@@ -362,7 +367,7 @@ const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
  * again whenever the runtime it installs under the root is missing. Existing
  * manifests keep the root they persisted.
  */
-const guestVolume = { e2b: "/tmp", namespace: "/Volumes/devbox" } as const;
+const guestVolume = { e2b: "/tmp", modal: "/tmp", namespace: "/Volumes/devbox" } as const;
 /**
  * The instance engine's cache volume and its one root. Every Mac mounts the
  * repository's cache volume here and every chat prepares at the same root, so a
@@ -986,8 +991,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
         if (candidate && spares && (await spares.claim(candidate, input.requestId)))
           spare = candidate;
       }
+      // A Modal box is built from the E2B template's image, home and all.
       const root =
-        input.provider === "e2b"
+        input.provider === "e2b" || input.provider === "modal"
           ? E2B_ROOT
           : instanceEngine
             ? `${volume}/root`
@@ -1267,6 +1273,25 @@ export function makeProvisionPreparationStore(stateDir: string) {
           ...(warm
             ? { templateId: warm, strategy: "direct" as const }
             : { templateId: await template(), strategy: "fork" as const }),
+        };
+      } else if (input.provider === "modal") {
+        const modal = provisioning.modal;
+        if (!modal || !config.modalTokenId || !config.modalTokenSecret)
+          throw new ProvisionRefused({
+            reason: "unconfigured",
+            message: "Configure Modal credentials and a Modal image before provisioning.",
+          });
+        request = {
+          ...common,
+          provider: "modal",
+          app: modal.app ?? "t3-cloud-chats",
+          imageId: modal.imageId,
+          sizing: {
+            cpu: modal.cpu ?? 8,
+            cpuLimit: modal.cpuLimit ?? 8,
+            memoryMiB: modal.memoryMiB ?? 32_768,
+            memoryLimitMiB: modal.memoryLimitMiB ?? 32_768,
+          },
         };
       } else {
         request = {
