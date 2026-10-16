@@ -157,7 +157,10 @@ effectIt.effect(
             }),
           ),
         );
-      const noteFor = (thread: string, environment = { ...box, T3CODE_HOME: t3home }) =>
+      const noteFor = (
+        thread: string,
+        environment: NodeJS.ProcessEnv = { ...box, T3CODE_HOME: t3home },
+      ) =>
         saveFailureNoteFor(thread).pipe(
           Effect.provideService(HostProcess.Environment, environment),
         );

@@ -136,7 +136,7 @@ type SaveFailure = typeof SaveFailure.Type;
 const decodeSaveFailure = Schema.decodeUnknownEffect(Schema.fromJsonString(SaveFailure));
 
 /** What an agent is told when its chat's work no longer fits in a save. */
-export function saveFailureNote(failure: SaveFailure): string {
+function saveFailureNote(failure: SaveFailure): string {
   const largest = failure.largest.map(({ path, bytes }) => `${path} (${sizeLabel(bytes)})`);
   return `Note: this chat's work no longer fits in a save off this machine, which holds at most ${sizeLabel(failure.limit)}. The largest saved paths are ${largest.join(", ")}. Delete what you no longer need or move it to S3; dependency installs and build outputs in a checkout's ignored directories are not saved. Until a save fits, work since the last one is lost when this machine is replaced.`;
 }
