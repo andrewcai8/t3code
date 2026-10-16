@@ -45,12 +45,12 @@ case "${1:-}" in
     tar -xJf "$temporary/node.tar.xz" --strip-components=1 -C /usr/local
     # Match MeGPT's env-lib.sh CPU selection, npm archive pins, and bunx alias.
     target=bun-linux-x64
-    checksum=1e812bd440362ae0a7f99f340a4d1202a1ed6c8e97553c820ffbb6445e576a65
+    checksum=efd069d474e6addceede0dc9c0981b4421cf35ceb3348e4b83462053a177281f
     if ! grep -qs avx2 /proc/cpuinfo; then
       target=bun-linux-x64-baseline
-      checksum=e8d1fcb859272945fdb9ed1de1fb787ab8ff4f85c5ad15a0a7134b76b63ceaa5
+      checksum=1a81395cfbd4c36573ef9b2d51da5231b63b2d0ad0e2a8ed2b075dada0de6dfb
     fi
-    download "https://registry.npmjs.org/@oven/$target/-/$target-1.4.0.tgz" \
+    download "https://registry.npmjs.org/@oven/$target/-/$target-1.4.3.tgz" \
       "$temporary/bun.tgz" "$checksum"
     tar -xzf "$temporary/bun.tgz" -C "$temporary" package/bin/bun
     install -m 755 "$temporary/package/bin/bun" /usr/local/bin/bun
@@ -58,7 +58,7 @@ case "${1:-}" in
     ln -sfn /usr/local/bin/bun /home/user/.bun/bin/bun
     ln -sfn bun /home/user/.bun/bin/bunx
     test "$(node --version)" = v24.21.0
-    test "$(bun --version)" = 1.4.0
+    test "$(bun --version)" = 1.4.3
     ;;
   tools)
     test "$HOME" = /home/user
@@ -130,7 +130,7 @@ case "${1:-}" in
       command -v "$tool"
     done
     test "$(node --version)" = v24.21.0
-    test "$(bun --version)" = 1.4.0
+    test "$(bun --version)" = 1.4.3
     codex --version
     claude --version
     agent --version
