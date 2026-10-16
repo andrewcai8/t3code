@@ -63,6 +63,8 @@ for (const step of COMMON_TOOLS_STEPS) {
   }
 }
 for (const owner of homes) commands.push(`RUN chown -R ${owner}:${owner} /home/${owner}`);
+// A Modal outbound domain allowlist passes HTTPS only, so apt fetches its mirrors over HTTPS.
+commands.push("RUN sed -i 's#http://#https://#g' /etc/apt/sources.list.d/ubuntu.sources");
 
 if (values["print-commands"]) {
   console.log([`FROM ${COMMON_TOOLS_BASE}`, ...commands].join("\n"));
