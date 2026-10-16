@@ -11,7 +11,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { useCallback, useState } from "react";
 import { Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { environmentCatalog } from "../../connection/catalog";
 import { serverEnvironment } from "../../state/server";
 import { threadEnvironment } from "../../state/threads";

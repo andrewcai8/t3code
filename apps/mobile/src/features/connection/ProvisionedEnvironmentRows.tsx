@@ -6,8 +6,8 @@ import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/c
 import { useState } from "react";
 import { ActivityIndicator, Alert, Pressable, View } from "react-native";
 
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { cn } from "../../lib/cn";
 import { useThreadShell } from "../../state/entities";
