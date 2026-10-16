@@ -91,7 +91,12 @@ import {
   makeNamespaceProvisionRuntime,
 } from "./NamespaceProvisionRuntime.ts";
 import { makeNamespaceMacRuntime } from "./NamespaceMacRuntime.ts";
-import { makeModalBoxes, makeModalRuntime } from "./ModalRuntime.ts";
+import {
+  makeModalBoxes,
+  makeModalRuntime,
+  type ModalBoxes,
+  type ModalCopySpec,
+} from "./ModalRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
 import { E2bPlacementUnavailable, type E2bResumeRetry } from "./e2bResume.ts";
@@ -303,9 +308,12 @@ const stalled = (record: { readonly status: string; readonly at: string } | unde
  */
 const CONFIRM_PROBE_MS = 10_000;
 
-/** What a chat is told when its box was booted fresh from its disk, and `why`. */
-const restartNotice = (why: string) =>
-  `This machine was restarted fresh from its disk because ${why}. What was only in memory, any processes that were running, and /tmp were lost; the checkout and this conversation are intact. Check \`git status\`, start again anything you had running, and carry on.`;
+/**
+ * What a chat is told when its box was booted fresh from its disk, and `why`. A Modal disk save
+ * keeps /tmp; an E2B boot from disk empties it.
+ */
+const restartNotice = (why: string, keepsTmp: boolean) =>
+  `This machine was restarted fresh from its disk because ${why}. What was only in memory${keepsTmp ? " and any processes that were running were" : ", any processes that were running, and /tmp were"} lost; the checkout and this conversation are intact. Check \`git status\`, start again anything you had running, and carry on.`;
 
 /**
  * One upkeep pass for a chat on the Namespace instance engine: a periodic
@@ -630,7 +638,7 @@ export function createEnvironmentControl(
     const freshBoot = await leaseRegistry.takeFreshBoot(lease.leaseId);
     if (!freshBoot) return;
     try {
-      await driver.tellChat(lease, restartNotice(freshBoot.reason));
+      await driver.tellChat(lease, restartNotice(freshBoot.reason, lease.provider === "modal"));
     } catch (cause) {
       reportFailure("cloud chat was not told its box restarted", { chatId: lease.leaseId, cause });
       await leaseRegistry.recordFreshBoot(lease.leaseId, freshBoot);
@@ -1019,10 +1027,20 @@ export function createEnvironmentControl(
         return { kind: "resumed" };
       })()
         .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
-          if (cause instanceof ProvisionedSandboxMissing)
+          if (cause instanceof ProvisionedSandboxMissing) {
             await leaseRegistry?.markMissing(input.leaseId);
-          if (cause instanceof ProvisionedSandboxMissing)
+            // A Modal chat is missing once its memory and its disk save are both gone, which
+            // leaves only its backup.
+            const lease = await leaseRegistry?.findById(input.leaseId);
+            if (lease?.provider === "modal")
+              void startRebuild(lease).catch((error: unknown) =>
+                reportFailure("cloud chat rebuild could not start", {
+                  chatId: input.leaseId,
+                  cause: error,
+                }),
+              );
             return { kind: "refused", reason: "missing", message: cause.message };
+          }
           if (
             cause instanceof E2bPlacementUnavailable &&
             cause.failure === "provider-unavailable"
@@ -1296,6 +1314,22 @@ export class EnvironmentControl extends Context.Service<
     readonly list: Effect.Effect<ReadonlyArray<ManagedEnvironment>, EnvironmentControlError>;
     /** The cloud configuration as last read from disk, or null when this install has none. */
     readonly controlConfig: Effect.Effect<EnvironmentControlConfig | null, EnvironmentControlError>;
+    /** The Modal chat behind a box's id, for its forks; null for a box that is not one. */
+    readonly modalForkSource: (sandboxId: string) => Effect.Effect<
+      {
+        readonly capture: (ttlMs: number) => Promise<{
+          readonly imageId: string;
+          readonly copy: Omit<ModalCopySpec, "imageId" | "timeoutMs" | "tags">;
+        } | null>;
+        readonly unpackInto: (archive: string, destination: string) => Promise<"copied" | "asleep">;
+      } | null,
+      EnvironmentControlError
+    >;
+    /** Modal and the app its chats run in, for fork copies; null without Modal configured. */
+    readonly modalBoxes: Effect.Effect<
+      { readonly boxes: ModalBoxes; readonly app: string; readonly environment?: string } | null,
+      EnvironmentControlError
+    >;
     /** The cloud environments the current configuration can provision; none without one. */
     readonly provisionProviders: Effect.Effect<
       ReadonlyArray<ProvisionProvider>,
@@ -1473,6 +1507,7 @@ export const layer = Layer.effect(
       | undefined;
     let modal: ReturnType<typeof makeModalRuntime> | undefined;
     const modalTurns = new Map<string, Promise<unknown>>();
+    const modalWork = new Map<string, Set<Promise<unknown>>>();
     let scannedSkills:
       | {
           readonly service: ManagerService;
@@ -1569,7 +1604,8 @@ export const layer = Layer.effect(
               pause: async (input) => {
                 const onModal = await modalChat(input.sandboxId);
                 if (onModal)
-                  return (await onModal.modal.release(onModal.operation)) === "missing"
+                  return (await onModal.modal.release(onModal.operation, input.keepMemory)) ===
+                    "missing"
                     ? "missing"
                     : undefined;
                 const chat = await instanceChat(input.sandboxId);
@@ -1633,9 +1669,10 @@ export const layer = Layer.effect(
                 sleepBudgetMs: SLEEP_BACKUP_BUDGET_MS,
                 turnBudgetMs: TURN_BACKUP_BUDGET_MS,
                 run: async (lease, deadline) => {
-                  const box = await e2bBox(lease);
-                  if (!box) return null;
-                  const { operation } = box;
+                  const e2b = await e2bBox(lease);
+                  const onModal = e2b ? null : await modalChat(lease.sandboxId);
+                  const operation = e2b?.operation ?? onModal?.operation;
+                  if (!operation) return null;
                   const manifest = await manifests.load(operation.request.requestId);
                   const token = config.provisioning?.githubToken;
                   const outputsUri = config.provisioning?.workerForks?.outputsUri;
@@ -1648,39 +1685,44 @@ export const layer = Layer.effect(
                           threadId: lease.owner.threadId,
                         }
                       : undefined;
-                  return makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).backUp(
-                    operation,
-                    box.sandboxId,
-                    manifest,
-                    {
-                      leaseId: lease.leaseId,
-                      target: workTarget({
-                        originIsPrivate: await repositoryIsPrivate(
-                          operation.request.repository,
-                          token,
-                        ),
+                  const input = {
+                    leaseId: lease.leaseId,
+                    target: workTarget({
+                      originIsPrivate: await repositoryIsPrivate(
+                        operation.request.repository,
                         token,
-                        bundlePath: sessions
-                          ? `${manifest.preparation.root}/backup/work.bundle`
-                          : undefined,
-                      }),
-                      ...(sessions ? { sessions } : {}),
-                      previous: lease.backup,
-                      now: new Date().toISOString(),
-                    },
-                    deadline,
-                  );
+                      ),
+                      token,
+                      bundlePath: sessions
+                        ? `${manifest.preparation.root}/backup/work.bundle`
+                        : undefined,
+                    }),
+                    ...(sessions ? { sessions } : {}),
+                    previous: lease.backup,
+                    now: new Date().toISOString(),
+                  };
+                  if (onModal) return onModal.modal.backUp(operation, manifest, input, deadline);
+                  return e2b
+                    ? makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).backUp(
+                        operation,
+                        e2b.sandboxId,
+                        manifest,
+                        input,
+                        deadline,
+                      )
+                    : null;
                 },
               },
               healthCheck: {
                 probe: async (lease) => {
                   const box = await e2bBox(lease);
-                  return box
-                    ? makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).probeHealth(
-                        box.operation,
-                        box.sandboxId,
-                      )
-                    : null;
+                  if (box)
+                    return makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).probeHealth(
+                      box.operation,
+                      box.sandboxId,
+                    );
+                  const onModal = await modalChat(lease.sandboxId);
+                  return onModal ? onModal.modal.probeHealth(onModal.operation) : null;
                 },
               },
               chatRebuild: {
@@ -1824,6 +1866,7 @@ export const layer = Layer.effect(
         stateDir,
         proxies: namespaceProxies,
         turns: modalTurns,
+        work: modalWork,
         log: (message, fields) =>
           void runLogged(Effect.logInfo(message).pipe(Effect.annotateLogs(fields))),
       });
@@ -1839,7 +1882,7 @@ export const layer = Layer.effect(
         operation.state.allocation.resource.provider !== "modal"
       )
         throw new Error("No ready Modal runtime");
-      const { namespaceProxy, refreshError, restarted } = await (
+      const resumed = await (
         await resolveModal()
       ).resume(
         operation,
@@ -1847,6 +1890,13 @@ export const layer = Layer.effect(
         recordedProxy,
         await manifests.readRuntime(requestId),
       );
+      const { namespaceProxy, refreshError, restarted } = resumed;
+      // Recorded before the wake marks the lease awake, which then tells the chat.
+      if ("freshBoot" in resumed && resumed.freshBoot)
+        await leaseRegistry.recordFreshBoot(requestId, {
+          at: new Date().toISOString(),
+          reason: resumed.freshBoot,
+        });
       if (restarted)
         await runLogged(
           Effect.logWarning("cloud workspace server was down; prepared it again", {
@@ -1938,25 +1988,26 @@ export const layer = Layer.effect(
         await reconnectProxy(lease, lease.namespaceProxy);
     };
     /**
-     * Rebuilds a chat whose box E2B cannot start on a fresh box from its last backup, through the
-     * same provisioning a client's request takes: provisioned on the old box's repository and
-     * branch, the backup restored by the new box with its own AWS keys, then the chat's Claude
-     * session imported and told why it moved. The old box is left as it is.
+     * Rebuilds a chat whose box cannot be started on a fresh box of the same provider from its
+     * last backup, through the same provisioning a client's request takes: provisioned on the old
+     * box's repository and branch, the backup restored by the new box with its own AWS keys, then
+     * the chat's Claude session imported and told why it moved. The old box is left as it is.
      */
     const rebuildChat = async (
       lease: ProvisionedLease,
       config: EnvironmentControlConfig,
     ): Promise<{ leaseId: string; environmentId: string; threadId: string }> => {
-      const old = await e2bBox(lease);
+      const old = (await e2bBox(lease)) ?? (await modalChat(lease.sandboxId));
       const uri = lease.backup?.sessionsUri;
-      if (!old || !uri) throw new Error("The chat has no E2B box and backup this host made.");
+      if (!old || !uri) throw new Error("The chat has no cloud box and backup this host made.");
       const { request } = old.operation;
+      if (request.provider === "namespace") throw new Error("Mac chats are not rebuilt.");
       const requestId = ProvisionRequestId.make(crypto.randomUUID());
       const ready = await runLogged(
         provisionControl
           .provision({
             requestId,
-            provider: "e2b",
+            provider: request.provider,
             providerInstanceId: leaseAccounts(lease)[0] ?? lease.providerInstanceId,
             pinAccount: true,
             ...(request.agentDriver ? { agentDriver: request.agentDriver } : {}),
@@ -1976,20 +2027,25 @@ export const layer = Layer.effect(
       await runLogged(provisionControl.attach({ requestId }));
       const remoteAccess = (await leaseRegistry.findById(requestId))?.remoteAccess;
       const operation = await Effect.runPromise(store.get(requestId));
-      if (
-        !remoteAccess ||
-        operation.state.kind !== "ready" ||
-        operation.state.allocation.resource.provider !== "e2b"
-      )
+      if (!remoteAccess || operation.state.kind !== "ready")
         throw new Error("The new box is not reachable.");
+      const resource = operation.state.allocation.resource;
+      const guest =
+        resource.provider === "e2b"
+          ? await makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).guest(
+              operation,
+              resource.sandboxId,
+            )
+          : resource.provider === "modal"
+            ? await (await resolveModal()).guest(operation)
+            : null;
+      if (!guest) throw new Error("The new box is not reachable.");
       const manifest = await manifests.load(requestId);
-      const restore = makeBoxRestore(
-        await makeE2bProvisionRuntime({ apiKey: config.e2bApiKey }).guest(
-          operation,
-          operation.state.allocation.resource.sandboxId,
-        ),
-        { root: manifest.preparation.root, uri, token: config.provisioning?.githubToken },
-      );
+      const restore = makeBoxRestore(guest, {
+        root: manifest.preparation.root,
+        uri,
+        token: config.provisioning?.githubToken,
+      });
       const backup = await restore.readManifest();
       const plan = planRebuild(backup, uri);
       if (backup.modelSelection === null) throw new Error("The backup records no model.");
@@ -3110,6 +3166,31 @@ export const layer = Layer.effect(
         }),
       list: run((service) => service.list(), []),
       controlConfig: run<EnvironmentControlConfig | null>(async (service) => service.config, null),
+      modalForkSource: (sandboxId) =>
+        Effect.tryPromise({
+          try: async () => {
+            const chat = await modalChat(sandboxId);
+            if (!chat) return null;
+            const manifest = await manifests.load(chat.operation.request.requestId);
+            return {
+              capture: (ttlMs: number) =>
+                chat.modal.captureForForks(chat.operation, manifest, ttlMs),
+              unpackInto: (archive: string, destination: string) =>
+                chat.modal.unpackInto(chat.operation, archive, destination),
+            };
+          },
+          catch: () =>
+            new EnvironmentControlError({ message: "The Modal chat could not be read." }),
+        }),
+      modalBoxes: run(async (service) => {
+        const modal = service.config.provisioning?.modal;
+        if (!modal || !service.config.modalTokenId || !service.config.modalTokenSecret) return null;
+        return {
+          boxes: (await resolveModal()).boxes,
+          app: modal.app ?? "t3-cloud-chats",
+          ...(modal.environment ? { environment: modal.environment } : {}),
+        };
+      }, null),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
       provisionedSkills: localAgentRuns
         ? Effect.succeed(undefined)

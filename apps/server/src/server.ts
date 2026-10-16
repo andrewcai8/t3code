@@ -558,7 +558,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ).pipe(
     Layer.provide(CloudFleetHost.layer),
     Layer.provide(WorkerForks.layer),
-    Layer.provide(ForkMachines.layerE2b),
+    Layer.provide(ForkMachines.layer),
     Layer.provide(BoxFleetClient.layer),
   ),
   layerThreadSettlementWorker,

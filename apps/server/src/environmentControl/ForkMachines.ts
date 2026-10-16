@@ -1,12 +1,14 @@
 // @effect-diagnostics globalTimers:off - the E2B adapter waits between retries inside Promise SDK calls.
 // @effect-diagnostics globalFetch:off - E2B's disk capture is an API call its SDK does not expose yet.
+// @effect-diagnostics nodeBuiltinImport:off - a Modal copy's outputs pass through a scratch file on the host.
 /**
  * ForkMachines - the cloud provider side of t3_fork_run: copies of a chat's machine.
  *
  * WorkerForks decides what runs where and for how long; this port does each step on the
- * provider. `layerE2b` copies an E2B sandbox by snapshotting it once per batch and starting
- * every copy from that snapshot, so all of a batch's jobs see the chat's machine as it was when
- * the batch started, and each copy carries this host's tags for the sweep.
+ * provider. `layer` copies a chat's machine on its own provider, E2B or Modal, by capturing it
+ * once per batch and starting every copy from that capture, so all of a batch's jobs see the
+ * chat's machine as it was when the batch started, and each copy carries this host's tags for
+ * the sweep.
  *
  * @module ForkMachines
  */
@@ -19,6 +21,10 @@ import {
   type SandboxNetworkUpdate,
   ServiceBusyError,
 } from "e2b";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import { ResourceExhaustedError } from "modal";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -27,6 +33,7 @@ import * as Schema from "effect/Schema";
 import type { EnvironmentControlConfig } from "./config.ts";
 import { agentEnvironmentPython } from "./guestAgentEnvironment.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
+import { MODAL_GUEST_ENV, type ModalBoxes, type ModalCopySpec } from "./ModalRuntime.ts";
 import { serviceCommands } from "./ProvisionPreparation.ts";
 
 export type WorkerForkSettings = NonNullable<
@@ -448,8 +455,201 @@ async function readBounded(sandbox: Sandbox, path: string, maxBytes: number) {
   }
 }
 
-/** Copies E2B sandboxes with the host's own E2B key; the chat's agent never holds it. */
-export const layerE2b = Layer.effect(
+/**
+ * Records, in a copy booted from a Modal chat's disk, the environment the chat's agent sees. The
+ * copy booted with none of the chat's processes and Modal cannot run one from a disk image, so
+ * unlike an E2B copy it has nothing to stop. Modal copies run as root, as Modal chats do, so the
+ * E2B copy's kill of every process its user owns would end the copy itself.
+ */
+const RECORD_ENV = String.raw`
+import json, os, pathlib
+${agentEnvironmentPython}
+env, _server, home, settings = agent_env(pathlib.Path('/home/user/.t3-provision'))
+state = pathlib.Path('${STATE}')
+(state / 'out').mkdir(parents=True, exist_ok=True)
+os.umask(0o077)
+(state / 'env.json').write_text(json.dumps(env))
+(state / 'unresolved.json').write_text(json.dumps(unresolved_env(home, settings)))
+`;
+
+/** A Modal capture outlives any batch, so one this host lost track of expires by itself. */
+const MODAL_CAPTURE_TTL_MS = 26 * 3_600_000;
+
+/**
+ * Copies Modal sandboxes: a capture is a filesystem snapshot of the chat's box, which keeps
+ * running through it, and a copy is a plain sandbox booted from it with the chat's sizing and
+ * egress. Captures and copies are known by the ids this host made, so a sweep after a restart
+ * finds copies by their tags and leaves captures to expire.
+ */
+const modalMachines = Effect.gen(function* () {
+  const control = yield* EnvironmentControl.EnvironmentControl;
+  const captures = new Map<
+    string,
+    {
+      readonly batchId: string;
+      readonly copy: Omit<ModalCopySpec, "imageId" | "timeoutMs" | "tags">;
+    }
+  >();
+  const copies = new Set<string>();
+  const attempt = <A>(
+    step: ForkMachineError["step"],
+    body: (modal: {
+      readonly boxes: ModalBoxes;
+      readonly app: string;
+      readonly environment?: string;
+    }) => Promise<A>,
+  ) =>
+    control.modalBoxes.pipe(
+      Effect.mapError((cause) => new ForkMachineError({ step, cause })),
+      Effect.flatMap((modal) =>
+        modal === null
+          ? Effect.fail(new ForkMachineError({ step, cause: new Error("Modal is not configured") }))
+          : Effect.tryPromise({
+              try: () => body(modal),
+              catch: (cause) =>
+                new ForkMachineError({
+                  step,
+                  cause,
+                  ...(cause instanceof ResourceExhaustedError ? { busy: true } : {}),
+                }),
+            }),
+      ),
+    );
+  /** Runs a step's command in a copy as Modal chats run theirs, with a non-zero exit as its failure. */
+  const exec = async (boxes: ModalBoxes, forkId: string, command: string, timeoutMs: number) => {
+    const result = await boxes.exec(forkId, [...MODAL_GUEST_ENV, "sh", "-c", command], {
+      timeoutMs,
+    });
+    if (result.exitCode !== 0)
+      throw new Error(`exit ${result.exitCode}: ${result.stderr.slice(-2000)}`);
+    return result.stdout;
+  };
+  return {
+    owns: (id: string) => captures.has(id) || copies.has(id),
+    capture: (sandboxId: string, tag: ForkTag) =>
+      control.modalForkSource(sandboxId).pipe(
+        Effect.mapError((cause) => new ForkMachineError({ step: "capture", cause })),
+        Effect.flatMap((source) =>
+          source === null
+            ? Effect.succeed(null)
+            : Effect.tryPromise({
+                try: async () => {
+                  const captured = await source.capture(MODAL_CAPTURE_TTL_MS);
+                  if (captured === null) throw new Error("The chat's machine is not running");
+                  captures.set(captured.imageId, { batchId: tag.batchId, copy: captured.copy });
+                  return captured.imageId;
+                },
+                catch: (cause) => new ForkMachineError({ step: "capture", cause }),
+              }),
+        ),
+      ),
+    release: (captureId: string) =>
+      attempt("capture", async ({ boxes }) => {
+        captures.delete(captureId);
+        await boxes.deleteImage(captureId);
+      }),
+    start: (captureId: string, tag: ForkTag, lifetimeMs: number) =>
+      attempt("start", async ({ boxes }) => {
+        const captured = captures.get(captureId);
+        if (!captured) throw new Error("The capture of the chat's machine is gone");
+        const forkId = await boxes.createCopy({
+          ...captured.copy,
+          imageId: captureId,
+          timeoutMs: lifetimeMs,
+          tags: { purpose: COPY_PURPOSE, host: tag.host, batch: tag.batchId, lease: tag.leaseId },
+        });
+        try {
+          await exec(boxes, forkId, python(RECORD_ENV), 60_000);
+        } catch (error) {
+          await boxes.terminate(forkId).catch(() => undefined);
+          throw error;
+        }
+        copies.add(forkId);
+        return forkId;
+      }),
+    run: (forkId: string, job: Parameters<ForkMachines["Service"]["run"]>[1]) =>
+      attempt("run", async ({ boxes }) =>
+        decodeExit(await exec(boxes, forkId, python(RUN, job), job.timeoutMs + 60_000)),
+      ),
+    upload: (forkId: string, input: Parameters<ForkMachines["Service"]["upload"]>[1]) =>
+      attempt("upload", async ({ boxes }) =>
+        decodeUpload(await exec(boxes, forkId, python(UPLOAD, input), 3_700_000)),
+      ),
+    copyBack: (forkId: string, input: Parameters<ForkMachines["Service"]["copyBack"]>[1]) =>
+      control.modalForkSource(input.sourceSandboxId).pipe(
+        Effect.mapError((cause) => new ForkMachineError({ step: "copy", cause })),
+        Effect.flatMap((source) =>
+          attempt("copy", async ({ boxes }): Promise<ForkCopyBack> => {
+            if (source === null) return { kind: "asleep" };
+            const claimed = Number(
+              await exec(
+                boxes,
+                forkId,
+                python(PACK, { cwd: input.cwd, paths: input.paths }),
+                600_000,
+              ),
+            );
+            if (claimed > input.maxBytes) return { kind: "too_large", bytes: claimed };
+            const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-fork-"));
+            try {
+              const archive = NodePath.join(scratch, "copy.tgz");
+              await boxes.download(forkId, `${STATE}/copy.tgz`, archive);
+              // The copy reports its own archive's size, so the host checks what it received.
+              const { size } = await NodeFSP.stat(archive);
+              if (size > input.maxBytes) return { kind: "too_large", bytes: size };
+              return { kind: await source.unpackInto(archive, input.destination) };
+            } finally {
+              await NodeFSP.rm(scratch, { recursive: true, force: true });
+            }
+          }),
+        ),
+      ),
+    kill: (forkId: string) =>
+      attempt("kill", async ({ boxes }) => {
+        copies.delete(forkId);
+        await boxes.terminate(forkId);
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("a worker fork could not be removed; it ends at its timeout", {
+            forkId,
+            cause: error.cause,
+          }),
+        ),
+      ),
+    sweep: (host: string, remove: (batchId: string) => boolean) =>
+      attempt("sweep", async ({ boxes, app, environment }) => {
+        const found = await boxes.list(app, environment, { purpose: COPY_PURPOSE, host });
+        const doomed = found.filter((copy) => remove(copy.tags.batch ?? ""));
+        const stale = [...captures].filter(([, captured]) => remove(captured.batchId));
+        const results = [
+          ...(await Promise.allSettled(
+            doomed.map(({ sandboxId }) => {
+              copies.delete(sandboxId);
+              return boxes.terminate(sandboxId);
+            }),
+          )),
+          ...(await Promise.allSettled(
+            stale.map(([captureId]) => {
+              captures.delete(captureId);
+              return boxes.deleteImage(captureId);
+            }),
+          )),
+        ];
+        return {
+          forks: doomed.length,
+          captures: stale.length,
+          failed: results.filter((result) => result.status === "rejected").length,
+        };
+      }),
+  };
+});
+
+/**
+ * Copies a chat's machine on its own provider: a Modal chat's on Modal, any other on E2B with the
+ * host's own E2B key, which the chat's agent never holds. A capture or copy is Modal's when this
+ * host made it there.
+ */
+export const layer = Layer.effect(
   ForkMachines,
   Effect.gen(function* () {
     const control = yield* EnvironmentControl.EnvironmentControl;
@@ -485,7 +685,7 @@ export const layerE2b = Layer.effect(
     const copyOf = (step: ForkMachineError["step"], forkId: string) =>
       attempt(step, async (e2b) => running.get(forkId) ?? (await e2b.Sandbox.connect(forkId)));
 
-    return ForkMachines.of({
+    const e2b = ForkMachines.of({
       settings: (repository) =>
         control.controlConfig.pipe(
           Effect.map((config) =>
@@ -677,6 +877,44 @@ export const layerE2b = Layer.effect(
             failed: results.filter((result) => result.status === "rejected").length,
           };
         }),
+    });
+    const modal = yield* modalMachines;
+    return ForkMachines.of({
+      settings: e2b.settings,
+      capture: (sandboxId, tag) =>
+        modal
+          .capture(sandboxId, tag)
+          .pipe(
+            Effect.flatMap((captureId) =>
+              captureId === null ? e2b.capture(sandboxId, tag) : Effect.succeed(captureId),
+            ),
+          ),
+      release: (captureId) =>
+        modal.owns(captureId) ? modal.release(captureId) : e2b.release(captureId),
+      start: (captureId, tag, lifetimeMs) =>
+        modal.owns(captureId)
+          ? modal.start(captureId, tag, lifetimeMs)
+          : e2b.start(captureId, tag, lifetimeMs),
+      run: (forkId, job) => (modal.owns(forkId) ? modal.run(forkId, job) : e2b.run(forkId, job)),
+      upload: (forkId, input) =>
+        modal.owns(forkId) ? modal.upload(forkId, input) : e2b.upload(forkId, input),
+      copyBack: (forkId, input) =>
+        modal.owns(forkId) ? modal.copyBack(forkId, input) : e2b.copyBack(forkId, input),
+      kill: (forkId) => (modal.owns(forkId) ? modal.kill(forkId) : e2b.kill(forkId)),
+      sweep: (host, remove) =>
+        Effect.all([
+          e2b.sweep(host, remove),
+          // A host without Modal has no Modal copies to sweep.
+          modal
+            .sweep(host, remove)
+            .pipe(Effect.catch(() => Effect.succeed({ forks: 0, captures: 0, failed: 0 }))),
+        ]).pipe(
+          Effect.map(([onE2b, onModal]) => ({
+            forks: onE2b.forks + onModal.forks,
+            captures: onE2b.captures + onModal.captures,
+            failed: onE2b.failed + onModal.failed,
+          })),
+        ),
     });
   }),
 );

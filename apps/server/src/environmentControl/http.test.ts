@@ -77,6 +77,8 @@ it.effect(
           list: Effect.succeed([]),
           provisionProviders: Effect.succeed([]),
           controlConfig: Effect.succeed(null),
+          modalForkSource: () => Effect.succeed(null),
+          modalBoxes: Effect.succeed(null),
           provisionedSkills: Effect.succeed(undefined),
           listProvisioned: () => Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),

@@ -81,7 +81,7 @@ const toldBySession = new WeakMap<object, Set<string>>();
  * The cloud machine note, sent on the first turn of each provider session for a native thread: a
  * new chat, and also a chat resumed after a wake, a restart or an account switch, since a chat
  * that began before the note existed, or lost it to compaction, would otherwise never hear it.
- * `session` is the live provider session runtime. Forks copy only E2B machines, so a Mac box's
+ * `session` is the live provider session runtime. Forks copy only Linux machines, so a Mac box's
  * agents are not pointed at them. Any agent can run `t3 fork-exec`, a shell command; only a box's
  * top-level chats reach t3_fork_run, and only when their provider exposes MCP tools.
  */

@@ -452,7 +452,7 @@ const make = Effect.gen(function* () {
 
   const run: WorkerForks["Service"]["run"] = (source, actor, input) =>
     Effect.gen(function* () {
-      if (source.provider !== "e2b")
+      if (source.provider === "namespace")
         return yield* failure(
           "capability_denied",
           "t3_fork_run is not supported on Mac machines yet; it runs on cloud sandbox chats.",
