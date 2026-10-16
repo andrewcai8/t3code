@@ -285,10 +285,9 @@ const Provisioning = Schema.Struct({
   ),
   /**
    * Modal box defaults. Present, with Modal credentials, only when on-demand Modal provisioning
-   * is enabled. A vm sandbox has `cpuLimit` CPUs and runs them all on a `cpu` reservation, but
-   * its RAM is its `memoryMiB` reservation and never bursts toward `memoryLimitMiB`, which is why
-   * memory reserves the full 32 GiB. Modal bills the larger of the reservation and the use. A
-   * chat keeps the values it was frozen with.
+   * is enabled. A box reserves `cpu` and `memoryMiB` and bursts to the limits; Modal bills the
+   * larger of the reservation and the use, and may evict a box using more memory than it
+   * reserved. A chat keeps the values it was frozen with.
    */
   modal: Schema.optional(
     Schema.Struct({
@@ -303,11 +302,16 @@ const Provisioning = Schema.Struct({
        * and the box's bearer token is the only gate.
        */
       inboundCidrs: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
-      /** Default 2. */
+      /**
+       * Default `gvisor`. A `vm` box can run Docker, but a vm box that can be snapshotted has only
+       * its `memoryMiB` reservation as RAM, so it needs the memory it will use reserved.
+       */
+      runtime: Schema.optional(Schema.Literals(["gvisor", "vm"])),
+      /** Default 0.125. */
       cpu: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
       /** Default 8. */
       cpuLimit: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
-      /** Default 32768. */
+      /** Default 2048, about what a box running its T3 server and an agent uses, since memory above the reservation risks eviction. */
       memoryMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
       /** Default 32768. */
       memoryLimitMiB: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),

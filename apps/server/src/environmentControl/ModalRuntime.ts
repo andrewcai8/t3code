@@ -10,6 +10,7 @@ import type { ProvisionOperation } from "@t3tools/contracts";
 
 import type { ProvisionRuntimeArtifact } from "./config.ts";
 import { ProvisionedSandboxMissing } from "./driver.ts";
+import { GUEST_INIT_SOCKET, guestInitScript } from "./guestInit.ts";
 import { withGuestProviderInstall } from "./guestProviderInstall.ts";
 import { makeModalChatStore, type ModalChatRecord } from "./modalChatStore.ts";
 import { makeNamespacePublisher, mintNamespacePairing } from "./NamespaceProvisionRuntime.ts";
@@ -54,6 +55,8 @@ export interface ModalBoxSpec {
   readonly environment?: string;
   readonly name: string;
   readonly imageId: string;
+  /** Absent, gVisor, Modal's default. */
+  readonly runtime?: "vm";
   readonly port: number;
   readonly timeoutMs: number;
   readonly sizing: {
@@ -142,8 +145,10 @@ export function makeModalBoxes(credentials: {
         const sandbox = await transient(() =>
           modal.sandboxes.create(app, image, {
             name: spec.name,
-            runtime: "vm",
-            // A snapshot keeps every process, which is what lets a chat sleep without a restart.
+            ...(spec.runtime ? { runtime: spec.runtime } : {}),
+            // A snapshot keeps the entrypoint's descendants, so the entrypoint starts the box's
+            // long-lived processes and a chat sleeps without a restart.
+            command: ["python3", "-c", guestInitScript, GUEST_INIT_SOCKET],
             experimentalEnableSnapshot: true,
             encryptedPorts: [spec.port],
             timeoutMs: spec.timeoutMs,
@@ -346,6 +351,7 @@ export function makeModalRuntime(config: {
       imageId: modal.imageId,
       port: manifest.preparation.port,
       timeoutMs: retentionTimeoutMs(operation.request.retentionDeadline, BOX_LIFETIME_MS),
+      ...(modal.runtime ? { runtime: modal.runtime } : {}),
       sizing: modal.sizing,
       tags: {
         provision_request_id: id,
@@ -377,6 +383,20 @@ export function makeModalRuntime(config: {
     const installed = `${manifest.preparation.root}/${
       guest.sha256 === manifest.preparation.artifact.sha256 ? "artifact" : `runtime/${guest.sha256}`
     }`;
+    // Started before the entrypoint listens, the server would run outside it and stop for good
+    // at the box's first snapshot.
+    const listening = await boxes.exec(
+      sandboxId,
+      [
+        "sh",
+        "-c",
+        'for _ in $(seq 300); do [ -S "$1" ] && exit 0; sleep 0.1; done; exit 1',
+        "sh",
+        GUEST_INIT_SOCKET,
+      ],
+      { timeoutMs: 60_000 },
+    );
+    if (listening.exitCode !== 0) throw new Error("The Modal box's entrypoint is not listening");
     const stopPresence = startProvisionPhase(record);
     const staged = await boxes.exec(
       sandboxId,

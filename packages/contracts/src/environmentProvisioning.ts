@@ -81,7 +81,9 @@ export const DurableProvisionRequest = Schema.Union([
     inboundCidrs: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
     /** The image every fresh box of this chat starts from. */
     imageId: TrimmedNonEmptyString,
-    /** Reservations and limits. A vm box has `cpuLimit` CPUs, and its RAM is `memoryMiB`. */
+    /** Absent, gVisor. `vm` boxes can run Docker, but with snapshots their RAM is `memoryMiB`. */
+    runtime: Schema.optional(Schema.Literal("vm")),
+    /** Reservations and limits; a box bursts from one to the other. */
     sizing: Schema.Struct({
       cpu: Schema.Number.check(Schema.isGreaterThan(0)),
       cpuLimit: Schema.Number.check(Schema.isGreaterThan(0)),

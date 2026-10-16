@@ -1288,10 +1288,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
           ...(modal.environment ? { environment: modal.environment } : {}),
           ...(modal.inboundCidrs?.length ? { inboundCidrs: modal.inboundCidrs } : {}),
           imageId: modal.imageId,
+          ...(modal.runtime === "vm" ? { runtime: "vm" as const } : {}),
           sizing: {
-            cpu: modal.cpu ?? 2,
+            cpu: modal.cpu ?? 0.125,
             cpuLimit: modal.cpuLimit ?? 8,
-            memoryMiB: modal.memoryMiB ?? 32_768,
+            memoryMiB: modal.memoryMiB ?? 2048,
             memoryLimitMiB: modal.memoryLimitMiB ?? 32_768,
           },
         };

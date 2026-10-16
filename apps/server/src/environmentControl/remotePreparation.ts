@@ -1,6 +1,7 @@
 import { AuthAccessWriteScope, ProvisionReadiness } from "@t3tools/contracts";
 import { Schema } from "effect";
 import type { RecordProvisionPhase } from "./provisionTiming.ts";
+import { spawnDetachedScript } from "./guestInit.ts";
 
 /** Trusted host-local inputs. Package dependencies are installed on the target host when requested. */
 export interface RemotePreparationInput {
@@ -403,7 +404,7 @@ ${brokerTokenFunctions}
  * caches, below 1 GiB. `once` runs before the server starts: it frees room, or sets the reserve
  * aside when there is plenty, and stays quick so a wake does not wait on it. `watch` only gives
  * room back, checking every 30 seconds until it finds the server stopped, one watcher per box.
- * Arguments: root, home, mode, and for `watch` an open descriptor of the guard's lock.
+ * Arguments: root, home, mode, and for `watch` the path of the guard's lock.
  * T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB low-disk threshold.
  */
 export const diskGuardScript = String.raw`
@@ -522,8 +523,12 @@ if mode == 'once':
 if mode == 'sweep':
     free_dependencies()
     sys.exit(0)
-# The lock comes open from the preparer, so a watcher never creates a file in the root.
-with os.fdopen(int(sys.argv[4]), 'w') as lock:
+# The preparer made the lock, so a watcher never creates a file in the root.
+try:
+    lock = open(os.open(sys.argv[4], os.O_WRONLY), 'w')
+except FileNotFoundError:
+    sys.exit(0)
+with lock:
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -552,6 +557,7 @@ import time
 # Before the other imports, so the time a restored box spends paging them in is a phase.
 INTERPRETER_START = time.monotonic()
 import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request, uuid
+${spawnDetachedScript}
 
 STARTUP = []
 # Children preparation started without waiting on; stopped if it fails first.
@@ -1163,8 +1169,7 @@ def prepare(spec):
                 # start --no-browser keeps the same bind as serve, and the cwd
                 # argument is the path we report as projectDir.
                 config = {'root': str(root), 'build': {'sha256': runtime['sha256'], 'revision': runtime['revision']}, 'brokerIssue': broker_issue, 'argv': command + ['start', '--base-dir', str(t3home), '--no-browser', '--host', '0.0.0.0', '--port', str(spec['port']), str(project)], 'cwd': str(project), 'env': env}
-                with open(root / 'server.log', 'a') as log:
-                    subprocess.Popen([sys.executable, '-c', SUPERVISOR, json.dumps(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                spawn_detached([sys.executable, '-c', SUPERVISOR, json.dumps(config)], os.environ, str(root), root / 'server.log')
                 deadline = time.monotonic() + spec['readinessTimeoutSeconds']
                 while not probe():
                     if time.monotonic() >= deadline:
@@ -1203,10 +1208,8 @@ def prepare(spec):
         if not journal.get('prepared'):
             journal['prepared'] = True
             atomic(journal_path, json.dumps(journal))
-        guard_lock = os.open(root / 'disk-guard.lock', os.O_WRONLY | os.O_CREAT, 0o600)
-        with open(root / 'disk-guard.log', 'a') as log:
-            subprocess.Popen([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'watch', str(guard_lock)], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, pass_fds=(guard_lock,))
-        os.close(guard_lock)
+        os.close(os.open(root / 'disk-guard.lock', os.O_WRONLY | os.O_CREAT, 0o600))
+        spawn_detached([sys.executable, '-c', DISK_GUARD, str(root), str(home), 'watch', str(root / 'disk-guard.lock')], os.environ, str(root), root / 'disk-guard.log')
         if tooling is not None:
             since, started = tooling
             try:

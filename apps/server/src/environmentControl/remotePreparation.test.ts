@@ -1722,7 +1722,14 @@ describe("box disk guard", () => {
     try {
       return NodeChildProcess.spawnSync(
         "python3",
-        ["-c", diskGuardScript, root, NodePath.join(root, "home"), mode, "3"],
+        [
+          "-c",
+          diskGuardScript,
+          root,
+          NodePath.join(root, "home"),
+          mode,
+          NodePath.join(root, "disk-guard.lock"),
+        ],
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe", lock.fd],
