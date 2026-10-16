@@ -292,6 +292,20 @@ describe("provisionCloudEnvironment", () => {
       message: "Namespace Mac was created but could not be connected.",
     });
   });
+
+  it("names a Modal machine after Modal, not E2B, though both are Linux sandboxes", async () => {
+    const { ports } = harness({ pair: () => null });
+
+    expect(
+      await provisionCloudEnvironment(
+        { ...draft, input: { ...draft.input, provider: "modal" } },
+        ports,
+      ),
+    ).toEqual({
+      kind: "failed",
+      message: "Modal was created but could not be connected.",
+    });
+  });
 });
 
 describe("offeredProvisionProviders", () => {
@@ -305,12 +319,19 @@ describe("offeredProvisionProviders", () => {
         provisionProviders: ["e2b", "namespace"],
       }),
     ).toEqual(["e2b", "namespace"]);
+    expect(
+      offeredProvisionProviders({
+        environmentControl: true,
+        provisionProviders: ["e2b", "namespace", "modal"],
+      }),
+    ).toEqual(["e2b", "namespace", "modal"]);
     expect(offeredProvisionProviders({ environmentControl: true, provisionProviders: [] })).toEqual(
       [],
     );
   });
 
-  it("offers every kind on an older server that only sets the control flag", () => {
+  it("offers every kind it knew on an older server that only sets the control flag", () => {
+    // Modal postdates the advertisement, so a server that advertises nothing cannot run it.
     expect(offeredProvisionProviders({ environmentControl: true })).toEqual(["e2b", "namespace"]);
     expect(offeredProvisionProviders({})).toEqual([]);
     expect(offeredProvisionProviders(null)).toEqual([]);
@@ -445,6 +466,22 @@ describe("newChatRunTargets", () => {
     expect(targets({ localAgentRuns: false })).toEqual({
       environments: [laptop],
       cloudProviders: ["e2b", "namespace"],
+      redirect: { kind: "cloud", provider: "e2b" },
+    });
+  });
+
+  it("still starts a chat on E2B when the host also offers Modal", () => {
+    expect(
+      targets({
+        localAgentRuns: false,
+        managerConfig: {
+          environmentControl: true,
+          provisionProviders: ["e2b", "namespace", "modal"],
+        },
+      }),
+    ).toEqual({
+      environments: [laptop],
+      cloudProviders: ["e2b", "namespace", "modal"],
       redirect: { kind: "cloud", provider: "e2b" },
     });
   });

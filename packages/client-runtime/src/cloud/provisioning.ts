@@ -36,15 +36,18 @@ export type CloudProvisioningProgressPhase = Exclude<CloudProvisioningPhase, "re
 /** How long a freshly paired environment gets to publish its cloned project. */
 const CLOUD_PROJECT_HANDOFF_TIMEOUT_MS = 120_000;
 
+/** Every kind a server that predates `provisionProviders` could create. */
+const PRE_ADVERTISEMENT_PROVIDERS: ReadonlyArray<ProvisionProvider> = ["e2b", "namespace"];
+
 /**
  * The cloud environments a manager offers to create. Servers that predate
- * `provisionProviders` only set `environmentControl`, and offered every kind.
+ * `provisionProviders` only set `environmentControl`, and offered every kind they knew.
  */
 export function offeredProvisionProviders(
   config: Pick<ServerConfig, "environmentControl" | "provisionProviders"> | null | undefined,
 ): ReadonlyArray<ProvisionProvider> {
   if (config?.provisionProviders) return config.provisionProviders;
-  return config?.environmentControl === true ? ProvisionProvider.literals : [];
+  return config?.environmentControl === true ? PRE_ADVERTISEMENT_PROVIDERS : [];
 }
 
 /** Whether an environment runs agents on its own machine. Servers that predate the switch did. */
@@ -357,9 +360,27 @@ export function newChatRunTargets<
   return { environments, cloudProviders, redirect };
 }
 
+/**
+ * What each cloud kind is called. `label` is the kind a person picks or reads; `vendor` names
+ * who runs a machine on its row, where a Namespace box may be a Devbox rather than a Mac.
+ */
+const CLOUD_PROVIDER_NAMES: Record<
+  ProvisionProvider,
+  { readonly label: string; readonly vendor: string }
+> = {
+  e2b: { label: "E2B", vendor: "E2B" },
+  namespace: { label: "Namespace Mac", vendor: "Namespace" },
+  modal: { label: "Modal", vendor: "Modal" },
+};
+
 /** The name a cloud machine kind goes by wherever a person picks or reads it. */
-export function cloudEnvironmentLabel(provider: EnvironmentProvisionInput["provider"]): string {
-  return provider === "namespace" ? "Namespace Mac" : "E2B";
+export function cloudEnvironmentLabel(provider: ProvisionProvider): string {
+  return CLOUD_PROVIDER_NAMES[provider].label;
+}
+
+/** Who runs a provisioned machine, as its row in a machine list says it. */
+export function cloudProviderVendor(provider: ProvisionProvider): string {
+  return CLOUD_PROVIDER_NAMES[provider].vendor;
 }
 
 /** What a client tells the user after asking a host to move a cloud chat onto another account. */

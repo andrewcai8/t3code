@@ -1,7 +1,14 @@
-import type { VcsRef } from "@t3tools/contracts";
+import type { ProvisionProvider, VcsRef } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { cloudBaseRefs, shouldOfferEnvironmentChoice } from "./CloudRunOn";
+import {
+  type CloudRunOn,
+  cloudBaseRefs,
+  cloudRunOnItems,
+  cloudRunOnLabel,
+  selectCloudRunOn,
+  shouldOfferEnvironmentChoice,
+} from "./CloudRunOn";
 
 describe("shouldOfferEnvironmentChoice", () => {
   it("offers a choice between machines that already exist", () => {
@@ -91,5 +98,41 @@ describe("cloudBaseRefs", () => {
     expect(names({ canonicalKey: "github.com/them/repo", locator: locator("upstream") })).toEqual([
       ["release", false],
     ]);
+  });
+});
+
+describe("the Run-on picker's cloud entries", () => {
+  const runOn = (providers: ReadonlyArray<ProvisionProvider>) => {
+    const picked: ProvisionProvider[] = [];
+    const cloudRunOn: CloudRunOn = {
+      providers,
+      onSelect: (provider) => picked.push(provider),
+      creating: false,
+      pending: null,
+      base: undefined,
+    };
+    return { cloudRunOn, picked };
+  };
+
+  it("lists only the kinds the host offers, E2B first and Modal by its own name", () => {
+    expect(cloudRunOnItems(runOn(["e2b", "modal"]).cloudRunOn).map(({ label }) => label)).toEqual([
+      "E2B",
+      "Modal",
+    ]);
+    expect(
+      cloudRunOnItems(runOn(["e2b", "namespace"]).cloudRunOn).map(({ label }) => label),
+    ).toEqual(["E2B", "Namespace Mac"]);
+  });
+
+  it("takes a pick of Modal as Modal, and refuses it where the host does not offer Modal", () => {
+    const offered = runOn(["e2b", "modal"]);
+    const [, modal] = cloudRunOnItems(offered.cloudRunOn);
+    expect(selectCloudRunOn(offered.cloudRunOn, modal?.value)).toBe(true);
+    expect(offered.picked).toEqual(["modal"]);
+    expect(cloudRunOnLabel({ ...offered.cloudRunOn, pending: "modal" })).toBe("Modal");
+
+    const notOffered = runOn(["e2b"]);
+    expect(selectCloudRunOn(notOffered.cloudRunOn, modal?.value)).toBe(false);
+    expect(notOffered.picked).toEqual([]);
   });
 });

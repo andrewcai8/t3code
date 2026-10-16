@@ -13,6 +13,7 @@ import type {
 import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   resolveEnvironmentMachineKind,
+  ScheduledTaskTarget,
 } from "@t3tools/contracts";
 import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { MenuAction } from "@react-native-menu/menu";
@@ -821,8 +822,8 @@ function TaskForm({
                   }))),
             ]}
             onSelect={(id) => {
-              if (id === "local" || id === "e2b" || id === "namespace")
-                setDraft({ ...draft, target: id });
+              const target = ScheduledTaskTarget.literals.find((literal) => literal === id);
+              if (target) setDraft({ ...draft, target });
             }}
           />
         ) : null}

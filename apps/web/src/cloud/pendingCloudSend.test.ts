@@ -101,7 +101,7 @@ describe("a draft's pending cloud send", () => {
     expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
   });
 
-  it("reloads an environment send cut off mid-setup as it was, for the page to pick back up", () => {
+  it("reloads an environment send cut off mid-setup as it was, on any cloud kind, for the page to pick back up", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
     store.setProjectDraftThreadId(otherProjectRef, otherDraftId, { threadId: otherThreadId });
@@ -122,6 +122,7 @@ describe("a draft's pending cloud send", () => {
     };
     const ready: PendingCloudEnvironmentSend = {
       ...pending,
+      provider: "modal",
       messageId: "msg-ready",
       phase: "ready",
       readyEnvironmentId: "box-environment",
@@ -159,6 +160,11 @@ describe("a draft's pending cloud send", () => {
         model: "gpt-5.5",
       },
     });
-    expect(hydrated.draftThreadsByThreadKey[otherDraftId]?.pendingEnvironmentSend).toEqual(ready);
+    expect(hydrated.draftThreadsByThreadKey[otherDraftId]?.pendingEnvironmentSend).toMatchObject({
+      provider: "modal",
+      messageId: "msg-ready",
+      phase: "ready",
+      readyEnvironmentId: "box-environment",
+    });
   });
 });

@@ -131,6 +131,14 @@ describe("resolveNewThreadStart", () => {
     });
   });
 
+  it("starts a cloud machine from a host whose only cloud kind is Modal", () => {
+    expect(start(project, { ...cloudOnlyHost, provisionProviders: ["modal"] })).toEqual({
+      kind: "cloud-machine",
+      managerId: EnvironmentId.make("host"),
+      repository: "andrewcai8/t3code",
+    });
+  });
+
   it("opens a draft on a host that runs agents, or predates the switch", () => {
     expect(start(project, { ...cloudOnlyHost, localAgentRuns: true })).toEqual({
       kind: "draft",

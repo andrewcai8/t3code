@@ -4,7 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { presentProvisionedEnvironment } from "./provisionedEnvironmentRowModel";
 
-const machine = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
+const decodeMachine = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment);
+const machine = decodeMachine({
   requestId: "11111111-1111-4111-a111-111111111111",
   leaseId: "11111111-1111-4111-a111-111111111112",
   sandboxId: "sandbox-1",
@@ -38,6 +39,21 @@ describe("presentProvisionedEnvironment", () => {
       cleanupAction: null,
       restorable: false,
     });
+  });
+
+  it("names who runs the machine, whatever cloud kind it is", () => {
+    const detail = (provider: string) =>
+      presentProvisionedEnvironment({
+        environment: decodeMachine({ ...machine, provider }),
+        threadTitle: null,
+        action: { kind: "idle" },
+        now,
+      }).detail;
+
+    expect([detail("modal"), detail("namespace")]).toEqual([
+      "Modal · proof/repo",
+      "Namespace · proof/repo",
+    ]);
   });
 
   it("falls back to the host's label for a chat that is not on this device", () => {

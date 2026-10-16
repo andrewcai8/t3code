@@ -1,4 +1,10 @@
-import type { EnvironmentId, RepositoryIdentity, VcsRef } from "@t3tools/contracts";
+import { cloudEnvironmentLabel } from "@t3tools/client-runtime/cloud";
+import type {
+  EnvironmentId,
+  ProvisionProvider,
+  RepositoryIdentity,
+  VcsRef,
+} from "@t3tools/contracts";
 import { ChevronDownIcon, CloudIcon, GitBranchIcon } from "lucide-react";
 import { type Ref, useDeferredValue, useImperativeHandle, useMemo, useState } from "react";
 
@@ -15,8 +21,6 @@ import { MenuRadioItem } from "./ui/menu";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import { SelectItem } from "./ui/select";
 
-export type CloudRunOnProvider = "e2b" | "namespace";
-
 /** The branch a pending cloud machine starts from. Nothing is checked out here. */
 export interface CloudBaseBranch {
   /** null is the repository's default branch. */
@@ -27,22 +31,27 @@ export interface CloudBaseBranch {
 
 /** The Run-on picker's cloud entries; absent where a draft cannot start a cloud machine. */
 export interface CloudRunOn {
-  readonly providers: ReadonlyArray<CloudRunOnProvider>;
-  readonly onSelect: (provider: CloudRunOnProvider) => void;
+  readonly providers: ReadonlyArray<ProvisionProvider>;
+  readonly onSelect: (provider: ProvisionProvider) => void;
   /** A cloud machine is being set up for the draft. */
   readonly creating: boolean;
   /** The cloud kind the draft starts on its first send. */
-  readonly pending: CloudRunOnProvider | null;
+  readonly pending: ProvisionProvider | null;
   /** The branch the cloud machine starts from; see `BranchToolbarBranchSelector`. */
   readonly base: CloudBaseBranch | undefined;
 }
 
 // A sentinel rather than an environment id: the machine this names does not exist yet, which
 // is the whole point of choosing it.
-const OPTIONS = {
-  e2b: { value: "create-cloud-environment", label: "E2B" },
-  namespace: { value: "create-namespace-environment", label: "Namespace Mac" },
-} satisfies Record<CloudRunOnProvider, { value: string; label: string }>;
+const VALUES = {
+  e2b: "create-cloud-environment",
+  namespace: "create-namespace-environment",
+  modal: "create-modal-environment",
+} satisfies Record<ProvisionProvider, string>;
+
+function option(provider: ProvisionProvider): { value: string; label: string } {
+  return { value: VALUES[provider], label: cloudEnvironmentLabel(provider) };
+}
 
 /**
  * Whether the composer should offer a choice of machine.
@@ -63,16 +72,16 @@ export function shouldOfferEnvironmentChoice(input: {
 
 /** The Run-on value of the cloud kind the draft starts, if it starts one. */
 export function cloudRunOnValue(cloudRunOn: CloudRunOn | undefined): string | null {
-  return cloudRunOn?.pending ? OPTIONS[cloudRunOn.pending].value : null;
+  return cloudRunOn?.pending ? VALUES[cloudRunOn.pending] : null;
 }
 
 export function cloudRunOnLabel(cloudRunOn: CloudRunOn | undefined): string | null {
-  return cloudRunOn?.pending ? OPTIONS[cloudRunOn.pending].label : null;
+  return cloudRunOn?.pending ? cloudEnvironmentLabel(cloudRunOn.pending) : null;
 }
 
 /** Takes a Run-on pick that names a cloud kind; false for any other value. */
 export function selectCloudRunOn(cloudRunOn: CloudRunOn | undefined, value: unknown): boolean {
-  const provider = cloudRunOn?.providers.find((candidate) => OPTIONS[candidate].value === value);
+  const provider = cloudRunOn?.providers.find((candidate) => VALUES[candidate] === value);
   if (!cloudRunOn || !provider) return false;
   cloudRunOn.onSelect(provider);
   return true;
@@ -81,17 +90,17 @@ export function selectCloudRunOn(cloudRunOn: CloudRunOn | undefined, value: unkn
 export function cloudRunOnItems(
   cloudRunOn: CloudRunOn | undefined,
 ): Array<{ value: string; label: string }> {
-  return cloudRunOn?.providers.map((provider) => OPTIONS[provider]) ?? [];
+  return cloudRunOn?.providers.map(option) ?? [];
 }
 
-function entryLabel(cloudRunOn: CloudRunOn, provider: CloudRunOnProvider): string {
-  const { label } = OPTIONS[provider];
+function entryLabel(cloudRunOn: CloudRunOn, provider: ProvisionProvider): string {
+  const label = cloudEnvironmentLabel(provider);
   return cloudRunOn.creating && cloudRunOn.pending === provider ? `Preparing ${label}…` : label;
 }
 
 export function CloudRunOnSelectItems({ cloudRunOn }: { cloudRunOn: CloudRunOn | undefined }) {
   return cloudRunOn?.providers.map((provider) => (
-    <SelectItem key={provider} value={OPTIONS[provider].value} disabled={cloudRunOn.creating}>
+    <SelectItem key={provider} value={VALUES[provider]} disabled={cloudRunOn.creating}>
       <span className="inline-flex items-center gap-1.5">
         <CloudIcon className="size-3" aria-hidden="true" />
         {entryLabel(cloudRunOn, provider)}
@@ -110,7 +119,7 @@ export function CloudRunOnMenuItems({
   return cloudRunOn?.providers.map((provider) => (
     <MenuRadioItem
       key={provider}
-      value={OPTIONS[provider].value}
+      value={VALUES[provider]}
       disabled={envLocked || cloudRunOn.creating}
     >
       <span className="flex min-w-0 items-center gap-1.5">

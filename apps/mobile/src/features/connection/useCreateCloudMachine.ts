@@ -1,4 +1,5 @@
 import {
+  cloudEnvironmentLabel,
   provisionCloudEnvironment,
   type CloudProvisioningProgressPhase,
 } from "@t3tools/client-runtime/cloud";
@@ -7,7 +8,7 @@ import {
   isOffDeviceReachablePairingUrl,
   provisionedGatewayPairingUrl,
 } from "@t3tools/client-runtime/connection";
-import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
+import type { EnvironmentId, ProvisionProvider, ScopedProjectRef } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useRef, useState } from "react";
 
@@ -22,11 +23,7 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { hydrateProvisionStorage } from "../../state/provision-storage";
 import { provisionRequests, provisionedSandboxLeases } from "../../state/provision-stores";
-import {
-  CLOUD_MACHINE_PROVIDER_LABELS,
-  type CloudMachineAccountOption,
-  type CloudMachineProvider,
-} from "./cloudMachineOptions";
+import type { CloudMachineAccountOption } from "./cloudMachineOptions";
 
 export type CreateCloudMachineState =
   | { readonly kind: "idle" }
@@ -38,9 +35,9 @@ const IDLE: CreateCloudMachineState = { kind: "idle" };
 /** What each phase of the shared flow is called on a screen with no thread to show progress in. */
 export function createCloudMachineProgressText(
   phase: CloudProvisioningProgressPhase,
-  provider: CloudMachineProvider,
+  provider: ProvisionProvider,
 ): string {
-  const label = CLOUD_MACHINE_PROVIDER_LABELS[provider];
+  const label = cloudEnvironmentLabel(provider);
   switch (phase) {
     case "creating":
       return `Starting your ${label} machine…`;
@@ -79,7 +76,7 @@ export function useCreateCloudMachine(input: {
   const create = useCallback(
     async (selection: {
       readonly repository: string;
-      readonly provider: CloudMachineProvider;
+      readonly provider: ProvisionProvider;
       readonly account: CloudMachineAccountOption;
     }) => {
       if (inFlight.current) return;
