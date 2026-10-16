@@ -1192,7 +1192,9 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     );
     if (paused.kind !== "paused") return yield* fail("resume.pause", paused.kind, paused);
     yield* record("resume.pause", true, seconds(pauseAt, yield* Clock.currentTimeMillis));
-    const listed = yield* manager["environmentControl.listProvisioned"]({}).pipe(
+    const listed = yield* manager["environmentControl.listProvisioned"]({
+      providers: ProvisionProvider.literals,
+    }).pipe(
       Effect.map((list) => list.find((entry) => entry.leaseId === box.leaseId)),
       Effect.repeat({
         until: (entry) => entry?.lifecycle === "paused",
@@ -1306,7 +1308,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     if (!box) return;
     const second = yield* disposeOnce;
     yield* record("delete.disposeAgain", second.kind === "disposed", second.kind, second);
-    const entry = yield* bounded(manager["environmentControl.listProvisioned"]({}), "list").pipe(
+    const entry = yield* bounded(
+      manager["environmentControl.listProvisioned"]({ providers: ProvisionProvider.literals }),
+      "list",
+    ).pipe(
       Effect.map((list) => list.find((candidate) => candidate.leaseId === box.leaseId)),
       Effect.catch((cause) => Effect.succeed({ lifecycle: `unknown: ${describe(cause)}` })),
     );

@@ -86,6 +86,8 @@ const EnvironmentControlListProvisionedRpc = Rpc.make(
       chats: Schema.optional(
         Schema.Array(Schema.Struct({ environmentId: EnvironmentId, sequence: NonNegativeInt })),
       ),
+      /** The providers this client can read; see `readableProvisionProviders`. */
+      providers: Schema.optional(Schema.Array(Schema.String)),
     }),
     success: ProvisionedEnvironmentList,
     error: Schema.Union([EnvironmentAuthorizationError, EnvironmentControlError]),

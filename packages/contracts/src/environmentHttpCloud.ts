@@ -62,7 +62,10 @@ export function makeEnvironmentCloudHttpApis<
     .add(
       HttpApiEndpoint.post("listProvisioned", "/api/environment-control/list-provisioned", {
         headers: shared.bearerHeaders,
-        payload: Schema.Struct({}),
+        payload: Schema.Struct({
+          /** The providers this client can read; see `readableProvisionProviders`. */
+          providers: Schema.optional(Schema.Array(Schema.String)),
+        }),
         success: ProvisionedEnvironmentList,
         error: scopedErrors,
       }).middleware(shared.auth),

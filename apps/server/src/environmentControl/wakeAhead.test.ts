@@ -172,24 +172,26 @@ it.effect(
 
       expect(yield* wakeAhead.presence(false)).toEqual({
         machines: [
-          { environmentId: "first", state: "asleep", machine: "sandbox" },
-          { environmentId: "second", state: "asleep", machine: "sandbox" },
-          { environmentId: "settled", state: "asleep", machine: "sandbox" },
+          { environmentId: "first", state: "asleep", machine: "sandbox", provider: "e2b" },
+          { environmentId: "second", state: "asleep", machine: "sandbox", provider: "e2b" },
+          { environmentId: "settled", state: "asleep", machine: "sandbox", provider: "e2b" },
         ],
       });
       expect(resumed).toEqual([]);
       expect(yield* wakeAhead.presence(true)).toEqual({
         machines: [
-          { environmentId: "second", state: "waking", machine: "sandbox" },
-          { environmentId: "first", state: "waking", machine: "sandbox" },
-          { environmentId: "settled", state: "asleep", machine: "sandbox" },
+          { environmentId: "second", state: "waking", machine: "sandbox", provider: "e2b" },
+          { environmentId: "first", state: "waking", machine: "sandbox", provider: "e2b" },
+          { environmentId: "settled", state: "asleep", machine: "sandbox", provider: "e2b" },
         ],
       });
       expect(resumed).toEqual(["second", "first"]);
       yield* Deferred.succeed(release, undefined);
       yield* Effect.yieldNow;
       expect(yield* wakeAhead.presence(false)).toEqual({
-        machines: [{ environmentId: "settled", state: "asleep", machine: "sandbox" }],
+        machines: [
+          { environmentId: "settled", state: "asleep", machine: "sandbox", provider: "e2b" },
+        ],
       });
     }).pipe(Effect.scoped),
 );
@@ -276,6 +278,7 @@ it.effect(
             environmentId: "crowded",
             state: "asleep",
             machine: "sandbox",
+            provider: "e2b",
             providerFailure: { cause: "provider-unavailable", at: "2026-10-01T12:00:00.000Z" },
           },
         ],
@@ -286,7 +289,9 @@ it.effect(
         message: "The workspace could not be reconnected. Retry shortly.",
       });
       expect(yield* wakeAhead.presence(false)).toEqual({
-        machines: [{ environmentId: "crowded", state: "asleep", machine: "sandbox" }],
+        machines: [
+          { environmentId: "crowded", state: "asleep", machine: "sandbox", provider: "e2b" },
+        ],
       });
     }).pipe(Effect.scoped),
 );
@@ -318,16 +323,17 @@ it.effect("stops saying a provider is failing once the host would not retry the 
           environmentId: "crowded",
           state: "asleep",
           machine: "sandbox",
+          provider: "e2b",
           providerFailure: { cause: "provider-unavailable", at: "2026-10-01T12:00:00.000Z" },
         },
-        { environmentId: "settled", state: "asleep", machine: "sandbox" },
+        { environmentId: "settled", state: "asleep", machine: "sandbox", provider: "e2b" },
       ],
     });
     yield* TestClock.adjust("11 minutes");
     expect(yield* wakeAhead.presence(false)).toEqual({
       machines: [
-        { environmentId: "crowded", state: "asleep", machine: "sandbox" },
-        { environmentId: "settled", state: "asleep", machine: "sandbox" },
+        { environmentId: "crowded", state: "asleep", machine: "sandbox", provider: "e2b" },
+        { environmentId: "settled", state: "asleep", machine: "sandbox", provider: "e2b" },
       ],
     });
   }).pipe(Effect.scoped),

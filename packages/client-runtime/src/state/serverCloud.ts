@@ -1,4 +1,4 @@
-import { EnvironmentId, WS_METHODS } from "@t3tools/contracts";
+import { EnvironmentId, ProvisionProvider, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -29,9 +29,10 @@ export function createServerCloudAtoms<R, E>(
     label: "environment-data:cloud:provisioned",
     staleTimeMs: 5_000,
     execute: (input: EnvironmentRpcInput<typeof WS_METHODS.environmentControlListProvisioned>) =>
-      request(WS_METHODS.environmentControlListProvisioned, input).pipe(
-        Effect.timeout("20 seconds"),
-      ),
+      request(WS_METHODS.environmentControlListProvisioned, {
+        ...input,
+        providers: ProvisionProvider.literals,
+      }).pipe(Effect.timeout("20 seconds")),
   });
   // Asks about every saved environment, by id and by the address it is dialed at, so a host also
   // lists the saved ones that were its boxes and are gone, even one it disposed before it kept the
@@ -50,6 +51,7 @@ export function createServerCloudAtoms<R, E>(
         const entries = yield* SubscriptionRef.get(registry.entries);
         const held = yield* SubscriptionRef.get(registry.hostChats);
         const rows = yield* request(WS_METHODS.environmentControlListProvisioned, {
+          providers: ProvisionProvider.literals,
           environmentIds: [...entries.keys()],
           addresses: [...entries].flatMap(([environmentId, { profile }]) =>
             Option.isSome(profile) && profile.value._tag === "BearerConnectionProfile"

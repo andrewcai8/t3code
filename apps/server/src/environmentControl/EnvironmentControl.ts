@@ -9,6 +9,7 @@ import {
   EnvironmentControlError,
   ProviderInstanceId,
   ProvisionRequestId,
+  readableProvisionProviders,
   ThreadId,
   type ComputeState,
   type EnvironmentId,
@@ -1310,12 +1311,13 @@ export class EnvironmentControl extends Context.Service<
      * Also reports removed boxes that can still be restored, those of `knownEnvironmentIds` that
      * were this host's boxes and are gone, and those of `addresses` that dial such a box. With
      * `chats`, each box carries the chat the host last read from it, when newer than the one the
-     * client holds.
+     * client holds. Only boxes of the `providers` the client can read are listed.
      */
     readonly listProvisioned: (
       knownEnvironmentIds?: ReadonlyArray<EnvironmentId>,
       addresses?: ReadonlyArray<SavedEnvironmentAddress>,
       chats?: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly sequence: number }>,
+      providers?: ReadonlyArray<string>,
     ) => Effect.Effect<ReadonlyArray<DiscoveredProvisionedEnvironment>, EnvironmentControlError>;
     readonly start: (
       id: EnvironmentId,
@@ -3131,7 +3133,7 @@ export const layer = Layer.effect(
               scannedSkills = { service, mtimes, skills: readProvisionedSkills(bundles) };
             return scannedSkills.skills;
           }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
-      listProvisioned: (knownEnvironmentIds, addresses, chats) =>
+      listProvisioned: (knownEnvironmentIds, addresses, chats, providers) =>
         cloudMachinesAfterDays.pipe(
           Effect.orElseSucceed(() => null),
           Effect.flatMap((afterDays) =>
@@ -3142,6 +3144,7 @@ export const layer = Layer.effect(
               chats,
               afterDays,
               true,
+              readableProvisionProviders(providers),
             ),
           ),
           // A chat started since the last sweep has no card yet, so it is read in the background

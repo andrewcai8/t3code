@@ -76,6 +76,9 @@ export function boxMachine(request: DurableProvisionRequest): CloudMachineKind {
  *
  * A removed box lists as `disposed` with the time it stays restorable, when it is one of `known`,
  * and with `removed` even when it is not.
+ *
+ * With `readable`, only boxes of those providers are listed, for a client that cannot decode the
+ * others.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
   function* (
@@ -85,6 +88,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
     chats?: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly sequence: number }>,
     afterDays: number | null = null,
     removed = false,
+    readable?: ReadonlyArray<string>,
   ) {
     const { byLease, byOrigin } = savedBoxAddresses(addresses);
     const heldChats =
@@ -182,6 +186,7 @@ export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
       }
       if (
         box === null ||
+        (readable !== undefined && !readable.includes(request.provider)) ||
         lease.leaseId !== request.requestId ||
         lease.provider !== request.provider ||
         lease.providerInstanceId !== request.providerInstanceId ||

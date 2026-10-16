@@ -7,6 +7,7 @@ import {
   EnvironmentId,
   type ProvisionOperation,
   ProvisionRequestId,
+  readableProvisionProviders,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -776,3 +777,85 @@ it("labels a box by its repository's name and where it runs, and names its machi
     ["sandbox", "mac", "devbox"],
   );
 });
+
+it.effect("lists a Modal box only to a client that names Modal among the providers it reads", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const database = path.join(yield* fs.makeTempDirectoryScoped(), "manager.sqlite");
+    yield* Effect.gen(function* () {
+      const store = yield* ProvisionOperationStore;
+      const sql = yield* SqlClient.SqlClient;
+      const registry = createProvisionedLeaseRegistry(sql);
+      const common = {
+        providerInstanceId: "account",
+        sourceRevision: null,
+        preparationHash: "a".repeat(64),
+      };
+      const boxes = [
+        {
+          request: {
+            ...common,
+            requestId: id(1),
+            provider: "e2b",
+            strategy: "direct",
+            templateId: "t",
+          },
+          resource: { provider: "e2b", sandboxId: "sandbox-1" },
+          sandboxId: "sandbox-1",
+        },
+        {
+          request: {
+            ...common,
+            requestId: id(2),
+            provider: "modal",
+            app: "t3-cloud-chats",
+            imageId: "im-1",
+            sizing: { cpu: 2, cpuLimit: 8, memoryMiB: 32_768, memoryLimitMiB: 32_768 },
+          },
+          resource: { provider: "modal", chatId: id(2) },
+          sandboxId: id(2),
+        },
+      ] as const;
+      for (const [index, { request, resource, sandboxId }] of boxes.entries()) {
+        const operation = yield* store.accept(decodeRequest(request));
+        yield* store.advance(operation, {
+          kind: "ready",
+          allocation: { kind: "direct", resource },
+          readiness: {
+            environmentId: EnvironmentId.make(`environment-${index + 1}`),
+            projectDir: "/private/project",
+            sourceRevision: null,
+            t3Revision: "b".repeat(40),
+            artifactSha256: "c".repeat(64),
+            preparationHash: "a".repeat(64),
+          },
+        });
+        yield* Effect.promise(() =>
+          registry.register({
+            leaseId: request.requestId,
+            sandboxId,
+            provider: resource.provider,
+            providerInstanceId: "account",
+          }),
+        );
+      }
+      const providersListed = (readable?: ReadonlyArray<string>) =>
+        listProvisionedEnvironments(sql, [], [], undefined, null, false, readable).pipe(
+          Effect.map((listed) => listed.map((box) => box.provider).toSorted()),
+        );
+      // A client that names no providers predates Modal.
+      expect(yield* providersListed(readableProvisionProviders(undefined))).toEqual(["e2b"]);
+      expect(
+        yield* providersListed(readableProvisionProviders(["e2b", "namespace", "modal"])),
+      ).toEqual(["e2b", "modal"]);
+      expect(yield* providersListed()).toEqual(["e2b", "modal"]);
+    }).pipe(
+      Effect.provide(
+        ProvisionOperationStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistence.layerFromPath(database)),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);

@@ -51,6 +51,13 @@ export class EnvironmentControlError extends Schema.TaggedError<EnvironmentContr
 /** Where a provisioned environment runs: an E2B or Modal Linux sandbox, or a Namespace Mac. */
 export const ProvisionProvider = Schema.Literals(["e2b", "namespace", "modal"]);
 export type ProvisionProvider = typeof ProvisionProvider.Type;
+/**
+ * The providers a client lists boxes of. A client names those it can decode; one that names none
+ * predates Modal and decodes a list strictly, so a single Modal box would fail its whole list.
+ */
+export const readableProvisionProviders = (
+  named: ReadonlyArray<string> | undefined,
+): ReadonlyArray<string> => named ?? ["e2b", "namespace"];
 
 export const ProvisionRequestId = Schema.String.check(
   Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
@@ -509,6 +516,10 @@ export const EnvironmentControlPresenceResult = Schema.Struct({
       environmentId: EnvironmentId,
       state: CloudMachineState,
       machine: CloudMachineKind,
+      /** Who runs the machine, which `machine` alone cannot say for a sandbox. Absent from older hosts. */
+      provider: Schema.optional(ProvisionProvider).pipe(
+        Schema.catchDecoding(() => Effect.succeedNone),
+      ),
       /**
        * Why and when its provider last could not start it, while the host still retries it.
        * Absent from hosts that predate it.
