@@ -1,4 +1,6 @@
 // @effect-diagnostics globalDate:off - Modal deadlines and snapshot ages are wall-clock times at the SDK boundary.
+// @effect-diagnostics nodeBuiltinImport:off - the Promise box API backs off between Modal SDK retries outside Effect.
+import * as NodeTimersPromises from "node:timers/promises";
 import {
   InternalFailure,
   ModalClient,
@@ -101,7 +103,7 @@ async function transient<A>(call: () => Promise<A>, attempts = 4): Promise<A> {
     } catch (error) {
       const retryable = error instanceof ResourceExhaustedError || error instanceof InternalFailure;
       if (!retryable || attempt >= attempts) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 2_000 * 2 ** (attempt - 1)));
+      await NodeTimersPromises.setTimeout(2_000 * 2 ** (attempt - 1));
     }
   }
 }
