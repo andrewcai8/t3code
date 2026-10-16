@@ -3,8 +3,8 @@ import type { EnvironmentId, ProvisionProvider } from "@t3tools/contracts";
 import { type ReactNode, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
 import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
 import {
