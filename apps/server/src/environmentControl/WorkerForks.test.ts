@@ -25,20 +25,26 @@ const actor = { environmentId: EnvironmentId.make("box-1"), threadId: owner };
 
 /** Box 1 as the host records it: an E2B machine owned by chat-1. */
 const box = (
-  overrides: { readonly provider?: "e2b" | "namespace"; readonly leaseId?: string } = {},
+  overrides: {
+    readonly provider?: "e2b" | "namespace";
+    readonly leaseId?: string;
+    readonly repository?: string;
+  } = {},
 ) =>
   ({
     leaseId: overrides.leaseId ?? "lease-1",
     environmentId: "box-1",
     sandboxId: "sandbox-1",
     provider: overrides.provider ?? "e2b",
+    repository: overrides.repository ?? null,
     projectDir: "/home/user/work/app",
     threadId: owner,
   }) as unknown as DiscoveredProvisionedEnvironment;
 
 /**
  * A provider where copies live until killed. A job's command picks its outcome: `exit N` exits
- * N, `hang` times out, `lose` loses its copy, `wait` holds until `gate` opens. `holdStarts` makes
+ * N, `hang` times out, `lose` loses its copy, `wait` holds until `gate` opens. A chat of `acme/api`
+ * starts its services with `redis-server --daemonize yes`, which its jobs' output names. `holdStarts` makes
  * each copy's start wait on its gate. Output paths
  * starting with `big` are over any copy-back cap; `gone` does not exist.
  */
@@ -65,7 +71,11 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
     let loseStartAnswer = false;
     let busyStarts = 0;
     const machines = ForkMachines.ForkMachines.of({
-      settings: Effect.succeed(settings),
+      settings: (repository) =>
+        Effect.succeed({
+          limits: settings,
+          services: repository === "acme/api" ? ["redis-server --daemonize yes"] : [],
+        }),
       capture: (sandboxId, tag) =>
         Effect.gen(function* () {
           capturing += 1;
@@ -119,7 +129,10 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
           return {
             exitCode: hang ? -9 : Number(job.command.replace("exit ", "")) || 0,
             timedOut: hang,
-            stdoutTail: `ran in ${job.cwd} for at most ${job.timeoutMs}ms`,
+            stdoutTail:
+              job.services.commands.length === 0
+                ? `ran in ${job.cwd} for at most ${job.timeoutMs}ms`
+                : `ran in ${job.cwd} after ${job.services.commands.join(" && ")} in ${job.services.cwd}`,
             stderrTail: "",
           };
         }),
@@ -310,6 +323,26 @@ it.effect("runs each job in its own copy and removes every copy once, however it
       expect(fake.live.size).toBe(0);
       expect(fake.captures).toEqual([`sandbox-1@${batch.batchId}`]);
       expect(fake.stored.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("starts the chat's repository services in its checkout before every job", () =>
+  withForks({}, () =>
+    Effect.gen(function* () {
+      const batch = yield* run(
+        { jobs: [{ command: "exit 0", cwd: "/tmp" }] },
+        box({ repository: "acme/api" }),
+      );
+      expect(batch.jobs[0]).toEqual({
+        index: 0,
+        state: "exited",
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 0,
+        stdoutTail: "ran in /tmp after redis-server --daemonize yes in /home/user/work/app",
+        stderrTail: "",
+      });
     }),
   ),
 );

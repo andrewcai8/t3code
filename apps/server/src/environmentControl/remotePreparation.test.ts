@@ -21,6 +21,7 @@ import {
   type RemotePreparationPort,
 } from "./remotePreparation.ts";
 import type { ProvisionPhase } from "./provisionTiming.ts";
+import { commandLine } from "./config.ts";
 import { warmSealHomePaths } from "./E2bProvisionRuntime.ts";
 
 const roots: string[] = [];
@@ -855,6 +856,37 @@ describe("remote preparation subprocess", () => {
     expect(await NodeFSP.readFile(NodePath.join(input.root, "started"), "utf8")).toBe(
       "start\nstart\n",
     );
+  });
+
+  it("starts a background setup command without waiting for it, and again once the server is gone", async () => {
+    const input = await fixture();
+    // The service answers one request through these, so a preparation that waited on it would hang.
+    const gate = NodePath.join(NodePath.dirname(input.root), "gate");
+    const reply = NodePath.join(NodePath.dirname(input.root), "reply");
+    NodeChildProcess.execFileSync("mkfifo", [gate, reply]);
+    const service = async (request: string) =>
+      (await Promise.all([NodeFSP.writeFile(gate, request), NodeFSP.readFile(reply, "utf8")]))[1];
+    const prepared: RemotePreparationInput = {
+      ...input,
+      setup: {
+        commands: [commandLine({ command: `cat ${gate} > ${reply}`, background: true })],
+        environment: [],
+      },
+    };
+    const first = await prepareRemoteHost(localPort, prepared);
+    pids.add(first.serverPid);
+    const before = await service("first boot");
+    // A box booted fresh from its disk has no server, so its resume prepares it again.
+    await fetch(`http://127.0.0.1:${input.port}/stop`);
+    await localPort.executePython({
+      script:
+        "import fcntl,sys\nwith open(sys.stdin.read(), 'a') as lock: fcntl.flock(lock, fcntl.LOCK_EX)",
+      stdin: NodePath.join(input.root, "server.lock"),
+    });
+    pids.delete(first.serverPid);
+    const again = await prepareRemoteHost(localPort, prepared);
+    pids.add(again.serverPid);
+    expect([before, await service("fresh boot")]).toEqual(["first boot", "fresh boot"]);
   });
 
   it("tells a resume whether the box's server still answers, without starting one", async () => {

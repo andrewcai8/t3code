@@ -23,7 +23,7 @@ import {
   isBackground,
   ProvisionRuntimeArtifact,
   type EnvironmentControlConfig,
-  type NamespacePrepareCommand,
+  type PrepareCommand,
 } from "./config.ts";
 import { repositoryUrl } from "./driver.ts";
 import { credentialDestinations } from "./credentialDestinations.ts";
@@ -193,7 +193,7 @@ export function currentMacTemplate(
         (entry) => canonicalRepository(entry.repository) === canonicalRepository(repository),
       )?.namespace
     : undefined;
-  const commands: ReadonlyArray<NamespacePrepareCommand> =
+  const commands: ReadonlyArray<PrepareCommand> =
     setup?.prepareCommands ?? provisioning.namespace.prepareCommands ?? [];
   return {
     key: macTemplateKey(
@@ -214,7 +214,7 @@ function configuredPrepareCommands(
   provisioning: ProvisioningSettings,
   repository: string | undefined,
   provider: EnvironmentProvisionInput["provider"],
-): ReadonlyArray<NamespacePrepareCommand> {
+): ReadonlyArray<PrepareCommand> {
   const entry = repository
     ? provisioning.repositories?.find(
         (candidate) =>
@@ -225,6 +225,21 @@ function configuredPrepareCommands(
     entry?.[provider]?.prepareCommands ??
     (provider === "namespace" ? provisioning.namespace?.prepareCommands : undefined) ??
     []
+  );
+}
+
+/**
+ * The commands that start `repository`'s services on a fresh boot of an E2B chat's disk, as
+ * written: its background prepare commands. A copy of the chat's machine boots with no process
+ * of the chat's running, and its checkout is already prepared, so it runs only these.
+ */
+export function serviceCommands(
+  config: EnvironmentControlConfig,
+  repository: string | null,
+): ReadonlyArray<string> {
+  if (!config.provisioning || repository === null) return [];
+  return configuredPrepareCommands(config.provisioning, repository, "e2b").flatMap((entry) =>
+    typeof entry !== "string" && entry.background === true ? [entry.command] : [],
   );
 }
 
