@@ -1470,6 +1470,7 @@ export const layer = Layer.effect(
         }>
       | undefined;
     let modal: ReturnType<typeof makeModalRuntime> | undefined;
+    const modalTurns = new Map<string, Promise<unknown>>();
     let scannedSkills:
       | {
           readonly service: ManagerService;
@@ -1820,6 +1821,7 @@ export const layer = Layer.effect(
         boxes: makeModalBoxes({ tokenId, tokenSecret }),
         stateDir,
         proxies: namespaceProxies,
+        turns: modalTurns,
         log: (message, fields) =>
           void runLogged(Effect.logInfo(message).pipe(Effect.annotateLogs(fields))),
       });
@@ -2558,9 +2560,9 @@ export const layer = Layer.effect(
             },
           );
           // A chat that had to start cold asks for a base, on the account it
-          // routed to. One that started warm keeps its base in use.
+          // routed to. One that started warm keeps its base in use. Modal keeps no bases.
           const { request } = manifest;
-          if (manifest.warmKey && manifest.input.repository) {
+          if (request.provider !== "modal" && manifest.warmKey && manifest.input.repository) {
             const bases = request.provider === "e2b" ? warmBases : spares;
             if (request.provider === "e2b" ? request.strategy === "direct" : request.devboxName)
               bases.used(manifest.input.repository);

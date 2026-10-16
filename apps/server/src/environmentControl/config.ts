@@ -285,9 +285,10 @@ const Provisioning = Schema.Struct({
   ),
   /**
    * Modal box defaults. Present, with Modal credentials, only when on-demand Modal provisioning
-   * is enabled. A box reserves `cpu` and `memoryMiB` and may use up to the limits, but a vm
-   * sandbox's RAM is its `memoryMiB` reservation, which is why that defaults to the full 32 GiB;
-   * `nproc` reports `cpu`. A chat keeps the values it was frozen with.
+   * is enabled. A vm sandbox has `cpuLimit` CPUs and runs them all on a `cpu` reservation, but
+   * its RAM is its `memoryMiB` reservation and never bursts toward `memoryLimitMiB`, which is why
+   * memory reserves the full 32 GiB. Modal bills the larger of the reservation and the use. A
+   * chat keeps the values it was frozen with.
    */
   modal: Schema.optional(
     Schema.Struct({
@@ -295,7 +296,14 @@ const Provisioning = Schema.Struct({
       imageId: TrimmedNonEmptyString,
       /** Default `t3-cloud-chats`. */
       app: Schema.optional(TrimmedNonEmptyString),
-      /** Default 8. */
+      /** The Modal environment the app lives in, apart from other apps. Default the workspace's. */
+      environment: Schema.optional(TrimmedNonEmptyString),
+      /**
+       * CIDRs allowed to reach a box's tunnel: the manager's egress. Absent, any address can,
+       * and the box's bearer token is the only gate.
+       */
+      inboundCidrs: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+      /** Default 2. */
       cpu: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
       /** Default 8. */
       cpuLimit: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),

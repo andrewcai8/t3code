@@ -13,6 +13,7 @@ const { ModalClient } = require("modal");
 const { values } = NodeUtil.parseArgs({
   options: {
     app: { type: "string", default: "t3-cloud-chats" },
+    environment: { type: "string" },
     config: {
       type: "string",
       default: NodePath.join(NodeOS.homedir(), ".t3/environment-control.json"),
@@ -23,10 +24,10 @@ const { values } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(
-    "Usage: node scripts/cloud/build-modal-image.mjs [--app NAME] [--config FILE] [--print-commands]",
+    "Usage: node scripts/cloud/build-modal-image.mjs [--app NAME] [--environment ENV] [--config FILE] [--print-commands]",
   );
   console.log(
-    "Builds the Linux cloud box image the E2B template is built from, in the Modal app NAME (default t3-cloud-chats), and prints its image id for provisioning.modal.imageId. Credentials come from MODAL_TOKEN_ID/MODAL_TOKEN_SECRET, else modalTokenId/modalTokenSecret in FILE. Does not change configuration.",
+    "Builds the Linux cloud box image the E2B template is built from, in the Modal app NAME (default t3-cloud-chats) of environment ENV (default the workspace default), and prints its image id for provisioning.modal.imageId. Credentials come from MODAL_TOKEN_ID/MODAL_TOKEN_SECRET, else modalTokenId/modalTokenSecret in FILE. Does not change configuration.",
   );
   process.exit(0);
 }
@@ -76,7 +77,10 @@ const configured = () => {
 const modal = new ModalClient(
   process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET ? {} : configured(),
 );
-const app = await modal.apps.fromName(values.app, { createIfMissing: true });
+const app = await modal.apps.fromName(values.app, {
+  createIfMissing: true,
+  ...(values.environment ? { environment: values.environment } : {}),
+});
 const started = performance.now();
 // One layer per step, each built before the next, so a failure names its step and a rerun
 // starts from the last layer that built.

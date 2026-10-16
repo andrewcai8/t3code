@@ -75,9 +75,13 @@ export const DurableProvisionRequest = Schema.Union([
     provider: Schema.Literal("modal"),
     /** The Modal app a chat's boxes run in, where its box is found by name. */
     app: TrimmedNonEmptyString,
+    /** The app's Modal environment. Absent, the workspace's default one. */
+    environment: Schema.optional(TrimmedNonEmptyString),
+    /** CIDRs allowed to reach the box's tunnel. Absent, any address can. */
+    inboundCidrs: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
     /** The image every fresh box of this chat starts from. */
     imageId: TrimmedNonEmptyString,
-    /** Reservation and hard limit. A vm box's RAM is the `memoryMiB` reservation. */
+    /** Reservations and limits. A vm box has `cpuLimit` CPUs, and its RAM is `memoryMiB`. */
     sizing: Schema.Struct({
       cpu: Schema.Number.check(Schema.isGreaterThan(0)),
       cpuLimit: Schema.Number.check(Schema.isGreaterThan(0)),

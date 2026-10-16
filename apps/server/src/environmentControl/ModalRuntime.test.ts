@@ -307,6 +307,22 @@ describe("Modal runtime", () => {
     expect(await other.runtime.upkeep(other.operation, idle)).toBe("released");
   });
 
+  it("starts a chat over on a new box when its first box died before the chat was ready", async () => {
+    const t = await setup();
+    const dead = await t.awakeOn();
+    t.modal.boxes.get(dead)!.alive = false;
+    const preparing = { ...t.operation, state: { kind: "intent" as const } };
+
+    await expect(t.runtime.resume(preparing, t.manifest)).rejects.toThrow("not ready");
+
+    expect(t.modal.calls).toEqual(["create"]);
+    expect(await t.record()).toMatchObject({
+      kind: "awake",
+      sandboxId: "sb-2",
+      chainStartedAt: null,
+    });
+  });
+
   it("reports a box Modal ended without a snapshot as missing", async () => {
     const t = await setup();
     const sandboxId = await t.awakeOn();

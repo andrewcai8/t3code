@@ -1285,9 +1285,11 @@ export function makeProvisionPreparationStore(stateDir: string) {
           ...common,
           provider: "modal",
           app: modal.app ?? "t3-cloud-chats",
+          ...(modal.environment ? { environment: modal.environment } : {}),
+          ...(modal.inboundCidrs?.length ? { inboundCidrs: modal.inboundCidrs } : {}),
           imageId: modal.imageId,
           sizing: {
-            cpu: modal.cpu ?? 8,
+            cpu: modal.cpu ?? 2,
             cpuLimit: modal.cpuLimit ?? 8,
             memoryMiB: modal.memoryMiB ?? 32_768,
             memoryLimitMiB: modal.memoryLimitMiB ?? 32_768,

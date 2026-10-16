@@ -1,5 +1,11 @@
 // @effect-diagnostics globalDate:off - Modal deadlines and snapshot ages are wall-clock times at the SDK boundary.
-import { ModalClient, NotFoundError, type Sandbox } from "modal";
+import {
+  InternalFailure,
+  ModalClient,
+  NotFoundError,
+  ResourceExhaustedError,
+  type Sandbox,
+} from "modal";
 import type { ProvisionOperation } from "@t3tools/contracts";
 
 import type { ProvisionRuntimeArtifact } from "./config.ts";
@@ -45,6 +51,7 @@ const AS_USER = [
 
 export interface ModalBoxSpec {
   readonly app: string;
+  readonly environment?: string;
   readonly name: string;
   readonly imageId: string;
   readonly port: number;
@@ -60,12 +67,13 @@ export interface ModalBoxSpec {
     readonly domains: ReadonlyArray<string>;
     readonly cidrs: ReadonlyArray<string>;
   };
+  readonly inboundCidrs?: ReadonlyArray<string>;
 }
 
 /** What the runtime asks of Modal. Every sandbox of a chat carries the chat's name. */
 export interface ModalBoxes {
   /** The running sandbox named `name`, if any. */
-  readonly find: (app: string, name: string) => Promise<string | null>;
+  readonly find: (app: string, name: string, environment?: string) => Promise<string | null>;
   /** Fails with `"exists"` when a running sandbox already has the name. */
   readonly create: (spec: ModalBoxSpec) => Promise<string | "exists">;
   /** A new sandbox from the snapshot, under the name it was taken with; `"exists"` as for create. */
@@ -85,6 +93,22 @@ export interface ModalBoxes {
 
 const cidr = /^[0-9.:a-fA-F]+(?:\/\d+)?$/;
 
+/**
+ * Retries a call Modal refused for capacity, quota or a fault of its own, which a create meets
+ * while it waits to be scheduled. Any other failure is the caller's.
+ */
+async function transient<A>(call: () => Promise<A>, attempts = 4): Promise<A> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await call();
+    } catch (error) {
+      const retryable = error instanceof ResourceExhaustedError || error instanceof InternalFailure;
+      if (!retryable || attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2_000 * 2 ** (attempt - 1)));
+    }
+  }
+}
+
 export function makeModalBoxes(credentials: {
   readonly tokenId: string;
   readonly tokenSecret: string;
@@ -95,9 +119,13 @@ export function makeModalBoxes(credentials: {
   const nameTaken = (error: unknown) =>
     error instanceof Error && /ALREADY_EXISTS|already in use/i.test(error.message);
   return {
-    find: async (app, name) => {
+    find: async (app, name, environment) => {
       try {
-        const sandbox = await modal.sandboxes.fromName(app, name);
+        const sandbox = await modal.sandboxes.fromName(
+          app,
+          name,
+          environment ? { environment } : {},
+        );
         return (await isRunning(sandbox)) ? sandbox.sandboxId : null;
       } catch (error) {
         if (error instanceof NotFoundError) return null;
@@ -105,23 +133,29 @@ export function makeModalBoxes(credentials: {
       }
     },
     create: async (spec) => {
-      const app = await modal.apps.fromName(spec.app, { createIfMissing: true });
+      const app = await modal.apps.fromName(spec.app, {
+        createIfMissing: true,
+        ...(spec.environment ? { environment: spec.environment } : {}),
+      });
       const image = await modal.images.fromId(spec.imageId);
       try {
-        const sandbox = await modal.sandboxes.create(app, image, {
-          name: spec.name,
-          runtime: "vm",
-          // A snapshot keeps every process, which is what lets a chat sleep without a restart.
-          experimentalEnableSnapshot: true,
-          encryptedPorts: [spec.port],
-          timeoutMs: spec.timeoutMs,
-          ...spec.sizing,
-          tags: { ...spec.tags },
-          ...(spec.egress.domains.length
-            ? { outboundDomainAllowlist: [...spec.egress.domains] }
-            : {}),
-          ...(spec.egress.cidrs.length ? { outboundCidrAllowlist: [...spec.egress.cidrs] } : {}),
-        });
+        const sandbox = await transient(() =>
+          modal.sandboxes.create(app, image, {
+            name: spec.name,
+            runtime: "vm",
+            // A snapshot keeps every process, which is what lets a chat sleep without a restart.
+            experimentalEnableSnapshot: true,
+            encryptedPorts: [spec.port],
+            timeoutMs: spec.timeoutMs,
+            ...spec.sizing,
+            tags: { ...spec.tags },
+            ...(spec.egress.domains.length
+              ? { outboundDomainAllowlist: [...spec.egress.domains] }
+              : {}),
+            ...(spec.egress.cidrs.length ? { outboundCidrAllowlist: [...spec.egress.cidrs] } : {}),
+            ...(spec.inboundCidrs?.length ? { inboundCidrAllowlist: [...spec.inboundCidrs] } : {}),
+          }),
+        );
         return sandbox.sandboxId;
       } catch (error) {
         if (nameTaken(error)) return "exists";
@@ -131,7 +165,8 @@ export function makeModalBoxes(credentials: {
     restore: async (snapshotId) => {
       try {
         const snapshot = await modal.sandboxSnapshots.fromId(snapshotId);
-        return (await modal.sandboxes.experimentalFromSnapshot(snapshot)).sandboxId;
+        return (await transient(() => modal.sandboxes.experimentalFromSnapshot(snapshot)))
+          .sandboxId;
       } catch (error) {
         if (nameTaken(error)) return "exists";
         if (error instanceof Error && /NOT_FOUND|not found/i.test(error.message)) return "expired";
@@ -168,7 +203,7 @@ export function makeModalBoxes(credentials: {
       const sandbox = await box(sandboxId);
       await sandbox.filesystem.copyFromLocal(localPath, remotePath);
       // Copied as root; the guest reads it as the image's user.
-      const chmod = await sandbox.exec(["chmod", "0644", remotePath]);
+      const chmod = await sandbox.exec(["chmod", "0644", remotePath], { timeoutMs: 60_000 });
       if ((await chmod.wait()) !== 0) throw new Error("The runtime archive could not be shared");
     },
   };
@@ -195,6 +230,11 @@ export function makeModalRuntime(config: {
   readonly proxies?: Pick<NamespaceProxyManager, "open" | "restore" | "close">;
   readonly now?: () => number;
   readonly log?: (message: string, fields: Record<string, unknown>) => void;
+  /**
+   * Each chat's step in flight. A host that rebuilds the runtime on a config change passes the
+   * one map it keeps, so a step on the old runtime still orders the next one on the new.
+   */
+  readonly turns?: Map<string, Promise<unknown>>;
 }) {
   const { boxes } = config;
   const store = makeModalChatStore(config.stateDir);
@@ -205,7 +245,7 @@ export function makeModalRuntime(config: {
     proxies: config.proxies ?? new NamespaceProxyManager(),
     ingressAuthorization: async () => "",
   });
-  const turns = new Map<string, Promise<unknown>>();
+  const turns = config.turns ?? new Map<string, Promise<unknown>>();
   const inTurn = <A>(chatId: string, run: () => Promise<A>): Promise<A> => {
     const result = (turns.get(chatId) ?? Promise.resolve()).then(run);
     const settled = result.catch(() => undefined);
@@ -272,14 +312,21 @@ export function makeModalRuntime(config: {
         if (current.kind === "saving") await store.write(id, { ...current, kind: "awake" });
         return current.sandboxId;
       }
-      // Modal ended it without a snapshot this manager recorded.
-      throw new ProvisionedSandboxMissing();
+      // Modal ended it without a snapshot this manager recorded. A box that died before its chat
+      // was ever ready held nothing, so its preparation starts over on a new one.
+      if (
+        current.kind === "saving" ||
+        current.chainStartedAt !== null ||
+        operation.state.kind === "ready"
+      )
+        throw new ProvisionedSandboxMissing();
     }
     if (current?.kind === "asleep") {
       if (expired(current.chainStartedAt)) throw new ProvisionedSandboxMissing();
       const stop = startProvisionPhase(record);
       const restored = await boxes.restore(current.snapshotId);
-      const sandboxId = restored === "exists" ? await boxes.find(modal.app, name) : restored;
+      const sandboxId =
+        restored === "exists" ? await boxes.find(modal.app, name, modal.environment) : restored;
       if (sandboxId === null || sandboxId === "expired") throw new ProvisionedSandboxMissing();
       stop("modal.restore");
       await store.write(id, {
@@ -294,6 +341,7 @@ export function makeModalRuntime(config: {
     const stop = startProvisionPhase(record);
     const created = await boxes.create({
       app: modal.app,
+      ...(modal.environment ? { environment: modal.environment } : {}),
       name,
       imageId: modal.imageId,
       port: manifest.preparation.port,
@@ -305,8 +353,10 @@ export function makeModalRuntime(config: {
         account: operation.request.providerInstanceId,
       },
       egress: modalEgress(manifest.egressAllow),
+      ...(modal.inboundCidrs ? { inboundCidrs: modal.inboundCidrs } : {}),
     });
-    const sandboxId = created === "exists" ? await boxes.find(modal.app, name) : created;
+    const sandboxId =
+      created === "exists" ? await boxes.find(modal.app, name, modal.environment) : created;
     if (sandboxId === null) throw new Error("The Modal box named for this chat could not be found");
     stop("modal.create");
     await store.write(id, { kind: "awake", sandboxId, startedAt: now(), chainStartedAt: null });
@@ -508,7 +558,8 @@ export function makeModalRuntime(config: {
       await publisher.close(proxyId(operation));
       await inTurn(chatId(operation), async () => {
         const current = await store.read(chatId(operation));
-        const named = await boxes.find(request(operation).app, boxName(operation));
+        const { app, environment } = request(operation);
+        const named = await boxes.find(app, boxName(operation), environment);
         for (const sandboxId of new Set([
           ...(current && current.kind !== "asleep" ? [current.sandboxId] : []),
           ...(named ? [named] : []),
