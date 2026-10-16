@@ -39,7 +39,7 @@ import {
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
-import { cloudMachineNoteFor, lowDiskNoteFor } from "./DiskHeadroom.ts";
+import { cloudMachineNoteFor, lowDiskNoteFor, saveFailureNoteFor } from "./DiskHeadroom.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -1031,19 +1031,21 @@ export const layer: Layer.Layer<
         (legacyInputRunIds.size > 0 &&
           sameNativeThread &&
           !acceptedAttempts.some((source) => source.nativeThreadId !== undefined));
-      // Sent with the user's text: work a restart cancelled, a disk about to fill, and a cloud
-      // machine's guidance at the start of each provider session.
+      // Sent with the user's text: work a restart cancelled, a disk about to fill, a chat too
+      // large to save, and a cloud machine's guidance at the start of each provider session.
+      const nativeThreadId = runningProviderThread.nativeThreadRef?.nativeId ?? providerThread.id;
       const restartNote = [
         restartCancelledWork.length === 0
           ? ""
           : restartCancelledBackgroundWorkNote(restartCancelledWork),
         yield* lowDiskNoteFor(resolvedRuntimePolicy.cwd),
+        yield* saveFailureNoteFor(nativeThreadId),
         yield* cloudMachineNoteFor({
           cwd: resolvedRuntimePolicy.cwd,
           subagent: projection.thread.lineage.relationshipToParent === "subagent",
           mcpTools: session.providerSession.capabilities.tools.supportsMcpTools,
           session,
-          nativeThreadId: runningProviderThread.nativeThreadRef?.nativeId ?? providerThread.id,
+          nativeThreadId,
         }),
       ]
         .filter((note) => note !== "")

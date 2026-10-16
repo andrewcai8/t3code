@@ -7,7 +7,12 @@ import * as Effect from "effect/Effect";
 import { it as effectIt } from "@effect/vitest";
 import { expect, it } from "vite-plus/test";
 
-import { cloudMachineNote, cloudMachineNoteFor, lowDiskNote } from "./DiskHeadroom.ts";
+import {
+  cloudMachineNote,
+  cloudMachineNoteFor,
+  lowDiskNote,
+  saveFailureNoteFor,
+} from "./DiskHeadroom.ts";
 
 it("tells a cloud box's agent how much disk is left once under 10 GB, and nothing above", () => {
   expect(lowDiskNote(10.1 * 1024 ** 3, true)).toBe("");
@@ -132,4 +137,54 @@ effectIt.effect("tells a box's chat when the project setup failed and where its 
     expect(yield* noteOn(onBox, "darwin")).toContain(`(${"x".repeat(199)}…), so`);
     yield* Effect.promise(() => NodeFSP.rm(t3home, { recursive: true }));
   }),
+);
+
+effectIt.effect(
+  "tells each thread once which paths keep its chat from saving, again when they change",
+  () =>
+    Effect.gen(function* () {
+      const t3home = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-save-note-")),
+      );
+      const failure = NodePath.join(t3home, "save-failure.json");
+      const write = (largest: ReadonlyArray<readonly [string, number]>) =>
+        Effect.promise(() =>
+          NodeFSP.writeFile(
+            failure,
+            JSON.stringify({
+              limit: 4 * 1024 ** 3,
+              largest: largest.map(([path, bytes]) => ({ path, bytes })),
+            }),
+          ),
+        );
+      const noteFor = (
+        thread: string,
+        environment: NodeJS.ProcessEnv = { ...box, T3CODE_HOME: t3home },
+      ) =>
+        saveFailureNoteFor(thread).pipe(
+          Effect.provideService(HostProcess.Environment, environment),
+        );
+
+      expect(yield* noteFor("native-1")).toBe("");
+      yield* write([
+        ["/root/home/fuzz/wt-fix3", 9.1 * 1024 ** 3],
+        ["/root/home/.t3/baseline.tar.gz", 1.4 * 1024 ** 3],
+      ]);
+      expect(yield* noteFor("native-1")).toBe(
+        "Note: this chat's work no longer fits in a save off this machine, which holds at most 4.0 GB. The largest saved paths are /root/home/fuzz/wt-fix3 (9.1 GB), /root/home/.t3/baseline.tar.gz (1.4 GB). Delete what you no longer need or move it to S3; dependency installs and build outputs in a checkout's ignored directories are not saved. Until a save fits, work since the last one is lost when this machine is replaced.",
+      );
+      expect(yield* noteFor("native-1"), "told once").toBe("");
+      expect(yield* noteFor("native-2")).toContain("/root/home/fuzz/wt-fix3 (9.1 GB)");
+      expect(yield* noteFor("native-3", { T3CODE_HOME: t3home }), "not a cloud box").toBe("");
+
+      yield* write([["/root/home/.t3/baseline.tar.gz", 5 * 1024 ** 3]]);
+      expect(yield* noteFor("native-1")).toContain(
+        "The largest saved paths are /root/home/.t3/baseline.tar.gz (5.0 GB).",
+      );
+      yield* Effect.promise(() => NodeFSP.rm(failure));
+      expect(yield* noteFor("native-1")).toBe("");
+      yield* write([["/root/home/.t3/baseline.tar.gz", 5 * 1024 ** 3]]);
+      expect(yield* noteFor("native-1"), "a new failure is news").toContain("baseline.tar.gz");
+      yield* Effect.promise(() => NodeFSP.rm(t3home, { recursive: true }));
+    }),
 );

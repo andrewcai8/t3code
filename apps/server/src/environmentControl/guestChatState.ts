@@ -45,6 +45,8 @@ WARM_KEYS = ${JSON.stringify(warmJournalKeys)}
 DERIVED_HOME = ${JSON.stringify(DERIVED_HOME_PATHS)}
 # Thread worktrees live in the home but are saved through git with the repository.
 GIT_SAVED_HOME = ['.t3/worktrees']
+# Under T3 home: what a save that cannot fit would carry, read out to the chat's agent.
+SAVE_FAILURE = '.t3/save-failure.json'
 ROOT_FILES = ['preparation.json', 'broker-token']
 # Ignored single files up to this size are a chat's own (.env.local); ignored
 # directories (node_modules, build trees) are always derived.
@@ -184,16 +186,53 @@ def excluded(rel, paths):
 
 def walk(base, skip):
     # Sorted, so two saves of an unchanged root list the same entries in the same order.
+    derived = set()
     for current, dirs, files in os.walk(base):
         rel_dir = os.path.relpath(current, base)
         rel_dir = '' if rel_dir == '.' else rel_dir
-        dirs[:] = sorted(d for d in dirs if not excluded(os.path.join(rel_dir, d), skip))
+        if rel_dir and '.git' in dirs + files:
+            derived.update(os.path.join(rel_dir, rel) for rel in derived_in_checkout(pathlib.Path(current)))
+        dirs[:] = sorted(d for d in dirs if not excluded(os.path.join(rel_dir, d), skip) and os.path.join(rel_dir, d) not in derived)
         for name in dirs:
             yield os.path.join(rel_dir, name)
         for name in sorted(files):
             rel = os.path.join(rel_dir, name)
-            if not excluded(rel, skip):
+            if not excluded(rel, skip) and rel not in derived:
                 yield rel
+
+def derived_in_checkout(tree):
+    # A clone or worktree in the home keeps its .git, tracked and untracked files; as in the
+    # chat's own checkout, its ignored directories and large ignored files are derived.
+    listing = git(tree, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', check=False)
+    if listing.returncode != 0:
+        return []
+    derived = []
+    for rel in filter(None, listing.stdout.decode().split('\0')):
+        path = tree / rel
+        if rel.endswith('/') or (path.is_file() and not path.is_symlink() and path.stat().st_size > IGNORED_FILE_MAX):
+            derived.append(rel.rstrip('/'))
+    return derived
+
+def largest_saved(home, skip):
+    # Summed at three levels deep: enough to name a worktree's install, shallow enough to add up.
+    sizes = {}
+    for rel in walk(home, skip):
+        with contextlib.suppress(OSError):
+            info = os.lstat(home / rel)
+            if stat.S_ISREG(info.st_mode):
+                key = '/'.join(rel.split('/')[:3])
+                sizes[key] = sizes.get(key, 0) + info.st_size
+    largest = sorted(sizes.items(), key=lambda item: (-item[1], item[0]))[:5]
+    return [{'path': str(home / key), 'bytes': size} for key, size in largest]
+
+@contextlib.contextmanager
+def naming_largest(home, skip, limit):
+    try:
+        yield
+    except TooLarge:
+        if (home / '.t3').is_dir():
+            atomic(home / SAVE_FAILURE, json.dumps({'limit': limit, 'largest': largest_saved(home, skip)}))
+        raise
 
 
 def list_trees(root):
@@ -300,13 +339,16 @@ def fingerprint(root, trees, skip_home):
     return digest.hexdigest()
 
 
+class TooLarge(RuntimeError):
+    pass
+
 class Sink:
     def __init__(self, handle, limit):
         self.handle, self.limit, self.size, self.digest = handle, limit, 0, hashlib.sha256()
     def write(self, data):
         self.size += len(data)
         if self.size > self.limit:
-            raise RuntimeError('The chat snapshot exceeds ' + str(self.limit) + ' bytes; a cache is probably being saved')
+            raise TooLarge('The chat snapshot exceeds ' + str(self.limit) + ' bytes; a cache is probably being saved')
         self.digest.update(data)
         self.handle.write(data)
         return len(data)
@@ -418,15 +460,19 @@ def save(spec):
             raise RuntimeError('No prepared chat lives at this root')
         if not live:
             stop_server(root)
-        skip_home = DERIVED_HOME + list(spec.get('derivedHomePaths') or []) + GIT_SAVED_HOME
+        home = root / 'home'
         trees = list_trees(root)
+        # The checkout's worktrees, wherever in the home an agent made them, are saved through git.
+        in_home = [str(tree.relative_to(home)) for tree in trees if home in tree.parents]
+        skip_home = DERIVED_HOME + list(spec.get('derivedHomePaths') or []) + GIT_SAVED_HOME + in_home + [SAVE_FAILURE]
         print_fingerprint = fingerprint(root, trees, skip_home)
         if spec.get('previousFingerprint') == print_fingerprint:
+            (home / SAVE_FAILURE).unlink(missing_ok=True)
             return {'kind': 'unchanged', 'fingerprint': print_fingerprint}
         scratch = tempfile.mkdtemp(prefix='t3-save-', dir=spec.get('scratch'))
         try:
             archive_path = pathlib.Path(scratch) / 'snapshot.tar'
-            with open(archive_path, 'wb') as handle:
+            with naming_largest(home, skip_home, spec['maxBytes']), open(archive_path, 'wb') as handle:
                 sink = Sink(handle, spec['maxBytes'])
                 with tarfile.open(fileobj=sink, mode='w|', format=tarfile.PAX_FORMAT) as archive:
                     manifest = {'format': FORMAT, 'root': str(root), 'mode': spec['mode'], 'fingerprint': print_fingerprint, 'trees': [], 'stash': [], 'refs': {}, 'remoteRefs': {}, 'prerequisites': []}
@@ -478,7 +524,6 @@ def save(spec):
                     add_bytes(archive, 'root/preparation.json', json.dumps(journal).encode())
                     if (root / 'broker-token').is_file():
                         add_path(archive, 'root/broker-token', root / 'broker-token', False, scratch)
-                    home = root / 'home'
                     if home.is_dir():
                         for rel in walk(home, skip_home):
                             path = str(home / rel)
@@ -488,6 +533,7 @@ def save(spec):
                                 add_path(archive, 'home/' + rel, path, live, scratch)
             sha256, size = sink.digest.hexdigest(), sink.size
             upload(spec['uploadUrl'], archive_path, size)
+            (home / SAVE_FAILURE).unlink(missing_ok=True)
             return {'kind': 'saved', 'sha256': sha256, 'bytes': size, 'fingerprint': print_fingerprint}
         finally:
             rmtree(scratch, ignore=True)
