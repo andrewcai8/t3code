@@ -49,9 +49,7 @@ export type ScheduleDraft = {
   readonly timeOfDay: string;
   readonly weekdays: ReadonlyArray<number>;
   readonly intervalMinutes: string;
-  /** A webhook signature check configured elsewhere; mobile keeps it but does not edit it. */
   readonly signature: ScheduledTaskWebhookSignature | null;
-  /** Minutes as typed; empty runs every held request regardless of age. */
   readonly maxDeliveryAgeMinutes: string;
 };
 
@@ -113,7 +111,6 @@ export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSche
   }
   if (draft.mode === "interval") {
     const minutes = Number(draft.intervalMinutes);
-    // Undo floating-point noise from displaying existing millisecond intervals as minutes.
     const everyMs = Math.round(minutes * 60_000);
     return minutes >= 1 && Number.isSafeInteger(everyMs) ? { type: "interval", everyMs } : null;
   }
