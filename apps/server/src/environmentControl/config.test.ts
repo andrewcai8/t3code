@@ -139,7 +139,7 @@ it("loads Namespace preparation artifacts and rejects invalid SHA256 digests", a
   }
 });
 
-it("loads Namespace prepare commands marked background and refuses one with no command", async () => {
+it("loads E2B and Namespace prepare commands marked background and refuses one with no command", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-background-config-"));
   const path = NodePath.join(directory, "config.json");
   const write = (prepareCommands: unknown) =>
@@ -155,16 +155,24 @@ it("loads Namespace prepare commands marked background and refuses one with no c
         },
         targets: [],
         provisioning: {
-          repositories: [{ repository: "example/repo", namespace: { prepareCommands } }],
+          repositories: [
+            {
+              repository: "example/repo",
+              e2b: { prepareCommands },
+              namespace: { prepareCommands },
+            },
+          ],
         },
       }),
     );
-  const commands = ["make setup", { command: "make serve &", background: true }];
+  const commands = ["make setup", { command: "make serve", background: true }];
   try {
     await write(commands);
-    expect(
-      (await readConfig(path)).provisioning?.repositories?.[0]?.namespace?.prepareCommands,
-    ).toEqual(commands);
+    const [entry] = (await readConfig(path)).provisioning?.repositories ?? [];
+    expect([entry?.e2b?.prepareCommands, entry?.namespace?.prepareCommands]).toEqual([
+      commands,
+      commands,
+    ]);
     await write([{ background: true }]);
     await expect(readConfig(path)).rejects.toThrow();
   } finally {

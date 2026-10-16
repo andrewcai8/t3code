@@ -25,6 +25,7 @@ import {
   frozenMacTemplate,
   provisionDigest,
   provisionProviders,
+  serviceCommands,
   warmBaseKey,
   withCurrentSetup,
 } from "./ProvisionPreparation.ts";
@@ -1949,7 +1950,8 @@ it("freezes every prepare command for a chat and only the foreground ones for a 
   const f = await fixture();
   try {
     const serve = "make serve &";
-    const marked = ["make setup", { command: serve, background: true }];
+    const marked = ["make setup", { command: "make serve", background: true }];
+    const started = '{ make serve\n} >> "$T3CODE_HOME/background-commands.log" 2>&1 < /dev/null &';
     const frozen = await Promise.all(
       (
         [
@@ -1972,14 +1974,10 @@ it("freezes every prepare command for a chat and only the foreground ones for a 
         manifest.buildPrepareCommands,
       ]),
     ).toEqual([
-      [["make setup", serve], ["make setup"]],
+      [["make setup", started], ["make setup"]],
       [["make setup", serve], undefined],
-      [["make setup", serve], undefined],
+      [["make setup", started], undefined],
     ]);
-    expect(
-      frozen[0]?.request.preparationHash,
-      "the marker is not part of what a chat prepares",
-    ).toBe(frozen[1]?.request.preparationHash);
     const config = spareConfig(f.config, { engine: "instance", prepareCommands: marked });
     const current = currentMacTemplate(config, "example/repo");
     expect(current, "a chat frozen now builds the current template").toEqual(
@@ -2166,6 +2164,51 @@ it("hands a chat frozen earlier the setup the manager is configured with now, wi
         commands: ["node --env-file-if-exists=.env prepare.mjs"],
         environment: [{ name: "MIND_BEDROCK_AUTH_URL", value: "https://auth.example" }],
       },
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("starts an E2B chat's services without waiting, and gives its copies only those, as written", async () => {
+  const f = await fixture();
+  try {
+    const config = {
+      ...f.config,
+      provisioning: {
+        ...f.config.provisioning!,
+        repositories: [
+          {
+            repository: "example/repo",
+            e2b: {
+              prepareCommands: [
+                "node prepare.mjs",
+                { command: "bash backend.sh install", background: false },
+                { command: "bash backend.sh start", background: true },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const manifest = await withCurrentSetup(
+      config,
+      await f.store.freeze(input, config, f.resolver, [f.profile]),
+    );
+    expect([
+      manifest.setup?.commands,
+      serviceCommands(config, "https://github.com/Example/Repo.git"),
+      serviceCommands(config, "example/other"),
+      serviceCommands(config, null),
+    ]).toEqual([
+      [
+        "node prepare.mjs",
+        "bash backend.sh install",
+        '{ bash backend.sh start\n} >> "$T3CODE_HOME/background-commands.log" 2>&1 < /dev/null &',
+      ],
+      ["bash backend.sh start"],
+      [],
+      [],
     ]);
   } finally {
     await f.cleanup();

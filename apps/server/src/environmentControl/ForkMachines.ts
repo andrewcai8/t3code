@@ -27,10 +27,17 @@ import * as Schema from "effect/Schema";
 import type { EnvironmentControlConfig } from "./config.ts";
 import { agentEnvironmentPython } from "./guestAgentEnvironment.ts";
 import * as EnvironmentControl from "./EnvironmentControl.ts";
+import { serviceCommands } from "./ProvisionPreparation.ts";
 
 export type WorkerForkSettings = NonNullable<
   NonNullable<EnvironmentControlConfig["provisioning"]>["workerForks"]
 >;
+
+export interface ForkSettings {
+  readonly limits: WorkerForkSettings;
+  /** The commands that start the chat's repository's services in a copy, before its job. */
+  readonly services: ReadonlyArray<string>;
+}
 
 export class ForkMachineError extends Schema.TaggedError<ForkMachineError>()("ForkMachineError", {
   step: Schema.Literals(["settings", "capture", "start", "run", "upload", "copy", "kill", "sweep"]),
@@ -72,8 +79,10 @@ export type ForkCopyBack =
 export class ForkMachines extends Context.Service<
   ForkMachines,
   {
-    /** This host's fork settings, or null when it has no cloud configuration. */
-    readonly settings: Effect.Effect<WorkerForkSettings | null, ForkMachineError>;
+    /** This host's fork settings for a chat of `repository`, or null with no cloud configuration. */
+    readonly settings: (
+      repository: string | null,
+    ) => Effect.Effect<ForkSettings | null, ForkMachineError>;
     /** Captures the chat's machine once; every copy in its batch starts from the capture. */
     readonly capture: (sandboxId: string, tag: ForkTag) => Effect.Effect<string, ForkMachineError>;
     /** Deletes a capture once no copy of it is left. A capture already gone is fine. */
@@ -88,10 +97,18 @@ export class ForkMachines extends Context.Service<
       tag: ForkTag,
       lifetimeMs: number,
     ) => Effect.Effect<string, ForkMachineError>;
-    /** Runs a job to its end or its timeout; the job's own failure is its exit code. */
+    /**
+     * Runs `services.commands` in `services.cwd`, then the job, to its end or its timeout, which
+     * covers both. The job's own failure, or a service command's, is its exit code.
+     */
     readonly run: (
       forkId: string,
-      job: { readonly command: string; readonly cwd: string; readonly timeoutMs: number },
+      job: {
+        readonly command: string;
+        readonly cwd: string;
+        readonly timeoutMs: number;
+        readonly services: { readonly commands: ReadonlyArray<string>; readonly cwd: string };
+      },
     ) => Effect.Effect<ForkJobExit, ForkMachineError>;
     /**
      * Uploads the job's logs under `<uri>logs/` and its outputs under `<uri>outputs/`, each at its
@@ -242,27 +259,47 @@ for path, directories, files in os.walk('/tmp'):
 print(json.dumps({'skipped': skipped}))
 `;
 
-const RUN = String.raw`
+/** A copy gives its repository's service commands this long, at most, before its job. */
+const SERVICES_SECONDS = 600;
+
+/**
+ * Runs a job in a copy whose state is under `state`. The copy booted with none of the chat's
+ * processes, so it first runs the repository's service commands to their end, in its checkout,
+ * into the job's own logs. A command that fails or outlasts its time is the job's result and the
+ * job does not run: a test run against services that never started fails for the wrong reason.
+ */
+export const forkRunScript = (state: string) => String.raw`
 import json, os, subprocess, sys, time
 spec = json.loads(sys.argv[1])
-env = json.load(open('${STATE}/env.json'))
-out = '${STATE}/out/'
-with open(out + 'stdout.log', 'wb') as stdout, open(out + 'stderr.log', 'wb') as stderr:
+env = json.load(open('${state}/env.json'))
+out = '${state}/out/'
+deadline = time.monotonic() + spec['timeoutMs'] / 1000
+def run(command, cwd, seconds):
     try:
-        child = subprocess.Popen(['bash', '-lc', spec['command']], cwd=spec['cwd'], env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=True)
+        child = subprocess.Popen(['bash', '-lc', command], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=True)
     except OSError as error:
-        stderr.write(('Could not start the job in %s: %s\n' % (spec['cwd'], error)).encode())
-        child = None
-    timed_out = False
-    if child is None:
-        code = 127
-    else:
-        try:
-            code = child.wait(timeout=spec['timeoutMs'] / 1000)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, 9)
-            code = child.wait()
-            timed_out = True
+        stderr.write(('Could not start %s in %s: %s\n' % (command, cwd, error)).encode())
+        return 127
+    try:
+        return child.wait(timeout=max(0, seconds))
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, 9)
+        child.wait()
+        return None
+with open(out + 'stdout.log', 'wb', buffering=0) as stdout, open(out + 'stderr.log', 'wb', buffering=0) as stderr:
+    code, timed_out = 0, False
+    for command in spec['services']['commands']:
+        stderr.write(('[t3] Starting this machine\'s services: %s\n' % command).encode())
+        code = run(command, spec['services']['cwd'], min(${SERVICES_SECONDS}, deadline - time.monotonic()))
+        if code != 0:
+            stderr.write(('[t3] It %s, so the job did not run.\n' % ('did not finish in time' if code is None else 'exited %d' % code)).encode())
+            code = 124 if code is None else code
+            break
+    if code == 0:
+        code = run(spec['command'], spec['cwd'], deadline - time.monotonic())
+        timed_out = code is None
+        if timed_out:
+            code = -9
 def tail(name):
     with open(out + name, 'rb') as log:
         log.seek(0, 2)
@@ -270,6 +307,8 @@ def tail(name):
         return log.read().decode(errors='replace')
 print(json.dumps({'exitCode': code, 'timedOut': timed_out, 'stdoutTail': tail('stdout.log'), 'stderrTail': tail('stderr.log')}))
 `;
+
+const RUN = forkRunScript(STATE);
 
 const UPLOAD = String.raw`
 import json, os, shutil, subprocess, sys
@@ -447,10 +486,18 @@ export const layerE2b = Layer.effect(
       attempt(step, async (e2b) => running.get(forkId) ?? (await e2b.Sandbox.connect(forkId)));
 
     return ForkMachines.of({
-      settings: control.controlConfig.pipe(
-        Effect.map((config) => (config === null ? null : (config.provisioning?.workerForks ?? {}))),
-        Effect.mapError((cause) => new ForkMachineError({ step: "settings", cause })),
-      ),
+      settings: (repository) =>
+        control.controlConfig.pipe(
+          Effect.map((config) =>
+            config === null
+              ? null
+              : {
+                  limits: config.provisioning?.workerForks ?? {},
+                  services: serviceCommands(config, repository),
+                },
+          ),
+          Effect.mapError((cause) => new ForkMachineError({ step: "settings", cause })),
+        ),
 
       capture: (sandboxId, tag) =>
         attempt("capture", async (e2b, signal, apiKey) => {

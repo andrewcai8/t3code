@@ -518,6 +518,104 @@ describe("guest chat state", () => {
     ).toBe("main");
   });
 
+  it("saves worktrees and clones an agent made anywhere in the home through git, without their installs", async () => {
+    const w = await world();
+    const store = await artifactStore();
+    await w.newMac("empty");
+    await adoptChatTemplate(localPort, templateIdentity(w));
+    await prepareRemoteHost(localPort, await w.prepareInput("chat-stray", w.head()));
+    const workspace = NodePath.join(w.root, "workspace");
+    const home = NodePath.join(w.root, "home");
+    const install = Buffer.alloc(16 * 1024 * 1024, 1);
+
+    const stray = NodePath.join(home, "fuzz", "wt-fix3");
+    git(workspace, "worktree", "add", "-q", "-b", "fix3", stray);
+    await NodeFSP.writeFile(NodePath.join(stray, "fix.txt"), "staged fix\n");
+    git(stray, "add", "fix.txt");
+    await NodeFSP.appendFile(NodePath.join(stray, "README.md"), "unstaged\n");
+    await NodeFSP.writeFile(NodePath.join(stray, "notes.txt"), "untracked\n");
+    await NodeFSP.writeFile(NodePath.join(stray, ".env.local"), "SECRET=fix3\n");
+    await NodeFSP.mkdir(NodePath.join(stray, "node_modules", "dep"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(stray, "node_modules", "dep", "index.js"), install);
+
+    const clone = NodePath.join(home, "src", "tool");
+    git(w.base, "clone", "-q", w.origin, clone);
+    await NodeFSP.appendFile(NodePath.join(clone, "staged.txt"), "clone staged\n");
+    git(clone, "add", "staged.txt");
+    await NodeFSP.writeFile(NodePath.join(clone, "draft.txt"), "clone untracked\n");
+    await NodeFSP.writeFile(NodePath.join(clone, ".env"), "SECRET=clone\n");
+    await NodeFSP.writeFile(NodePath.join(clone, "build.bin"), install);
+    await NodeFSP.mkdir(NodePath.join(clone, "node_modules"));
+    await NodeFSP.writeFile(NodePath.join(clone, "node_modules", "dep.js"), install);
+
+    const saved = await saveChat(localPort, {
+      root: w.root,
+      mode: "final",
+      uploadUrl: store.url("stray/1"),
+      maxBytes: 8 * 1024 * 1024,
+      previousFingerprint: null,
+    });
+    if (saved.kind !== "saved") throw new Error("expected a saved snapshot");
+
+    await w.depart("abandon");
+    await w.newMac("empty");
+    await adoptChatTemplate(localPort, templateIdentity(w));
+    await restoreChat(localPort, {
+      root: w.root,
+      snapshot: { url: store.url("stray/1"), sha256: saved.sha256 },
+    });
+
+    expect(git(stray, "rev-parse", "--abbrev-ref", "HEAD")).toBe("fix3");
+    expect(statusLines(stray)).toEqual([" M README.md", "?? notes.txt", "A  fix.txt"]);
+    expect(await NodeFSP.readFile(NodePath.join(stray, ".env.local"), "utf8")).toBe(
+      "SECRET=fix3\n",
+    );
+    expect(await exists(NodePath.join(stray, "node_modules")), "its install is derived").toBe(
+      false,
+    );
+    expect(statusLines(clone)).toEqual(["?? draft.txt", "M  staged.txt"]);
+    expect(await NodeFSP.readFile(NodePath.join(clone, ".env"), "utf8")).toBe("SECRET=clone\n");
+    expect(
+      [
+        await exists(NodePath.join(clone, "node_modules")),
+        await exists(NodePath.join(clone, "build.bin")),
+      ],
+      "a clone's ignored directories and large ignored files are derived",
+    ).toEqual([false, false]);
+  });
+
+  it("names the largest saved paths when a save cannot fit, and drops the note once one does", async () => {
+    const w = await world();
+    const store = await artifactStore();
+    await w.newMac("empty");
+    await adoptChatTemplate(localPort, templateIdentity(w));
+    await prepareRemoteHost(localPort, await w.prepareInput("chat-full", w.head()));
+    const home = NodePath.join(w.root, "home");
+    const capture = NodePath.join(home, "data", "runs", "capture.raw");
+    await NodeFSP.mkdir(NodePath.dirname(capture), { recursive: true });
+    await NodeFSP.writeFile(capture, Buffer.alloc(12 * 1024 * 1024, 2));
+    const save = (key: string) =>
+      saveChat(localPort, {
+        root: w.root,
+        mode: "live",
+        uploadUrl: store.url(key),
+        maxBytes: 8 * 1024 * 1024,
+        previousFingerprint: null,
+      });
+    const note = NodePath.join(home, ".t3", "save-failure.json");
+
+    await expect(save("full/1")).rejects.toThrow("The chat snapshot exceeds 8388608 bytes");
+    const failure = JSON.parse(await NodeFSP.readFile(note, "utf8"));
+    expect([failure.limit, failure.largest[0]]).toEqual([
+      8 * 1024 * 1024,
+      { path: NodePath.join(home, "data", "runs", "capture.raw"), bytes: 12 * 1024 * 1024 },
+    ]);
+
+    await NodeFSP.rm(capture);
+    expect((await save("full/2")).kind).toBe("saved");
+    expect(await exists(note)).toBe(false);
+  });
+
   it("keeps every chat's state out of the shared template and never adopts an unsealed volume", async () => {
     const w = await world();
     const store = await artifactStore();

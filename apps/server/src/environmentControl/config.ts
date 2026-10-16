@@ -29,28 +29,31 @@ const WorkspaceFile = Schema.Struct({
   source: TrimmedNonEmptyString,
   destination: RelativeFilePath,
 });
-const Commands = {
-  prepareCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
-  verifyCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
-};
 /**
- * A Namespace prepare command. `background: true` marks one that starts a service for the chat,
- * such as a dev server or a simulator, rather than preparing its checkout: an instance-engine
- * template builder runs no chat, so it skips these. Chats run every command as written.
+ * A repository prepare command. `background: true` marks one that starts a service for the chat,
+ * such as a dev server or a simulator, rather than preparing its checkout. Write it to start the
+ * service and exit once it is up, nonzero when it could not: a chat starts it without waiting for
+ * it, a copy of the chat's machine runs it to its end before the copy's job (see WorkerForks.ts),
+ * and an instance-engine template builder, which runs no chat, skips it.
  */
-const NamespacePrepareCommand = Schema.Union([
+const PrepareCommand = Schema.Union([
   TrimmedNonEmptyString,
   Schema.Struct({ command: TrimmedNonEmptyString, background: Schema.optional(Schema.Boolean) }),
 ]);
-export type NamespacePrepareCommand = typeof NamespacePrepareCommand.Type;
-const NamespaceCommands = {
-  ...Commands,
-  prepareCommands: Schema.optional(Schema.Array(NamespacePrepareCommand)),
+export type PrepareCommand = typeof PrepareCommand.Type;
+const Commands = {
+  prepareCommands: Schema.optional(Schema.Array(PrepareCommand)),
+  verifyCommands: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 };
-export const commandLine = (entry: NamespacePrepareCommand) =>
-  typeof entry === "string" ? entry : entry.command;
-export const isBackground = (entry: NamespacePrepareCommand) =>
+export const isBackground = (entry: PrepareCommand) =>
   typeof entry !== "string" && entry.background === true;
+/** The shell line a chat's preparation runs for an entry: a background one detached, into T3 home. */
+export const commandLine = (entry: PrepareCommand) =>
+  typeof entry === "string"
+    ? entry
+    : isBackground(entry)
+      ? `{ ${entry.command}\n} >> "$T3CODE_HOME/background-commands.log" 2>&1 < /dev/null &`
+      : entry.command;
 
 const E2bIdentity = Schema.Struct({
   sandboxId: TrimmedNonEmptyString,
@@ -180,7 +183,7 @@ const Provisioning = Schema.Struct({
         ),
         namespace: Schema.optional(
           Schema.Struct({
-            ...NamespaceCommands,
+            ...Commands,
             artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
             /**
              * Keep one prepared, stopped Mac of this repository for the next
@@ -323,7 +326,7 @@ const Provisioning = Schema.Struct({
       size: TrimmedNonEmptyString,
       region: Schema.optional(TrimmedNonEmptyString),
       idleTimeoutMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
-      ...NamespaceCommands,
+      ...Commands,
       artifacts: Schema.optional(Schema.Array(NamespaceArtifact)),
     }),
   ),

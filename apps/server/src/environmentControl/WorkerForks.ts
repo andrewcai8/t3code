@@ -116,6 +116,8 @@ interface Batch {
   readonly cancels: ReadonlyArray<Deferred.Deferred<void>>;
   readonly done: Deferred.Deferred<void>;
   readonly start: Effect.Effect<void>;
+  /** What each copy runs before its job to start the chat's services, read when it was reserved. */
+  readonly services: ReadonlyArray<string>;
   finishedAt: number | null;
 }
 
@@ -272,18 +274,21 @@ const make = Effect.gen(function* () {
       }),
       ({ forkId, startedAt }) =>
         Effect.gen(function* () {
-          const exit = yield* machines.run(forkId, { command: job.command, cwd, timeoutMs }).pipe(
-            Effect.timeoutOrElse({
-              duration: Duration.millis(timeoutMs + RUN_GRACE_MS),
-              orElse: () =>
-                Effect.fail(
-                  new ForkMachines.ForkMachineError({
-                    step: "run",
-                    cause: new Error("The copy stopped answering"),
-                  }),
-                ),
-            }),
-          );
+          const services = { commands: batch.services, cwd: source.projectDir ?? "/home/user" };
+          const exit = yield* machines
+            .run(forkId, { command: job.command, cwd, timeoutMs, services })
+            .pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.millis(timeoutMs + RUN_GRACE_MS),
+                orElse: () =>
+                  Effect.fail(
+                    new ForkMachines.ForkMachineError({
+                      step: "run",
+                      cause: new Error("The copy stopped answering"),
+                    }),
+                  ),
+              }),
+            );
           const durationMs = (yield* Clock.currentTimeMillis) - startedAt;
           const problems: Array<string> = [];
           let logsUri: string | undefined;
@@ -458,14 +463,16 @@ const make = Effect.gen(function* () {
         if ((job.outputs ?? []).some(hasParentSegment))
           return yield* failure("invalid_request", "Output paths cannot contain '..'.");
       }
-      const settings = yield* machines.settings.pipe(
-        Effect.mapError(() =>
-          failure("environment_unavailable", "The host could not read its cloud settings."),
-        ),
-      );
+      const settings = yield* machines
+        .settings(source.repository)
+        .pipe(
+          Effect.mapError(() =>
+            failure("environment_unavailable", "The host could not read its cloud settings."),
+          ),
+        );
       if (settings === null)
         return yield* failure("environment_unavailable", "This host has no cloud configuration.");
-      const limits = forkLimits(settings);
+      const limits = forkLimits(settings.limits);
       const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const done = yield* Deferred.make<void>();
       yield* prune;
@@ -496,6 +503,7 @@ const make = Effect.gen(function* () {
             Effect.asVoid,
           );
         }),
+        services: settings.services,
         finishedAt: null,
       };
       batches.set(batch.id, batch);
