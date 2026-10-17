@@ -6,7 +6,7 @@ import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/envir
 import { isHomeProject, isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { FolderPlusIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { openCommandPalette } from "~/commandPaletteBus";
 import { shortcutLabelForCommand } from "~/keybindings";
@@ -73,7 +73,7 @@ export function DraftHeroHeadline({
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
   const applyStickyState = useComposerDraftStore((store) => store.applyStickyState);
   const setModelSelection = useComposerDraftStore((store) => store.setModelSelection);
-  const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
+  const openAddProject = () => openCommandPalette({ open: "add-project" });
   const { scratchEnvironmentId, scratchWorkspaceRootFor, openScratchProject } = useScratchProject();
   const openProjectDraft = useNewThreadHandler();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -81,66 +81,41 @@ export function DraftHeroHeadline({
     primaryServerConfigAtom,
     (config) => config?.homeWorkspaceRoot ?? null,
   );
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState("");
+  const pickerFilter = useComboboxFilter();
 
-  const environmentLabelById = useMemo(
-    () =>
-      new Map(
-        environments.map((environment) => [environment.environmentId, environment.label] as const),
-      ),
-    [environments],
+  const environmentLabelById = new Map(
+    environments.map((environment) => [environment.environmentId, environment.label] as const),
   );
-  const projectGroups = useMemo(
-    () =>
-      sortLogicalProjectsForSidebar(
-        buildSidebarProjectSnapshots({
-          projects,
-          settings: projectGroupingSettings,
-          primaryEnvironmentId,
-          resolveEnvironmentLabel: (environmentId) =>
-            environmentLabelById.get(environmentId) ?? null,
-        }),
-        threads,
-        projectSortOrder,
-      ),
-    [
-      environmentLabelById,
-      primaryEnvironmentId,
-      projectGroupingSettings,
-      projectSortOrder,
+  const projectGroups = sortLogicalProjectsForSidebar(
+    buildSidebarProjectSnapshots({
       projects,
-      threads,
-    ],
+      settings: projectGroupingSettings,
+      primaryEnvironmentId,
+      resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
+    }),
+    threads,
+    projectSortOrder,
   );
-  const showProjectEnvironments = useMemo(
-    () => projectGroupsSpanEnvironments(projectGroups),
-    [projectGroups],
-  );
-  const environmentMachineById = useMemo(
-    () =>
-      new Map(
-        environments.map(
-          (environment) =>
-            [
-              environment.environmentId,
-              resolveEnvironmentMachineKind(environment.serverConfig),
-            ] as const,
-        ),
-      ),
-    [environments],
+  const showProjectEnvironments = projectGroupsSpanEnvironments(projectGroups);
+  const environmentMachineById = new Map(
+    environments.map(
+      (environment) =>
+        [
+          environment.environmentId,
+          resolveEnvironmentMachineKind(environment.serverConfig),
+        ] as const,
+    ),
   );
   const newChatPlacement = useNewChatPlacement();
-  const projectPickerEntries = useMemo(
-    () =>
-      buildSidebarProjectPickerEntries({
-        groups: projectGroups,
-        preferredProjectRef: activeProjectRef,
-        ...newChatPlacement,
-      }),
-    [activeProjectRef, newChatPlacement, projectGroups],
-  );
-  const projectEntryByKey = useMemo(
-    () => new Map(projectPickerEntries.map((entry) => [entry.group.projectKey, entry] as const)),
-    [projectPickerEntries],
+  const projectPickerEntries = buildSidebarProjectPickerEntries({
+    groups: projectGroups,
+    preferredProjectRef: activeProjectRef,
+    ...newChatPlacement,
+  });
+  const projectEntryByKey = new Map(
+    projectPickerEntries.map((entry) => [entry.group.projectKey, entry] as const),
   );
   const activeProjectGroup =
     activeProjectRef === null
@@ -155,17 +130,13 @@ export function DraftHeroHeadline({
   const hasResolvedProject = activeProjectTitle !== null;
   const canChooseProject = projectPickerEntries.length > 0;
   const shouldShowProjectMenu = canChooseProject;
-  const menuEntries = useMemo(
-    () =>
-      projectPickerEntries.filter(
-        ({ targetProject }) =>
-          !isScratchProject(targetProject, scratchWorkspaceRootFor(targetProject.environmentId)) &&
-          !(
-            targetProject.environmentId === primaryEnvironmentId &&
-            isHomeProject(targetProject, homeWorkspaceRoot)
-          ),
+  const menuEntries = projectPickerEntries.filter(
+    ({ targetProject }) =>
+      !isScratchProject(targetProject, scratchWorkspaceRootFor(targetProject.environmentId)) &&
+      !(
+        targetProject.environmentId === primaryEnvironmentId &&
+        isHomeProject(targetProject, homeWorkspaceRoot)
       ),
-    [homeWorkspaceRoot, primaryEnvironmentId, projectPickerEntries, scratchWorkspaceRootFor],
   );
   const activeProject =
     activeProjectRef === null
@@ -182,25 +153,19 @@ export function DraftHeroHeadline({
   const isScratchDraft =
     activeProject !== null && isScratchProject(activeProject, scratchWorkspaceRoot);
 
-  const pickerItems = useMemo<readonly PickerItem[]>(
-    () => [
-      ...menuEntries.map(({ group }) => ({ value: group.projectKey, label: group.displayName })),
-      { value: ADD_PROJECT_VALUE, label: "Add project" },
-    ],
-    [menuEntries],
-  );
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerQuery, setPickerQuery] = useState("");
-  const pickerFilter = useComboboxFilter();
-  const filteredPickerItems = useMemo(() => {
-    const query = pickerQuery.trim();
-    if (query.length === 0) return pickerItems;
-    return pickerItems.filter(
-      (item) =>
-        item.value !== ADD_PROJECT_VALUE &&
-        pickerFilter.contains(item, query, (candidate) => candidate.label),
-    );
-  }, [pickerFilter, pickerItems, pickerQuery]);
+  const pickerItems: readonly PickerItem[] = [
+    ...menuEntries.map(({ group }) => ({ value: group.projectKey, label: group.displayName })),
+    { value: ADD_PROJECT_VALUE, label: "Add project" },
+  ];
+  const pickerSearch = pickerQuery.trim();
+  const filteredPickerItems =
+    pickerSearch.length === 0
+      ? pickerItems
+      : pickerItems.filter(
+          (item) =>
+            item.value !== ADD_PROJECT_VALUE &&
+            pickerFilter.contains(item, pickerSearch, (candidate) => candidate.label),
+        );
   const selectedPickerItem = pickerItems.find((item) => item.value === activeProjectKey) ?? null;
 
   // The picker can change the draft's target while the no-project home is

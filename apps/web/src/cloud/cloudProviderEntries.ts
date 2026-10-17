@@ -3,8 +3,6 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
-import { useMemo } from "react";
-
 import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
@@ -68,10 +66,7 @@ export function useCloudProviderPicker(input: {
   readonly selectedInstanceId: ProviderInstanceId;
 }) {
   const { startsCloudEnvironment, entries, selectedProvider, selectedInstanceId } = input;
-  const instanceEntries = useMemo(
-    () => (startsCloudEnvironment ? cloudProviderEntries(entries) : entries),
-    [entries, startsCloudEnvironment],
-  );
+  const instanceEntries = startsCloudEnvironment ? cloudProviderEntries(entries) : entries;
   const activeInstanceId =
     (startsCloudEnvironment
       ? instanceEntries.find((entry) => entry.driverKind === selectedProvider)?.instanceId

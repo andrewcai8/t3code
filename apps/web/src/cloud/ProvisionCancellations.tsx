@@ -27,11 +27,9 @@ export function ProvisionCancellations() {
     const drain = async () => {
       if (draining) return;
       draining = true;
-      try {
-        await cancelRequests();
-      } finally {
+      await cancelRequests().finally(() => {
         draining = false;
-      }
+      });
     };
     const trigger = () => {
       void drain();

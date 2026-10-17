@@ -2,7 +2,7 @@ import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { createRunningBoxDemandAtom } from "@t3tools/client-runtime/state/boxDemand";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -46,7 +46,7 @@ export function CloudBoxes() {
   }, [catalogReady, markBoxes]);
 
   const hosts = useCloudHosts();
-  const hostIds = useMemo(() => hosts.map((host) => host.environmentId), [hosts]);
+  const hostIds = hosts.map((host) => host.environmentId);
   const lists = useAtomValue(serverEnvironment.hostBoxLists(hostIds));
   useEffect(() => {
     void syncHostBoxes(lists);
