@@ -272,7 +272,10 @@ export function useNewChatRunTargets(input: {
   readonly environmentById: ReadonlyMap<EnvironmentId, EnvironmentPresentation>;
   readonly environmentId: EnvironmentId | null;
   readonly draftId: DraftId | null;
-  readonly managerConfig: ServerConfig | null | undefined;
+  readonly managerConfig:
+    | Pick<ServerConfig, "environmentControl" | "provisionProviders">
+    | null
+    | undefined;
 }) {
   const { environmentById, environmentId, draftId, managerConfig } = input;
   const projectEnvironments = knownRunOnEnvironments(input.projectEnvironments, environmentById);
