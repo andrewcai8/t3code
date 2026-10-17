@@ -154,12 +154,11 @@ export function ProvisionedEnvironmentConnections({
   ) {
     setBusy(environment.requestId);
     setMessage(null);
-    try {
-      setMessage(await action());
-    } finally {
+    const outcome = await action().finally(() => {
       setBusy(null);
       refresh();
-    }
+    });
+    setMessage(outcome);
   }
   const resumeEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
     act(environment, async () => {

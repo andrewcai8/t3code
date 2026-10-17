@@ -1,7 +1,5 @@
 import { runsLocalAgents } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useMemo } from "react";
-
 import type { EnvironmentPresentation } from "../../state/environments";
 import { CloudComputeControls } from "./CloudComputeControls";
 import { ProvisionedEnvironmentConnections } from "./ProvisionedEnvironmentConnections";
@@ -48,8 +46,5 @@ export function CloudConnectionsSettings({
 export function useAgentRunningEnvironments(
   environments: ReadonlyArray<EnvironmentPresentation>,
 ): ReadonlyArray<EnvironmentPresentation> {
-  return useMemo(
-    () => environments.filter((environment) => runsLocalAgents(environment.serverConfig)),
-    [environments],
-  );
+  return environments.filter((environment) => runsLocalAgents(environment.serverConfig));
 }

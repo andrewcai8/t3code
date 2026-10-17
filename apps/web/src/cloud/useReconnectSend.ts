@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type ReconnectResult =
   | { readonly kind: "ready" }
@@ -18,31 +18,29 @@ export function useReconnectSend<Input>(options: {
   const [pending, setPending] = useState<Pending | null>(null);
   const pendingRef = useRef<Pending | null>(null);
   const { threadKey, ready, recover, send, onFailure, onAbandoned } = options;
-  const reconnectAndSend = useCallback(
-    async (environmentId: EnvironmentId, input: Input) => {
-      if (pendingRef.current) return;
-      const request = { threadKey, input, ready: false };
-      pendingRef.current = request;
-      setPending(request);
-      const recovered = await recover(environmentId);
-      if (pendingRef.current !== request) return;
-      if (recovered.kind === "ready") {
-        const next = { ...request, ready: true };
-        pendingRef.current = next;
-        setPending(next);
-      } else {
-        pendingRef.current = null;
-        setPending(null);
-        onFailure(recovered.message);
-      }
-    },
-    [threadKey, recover, onFailure],
-  );
+  const reconnectAndSend = async (environmentId: EnvironmentId, input: Input) => {
+    if (pendingRef.current) return;
+    const request = { threadKey, input, ready: false };
+    pendingRef.current = request;
+    setPending(request);
+    const recovered = await recover(environmentId);
+    if (pendingRef.current !== request) return;
+    if (recovered.kind === "ready") {
+      const next = { ...request, ready: true };
+      pendingRef.current = next;
+      setPending(next);
+    } else {
+      pendingRef.current = null;
+      setPending(null);
+      onFailure(recovered.message);
+    }
+  };
 
   useEffect(() => {
     if (!pending || pendingRef.current !== pending) return;
     if (pending.threadKey !== threadKey) {
       pendingRef.current = null;
+      // oxlint-disable-next-line react/set-state-in-effect -- The abandon notice below must run once, after the navigation commits.
       setPending(null);
       onAbandoned();
       return;
@@ -64,11 +62,11 @@ export function useReconnectSend<Input>(options: {
     },
     [],
   );
-  const isPending = useCallback(() => pendingRef.current !== null, []);
+  const isPending = () => pendingRef.current !== null;
   /** Stops waiting to send; the message stays in the composer. */
-  const cancel = useCallback(() => {
+  const cancel = () => {
     pendingRef.current = null;
     setPending(null);
-  }, []);
+  };
   return { reconnectAndSend, reconnecting: pending !== null, isPending, cancel };
 }

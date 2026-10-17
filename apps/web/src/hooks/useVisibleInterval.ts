@@ -1,12 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent } from "react";
 
 /**
  * Calls `callback` every `ms` while the page is visible, and once each time it becomes visible
  * again, so a hidden tab costs nothing and catches up with one call when it returns.
  */
 export function useVisibleInterval(callback: () => void, ms: number, enabled: boolean): void {
-  const latest = useRef(callback);
-  latest.current = callback;
+  const tick = useEffectEvent(callback);
 
   useEffect(() => {
     if (!enabled) return;
@@ -15,10 +14,10 @@ export function useVisibleInterval(callback: () => void, ms: number, enabled: bo
       clearInterval(timer);
       timer = undefined;
       if (document.visibilityState !== "visible") return;
-      timer = setInterval(() => latest.current(), ms);
+      timer = setInterval(() => tick(), ms);
     };
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") latest.current();
+      if (document.visibilityState === "visible") tick();
       sync();
     };
     sync();

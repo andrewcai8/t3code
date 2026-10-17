@@ -28,11 +28,7 @@ export function SavedCloudBoxConnections() {
   if (boxes.length === 0) return null;
   const run = async (environmentId: EnvironmentId, action: () => Promise<unknown>) => {
     setBusy(environmentId);
-    try {
-      await action();
-    } finally {
-      setBusy(null);
-    }
+    await action().finally(() => setBusy(null));
   };
   return (
     <SettingsSection title="Cloud machine connections">

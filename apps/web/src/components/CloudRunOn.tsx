@@ -6,7 +6,7 @@ import type {
   VcsRef,
 } from "@t3tools/contracts";
 import { ChevronDownIcon, CloudIcon, GitBranchIcon } from "lucide-react";
-import { type Ref, useDeferredValue, useImperativeHandle, useMemo, useState } from "react";
+import { type Ref, useDeferredValue, useImperativeHandle, useState } from "react";
 
 import { cn } from "../lib/utils";
 import { useEnvironmentQuery } from "../state/query";
@@ -190,20 +190,14 @@ export function CloudBaseBranchSelector({
           },
         }),
   );
-  const refs = useMemo(
-    () => cloudBaseRefs(listed.data?.refs ?? [], repositoryIdentity),
-    [listed.data, repositoryIdentity],
-  );
-  const refByName = useMemo(() => new Map(refs.map((ref) => [ref.name, ref] as const)), [refs]);
-  const items = useMemo(() => refs.map((ref) => ref.name), [refs]);
+  const refs = cloudBaseRefs(listed.data?.refs ?? [], repositoryIdentity);
+  const refByName = new Map(refs.map((ref) => [ref.name, ref] as const));
+  const items = refs.map((ref) => ref.name);
   const normalizedQuery = deferredQuery.toLowerCase();
-  const filteredItems = useMemo(
-    () =>
-      normalizedQuery.length === 0
-        ? items
-        : items.filter((name) => name.toLowerCase().includes(normalizedQuery)),
-    [items, normalizedQuery],
-  );
+  const filteredItems =
+    normalizedQuery.length === 0
+      ? items
+      : items.filter((name) => name.toLowerCase().includes(normalizedQuery));
   const value = base.branch ?? refs.find((ref) => ref.isDefault)?.name ?? null;
   const loading = listed.isPending && listed.data === null;
   const disabled = base.onChange === null || loading;

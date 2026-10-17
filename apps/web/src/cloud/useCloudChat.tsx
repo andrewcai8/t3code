@@ -36,15 +36,7 @@ import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@t3t
 import { truncate } from "@t3tools/shared/String";
 import { AsyncResult } from "effect/reactivity";
 import { SendIcon } from "lucide-react";
-import {
-  type RefObject,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { EnvironmentOption } from "../components/BranchToolbar.logic";
 import type { ChatComposerHandle } from "../components/chat/ChatComposer";
@@ -258,7 +250,7 @@ export function useChatEnvironmentById(input: {
       readyBoxEnvironmentId ?? (ownBox?.draftId === draftId ? ownBox.environmentId : null),
     boxIds,
   });
-  const environmentById = useMemo(() => {
+  const environmentById = (() => {
     const byId = new Map(
       environments.map((environment) => [environment.environmentId, environment]),
     );
@@ -266,7 +258,7 @@ export function useChatEnvironmentById(input: {
       byId.set(activeEnvironment.environmentId, activeEnvironment);
     }
     return byId;
-  }, [activeEnvironment, environments, onAnotherChatsBox]);
+  })();
   useBoxDemand(onAnotherChatsBox ? null : environmentId);
   return { environmentById, onAnotherChatsBox };
 }
@@ -283,20 +275,13 @@ export function useNewChatRunTargets(input: {
   readonly managerConfig: ServerConfig | null | undefined;
 }) {
   const { environmentById, environmentId, draftId, managerConfig } = input;
-  const projectEnvironments = useMemo(
-    () => knownRunOnEnvironments(input.projectEnvironments, environmentById),
-    [input.projectEnvironments, environmentById],
-  );
-  const runTargets = useMemo(
-    () =>
-      newChatRunTargets({
-        environments: projectEnvironments,
-        environmentState: (id) => environmentById.get(id),
-        environmentId,
-        managerConfig,
-      }),
-    [projectEnvironments, environmentById, environmentId, managerConfig],
-  );
+  const projectEnvironments = knownRunOnEnvironments(input.projectEnvironments, environmentById);
+  const runTargets = newChatRunTargets({
+    environments: projectEnvironments,
+    environmentState: (id) => environmentById.get(id),
+    environmentId,
+    managerConfig,
+  });
   return {
     runTargets,
     logicalProjectEnvironments: draftId ? runTargets.environments : projectEnvironments,
@@ -350,8 +335,11 @@ export function useCloudChat(input: {
     automaticEnvironment,
     sendInFlightRef,
   } = input;
+  // Handlers read the latest props through this; render reads `input` itself.
   const inputRef = useRef(input);
-  inputRef.current = input;
+  useLayoutEffect(() => {
+    inputRef.current = input;
+  });
 
   // The cloud kind the user picked; `requested` adds the default.
   const [choice, setChoice] = useState<CloudProvider | null>(null);
@@ -363,6 +351,8 @@ export function useCloudChat(input: {
   // internal call cross the send guard once; an ordinary send still waits for the handoff.
   const resumingRef = useRef(false);
   const heldRef = useRef<HeldCloudSend | null>(null);
+  // The message this page holds, with its local previews; a restored hold shows the record's.
+  const [heldLocalMessage, setHeldLocalMessage] = useState<ChatMessage | null>(null);
   // The held message this page sent; a failed send gives it back to the composer, not the timeline.
   const [sentHeldMessageId, setSentHeldMessageId] = useState<string | null>(null);
 
@@ -397,10 +387,13 @@ export function useCloudChat(input: {
           threadContexts: [],
         }
       : null;
+    // oxlint-disable-next-line react/set-state-in-effect -- Runs once per draft, alongside the ref resets above that render must not do.
     if (!restored) setChoice(null);
   }, [draftId, sendInFlightRef, threadId]);
 
+  // The draft's record, which other pages write too, resets what this page's own handlers set.
   useLayoutEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- Follows each new record; this page's handlers also set these between records.
     setSetupPhase(pending?.phase ?? null);
     if (!pending) {
       setReadyEnvironmentId(null);
@@ -416,13 +409,10 @@ export function useCloudChat(input: {
   }, [pending]);
 
   // The manager picks the account; this instance is only the hint the picker shows for the driver.
-  const cloudAccount = useMemo(
-    () =>
-      cloudProviderEntries(input.providerInstanceEntries).find(
-        (entry) => entry.driverKind === input.activeProviderStatus?.driver,
-      )?.snapshot ?? input.activeProviderStatus,
-    [input.activeProviderStatus, input.providerInstanceEntries],
-  );
+  const cloudAccount =
+    cloudProviderEntries(input.providerInstanceEntries).find(
+      (entry) => entry.driverKind === input.activeProviderStatus?.driver,
+    )?.snapshot ?? input.activeProviderStatus;
   const offeredProviders = runTargets.cloudProviders;
   const canCreate =
     draftId !== null &&
@@ -436,36 +426,26 @@ export function useCloudChat(input: {
       : null);
   const creating = isInProgressCloudProvisioningPhase(setupPhase);
 
-  const onSelect = useCallback(
-    (provider: CloudProvider) => {
-      if (!canCreate) return;
-      setChoice(provider);
-      setReadyEnvironmentId(null);
-      const label = cloudEnvironmentLabel(provider);
-      toastManager.add({
-        type: "info",
-        title: `${label} selected`,
-        description: `Your ${label} environment will start when you send the first message.`,
-      });
-    },
-    [canCreate],
-  );
+  const onSelect = (provider: CloudProvider) => {
+    if (!canCreate) return;
+    setChoice(provider);
+    setReadyEnvironmentId(null);
+    const label = cloudEnvironmentLabel(provider);
+    toastManager.add({
+      type: "info",
+      title: `${label} selected`,
+      description: `Your ${label} environment will start when you send the first message.`,
+    });
+  };
   // While a cloud environment is pending, the branch picker chooses the branch it clones. The
   // choice is fixed once a send has reserved the request.
-  const base = useMemo<CloudBaseBranch | undefined>(
-    () =>
-      requested !== null && cloneRepository(activeProject?.repositoryIdentity)
-        ? { branch: baseBranch, onChange: setupPhase === null ? setBaseBranch : null }
-        : undefined,
-    [activeProject, baseBranch, setupPhase, requested],
-  );
-  const runOn = useMemo<CloudRunOn | undefined>(
-    () =>
-      canCreate
-        ? { providers: offeredProviders, onSelect, creating, pending: requested, base }
-        : undefined,
-    [base, canCreate, creating, offeredProviders, onSelect, requested],
-  );
+  const base: CloudBaseBranch | undefined =
+    requested !== null && cloneRepository(activeProject?.repositoryIdentity)
+      ? { branch: baseBranch, onChange: setupPhase === null ? setBaseBranch : null }
+      : undefined;
+  const runOn: CloudRunOn | undefined = canCreate
+    ? { providers: offeredProviders, onSelect, creating, pending: requested, base }
+    : undefined;
 
   // A draft on an expired box, or on another chat's box or a host that runs no agents with no
   // cloud kind to start instead, moves to a machine that can take it.
@@ -476,25 +456,16 @@ export function useCloudChat(input: {
     runTargets.redirect?.kind === "environment"
       ? runTargets.redirect.environment
       : null;
-  const projectOffAnotherChatsBox = useMemo(
-    () =>
-      input.onAnotherChatsBox && activeProject
-        ? newChatProject({
-            requested: scopeProjectRef(activeProject.environmentId, activeProject.id),
-            projects: input.allProjects,
-            logicalProjectKey: (project) =>
-              deriveLogicalProjectKeyFromSettings(project, input.projectGroupingSettings),
-            environmentState: (environmentId) => input.environmentById.get(environmentId),
-          })
-        : null,
-    [
-      activeProject,
-      input.allProjects,
-      input.environmentById,
-      input.onAnotherChatsBox,
-      input.projectGroupingSettings,
-    ],
-  );
+  const projectOffAnotherChatsBox =
+    input.onAnotherChatsBox && activeProject
+      ? newChatProject({
+          requested: scopeProjectRef(activeProject.environmentId, activeProject.id),
+          projects: input.allProjects,
+          logicalProjectKey: (project) =>
+            deriveLogicalProjectKeyFromSettings(project, input.projectGroupingSettings),
+          environmentState: (environmentId) => input.environmentById.get(environmentId),
+        })
+      : null;
   useEffect(() => {
     if (!draftId || !projectOffAnotherChatsBox || sendInFlightRef.current) return;
     useComposerDraftStore.getState().setDraftThreadContext(draftId, {
@@ -522,54 +493,48 @@ export function useCloudChat(input: {
   }, [draftId, redirectEnvironment, sendInFlightRef]);
 
   /** Auto balance or another machine replaces the cloud choice. */
-  const onEnvironmentPicked = useCallback(
-    (nextEnvironmentId: EnvironmentId | null) => {
-      setChoice(null);
-      setReadyEnvironmentId(null);
-      if (draftId === null || nextEnvironmentId === null) return;
-      // Moving off the box this draft provisioned lets the box go, so no later send claims it.
-      const lease = provisionedSandboxFor(draftId);
-      if (
-        lease &&
-        !leaseReachesBox(
-          draftBoxLease(lease, readyDraftBoxEnvironmentId(draftId)),
-          nextEnvironmentId,
-          catalogBoxManager,
-        )
-      ) {
-        cancelProvisionRequest(draftId);
-        setDraftPendingEnvironmentSend(draftId, null);
-      }
-    },
-    [draftId],
-  );
+  const onEnvironmentPicked = (nextEnvironmentId: EnvironmentId | null) => {
+    setChoice(null);
+    setReadyEnvironmentId(null);
+    if (draftId === null || nextEnvironmentId === null) return;
+    // Moving off the box this draft provisioned lets the box go, so no later send claims it.
+    const lease = provisionedSandboxFor(draftId);
+    if (
+      lease &&
+      !leaseReachesBox(
+        draftBoxLease(lease, readyDraftBoxEnvironmentId(draftId)),
+        nextEnvironmentId,
+        catalogBoxManager,
+      )
+    ) {
+      cancelProvisionRequest(draftId);
+      setDraftPendingEnvironmentSend(draftId, null);
+    }
+  };
 
-  const provision = useCallback(
-    async (
-      startedDraftId: DraftId,
-      handoff: {
-        readonly agentDriver: ProviderDriverKind;
-        readonly modelSelection: ModelSelection;
-      },
-      chat: ProvisionChat | undefined,
-    ) => {
-      if (!requested || !canCreate || primaryEnvironmentId === null || !cloudAccount) return;
-      // Saved with the draft, so a page that picks the send back up sends it on the same model.
-      patchDraftPendingEnvironmentSend(startedDraftId, { modelSelection: handoff.modelSelection });
-      await cloudSends.start({
-        draftId: startedDraftId,
-        managerEnvironmentId: primaryEnvironmentId,
-        input: {
-          provider: requested,
-          providerInstanceId: cloudAccount.instanceId,
-          agentDriver: handoff.agentDriver,
-          ...cloudCloneSource(activeProject?.repositoryIdentity, baseBranch),
-          ...(chat ? { chat } : {}),
-        },
-      });
+  const provision = async (
+    startedDraftId: DraftId,
+    handoff: {
+      readonly agentDriver: ProviderDriverKind;
+      readonly modelSelection: ModelSelection;
     },
-    [activeProject, baseBranch, canCreate, cloudAccount, primaryEnvironmentId, requested],
-  );
+    chat: ProvisionChat | undefined,
+  ) => {
+    if (!requested || !canCreate || primaryEnvironmentId === null || !cloudAccount) return;
+    // Saved with the draft, so a page that picks the send back up sends it on the same model.
+    patchDraftPendingEnvironmentSend(startedDraftId, { modelSelection: handoff.modelSelection });
+    await cloudSends.start({
+      draftId: startedDraftId,
+      managerEnvironmentId: primaryEnvironmentId,
+      input: {
+        provider: requested,
+        providerInstanceId: cloudAccount.instanceId,
+        agentDriver: handoff.agentDriver,
+        ...cloudCloneSource(activeProject?.repositoryIdentity, baseBranch),
+        ...(chat ? { chat } : {}),
+      },
+    });
+  };
 
   /**
    * A draft's first send while a cloud kind is chosen: shows the message, clears the composer, and
@@ -697,6 +662,7 @@ export function useCloudChat(input: {
       reviewComments,
       threadContexts,
     };
+    setHeldLocalMessage(message);
     setDraftPendingEnvironmentSend(draftId, {
       provider: requested,
       preview: pendingCloudSendPreview(outgoingMessageText),
@@ -739,7 +705,7 @@ export function useCloudChat(input: {
     return true;
   };
 
-  const cancelSetup = useCallback(() => {
+  const cancelSetup = () => {
     const { composerRef, promptRef, composerDraftTarget } = inputRef.current;
     if (draftId !== null) {
       cancelProvisionRequest(draftId);
@@ -748,6 +714,7 @@ export function useCloudChat(input: {
     sendInFlightRef.current = false;
     const held = heldRef.current;
     heldRef.current = null;
+    setHeldLocalMessage(null);
     if (!held) return;
     revokeUserMessagePreviewUrls(held.message);
     const store = useComposerDraftStore.getState();
@@ -768,9 +735,9 @@ export function useCloudChat(input: {
       prompt: held.prompt,
       detectTrigger: true,
     });
-  }, [draftId, sendInFlightRef]);
+  };
 
-  const environmentSetup = useMemo<CloudEnvironmentSetupSnapshot | null>(() => {
+  const environmentSetup = ((): CloudEnvironmentSetupSnapshot | null => {
     if (setupPhase === null || pending === null) return null;
     const repository = cloneRepository(activeProject?.repositoryIdentity);
     return {
@@ -781,61 +748,52 @@ export function useCloudChat(input: {
       ...(pending.error ? { error: pending.error } : {}),
       ...(repository ? { repository } : {}),
     };
-  }, [activeProject, pending, setupPhase]);
-  const environmentSetupCard = useMemo(
-    () =>
-      environmentSetup === null ? null : (
-        <EnvironmentSetupFooter snapshot={environmentSetup} onCancel={cancelSetup} />
-      ),
-    [cancelSetup, environmentSetup],
-  );
-  const heldMessage = useMemo(
-    () =>
-      pending === null || pending.messageId === sentHeldMessageId
-        ? null
-        : heldRef.current?.message.id === pending.messageId
-          ? heldRef.current.message
-          : heldMessageFromRecord(pending),
-    [pending, sentHeldMessageId],
-  );
+  })();
+  const environmentSetupCard =
+    environmentSetup === null ? null : (
+      <EnvironmentSetupFooter snapshot={environmentSetup} onCancel={cancelSetup} />
+    );
+  const heldMessage =
+    pending === null || pending.messageId === sentHeldMessageId
+      ? null
+      : heldLocalMessage?.id === pending.messageId
+        ? heldLocalMessage
+        : heldMessageFromRecord(pending);
 
   // The send button spins while a queued send waits for its environment, through a box's wake.
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const awaitEnvironmentConnected = useAtomCommand(environmentCatalog.awaitConnected, {
     reportFailure: false,
   });
-  const recoverForSend = useCallback(
-    async (environmentId: EnvironmentId): Promise<ReconnectResult> => {
-      await retryEnvironment(environmentId);
-      const connected = await awaitEnvironmentConnected(environmentId);
-      if (connected._tag !== "Failure") return { kind: "ready" };
-      const error = squashAtomCommandFailure(connected);
-      return {
-        kind: "failed",
-        message: error instanceof Error ? error.message : "The environment could not reconnect.",
-      };
-    },
-    [awaitEnvironmentConnected, retryEnvironment],
-  );
-  const sendReconnected = useCallback((pendingSend: ReconnectedSend) => {
+  const recoverForSend = async (environmentId: EnvironmentId): Promise<ReconnectResult> => {
+    await retryEnvironment(environmentId);
+    const connected = await awaitEnvironmentConnected(environmentId);
+    if (connected._tag !== "Failure") return { kind: "ready" };
+    const error = squashAtomCommandFailure(connected);
+    return {
+      kind: "failed",
+      message: error instanceof Error ? error.message : "The environment could not reconnect.",
+    };
+  };
+  const sendReconnected = (pendingSend: ReconnectedSend) => {
     void inputRef.current.send(
       pendingSend.dispatchMode,
       pendingSend.submissionIntent,
       pendingSend.directAnnotation,
     );
-  }, []);
-  const notifyReconnectSendAbandoned = useCallback(() => {
+  };
+  const notifyReconnectSendAbandoned = () => {
     toastManager.add({
       type: "info",
       title: "Message not sent",
       description: "You left the chat before it reconnected. The message is still in its composer.",
     });
-  }, []);
-  const notifyReconnectSendFailed = useCallback((message: string) => {
+  };
+  const notifyReconnectSendFailed = (message: string) => {
     toastManager.add(
       stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
     );
-  }, []);
+  };
   const reconnect = useReconnectSend<ReconnectedSend>({
     threadKey: input.routeThreadKey,
     ready: input.sendReady,
@@ -847,25 +805,21 @@ export function useCloudChat(input: {
   const { cancel: cancelReconnectSend, reconnecting } = reconnect;
   // A send waiting on a reconnect, which a box's wake can stretch to minutes, can be called off;
   // its message stays in the composer.
-  const bannerItems = useMemo<ComposerBannerStackItem[]>(
-    () =>
-      reconnecting
-        ? [
-            {
-              id: `pending-send:${input.routeThreadKey}`,
-              variant: "info",
-              icon: <SendIcon />,
-              title: "Your message sends once this chat reconnects",
-              actions: (
-                <Button size="xs" variant="ghost" onClick={cancelReconnectSend}>
-                  Cancel send
-                </Button>
-              ),
-            },
-          ]
-        : [],
-    [cancelReconnectSend, input.routeThreadKey, reconnecting],
-  );
+  const bannerItems: ComposerBannerStackItem[] = reconnecting
+    ? [
+        {
+          id: `pending-send:${input.routeThreadKey}`,
+          variant: "info",
+          icon: <SendIcon />,
+          title: "Your message sends once this chat reconnects",
+          actions: (
+            <Button size="xs" variant="ghost" onClick={cancelReconnectSend}>
+              Cancel send
+            </Button>
+          ),
+        },
+      ]
+    : [];
 
   // Once the environment is ready and the draft points at it, the held message goes out.
   const activeProjectEnvironmentId = activeProject?.environmentId ?? null;
@@ -904,11 +858,9 @@ export function useCloudChat(input: {
         if (heldRef.current !== held) return;
         sendInFlightRef.current = false;
         resumingRef.current = true;
-        try {
-          await inputRef.current.send();
-        } finally {
+        await inputRef.current.send().finally(() => {
           resumingRef.current = false;
-        }
+        });
       })
       .finally(() => {
         if (heldRef.current !== held) return;

@@ -30,21 +30,19 @@ export function CloudComputeControls({
   async function act(environmentId: EnvironmentId, action: "start" | "stop") {
     setPending(environmentId);
     setMessage(null);
-    try {
-      const result = await (action === "start" ? start : stop)({
-        environmentId: managerId,
-        input: { environmentId },
-      });
-      if (AsyncResult.isFailure(result))
-        setMessage("Compute command failed. Refresh to check the provider state.");
-      else if (result.value.kind === "refused") setMessage(result.value.message);
-      else if (action === "start" && !onStarted(environmentId))
-        setMessage(
-          "Started. Choose this environment in T3 Connect or pair with it to connect this device.",
-        );
-    } finally {
-      setPending(null);
-    }
+    // An atom command settles into a result, so the cleanup can follow the await.
+    const result = await (action === "start" ? start : stop)({
+      environmentId: managerId,
+      input: { environmentId },
+    });
+    setPending(null);
+    if (AsyncResult.isFailure(result))
+      setMessage("Compute command failed. Refresh to check the provider state.");
+    else if (result.value.kind === "refused") setMessage(result.value.message);
+    else if (action === "start" && !onStarted(environmentId))
+      setMessage(
+        "Started. Choose this environment in T3 Connect or pair with it to connect this device.",
+      );
   }
   if (!query.error && !query.data?.length) return null;
   return (
