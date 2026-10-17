@@ -579,8 +579,8 @@ export function useCloudChat(input: {
     readonly sendCtx: SendContext;
     readonly prompt: string;
     readonly trimmed: string;
-    readonly images: ComposerImageAttachment[];
-    readonly previewAnnotations: PreviewAnnotationPayload[];
+    readonly images: ReadonlyArray<ComposerImageAttachment>;
+    readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
     readonly sendableTerminalContexts: TerminalContextDraft[];
     readonly hasSendableContent: boolean;
     readonly runtimeMode: RuntimeMode;
