@@ -5725,6 +5725,7 @@ export default function ChatView(props: ChatViewProps) {
     activeBranchMismatchKey,
     activeThreadShell,
     serverRuntime?.usageLimitResetAt,
+    cloud.bannerItems,
     canWriteSourceControl,
     feedbackBannerItems,
     limitRecoveryBanner,
