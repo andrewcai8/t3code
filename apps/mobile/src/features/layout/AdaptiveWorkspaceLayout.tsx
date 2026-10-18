@@ -57,16 +57,12 @@ import {
   useHardwareKeyboardCommand,
 } from "../keyboard/hardwareKeyboardCommands";
 import { AndroidHomeFabLayout } from "../home/AndroidHomeFab";
-import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
-import {
-  AndroidWorkspaceNavigation,
-  ANDROID_WORKSPACE_RAIL_WIDTH,
-} from "../workspace/AndroidWorkspaceNavigation";
 import { AndroidWorkspaceSidebar } from "../workspace/AndroidWorkspaceSidebar";
 import { useAndroidWorkspaceSelection } from "../workspace/useAndroidWorkspaceSelection";
 import { HomeListOptionsProvider } from "../home/home-list-options";
 import { ThreadNavigationSidebar } from "../threads/ThreadNavigationSidebar";
 import { useNewThreadNavigation } from "../threads/use-new-thread-navigation";
+import { useOpenThreadPullRequests } from "../threads/use-open-thread-pull-requests";
 import { RenderErrorBoundary, RenderFailureView } from "../../components/RenderErrorBoundary";
 import { WORKSPACE_PANE_TIMING } from "./workspace-pane-animation";
 import { WorkspaceInspectorPane } from "./workspace-inspector-pane";
@@ -239,7 +235,6 @@ function AdaptiveWorkspaceLayoutContent(
   const windowDimensions = useWindowDimensions();
   const nativeMetrics = useNativeLayoutMetrics();
   const { width: viewportWidth, height } = nativeMetrics ?? windowDimensions;
-  const { scale: androidControlScale } = useAndroidControlSizing();
   const pathname = props.pathname;
   const navigation = useNavigation();
   const activeRoleOwner = useRef<symbol | null>(null);
@@ -265,11 +260,6 @@ function AdaptiveWorkspaceLayoutContent(
     usesSplitView: baseLayout.usesSplitView,
   });
   const showPrimarySidebar = primarySidebarPinned || primarySidebarPreferredVisible;
-  const shouldRenderNavigationRail = Platform.OS === "android" && baseLayout.usesSplitView;
-  const navigationRailWidth =
-    shouldRenderNavigationRail && showPrimarySidebar
-      ? ANDROID_WORKSPACE_RAIL_WIDTH * Math.max(1, androidControlScale)
-      : 0;
   const [hinge, setHinge] = useState<VerticalHinge | null>(null);
   const [windowHinge, setWindowHinge] = useState<VerticalHinge | null>(null);
   const handleHingeChange = useCallback(
@@ -280,29 +270,28 @@ function AdaptiveWorkspaceLayoutContent(
     [],
   );
   const layout = useMemo(
-    () =>
-      alignListPaneToHinge({
-        layout: baseLayout,
-        hinge,
-        viewportWidth,
-        leadingWidth: navigationRailWidth,
-      }),
-    [baseLayout, hinge, viewportWidth, navigationRailWidth],
+    () => alignListPaneToHinge({ layout: baseLayout, hinge, viewportWidth }),
+    [baseLayout, hinge, viewportWidth],
   );
-  const width = viewportWidth - navigationRailWidth;
   const shouldRenderPrimarySidebar = layout.usesSplitView;
   const fileInspector = useMemo(
     () =>
       deriveFileInspectorPaneLayout({
         layout,
-        viewportWidth: width,
+        viewportWidth,
         preferredWidth: fileInspectorPreferredWidth ?? undefined,
         reservedLeadingWidth:
           shouldRenderPrimarySidebar && showPrimarySidebar
             ? (layout.listPaneWidth ?? 0) + (layout.listPaneGap ?? 0)
             : 0,
       }),
-    [fileInspectorPreferredWidth, layout, showPrimarySidebar, shouldRenderPrimarySidebar, width],
+    [
+      fileInspectorPreferredWidth,
+      layout,
+      showPrimarySidebar,
+      shouldRenderPrimarySidebar,
+      viewportWidth,
+    ],
   );
   const auxiliaryPaneRole: WorkspaceAuxiliaryPaneRole =
     focusedAuxiliaryPaneRole ?? (/\/files(?:\/|$)/.test(pathname) ? "inspector" : "supplementary");
@@ -318,7 +307,7 @@ function AdaptiveWorkspaceLayoutContent(
     () =>
       deriveWorkspacePaneLayout({
         layout,
-        viewportWidth: width,
+        viewportWidth,
         primarySidebarPreferredVisible: showPrimarySidebar,
         auxiliaryPanePreferredVisible,
         auxiliaryPaneRole,
@@ -330,7 +319,7 @@ function AdaptiveWorkspaceLayoutContent(
       auxiliaryPanePreferredWidth,
       layout,
       showPrimarySidebar,
-      width,
+      viewportWidth,
     ],
   );
   const activeThread = parseActiveThreadPath(pathname);
@@ -470,6 +459,8 @@ function AdaptiveWorkspaceLayoutContent(
     });
   }, [navigation]);
 
+  const handleOpenThreadPullRequests = useOpenThreadPullRequests();
+
   const {
     newThreadInProject: handleNewThreadInProject,
     newThreadOnBranch: handleNewThreadOnBranch,
@@ -556,7 +547,6 @@ function AdaptiveWorkspaceLayoutContent(
   const renderedSidebarWidth = useSharedValue(
     panes.primarySidebarVisible ? (layout.listPaneWidth ?? 0) + (layout.listPaneGap ?? 0) : 0,
   );
-  const renderedRailWidth = useSharedValue(navigationRailWidth);
   useEffect(() => {
     if (nativeWorkspace) return;
     const targetWidth = panes.primarySidebarVisible
@@ -565,19 +555,15 @@ function AdaptiveWorkspaceLayoutContent(
     renderedSidebarWidth.value = withTiming(targetWidth, WORKSPACE_PANE_TIMING, (finished) => {
       if (finished && Platform.OS === "android") runOnJS(settleContentWidth)(contentRevision);
     });
-    renderedRailWidth.set(withTiming(navigationRailWidth, WORKSPACE_PANE_TIMING));
   }, [
     nativeWorkspace,
-    navigationRailWidth,
     layout.listPaneWidth,
     layout.listPaneGap,
     panes.primarySidebarVisible,
     renderedSidebarWidth,
-    renderedRailWidth,
     settleContentWidth,
     contentRevision,
   ]);
-  const railAnimatedStyle = useAnimatedStyle(() => ({ width: renderedRailWidth.value }));
   // Showing or hiding the sidebar clips a fixed-width list. A hinge resize instead tracks the
   // animated edge, so the header actions slide with it rather than jumping or being covered.
   const listPaneGap = layout.listPaneGap ?? 0;
@@ -598,13 +584,7 @@ function AdaptiveWorkspaceLayoutContent(
   // merely clip/reveal it over a matching background.
   const renderedInspectorWidth = useSharedValue(inspectorColumnTargetWidth);
   const renderedContentWidth = useDerivedValue(() =>
-    Math.max(
-      0,
-      viewportWidth -
-        renderedRailWidth.value -
-        renderedSidebarWidth.value -
-        renderedInspectorWidth.value,
-    ),
+    Math.max(0, viewportWidth - renderedSidebarWidth.value - renderedInspectorWidth.value),
   );
 
   const selectAndroidWorkspace = useAndroidWorkspaceSelection();
@@ -719,17 +699,6 @@ function AdaptiveWorkspaceLayoutContent(
             className={Platform.OS === "android" ? "flex-1 flex-row bg-header" : "flex-1 flex-row"}
           >
             <AndroidHingeObserver onChange={handleHingeChange} />
-            {shouldRenderNavigationRail ? (
-              <Animated.View
-                className="self-stretch overflow-hidden"
-                accessibilityElementsHidden={navigationRailWidth === 0}
-                importantForAccessibility={navigationRailWidth > 0 ? "auto" : "no-hide-descendants"}
-                pointerEvents={navigationRailWidth > 0 ? "auto" : "none"}
-                style={railAnimatedStyle}
-              >
-                <AndroidWorkspaceNavigation rail onSelect={revealPrimarySidebar} />
-              </Animated.View>
-            ) : null}
             {shouldRenderPrimarySidebar && layout.listPaneWidth !== null ? (
               <Animated.View
                 className="self-stretch overflow-hidden"
@@ -766,6 +735,7 @@ function AdaptiveWorkspaceLayoutContent(
                           onNewThreadInProject={handleNewThreadInProject}
                           onNewThreadOnBranch={handleNewThreadOnBranch}
                           onSelectThread={handleSelectThread}
+                          onOpenThreadPullRequests={handleOpenThreadPullRequests}
                           onSearchQueryChange={setPrimarySidebarSearchQuery}
                           searchQuery={primarySidebarSearchQuery}
                         />
