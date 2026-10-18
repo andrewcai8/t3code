@@ -40,6 +40,19 @@ if ! grep -q '"\.\./models\.json"' "$skills/setup-pstack/scripts/t3-sheet.mjs"; 
   echo "t3-sheet.mjs at t3-pstack $commit no longer reads ../../../models.json; update build.sh to its new path." >&2
   exit 1
 fi
+# Neither upstream lands through a Graphite merge queue. The rule goes in above Shipping's first
+# step rather than as a patch on its prose, which upstream rewrites too often for a patch to hold.
+shipping="$skills/poteto-mode/playbooks/shipping.md"
+if ! grep -q '^### Shipping$' "$shipping" || ! grep -q '^1\. ' "$shipping"; then
+  echo "shipping.md at t3-pstack $commit lost its '### Shipping' heading or first step; update build.sh's Graphite rule." >&2
+  exit 1
+fi
+LANDING="$(cat "$here/graphite-landing.md")" perl -0pi -e 's/^(?=1\. )/$ENV{LANDING}\n\n/m' "$shipping"
+grep -q '^\*\*Graphite merge queue first\.\*\*' "$shipping" || {
+  echo "build.sh could not place the Graphite rule in shipping.md at t3-pstack $commit." >&2
+  exit 1
+}
+cp "$here/github-merge-queue-label.sh" "$skills/poteto-mode/scripts/github-merge-queue-label.sh"
 mkdir "$skills/poteto-mode/licenses"
 cp "$tree"/LICENSE* "$tree"/NOTICE*.md "$skills/poteto-mode/licenses/"
 # Only the skill directories ship, so the checks below see only them.

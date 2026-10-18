@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: "41 6 * * *"
   workflow_dispatch:
+  # A pull request that changes the build runs it without publishing.
+  pull_request:
+    paths:
+      - "scripts/pstack/**"
+      - ".github/workflows/pstack-skills.yml"
 
 permissions:
   contents: write
@@ -50,6 +55,7 @@ jobs:
           echo "COMMIT=$commit" >> "$GITHUB_ENV"
 
       - name: Publish
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
