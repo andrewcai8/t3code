@@ -267,7 +267,7 @@ export function useChatEnvironmentById(input: {
  * The machines "Run on" offers. A draft offers only machines a new chat can run on, never another
  * chat's box; a started thread still names the machine it ran on.
  */
-export function newChatRunTargets(input: {
+export function chatRunOnTargets(input: {
   readonly projectEnvironments: ReadonlyArray<EnvironmentOption>;
   readonly environmentById: ReadonlyMap<EnvironmentId, EnvironmentPresentation>;
   readonly environmentId: EnvironmentId | null;
@@ -307,7 +307,7 @@ export function useCloudChat(input: {
   readonly projectGroupingSettings: ProjectGroupingSettings;
   readonly environmentById: ReadonlyMap<EnvironmentId, EnvironmentPresentation>;
   readonly onAnotherChatsBox: boolean;
-  readonly runTargets: ReturnType<typeof newChatRunTargets>["runTargets"];
+  readonly runTargets: ReturnType<typeof chatRunOnTargets>["runTargets"];
   readonly projectEnvironments: ReadonlyArray<EnvironmentOption>;
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
