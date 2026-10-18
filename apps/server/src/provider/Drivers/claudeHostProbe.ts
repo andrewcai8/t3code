@@ -7,13 +7,12 @@
  * @module provider/Drivers/claudeHostProbe
  */
 import type { ClaudeSettings } from "@t3tools/contracts";
-import type * as Cache from "effect/Cache";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import type { ChildProcessSpawner } from "effect/process";
 
-import { getProbeDroppingFailedUsage, orClaudeAuthStatus } from "../claudeColdProbe.ts";
+import { type ClaudeAuthStatusProbe, orClaudeAuthStatus } from "../claudeColdProbe.ts";
 import { type probeClaudeCapabilities, runClaudeCommand } from "../ClaudeProvider.ts";
 import { makeClaudeUsageTurnReader, resolveClaudeProbeUsage } from "../claudeSetupTokenUsage.ts";
 import { resolveClaudeSdkExecutablePath } from "./ClaudeExecutable.ts";
@@ -36,37 +35,38 @@ export const makeClaudeHostProbe = Effect.fn("makeClaudeHostProbe")(function* (
 
   return {
     /** Runs after a fresh SDK probe; the result is what the capabilities cache keeps. */
-    withSetupTokenUsage: (
-      probe: ClaudeCapabilities | undefined,
-    ): Effect.Effect<ClaudeCapabilities | undefined> =>
-      probe === undefined
-        ? Effect.succeed(undefined)
-        : Effect.gen(function* () {
-            const claudeEnvironment = yield* makeClaudeEnvironment(settings, environment);
-            const executablePath = yield* resolveClaudeSdkExecutablePath(
-              settings.binaryPath,
-              claudeEnvironment,
-            );
-            const usage = yield* resolveClaudeProbeUsage({
-              usage: probe.usage,
-              tokenSource: probe.tokenSource,
-              turn: { executablePath, environment: claudeEnvironment, cwd },
-              readUsageTurn,
-            });
-            const { usage: _probedUsage, ...probed } = probe;
-            return usage ? { ...probed, usage } : probed;
-          }).pipe(Effect.provide(services)),
-    /** The capabilities the status check reads from the probe cache. */
-    readCapabilities: <K>(
-      cache: Cache.Cache<K, ClaudeCapabilities | undefined>,
-      key: K,
-    ): Effect.Effect<ClaudeCapabilities | undefined> =>
-      getProbeDroppingFailedUsage(cache, key).pipe(
-        Effect.flatMap(
-          orClaudeAuthStatus(runClaudeCommand(settings, ["auth", "status"], environment)),
+    withSetupTokenUsage: (probe: ClaudeCapabilities): Effect.Effect<ClaudeCapabilities> =>
+      Effect.gen(function* () {
+        const claudeEnvironment = yield* makeClaudeEnvironment(settings, environment);
+        const executablePath = yield* resolveClaudeSdkExecutablePath(
+          settings.binaryPath,
+          claudeEnvironment,
+        );
+        const usage = yield* resolveClaudeProbeUsage({
+          usage: probe.usage,
+          tokenSource: probe.tokenSource,
+          turn: { executablePath, environment: claudeEnvironment, cwd },
+          readUsageTurn,
+        });
+        const { usage: _probedUsage, ...probed } = probe;
+        return usage ? { ...probed, usage } : probed;
+      }).pipe(Effect.provide(services)),
+    /** The capabilities the status check reads; a failed probe asks `claude auth status`. */
+    readCapabilities: <E>(
+      capabilities: Effect.Effect<ClaudeCapabilities, E>,
+    ): Effect.Effect<ClaudeCapabilities | ClaudeAuthStatusProbe, E> =>
+      capabilities.pipe(
+        Effect.catch((error) =>
+          orClaudeAuthStatus(runClaudeCommand(settings, ["auth", "status"], environment))(
+            undefined,
+          ).pipe(
+            Effect.flatMap((status) =>
+              status === undefined ? Effect.fail(error) : Effect.succeed(status),
+            ),
+          ),
         ),
         Effect.map((probe) =>
-          probe === undefined || probe.email !== undefined || accountEmail === undefined
+          probe.email !== undefined || accountEmail === undefined
             ? probe
             : { ...probe, email: accountEmail },
         ),

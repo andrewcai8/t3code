@@ -59,7 +59,7 @@ export function cloudProviderEntries(
  * start a cloud environment, where a draft still pinned to another account of a driver shows as
  * that driver's row; otherwise the composer's own instances.
  */
-export function useCloudProviderPicker(input: {
+export function cloudProviderPicker(input: {
   readonly startsCloudEnvironment: boolean;
   readonly entries: ReadonlyArray<ProviderInstanceEntry>;
   readonly selectedProvider: ProviderDriverKind;

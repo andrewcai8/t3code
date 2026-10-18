@@ -69,6 +69,7 @@ import {
   canRevokeOtherClients,
   isQrShareableEndpoint,
   isWslSettingsRowVisible,
+  missingTailscaleEndpointDescription,
   selectQrEndpointOption,
   togglePairingScopeSelection,
 } from "./ConnectionsSettings.logic";
@@ -140,7 +141,7 @@ import { Textarea } from "../ui/textarea";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import { pairingUrlHost } from "./pairingFields";
-import { CloudConnectionsSettings, useAgentRunningEnvironments } from "./CloudConnectionsSettings";
+import { CloudConnectionsSettings, agentRunningEnvironments } from "./CloudConnectionsSettings";
 import { isRemoteServerUpdate } from "../../cloud/guestServerUpdate";
 import {
   createServerPairingCredential,
@@ -2081,7 +2082,7 @@ export function ConnectionsSettings() {
     ...(primaryEnvironment ? [primaryEnvironment] : []),
     ...savedEnvironments.filter((environment) => environment.entry.enabled),
   ];
-  const balancedEnvironments = useAgentRunningEnvironments(loadBalancingEnvironments);
+  const balancedEnvironments = agentRunningEnvironments(loadBalancingEnvironments);
   const savedDesktopSshEnvironmentKeys = (() => {
     const keys = new Set<string>();
     for (const environment of savedEnvironments) {
@@ -3276,7 +3277,7 @@ export function ConnectionsSettings() {
           ? tailscaleHttpsEndpoint.status === "available"
             ? tailscaleHttpsEndpoint.httpBaseUrl
             : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
-          : "Start Tailscale to set up HTTPS access through MagicDNS."
+          : missingTailscaleEndpointDescription(desktopServerExposureState)
       }
       control={
         tailscaleHttpsEndpoint ? (

@@ -28,15 +28,7 @@ import {
   DEFAULT_WEBHOOK_PROMPT,
   parseMaxDeliveryAge,
 } from "@t3tools/client-runtime/scheduled-task-webhook";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useFocusEffect, useNavigation, usePreventRemove } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { AppState, Platform, Pressable, TextInput as RNTextInput, View } from "react-native";
@@ -268,20 +260,18 @@ function PickerRow(props: {
 
 export function SettingsScheduledTasksRouteScreen() {
   const [now, setNow] = useState(Date.now);
-  useFocusEffect(
-    useCallback(() => {
-      const updateNow = () => setNow(Date.now());
-      updateNow();
-      const timer = setInterval(updateNow, 60_000);
-      const subscription = AppState.addEventListener("change", (state) => {
-        if (state === "active") updateNow();
-      });
-      return () => {
-        clearInterval(timer);
-        subscription.remove();
-      };
-    }, []),
-  );
+  useFocusEffect(() => {
+    const updateNow = () => setNow(Date.now());
+    updateNow();
+    const timer = setInterval(updateNow, 60_000);
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") updateNow();
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
+  });
   const { availableTargets, selectedTargets, selectedProjectKey, projectGroups } =
     useSettingsEnvironmentFilter();
   const selectedGroup = projectGroups.find((group) => group.key === selectedProjectKey);
@@ -437,9 +427,8 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
     selection,
     readDraftMessage: () => {
       const current = readEditor();
-      return current?.environmentId === editor?.environmentId
-        ? (current?.draft.prompt ?? null)
-        : null;
+      if (current?.environmentId !== editor?.environmentId) return null;
+      return current?.draft.prompt ?? null;
     },
     onChangeSelection: setSelection,
     onChangeDraftMessage: (text) => {
@@ -588,10 +577,7 @@ function TaskForm({
   );
   const projects = useProjects().filter((project) => project.environmentId === environmentId);
   const config = useEnvironmentServerConfig(environmentId);
-  const modelOptions = useMemo(
-    () => buildModelOptions(config, null, undefined, draft.projectId),
-    [config, draft.projectId],
-  );
+  const modelOptions = buildModelOptions(config, null, undefined, draft.projectId);
   const cloudProviders = offeredProvisionProviders(config);
   const cloud = draft.target !== "local";
   const canOperate = useAtomValue(

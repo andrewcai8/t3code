@@ -894,9 +894,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const failedProbe = yield* Ref.getAndSet(probeUnanswered, false);
       if (outcome.established) {
         generation = nextGeneration;
+        // A session came up, so no earlier failure describes the connection.
+        // Losing a live session is not a failed connection either, for example
+        // a socket the OS killed while the app was suspended: its replacement
+        // reports no failure until it fails itself.
+        latestFailure = null;
         if (outcome.stable) {
           resetRetryLadder();
-          latestFailure = null;
           boxWaker.reset();
         }
       }
@@ -909,7 +913,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       }
 
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
-      latestFailure = outcome.failure.error;
+      if (!outcome.established) {
+        latestFailure = outcome.failure.error;
+      }
       const woken: Option.Option<ConnectionAttemptError> = yield* boxWaker.afterFailure(
         outcome.failure.error,
         attempt,
@@ -917,7 +923,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       );
       if (Option.isNone(woken)) continue;
       const error: ConnectionAttemptError = woken.value;
-      latestFailure = error;
+      if (!outcome.established) {
+        latestFailure = error;
+      }
       if (error._tag === "ConnectionBlockedError") {
         const blockedIntent = yield* Ref.get(intent);
         yield* setState({
@@ -939,7 +947,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
       if (failedProbe) {
         resetRetryLadder();
-        yield* setState(connectingState(yield* Ref.get(intent), generation, 1, error));
+        yield* setState(connectingState(yield* Ref.get(intent), generation, 1, latestFailure));
         continue;
       }
 
@@ -959,7 +967,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         stage: null,
         attempt,
         generation,
-        lastFailure: error,
+        lastFailure: latestFailure,
         retryAt: (yield* Clock.currentTimeMillis) + delayMs,
       });
       const applicationActivated = yield* waitForRetrySignal(delayMs);

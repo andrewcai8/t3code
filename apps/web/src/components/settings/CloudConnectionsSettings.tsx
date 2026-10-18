@@ -43,7 +43,7 @@ export function CloudConnectionsSettings({
 }
 
 /** The machines load balancing offers: a host that runs no agents never receives a thread. */
-export function useAgentRunningEnvironments(
+export function agentRunningEnvironments(
   environments: ReadonlyArray<EnvironmentPresentation>,
 ): ReadonlyArray<EnvironmentPresentation> {
   return environments.filter((environment) => runsLocalAgents(environment.serverConfig));

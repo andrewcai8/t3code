@@ -6,8 +6,9 @@
  * @module provider/Layers/claudeColdProbe
  */
 import type { ServerProviderSlashCommand } from "@t3tools/contracts";
-import * as Cache from "effect/Cache";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
@@ -114,14 +115,18 @@ export const orClaudeAuthStatus =
         );
 
 /**
- * Read the capabilities cache, but keep an entry only when its usage read
- * succeeded. A timed-out `get_usage` would otherwise stick for the cache's
- * lifetime and Settings would keep showing "Could not read limits."
+ * Only a fresh probe that read its usage earns the TTL. A failure, its
+ * last-good fallback, or a timed-out `get_usage` retries on the next check, so
+ * Settings never sticks on "Could not read limits."
  */
-export const getProbeDroppingFailedUsage = <K, A extends { readonly usage?: unknown }, E, R>(
-  cache: Cache.Cache<K, A | undefined, E, R>,
-  key: K,
-): Effect.Effect<A | undefined, E, R> =>
-  Cache.get(cache, key).pipe(
-    Effect.tap((probe) => (probe?.usage ? Effect.void : Cache.invalidate(cache, key))),
-  );
+export const claudeProbeTimeToLive =
+  (ttl: Duration.Duration) =>
+  (
+    exit: Exit.Exit<
+      { readonly _tag: "fresh" | "fallback"; readonly capabilities: { readonly usage?: unknown } },
+      unknown
+    >,
+  ): Duration.Duration =>
+    Exit.isSuccess(exit) && exit.value._tag === "fresh" && exit.value.capabilities.usage
+      ? ttl
+      : Duration.zero;

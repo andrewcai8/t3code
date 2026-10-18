@@ -1,18 +1,19 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ClaudeSettings } from "@t3tools/contracts";
-import * as Cache from "effect/Cache";
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 
-import { type ClaudeCapabilities, makeClaudeHostProbe } from "./Drivers/claudeHostProbe.ts";
+import { makeClaudeHostProbe } from "./Drivers/claudeHostProbe.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
-import { getProbeDroppingFailedUsage, parseClaudeAuthStatusOutput } from "./claudeColdProbe.ts";
+import { claudeProbeTimeToLive, parseClaudeAuthStatusOutput } from "./claudeColdProbe.ts";
 
 const defaultClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const encoder = new TextEncoder();
@@ -72,13 +73,8 @@ it("returns undefined for non-JSON claude auth status output", () => {
 it.effect("reports a logged-in account as ready when the SDK probe returns nothing", () =>
   Effect.gen(function* () {
     const hostProbe = yield* makeClaudeHostProbe(defaultClaudeSettings, process.env, undefined);
-    const nothingProbed = yield* Cache.make<unknown, ClaudeCapabilities | undefined>({
-      capacity: 1,
-      timeToLive: "5 minutes",
-      lookup: () => Effect.succeed(undefined),
-    });
     const status = yield* checkClaudeProviderStatus(defaultClaudeSettings, () =>
-      hostProbe.readCapabilities(nothingProbed, "claude"),
+      hostProbe.readCapabilities(Effect.fail(new Cause.TimeoutError())),
     );
     assert.strictEqual(status.status, "ready");
     assert.deepStrictEqual(status.auth, {
@@ -100,23 +96,16 @@ it.effect("reports a logged-in account as ready when the SDK probe returns nothi
   ),
 );
 
-it.effect("keeps a probe in the cache only when its usage read succeeded", () =>
-  Effect.gen(function* () {
-    const lookups = yield* Ref.make(0);
-    const readTwice = Effect.fn(function* (usage: { readonly read: true } | undefined) {
-      yield* Ref.set(lookups, 0);
-      const cache = yield* Cache.make({
-        capacity: 1,
-        timeToLive: "5 minutes",
-        lookup: (): Effect.Effect<{ readonly usage: typeof usage } | undefined> =>
-          Ref.update(lookups, (count) => count + 1).pipe(Effect.as({ usage })),
-      });
-      yield* getProbeDroppingFailedUsage(cache, "claude");
-      yield* getProbeDroppingFailedUsage(cache, "claude");
-      return yield* Ref.get(lookups);
-    });
-
-    assert.strictEqual(yield* readTwice(undefined), 2);
-    assert.strictEqual(yield* readTwice({ read: true }), 1);
-  }),
-);
+it("keeps a probe for the TTL only when it is fresh and read its usage", () => {
+  const ttl = claudeProbeTimeToLive(Duration.minutes(5));
+  const usage = { rate_limits_available: true };
+  assert.deepStrictEqual(
+    [
+      ttl(Exit.succeed({ _tag: "fresh", capabilities: { usage } })),
+      ttl(Exit.succeed({ _tag: "fresh", capabilities: {} })),
+      ttl(Exit.succeed({ _tag: "fallback", capabilities: { usage } })),
+      ttl(Exit.fail("probe failed")),
+    ].map(Duration.toMillis),
+    [300_000, 0, 0, 0],
+  );
+});

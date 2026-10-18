@@ -79,6 +79,8 @@ const result = (uuid: string, limited: boolean) =>
     result: limited ? "You've hit your limit" : "Done.",
     stop_reason: "end_turn",
     terminal_reason: limited ? "blocking_limit" : "completed",
+    // blocking_limit alone also means a full context window; the 429 makes it a usage limit.
+    ...(limited ? { api_error_status: 429 } : {}),
     permission_denials: [],
     duration_ms: 1,
     duration_api_ms: 1,

@@ -3,7 +3,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ClaudeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import { rankAccounts } from "@t3tools/shared/usageLimits";
-import * as Cache from "effect/Cache";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -13,7 +12,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import { vi } from "vite-plus/test";
 
-import { type ClaudeCapabilities, makeClaudeHostProbe } from "./Drivers/claudeHostProbe.ts";
+import { makeClaudeHostProbe } from "./Drivers/claudeHostProbe.ts";
 import { checkClaudeProviderStatus, probeClaudeCapabilities } from "./ClaudeProvider.ts";
 import {
   CLAUDE_USAGE_TURN_PROMPT,
@@ -275,22 +274,15 @@ const statusWithAccountEmail = Effect.fn(function* (
 ) {
   const settings = decodeClaudeSettings({ accountEmail });
   const hostProbe = yield* makeClaudeHostProbe(settings, process.env, undefined);
-  const capabilities = yield* Cache.make<unknown, ClaudeCapabilities | undefined>({
-    capacity: 1,
-    timeToLive: "5 minutes",
-    lookup: () =>
-      Effect.succeed({
-        email: probed.email,
-        subscriptionType: undefined,
-        tokenSource: probed.tokenSource,
-        apiKeySource: undefined,
-        apiProvider: undefined,
-        slashCommands: [],
-      }),
+  const capabilities = Effect.succeed({
+    email: probed.email,
+    subscriptionType: undefined,
+    tokenSource: probed.tokenSource,
+    apiKeySource: undefined,
+    apiProvider: undefined,
+    slashCommands: [],
   });
-  return yield* checkClaudeProviderStatus(settings, () =>
-    hostProbe.readCapabilities(capabilities, "claude"),
-  );
+  return yield* checkClaudeProviderStatus(settings, () => hostProbe.readCapabilities(capabilities));
 });
 
 describe("setup-token account email", () => {
