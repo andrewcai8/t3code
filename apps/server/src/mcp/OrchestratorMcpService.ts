@@ -37,6 +37,7 @@ import {
   type OrchestratorMcpListScheduledTasksInput,
   type ProjectId,
   type OrchestratorMcpThreadDetail,
+  type OrchestratorMcpThreadPullRequest,
   type OrchestratorMcpThreadInterruptInput,
   type OrchestratorMcpThreadInterruptResult,
   type OrchestratorMcpThreadListInput,
@@ -61,6 +62,10 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import {
+  normalizeThreadPullRequestKey,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -88,6 +93,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
+import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
@@ -325,11 +331,16 @@ function providerConstraints(
     constraints.push("No V2 provider adapter is registered.");
   }
   if (provider === undefined) return constraints;
-  if (!provider.enabled) constraints.push("Provider instance is disabled.");
-  if (!provider.installed) constraints.push("Provider executable is not installed.");
+  // Driver availability comes from the registry, even when health probes are skipped.
   if (!isProviderAvailable(provider)) {
     constraints.push(provider.unavailableReason ?? "Provider driver is unavailable.");
   }
+  if (!provider.enabled) {
+    constraints.push("Provider instance is disabled.");
+    // Disabled snapshots contain placeholders for installation, health, and auth.
+    return constraints;
+  }
+  if (!provider.installed) constraints.push("Provider executable is not installed.");
   if (provider.status === "error" || provider.status === "disabled") {
     constraints.push(provider.message ?? `Provider status is ${provider.status}.`);
   }
@@ -744,6 +755,20 @@ function threadSnooze(
   };
 }
 
+/** The same links `list_thread_pull_requests` reports, without the snapshot details. */
+function threadPullRequests(
+  links: OrchestrationV2ThreadShell["pullRequests"],
+): OrchestratorMcpThreadPullRequest[] {
+  return visibleThreadPullRequests(links ?? []).map((link) => ({
+    host: normalizeThreadPullRequestKey(link).host,
+    repository: link.repository,
+    number: link.number,
+    url: link.url,
+    source: link.source,
+    state: link.snapshot?.state ?? null,
+  }));
+}
+
 export function listItemFromShell(
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
@@ -761,6 +786,7 @@ export function listItemFromShell(
     runtimeMode: shell.runtimeMode,
     interactionMode: shell.interactionMode,
     linkedPullRequest: shell.linkedPullRequest ?? null,
+    pullRequests: threadPullRequests(shell.pullRequests),
     ...threadSettlement(shell),
     ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
@@ -793,6 +819,7 @@ function threadDetail(
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
+    pullRequests: threadPullRequests(projection.thread.pullRequests),
     titleRegeneration:
       projection.thread.titleRegeneration === undefined ||
       projection.thread.titleRegeneration === null
@@ -2622,7 +2649,7 @@ const make = Effect.gen(function* () {
                 ? threadManagementFailure(error)
                 : failure(
                     "orchestration_error",
-                    `Unable to send to thread ${input.threadId}: ${errorMessage(error)}`,
+                    `Unable to send to thread ${input.threadId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
                   ),
             ),
           );

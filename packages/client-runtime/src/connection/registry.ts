@@ -361,8 +361,12 @@ export const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const environmentId = entry.target.environmentId;
           const scope = yield* Scope.fork(registryScope);
+          const initiallyDesired = yield* boxes.wantsConnection(entry);
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
-            initiallyDesired: false,
+            // A wanted environment starts out connecting. Starting it idle and
+            // then asking it to connect would first publish the state of an
+            // environment the user switched off.
+            initiallyDesired,
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
             ...boxes.supervisorOptions(entry),
           }).pipe(
@@ -372,9 +376,6 @@ export const make = Effect.gen(function* () {
             Scope.provide(scope),
             Effect.onError(() => Scope.close(scope, Exit.void)),
           );
-          if (yield* boxes.wantsConnection(entry)) {
-            yield* supervisor.connect;
-          }
           yield* SubscriptionRef.update(serviceScopes, (current) => {
             const next = new Map(current);
             next.set(environmentId, { entry, supervisor, scope });

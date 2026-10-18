@@ -17,6 +17,7 @@ import {
   peekHeldThreadTimeline,
   peekRememberedThreadTimeline,
   rememberReadyThreadTimeline,
+  resolveExplicitDiffOpenOnActivate,
   resolveThreadSwitchTimeline,
   timelineHasEphemeralPreviewUrls,
   recallCheckoutIsRepo,
@@ -177,6 +178,7 @@ import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
 import {
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
+  composerRequiresModifier,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -3390,7 +3392,7 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const scheduleComposerFocusStable = useStableCallback(scheduleComposerFocus);
-  const useArtifactTemplate = (template: CodexArtifactTemplate) => {
+  const insertArtifactTemplate = (template: CodexArtifactTemplate) => {
     const composer = composerRef.current;
     if (!composer) return;
 
@@ -3406,7 +3408,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     scheduleComposerFocus();
   };
-  const useArtifactTemplateStable = useStableCallback(useArtifactTemplate);
+  const insertArtifactTemplateStable = useStableCallback(insertArtifactTemplate);
   const sendAppMessage = async (text: string) => {
     if (!isServerThread || activeThreadId === null) {
       throw new Error("Messages from apps need a started thread.");
@@ -3890,6 +3892,11 @@ export default function ChatView(props: ChatViewProps) {
   const requestClosePanelTerminalStable = useStableCallback(requestClosePanelTerminal);
   const activateRightPanelSurface = (surface: RightPanelSurface) => {
     if (!activeThreadRef) return;
+    explicitDiffOpenRef.current = resolveExplicitDiffOpenOnActivate({
+      surfaceKind: surface.kind,
+      diffOpen,
+      activeThreadRef,
+    });
     useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
     if (surface.kind === "preview" && surface.resourceId) {
       setActivePreviewTab(activeThreadRef, surface.resourceId);
@@ -5556,6 +5563,7 @@ export default function ChatView(props: ChatViewProps) {
     composerFocus: document.activeElement?.getAttribute("data-testid") === "composer-editor",
     draftThreadRoute: routeKind === "draft",
     turnRunning: phase === "running",
+    composerRequiresModifier: composerRequiresModifier(settings.sendShortcut, promptRef.current),
     isWeb: !isElectron,
     isDesktop: isElectron,
   });
@@ -8129,7 +8137,7 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 {...(!paintOnlyDisplayedTimeline
                   ? {
-                      onUseArtifactTemplate: useArtifactTemplateStable,
+                      onUseArtifactTemplate: insertArtifactTemplateStable,
                       onSendAppMessage: sendAppMessageStable,
                     }
                   : {})}
