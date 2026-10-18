@@ -553,8 +553,8 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               after.runs.map((run) => [run.status, run.ordinal]),
               [
                 ["failed", 1],
-                ["running", 2],
                 ["completed", 3],
+                ["running", 4],
               ],
             );
             assert.deepEqual(
@@ -719,8 +719,8 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               after.runs.map((run) => [run.status, run.ordinal]),
               [
                 ["failed", 1],
-                ["completed", 2],
                 ["completed", 3],
+                ["completed", 4],
               ],
             );
             assert.deepEqual(
