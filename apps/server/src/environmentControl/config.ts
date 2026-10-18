@@ -272,8 +272,18 @@ const Provisioning = Schema.Struct({
     Schema.Struct({
       /** Copies one chat may run at once. Default 8. */
       maxPerChat: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
-      /** Copies this host runs at once, across chats. Default 20. */
+      /** Copies this host runs at once, across chats, whatever room E2B has. Default 20. */
       maxPerHost: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /**
+       * Sandboxes the E2B account may run at once, chats and copies together; paused ones do
+       * not count. Default 100.
+       */
+      e2bConcurrency: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      /**
+       * Of those, how many E2B copies always leave free, so a chat can start or wake while
+       * copies fill the rest. Default 5.
+       */
+      e2bChatReserve: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
       /** Longest a job may run. Default 120. */
       maxJobMinutes: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
       /** Largest compressed outputs one job copies back into its chat's machine. Default 100. */

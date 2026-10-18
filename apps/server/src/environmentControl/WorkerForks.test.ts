@@ -29,12 +29,13 @@ const box = (
     readonly provider?: "e2b" | "namespace";
     readonly leaseId?: string;
     readonly repository?: string;
+    readonly sandboxId?: string;
   } = {},
 ) =>
   ({
     leaseId: overrides.leaseId ?? "lease-1",
     environmentId: "box-1",
-    sandboxId: "sandbox-1",
+    sandboxId: overrides.sandboxId ?? "sandbox-1",
     provider: overrides.provider ?? "e2b",
     repository: overrides.repository ?? null,
     projectDir: "/home/user/work/app",
@@ -46,7 +47,9 @@ const box = (
  * N, `hang` times out, `lose` loses its copy, `wait` holds until `gate` opens. A chat of `acme/api`
  * starts its services with `redis-server --daemonize yes`, which its jobs' output names. `holdStarts` makes
  * each copy's start wait on its gate. Output paths
- * starting with `big` are over any copy-back cap; `gone` does not exist.
+ * starting with `big` are over any copy-back cap; `gone` does not exist. A machine whose sandbox id
+ * starts with `modal` is copied on Modal; every other on E2B, whose account runs `setOthers`
+ * sandboxes besides this host's copies.
  */
 const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
   Effect.gen(function* () {
@@ -70,6 +73,7 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
     let providerWorks = true;
     let loseStartAnswer = false;
     let busyStarts = 0;
+    let others = 0;
     const machines = ForkMachines.ForkMachines.of({
       settings: (repository) =>
         Effect.succeed({
@@ -84,7 +88,7 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
           if (captureGate !== null) yield* Deferred.await(captureGate);
           capturing -= 1;
           captures.push(`${sandboxId}@${tag.batchId}`);
-          const captureId = `capture-${captures.length}`;
+          const captureId = `${sandboxId.startsWith("modal") ? "modal-" : ""}capture-${captures.length}`;
           stored.set(captureId, { host: tag.host, batchId: tag.batchId });
           return captureId;
         }),
@@ -116,6 +120,8 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
             return yield* new ForkMachines.ForkMachineError({ step: "start", cause: "timed out" });
           return forkId;
         }),
+      othersRunning: (captureId) =>
+        Effect.sync(() => (captureId.startsWith("modal") ? null : others)),
       run: (forkId, job) =>
         Effect.gen(function* () {
           running += 1;
@@ -199,6 +205,9 @@ const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
       },
       busyFor: (starts: number) => {
         busyStarts = starts;
+      },
+      setOthers: (count: number) => {
+        others = count;
       },
       breakProvider: (works: boolean) => {
         providerWorks = works;
@@ -489,6 +498,158 @@ it.effect("starts a copy once the provider has room again after asking for a ret
       const finished = yield* Fiber.join(batch);
       expect(finished.jobs.map((job) => job.state)).toEqual(["exited"]);
       expect(fake.live.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("waits out an E2B account at its limit, keeping the job's place, then starts", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      fake.busyFor(8);
+      const { batch, start } = yield* forks.run(box(), actor, { jobs: [{ command: "exit 0" }] });
+      yield* start;
+      yield* TestClock.adjust("10 minutes");
+      const finished = yield* forks.status(box(), { batchId: batch.batchId });
+      expect([finished.state, finished.jobs.map((job) => job.state)]).toEqual([
+        "finished",
+        ["exited"],
+      ]);
+      expect(fake.kills).toEqual(["fork-1"]);
+    }),
+  ),
+);
+
+it.effect("fails a job whose provider has had no room for fifteen minutes", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      fake.busyFor(1_000);
+      const { batch, start } = yield* forks.run(box(), actor, { jobs: [{ command: "exit 0" }] });
+      yield* start;
+      yield* TestClock.adjust("20 minutes");
+      const ended = yield* forks.status(box(), { batchId: batch.batchId });
+      expect(ended).toEqual({
+        batchId: batch.batchId,
+        state: "finished",
+        jobs: [
+          {
+            index: 0,
+            state: "failed",
+            message: "A copy of the chat's machine failed at its start step.",
+          },
+        ],
+      });
+      expect(fake.live.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("cancels a job while it waits for its provider to have room", () =>
+  withForks({}, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      fake.busyFor(1_000);
+      const { batch, start } = yield* forks.run(box(), actor, { jobs: [{ command: "exit 0" }] });
+      yield* start;
+      yield* TestClock.adjust("1 minute");
+      yield* forks.cancel(box(), { batchId: batch.batchId });
+      const ended = yield* forks.status(box(), { batchId: batch.batchId, waitSeconds: 45 });
+      expect(ended).toEqual({
+        batchId: batch.batchId,
+        state: "finished",
+        jobs: [{ index: 0, state: "cancelled" }],
+      });
+      expect(fake.live.size).toBe(0);
+      expect(fake.stored.size).toBe(0);
+    }),
+  ),
+);
+
+it.effect("runs E2B copies in the room chats leave, and another once a chat pauses", () =>
+  withForks({ e2bConcurrency: 10, e2bChatReserve: 2 }, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      fake.setOthers(6);
+      const { batch, start } = yield* forks.run(box(), actor, {
+        jobs: Array.from({ length: 4 }, () => ({ command: "wait" })),
+      });
+      yield* start;
+      yield* Queue.take(fake.entered);
+      yield* Queue.take(fake.entered);
+      yield* TestClock.adjust("5 minutes");
+      expect(fake.startedBatches).toHaveLength(2);
+      fake.setOthers(5);
+      yield* TestClock.adjust("30 seconds");
+      yield* Queue.take(fake.entered);
+      expect(fake.startedBatches).toHaveLength(3);
+      yield* Deferred.succeed(fake.gate, undefined);
+      const finished = yield* forks.status(box(), { batchId: batch.batchId, waitSeconds: 45 });
+      expect(finished.jobs.map((job) => job.state)).toEqual([
+        "exited",
+        "exited",
+        "exited",
+        "exited",
+      ]);
+      expect(fake.mostRunning()).toBe(3);
+    }),
+  ),
+);
+
+it.effect("never starts an E2B copy in the chats' reserve", () =>
+  withForks({ e2bConcurrency: 10, e2bChatReserve: 2 }, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      fake.setOthers(8);
+      const { batch, start } = yield* forks.run(box(), actor, { jobs: [{ command: "exit 0" }] });
+      yield* start;
+      yield* TestClock.adjust("1 hour");
+      const waiting = yield* forks.status(box(), { batchId: batch.batchId });
+      expect([waiting.state, waiting.jobs, fake.startedBatches]).toEqual([
+        "running",
+        [{ index: 0, state: "queued" }],
+        [],
+      ]);
+      fake.setOthers(7);
+      yield* TestClock.adjust("30 seconds");
+      const finished = yield* forks.status(box(), { batchId: batch.batchId, waitSeconds: 45 });
+      expect(finished.jobs.map((job) => job.state)).toEqual(["exited"]);
+    }),
+  ),
+);
+
+it.effect("runs a Modal chat's copies however full the E2B account is", () =>
+  withForks({ e2bConcurrency: 10 }, (fake) =>
+    Effect.gen(function* () {
+      fake.setOthers(100);
+      const batch = yield* run({ jobs: [{ command: "exit 0" }] }, box({ sandboxId: "modal-1" }));
+      expect(batch.jobs.map((job) => job.state)).toEqual(["exited"]);
+    }),
+  ),
+);
+
+it.effect("hands freed E2B room to the batch that waited longest", () =>
+  withForks({ e2bConcurrency: 6, e2bChatReserve: 5 }, (fake) =>
+    Effect.gen(function* () {
+      const forks = yield* WorkerForks.WorkerForks;
+      const long = yield* forks.run(box(), actor, {
+        jobs: [{ command: "wait" }, { command: "exit 1" }, { command: "exit 2" }],
+        concurrency: 1,
+      });
+      yield* long.start;
+      yield* Queue.take(fake.entered);
+      const other = box({ leaseId: "lease-2" });
+      const short = yield* forks.run(other, actor, { jobs: [{ command: "exit 0" }] });
+      yield* short.start;
+      yield* Queue.take(fake.capturesEntered);
+      yield* Queue.take(fake.capturesEntered);
+      // Lets the short batch's job reach the room queue before the long batch's first job ends.
+      yield* Effect.yieldNow;
+      const [a, b] = [long.batch.batchId, short.batch.batchId];
+      expect(fake.startedBatches).toEqual([a]);
+      yield* Deferred.succeed(fake.gate, undefined);
+      yield* forks.status(box(), { batchId: long.batch.batchId, waitSeconds: 45 });
+      expect(fake.startedBatches).toEqual([a, b, a, a]);
     }),
   ),
 );

@@ -47,7 +47,17 @@ export interface ForkSettings {
 }
 
 export class ForkMachineError extends Schema.TaggedError<ForkMachineError>()("ForkMachineError", {
-  step: Schema.Literals(["settings", "capture", "start", "run", "upload", "copy", "kill", "sweep"]),
+  step: Schema.Literals([
+    "settings",
+    "capture",
+    "start",
+    "run",
+    "upload",
+    "copy",
+    "kill",
+    "sweep",
+    "count",
+  ]),
   cause: Schema.Defect(),
   /** The provider could not place the copy now and asked for a retry; nothing was left running. */
   busy: Schema.optional(Schema.Boolean),
@@ -104,6 +114,14 @@ export class ForkMachines extends Context.Service<
       tag: ForkTag,
       lifetimeMs: number,
     ) => Effect.Effect<string, ForkMachineError>;
+    /**
+     * How many sandboxes other than `host`'s copies are running on the account copies of
+     * `captureId` start on, or null where copies share no limit with chats (Modal).
+     */
+    readonly othersRunning: (
+      captureId: string,
+      host: string,
+    ) => Effect.Effect<number | null, ForkMachineError>;
     /**
      * Runs `services.commands` in `services.cwd`, then the job, to its end or its timeout, which
      * covers both. The job's own failure, or a service command's, is its exit code.
@@ -375,6 +393,18 @@ const decodeUpload = Schema.decodeUnknownSync(
     ]),
   ),
 );
+
+/**
+ * E2B could not take a new sandbox for now and nothing was created: no capacity to place it (5xx),
+ * or the account at its running-sandbox limit or its request rate (429).
+ */
+export const e2bBusy = (cause: unknown) =>
+  cause instanceof ServiceBusyError ||
+  (cause instanceof SandboxError && (cause.statusCode === 429 || (cause.statusCode ?? 0) >= 500));
+
+/** Running sandboxes on the account, from their metadata, that are not `host`'s copies. */
+export const othersOf = (host: string, running: ReadonlyArray<Record<string, string>>) =>
+  running.filter((metadata) => metadata.purpose !== COPY_PURPOSE || metadata.host !== host).length;
 
 /** Runs a step's command, with a non-zero exit as the step's failure. */
 async function exec(sandbox: Sandbox, command: string, timeoutMs: number) {
@@ -684,6 +714,17 @@ export const layer = Layer.effect(
       );
     const copyOf = (step: ForkMachineError["step"], forkId: string) =>
       attempt(step, async (e2b) => running.get(forkId) ?? (await e2b.Sandbox.connect(forkId)));
+    // Every job waiting for room asks; one listing answers all of them for a few seconds.
+    const listRunning = yield* Effect.cachedWithTTL(
+      attempt("count", async (e2b, signal) => {
+        const found: Array<Record<string, string>> = [];
+        const listed = e2b.Sandbox.list({ query: { state: ["running"] }, limit: 100 });
+        while (listed.hasNext)
+          for (const sandbox of await listed.nextItems({ signal })) found.push(sandbox.metadata);
+        return found;
+      }),
+      "10 seconds",
+    );
 
     const e2b = ForkMachines.of({
       settings: (repository) =>
@@ -766,15 +807,17 @@ export const layer = Layer.effect(
           running.set(sandbox.sandboxId, sandbox);
           return sandbox.sandboxId;
         }).pipe(
-          // E2B answers a placement it could not make with a 5xx that asks for a retry. A copy that
-          // was created is killed above before the error leaves, so a retry never leaks one.
+          // A copy that was created is killed above before the error leaves, so a retry never
+          // leaks one.
           Effect.mapError((error) =>
-            error.cause instanceof ServiceBusyError ||
-            (error.cause instanceof SandboxError && (error.cause.statusCode ?? 0) >= 500)
+            e2bBusy(error.cause)
               ? new ForkMachineError({ step: error.step, cause: error.cause, busy: true })
               : error,
           ),
         ),
+
+      othersRunning: (_captureId, host) =>
+        listRunning.pipe(Effect.map((running) => othersOf(host, running))),
 
       run: (forkId, job) =>
         copyOf("run", forkId).pipe(
@@ -895,6 +938,8 @@ export const layer = Layer.effect(
         modal.owns(captureId)
           ? modal.start(captureId, tag, lifetimeMs)
           : e2b.start(captureId, tag, lifetimeMs),
+      othersRunning: (captureId, host) =>
+        modal.owns(captureId) ? Effect.succeed(null) : e2b.othersRunning(captureId, host),
       run: (forkId, job) => (modal.owns(forkId) ? modal.run(forkId, job) : e2b.run(forkId, job)),
       upload: (forkId, input) =>
         modal.owns(forkId) ? modal.upload(forkId, input) : e2b.upload(forkId, input),
