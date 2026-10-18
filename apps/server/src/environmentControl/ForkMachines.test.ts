@@ -4,8 +4,35 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
+import { RateLimitError, SandboxError, ServiceBusyError } from "e2b";
 
-import { captureBatch, forkRunScript } from "./ForkMachines.ts";
+import { captureBatch, e2bBusy, forkRunScript, othersOf } from "./ForkMachines.ts";
+
+it("retries an E2B start refused for room or rate, and fails one refused for anything else", () => {
+  const withStatus = (statusCode: number) =>
+    Object.assign(new SandboxError(`${statusCode}: refused`), { statusCode });
+  expect(
+    [
+      new RateLimitError("You have reached the maximum number of concurrent E2B sandboxes"),
+      new ServiceBusyError("no capacity"),
+      withStatus(502),
+      withStatus(400),
+      new Error("socket hang up"),
+    ].map(e2bBusy),
+  ).toEqual([true, true, true, false, false]);
+});
+
+it("counts every running sandbox on the account except this host's copies", () => {
+  expect(
+    othersOf("host-a", [
+      { purpose: "t3-environment" },
+      { purpose: "t3-worker-fork", host: "host-a", batch: "b1" },
+      { purpose: "t3-worker-fork", host: "host-b", batch: "b2" },
+      { purpose: "t3-worker-fork", host: "host-a", batch: "b3" },
+      {},
+    ]),
+  ).toBe(3);
+});
 
 it("reads the batch from a capture's snapshot name, with or without its team and tag", () => {
   const batch = "7880e39f-43ec-496e-b333-f616a22862bf";

@@ -55,10 +55,23 @@ const FINISHED_BATCH_TTL_MS = 6 * 3_600_000;
 const MAX_RUNNING_BATCHES_PER_CHAT = 4;
 /** E2B keeps no sandbox longer than a day. */
 const MAX_LIFETIME_MS = 86_400_000;
+/**
+ * How long a job keeps its place while its provider refuses its copy for want of room: an E2B
+ * account at its running-sandbox limit, or a placement that failed for the moment. Each refusal
+ * leaves nothing running, and the waits grow to a minute apart.
+ */
+const NO_ROOM_RETRY = Schedule.min([
+  Schedule.exponential("5 seconds"),
+  Schedule.spaced("1 minute"),
+]).pipe(Schedule.upTo({ duration: "15 minutes" }));
+/** Chats wake and pause without telling this host, so a job waiting for E2B room counts again. */
+const E2B_RECOUNT = Duration.seconds(30);
 
 interface ForkLimits {
   readonly maxPerChat: number;
   readonly maxPerHost: number;
+  /** Running sandboxes the E2B account holds before copies stop starting: chats keep the rest. */
+  readonly e2bRoom: number;
   readonly maxJobMs: number;
   readonly maxCopyBackBytes: number;
   readonly outputsUri: string | undefined;
@@ -67,6 +80,7 @@ interface ForkLimits {
 const forkLimits = (settings: ForkMachines.WorkerForkSettings): ForkLimits => ({
   maxPerChat: settings.maxPerChat ?? 8,
   maxPerHost: settings.maxPerHost ?? 20,
+  e2bRoom: (settings.e2bConcurrency ?? 100) - (settings.e2bChatReserve ?? 5),
   maxJobMs: (settings.maxJobMinutes ?? 120) * 60_000,
   maxCopyBackBytes: (settings.maxCopyBackMiB ?? 100) * 1024 * 1024,
   outputsUri: settings.outputsUri?.replace(/\/+$/, ""),
@@ -149,7 +163,11 @@ const makeSlots = (initial: number) => {
         size = next;
         handOut();
       }),
-    withSlot: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    /** `whileWaiting` runs only until the slot is handed over, as a way to learn of a resize. */
+    withSlot: <A, E, R>(
+      effect: Effect.Effect<A, E, R>,
+      whileWaiting: Effect.Effect<never> = Effect.never,
+    ) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.suspend(() => {
           if (waiting.size === 0 && used < size) {
@@ -159,7 +177,7 @@ const makeSlots = (initial: number) => {
           const turn = Deferred.makeUnsafe<void>();
           waiting.add(turn);
           // A slot handed over just as the wait is interrupted goes to the next waiter.
-          return Effect.interruptible(Deferred.await(turn)).pipe(
+          return Effect.interruptible(Effect.raceFirst(Deferred.await(turn), whileWaiting)).pipe(
             Effect.onInterrupt(() =>
               Effect.sync(() => {
                 if (!waiting.delete(turn)) free();
@@ -207,6 +225,12 @@ const make = Effect.gen(function* () {
   const scope = yield* Effect.scope;
   const batches = new Map<string, Batch>();
   const hostSlots = makeSlots(forkLimits({}).maxPerHost);
+  /**
+   * This host's E2B copies, held from before their start until they are killed. Its size is the
+   * room left by every other running sandbox on the account, so a copy starting now is counted
+   * exactly once, by its slot, however the account's listing lags.
+   */
+  const e2bSlots = makeSlots(0);
   const chats = new Map<string, Chat>();
   const chatOf = (leaseId: string) => {
     let chat = chats.get(leaseId);
@@ -229,6 +253,39 @@ const make = Effect.gen(function* () {
     for (const leaseId of chats.keys())
       if (runningBatches(leaseId).length === 0) chats.delete(leaseId);
   });
+
+  /**
+   * Runs `effect` once a copy of `captureId` fits: at once on a provider whose copies share no limit
+   * with chats (Modal), or in its turn for an E2B slot. A count that fails leaves the room as it was.
+   */
+  const withProviderRoom = <A, E, R>(
+    captureId: string,
+    limits: ForkLimits,
+    effect: Effect.Effect<A, E, R>,
+  ) => {
+    const recount = machines.othersRunning(captureId, host).pipe(
+      Effect.flatMap((others) =>
+        others === null
+          ? Effect.succeed(false)
+          : e2bSlots.resize(Math.max(0, limits.e2bRoom - others)).pipe(Effect.as(true)),
+      ),
+      Effect.catch((error) =>
+        Effect.logWarning("could not count the E2B account's running sandboxes", {
+          cause: error.cause,
+        }).pipe(Effect.as(true)),
+      ),
+    );
+    return recount.pipe(
+      Effect.flatMap((shared) =>
+        shared
+          ? e2bSlots.withSlot(
+              effect,
+              Effect.forever(Effect.sleep(E2B_RECOUNT).pipe(Effect.andThen(recount))),
+            )
+          : effect,
+      ),
+    );
+  };
 
   const runJob = (
     batch: Batch,
@@ -258,16 +315,11 @@ const make = Effect.gen(function* () {
       });
     return Effect.acquireUseRelease(
       Effect.gen(function* () {
-        const forkId = yield* machines
-          .start(captureId, tag, Math.min(timeoutMs + AFTER_JOB_MS, MAX_LIFETIME_MS))
-          .pipe(
-            // A provider out of room for the moment usually has it again within seconds.
-            Effect.retry({
-              while: (error) => error.busy === true,
-              schedule: Schedule.exponential("5 seconds"),
-              times: 3,
-            }),
-          );
+        const forkId = yield* machines.start(
+          captureId,
+          tag,
+          Math.min(timeoutMs + AFTER_JOB_MS, MAX_LIFETIME_MS),
+        );
         setJob(batch, { index, state: "running" });
         yield* Effect.logInfo("worker fork started", { ...fields, forkId });
         return { forkId, startedAt: yield* Clock.currentTimeMillis };
@@ -354,6 +406,12 @@ const make = Effect.gen(function* () {
           });
         }),
     ).pipe(
+      // Retried outside the start itself, which cannot be interrupted, so cancelling a job or
+      // shutting down the host never waits out the retries.
+      Effect.retry({
+        while: (error) => error.step === "start" && error.busy === true,
+        schedule: NO_ROOM_RETRY,
+      }),
       Effect.catchTags({
         ForkMachineError: (error) =>
           Effect.sync(() => {
@@ -402,17 +460,22 @@ const make = Effect.gen(function* () {
         (captureId) =>
           Effect.forEach(
             input.jobs.map((_, index) => index),
-            // Every job takes its chat's slot before the host's, so no two jobs wait on each other.
+            // Every job takes its chat's slot, then its provider's room, then the host's slot, so no
+            // two jobs wait on each other, and a Modal job never waits behind E2B's room.
             // Cancelling a job interrupts its wait for a slot, or kills its copy as it ends. A job
             // handed a slot as it is cancelled checks once more before starting a copy.
             (index) =>
               Effect.raceFirst(
                 chat.copySlots.withSlot(
-                  hostSlots.withSlot(
-                    Effect.suspend(() =>
-                      batch.jobs[index]!.state === "cancelled"
-                        ? Effect.void
-                        : runJob(batch, source, actor, input, limits, captureId, index),
+                  withProviderRoom(
+                    captureId,
+                    limits,
+                    hostSlots.withSlot(
+                      Effect.suspend(() =>
+                        batch.jobs[index]!.state === "cancelled"
+                          ? Effect.void
+                          : runJob(batch, source, actor, input, limits, captureId, index),
+                      ),
                     ),
                   ),
                 ),
