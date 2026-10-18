@@ -37,7 +37,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolver for cloud clones", (it)
 
       expect(identity).not.toBeNull();
       expect(identity?.canonicalKey).toBe("github.com/t3tools/t3code");
-      expect(identity?.owner).toBe("t3tools");
+      expect(identity?.owner).toBe("T3Tools");
       expect(identity?.name).toBe("t3code");
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
