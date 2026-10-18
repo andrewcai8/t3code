@@ -141,7 +141,7 @@ import { Textarea } from "../ui/textarea";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import { pairingUrlHost } from "./pairingFields";
-import { CloudConnectionsSettings, useAgentRunningEnvironments } from "./CloudConnectionsSettings";
+import { CloudConnectionsSettings, agentRunningEnvironments } from "./CloudConnectionsSettings";
 import { isRemoteServerUpdate } from "../../cloud/guestServerUpdate";
 import {
   createServerPairingCredential,
@@ -2082,7 +2082,7 @@ export function ConnectionsSettings() {
     ...(primaryEnvironment ? [primaryEnvironment] : []),
     ...savedEnvironments.filter((environment) => environment.entry.enabled),
   ];
-  const balancedEnvironments = useAgentRunningEnvironments(loadBalancingEnvironments);
+  const balancedEnvironments = agentRunningEnvironments(loadBalancingEnvironments);
   const savedDesktopSshEnvironmentKeys = (() => {
     const keys = new Set<string>();
     for (const environment of savedEnvironments) {

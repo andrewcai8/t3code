@@ -2059,7 +2059,7 @@ export default function ChatView(props: ChatViewProps) {
     activeProject,
     activeProjectIsScratch && draftId !== null,
   );
-  const { runTargets, logicalProjectEnvironments } = Cloud.useNewChatRunTargets({
+  const { runTargets, logicalProjectEnvironments } = Cloud.newChatRunTargets({
     projectEnvironments,
     environmentById,
     environmentId: activeThread?.environmentId ?? null,

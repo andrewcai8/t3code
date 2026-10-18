@@ -1060,7 +1060,7 @@ import {
 } from "lucide-react";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
 import { hasProviderSetup } from "./ProviderStatusBanner";
-import { useCloudProviderPicker } from "../../cloud/cloudProviderEntries";
+import { cloudProviderPicker } from "../../cloud/cloudProviderEntries";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -2366,7 +2366,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedModelOptionsForDispatch,
   );
   const selectedModelForPicker = selectedModel;
-  const cloudPicker = useCloudProviderPicker({
+  const cloudPicker = cloudProviderPicker({
     startsCloudEnvironment,
     entries: providerInstanceEntries,
     selectedProvider,

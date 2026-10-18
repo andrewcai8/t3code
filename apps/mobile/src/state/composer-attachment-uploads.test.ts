@@ -28,6 +28,7 @@ const native = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
+vi.mock("./cloud-chat-delivery", () => ({ useCloudChatDelivery: () => () => undefined }));
 vi.mock("react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react")>()),
   useEffect: (effect: () => void | (() => void)) => native.effects.push(effect),
