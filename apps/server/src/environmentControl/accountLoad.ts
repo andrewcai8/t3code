@@ -13,6 +13,35 @@ const requestAccounts = (request: {
     ProviderInstanceId.make(id),
   );
 
+/** One entry per local thread with a run in flight, named by its provider instance. */
+const localSessions = (sql: SqlClient.SqlClient) =>
+  sql<{ readonly providerInstanceId: string; readonly threads: number }>`
+    SELECT provider_instance_id AS "providerInstanceId", COUNT(DISTINCT thread_id) AS threads
+    FROM orchestration_v2_projection_runs
+    WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+      AND provider_instance_id IS NOT NULL
+    GROUP BY provider_instance_id
+  `.pipe(
+    Effect.map((rows) =>
+      rows.flatMap(({ providerInstanceId, threads }) =>
+        Array.from({ length: threads }, () => ProviderInstanceId.make(providerInstanceId)),
+      ),
+    ),
+    Effect.catch((cause) =>
+      Effect.as(Effect.logDebug("local sessions unread for account load", { cause }), []),
+    ),
+  );
+
+const toLoad = (sessions: ReadonlyArray<ProviderInstanceId>) => {
+  const load = new Map<ProviderInstanceId, number>();
+  for (const id of sessions) load.set(id, (load.get(id) ?? 0) + 1);
+  return load satisfies AccountLoad;
+};
+
+/** Sessions running on each account of this host's own threads, for routing a new local chat. */
+export const readLocalAccountLoad = (sql: SqlClient.SqlClient) =>
+  Effect.map(localSessions(sql), toLoad);
+
 /**
  * Sessions already running on each account, for routing a new cloud chat.
  *
@@ -51,28 +80,9 @@ export const readAccountLoad = (
           Effect.as(Effect.logDebug("provisioning boxes unread for account load", { cause }), []),
         ),
       ),
-      local: sql<{ readonly providerInstanceId: string; readonly threads: number }>`
-        SELECT provider_instance_id AS "providerInstanceId", COUNT(DISTINCT thread_id) AS threads
-        FROM orchestration_v2_projection_runs
-        WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-          AND provider_instance_id IS NOT NULL
-        GROUP BY provider_instance_id
-      `.pipe(
-        Effect.map((rows) =>
-          rows.flatMap(({ providerInstanceId, threads }) =>
-            Array.from({ length: threads }, () => ProviderInstanceId.make(providerInstanceId)),
-          ),
-        ),
-        Effect.catch((cause) =>
-          Effect.as(Effect.logDebug("local sessions unread for account load", { cause }), []),
-        ),
-      ),
+      local: localSessions(sql),
     },
     { concurrency: "unbounded" },
   ).pipe(
-    Effect.map(({ boxes, provisioning, local }) => {
-      const load = new Map<ProviderInstanceId, number>();
-      for (const id of [...boxes, ...provisioning, ...local]) load.set(id, (load.get(id) ?? 0) + 1);
-      return load satisfies AccountLoad;
-    }),
+    Effect.map(({ boxes, provisioning, local }) => toLoad([...boxes, ...provisioning, ...local])),
   );

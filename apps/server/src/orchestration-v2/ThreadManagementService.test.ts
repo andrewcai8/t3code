@@ -36,6 +36,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
@@ -473,6 +474,109 @@ it.effect(
     }).pipe(Effect.provide(layerTest));
   },
 );
+
+it.effect("starts a new thread on the account with the most usage left and keeps it there", () => {
+  const projectId = ProjectId.make("project:thread-management:chokepoint");
+  const threadId = ThreadId.make("thread:thread-management:chokepoint");
+  const dispatched: Array<OrchestrationV2Command> = [];
+  const account = (instanceId: string, usedPercent: number) => ({
+    instanceId: ProviderInstanceId.make(instanceId),
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready" as const,
+    auth: { status: "authenticated" as const },
+    checkedAt: "2026-09-03T11:55:00.000Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+    usageLimits: {
+      checkedAt: new Date().toISOString(),
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session" as const,
+          label: "Session",
+          usedPercent,
+          resetsAt: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+      ],
+    },
+  });
+  const layerTest = ThreadManagementService.layer.pipe(
+    Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([account("codex", 90), account("codex_work", 10)]),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        getThreadRecords: () =>
+          Effect.succeed({
+            thread: {
+              id: threadId,
+              projectId,
+              deletedAt: null,
+              modelSelection: { instanceId: ProviderInstanceId.make("codex_work"), model: "m" },
+            },
+          } as unknown as OrchestrationV2ThreadProjection),
+        dispatch: (command) =>
+          Effect.sync(() => {
+            dispatched.push(command as OrchestrationV2Command);
+            return { sequence: 1, storedEvents: [] } as never;
+          }),
+      }),
+    ),
+    Layer.provide(
+      ServerSettings.layerTest({
+        providerInstances: {
+          codex: { driver: "codex" },
+          codex_work: { driver: "codex" },
+        },
+      }),
+    ),
+    Layer.provideMerge(layerReceiptsTest),
+  );
+
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const selected = { instanceId: ProviderInstanceId.make("codex"), model: "m" };
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:thread-management:route-create"),
+      threadId,
+      projectId,
+      title: "Routed",
+      modelSelection: selected,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* threads.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("command:thread-management:route-follow-up"),
+      threadId,
+      messageId: MessageId.make("message:thread-management:route-follow-up"),
+      text: "Follow-up from a composer still showing the first account.",
+      attachments: [],
+      modelSelection: selected,
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+
+    expect(
+      dispatched.map((command) =>
+        "modelSelection" in command ? command.modelSelection?.instanceId : undefined,
+      ),
+    ).toEqual(["codex_work", "codex_work"]);
+  }).pipe(Effect.provide(layerTest));
+});
 
 it.effect("classifies projection infrastructure failures separately from a missing thread", () => {
   const projectId = ProjectId.make("project:thread-management:projection-failure");

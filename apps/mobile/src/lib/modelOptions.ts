@@ -6,11 +6,12 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
-import { resolveProjectProviderInstanceEnabled } from "@t3tools/contracts";
+import { PROVIDER_DISPLAY_NAMES, resolveProjectProviderInstanceEnabled } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
+import { ROUTED_ACCOUNT_DRIVERS } from "@t3tools/shared/usageLimits";
 
 export type ModelOption = {
   readonly key: string;
@@ -235,19 +236,39 @@ export function buildModelOptions(
   includeHidden = false,
 ): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
-
-  for (const provider of config?.providers ?? []) {
-    if (
-      (providerInstanceId !== undefined && provider.instanceId !== providerInstanceId) ||
-      !isProviderEnabledForProject(config, provider, projectId) ||
-      !provider.installed ||
-      provider.auth.status === "unauthenticated" ||
-      (provider.driver === "antigravity" && provider.availability === "unavailable")
-    ) {
-      continue;
+  const offered = (config?.providers ?? []).filter(
+    (provider) =>
+      (providerInstanceId === undefined || provider.instanceId === providerInstanceId) &&
+      isProviderEnabledForProject(config, provider, projectId) &&
+      provider.installed &&
+      provider.auth.status !== "unauthenticated" &&
+      !(provider.driver === "antigravity" && provider.availability === "unavailable"),
+  );
+  // A server that picks each chat's account offers each routed driver once, as the selected
+  // account, else the default, else the first; the server runs the chat on its best account.
+  const standIns = new Map<string, ModelSelection["instanceId"]>();
+  if (config?.settings?.autoPickProviderAccounts) {
+    const rank = (instanceId: string, driver: string) =>
+      instanceId === fallbackModelSelection?.instanceId ? 2 : instanceId === driver ? 1 : 0;
+    for (const provider of offered) {
+      if (!ROUTED_ACCOUNT_DRIVERS.has(provider.driver)) continue;
+      const current = standIns.get(provider.driver);
+      if (
+        current === undefined ||
+        rank(provider.instanceId, provider.driver) > rank(current, provider.driver)
+      )
+        standIns.set(provider.driver, provider.instanceId);
     }
+  }
 
-    const providerLabel = providerDisplayLabel(provider);
+  for (const provider of offered) {
+    const standIn = standIns.get(provider.driver);
+    if (standIn !== undefined && standIn !== provider.instanceId) continue;
+
+    const providerLabel =
+      standIn === undefined
+        ? providerDisplayLabel(provider)
+        : (PROVIDER_DISPLAY_NAMES[provider.driver] ?? providerDisplayLabel(provider));
     const updateRequired = provider.updateRequiredModels?.length
       ? { driver: provider.driver, updateRequiredModels: provider.updateRequiredModels }
       : undefined;

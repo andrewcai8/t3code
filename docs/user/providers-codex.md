@@ -27,9 +27,12 @@ covers installation and custom configuration.
 
 ## Use multiple accounts
 
-Add another ChatGPT account in **Settings → Providers**, then select the account
-from the thread's model picker. Compatible accounts can continue the same thread.
-Connecting accounts through T3 Code leaves your CLI login unchanged.
+Add another ChatGPT account in **Settings → Providers**. With **Auto-pick
+accounts** on, the default, each new thread starts on the Codex account with the
+most usage left and stays there, and the model picker offers Codex once. Turn it
+off in **Settings → General** to select the account from the thread's model
+picker instead. Compatible accounts can continue the same thread. Connecting
+accounts through T3 Code leaves your CLI login unchanged.
 
 ### Multiple CLI logins
 
@@ -66,7 +69,8 @@ from the other home.
 
 ## Switch accounts in an existing thread
 
-Choose the other account from the thread's model picker. T3 Code offers compatible
+Turn off **Auto-pick accounts**, then choose the other account from the thread's
+model picker. T3 Code offers compatible
 Codex instances that share the thread's **CODEX_HOME path**. Changing accounts does
 not move the conversation into a separate Codex home.
 

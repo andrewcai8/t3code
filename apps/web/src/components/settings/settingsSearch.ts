@@ -329,6 +329,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["usage quota rate limit reset recover continue"],
   },
   {
+    id: "auto-pick-provider-accounts",
+    title: "Auto-pick accounts",
+    to: "/settings/general",
+    searchTerms: ["usage quota rate limit route balance account claude codex cursor new chat"],
+  },
+  {
     id: "auto-switch-cloud-accounts",
     title: "Switch cloud chats to another account at a usage limit",
     to: "/settings/general",

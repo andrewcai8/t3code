@@ -2,7 +2,7 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
 import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceEntries, isProviderInstancePickerReady } from "../providerInstances";
-import { cloudProviderEntries } from "./cloudProviderEntries";
+import { accountPickedProviderEntries, cloudProviderEntries } from "./cloudProviderEntries";
 
 function provider(input: {
   provider: ProviderDriverKind;
@@ -169,5 +169,35 @@ describe("cloudProviderEntries", () => {
         message: entry.snapshot.message,
       })),
     ).toEqual([{ pickerReady: false, message: "Claude is not signed in." }]);
+  });
+});
+
+describe("accountPickedProviderEntries", () => {
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const entries = deriveProviderInstanceEntries([
+    provider({ provider: claude, instanceId: "claudeAgent", displayName: "Claude · a@x.com" }),
+    provider({ provider: ProviderDriverKind.make("opencode"), instanceId: "opencode" }),
+    provider({ provider: claude, instanceId: "claude_work", displayName: "Claude · w@x.com" }),
+    provider({
+      provider: claude,
+      instanceId: "claude_out",
+      auth: { status: "unauthenticated" },
+    }),
+  ]);
+  const rail = (selected: string) =>
+    accountPickedProviderEntries(entries, ProviderInstanceId.make(selected)).map((entry) => [
+      entry.instanceId,
+      entry.displayName,
+    ]);
+
+  it("shows each routed driver once, as the selected account, beside other drivers", () => {
+    expect(rail("claude_work")).toEqual([
+      ["claude_work", "Claude"],
+      ["opencode", "OpenCode"],
+    ]);
+  });
+
+  it("stands a usable account in for a selected one that is signed out", () => {
+    expect(rail("claude_out")[0]).toEqual(["claudeAgent", "Claude"]);
   });
 });

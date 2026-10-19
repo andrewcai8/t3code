@@ -22,6 +22,16 @@ import {
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
+/**
+ * Drivers whose instances are interchangeable subscriptions of one provider, so a chat can be
+ * routed to any of them. Instances of other drivers are configurations, not accounts.
+ */
+export const ROUTED_ACCOUNT_DRIVERS: ReadonlySet<string> = new Set([
+  "codex",
+  "claudeAgent",
+  "cursor",
+]);
+
 /** Notices naming accounts whose limits read identically, as `collectLimitNotices` lists them. */
 export function identicalReadingNotices(presentations: LimitPresentations): string[] {
   const readings = [...presentations].flatMap(([environmentId, presentation]) => [

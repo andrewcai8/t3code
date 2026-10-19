@@ -1153,6 +1153,11 @@ export const ServerSettings = Schema.Struct({
    * account of the same provider and continues the turn.
    */
   autoSwitchCloudAccounts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * A new chat on a provider with several accounts here runs on the one with the most usage
+   * left, and stays on it; pickers offer the provider instead of each account.
+   */
+  autoPickProviderAccounts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1466,6 +1471,7 @@ export const ServerSettingsPatch = Schema.Struct({
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   autoSwitchCloudAccounts: Schema.optionalKey(Schema.Boolean),
+  autoPickProviderAccounts: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
