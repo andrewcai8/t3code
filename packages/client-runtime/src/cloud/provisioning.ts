@@ -9,6 +9,8 @@ import {
   type ProjectId,
   type ProvisionedChat,
   ProvisionProvider,
+  type ScheduledTaskTarget,
+  scheduledTaskTargets,
   type ScopedProjectRef,
   type ScopedThreadRef,
   type ServerConfig,
@@ -55,6 +57,19 @@ export function runsLocalAgents(
   config: Pick<ServerConfig, "localAgentRuns"> | null | undefined,
 ): boolean {
   return config?.localAgentRuns !== false;
+}
+
+/** Where an environment can run a scheduled task, its default first. */
+export function offeredScheduledTaskTargets(
+  config:
+    | Pick<ServerConfig, "environmentControl" | "provisionProviders" | "localAgentRuns">
+    | null
+    | undefined,
+): readonly [ScheduledTaskTarget, ...ReadonlyArray<ScheduledTaskTarget>] {
+  return scheduledTaskTargets({
+    localAgentRuns: runsLocalAgents(config),
+    provisionProviders: offeredProvisionProviders(config),
+  });
 }
 
 /** What the client knows about one environment when placing a new chat. */

@@ -33,7 +33,7 @@ import {
   ProviderInstanceId,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
-import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import { cloudEnvironmentLabel, offeredScheduledTaskTargets } from "@t3tools/client-runtime/cloud";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -155,7 +155,7 @@ function Field({
   children,
 }: {
   label: string;
-  hint?: string;
+  hint?: string | undefined;
   htmlFor?: string;
   children: ReactNode;
 }) {
@@ -1013,8 +1013,10 @@ function ScheduledTaskEditorForm({
       selectedProject?.id ?? null,
     ),
   );
-  const cloudProviders = offeredProvisionProviders(environment?.serverConfig);
-  const cloud = draft.target !== "local";
+  const targets = offeredScheduledTaskTargets(environment?.serverConfig);
+  // A host that runs no agents never offers itself, so its own default stands in.
+  const target = draft.target === "local" ? targets[0] : draft.target;
+  const cloud = target !== "local";
 
   const firstInstance = instanceEntries[0];
   const draftSelection = draft.modelKey ? splitModelKey(draft.modelKey) : null;
@@ -1120,7 +1122,7 @@ function ScheduledTaskEditorForm({
       schedule,
       projectId: selectedProjectId as ProjectId,
       threadId: draft.threadId ? (draft.threadId as ThreadId) : null,
-      target: draft.target,
+      target,
       workspaceStrategy,
       modelSelection,
       runtimeMode: draft.runtimeMode,
@@ -1219,26 +1221,29 @@ function ScheduledTaskEditorForm({
               </SelectPopup>
             </Select>
           </Field>
-          {cloudProviders.length > 0 || cloud ? (
+          {targets.length > 1 || cloud ? (
             <Field label="Run on" htmlFor="scheduled-task-target">
               <Select
-                value={draft.target}
-                onValueChange={(target) => {
-                  if (target) setDraft((current) => ({ ...current, target }));
+                value={target}
+                onValueChange={(next) => {
+                  if (next) setDraft((current) => ({ ...current, target: next }));
                 }}
               >
                 <SelectTrigger id="scheduled-task-target" size="sm">
-                  <SelectValue>
-                    {cloud ? cloudEnvironmentLabel(draft.target) : "This server"}
-                  </SelectValue>
+                  <SelectValue>{cloud ? cloudEnvironmentLabel(target) : "This server"}</SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
-                  <SelectItem value="local">This server</SelectItem>
-                  {cloudProviders.map((provider) => (
-                    <SelectItem key={provider} value={provider} disabled={draft.threadId !== ""}>
-                      {cloudEnvironmentLabel(provider)}
-                    </SelectItem>
-                  ))}
+                  {targets.map((option) =>
+                    option === "local" ? (
+                      <SelectItem key={option} value={option}>
+                        This server
+                      </SelectItem>
+                    ) : (
+                      <SelectItem key={option} value={option} disabled={draft.threadId !== ""}>
+                        {cloudEnvironmentLabel(option)}
+                      </SelectItem>
+                    ),
+                  )}
                 </SelectPopup>
               </Select>
             </Field>
@@ -1361,7 +1366,10 @@ function ScheduledTaskEditorForm({
             />
           </Field>
 
-          <Field label="Model">
+          <Field
+            label="Model"
+            hint={cloud ? "Runs on the account with the most usage left" : undefined}
+          >
             <div>
               <ProviderModelPicker
                 environmentId={environmentId}

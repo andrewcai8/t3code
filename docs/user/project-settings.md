@@ -77,6 +77,8 @@ On a server that can start cloud machines, **Run on** can send each run to a fre
 box or Namespace Mac instead. Every run clones the project's repository at the base branch and starts a
 new chat there, on the account for the task's model with the most usage left. The chat shows in
 the sidebar like any cloud chat. The machine and its chat are removed a day after the run.
+A server that runs no agents itself does not offer **This server**, so its new tasks run on a
+cloud machine by default.
 
 ## Webhook automations
 

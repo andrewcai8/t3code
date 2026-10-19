@@ -89,6 +89,8 @@ const failed = (task: ScheduledTask, message: string) =>
  * Firing again with the same key and time sends the same request, so it resumes the first fire.
  */
 export class ScheduledCloudFire extends Context.Reference<{
+  /** The machine kinds this host can start now; none when its config cannot be read. */
+  readonly providers: Effect.Effect<ReadonlyArray<ProvisionProvider>>;
   readonly fire: (input: {
     readonly task: ScheduledTask;
     readonly provider: ProvisionProvider;
@@ -97,6 +99,7 @@ export class ScheduledCloudFire extends Context.Reference<{
   }) => Effect.Effect<void, ScheduledTaskError>;
 }>("t3/scheduledTasks/ScheduledCloudFire", {
   defaultValue: () => ({
+    providers: Effect.succeed([]),
     fire: ({ task }) => Effect.fail(failed(task, "This server cannot start cloud machines.")),
   }),
 }) {}
@@ -176,6 +179,7 @@ export const layer = Layer.effect(
       );
 
     return ScheduledCloudFire.of({
+      providers: control.provisionProviders.pipe(Effect.orElseSucceed(() => [])),
       fire: Effect.fn("ScheduledCloudFire.fire")(function* ({ task, provider, fireKey, firedAt }) {
         const project = yield* projects
           .getById(task.projectId)

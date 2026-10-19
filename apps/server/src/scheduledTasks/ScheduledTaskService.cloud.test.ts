@@ -1,4 +1,5 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -9,6 +10,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import * as ServerConfig from "../config.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -18,7 +20,7 @@ import { ScheduledCloudFire } from "./ScheduledCloudFire.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownSync(ScheduledTaskUpsertInput);
-const taskInput = (title: string, target?: "local" | "e2b") =>
+const taskInput = (title: string, target?: "local" | "e2b" | "modal") =>
   decodeUpsertInput({
     title,
     prompt: `Run ${title}.`,
@@ -50,6 +52,7 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(SecretRequests.SecretRequests)({}),
       Layer.succeed(ScheduledCloudFire, {
+        providers: Effect.succeed(["e2b"] as const),
         fire: ({ task, provider }) =>
           Ref.update(fired, (calls) => [...calls, { title: task.title, provider }]).pipe(
             Effect.andThen(Deferred.succeed(fireStarted, undefined)),
@@ -96,15 +99,59 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
-const dependenciesWith = (fire: (typeof ScheduledCloudFire)["Service"]["fire"]) =>
+const dependenciesWith = (
+  fire: (typeof ScheduledCloudFire)["Service"]["fire"],
+  providers: (typeof ScheduledCloudFire)["Service"]["providers"] = Effect.succeed(["e2b"]),
+) =>
   Layer.mergeAll(
     NodeCrypto.layer,
     Scheduler.layer,
     Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
     Layer.mock(ThreadManagementService.ThreadManagementService)({}),
     Layer.mock(SecretRequests.SecretRequests)({}),
-    Layer.succeed(ScheduledCloudFire, { fire }),
+    Layer.succeed(ScheduledCloudFire, { providers, fire }),
   );
+
+/** A host started with T3CODE_LOCAL_AGENT_RUNS=false. */
+const layerCloudOnlyHostConfig = Layer.effect(
+  ServerConfig.ServerConfig,
+  Effect.map(ServerConfig.ServerConfig, (config) => ({ ...config, localAgentRuns: false })),
+).pipe(
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-scheduled-cloud-only-" })),
+  Layer.provide(NodeServices.layer),
+);
+
+const cloudOnlyHostService = (providers: ReadonlyArray<"e2b" | "modal">) =>
+  ScheduledTaskService.layer.pipe(
+    Layer.provide(dependenciesWith(() => Effect.void, Effect.succeed(providers))),
+    Layer.provide(layerCloudOnlyHostConfig),
+    Layer.provide(SqlitePersistence.layerMemory),
+  );
+
+it.effect("runs a new task on a host that runs no agents on its first cloud machine kind", () =>
+  Effect.gen(function* () {
+    const service = yield* ScheduledTaskService.ScheduledTaskService;
+    assert.equal((yield* service.upsert(taskInput("default"))).task.target, "e2b");
+    assert.equal((yield* service.upsert(taskInput("chosen", "modal"))).task.target, "modal");
+
+    const local = yield* service.upsert(taskInput("local", "local")).pipe(Effect.flip);
+    assert.equal(
+      local.message,
+      "This server does not run agents. Run the task on a cloud machine.",
+    );
+    assert.deepEqual((yield* service.list()).tasks.map((task) => task.title).toSorted(), [
+      "chosen",
+      "default",
+    ]);
+  }).pipe(Effect.provide(cloudOnlyHostService(["e2b", "modal"]))),
+);
+
+it.effect("keeps a new task here on a host that runs no agents and has no cloud machine", () =>
+  Effect.gen(function* () {
+    const service = yield* ScheduledTaskService.ScheduledTaskService;
+    assert.equal((yield* service.upsert(taskInput("default"))).task.target, "local");
+  }).pipe(Effect.provide(cloudOnlyHostService([]))),
+);
 
 it.effect("refuses to run a cloud task that is already running, as it does a local one", () =>
   Effect.gen(function* () {

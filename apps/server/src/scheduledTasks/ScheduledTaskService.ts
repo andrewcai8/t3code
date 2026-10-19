@@ -21,6 +21,7 @@ import {
   type ScheduledTaskRunNowResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskUpsertInput,
+  scheduledTaskTargets,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -41,6 +42,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { localAgentRunsEnabled } from "../orchestration-v2/cloudOnlyHost.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -372,7 +374,9 @@ export const layer = Layer.effect(
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
-    const launch = launchFire(yield* ScheduledCloudFire, threadLaunch);
+    const cloudFire = yield* ScheduledCloudFire;
+    const launch = launchFire(cloudFire, threadLaunch);
+    const localAgentRuns = yield* localAgentRunsEnabled;
     const cloudRuns = yield* FiberSet.make();
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
@@ -1009,7 +1013,17 @@ export const layer = Layer.effect(
         // keep their run history, and so real load failures propagate instead
         // of silently resetting an existing row.
         const existingTask = yield* findTask(id);
-        const target = input.target ?? existingTask?.target ?? "local";
+        const offeredTargets = scheduledTaskTargets({
+          localAgentRuns,
+          provisionProviders: yield* cloudFire.providers,
+        });
+        if (input.target === "local" && !offeredTargets.includes("local")) {
+          return yield* taskError(
+            "This server does not run agents. Run the task on a cloud machine.",
+            { taskId: id },
+          );
+        }
+        const target = input.target ?? existingTask?.target ?? offeredTargets[0];
         if (target !== "local" && (input.threadId ?? null) !== null) {
           return yield* taskError("A task that runs on a cloud machine must start a new chat.", {
             taskId: id,

@@ -16,7 +16,7 @@ import {
   resolveEnvironmentMachineKind,
   ScheduledTaskTarget,
 } from "@t3tools/contracts";
-import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
+import { cloudEnvironmentLabel, offeredScheduledTaskTargets } from "@t3tools/client-runtime/cloud";
 import type { MenuAction } from "@react-native-menu/menu";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import {
@@ -578,8 +578,10 @@ function TaskForm({
   const projects = useProjects().filter((project) => project.environmentId === environmentId);
   const config = useEnvironmentServerConfig(environmentId);
   const modelOptions = buildModelOptions(config, null, undefined, draft.projectId);
-  const cloudProviders = offeredProvisionProviders(config);
-  const cloud = draft.target !== "local";
+  const targets = offeredScheduledTaskTargets(config);
+  // A host that runs no agents never offers itself, so its own default stands in.
+  const target = draft.target === "local" ? targets[0] : draft.target;
+  const cloud = target !== "local";
   const canOperate = useAtomValue(
     serverEnvironment.upsertScheduledTask.permissionAtom(environmentId),
   );
@@ -658,7 +660,7 @@ function TaskForm({
       schedule,
       enabled: draft.enabled,
       threadId: draft.task?.threadId ?? null,
-      target: draft.target,
+      target,
       workspaceStrategy:
         !cloud && draft.workspace === "root"
           ? { type: "root" }
@@ -795,24 +797,21 @@ function TaskForm({
         </SettingsSection>
 
         <SettingsSection title="Workspace">
-          {cloudProviders.length > 0 || cloud ? (
+          {targets.length > 1 || cloud ? (
             <SelectRow
               label="Run on"
-              value={cloud ? cloudEnvironmentLabel(draft.target) : "This server"}
-              actions={[
-                { id: "local", title: "This server", state: cloud ? undefined : "on" },
+              value={cloud ? cloudEnvironmentLabel(target) : "This server"}
+              actions={targets
                 // A task bound to an existing chat keeps running in that chat on this server.
-                ...(draft.task?.threadId
-                  ? []
-                  : cloudProviders.map((provider) => ({
-                      id: provider,
-                      title: cloudEnvironmentLabel(provider),
-                      state: draft.target === provider ? ("on" as const) : undefined,
-                    }))),
-              ]}
+                .filter((option) => option === "local" || !draft.task?.threadId)
+                .map((option) => ({
+                  id: option,
+                  title: option === "local" ? "This server" : cloudEnvironmentLabel(option),
+                  state: target === option ? ("on" as const) : undefined,
+                }))}
               onSelect={(id) => {
-                const target = ScheduledTaskTarget.literals.find((literal) => literal === id);
-                if (target) setDraft({ ...draft, target });
+                const next = ScheduledTaskTarget.literals.find((literal) => literal === id);
+                if (next) setDraft({ ...draft, target: next });
               }}
             />
           ) : null}
@@ -847,7 +846,7 @@ function TaskForm({
                 if (id === "worktree" || id === "root" || id === "existing_worktree")
                   setDraft({ ...draft, workspace: id });
               }}
-              borderTop={cloudProviders.length > 0}
+              borderTop={targets.length > 1}
             />
           )}
           {cloud || draft.workspace === "worktree" ? (
