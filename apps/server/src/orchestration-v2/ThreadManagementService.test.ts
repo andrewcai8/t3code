@@ -492,14 +492,15 @@ it.effect("starts a new thread on the account with the most usage left and keeps
     slashCommands: [],
     skills: [],
     usageLimits: {
-      checkedAt: new Date().toISOString(),
+      // The test clock starts at the epoch, so this reading is fresh.
+      checkedAt: "1970-01-01T00:00:00.000Z",
       windows: [
         {
           id: "five_hour",
           kind: "session" as const,
           label: "Session",
           usedPercent,
-          resetsAt: new Date(Date.now() + 3_600_000).toISOString(),
+          resetsAt: "1970-01-01T01:00:00.000Z",
         },
       ],
     },
@@ -532,8 +533,8 @@ it.effect("starts a new thread on the account with the most usage left and keeps
     Layer.provide(
       ServerSettings.layerTest({
         providerInstances: {
-          codex: { driver: "codex" },
-          codex_work: { driver: "codex" },
+          [ProviderInstanceId.make("codex")]: { driver: ProviderDriverKind.make("codex") },
+          [ProviderInstanceId.make("codex_work")]: { driver: ProviderDriverKind.make("codex") },
         },
       }),
     ),
