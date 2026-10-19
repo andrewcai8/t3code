@@ -46,6 +46,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import { makeAccountRouting } from "./accountRouting.ts";
 import { makeLocalRunRefusal } from "./cloudOnlyHost.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -514,6 +515,7 @@ const make = Effect.gen(function* () {
   const layerScope = yield* Effect.scope;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const refuseLocalRun = yield* makeLocalRunRefusal;
+  const routeAccount = yield* makeAccountRouting;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
 
@@ -671,11 +673,51 @@ const make = Effect.gen(function* () {
     }
   };
 
+  // A replayed command keeps the account its first attempt was accepted with.
+  const routeCommandAccount = Effect.fn("orchestrationV2.threadManagement.routeCommandAccount")(
+    function* (command: OrchestrationV2ServerCommand) {
+      switch (command.type) {
+        case "thread.create": {
+          if (yield* hasReceipt(command.commandId)) return command;
+          const modelSelection = yield* routeAccount({
+            projectId: command.projectId,
+            selection: command.modelSelection,
+          });
+          return { ...command, modelSelection };
+        }
+        case "message.dispatch": {
+          if (command.modelSelection === undefined || (yield* hasReceipt(command.commandId)))
+            return command;
+          const { thread } = yield* orchestrator.getThreadRecords(command.threadId, []);
+          const modelSelection = yield* routeAccount({
+            projectId: thread.projectId,
+            selection: command.modelSelection,
+            current: thread.modelSelection.instanceId,
+          });
+          return { ...command, modelSelection };
+        }
+        case "delegated_task.request": {
+          if (yield* hasReceipt(command.commandId)) return command;
+          const { thread } = yield* orchestrator.getThreadRecords(command.parentThreadId, []);
+          const modelSelection = yield* routeAccount({
+            projectId: thread.projectId,
+            selection: command.modelSelection,
+          });
+          return { ...command, modelSelection };
+        }
+        default:
+          return command;
+      }
+    },
+  );
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     refuseLocalRun(command).pipe(
       Effect.andThen(ensureCommandTranscripts(command)),
-      Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(routeCommandAccount(command)),
+      Effect.flatMap((routed) =>
+        assertDispatchTargetEnabled(routed).pipe(Effect.andThen(orchestrator.dispatch(routed))),
+      ),
     );
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>

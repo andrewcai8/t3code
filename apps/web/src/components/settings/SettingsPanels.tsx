@@ -586,6 +586,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
       ? ["Snooze limited threads"]
       : []),
+    ...(settings.autoPickProviderAccounts !== DEFAULT_UNIFIED_SETTINGS.autoPickProviderAccounts
+      ? ["Auto-pick accounts"]
+      : []),
     ...(settings.autoSwitchCloudAccounts !== DEFAULT_UNIFIED_SETTINGS.autoSwitchCloudAccounts
       ? ["Switch cloud chats to another account at a usage limit"]
       : []),
@@ -746,6 +749,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
+      autoPickProviderAccounts: DEFAULT_UNIFIED_SETTINGS.autoPickProviderAccounts,
       autoSwitchCloudAccounts: DEFAULT_UNIFIED_SETTINGS.autoSwitchCloudAccounts,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
@@ -2249,6 +2253,22 @@ export function GeneralSettingsPanel() {
                 updateSettings({ snoozeLimitedThreads: Boolean(checked) })
               }
               aria-label="Snooze limited threads"
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("auto-pick-provider-accounts")}
+          description="Start each new chat on the account of its provider with the most usage left, and keep it there. Turn off to choose accounts yourself."
+          settingKeys={["autoPickProviderAccounts"]}
+          control={
+            <ScopedSwitch
+              settingKeys={["autoPickProviderAccounts"]}
+              checked={settings.autoPickProviderAccounts}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoPickProviderAccounts: Boolean(checked) })
+              }
+              aria-label="Auto-pick accounts"
             />
           }
         />

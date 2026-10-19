@@ -94,6 +94,7 @@ function AutoSettleSettingsRows() {
       autoResumeLimitedThreads?: boolean;
       snoozeLimitedThreads?: boolean;
       autoSwitchCloudAccounts?: boolean;
+      autoPickProviderAccounts?: boolean;
     },
   ) => {
     if (
@@ -205,6 +206,13 @@ function AutoSettleSettingsRows() {
             value={uniformMobileSetting(displayTargets, "snoozeLimitedThreads")}
             disabled={disabled}
             onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
+          />
+          <SettingsSwitchRow
+            icon="clock"
+            label="Auto-pick accounts"
+            value={uniformMobileSetting(displayTargets, "autoPickProviderAccounts")}
+            disabled={disabled}
+            onValueChange={(value) => writeToAll({ autoPickProviderAccounts: value })}
           />
           {runsEnvironmentControl ? (
             <SettingsSwitchRow

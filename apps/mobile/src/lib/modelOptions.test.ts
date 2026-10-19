@@ -738,6 +738,51 @@ describe("mobile model options", () => {
   });
 });
 
+describe("servers that pick each chat's account", () => {
+  const claude = (instanceId: string, displayName: string) => ({
+    instanceId,
+    driver: "claudeAgent",
+    displayName,
+    enabled: true,
+    installed: true,
+    auth: { status: "authenticated" },
+    models: [{ slug: "claude-opus", name: "Opus", isCustom: false, capabilities: null }],
+  });
+  const config = (autoPickProviderAccounts: boolean) =>
+    ({
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        autoPickProviderAccounts,
+        providerInstances: {
+          claudeAgent: { driver: "claudeAgent" },
+          claude_work: { driver: "claudeAgent" },
+        },
+      },
+      providers: [
+        claude("claudeAgent", "Claude · a@x.com"),
+        claude("claude_work", "Claude · w@x.com"),
+      ],
+    }) as unknown as ServerConfig;
+  const selected = { instanceId: ProviderInstanceId.make("claude_work"), model: "claude-opus" };
+
+  it("offers the provider once, as the selected account", () => {
+    expect(
+      buildModelOptions(config(true), selected, undefined, null).map((option) => [
+        option.providerKey,
+        option.providerLabel,
+      ]),
+    ).toEqual([["claude_work", "Claude"]]);
+  });
+
+  it("offers every account when the server leaves the choice to the user", () => {
+    expect(
+      buildModelOptions(config(false), selected, undefined, null).map(
+        (option) => option.providerLabel,
+      ),
+    ).toEqual(["Claude · a@x.com", "Claude · w@x.com"]);
+  });
+});
+
 describe("synchronized mobile model visibility", () => {
   const provider = ProviderInstanceId.make("codex_work");
   const other = ProviderInstanceId.make("codex_personal");
@@ -750,6 +795,7 @@ describe("synchronized mobile model visibility", () => {
   const config = {
     settings: {
       ...DEFAULT_SERVER_SETTINGS,
+      autoPickProviderAccounts: false,
       providerInstances: {
         [provider]: { driver: ProviderDriverKind.make("codex"), enabled: true },
         [other]: { driver: ProviderDriverKind.make("codex"), enabled: true },

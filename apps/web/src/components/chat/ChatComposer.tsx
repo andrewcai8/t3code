@@ -2368,6 +2368,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedModelForPicker = selectedModel;
   const cloudPicker = cloudProviderPicker({
     startsCloudEnvironment,
+    autoPickAccounts: settings.autoPickProviderAccounts,
     entries: providerInstanceEntries,
     selectedProvider,
     selectedInstanceId,
