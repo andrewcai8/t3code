@@ -66,11 +66,9 @@ export const NEW_CLOUD_CHAT_ENVIRONMENT_ID = EnvironmentId.make("cloud:new-chat"
 
 /**
  * Every chat the host starts for another chat has an id that starts with this and names the
- * starting chat's lease. Such a chat cannot start more, and one chat keeps at most
- * MAX_STARTED_CHATS of them, so an agent cannot fan out paid machines without a person.
+ * starting chat's lease. Such a chat cannot start more, so an agent's fan-out stays one level deep.
  */
 const STARTED_CHAT_PREFIX = "cloud-started:";
-const MAX_STARTED_CHATS = 4;
 
 const RECONCILE_INTERVAL = Duration.seconds(15);
 const FORK_SWEEP_INTERVAL = Duration.minutes(10);
@@ -271,19 +269,13 @@ const make = Effect.gen(function* () {
       return Effect.succeed(fiber);
     });
 
-  const claimLaunch = <A, E>(
-    leaseId: string,
-    asked: string,
-    started: number,
-    effect: Effect.Effect<A, E>,
-  ) =>
-    Effect.withFiber<Fiber.Fiber<A, E> | "busy" | "full">((caller) => {
+  const claimLaunch = <A, E>(leaseId: string, asked: string, effect: Effect.Effect<A, E>) =>
+    Effect.withFiber<Fiber.Fiber<A, E> | "busy">((caller) => {
       const running = FiberMap.getUnsafe(work, `launch:${leaseId}`);
       if (Option.isSome(running))
         return Effect.succeed(
           launching.get(leaseId) === asked ? (running.value as Fiber.Fiber<A, E>) : "busy",
         );
-      if (started >= MAX_STARTED_CHATS) return Effect.succeed("full" as const);
       launching.set(leaseId, asked);
       const fiber = Effect.runForkWith(caller.context)(effect);
       FiberMap.setUnsafe(work, `launch:${leaseId}`, fiber);
@@ -335,19 +327,6 @@ const make = Effect.gen(function* () {
           "capability_denied",
           "A cloud chat another chat started cannot start more.",
         );
-      // Chats still being prepared count too, from the durable request, so a restart or a launch
-      // that outlived its call cannot slip past the cap.
-      const preparing = yield* operations.listUnresolved.pipe(
-        Effect.mapError(() => unavailable("The host could not read its cloud chats.")),
-      );
-      const started = new Set([
-        ...boxes
-          .filter((box) => box.threadId?.startsWith(startedBy(source)))
-          .map((box) => box.requestId),
-        ...preparing
-          .filter((operation) => operation.request.chat?.threadId.startsWith(startedBy(source)))
-          .map((operation) => operation.request.requestId),
-      ]).size;
       const origin = (yield* operations
         .get(source.requestId)
         .pipe(Effect.mapError(() => unavailable("The host could not read this chat's machine."))))
@@ -373,7 +352,6 @@ const make = Effect.gen(function* () {
       const claim = yield* claimLaunch(
         source.leaseId,
         `${input.title}\u0000${message}`,
-        started,
         Effect.gen(function* () {
           const createdAt = DateTime.formatIso(yield* DateTime.now);
           return yield* environmentControl.provision({
@@ -402,11 +380,6 @@ const make = Effect.gen(function* () {
         return yield* failure(
           "capability_denied",
           "This chat is still starting another cloud chat. Try again once that one is ready.",
-        );
-      if (claim === "full")
-        return yield* failure(
-          "capability_denied",
-          `This chat already has ${MAX_STARTED_CHATS} cloud chats it started. Delete one of their machines first.`,
         );
       const provisioned = yield* Fiber.join(claim).pipe(
         Effect.timeoutOption(LAUNCH_BUDGET),

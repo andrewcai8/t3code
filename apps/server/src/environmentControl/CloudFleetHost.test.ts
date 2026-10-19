@@ -742,14 +742,9 @@ it.effect("lets a chat another chat started reach the others but start no more",
         op: "threads.launch",
         input: { title: "One more", message: "Go." },
       });
-      expect(response).toMatchObject({
-        failure: {
-          code: "capability_denied",
-          message:
-            "This chat already has 4 cloud chats it started. Delete one of their machines first.",
-        },
-      });
-      expect(provisioned).toEqual([]);
+      // Fan-out stays one level deep, not capped: a chat that started four still starts a fifth.
+      expect(response).not.toHaveProperty("failure");
+      expect(provisioned.map((input) => input.chat?.firstTurn?.title)).toEqual(["One more"]);
     }),
   ),
 );
@@ -769,46 +764,6 @@ it.effect("refuses a new cloud chat on another agent than this machine runs", ()
         failure: {
           code: "invalid_request",
           message: "A new cloud chat runs codex like this one; pick one of its models.",
-        },
-      });
-      expect(provisioned).toEqual([]);
-    }),
-  ),
-);
-
-/** A request this host accepted to start a chat for box 1, still being prepared. */
-const acceptPreparing = (index: number) =>
-  Effect.gen(function* () {
-    const store = yield* ProvisionOperationStore;
-    yield* store.accept(
-      decodeRequest({
-        requestId: id(index),
-        provider: "e2b",
-        providerInstanceId: "account",
-        agentDriver: "codex",
-        sourceRevision: null,
-        repository: "acme/app",
-        preparationHash: "a".repeat(64),
-        strategy: "direct",
-        templateId: "fixture",
-        chat: { threadId: `cloud-started:${id(1)}:${index}` },
-      }),
-    );
-  });
-
-it.effect("counts chats still being prepared toward the cap", () =>
-  withBoxes(({ relay, provisioned }) =>
-    Effect.gen(function* () {
-      for (const index of [11, 12, 13, 14]) yield* acceptPreparing(index);
-      const response = yield* relay(CloudFleetHost.NEW_CLOUD_CHAT_ENVIRONMENT_ID, {
-        op: "threads.launch",
-        input: { title: "Fifth", message: "Go." },
-      });
-      expect(response).toMatchObject({
-        failure: {
-          code: "capability_denied",
-          message:
-            "This chat already has 4 cloud chats it started. Delete one of their machines first.",
         },
       });
       expect(provisioned).toEqual([]);
