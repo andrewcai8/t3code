@@ -8667,27 +8667,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         }
       }
-      // A live process owns its roster and reports clearing it. A run can stop
-      // reading before that report lands, so a session that says it runs
-      // nothing more for the thread does not keep the list.
-      const liveSessionRunsWork = (providerThread: OrchestrationV2ProviderThread) =>
-        Effect.gen(function* () {
-          const sessionId = providerThread.providerSessionId;
-          if (sessionId === null || sessionId === undefined) return false;
-          const session = yield* providerSessions
-            .get(sessionId)
-            .pipe(Effect.orElseSucceed(() => Option.none()));
-          if (Option.isNone(session)) return false;
-          const probe = session.value.hasPendingBackgroundWorkForThread;
-          return probe === undefined || (yield* probe(providerThread));
-        });
       for (const providerThread of input.projection.providerThreads) {
         if ((providerThread.pendingBackgroundTasks?.length ?? 0) === 0) continue;
         if (providerThread.id === input.stoppedProviderThreadId) {
           // A refused newer start can take ownership and reject the stopped
           // turn's roster clear. Reconcile it without hiding surviving work.
           if (yield* stillReportsBackgroundWork(providerThread)) continue;
-        } else if (yield* liveSessionRunsWork(providerThread)) {
+        } else if (yield* hasLiveSession(providerThread.id)) {
           continue;
         }
         yield* emitEvent({
