@@ -28,6 +28,7 @@ import {
   newChatRunTargets,
   nextDraftEnvironment,
   offeredProvisionProviders,
+  offeredScheduledTaskTargets,
   type ProvisionedBoxClaim,
   provisionCloudEnvironment,
 } from "./provisioning.ts";
@@ -335,6 +336,38 @@ describe("offeredProvisionProviders", () => {
     expect(offeredProvisionProviders({ environmentControl: true })).toEqual(["e2b", "namespace"]);
     expect(offeredProvisionProviders({})).toEqual([]);
     expect(offeredProvisionProviders(null)).toEqual([]);
+  });
+});
+
+describe("offeredScheduledTaskTargets", () => {
+  it("defaults to this server where it runs agents, with its cloud machines after", () => {
+    expect(
+      offeredScheduledTaskTargets({
+        environmentControl: true,
+        provisionProviders: ["e2b", "modal"],
+      }),
+    ).toEqual(["local", "e2b", "modal"]);
+    expect(offeredScheduledTaskTargets(null)).toEqual(["local"]);
+  });
+
+  it("offers only cloud machines on a host that runs no agents", () => {
+    expect(
+      offeredScheduledTaskTargets({
+        environmentControl: true,
+        localAgentRuns: false,
+        provisionProviders: ["e2b", "modal"],
+      }),
+    ).toEqual(["e2b", "modal"]);
+  });
+
+  it("keeps this server on a host that runs no agents and has no cloud machine", () => {
+    expect(
+      offeredScheduledTaskTargets({
+        environmentControl: true,
+        localAgentRuns: false,
+        provisionProviders: [],
+      }),
+    ).toEqual(["local"]);
   });
 });
 

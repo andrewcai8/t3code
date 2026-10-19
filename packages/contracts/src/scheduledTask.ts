@@ -165,6 +165,20 @@ export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 export const ScheduledTaskTarget = Schema.Literals(["local", "e2b", "namespace", "modal"]);
 export type ScheduledTaskTarget = typeof ScheduledTaskTarget.Type;
 
+/**
+ * Where a host can run a scheduled task, its default first. A host that runs no agents itself
+ * offers only its cloud machines, unless it has none.
+ */
+export function scheduledTaskTargets(host: {
+  readonly localAgentRuns: boolean;
+  readonly provisionProviders: ReadonlyArray<Exclude<ScheduledTaskTarget, "local">>;
+}): readonly [ScheduledTaskTarget, ...ReadonlyArray<ScheduledTaskTarget>] {
+  const [first, ...rest] = host.provisionProviders;
+  return host.localAgentRuns || first === undefined
+    ? ["local", ...host.provisionProviders]
+    : [first, ...rest];
+}
+
 export const ScheduledTaskWebhookEndpoint = Schema.Struct({
   path: TrimmedNonEmptyString,
   url: Schema.NullOr(TrimmedNonEmptyString),
@@ -221,7 +235,8 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   projectId: ProjectId,
   threadId: Schema.optional(Schema.NullOr(ThreadId)),
   target: Schema.optional(ScheduledTaskTarget).annotate({
-    description: "Omit to keep the task's current target; new tasks default to local.",
+    description:
+      "Omit to keep the task's current target. A new task runs on this server, or on its first cloud machine kind when this server runs no agents.",
   }),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
