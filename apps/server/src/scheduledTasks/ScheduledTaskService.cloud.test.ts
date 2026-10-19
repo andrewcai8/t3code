@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -50,6 +51,10 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
           ),
       }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        isScratchProject: () => Effect.succeed(false),
+      }),
       Layer.mock(SecretRequests.SecretRequests)({}),
       Layer.succeed(ScheduledCloudFire, {
         providers: Effect.succeed(["e2b"] as const),
@@ -108,6 +113,10 @@ const dependenciesWith = (
     Scheduler.layer,
     Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
     Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+      namedProjectsRoot: "/projects",
+      isScratchProject: () => Effect.succeed(false),
+    }),
     Layer.mock(SecretRequests.SecretRequests)({}),
     Layer.succeed(ScheduledCloudFire, { providers, fire }),
   );

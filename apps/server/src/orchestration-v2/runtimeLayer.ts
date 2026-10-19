@@ -287,6 +287,7 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
     Layer.mergeAll(
       layerThreadLaunchProvided,
       layerThreadManagementProvided,
+      layerManagedProjectFoldersProvided,
       layerSecretRequestsProvided,
       ScheduledCloudFire.layer.pipe(Layer.provide(layerProjectService)),
     ),
