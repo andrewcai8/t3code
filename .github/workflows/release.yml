@@ -51,6 +51,7 @@ jobs:
   resolve_commit:
     if: github.repository == 'pingdotgg/t3code' || vars.ENABLE_RELEASE_WORKFLOW == 'true'
     name: Resolve release commit
+    if: github.repository == 'pingdotgg/t3code'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:

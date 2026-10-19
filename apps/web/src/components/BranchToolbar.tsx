@@ -656,6 +656,7 @@ export const BranchToolbar = memo(function BranchToolbar({
     ],
   );
 
+  const hasMultipleEnvironments = (availableEnvironments?.length ?? 0) > 1;
   const showEnvironmentPicker = RunOnCloud.shouldOfferEnvironmentChoice({
     environmentCount: availableEnvironments?.length ?? 0,
     canChangeEnvironment: Boolean(availableEnvironments && onEnvironmentChange),
@@ -663,9 +664,11 @@ export const BranchToolbar = memo(function BranchToolbar({
   });
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
+  // Started threads get no handler but still show which machine they run on,
+  // matching the strip visibility ChatView computes from the same inputs.
   const showEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: showEnvironmentPicker,
+    canPickEnvironment: hasMultipleEnvironments,
   });
   const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
   const labelsOverflow = useLabelsOverflow(stripElement);

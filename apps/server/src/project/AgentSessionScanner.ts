@@ -528,7 +528,8 @@ function isT3ManagedWorktree(
   );
 }
 
-function extractCwd(line: string): string | null {
+// false stops metadata scanning for an excluded rollout, even if later records contain a cwd.
+function extractCwd(line: string, source: AgentSessionSource): string | null | false {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -543,6 +544,17 @@ function extractCwd(line: string): string | null {
   }
   const payload = record.payload;
   if (typeof payload === "object" && payload !== null) {
+    if (source === "codex" && record.type === "session_meta") {
+      const sessionSource = (payload as Record<string, unknown>).source;
+      if (
+        typeof sessionSource === "object" &&
+        sessionSource !== null &&
+        !Array.isArray(sessionSource) &&
+        (Object.hasOwn(sessionSource, "subagent") || Object.hasOwn(sessionSource, "subAgent"))
+      ) {
+        return false;
+      }
+    }
     const nested = (payload as Record<string, unknown>).cwd;
     if (typeof nested === "string" && nested.trim().length > 0) {
       return nested;
@@ -677,6 +689,7 @@ export const make = Effect.gen(function* () {
   });
 
   const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
+    source: AgentSessionSource,
     transcript: TranscriptCandidate,
     budget: MetadataReadBudget,
   ) {
@@ -713,7 +726,9 @@ export const make = Effect.gen(function* () {
             };
             const readLastRecord = () => {
               const record = remaining + decoder.decode();
-              return record.length === 0 || !reserveRecord() ? null : extractCwd(record.trim());
+              return record.length === 0 || !reserveRecord()
+                ? null
+                : extractCwd(record.trim(), source);
             };
 
             while (bytesRead < maxBytes) {
@@ -740,7 +755,7 @@ export const make = Effect.gen(function* () {
 
               for (const line of lines) {
                 if (!reserveRecord()) return null;
-                const cwd = extractCwd(line.trim());
+                const cwd = extractCwd(line.trim(), source);
                 if (cwd !== null) return cwd;
               }
             }
@@ -989,8 +1004,8 @@ export const make = Effect.gen(function* () {
     >();
 
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(transcript, budget);
-      if (cwd === null) continue;
+      const cwd = yield* readCwd(source, transcript, budget);
+      if (cwd === null || cwd === false) continue;
       const key = `${transcript.providerInstanceId}\0${cwd}`;
       const existing = byOwnerAndCwd.get(key);
       if (existing) {
