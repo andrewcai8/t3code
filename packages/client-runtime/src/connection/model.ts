@@ -81,6 +81,7 @@ export const ConnectionTransientReason = Schema.Literals([
   "remote-unavailable",
   // A box's address answers but nothing serves behind it, as while the box is paused.
   "not-serving",
+  "session-pending",
 ]);
 export type ConnectionTransientReason = typeof ConnectionTransientReason.Type;
 
