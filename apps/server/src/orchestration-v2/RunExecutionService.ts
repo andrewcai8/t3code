@@ -167,6 +167,10 @@ function isRunOwnedSubagentTerminalStatus(
   return status === "interrupted" || status === "failed" || status === "cancelled";
 }
 
+function childTurnsContinue(terminal: ProviderTerminalEvent): boolean {
+  return terminal.status === "failed" && terminal.childTurnsContinue === true;
+}
+
 /**
  * A running subagent stays with the run that launched it, which keeps ingesting until it ends;
  * taking it over too would store its events twice.
@@ -645,7 +649,9 @@ export const layer: Layer.Layer<
           open.childTurnItems.size > 0 ||
           open.nodes.size > 0;
         const cascadedSubagentEvents =
-          isRunOwnedSubagentTerminalStatus(input.terminal.status) && hasOpenSubagentProjection
+          isRunOwnedSubagentTerminalStatus(input.terminal.status) &&
+          !childTurnsContinue(input.terminal) &&
+          hasOpenSubagentProjection
             ? yield* cascadeTerminalizeRunOwnedSubagents({
                 run: input.run,
                 open,
@@ -1011,7 +1017,10 @@ export const layer: Layer.Layer<
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
                 ),
               );
-              if (isRunOwnedSubagentTerminalStatus(terminal.status)) {
+              if (
+                isRunOwnedSubagentTerminalStatus(terminal.status) &&
+                !childTurnsContinue(terminal)
+              ) {
                 yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
               }
               yield* Ref.set(rootRunFinalized, true);
@@ -1161,15 +1170,19 @@ export const layer: Layer.Layer<
               return false;
             }
             // Interrupted/failed turns drop child and item tracking rather than
-            // pinning the stream open. Only the provider-thread probe below,
-            // which the adapter clears when the work ends, still holds them.
-            const completed = (yield* Ref.get(terminalEvent))?.status === "completed";
+            // pinning the stream open, unless the provider reports that their child
+            // turns continue. Only the provider-thread probe below, which the
+            // adapter clears when the work ends, still holds them.
+            const terminal = yield* Ref.get(terminalEvent);
+            const childrenHold =
+              terminal !== null &&
+              (terminal.status === "completed" || childTurnsContinue(terminal));
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
-            if (completed && childProviderTurns.size > 0) {
+            if (childrenHold && childProviderTurns.size > 0) {
               return false;
             }
             const childSubagents = yield* Ref.get(activeChildSubagents);
-            if (completed && childSubagents.size > 0) {
+            if (childrenHold && childSubagents.size > 0) {
               return false;
             }
             // Newly owned items depend on adapters emitting a non-terminal event before the root
@@ -1177,7 +1190,7 @@ export const layer: Layer.Layer<
             // while these sets are non-empty: turn_item.updated writes are not ownership-gated, so
             // late completions still land.
             const backgroundItems = yield* Ref.get(activeBackgroundTurnItems);
-            if (completed && backgroundItems.size > 0) {
+            if (childrenHold && backgroundItems.size > 0) {
               return false;
             }
             if (yield* Ref.get(providerThreadOwnerLost)) {
