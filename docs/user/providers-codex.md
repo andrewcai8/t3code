@@ -29,9 +29,9 @@ covers installation and custom configuration.
 
 Add another ChatGPT account in **Settings → Providers**. With **Auto-pick
 accounts** on, the default, each new thread starts on the Codex account with the
-most usage left and stays there, and the model picker offers Codex once. Turn it
-off in **Settings → General** to select the account from the thread's model
-picker instead. Compatible accounts can continue the same thread. Connecting
+most usage left and stays there until that account runs out, and the model
+picker offers Codex once. Turn it off in **Settings → General** to select the
+account from the thread's model picker instead. Compatible accounts can continue the same thread. Connecting
 accounts through T3 Code leaves your CLI login unchanged.
 
 ### Multiple CLI logins

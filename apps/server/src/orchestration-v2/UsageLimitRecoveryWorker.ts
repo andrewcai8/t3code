@@ -1,9 +1,17 @@
-import { CommandId, MessageId, type OrchestrationV2Command } from "@t3tools/contracts";
+import {
+  CommandId,
+  MessageId,
+  type OrchestrationV2Command,
+  type OrchestrationV2LimitRecoveryUpdate,
+  type RunId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { makeAccountRouting } from "./accountRouting.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -53,29 +61,64 @@ export function limitRecoveryCommand(
     (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > nowMs)
   )
     return null;
-  const deliveryIdentity = `${identity}:${recovery.requestId ?? "legacy"}`;
+  return continuation(
+    thread.id,
+    thread.latestRunId,
+    `limit-resume:${identity}:${recovery.requestId ?? "legacy"}`,
+    recovery.requestId,
+  );
+}
+
+/**
+ * The continuation that moves a limited run to whichever account routing picks, right after the
+ * sweep armed its recovery with `arm`. It carries the thread's own selection, so
+ * `ThreadManagementService.dispatch` routes it like any follow-up.
+ */
+function limitSwitchCommand(
+  thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
+  arm: {
+    readonly commandId: CommandId;
+    readonly limitRecovery: OrchestrationV2LimitRecoveryUpdate;
+  },
+): OrchestrationV2Command {
+  const { runId, resetAt } = arm.limitRecovery;
   return {
+    ...continuation(
+      thread.id,
+      runId,
+      `limit-switch:${thread.id}:${runId}:${Date.parse(resetAt)}`,
+      arm.commandId,
+    ),
+    modelSelection: thread.modelSelection,
+  };
+}
+
+const continuation = (
+  threadId: ThreadId,
+  runId: RunId,
+  id: string,
+  requestId: CommandId | undefined,
+) =>
+  ({
     type: "message.dispatch",
-    commandId: CommandId.make(`limit-resume:${deliveryIdentity}`),
-    messageId: MessageId.make(`limit-resume:${deliveryIdentity}`),
-    threadId: thread.id,
-    usageLimitContinuationOfRunId: thread.latestRunId,
-    ...(recovery.requestId === undefined
-      ? {}
-      : { usageLimitRecoveryRequestId: recovery.requestId }),
+    commandId: CommandId.make(id),
+    messageId: MessageId.make(id),
+    threadId,
+    usageLimitContinuationOfRunId: runId,
+    ...(requestId === undefined ? {} : { usageLimitRecoveryRequestId: requestId }),
     text: "Continue where you left off.",
     attachments: [],
     dispatchMode: { type: "start_immediately" },
     createdBy: "user",
     creationSource: "server",
-  };
-}
+  }) satisfies OrchestrationV2Command;
 
-const makeSweep = Effect.gen(function* () {
+export const makeSweep = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const settings = yield* ServerSettings.ServerSettingsService;
+  const routeAccount = yield* makeAccountRouting;
   return Effect.fn("UsageLimitRecoveryWorker.sweep")(function* () {
     const preferences = yield* settings.getSettings;
     const now = yield* DateTime.now;
@@ -95,11 +138,30 @@ const makeSweep = Effect.gen(function* () {
       if (command === null) continue;
       yield* Effect.gen(function* () {
         if (command.type === "thread.metadata.update" && command.limitRecovery != null) {
+          const moves =
+            command.limitRecovery.autoResume === true &&
+            (yield* routeAccount({
+              projectId: thread.projectId,
+              selection: thread.modelSelection,
+              current: thread.modelSelection.instanceId,
+            }).pipe(Effect.orElseSucceed(() => thread.modelSelection))).instanceId !==
+              thread.modelSelection.instanceId;
+          // Arming first marks the run handled, so a sweep after a crash never moves it twice.
           yield* orchestrator.autoArmLimitRecovery({
             commandId: command.commandId,
             threadId: command.threadId,
-            limitRecovery: command.limitRecovery,
+            // A snooze until the spent account resets would hold the moved chat back too.
+            limitRecovery: moves
+              ? { ...command.limitRecovery, snooze: false }
+              : command.limitRecovery,
           });
+          if (moves)
+            yield* threads.dispatch(
+              limitSwitchCommand(thread, {
+                commandId: command.commandId,
+                limitRecovery: command.limitRecovery,
+              }),
+            );
         } else {
           yield* threads.dispatch(command);
         }

@@ -204,7 +204,10 @@ the continuation finishes. If the queue was held by a restart, resume it then.
 When the provider reports a reset time, choose **Resume at reset** to schedule a
 continuation. You can cancel it from the thread. Enable **Auto-resume limited
 threads** in **Settings → General** on web and desktop, or **Settings → Thread
-behavior** on mobile, to schedule limit stops by default.
+behavior** on mobile, to schedule limit stops by default. With **Auto-pick
+accounts** also on, a Claude, Codex, or Cursor thread instead continues right
+away on another account of its provider that has usage left, and waits for the
+reset only when none does.
 The environment must be running when the reset arrives; it resumes overdue
 continuations after a restart. Stopping the thread, sending a new message,
 archiving, or settling it prevents a pending continuation from starting.
