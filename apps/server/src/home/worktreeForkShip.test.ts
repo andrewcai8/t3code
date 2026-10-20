@@ -15,6 +15,7 @@ import {
   applyArgv,
   driftInstallDirs,
   inspectCheckout,
+  onlyLiveFileWarnings,
   sandboxEnvironment,
   shipState,
 } from "./worktreeForkShip.ts";
@@ -188,6 +189,27 @@ it.effect("refuses a directory outside git, an unlisted origin, and a base it la
     );
   }).pipe(Effect.provide(runner)),
 );
+
+it("still ships a worktree whose files change or vanish while tar packs them, and nothing else", () => {
+  // GNU tar's own messages: a live sqlite file an agent's test keeps writing, a temp file gone.
+  expect(
+    onlyLiveFileWarnings(
+      "tar: .tmp-check/mail-lifecycle-d8nS3s/mind.sqlite: file changed as we read it\n",
+    ),
+  ).toBe(true);
+  expect(
+    onlyLiveFileWarnings(
+      "tar: out/tmp-1: Cannot stat: No such file or directory\ntar: Exiting with failure status due to previous errors\n",
+    ),
+  ).toBe(true);
+  expect(
+    onlyLiveFileWarnings(
+      "tar: src/a.ts: file changed as we read it\ntar: secret.pem: Cannot open: Permission denied\n",
+    ),
+  ).toBe(false);
+  expect(onlyLiveFileWarnings("tar: Error is not recoverable: exiting now\n")).toBe(false);
+  expect(onlyLiveFileWarnings("")).toBe(false);
+});
 
 it("installs again only where a manifest or lockfile changed, at its nearest lockfile", () => {
   const locks = new Set([".", "apps/api"]);

@@ -139,6 +139,23 @@ export const inspectCheckout = Effect.fn("WorktreeForks.inspectCheckout")(functi
   } satisfies Checkout;
 });
 
+/**
+ * Whether GNU tar failed only because files changed or vanished while it read them. Agents keep
+ * writing in their worktree (a test's sqlite file, a temp dir), and tar still packs what it read,
+ * which is the state the copy gets; any other complaint means the pack is not to be trusted.
+ */
+export const onlyLiveFileWarnings = (stderr: string) => {
+  const lines = stderr.split("\n").filter((line) => line.trim() !== "");
+  return (
+    lines.length > 0 &&
+    lines.every((line) =>
+      /: file changed as we read it$|: File removed before we read it$|: Cannot stat: No such file or directory$|^tar: Exiting with failure status due to previous errors$/.test(
+        line,
+      ),
+    )
+  );
+};
+
 /** The nearest directory at or above each changed manifest or lockfile that has a bun.lock. */
 export const driftInstallDirs = (
   changed: ReadonlyArray<string>,
@@ -225,10 +242,17 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
     catch: (cause) => new CheckoutRefused({ reason: "unreadable", cause }),
   });
   // gzip, not zstd: the template image has no zstd. No AppleDouble files from a macOS host.
-  yield* succeeded(root, "tar", ["-czf", NodePath.join(dir, "delta.tgz"), "--null", "-T", "-"], {
-    stdin: changed.map((path) => `${path}\0`).join(""),
-    env: { COPYFILE_DISABLE: "1" },
-  });
+  const packed = yield* run(
+    root,
+    "tar",
+    ["-czf", NodePath.join(dir, "delta.tgz"), "--null", "-T", "-"],
+    { stdin: changed.map((path) => `${path}\0`).join(""), env: { COPYFILE_DISABLE: "1" } },
+  );
+  if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
+    return yield* new CheckoutRefused({
+      reason: "unreadable",
+      cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+    });
   const archive = NodePath.join(dir, "state.tar");
   yield* succeeded(dir, "tar", ["-cf", archive, ...parts], { env: { COPYFILE_DISABLE: "1" } });
   if (NodeFS.statSync(archive).size > MAX_SHIPMENT_BYTES)
