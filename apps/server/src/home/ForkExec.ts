@@ -1,13 +1,16 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no Unix socket server.
 /**
- * ForkExec - runs one shell command in a throwaway copy of this cloud machine, for any process on it.
+ * ForkExec - runs one shell command in a throwaway copy of this machine or worktree, for any
+ * process on it.
  *
- * Whole-repo checks (typechecks, full test suites, builds) push a cloud chat's machine into swap,
- * which stalls every agent on it. `t3 fork-exec -- <command>` hands the command to this service
- * over a Unix socket in T3 home, which only processes on this machine can open. It runs the
+ * Whole-repo checks (typechecks, full test suites, builds) push a machine into swap, which stalls
+ * every agent on it. `t3 fork-exec -- <command>` hands the command to this service over a Unix
+ * socket in T3 home, which only processes on this machine can open. On a cloud box it runs the
  * command as a one-job t3_fork_run batch for the machine's own chat, the one actor its host accepts
- * for forks, waits for it, and answers with the job's exit code and output. Subagents, scripts and
- * every provider reach it the same way, so nothing has to be taught to use it.
+ * for forks, waits for it, and answers with the job's exit code and output. On a self-hosted
+ * server with worktree forks (WorktreeForks.ts) it runs it in a Modal copy of the caller's
+ * worktree, with the output live. Subagents, scripts and every provider reach it the same way, so
+ * nothing has to be taught to use it.
  *
  * @module ForkExec
  */
@@ -31,7 +34,9 @@ import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { reconcileBunShim } from "./bunShim.ts";
 import * as FleetBroker from "./FleetBroker.ts";
+import * as WorktreeForks from "./WorktreeForks.ts";
 import {
   exportsOf,
   ForkExecEvent,
@@ -153,25 +158,92 @@ const linkT3Command = Effect.gen(function* () {
   });
 });
 
+/**
+ * Runs `request` in a copy of its worktree on this host's own Modal backend, writing the
+ * command's output as it comes.
+ */
+const runInWorktreeCopy = Effect.fn("ForkExec.runInWorktreeCopy")(function* (
+  request: ForkExecRequest,
+  write: (event: ForkExecEvent) => void,
+) {
+  const outcome = yield* (yield* WorktreeForks.WorktreeForks).exec(request, {
+    started: (jobId) => Effect.sync(() => write({ kind: "started", batchId: jobId, live: true })),
+    output: (stream, text) => write({ kind: "output", stream, text }),
+  });
+  switch (outcome._tag) {
+    case "Exited":
+      return write({
+        kind: "exited",
+        exitCode: outcome.exitCode,
+        timedOut: outcome.timedOut,
+        durationMs: outcome.durationMs,
+        stdoutTail: "",
+        stderrTail: "",
+      });
+    case "NotStarted":
+      return write({ kind: "unavailable", message: outcome.message });
+    case "Lost":
+      return write({ kind: "failed", message: outcome.message });
+  }
+});
+
+/**
+ * Makes `~/.local/bin/bun` this host's bun shim, or puts back what it replaced. A cloud box has
+ * neither.
+ */
+const reconcileShim = Effect.fn("ForkExec.reconcileShim")(
+  function* (owner: string, want: WorktreeForks.WorktreeForks["Service"]["bunShim"]) {
+    const bin = NodePath.join(yield* HostProcess.HomeDirectory, ".local", "bin");
+    const changes = yield* Effect.try(() => reconcileBunShim(bin, owner, want));
+    if (changes.includes("conflict"))
+      yield* Effect.logWarning(
+        "bun test is not offloaded: ~/.local/bin/bun and ~/.local/bin/.bun.t3-real both exist and neither is T3's shim",
+      );
+    else if (changes.length > 0) yield* Effect.logInfo("bun shim updated", { changes });
+  },
+  (effect) =>
+    effect.pipe(
+      Effect.tapCause((cause) => Effect.logWarning("bun shim could not be updated", { cause })),
+      Effect.ignore,
+    ),
+);
+
+/** What either backend runs with. */
+type Backends =
+  | FleetBroker.FleetBroker
+  | ServerEnvironment.ServerEnvironment
+  | ServerConfig
+  | WorktreeForks.WorktreeForks;
+
 const decodeRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(ForkExecRequest));
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(ForkExecEvent));
 
 /**
- * Serves the socket on a Linux cloud box, the only machine forks copy. One connection carries one
- * request; closing it cancels the batch.
+ * Serves the socket on a Linux cloud box, through its host, and on a self-hosted server with
+ * worktree forks, through its own Modal backend. One connection carries one request; closing it
+ * cancels the command.
  */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const environment = yield* HostProcess.Environment;
-    if (!environment.T3CODE_USAGE_HOST_ID?.trim() || (yield* HostProcess.Platform) !== "linux")
-      return;
-    const path = forkExecSocketPath((yield* ServerConfig).baseDir);
-    const context = yield* Effect.context<
-      FleetBroker.FleetBroker | ServerEnvironment.ServerEnvironment | ServerConfig
-    >();
+    const platform = yield* HostProcess.Platform;
+    const forks = yield* WorktreeForks.WorktreeForks;
+    const { baseDir } = yield* ServerConfig;
+    const onCloudBox = Boolean(environment.T3CODE_USAGE_HOST_ID?.trim());
+    if (!onCloudBox && platform !== "win32")
+      yield* reconcileShim(baseDir, forks.enabled ? forks.bunShim : null);
+    const relays = onCloudBox && platform === "linux";
+    if (!relays && !forks.enabled) return;
+    // Provider CLIs inherit this server's environment, so their agents and scripts find the
+    // socket at $T3CODE_HOME/fork.sock, as a cloud box's service unit already arranges.
+    if (forks.enabled && !environment.T3CODE_HOME?.trim()) environment.T3CODE_HOME = baseDir;
+    const path = forkExecSocketPath(baseDir);
+    const context = yield* Effect.context<Backends>();
     const serve = (socket: NodeNet.Socket) => {
-      const emit = (event: ForkExecEvent) =>
-        Effect.sync(() => void socket.write(`${encodeEvent(event)}\n`));
+      const write = (event: ForkExecEvent) => void socket.write(`${encodeEvent(event)}\n`);
+      const emit = (event: ForkExecEvent) => Effect.sync(() => write(event));
+      const run = (request: ForkExecRequest): Effect.Effect<void, never, Backends> =>
+        relays ? runInFork(request, emit) : runInWorktreeCopy(request, write);
       let buffered = "";
       const onData = (chunk: Buffer) => {
         buffered += chunk.toString("utf8");
@@ -182,7 +254,7 @@ export const layer = Layer.effectDiscard(
           decodeRequest(newline === -1 ? "" : buffered.slice(0, newline)).pipe(
             Effect.matchEffect({
               onFailure: () => emit({ kind: "unavailable", message: "The request was malformed." }),
-              onSuccess: (request) => runInFork(request, emit),
+              onSuccess: run,
             }),
             Effect.ensuring(Effect.sync(() => socket.end())),
           ),

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../../../home/FleetBroker.ts";
 import * as HomeService from "../../../home/HomeService.ts";
+import * as WorktreeForks from "../../../home/WorktreeForks.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   callerHasFleetReach,
@@ -11,7 +12,7 @@ import {
   readHomeChangeCaller,
   runAsHome,
 } from "../../homeRouting.ts";
-import { readCaller, unavailable } from "../../threadAccess.ts";
+import { type Caller, readCaller, unavailable } from "../../threadAccess.ts";
 import { HomeToolkit } from "./tools.ts";
 
 /**
@@ -25,6 +26,19 @@ const acrossHostReconnect = Effect.fn("HomeToolkit.acrossHostReconnect")(
   },
   Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }),
 );
+
+/** The thread a self-hosted server's fork batches belong to: the caller's own. */
+const callingThread = Effect.fn("HomeToolkit.callingThread")(function* <E, R>(
+  caller: Effect.Effect<Caller, E, R>,
+) {
+  const { scope } = yield* caller;
+  if (scope.thread === undefined)
+    return yield* new OrchestratorMcpFailure({
+      code: "capability_denied",
+      message: "Fork batches belong to a thread; call this from one.",
+    });
+  return scope.thread.threadId;
+});
 
 export const layer = McpToolAccess.toLayer(HomeToolkit, {
   t3_environment_list: McpToolAccess.reads(() =>
@@ -104,14 +118,35 @@ export const layer = McpToolAccess.toLayer(HomeToolkit, {
   ),
 
   t3_fork_run: McpToolAccess.actsAsCaller((input) =>
-    acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input)),
+    Effect.gen(function* () {
+      const forks = yield* WorktreeForks.WorktreeForks;
+      if (!forks.enabled)
+        return yield* acrossHostReconnect(
+          runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.run", input),
+        );
+      return yield* forks.run(yield* callingThread(readHomeChangeCaller()), input);
+    }),
   ),
 
   t3_fork_status: McpToolAccess.readsAsCaller((input) =>
-    acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input)),
+    Effect.gen(function* () {
+      const forks = yield* WorktreeForks.WorktreeForks;
+      if (!forks.enabled)
+        return yield* acrossHostReconnect(
+          runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.status", input),
+        );
+      return yield* forks.status(yield* callingThread(readCaller()), input);
+    }),
   ),
 
   t3_fork_cancel: McpToolAccess.actsAsCaller((input) =>
-    acrossHostReconnect(runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.cancel", input)),
+    Effect.gen(function* () {
+      const forks = yield* WorktreeForks.WorktreeForks;
+      if (!forks.enabled)
+        return yield* acrossHostReconnect(
+          runAsHome(CLOUD_FORKS_ENVIRONMENT_ID, "forks.cancel", input),
+        );
+      return yield* forks.cancel(yield* callingThread(readCaller()), input);
+    }),
   ),
 });
