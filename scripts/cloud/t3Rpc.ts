@@ -39,47 +39,46 @@ const decodeAccessToken = Schema.decodeUnknownEffect(AuthAccessTokenResult);
  * first and each reconnect, authenticates with a fresh ticket in its URL as the web client does:
  * the manager's gateway to a Namespace box forwards the upgrade URL but not its headers.
  */
-export const withRpc = <A, E, R>(
+export const withRpc = Effect.fn("withRpc")(function* <A, E, R>(
   httpBaseUrl: string,
   bearer: string,
   use: (client: T3Client) => Effect.Effect<A, E, R>,
-) =>
-  Effect.gen(function* () {
-    const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-    const connectUrl = http
-      .execute(
-        HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
-          HttpClientRequest.bearerToken(bearer),
-        ),
-      )
-      .pipe(
-        Effect.flatMap((response) => response.json),
-        Effect.flatMap(decodeWebSocketTicket),
-        Effect.map(({ ticket }) => {
-          const url = new URL(wsUrl(httpBaseUrl));
-          url.searchParams.set("wsTicket", ticket);
-          return url.toString();
-        }),
-        Effect.timeout("2 minutes"),
-        // Without a ticket the server refuses the upgrade, which the RPC client reports as a
-        // socket error on the call that needed it.
-        Effect.orElseSucceed(() => wsUrl(httpBaseUrl)),
-      );
-    return yield* makeClient.pipe(
-      Effect.flatMap(use),
-      Effect.provide(
-        RpcClient.layerProtocolSocket().pipe(
-          Layer.provide(
-            Socket.layerWebSocket(connectUrl).pipe(
-              Layer.provide(NodeSocket.layerWebSocketConstructor),
-            ),
-          ),
-          Layer.provide(RpcSerialization.layerJson),
-        ),
+) {
+  const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const connectUrl = http
+    .execute(
+      HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
+        HttpClientRequest.bearerToken(bearer),
       ),
-      Effect.scoped,
+    )
+    .pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.flatMap(decodeWebSocketTicket),
+      Effect.map(({ ticket }) => {
+        const url = new URL(wsUrl(httpBaseUrl));
+        url.searchParams.set("wsTicket", ticket);
+        return url.toString();
+      }),
+      Effect.timeout("2 minutes"),
+      // Without a ticket the server refuses the upgrade, which the RPC client reports as a
+      // socket error on the call that needed it.
+      Effect.orElseSucceed(() => wsUrl(httpBaseUrl)),
     );
-  });
+  return yield* makeClient.pipe(
+    Effect.flatMap(use),
+    Effect.provide(
+      RpcClient.layerProtocolSocket().pipe(
+        Layer.provide(
+          Socket.layerWebSocket(connectUrl).pipe(
+            Layer.provide(NodeSocket.layerWebSocketConstructor),
+          ),
+        ),
+        Layer.provide(RpcSerialization.layerJson),
+      ),
+    ),
+    Effect.scoped,
+  );
+});
 
 export const exchangePairingToken = Effect.fn("exchangePairingToken")(function* (
   httpBaseUrl: string,

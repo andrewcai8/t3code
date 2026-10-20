@@ -157,8 +157,8 @@ export const layer = Layer.effect(
     const projects = yield* ProjectService.ProjectService;
     const repositories = yield* RepositoryIdentityResolver;
 
-    const untilReady = (task: ScheduledTask, request: EnvironmentProvisionInput) =>
-      Effect.gen(function* () {
+    const untilReady = Effect.fn("ScheduledCloudFire.untilReady")(
+      function* (task: ScheduledTask, request: EnvironmentProvisionInput) {
         for (;;) {
           const result = yield* control
             .provision(request)
@@ -171,12 +171,15 @@ export const layer = Layer.effect(
           }
           yield* Effect.sleep(PROVISION_RETRY);
         }
-      }).pipe(
-        Effect.timeoutOrElse({
-          duration: PROVISION_TIMEOUT,
-          orElse: () => Effect.fail(failed(task, "The machine was not ready after 30 minutes.")),
-        }),
-      );
+      },
+      (effect, task) =>
+        effect.pipe(
+          Effect.timeoutOrElse({
+            duration: PROVISION_TIMEOUT,
+            orElse: () => Effect.fail(failed(task, "The machine was not ready after 30 minutes.")),
+          }),
+        ),
+    );
 
     return ScheduledCloudFire.of({
       providers: control.provisionProviders.pipe(Effect.orElseSucceed(() => [])),

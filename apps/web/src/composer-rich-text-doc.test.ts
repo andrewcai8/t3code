@@ -6,7 +6,11 @@ import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { splitBlockKeepMarks } from "@tiptap/pm/commands";
 import { describe, expect, it, onTestFinished } from "vite-plus/test";
 
-import { collapseExpandedComposerCursor, pastedPathQueryLength } from "./composer-logic";
+import {
+  collapseExpandedComposerCursor,
+  expandCollapsedComposerCursor,
+  pastedPathQueryLength,
+} from "./composer-logic";
 
 import {
   buildDocJson,
@@ -15,15 +19,15 @@ import {
   ComposerBlockExtensions,
   ComposerCodeBlockExtension,
   ComposerListExtensions,
-  collapsedToFlat,
   ComposerCodeExtension,
   ComposerTaskItemExtension,
-  flatToCollapsed,
   flatToMarkdown,
   flatToPm,
+  markdownToFlat,
   pmToFlat,
   serializeEditorDoc,
   serializeSelection,
+  skillChipReplacements,
   stepCaretAcrossStyledEdge,
 } from "./composer-rich-text-doc";
 
@@ -86,6 +90,54 @@ function roundTrip(value: string) {
   return serializeEditorDoc(doc);
 }
 
+describe("editable math source", () => {
+  it.each([
+    "Area $x_i^2$ after",
+    "before \\(\\frac{1}{2}\\) after",
+    "before $$x^2$$ after",
+    "\\[\nx = 1\ny = 2\n\\]",
+    "\\[\\text{use $browser then @README.md and **literal**}\\]",
+    "```math\nx_i + y_i\n```",
+    "- **use** $x_i$ then @README.md",
+    "**$x_i$** and **A $x_i$ B**",
+    "| Name | Formula |\n| --- | --- |\n| Norm | $|x|$ |",
+    "| Name | Formula |\n| --- | --- |\n| Norm | \\(\\|x\\|\\) |",
+  ])("keeps TeX editable and round trips its source: %s", (source) => {
+    const map = roundTrip(source);
+    expect(map.value).toBe(source);
+    expect(map.runs.some((run) => run.nodeName === "composer-math")).toBe(false);
+    const doc = schema.nodeFromJSON(
+      buildDocJson(source, (name) => ({ label: name, description: null })),
+    );
+    expect(serializeSelection(doc, 1, doc.content.size - 1)).toBe(source);
+  });
+
+  it("edits a command character directly without replacing a formula node", () => {
+    const source = "before \\(\\frac{a}{b}\\) after";
+    const doc = schema.nodeFromJSON(
+      buildDocJson(source, (name) => ({ label: name, description: null })),
+    );
+    const map = serializeEditorDoc(doc);
+    const offset = source.indexOf("{a}") + 1;
+    const position = flatToPm(map, offset);
+    const state = EditorState.create({ doc });
+    const next = state.apply(state.tr.insertText("c", position, position + 1));
+    expect(serializeEditorDoc(next.doc).value).toBe(source.replace("{a}", "{c}"));
+  });
+  it("preserves formula source as text when styling is disabled", () => {
+    const source =
+      "\\[\n\\text{use $browser, @README.md and [file](t3-context://v1/file/ctx_1)}\n\\]";
+    const doc = plainSchema.nodeFromJSON(
+      buildDocJson(source, (name) => ({ label: name, description: null }), { styling: false }),
+    );
+    const map = serializeEditorDoc(doc);
+    expect(map.value).toBe(source);
+    expect(map.runs.some((run) => run.kind === "token")).toBe(false);
+  });
+});
+
+// Plain mode: the same engine with the mark extensions off. Markers stay
+// literal characters and task lines stay paragraphs.
 const plainSchema = getSchemaByResolvedExtensions(
   resolveExtensions([
     StarterKit.configure({
@@ -157,7 +209,9 @@ describe("literal editor answers", () => {
     expect(serialized.contextIds).toEqual([]);
     expect(serializeSelection(doc, 1, doc.content.size - 1)).toBe(value);
     for (let offset = 0; offset <= value.length; offset += 1) {
-      expect(flatToCollapsed(serialized, offset)).toBe(offset);
+      expect(collapseExpandedComposerCursor(value, flatToMarkdown(serialized, offset), true)).toBe(
+        offset,
+      );
     }
   });
 
@@ -253,7 +307,7 @@ describe("composer rich text document model", () => {
       const position = flatToPm(map, flat);
       expect(doc.resolve(position).parent.isTextblock).toBe(true);
       expect(pmToFlat(map, position)).toBe(flat);
-      expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+      expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
     }
   });
 
@@ -364,7 +418,7 @@ describe("composer rich text document model", () => {
     expect(serializeEditorDoc(rebuilt).value).toBe(map.value);
     for (let flat = 0; flat <= map.docLength; flat += 1) {
       expect(pmToFlat(map, flatToPm(map, flat))).toBe(flat);
-      expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+      expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
       if (flat < map.docLength && !/\s/.test(doc.textContent[flat]!)) {
         expect(rebuilt.resolve(flat + 1).nodeAfter!.marks.map((mark) => mark.type.name)).toEqual(
           doc.resolve(flat + 1).nodeAfter!.marks.map((mark) => mark.type.name),
@@ -442,12 +496,12 @@ describe("composer rich text document model", () => {
   });
 
   it.each(["- one\n- two", "1. a\n   - b\n2. c", "- **bold** @README.md tail", "-"])(
-    "maps every document offset of the list %s through collapsed coordinates and back",
+    "maps every document offset of the list %s through markdown coordinates and back",
     (value) => {
       const map = roundTrip(value);
       expect(map.value).toBe(value);
       for (let flat = 0; flat <= map.docLength; flat += 1) {
-        expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+        expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
       }
     },
   );
@@ -455,11 +509,11 @@ describe("composer rich text document model", () => {
   it("clamps offsets inside a list marker to the start of the item text", () => {
     const value = "- item";
     const map = roundTrip(value);
-    for (let collapsed = 0; collapsed <= "- ".length; collapsed += 1) {
-      expect(collapsedToFlat(map, collapsed)).toBe(0);
+    for (let markdown = 0; markdown <= "- ".length; markdown += 1) {
+      expect(markdownToFlat(map, markdown)).toBe(0);
     }
-    expect(collapsedToFlat(map, "- it".length)).toBe(2);
-    expect(flatToCollapsed(map, 0)).toBe("- ".length);
+    expect(markdownToFlat(map, "- it".length)).toBe(2);
+    expect(flatToMarkdown(map, 0)).toBe("- ".length);
   });
 
   it.each([
@@ -529,13 +583,13 @@ describe("composer rich text document model", () => {
     it("keeps every offset mapped through the blank line", () => {
       const { doc, map } = serialize(quote("quoted"), paragraph("Comment"));
       for (let flat = 0; flat <= map.docLength; flat += 1) {
-        expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+        expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
       }
       // The caret on the end of the quote stays on it, and the blank line is
       // not a place to type: it clamps to the start of the comment.
-      expect(flatToCollapsed(map, "quoted".length)).toBe("> quoted".length);
-      expect(collapsedToFlat(map, "> quoted\n".length)).toBe("quoted".length + 1);
-      expect(flatToCollapsed(map, "quoted".length + 1)).toBe("> quoted\n\n".length);
+      expect(flatToMarkdown(map, "quoted".length)).toBe("> quoted".length);
+      expect(markdownToFlat(map, "> quoted\n".length)).toBe("quoted".length + 1);
+      expect(flatToMarkdown(map, "quoted".length + 1)).toBe("> quoted\n\n".length);
       expect(flatToPm(map, "quoted".length + 1)).toBe(doc.child(0).nodeSize + 1);
     });
   });
@@ -681,12 +735,12 @@ describe("composer rich text document model", () => {
     "# Heading text",
     "## **b** @README.md",
   ])(
-    "maps every document offset of the block %s through collapsed coordinates and back",
+    "maps every document offset of the block %s through markdown coordinates and back",
     (value) => {
       const map = roundTrip(value);
       expect(map.value).toBe(value);
       for (let flat = 0; flat <= map.docLength; flat += 1) {
-        expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+        expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
       }
     },
   );
@@ -697,10 +751,10 @@ describe("composer rich text document model", () => {
       ["# Heading", "# "],
     ] as const) {
       const map = roundTrip(value);
-      for (let collapsed = 0; collapsed <= prefix.length; collapsed += 1) {
-        expect(collapsedToFlat(map, collapsed)).toBe(0);
+      for (let markdown = 0; markdown <= prefix.length; markdown += 1) {
+        expect(markdownToFlat(map, markdown)).toBe(0);
       }
-      expect(flatToCollapsed(map, 0)).toBe(prefix.length);
+      expect(flatToMarkdown(map, 0)).toBe(prefix.length);
     }
   });
 
@@ -726,12 +780,12 @@ describe("composer rich text document model", () => {
   });
 
   it.each(["```ts\nconst a = 1;\n```", "```\n```", "before\n```ts\ncode\n```\nafter"])(
-    "maps every document offset of %s through collapsed coordinates and back",
+    "maps every document offset of %s through markdown coordinates and back",
     (value) => {
       const map = roundTrip(value);
       expect(map.value).toBe(value);
       for (let flat = 0; flat <= map.docLength; flat += 1) {
-        expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+        expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
       }
     },
   );
@@ -753,17 +807,16 @@ describe("composer rich text document model", () => {
     const value = "```ts\nfunc();\n```";
     const map = roundTrip(value);
     const endOfCode = "func();".length;
-    expect(flatToCollapsed(map, endOfCode)).toBe("```ts\nfunc();".length);
     expect(flatToMarkdown(map, endOfCode)).toBe("```ts\nfunc();".length);
-    expect(collapsedToFlat(map, flatToCollapsed(map, endOfCode))).toBe(endOfCode);
+    expect(markdownToFlat(map, flatToMarkdown(map, endOfCode))).toBe(endOfCode);
   });
 
   it("keeps the caret inside an empty fence", () => {
     const value = "before\n```\n```";
     const map = roundTrip(value);
     const inside = "before\n".length;
-    expect(flatToCollapsed(map, inside)).toBe("before\n```".length);
-    expect(collapsedToFlat(map, flatToCollapsed(map, inside))).toBe(inside);
+    expect(flatToMarkdown(map, inside)).toBe("before\n```".length);
+    expect(markdownToFlat(map, flatToMarkdown(map, inside))).toBe(inside);
   });
 
   it("still places the end of an inline mark after its markers", () => {
@@ -775,12 +828,12 @@ describe("composer rich text document model", () => {
     const value = "```ts\nab\n```";
     const map = roundTrip(value);
     expect(map.value).toBe(value);
-    for (let collapsed = 0; collapsed <= "```ts\n".length; collapsed += 1) {
-      expect(collapsedToFlat(map, collapsed)).toBe(0);
+    for (let markdown = 0; markdown <= "```ts\n".length; markdown += 1) {
+      expect(markdownToFlat(map, markdown)).toBe(0);
     }
-    expect(collapsedToFlat(map, "```ts\na".length)).toBe(1);
-    for (let collapsed = "```ts\nab".length; collapsed <= value.length; collapsed += 1) {
-      expect(collapsedToFlat(map, collapsed)).toBe(2);
+    expect(markdownToFlat(map, "```ts\na".length)).toBe(1);
+    for (let markdown = "```ts\nab".length; markdown <= value.length; markdown += 1) {
+      expect(markdownToFlat(map, markdown)).toBe(2);
     }
   });
 
@@ -862,19 +915,18 @@ describe("composer rich text document model", () => {
     expect(roundTrip("```\ncode").value).toBe("```\ncode");
   });
 
-  it("counts a chip's source in a fence as one cursor position, as the draft store does", () => {
-    const value = "```\nsee @b.md now\n```\nafter";
-    const map = roundTrip(value);
+  it("keeps a chip's source in a fence as literal text", () => {
+    const value = "```\nsee @b.md and $babysit now\n```\nafter";
+    const known = () => ({ label: "Babysit", description: null });
+    const doc = ProseMirrorNode.fromJSON(schema, buildDocJson(value, known));
+    const map = serializeEditorDoc(doc);
     expect(map.value).toBe(value);
+    expect(map.runs.filter((run) => run.kind === "token")).toEqual([]);
     for (let flat = 0; flat <= map.docLength; flat += 1) {
-      expect(flatToCollapsed(map, flat)).toBe(
-        collapseExpandedComposerCursor(value, flatToMarkdown(map, flat)),
-      );
+      expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
     }
-    const afterChip = "see @b.md".length;
-    expect(collapsedToFlat(map, flatToCollapsed(map, afterChip))).toBe(afterChip);
-    const end = map.docLength;
-    expect(collapsedToFlat(map, flatToCollapsed(map, end))).toBe(end);
+    // Reconciling against the provider's skills leaves the code alone too.
+    expect(skillChipReplacements(doc, known)).toEqual([]);
   });
 
   it("keeps fences literal in plain mode", () => {
@@ -882,12 +934,12 @@ describe("composer rich text document model", () => {
     expect(roundTripPlain(value).value).toBe(value);
   });
 
-  it("maps every document offset through collapsed coordinates and back", () => {
+  it("maps every document offset through markdown coordinates and back", () => {
     const value = "hi **bold** @README.md bye";
     const map = roundTrip(value);
     expect(map.value).toBe(value);
     for (let flat = 0; flat <= map.docLength; flat += 1) {
-      expect(collapsedToFlat(map, flatToCollapsed(map, flat))).toBe(flat);
+      expect(markdownToFlat(map, flatToMarkdown(map, flat))).toBe(flat);
     }
   });
 
@@ -902,8 +954,9 @@ describe("composer rich text document model", () => {
     expect(rich.value).toBe(value);
     expect(plain.value).toBe(value);
     for (let collapsed = 0; collapsed <= value.length; collapsed += 1) {
-      expect(flatToMarkdown(rich, collapsedToFlat(rich, collapsed))).toBe(
-        flatToMarkdown(plain, collapsedToFlat(plain, collapsed)),
+      const markdown = expandCollapsedComposerCursor(value, collapsed);
+      expect(flatToMarkdown(rich, markdownToFlat(rich, markdown))).toBe(
+        flatToMarkdown(plain, markdownToFlat(plain, markdown)),
       );
     }
   });
@@ -912,8 +965,8 @@ describe("composer rich text document model", () => {
     const value = "a **bold** c";
     const plain = roundTripPlain(value);
     const rich = roundTrip(value);
-    expect(flatToMarkdown(plain, collapsedToFlat(plain, 3))).toBe(3);
-    expect(flatToMarkdown(rich, collapsedToFlat(rich, 3))).toBe(4);
+    expect(flatToMarkdown(plain, markdownToFlat(plain, 3))).toBe(3);
+    expect(flatToMarkdown(rich, markdownToFlat(rich, 3))).toBe(4);
   });
 
   it("maps markdown offsets at styled edges onto document text", () => {
@@ -922,8 +975,8 @@ describe("composer rich text document model", () => {
     expect(map.value).toBe(value);
     expect(flatToMarkdown(map, 2)).toBe(4);
     expect(flatToMarkdown(map, 6)).toBe(10);
-    expect(collapsedToFlat(map, 3)).toBe(2);
-    expect(collapsedToFlat(map, 9)).toBe(6);
+    expect(markdownToFlat(map, 3)).toBe(2);
+    expect(markdownToFlat(map, 9)).toBe(6);
   });
 });
 

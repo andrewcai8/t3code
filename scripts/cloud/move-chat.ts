@@ -424,20 +424,24 @@ function saveState(threadId: string, state: MoveState) {
 }
 
 /** Follows a turn on the box until its run settles or `minutes` pass, whichever is first. */
-const watchTurn = (client: T3Client, threadId: ThreadId, messageId: string, minutes: number) =>
-  Effect.gen(function* () {
-    let progress: TurnProgress = initialProgress;
-    yield* client["orchestration.subscribeThread"]({ threadId }).pipe(
-      Stream.runForEachWhile((item) =>
-        Effect.sync(() => {
-          progress = advanceTurn(progress, item, messageId, Date.now());
-          return progress.completedAt === null;
-        }),
-      ),
-      Effect.timeoutOption(`${minutes} minutes`),
-    );
-    return progress;
-  });
+const watchTurn = Effect.fn("watchTurn")(function* (
+  client: T3Client,
+  threadId: ThreadId,
+  messageId: string,
+  minutes: number,
+) {
+  let progress: TurnProgress = initialProgress;
+  yield* client["orchestration.subscribeThread"]({ threadId }).pipe(
+    Stream.runForEachWhile((item) =>
+      Effect.sync(() => {
+        progress = advanceTurn(progress, item, messageId, Date.now());
+        return progress.completedAt === null;
+      }),
+    ),
+    Effect.timeoutOption(`${minutes} minutes`),
+  );
+  return progress;
+});
 
 const projectionOf = (client: T3Client, threadId: ThreadId) =>
   client["orchestration.subscribeThread"]({ threadId }).pipe(

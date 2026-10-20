@@ -253,12 +253,16 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
   const startedAt = DateTime.formatIso(yield* DateTime.now);
   const runStart = yield* Clock.currentTimeMillis;
   const checks: Array<Check> = [];
-  const record = (name: string, pass: boolean, value: Check["value"], evidence: unknown = null) =>
-    Effect.gen(function* () {
-      checks.push({ name, pass, value, evidence });
-      const at = seconds(runStart, yield* Clock.currentTimeMillis);
-      yield* Console.log(`[${at}s] ${pass ? "PASS" : "FAIL"} ${name} ${value ?? ""}`);
-    });
+  const record = Effect.fn("record")(function* (
+    name: string,
+    pass: boolean,
+    value: Check["value"],
+    evidence: unknown = null,
+  ) {
+    checks.push({ name, pass, value, evidence });
+    const at = seconds(runStart, yield* Clock.currentTimeMillis);
+    yield* Console.log(`[${at}s] ${pass ? "PASS" : "FAIL"} ${name} ${value ?? ""}`);
+  });
   /** Records a failed check and stops the current step. */
   const fail = (name: string, message: string, evidence: unknown = null) =>
     record(name, false, null, { error: message, ...(evidence ? { detail: evidence } : {}) }).pipe(

@@ -206,41 +206,40 @@ const threadProjection = (rpc: BoxRpc, threadId: ThreadId) =>
   );
 
 /** Sends a message to a chat on the box and waits up to 15 minutes for its run to settle. */
-const sendAndSettle = (
+const sendAndSettle = Effect.fn("chatRebuild.sendAndSettle")(function* (
   rpc: BoxRpc,
   input: {
     readonly threadId: ThreadId;
     readonly text: string;
     readonly modelSelection: ModelSelection;
   },
-) =>
-  Effect.gen(function* () {
-    const messageId = MessageId.make(crypto.randomUUID());
-    yield* rpc["orchestration.dispatchCommand"]({
-      type: "message.dispatch",
-      commandId: CommandId.make(crypto.randomUUID()),
-      createdBy: "user",
-      creationSource: "web",
-      threadId: input.threadId,
-      messageId,
-      text: input.text,
-      attachments: [],
-      modelSelection: input.modelSelection,
-      deliveryIntent: "auto",
-      dispatchMode: { type: "start_immediately" },
-    });
-    return yield* threadProjection(rpc, input.threadId).pipe(
-      Effect.map((projection) => {
-        const run = projection?.runs.findLast((candidate) => candidate.userMessageId === messageId);
-        return projection && run && SETTLED_RUN.has(run.status) ? { projection, run } : null;
-      }),
-      Effect.repeat({
-        until: (settled) => settled !== null,
-        schedule: Schedule.spaced("5 seconds"),
-      }),
-      Effect.timeout("15 minutes"),
-    );
+) {
+  const messageId = MessageId.make(crypto.randomUUID());
+  yield* rpc["orchestration.dispatchCommand"]({
+    type: "message.dispatch",
+    commandId: CommandId.make(crypto.randomUUID()),
+    createdBy: "user",
+    creationSource: "web",
+    threadId: input.threadId,
+    messageId,
+    text: input.text,
+    attachments: [],
+    modelSelection: input.modelSelection,
+    deliveryIntent: "auto",
+    dispatchMode: { type: "start_immediately" },
   });
+  return yield* threadProjection(rpc, input.threadId).pipe(
+    Effect.map((projection) => {
+      const run = projection?.runs.findLast((candidate) => candidate.userMessageId === messageId);
+      return projection && run && SETTLED_RUN.has(run.status) ? { projection, run } : null;
+    }),
+    Effect.repeat({
+      until: (settled) => settled !== null,
+      schedule: Schedule.spaced("5 seconds"),
+    }),
+    Effect.timeout("15 minutes"),
+  );
+});
 
 /**
  * Imports the chat's staged Claude session on the box and sends `message`, as move-chat's to-cloud
@@ -248,7 +247,7 @@ const sendAndSettle = (
  * id, so a header turn opens it, its process is let go, and the moved history replaces what it
  * wrote. Answers the box's thread for the chat.
  */
-export const continueChatOnBox = (
+export const continueChatOnBox = Effect.fn("chatRebuild.continueChatOnBox")(function* (
   rpc: BoxRpc,
   restore: BoxRestore,
   input: {
@@ -257,91 +256,90 @@ export const continueChatOnBox = (
     readonly files: { readonly staged: string; readonly final: string; readonly moved: string };
     readonly modelSelection: ModelSelection;
   },
-) =>
-  Effect.gen(function* () {
-    const { plan } = input;
-    const threadId = ThreadId.make(`import:${BOX_CLAUDE_INSTANCE}:${plan.sessionId}`);
-    const selection = { ...input.modelSelection, instanceId: BOX_CLAUDE_INSTANCE };
-    const project = yield* rpc["orchestration.subscribeShell"]({}).pipe(
-      Stream.flatMap((item) =>
-        Stream.fromIterable(item.kind === "snapshot" ? item.snapshot.projects : []),
-      ),
-      Stream.filter((candidate) => candidate.workspaceRoot === input.workspace),
-      Stream.runHead,
-      Effect.timeoutOption("3 minutes"),
-      Effect.map(Option.flatten),
+) {
+  const { plan } = input;
+  const threadId = ThreadId.make(`import:${BOX_CLAUDE_INSTANCE}:${plan.sessionId}`);
+  const selection = { ...input.modelSelection, instanceId: BOX_CLAUDE_INSTANCE };
+  const project = yield* rpc["orchestration.subscribeShell"]({}).pipe(
+    Stream.flatMap((item) =>
+      Stream.fromIterable(item.kind === "snapshot" ? item.snapshot.projects : []),
+    ),
+    Stream.filter((candidate) => candidate.workspaceRoot === input.workspace),
+    Stream.runHead,
+    Effect.timeoutOption("3 minutes"),
+    Effect.map(Option.flatten),
+  );
+  if (Option.isNone(project))
+    return yield* Effect.fail(
+      new ChatRebuildError({ reason: `The new box has no project at ${input.workspace}.` }),
     );
-    if (Option.isNone(project))
-      return yield* Effect.fail(
-        new ChatRebuildError({ reason: `The new box has no project at ${input.workspace}.` }),
-      );
-    yield* rpc["server.getConfig"]({}).pipe(
-      Effect.map((config) =>
-        config.providers.some(
-          (provider) => provider.instanceId === BOX_CLAUDE_INSTANCE && provider.models.length > 0,
-        ),
+  yield* rpc["server.getConfig"]({}).pipe(
+    Effect.map((config) =>
+      config.providers.some(
+        (provider) => provider.instanceId === BOX_CLAUDE_INSTANCE && provider.models.length > 0,
       ),
-      Effect.repeat({ until: (ready) => ready, schedule: Schedule.spaced("3 seconds") }),
-      Effect.timeout("3 minutes"),
-    );
-    yield* rpc["agentSessions.scan"]({});
-    yield* rpc["agentSessions.import"]({
-      projectId: project.value.id,
-      expectedWorkspaceRoot: input.workspace,
-    });
-    yield* Effect.tryPromise(() => restore.unstage(input.files.staged));
-    if ((yield* threadProjection(rpc, threadId)) === null)
-      return yield* Effect.fail(
-        new ChatRebuildError({ reason: `The new box did not import session ${plan.sessionId}.` }),
-      );
-    yield* rpc["orchestration.dispatchCommand"]({
-      type: "thread.metadata.update",
-      commandId: CommandId.make(crypto.randomUUID()),
-      threadId,
-      title: plan.title,
-    });
-    // The importer files history as settled; this chat is live.
-    yield* rpc["orchestration.dispatchCommand"]({
-      type: "thread.unsettle",
-      commandId: CommandId.make(crypto.randomUUID()),
-      threadId,
-      reason: "user",
-    });
-    const header = yield* sendAndSettle(rpc, {
-      threadId,
-      text: `Rebuilt from a backup: continues Claude session ${plan.sessionId} on ${plan.checkout}. Reply with only: ok`,
-      modelSelection: selection,
-    });
-    if (header === null)
-      return yield* Effect.fail(
-        new ChatRebuildError({ reason: "The header turn on the new box did not settle." }),
-      );
-    const sessions: ReadonlyArray<OrchestrationV2ProviderSession> =
-      header.projection.providerSessions;
-    for (const session of sessions.filter((candidate) => candidate.status !== "stopped"))
-      yield* rpc["orchestration.dispatchCommand"]({
-        type: "provider-session.detach",
-        commandId: CommandId.make(crypto.randomUUID()),
-        threadId,
-        providerSessionId: session.id,
-        reason: "rebuild: reopen the restored native session",
-      });
-    yield* Effect.tryPromise(() => restore.swap(plan.sessionId, input.files));
-    yield* rpc["orchestration.dispatchCommand"]({
-      type: "message.dispatch",
-      commandId: CommandId.make(crypto.randomUUID()),
-      createdBy: "user",
-      creationSource: "web",
-      threadId,
-      messageId: MessageId.make(crypto.randomUUID()),
-      text: plan.message,
-      attachments: [],
-      modelSelection: selection,
-      deliveryIntent: "auto",
-      dispatchMode: { type: "start_immediately" },
-    });
-    return threadId;
+    ),
+    Effect.repeat({ until: (ready) => ready, schedule: Schedule.spaced("3 seconds") }),
+    Effect.timeout("3 minutes"),
+  );
+  yield* rpc["agentSessions.scan"]({});
+  yield* rpc["agentSessions.import"]({
+    projectId: project.value.id,
+    expectedWorkspaceRoot: input.workspace,
   });
+  yield* Effect.tryPromise(() => restore.unstage(input.files.staged));
+  if ((yield* threadProjection(rpc, threadId)) === null)
+    return yield* Effect.fail(
+      new ChatRebuildError({ reason: `The new box did not import session ${plan.sessionId}.` }),
+    );
+  yield* rpc["orchestration.dispatchCommand"]({
+    type: "thread.metadata.update",
+    commandId: CommandId.make(crypto.randomUUID()),
+    threadId,
+    title: plan.title,
+  });
+  // The importer files history as settled; this chat is live.
+  yield* rpc["orchestration.dispatchCommand"]({
+    type: "thread.unsettle",
+    commandId: CommandId.make(crypto.randomUUID()),
+    threadId,
+    reason: "user",
+  });
+  const header = yield* sendAndSettle(rpc, {
+    threadId,
+    text: `Rebuilt from a backup: continues Claude session ${plan.sessionId} on ${plan.checkout}. Reply with only: ok`,
+    modelSelection: selection,
+  });
+  if (header === null)
+    return yield* Effect.fail(
+      new ChatRebuildError({ reason: "The header turn on the new box did not settle." }),
+    );
+  const sessions: ReadonlyArray<OrchestrationV2ProviderSession> =
+    header.projection.providerSessions;
+  for (const session of sessions.filter((candidate) => candidate.status !== "stopped"))
+    yield* rpc["orchestration.dispatchCommand"]({
+      type: "provider-session.detach",
+      commandId: CommandId.make(crypto.randomUUID()),
+      threadId,
+      providerSessionId: session.id,
+      reason: "rebuild: reopen the restored native session",
+    });
+  yield* Effect.tryPromise(() => restore.swap(plan.sessionId, input.files));
+  yield* rpc["orchestration.dispatchCommand"]({
+    type: "message.dispatch",
+    commandId: CommandId.make(crypto.randomUUID()),
+    createdBy: "user",
+    creationSource: "web",
+    threadId,
+    messageId: MessageId.make(crypto.randomUUID()),
+    text: plan.message,
+    attachments: [],
+    modelSelection: selection,
+    deliveryIntent: "auto",
+    dispatchMode: { type: "start_immediately" },
+  });
+  return threadId;
+});
 
 /** Sends `text` into a chat on the box as its user, on the chat's own model. */
 export const sendChatMessage = (rpc: BoxRpc, threadId: ThreadId, text: string) =>

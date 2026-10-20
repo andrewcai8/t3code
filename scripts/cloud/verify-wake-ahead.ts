@@ -123,45 +123,44 @@ const wsUrl = (httpBaseUrl: string) => {
   return url.toString();
 };
 
-const withRpc = <A, E, R>(
+const withRpc = Effect.fn("withRpc")(function* <A, E, R>(
   httpBaseUrl: string,
   bearer: string,
   use: (client: T3Client) => Effect.Effect<A, E, R>,
-) =>
-  Effect.gen(function* () {
-    const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-    const connectUrl = http
-      .execute(
-        HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
-          HttpClientRequest.bearerToken(bearer),
-        ),
-      )
-      .pipe(
-        Effect.flatMap((response) => response.json),
-        Effect.flatMap(decodeTicket),
-        Effect.map(({ ticket }) => {
-          const url = new URL(wsUrl(httpBaseUrl));
-          url.searchParams.set("wsTicket", ticket);
-          return url.toString();
-        }),
-        Effect.timeout("1 minute"),
-        Effect.orElseSucceed(() => wsUrl(httpBaseUrl)),
-      );
-    return yield* makeClient.pipe(
-      Effect.flatMap(use),
-      Effect.provide(
-        RpcClient.layerProtocolSocket().pipe(
-          Layer.provide(
-            Socket.layerWebSocket(connectUrl).pipe(
-              Layer.provide(NodeSocket.layerWebSocketConstructor),
-            ),
-          ),
-          Layer.provide(RpcSerialization.layerJson),
-        ),
+) {
+  const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const connectUrl = http
+    .execute(
+      HttpClientRequest.post(new URL("api/auth/websocket-ticket", httpBaseUrl)).pipe(
+        HttpClientRequest.bearerToken(bearer),
       ),
-      Effect.scoped,
+    )
+    .pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.flatMap(decodeTicket),
+      Effect.map(({ ticket }) => {
+        const url = new URL(wsUrl(httpBaseUrl));
+        url.searchParams.set("wsTicket", ticket);
+        return url.toString();
+      }),
+      Effect.timeout("1 minute"),
+      Effect.orElseSucceed(() => wsUrl(httpBaseUrl)),
     );
-  });
+  return yield* makeClient.pipe(
+    Effect.flatMap(use),
+    Effect.provide(
+      RpcClient.layerProtocolSocket().pipe(
+        Layer.provide(
+          Socket.layerWebSocket(connectUrl).pipe(
+            Layer.provide(NodeSocket.layerWebSocketConstructor),
+          ),
+        ),
+        Layer.provide(RpcSerialization.layerJson),
+      ),
+    ),
+    Effect.scoped,
+  );
+});
 
 const exchange = Effect.fn("exchange")(function* (httpBaseUrl: string, credential: string) {
   const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
@@ -193,13 +192,12 @@ const program = Effect.gen(function* () {
     yield* fs.writeFileString(statePath, yield* encodeState(state), { mode: 0o600 });
   });
   let failed = false;
-  const record = (name: string, pass: boolean, value: unknown) =>
-    Effect.gen(function* () {
-      failed ||= !pass;
-      state = { ...state, checks: [...state.checks, { step, name, pass, value }] };
-      yield* save;
-      yield* Console.log(`${pass ? "PASS" : "FAIL"} ${step}.${name} ${encodeValue(value)}`);
-    });
+  const record = Effect.fn("record")(function* (name: string, pass: boolean, value: unknown) {
+    failed ||= !pass;
+    state = { ...state, checks: [...state.checks, { step, name, pass, value }] };
+    yield* save;
+    yield* Console.log(`${pass ? "PASS" : "FAIL"} ${step}.${name} ${encodeValue(value)}`);
+  });
   if (state.managerBearer === undefined) {
     state = {
       ...state,

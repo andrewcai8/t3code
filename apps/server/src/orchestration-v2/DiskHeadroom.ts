@@ -30,15 +30,16 @@ export function lowDiskNote(freeBytes: number, box: boolean): string {
 }
 
 /** The note for `cwd`'s disk, or empty when it has room or cannot be read. */
-export const lowDiskNoteFor = (cwd: string | null | undefined): Effect.Effect<string> =>
-  Effect.gen(function* () {
-    if (!cwd) return "";
-    const box = yield* onCloudBox;
-    return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
-      Effect.map((stats) => lowDiskNote(stats.bavail * stats.bsize, box)),
-      Effect.orElseSucceed(() => ""),
-    );
-  });
+export const lowDiskNoteFor = Effect.fn("DiskHeadroom.lowDiskNoteFor")(function* (
+  cwd: string | null | undefined,
+): Effect.fn.Return<string> {
+  if (!cwd) return "";
+  const box = yield* onCloudBox;
+  return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
+    Effect.map((stats) => lowDiskNote(stats.bavail * stats.bsize, box)),
+    Effect.orElseSucceed(() => ""),
+  );
+});
 
 export interface CloudMachine {
   readonly cpus: number;
@@ -85,47 +86,46 @@ const toldBySession = new WeakMap<object, Set<string>>();
  * agents are not pointed at them. Any agent can run `t3 fork-exec`, a shell command; only a box's
  * top-level chats reach t3_fork_run, and only when their provider exposes MCP tools.
  */
-export const cloudMachineNoteFor = (input: {
+export const cloudMachineNoteFor = Effect.fn("DiskHeadroom.cloudMachineNoteFor")(function* (input: {
   readonly cwd: string | null | undefined;
   readonly subagent: boolean;
   readonly mcpTools: boolean;
   readonly session: object;
   readonly nativeThreadId: string;
-}): Effect.Effect<string> =>
-  Effect.gen(function* () {
-    if (!input.cwd || !(yield* onCloudBox)) return "";
-    const told = toldBySession.get(input.session) ?? new Set<string>();
-    if (told.has(input.nativeThreadId)) return "";
-    toldBySession.set(input.session, told.add(input.nativeThreadId));
-    const forkExec = (yield* HostProcess.Platform) === "linux";
-    const forkRun = input.mcpTools && !input.subagent;
-    const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
-    // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
-    const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
-    const setupFailure = log
-      ? yield* Effect.tryPromise(() => NodeFSP.readFile(log, "utf8")).pipe(
-          Effect.map((text) => {
-            const line = text.split("\n", 1)[0]!;
-            return { log, summary: line.length > 200 ? `${line.slice(0, 199)}…` : line };
-          }),
-          Effect.orElseSucceed(() => undefined),
-        )
-      : undefined;
-    const cwd = input.cwd;
-    return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
-      Effect.map((stats) =>
-        cloudMachineNote({
-          cpus: NodeOS.availableParallelism(),
-          memoryBytes: NodeOS.totalmem(),
-          diskBytes: stats.blocks * stats.bsize,
-          forkExec,
-          forkRun,
-          setupFailure,
+}): Effect.fn.Return<string> {
+  if (!input.cwd || !(yield* onCloudBox)) return "";
+  const told = toldBySession.get(input.session) ?? new Set<string>();
+  if (told.has(input.nativeThreadId)) return "";
+  toldBySession.set(input.session, told.add(input.nativeThreadId));
+  const forkExec = (yield* HostProcess.Platform) === "linux";
+  const forkRun = input.mcpTools && !input.subagent;
+  const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
+  // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
+  const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
+  const setupFailure = log
+    ? yield* Effect.tryPromise(() => NodeFSP.readFile(log, "utf8")).pipe(
+        Effect.map((text) => {
+          const line = text.split("\n", 1)[0]!;
+          return { log, summary: line.length > 200 ? `${line.slice(0, 199)}…` : line };
         }),
-      ),
-      Effect.orElseSucceed(() => ""),
-    );
-  });
+        Effect.orElseSucceed(() => undefined),
+      )
+    : undefined;
+  const cwd = input.cwd;
+  return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
+    Effect.map((stats) =>
+      cloudMachineNote({
+        cpus: NodeOS.availableParallelism(),
+        memoryBytes: NodeOS.totalmem(),
+        diskBytes: stats.blocks * stats.bsize,
+        forkExec,
+        forkRun,
+        setupFailure,
+      }),
+    ),
+    Effect.orElseSucceed(() => ""),
+  );
+});
 
 /** Written under T3 home by a Mac chat's save that would carry more than its limit. */
 const SaveFailure = Schema.Struct({
@@ -145,22 +145,23 @@ function saveFailureNote(failure: SaveFailure): string {
 const toldSaveFailure = new Map<string, string>();
 
 /** The save failure note for a native thread not yet told of these paths; empty otherwise. */
-export const saveFailureNoteFor = (nativeThreadId: string): Effect.Effect<string> =>
-  Effect.gen(function* () {
-    const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
-    if (!t3home || !(yield* onCloudBox)) return "";
-    const failure = yield* Effect.tryPromise(() =>
-      NodeFSP.readFile(NodePath.join(t3home, "save-failure.json"), "utf8"),
-    ).pipe(
-      Effect.flatMap(decodeSaveFailure),
-      Effect.orElseSucceed(() => null),
-    );
-    if (failure === null) {
-      toldSaveFailure.delete(nativeThreadId);
-      return "";
-    }
-    const paths = failure.largest.map(({ path }) => path).join("\n");
-    if (toldSaveFailure.get(nativeThreadId) === paths) return "";
-    toldSaveFailure.set(nativeThreadId, paths);
-    return saveFailureNote(failure);
-  });
+export const saveFailureNoteFor = Effect.fn("DiskHeadroom.saveFailureNoteFor")(function* (
+  nativeThreadId: string,
+): Effect.fn.Return<string> {
+  const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
+  if (!t3home || !(yield* onCloudBox)) return "";
+  const failure = yield* Effect.tryPromise(() =>
+    NodeFSP.readFile(NodePath.join(t3home, "save-failure.json"), "utf8"),
+  ).pipe(
+    Effect.flatMap(decodeSaveFailure),
+    Effect.orElseSucceed(() => null),
+  );
+  if (failure === null) {
+    toldSaveFailure.delete(nativeThreadId);
+    return "";
+  }
+  const paths = failure.largest.map(({ path }) => path).join("\n");
+  if (toldSaveFailure.get(nativeThreadId) === paths) return "";
+  toldSaveFailure.set(nativeThreadId, paths);
+  return saveFailureNote(failure);
+});

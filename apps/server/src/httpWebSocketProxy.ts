@@ -29,10 +29,12 @@ export const proxyWebSocket = Effect.fn("HttpWebSocketProxy.proxyWebSocket")(fun
   return HttpServerResponse.empty();
 });
 
-const pumpFrames = (source: Socket.Socket, sink: Socket.Writer) =>
-  Effect.gen(function* () {
-    const { pull } = yield* source.reader;
-    while (true) {
-      yield* sink.writeAll(yield* pull);
-    }
-  });
+const pumpFrames = Effect.fn("HttpWebSocketProxy.pumpFrames")(function* (
+  source: Socket.Socket,
+  sink: Socket.Writer,
+) {
+  const { pull } = yield* source.reader;
+  while (true) {
+    yield* sink.writeAll(yield* pull);
+  }
+});

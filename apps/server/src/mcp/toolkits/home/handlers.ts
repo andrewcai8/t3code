@@ -18,11 +18,13 @@ import { HomeToolkit } from "./tools.ts";
  * Runs a fork call across a brief loss of this cloud machine's host. Every fork call is safe to
  * repeat: the same run joins its batch, and a cancel changes nothing the second time.
  */
-const acrossHostReconnect = <A, R>(call: Effect.Effect<A, OrchestratorMcpFailure, R>) =>
-  Effect.gen(function* () {
+const acrossHostReconnect = Effect.fn("HomeToolkit.acrossHostReconnect")(
+  function* <A, R>(call: Effect.Effect<A, OrchestratorMcpFailure, R>) {
     if (!(yield* HomeService.HomeService).available) yield* FleetBroker.awaitHostReconnect;
     return yield* call;
-  }).pipe(Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }));
+  },
+  Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }),
+);
 
 export const layer = McpToolAccess.toLayer(HomeToolkit, {
   t3_environment_list: McpToolAccess.reads(() =>

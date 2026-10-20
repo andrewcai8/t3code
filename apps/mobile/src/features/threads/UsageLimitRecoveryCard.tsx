@@ -6,12 +6,13 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { Button } from "../../components/ui/Button";
 import { AsyncResult } from "effect/reactivity";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { useCallback, useEffect, useState } from "react";
-import { Pressable, View } from "react-native";
+import { View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import { environmentCatalog } from "../../connection/catalog";
 import { serverEnvironment } from "../../state/server";
@@ -140,39 +141,27 @@ export function UsageLimitRecoveryCard({
         <View className="flex-row flex-wrap gap-2">
           {canSchedule ? (
             <>
-              <Pressable
-                accessibilityRole="button"
+              <Button
+                label={scheduled ? "Cancel auto-resume" : "Resume at reset"}
+                tone="secondary"
                 disabled={pending || switching}
                 onPress={() => void toggle("resume")}
-                className="self-start rounded-lg bg-subtle px-3 py-2 active:opacity-70"
-              >
-                <Text className="text-sm text-foreground">
-                  {scheduled ? "Cancel auto-resume" : "Resume at reset"}
-                </Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
+              />
+              <Button
+                label={snoozed ? "Wake now" : "Snooze until reset"}
+                tone="secondary"
                 disabled={pending || switching || (!snoozed && resetPassed)}
                 onPress={() => void toggle("snooze")}
-                className="self-start rounded-lg bg-subtle px-3 py-2 active:opacity-70"
-              >
-                <Text className="text-sm text-foreground">
-                  {snoozed ? "Wake now" : "Snooze until reset"}
-                </Text>
-              </Pressable>
+              />
             </>
           ) : null}
           {boxManagerId !== null ? (
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label={switching ? "Switching..." : "Switch account"}
+              tone="secondary"
               disabled={pending || switching}
               onPress={() => void moveToAnotherAccount()}
-              className="self-start rounded-lg bg-subtle px-3 py-2 active:opacity-70"
-            >
-              <Text className="text-sm text-foreground">
-                {switching ? "Switching..." : "Switch account"}
-              </Text>
-            </Pressable>
+            />
           ) : null}
         </View>
       ) : null}
