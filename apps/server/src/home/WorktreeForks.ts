@@ -431,27 +431,21 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   /** One copy: waits for a slot, prepares, announces the start, runs. Its sandbox always ends. */
   const runJob = (job: CopyJob, shipment: Shipment, base: ForkBase, observer: ExecObserver) =>
-    slots
-      .withSlot(
-        Effect.scoped(
-          prepare(job, shipment, base.imageId).pipe(
-            Effect.tap(() => observer.started(job.id)),
-            Effect.flatMap((sandboxId) => execute(sandboxId, job, observer.output)),
-          ),
+    slots.withSlot(
+      Effect.scoped(
+        prepare(job, shipment, base.imageId).pipe(
+          Effect.tap(() => observer.started(job.id)),
+          Effect.flatMap((sandboxId) => execute(sandboxId, job, observer.output)),
         ),
-      )
-      .pipe(
-        Effect.tapError((error) =>
-          Effect.logWarning(
-            error._tag === "Lost" ? "worktree fork copy lost" : "worktree fork copy did not start",
-            {
-              job: job.id,
-              repository: shipment.checkout.repository.repository,
-              cause: error.cause,
-            },
-          ),
-        ),
-      );
+      ),
+    );
+
+  /** Logged where an outcome is decided, so a refusal before any copy exists says why too. */
+  const logFailure = (error: NotStarted | Lost, cwd: string) =>
+    Effect.logWarning(
+      error._tag === "Lost" ? "worktree fork copy lost" : "worktree fork copy did not start",
+      { cwd, reason: error.message, cause: error.cause },
+    );
 
   const sizeOf = (name: string | undefined) => host.sizes.get(name ?? host.defaultSize);
   const unknownSize = (name: string | undefined) =>
@@ -490,9 +484,10 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         durationMs: exited.durationMs,
       } satisfies ExecOutcome;
     },
-    (effect) =>
+    (effect, request) =>
       effect.pipe(
         Effect.scoped,
+        Effect.tapError((error) => logFailure(error, request.cwd)),
         Effect.catchTags({
           NotStarted: (error) =>
             Effect.succeed<ExecOutcome>({ _tag: "NotStarted", message: error.message }),
@@ -577,9 +572,10 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         logsUri: `${dir}/`,
       });
     },
-    (effect, batch, _input, index) =>
+    (effect, batch, _input, index, target) =>
       effect.pipe(
         Effect.scoped,
+        Effect.tapError((error) => logFailure(error, target.cwd)),
         Effect.catchTags({
           NotStarted: (error) =>
             Effect.sync(() => setJob(batch, { index, state: "failed", message: error.message })),
