@@ -144,7 +144,7 @@ gzip -dc "$stage/ship.tgz" | tar -x
 /** Ship paths are the worktree's (secrets, generated files), so no image keeps them. */
 const CLEAN_SCRIPT = `cd "$1" && shift && rm -rf -- "$@" && rm -rf -- "${ARCHIVE}" "${ARCHIVE}.d"`;
 
-export const buildArgv = (
+const buildArgv = (
   archive: string,
   repository: ForkRepository,
   branch: string,
