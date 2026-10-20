@@ -9,6 +9,8 @@ import {
 } from "@t3tools/contracts";
 import {
   type AccountLoad,
+  hasKnownRoom,
+  isAccountSpent,
   rankAccounts,
   ROUTED_ACCOUNT_DRIVERS,
 } from "@t3tools/shared/usageLimits";
@@ -25,7 +27,7 @@ import * as ServerSettingsService from "../serverSettings.ts";
 export interface AccountRequest {
   readonly projectId: ProjectId;
   readonly selection: ModelSelection;
-  /** The thread's account; a selection of the same driver keeps it rather than routing again. */
+  /** The thread's account; a selection of the same driver keeps it while it has usage left. */
   readonly current?: ProviderInstanceId | undefined;
 }
 
@@ -35,7 +37,8 @@ export interface AccountRequest {
  * serving the selected model, by the cloud manager's ranking (`rankAccounts`) with the selected
  * account winning ties. A thread keeps its account: pickers offer the driver rather than each
  * account while routing is on, so a follow-up naming another account of the driver is that
- * driver's row, not a request to move.
+ * driver's row, not a request to move. Only an account known to be spent lets the thread go, and
+ * only to one known to have room; otherwise it stays and waits for its own reset.
  */
 export function routeSelection(
   input: AccountRequest & {
@@ -53,7 +56,11 @@ export function routeSelection(
   if (driver === undefined || !ROUTED_ACCOUNT_DRIVERS.has(driver)) return selection;
   const pick = (instanceId: ProviderInstanceId) =>
     instanceId === selection.instanceId ? selection : { ...selection, instanceId };
-  if (input.current !== undefined && driverOf(input.current) === driver) return pick(input.current);
+  const current = providers.find(
+    (provider) => provider.instanceId === input.current && provider.driver === driver,
+  );
+  if (current !== undefined && !isAccountSpent(driver, current.usageLimits, input.now))
+    return pick(current.instanceId);
   const accounts = providers.filter(
     (provider) =>
       provider.driver === driver &&
@@ -75,6 +82,10 @@ export function routeSelection(
     selection.instanceId,
     input.load,
   );
+  if (current !== undefined)
+    return best !== undefined && hasKnownRoom(driver, best.usageLimits, input.now)
+      ? pick(best.instanceId)
+      : pick(current.instanceId);
   return best === undefined ? selection : pick(best.instanceId);
 }
 

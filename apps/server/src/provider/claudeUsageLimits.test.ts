@@ -297,7 +297,16 @@ describe("claudeRateLimitEventToUpdate", () => {
       ),
     ).toBeUndefined();
     expect(
-      claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
+      claudeRateLimitEventToUpdate({ status: "allowed", rateLimitType: "five_hour" }, noNames),
     ).toBeUndefined();
+  });
+
+  it("reads a rejection without a utilization as the named window spent", () => {
+    expect(
+      claudeRateLimitEventToUpdate(
+        { status: "rejected", rateLimitType: "five_hour", resetsAt: 1_784_000_000 },
+        noNames,
+      )?.windows,
+    ).toMatchObject([{ id: "five_hour", usedPercent: 100, resetsAt: "2026-07-14T03:33:20.000Z" }]);
   });
 });

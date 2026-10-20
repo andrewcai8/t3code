@@ -172,10 +172,12 @@ export function claudeRateLimitEventToUpdate(
   );
   if (unified?.length) return { windows: unified };
   const type: string | undefined = info.rateLimitType;
-  if (!type || typeof info.utilization !== "number") {
+  // A rejection can omit utilization, but the window it names is spent either way.
+  const utilization = info.utilization ?? (info.status === "rejected" ? 1 : undefined);
+  if (!type || typeof utilization !== "number") {
     return undefined;
   }
-  const usedPercent = info.utilization * 100;
+  const usedPercent = utilization * 100;
   const resetsAt = isoFromEpochSeconds(info.resetsAt);
   if (type in WINDOWS) {
     return { windows: [makeWindow(type, usedPercent, resetsAt)] };

@@ -2257,7 +2257,7 @@ export function GeneralSettingsPanel() {
         <SettingsRow
           serverScoped
           {...searchableSetting("auto-resume-limited-threads")}
-          description="Resume usage-limit stops at the reported reset time. Each thread can cancel its scheduled continuation."
+          description="Resume usage-limit stops at the reported reset time, or right away on another account with usage left while Auto-pick accounts is on. Each thread can cancel its scheduled continuation."
           settingKeys={["autoResumeLimitedThreads"]}
           control={
             <ScopedSwitch
@@ -2289,7 +2289,7 @@ export function GeneralSettingsPanel() {
         <SettingsRow
           serverScoped
           {...searchableSetting("auto-pick-provider-accounts")}
-          description="Start each new chat on the account of its provider with the most usage left, and keep it there. Turn off to choose accounts yourself."
+          description="Start each new chat on the account of its provider with the most usage left, and keep it there until that account runs out. Turn off to choose accounts yourself."
           settingKeys={["autoPickProviderAccounts"]}
           control={
             <ScopedSwitch

@@ -229,6 +229,15 @@ export function isAccountSpent(
   return headroomTier(accountHeadroom(driver, limits, now)) === 2;
 }
 
+/** Whether an account is known to have usage left in every window that has not reset. */
+export function hasKnownRoom(
+  driver: ServerProvider["driver"],
+  limits: ServerProviderUsageLimits | undefined,
+  now: number,
+): boolean {
+  return headroomTier(accountHeadroom(driver, limits, now)) === 0;
+}
+
 /** Known room first, then unknown, then known to be spent: a spent account fails its first turn. */
 const headroomTier = (headroom: AccountHeadroom | null) =>
   headroom === null ? 1 : headroom.remainingPercent > 0 ? 0 : 2;

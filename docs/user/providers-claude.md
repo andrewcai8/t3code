@@ -31,9 +31,9 @@ instead can put credentials where this provider will not find them.
 
 Check the account reported in provider settings after signing in. With **Auto-pick
 accounts** on, the default, each new thread starts on the Claude account with the
-most usage left and stays there; turn it off in **Settings → General** to choose
-the instance yourself. Existing threads can switch only between Claude instances
-with the same config directory.
+most usage left and stays there until that account runs out; turn it off in
+**Settings → General** to choose the instance yourself. You can switch an
+existing thread only between Claude instances with the same config directory.
 Separate account directories stay isolated, including their local conversation
 state. Claude does not have Codex's shared-home and shadow-home arrangement.
 

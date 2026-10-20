@@ -1181,7 +1181,7 @@ export const ServerSettings = Schema.Struct({
   autoSwitchCloudAccounts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /**
    * A new chat on a provider with several accounts here runs on the one with the most usage
-   * left, and stays on it; pickers offer the provider instead of each account.
+   * left, and stays on it until it runs out; pickers offer the provider instead of each account.
    */
   autoPickProviderAccounts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(

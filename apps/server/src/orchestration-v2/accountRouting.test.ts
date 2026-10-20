@@ -138,6 +138,26 @@ describe("routeSelection", () => {
     ).toBe("claude_work");
   });
 
+  it("moves a thread off a spent account to the one with the most usage left", () => {
+    expect(
+      route(
+        "claudeAgent",
+        [provider("claudeAgent", 100), provider("claude_work", 60), provider("claude_home", 10)],
+        { current: "claudeAgent" },
+      ),
+    ).toBe("claude_home");
+  });
+
+  it("keeps a thread on its spent account while no other account is known to have room", () => {
+    expect(
+      route(
+        "claudeAgent",
+        [provider("claudeAgent", 100), provider("claude_work", 100), provider("claude_home", null)],
+        { current: "claudeAgent" },
+      ),
+    ).toBe("claudeAgent");
+  });
+
   it("routes a thread moving to another driver among that driver's accounts", () => {
     expect(
       route("claude_home", [provider("claude_home", 90), provider("claude_work", 10)], {

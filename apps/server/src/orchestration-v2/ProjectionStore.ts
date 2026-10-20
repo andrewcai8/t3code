@@ -162,6 +162,8 @@ export type ProjectionRecoveryKind =
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
+  | "projectId"
+  | "modelSelection"
   | "status"
   | "lastErrorClass"
   | "latestRunId"
@@ -3848,6 +3850,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           if (summary.lastErrorClass !== "usage_limit") continue;
           candidates.push({
             id: thread.id,
+            projectId: thread.projectId,
+            modelSelection: thread.modelSelection,
             status: "failed",
             lastErrorClass: summary.lastErrorClass,
             usageLimitResetAt: summary.usageLimitResetAt,
