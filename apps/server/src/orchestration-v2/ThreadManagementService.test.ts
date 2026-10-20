@@ -579,6 +579,104 @@ it.effect("starts a new thread on the account with the most usage left and keeps
   }).pipe(Effect.provide(layerTest));
 });
 
+it.effect("refreshes stale account readings before routing a new thread", () => {
+  const projectId = ProjectId.make("project:thread-management:chokepoint");
+  const threadId = ThreadId.make("thread:thread-management:chokepoint");
+  const dispatched: Array<OrchestrationV2Command> = [];
+  const refreshes: Array<string | undefined> = [];
+  const account = (instanceId: string, usedPercent: number, checkedAt: string) => ({
+    instanceId: ProviderInstanceId.make(instanceId),
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready" as const,
+    auth: { status: "authenticated" as const },
+    checkedAt,
+    models: [],
+    slashCommands: [],
+    skills: [],
+    usageLimits: {
+      checkedAt,
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session" as const,
+          label: "Session",
+          usedPercent,
+          resetsAt: "1970-01-01T06:00:00.000Z",
+        },
+      ],
+    },
+  });
+  // An hour-old reading says codex_work has room; the refresh says it ran out.
+  const stale = [
+    account("codex", 90, "1970-01-01T00:00:00.000Z"),
+    account("codex_work", 10, "1970-01-01T00:00:00.000Z"),
+  ];
+  const refreshed = [
+    account("codex", 90, "1970-01-01T01:00:00.000Z"),
+    account("codex_work", 100, "1970-01-01T01:00:00.000Z"),
+  ];
+  const layerTest = ThreadManagementService.layer.pipe(
+    Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed(stale),
+        refresh: (driver) =>
+          Effect.sync(() => {
+            refreshes.push(driver);
+            return refreshed;
+          }),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        dispatch: (command) =>
+          Effect.sync(() => {
+            dispatched.push(command as OrchestrationV2Command);
+            return { sequence: 1, storedEvents: [] } as never;
+          }),
+      }),
+    ),
+    Layer.provide(
+      ServerSettings.layerTest({
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: { driver: ProviderDriverKind.make("codex") },
+          [ProviderInstanceId.make("codex_work")]: { driver: ProviderDriverKind.make("codex") },
+        },
+      }),
+    ),
+    Layer.provideMerge(layerReceiptsTest),
+  );
+
+  return Effect.gen(function* () {
+    yield* TestClock.adjust("1 hour");
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:thread-management:route-fresh"),
+      threadId,
+      projectId,
+      title: "Routed on fresh readings",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex_work"), model: "m" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+
+    expect(refreshes).toEqual(["codex"]);
+    expect(
+      dispatched.map((command) =>
+        "modelSelection" in command ? command.modelSelection?.instanceId : undefined,
+      ),
+    ).toEqual(["codex"]);
+  }).pipe(Effect.provide(layerTest));
+});
+
 it.effect("classifies projection infrastructure failures separately from a missing thread", () => {
   const projectId = ProjectId.make("project:thread-management:projection-failure");
   const threadId = ThreadId.make("thread:thread-management:projection-failure");

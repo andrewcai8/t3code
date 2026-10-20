@@ -15,6 +15,7 @@ import {
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { readLocalAccountLoad } from "../environmentControl/accountLoad.ts";
@@ -77,23 +78,63 @@ export function routeSelection(
   return best === undefined ? selection : pick(best.instanceId);
 }
 
+const STALE_READING_MS = 15 * 60_000;
+const REFRESH_SPACING_MS = 10 * 60_000;
+
 /**
- * Routes a chat's selection with this host's settings, provider readings and running sessions.
- * Without a provider registry, as in narrow test layers, selections pass through unchanged.
+ * The routed driver of a selection whose accounts' usage readings are missing or older than
+ * fifteen minutes. A host refreshes readings only while a client asks for provider status, so an
+ * unattended host would otherwise route by readings from hours ago and send chats to accounts
+ * that have since run out.
+ */
+export function staleRoutedDriver(
+  providers: ReadonlyArray<ServerProvider>,
+  selection: ModelSelection,
+  now: number,
+): ServerProvider["driver"] | undefined {
+  const driver = providers.find((provider) => provider.instanceId === selection.instanceId)?.driver;
+  if (driver === undefined || !ROUTED_ACCOUNT_DRIVERS.has(driver)) return undefined;
+  const stale = providers.some((provider) => {
+    if (provider.driver !== driver || !provider.enabled) return false;
+    const checkedAt = Date.parse(provider.usageLimits?.checkedAt ?? "");
+    return !Number.isFinite(checkedAt) || now - checkedAt > STALE_READING_MS;
+  });
+  return stale ? driver : undefined;
+}
+
+/**
+ * Routes a chat's selection with this host's settings, provider readings and running sessions,
+ * refreshing a driver's stale readings first at most every ten minutes. Without a provider
+ * registry, as in narrow test layers, selections pass through unchanged.
  */
 export const makeAccountRouting = Effect.gen(function* () {
   const registry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
   const settings = yield* Effect.serviceOption(ServerSettingsService.ServerSettingsService);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const lastRefresh = yield* Ref.make(new Map<string, number>());
   return Effect.fn("accountRouting.route")(function* (request: AccountRequest) {
     if (Option.isNone(registry) || Option.isNone(settings)) return request.selection;
     const current = yield* settings.value.getSettings.pipe(Effect.option);
     if (Option.isNone(current) || !current.value.autoPickProviderAccounts) return request.selection;
+    const now = yield* Clock.currentTimeMillis;
+    let providers = yield* registry.value.getProviders;
+    const stale = staleRoutedDriver(providers, request.selection, now);
+    if (
+      stale !== undefined &&
+      now - ((yield* Ref.get(lastRefresh)).get(stale) ?? 0) > REFRESH_SPACING_MS
+    ) {
+      yield* Ref.update(lastRefresh, (map) => new Map(map).set(stale, now));
+      const refreshed = yield* registry.value.refresh(stale).pipe(
+        Effect.timeoutOption("20 seconds"),
+        Effect.orElseSucceed(() => Option.none()),
+      );
+      if (Option.isSome(refreshed)) providers = refreshed.value;
+    }
     return routeSelection({
       ...request,
       settings: current.value,
-      providers: yield* registry.value.getProviders,
-      now: yield* Clock.currentTimeMillis,
+      providers,
+      now,
       ...(Option.isSome(sql) ? { load: yield* readLocalAccountLoad(sql.value) } : {}),
     });
   });
