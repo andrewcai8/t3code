@@ -74,7 +74,7 @@ export function limitRecoveryCommand(
  * sweep armed its recovery with `arm`. It carries the thread's own selection, so
  * `ThreadManagementService.dispatch` routes it like any follow-up.
  */
-export function limitSwitchCommand(
+function limitSwitchCommand(
   thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
   arm: {
     readonly commandId: CommandId;
