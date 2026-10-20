@@ -183,4 +183,4 @@ export const makeFakeSandboxes = () => {
 /** Whether an exec runs one of the backend's labelled scripts or a shell command. */
 export const isStep = (label: string) => (argv: ReadonlyArray<string>) => argv[3] === label;
 export const isCommand = (command: string) => (argv: ReadonlyArray<string>) =>
-  argv[0] === "bash" && argv[2] === command;
+  argv.at(-3) === "bash" && argv.at(-2) === "-lc" && argv.at(-1) === command;

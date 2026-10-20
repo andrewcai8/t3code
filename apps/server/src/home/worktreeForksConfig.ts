@@ -77,7 +77,7 @@ export interface SandboxSize {
 export interface ForkRepository {
   /** Canonical owner/name, matched against a checkout's origin. */
   readonly repository: string;
-  /** Where every base keeps the checkout; a copy bind-mounts it at the worktree's own path. */
+  /** Where every base keeps the checkout; a copy moves it to the worktree's own path. */
   readonly workDir: string;
   readonly prepare: ReadonlyArray<string>;
   readonly services: ReadonlyArray<string>;
@@ -125,8 +125,8 @@ export type ForkSandboxes = Pick<
 export const COPY_PURPOSE = "t3-worktree-fork";
 
 /**
- * A sandbox booted from `imageId`. Always the vm runtime: only it can bind-mount the checkout at
- * the worktree's own path. Egress stays open, like the host it stands in for.
+ * A sandbox booted from `imageId`, on the vm runtime, which ran a megpt-mono test shard in half
+ * the time gVisor took. Egress stays open, like the host it stands in for.
  */
 export const copySpec = (
   host: WorktreeForksHost,

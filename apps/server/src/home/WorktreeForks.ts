@@ -177,8 +177,26 @@ interface Exited {
   readonly outputsProblem?: string;
 }
 
-/** Bind-mounts the copy's checkout at the worktree's path: pwd, git and stack traces all agree. */
-const MOUNT_SCRIPT = `mkdir -p "$1" && mount --bind "$2" "$1"`;
+/**
+ * Moves the copy's checkout to the worktree's own path, so pwd, git and stack traces all agree,
+ * and leaves the base's path as a symlink to it. A bind mount would also show the path, but Linux
+ * refuses rename(2) across mount points, so a test moving a file into /tmp failed with EXDEV.
+ */
+const PLACE_SCRIPT = `mkdir -p "$(dirname "$1")" && mv "$2" "$1" && ln -s "$1" "$2"`;
+
+/**
+ * Runs the command as a child subreaper. Modal's agent is PID 1 in a copy and never reaps, so a
+ * killed orphan stayed a zombie that still answered kill(pid, 0); on the host, the user's service
+ * manager reaps it. Exits with the command's code, or 128 plus the signal that ended it.
+ */
+const SUBREAPER = `import ctypes, os, subprocess, sys
+ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)
+child = subprocess.Popen(sys.argv[1:])
+while True:
+    pid, status = os.wait()
+    if pid == child.pid:
+        code = os.waitstatus_to_exitcode(status)
+        sys.exit(code if code >= 0 else 128 - code)`;
 
 /**
  * Runs each service command to its end, as a chat's copy does; one that leaves a daemon behind
@@ -341,8 +359,8 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     });
     yield* stepSucceeds(
       sandboxId,
-      ["sh", "-c", MOUNT_SCRIPT, "t3-mount", checkout.root, checkout.repository.workDir],
-      "mount its checkout at this worktree's path",
+      ["sh", "-c", PLACE_SCRIPT, "t3-place", checkout.root, checkout.repository.workDir],
+      "move its checkout to this worktree's path",
     );
     if (checkout.repository.services.length > 0) {
       const services = yield* step(
@@ -413,7 +431,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     // Host-side, since Modal counts an exec's timeout in whole seconds; its own is a backstop.
     const exitCode = yield* Effect.tryPromise({
       try: () =>
-        sandboxes.execStream(sandboxId, ["bash", "-lc", job.command], {
+        sandboxes.execStream(sandboxId, ["python3", "-c", SUBREAPER, "bash", "-lc", job.command], {
           env: job.environment,
           workdir: job.cwd,
           timeoutMs: job.timeoutMs + 60_000,

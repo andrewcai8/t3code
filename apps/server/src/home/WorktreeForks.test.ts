@@ -192,7 +192,7 @@ it.effect(
         "create",
         "upload",
         "t3-apply",
-        "t3-mount",
+        "t3-place",
         "stream",
         "terminate",
       ]);
@@ -202,13 +202,13 @@ it.effect(
         cpu: 16,
         tags: { purpose: "t3-worktree-fork", host: "env-host" },
       });
-      expect(fake.calls.find((call) => call.argv?.[3] === "t3-mount")?.argv?.slice(4)).toEqual([
+      expect(fake.calls.find((call) => call.argv?.[3] === "t3-place")?.argv?.slice(4)).toEqual([
         root,
         "/work/widgets",
       ]);
       const run = fake.calls.find((call) => call.op === "stream");
+      expect(run?.argv?.slice(-3)).toEqual(["bash", "-lc", "bun test"]);
       expect(run).toMatchObject({
-        argv: ["bash", "-lc", "bun test"],
         workdir: root,
         env: {
           HOME: "/home/user",
