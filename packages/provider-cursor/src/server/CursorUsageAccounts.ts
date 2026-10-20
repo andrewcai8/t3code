@@ -188,6 +188,23 @@ const make = Effect.gen(function* () {
       }),
     );
 
+  // The same account includes CLI and desktop history from every machine.
+  // A stable remote fingerprint prevents connected environments counting it twice.
+  const cachedSource = (cache: CursorAccountCache, windowStartMs: number) => {
+    const source = `cursor-account:${cache.accountKey}`;
+    return {
+      dir: source,
+      hostId: "cursor.com",
+      volumeId: cache.accountKey,
+      files: [
+        {
+          path: source,
+          records: cache.records.filter((record) => record.timestampMs >= windowStartMs),
+        },
+      ],
+    } satisfies ProviderUsageScan;
+  };
+
   const accountSource = Effect.fn("CursorUsageAccounts.accountSource")(function* (
     credential: CursorCredentialSource,
     authPath: string,
@@ -228,19 +245,8 @@ const make = Effect.gen(function* () {
           : { files: null, message: failureMessage ?? CURSOR_ACCOUNT_READ_ERROR }),
       } satisfies ProviderUsageScan;
     }
-    // The same account includes CLI and desktop history from every machine.
-    // A stable remote fingerprint prevents connected environments counting it twice.
-    const source = `cursor-account:${cache.accountKey}`;
     return {
-      dir: source,
-      hostId: "cursor.com",
-      volumeId: cache.accountKey,
-      files: [
-        {
-          path: source,
-          records: cache.records.filter((record) => record.timestampMs >= windowStartMs),
-        },
-      ],
+      ...cachedSource(cache, windowStartMs),
       ...(failureMessage === undefined
         ? { status: "ok" }
         : { status: "partial", message: failureMessage }),
@@ -331,11 +337,23 @@ const make = Effect.gen(function* () {
       }
       // An account reached through several logins counts once, from the first login that reads it.
       const seen = new Set<string>();
-      return [...hostSources, ...others].filter((source): source is ProviderUsageScan => {
+      const live = [...hostSources, ...others].filter((source): source is ProviderUsageScan => {
         if (source === null || seen.has(source.dir)) return false;
         seen.add(source.dir);
         return true;
       });
+      // A removed or signed-out login keeps its account's history on the page,
+      // as stored; with no login left there is nothing to refresh it from.
+      yield* ensureLoaded;
+      const stored = [...caches.values()]
+        .map((cache) => cachedSource(cache, windowStartMs))
+        .filter((source) => {
+          if (seen.has(source.dir)) return false;
+          seen.add(source.dir);
+          return true;
+        })
+        .map((source) => ({ ...source, status: "ok" as const }));
+      return [...live, ...stored];
     },
   );
 

@@ -203,4 +203,32 @@ describe("UsageService with several Cursor logins", () => {
       );
     }).pipe(Effect.scoped),
   );
+
+  it.live("keeps a removed login's account history", () =>
+    Effect.gen(function* () {
+      const home = yield* makeHome;
+      yield* writeLogin(home, "config-b", "user_b");
+      yield* readSummary(home, "usage-service-cursor-removed", {
+        "cursor-work": cursorInstance(home, "config-b"),
+      });
+      yield* Effect.promise(() =>
+        NodeFSP.rm(NodePath.join(home, "config-b"), { recursive: true, force: true }),
+      );
+
+      const summary = yield* readSummary(home, "usage-service-cursor-removed", {});
+
+      assert.deepStrictEqual(
+        summary.sources
+          .filter((source) => source.fingerprint.provider === "cursor")
+          .map((source) => [source.fingerprint.hostId, source.status]),
+        [["cursor.com", "ok"]],
+      );
+      assert.strictEqual(
+        summary.buckets
+          .filter((bucket) => bucket.provider === "cursor")
+          .reduce((sum, bucket) => sum + bucket.totals.outputTokens, 0),
+        5,
+      );
+    }).pipe(Effect.scoped),
+  );
 });
