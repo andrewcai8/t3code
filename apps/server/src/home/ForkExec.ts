@@ -11,6 +11,7 @@
  *
  * @module ForkExec
  */
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
@@ -31,7 +32,14 @@ import * as Schema from "effect/Schema";
 import { ServerConfig } from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as FleetBroker from "./FleetBroker.ts";
-import { ForkExecEvent, ForkExecRequest, forkExecSocketPath } from "./forkExecProtocol.ts";
+import {
+  exportsOf,
+  ForkExecEvent,
+  ForkExecRequest,
+  forkExecSocketPath,
+  MAX_REQUEST_BYTES,
+  shellQuote,
+} from "./forkExecProtocol.ts";
 
 const unavailable = (message: string) =>
   new OrchestratorMcpFailure({ code: "environment_unavailable", message });
@@ -63,7 +71,22 @@ const runInFork = Effect.fn("ForkExec.runInFork")(
       Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }),
     );
 
-    const { cwd, command, timeoutSeconds } = request;
+    // The copy starts from this machine's disk, so the command picks up its caller's environment
+    // from a file written before the copy is taken.
+    const environmentFile = NodePath.join(
+      (yield* ServerConfig).baseDir,
+      "fork-exec",
+      `${NodeCrypto.randomUUID()}.env`,
+    );
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => NodeFS.rmSync(environmentFile, { force: true })),
+    );
+    yield* Effect.try(() => {
+      NodeFS.mkdirSync(NodePath.dirname(environmentFile), { recursive: true, mode: 0o700 });
+      NodeFS.writeFileSync(environmentFile, exportsOf(request.environment), { mode: 0o600 });
+    }).pipe(Effect.mapError(() => unavailable("The caller's environment could not be saved.")));
+    const { cwd, timeoutSeconds } = request;
+    const command = `. ${shellQuote(environmentFile)} && ${request.command}`;
     const job = { command, cwd, ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }) };
     const { batchId } = (yield* invoke({
       op: "forks.run",
@@ -108,10 +131,11 @@ const runInFork = Effect.fn("ForkExec.runInFork")(
     yield* emit(outcome);
   },
   (effect, request, emit) =>
-    effect.pipe(Effect.catch((error) => emit({ kind: "unavailable", message: error.message }))),
+    effect.pipe(
+      Effect.catch((error) => emit({ kind: "unavailable", message: error.message })),
+      Effect.scoped,
+    ),
 );
-
-const shellQuote = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 
 /**
  * Puts `t3` on this box's PATH as this server's own build, ahead of any older `t3` the machine
@@ -143,7 +167,7 @@ export const layer = Layer.effectDiscard(
       return;
     const path = forkExecSocketPath((yield* ServerConfig).baseDir);
     const context = yield* Effect.context<
-      FleetBroker.FleetBroker | ServerEnvironment.ServerEnvironment
+      FleetBroker.FleetBroker | ServerEnvironment.ServerEnvironment | ServerConfig
     >();
     const serve = (socket: NodeNet.Socket) => {
       const emit = (event: ForkExecEvent) =>
@@ -152,10 +176,10 @@ export const layer = Layer.effectDiscard(
       const onData = (chunk: Buffer) => {
         buffered += chunk.toString("utf8");
         const newline = buffered.indexOf("\n");
-        if (newline === -1) return;
+        if (newline === -1 && buffered.length <= MAX_REQUEST_BYTES) return;
         socket.off("data", onData);
         const fiber = Effect.runForkWith(context)(
-          decodeRequest(buffered.slice(0, newline)).pipe(
+          decodeRequest(newline === -1 ? "" : buffered.slice(0, newline)).pipe(
             Effect.matchEffect({
               onFailure: () => emit({ kind: "unavailable", message: "The request was malformed." }),
               onSuccess: (request) => runInFork(request, emit),

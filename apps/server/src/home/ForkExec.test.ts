@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
@@ -112,7 +113,13 @@ const send = (socketPath: string, stop: (lines: ReadonlyArray<string>) => boolea
       }
     });
     socket.on("close", () => Deferred.doneUnsafe(closed, Effect.void));
-    socket.write(`${JSON.stringify({ command: "bun run check:types", cwd: "/workspace" })}\n`);
+    socket.write(
+      `${JSON.stringify({
+        command: "bun run check:types",
+        cwd: "/workspace",
+        environment: { NODE_OPTIONS: "--max-old-space-size=8192 'x'" },
+      })}\n`,
+    );
     return { lines, closed };
   });
 
@@ -122,13 +129,20 @@ it.effect("runs a command from a box process as a one-job fork for the box's own
     const { lines, closed } = yield* send(socketPath);
 
     const run = yield* Queue.take(requests);
-    expect(run.invoke).toEqual({
-      actor: { environmentId: box, threadId: owner },
-      request: {
-        op: "forks.run",
-        input: { jobs: [{ command: "bun run check:types", cwd: "/workspace" }] },
-      },
-    });
+    expect(run.invoke.actor).toEqual({ environmentId: box, threadId: owner });
+    expect(run.invoke.request.op).toBe("forks.run");
+    const [job] = run.invoke.request.op === "forks.run" ? run.invoke.request.input.jobs : [];
+    // The copy's shell sources the caller's environment from a file the copy was taken with.
+    const sourced = /^\. (\S+) && bun run check:types$/.exec(job!.command)?.[1];
+    expect(sourced).toBeDefined();
+    const environmentFile = sourced!.replace(/^'|'$/g, "");
+    expect(
+      NodeChildProcess.execFileSync(
+        "/bin/sh",
+        ["-c", `${job!.command.replace("bun run check:types", 'printf %s "$NODE_OPTIONS"')}`],
+        { env: {} },
+      ).toString(),
+    ).toBe("--max-old-space-size=8192 'x'");
     yield* broker.respond({ requestId: run.requestId, result: running });
     const status = yield* Queue.take(requests);
     expect(status.invoke.request).toEqual({
@@ -150,6 +164,7 @@ it.effect("runs a command from a box process as a one-job fork for the box's own
         logsUri: "s3://bucket/b1/logs/",
       },
     ]);
+    expect(NodeFS.existsSync(environmentFile)).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(FleetBroker.layer.pipe(Layer.provide(NodeCrypto.layer)))),
 );
 
