@@ -19,10 +19,9 @@ export const ProviderCheckPermits = Context.Reference<Semaphore.Semaphore>(
  * Run one status check once it holds a permit. Provider timeouts live inside
  * the check, so time spent waiting in line never counts against them.
  */
-export const withProviderCheckPermit = <A, E, R>(
-  check: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-  Effect.gen(function* () {
+export const withProviderCheckPermit = Effect.fn("ProviderCheckPermits.withProviderCheckPermit")(
+  function* <A, E, R>(check: Effect.Effect<A, E, R>): Effect.fn.Return<A, E, R> {
     const permits = yield* ProviderCheckPermits;
     return yield* permits.withPermits(1)(check);
-  });
+  },
+);

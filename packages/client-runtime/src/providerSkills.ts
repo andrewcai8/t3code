@@ -115,6 +115,30 @@ export function hasCurrentProviderWorkspaceSnapshot(
   );
 }
 
+export function resolveProviderForCwd(
+  provider: ServerProvider,
+  cwd: string | null | undefined,
+): ServerProvider {
+  const descriptors = resolveProviderWorkspaceSnapshot(provider, cwd)?.optionDescriptors;
+  if (descriptors === undefined) return provider;
+  const overriddenIds = new Set(descriptors.map((descriptor) => descriptor.id));
+  return {
+    ...provider,
+    models: provider.models.map((model) => ({
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        optionDescriptors: [
+          ...(model.capabilities?.optionDescriptors ?? []).filter(
+            (descriptor) => !overriddenIds.has(descriptor.id),
+          ),
+          ...descriptors,
+        ],
+      },
+    })),
+  };
+}
+
 /**
  * A host's `provisionedSkills` join the result and win a name clash, since that copy is the one
  * its chats run.

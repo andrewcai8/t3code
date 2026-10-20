@@ -342,11 +342,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
 
   // Resumes a box through its host. The host joins concurrent resumes of one box and finishes a
   // resume this request stops waiting for, so there is no client timeout.
-  const wakeBox = (
-    environmentId: EnvironmentId,
-    managerId: EnvironmentId,
-  ): Effect.Effect<BoxWakeOutcome> =>
-    Effect.gen(function* () {
+  const wakeBox = Effect.fnUntraced(
+    function* (environmentId: EnvironmentId, managerId: EnvironmentId) {
       const result = yield* runOnHost(
         managerId,
         EnvironmentRpc.request(WS_METHODS.environmentControlResume, { environmentId }),
@@ -375,21 +372,21 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         case "unknown":
           return wakeRetryLater(result.message);
       }
-    }).pipe(
-      Effect.catchTags({
-        EnvironmentNotRegisteredError: (error) =>
-          Effect.succeed<BoxWakeOutcome>({
-            _tag: "Refused",
-            error: new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
-          }),
-      }),
-      Effect.catchTags({
-        EnvironmentRpcUnavailableError: (error) => Effect.succeed(wakeUndelivered(error.message)),
-        RpcClientError: (error) => Effect.succeed(wakeUndelivered(error.message)),
-      }),
-      Effect.catch((error) => Effect.succeed(wakeRetryLater(error.message))),
-      Effect.withSpan("EnvironmentRegistry.wakeBox"),
-    );
+    },
+    Effect.catchTags({
+      EnvironmentNotRegisteredError: (error) =>
+        Effect.succeed<BoxWakeOutcome>({
+          _tag: "Refused",
+          error: new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
+        }),
+    }),
+    Effect.catchTags({
+      EnvironmentRpcUnavailableError: (error) => Effect.succeed(wakeUndelivered(error.message)),
+      RpcClientError: (error) => Effect.succeed(wakeUndelivered(error.message)),
+    }),
+    Effect.catch((error) => Effect.succeed(wakeRetryLater(error.message))),
+    Effect.withSpan("EnvironmentRegistry.wakeBox"),
+  );
 
   // Every client whose user has a box's chat open keeps its lease alive, not only the one that
   // started it, so a phone or a second tab does not let the host pause the box under the open
@@ -504,91 +501,91 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
 
   // Replaces one host's machines with its answer. An unchanged machine keeps its object, so a
   // row reading it does not render again.
-  const applyHostMachines = (
+  const applyHostMachines = Effect.fn("EnvironmentRegistry.applyHostMachines")(function* (
     managerId: EnvironmentId,
     machines: ReadonlyArray<{ readonly environmentId: EnvironmentId } & CloudMachine>,
-  ) =>
-    Effect.gen(function* () {
-      const boxesOfHost = new Set(
-        [...(yield* SubscriptionRef.get(entries)).values()].flatMap((entry) =>
-          connectionBox(entry.target)?.managerId === managerId ? [entry.target.environmentId] : [],
-        ),
+  ) {
+    const boxesOfHost = new Set(
+      [...(yield* SubscriptionRef.get(entries)).values()].flatMap((entry) =>
+        connectionBox(entry.target)?.managerId === managerId ? [entry.target.environmentId] : [],
+      ),
+    );
+    yield* SubscriptionRef.update(cloudMachines, (current) => {
+      const next = new Map(
+        [...current].filter(([environmentId]) => !boxesOfHost.has(environmentId)),
       );
-      yield* SubscriptionRef.update(cloudMachines, (current) => {
-        const next = new Map(
-          [...current].filter(([environmentId]) => !boxesOfHost.has(environmentId)),
+      for (const { environmentId, ...answered } of machines) {
+        const previous = current.get(environmentId);
+        next.set(
+          environmentId,
+          previous?.state === answered.state &&
+            previous.machine === answered.machine &&
+            previous.provider === answered.provider &&
+            previous.providerFailure?.cause === answered.providerFailure?.cause &&
+            previous.providerFailure?.at === answered.providerFailure?.at
+            ? previous
+            : answered,
         );
-        for (const { environmentId, ...answered } of machines) {
-          const previous = current.get(environmentId);
-          next.set(
-            environmentId,
-            previous?.state === answered.state &&
-              previous.machine === answered.machine &&
-              previous.provider === answered.provider &&
-              previous.providerFailure?.cause === answered.providerFailure?.cause &&
-              previous.providerFailure?.at === answered.providerFailure?.at
-              ? previous
-              : answered,
-          );
-        }
-        return next.size === current.size &&
-          [...next].every(([environmentId, machine]) => current.get(environmentId) === machine)
-          ? current
-          : next;
-      });
+      }
+      return next.size === current.size &&
+        [...next].every(([environmentId, machine]) => current.get(environmentId) === machine)
+        ? current
+        : next;
     });
+  });
 
   // Tells a host the user is here, about every four minutes and at once when they return, and
   // reads its machines more often while one is waking, updating, or failing to start on its
   // provider. Nothing is sent while the user is away, since their chats should sleep.
-  const reportPresence = (managerId: EnvironmentId): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      let reportedAt = -Infinity;
-      for (;;) {
-        if (!(yield* userHere)) {
-          yield* userArrives;
-          reportedAt = -Infinity;
-        }
-        if (!(yield* hostConnected(managerId))) {
-          yield* Effect.raceFirst(Effect.sleep(PRESENCE_RETRY_INTERVAL), userReturns);
-          continue;
-        }
-        const now = yield* Clock.currentTimeMillis;
-        const present = now - reportedAt >= PRESENCE_REPORT_MS;
-        const answer = yield* runOnHost(
-          managerId,
-          EnvironmentRpc.request(WS_METHODS.environmentControlPresence, { present }),
-        ).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              if (present) reportedAt = now;
-            }),
-          ),
-          Effect.catch((error) =>
-            Effect.logWarning("Could not tell a cloud host the user is here.", {
-              managerId,
-              error,
-            }).pipe(Effect.as(null)),
-          ),
-        );
-        if (answer !== null) yield* applyHostMachines(managerId, answer.machines);
-        const changing =
-          answer?.machines.some(
-            (machine) => machine.state !== "asleep" || machine.providerFailure !== undefined,
-          ) ?? false;
-        const reportDue = Math.max(0, reportedAt + PRESENCE_REPORT_MS - now);
-        yield* Effect.raceFirst(
-          Effect.sleep(
-            answer === null
-              ? PRESENCE_RETRY_INTERVAL
-              : changing
-                ? MACHINE_CHANGE_POLL_INTERVAL
-                : Duration.millis(reportDue),
-          ),
-          userReturns.pipe(Effect.andThen(Effect.sync(() => (reportedAt = -Infinity)))),
-        );
+  const reportPresence = Effect.fnUntraced(function* (
+    managerId: EnvironmentId,
+  ): Effect.fn.Return<void> {
+    let reportedAt = -Infinity;
+    for (;;) {
+      if (!(yield* userHere)) {
+        yield* userArrives;
+        reportedAt = -Infinity;
       }
-    }).pipe(Effect.withSpan("EnvironmentRegistry.reportPresence"));
+      if (!(yield* hostConnected(managerId))) {
+        yield* Effect.raceFirst(Effect.sleep(PRESENCE_RETRY_INTERVAL), userReturns);
+        continue;
+      }
+      const now = yield* Clock.currentTimeMillis;
+      const present = now - reportedAt >= PRESENCE_REPORT_MS;
+      const answer = yield* runOnHost(
+        managerId,
+        EnvironmentRpc.request(WS_METHODS.environmentControlPresence, { present }),
+      ).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (present) reportedAt = now;
+          }),
+        ),
+        Effect.catch((error) =>
+          Effect.logWarning("Could not tell a cloud host the user is here.", {
+            managerId,
+            error,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (answer !== null) yield* applyHostMachines(managerId, answer.machines);
+      const changing =
+        answer?.machines.some(
+          (machine) => machine.state !== "asleep" || machine.providerFailure !== undefined,
+        ) ?? false;
+      const reportDue = Math.max(0, reportedAt + PRESENCE_REPORT_MS - now);
+      yield* Effect.raceFirst(
+        Effect.sleep(
+          answer === null
+            ? PRESENCE_RETRY_INTERVAL
+            : changing
+              ? MACHINE_CHANGE_POLL_INTERVAL
+              : Duration.millis(reportDue),
+        ),
+        userReturns.pipe(Effect.andThen(Effect.sync(() => (reportedAt = -Infinity)))),
+      );
+    }
+  }, Effect.withSpan("EnvironmentRegistry.reportPresence"));
 
   // One presence report per host this device holds boxes of, restarted only when that set changes.
   yield* SubscriptionRef.changes(entries).pipe(
@@ -734,44 +731,41 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   const boxDriver = (environmentId: EnvironmentId, managerId: EnvironmentId) =>
     ConnectionDriver.ConnectionDriver.of({
       ...driver,
-      connect: (captured, reportProgress) =>
-        Effect.gen(function* () {
-          const entry = (yield* SubscriptionRef.get(entries)).get(environmentId) ?? captured;
-          if (
-            entry.target._tag === "BearerConnectionTarget" &&
-            entry.target.workspaceStatus === "missing"
-          )
-            return yield* driver.connect(entry, reportProgress);
-          const pairThroughHost = pairBoxThroughHost(
-            { environmentId, managerId },
-            hostPairingPorts(environmentId, managerId),
+      connect: Effect.fn("EnvironmentRegistry.connect")(function* (captured, reportProgress) {
+        const entry = (yield* SubscriptionRef.get(entries)).get(environmentId) ?? captured;
+        if (
+          entry.target._tag === "BearerConnectionTarget" &&
+          entry.target.workspaceStatus === "missing"
+        )
+          return yield* driver.connect(entry, reportProgress);
+        const pairThroughHost = pairBoxThroughHost(
+          { environmentId, managerId },
+          hostPairingPorts(environmentId, managerId),
+        );
+        if (isUnpairedBox(entry)) {
+          yield* reportProgress({ stage: "preparing" });
+          return yield* driver.connect(
+            yield* savePairing(environmentId, yield* pairThroughHost),
+            reportProgress,
           );
-          if (isUnpairedBox(entry)) {
-            yield* reportProgress({ stage: "preparing" });
-            return yield* driver.connect(
-              yield* savePairing(environmentId, yield* pairThroughHost),
-              reportProgress,
-            );
-          }
-          if ((yield* Ref.get(grantsChecked)).has(environmentId))
-            return yield* driver.connect(entry, reportProgress);
-          const legacyDial = yield* Scope.fork(yield* Scope.Scope);
-          const lease = yield* driver
-            .connect(entry, reportProgress)
-            .pipe(Scope.provide(legacyDial));
-          const grant = yield* pairing.sessionGrant(lease.prepared);
-          if (Option.isNone(grant)) return lease;
-          // Checked before pairing again, so a host that still mints the legacy grant is asked once.
-          yield* Ref.update(grantsChecked, (checked) => new Set(checked).add(environmentId));
-          if (!sessionHasLegacyPermissions(grant.value)) return lease;
-          const repaired = yield* pairThroughHost.pipe(
-            Effect.flatMap((registration) => savePairing(environmentId, registration, true)),
-            Effect.option,
-          );
-          if (Option.isNone(repaired)) return lease;
-          yield* Scope.close(legacyDial, Exit.void);
-          return yield* driver.connect(repaired.value, reportProgress);
-        }),
+        }
+        if ((yield* Ref.get(grantsChecked)).has(environmentId))
+          return yield* driver.connect(entry, reportProgress);
+        const legacyDial = yield* Scope.fork(yield* Scope.Scope);
+        const lease = yield* driver.connect(entry, reportProgress).pipe(Scope.provide(legacyDial));
+        const grant = yield* pairing.sessionGrant(lease.prepared);
+        if (Option.isNone(grant)) return lease;
+        // Checked before pairing again, so a host that still mints the legacy grant is asked once.
+        yield* Ref.update(grantsChecked, (checked) => new Set(checked).add(environmentId));
+        if (!sessionHasLegacyPermissions(grant.value)) return lease;
+        const repaired = yield* pairThroughHost.pipe(
+          Effect.flatMap((registration) => savePairing(environmentId, registration, true)),
+          Effect.option,
+        );
+        if (Option.isNone(repaired)) return lease;
+        yield* Scope.close(legacyDial, Exit.void);
+        return yield* driver.connect(repaired.value, reportProgress);
+      }),
     });
 
   /**
@@ -839,8 +833,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         : new BearerConnectionTarget({ ...target, workspaceStatus: "missing" }),
     ).pipe(Effect.withSpan("EnvironmentRegistry.markWorkspaceMissing"));
 
-  const markBoxes: EnvironmentRegistry["Service"]["markBoxes"] = (boxes) =>
-    Effect.gen(function* () {
+  const markBoxes: EnvironmentRegistry["Service"]["markBoxes"] = Effect.fnUntraced(
+    function* (boxes) {
       const managers = new Set<EnvironmentId>(boxes.map(({ managerId }) => managerId));
       for (const entry of (yield* SubscriptionRef.get(entries)).values()) {
         const box = connectionBox(entry.target);
@@ -850,29 +844,29 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         ({ environmentId, managerId }) =>
           environmentId !== managerId && !managers.has(environmentId),
       );
-    }).pipe(
-      Effect.flatMap((boxes) =>
-        Effect.forEach(
-          boxes,
-          ({ environmentId, managerId }) =>
-            rewriteBearerTarget(environmentId, (target) =>
-              target.box?.managerId === managerId
-                ? null
-                : new BearerConnectionTarget({ ...target, box: { managerId } }),
-            ).pipe(
-              Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
-              Effect.catch((error) =>
-                Effect.logWarning("Could not mark a saved connection as a box.", {
-                  environmentId,
-                  error,
-                }),
-              ),
+    },
+    Effect.flatMap((boxes) =>
+      Effect.forEach(
+        boxes,
+        ({ environmentId, managerId }) =>
+          rewriteBearerTarget(environmentId, (target) =>
+            target.box?.managerId === managerId
+              ? null
+              : new BearerConnectionTarget({ ...target, box: { managerId } }),
+          ).pipe(
+            Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
+            Effect.catch((error) =>
+              Effect.logWarning("Could not mark a saved connection as a box.", {
+                environmentId,
+                error,
+              }),
             ),
-          { discard: true },
-        ),
+          ),
+        { discard: true },
       ),
-      Effect.withSpan("EnvironmentRegistry.markBoxes"),
-    );
+    ),
+    Effect.withSpan("EnvironmentRegistry.markBoxes"),
+  );
 
   const unmarkBox = (environmentId: EnvironmentId) =>
     rewriteBearerTarget(environmentId, ({ box: _box, ...target }) =>
@@ -1076,8 +1070,8 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     }
   };
 
-  const syncHostBoxes: EnvironmentRegistry["Service"]["syncHostBoxes"] = (managerId, boxes) =>
-    Effect.gen(function* () {
+  const syncHostBoxes: EnvironmentRegistry["Service"]["syncHostBoxes"] = Effect.fnUntraced(
+    function* (managerId, boxes) {
       const current = yield* SubscriptionRef.get(entries);
       const chats = boxes.flatMap((box) =>
         box.managerId === managerId && box.chat !== null
@@ -1133,7 +1127,9 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
           ),
         );
       }
-    }).pipe(Effect.withSpan("EnvironmentRegistry.syncHostBoxes"));
+    },
+    Effect.withSpan("EnvironmentRegistry.syncHostBoxes"),
+  );
 
   // Re-registering an unchanged entry, or marking a box, replaces the supervisor without
   // changing the catalog, so followers track the lease itself rather than the entry.

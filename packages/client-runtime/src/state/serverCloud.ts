@@ -44,26 +44,27 @@ export function createServerCloudAtoms<R, E>(
     label: "environment-data:cloud:provisioned-box-lists",
     staleTimeMs: 5_000,
     refreshIntervalMs: 60_000,
-    execute: (_input: Record<string, never>) =>
-      Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        const managerId = (yield* EnvironmentSupervisor.EnvironmentSupervisor).target.environmentId;
-        const entries = yield* SubscriptionRef.get(registry.entries);
-        const held = yield* SubscriptionRef.get(registry.hostChats);
-        const rows = yield* request(WS_METHODS.environmentControlListProvisioned, {
-          providers: ProvisionProvider.literals,
-          environmentIds: [...entries.keys()],
-          addresses: [...entries].flatMap(([environmentId, { profile }]) =>
-            Option.isSome(profile) && profile.value._tag === "BearerConnectionProfile"
-              ? [{ environmentId, httpBaseUrl: profile.value.httpBaseUrl }]
-              : [],
-          ),
-          chats: [...held].flatMap(([environmentId, { managerId: hostId, chat }]) =>
-            hostId === managerId ? [{ environmentId, sequence: chat.sequence }] : [],
-          ),
-        });
-        return rows.map((row) => provisionedBox(managerId, row));
-      }).pipe(Effect.timeout("20 seconds")),
+    execute: Effect.fn("serverCloud.provisionedBoxLists")(function* (
+      _input: Record<string, never>,
+    ) {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const managerId = (yield* EnvironmentSupervisor.EnvironmentSupervisor).target.environmentId;
+      const entries = yield* SubscriptionRef.get(registry.entries);
+      const held = yield* SubscriptionRef.get(registry.hostChats);
+      const rows = yield* request(WS_METHODS.environmentControlListProvisioned, {
+        providers: ProvisionProvider.literals,
+        environmentIds: [...entries.keys()],
+        addresses: [...entries].flatMap(([environmentId, { profile }]) =>
+          Option.isSome(profile) && profile.value._tag === "BearerConnectionProfile"
+            ? [{ environmentId, httpBaseUrl: profile.value.httpBaseUrl }]
+            : [],
+        ),
+        chats: [...held].flatMap(([environmentId, { managerId: hostId, chat }]) =>
+          hostId === managerId ? [{ environmentId, sequence: chat.sequence }] : [],
+        ),
+      });
+      return rows.map((row) => provisionedBox(managerId, row));
+    }, Effect.timeout("20 seconds")),
   });
   const hostBoxListsFamily = Atom.family((hostsKey: string) =>
     Atom.make((get): ReadonlyArray<HostBoxList> => {

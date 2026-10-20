@@ -421,14 +421,14 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const runBatch = (
-    batch: Batch,
-    source: Box,
-    actor: FleetActor,
-    input: FleetForkRunInput,
-    limits: ForkLimits,
-  ) =>
-    Effect.gen(function* () {
+  const runBatch = Effect.fn("WorkerForks.runBatch")(
+    function* (
+      batch: Batch,
+      source: Box,
+      actor: FleetActor,
+      input: FleetForkRunInput,
+      limits: ForkLimits,
+    ) {
       yield* hostSlots.resize(limits.maxPerHost);
       const chat = chatOf(source.leaseId);
       yield* chat.copySlots.resize(limits.maxPerChat);
@@ -497,14 +497,17 @@ const make = Effect.gen(function* () {
             }),
         }),
       );
-    }).pipe(
-      Effect.ensuring(
-        Effect.gen(function* () {
-          batch.finishedAt = yield* Clock.currentTimeMillis;
-          yield* Deferred.succeed(batch.done, undefined);
-        }),
+    },
+    (effect, batch) =>
+      effect.pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            batch.finishedAt = yield* Clock.currentTimeMillis;
+            yield* Deferred.succeed(batch.done, undefined);
+          }),
+        ),
       ),
-    );
+  );
 
   /** Waits up to `budget` for the batch to finish, then reports it. */
   const answer = (batch: Batch, budget: Duration.Duration) =>
@@ -513,8 +516,8 @@ const make = Effect.gen(function* () {
       Effect.map(() => view(batch)),
     );
 
-  const run: WorkerForks["Service"]["run"] = (source, actor, input) =>
-    Effect.gen(function* () {
+  const run: WorkerForks["Service"]["run"] = Effect.fn("WorkerForks.run")(
+    function* (source, actor, input) {
       if (source.provider === "namespace")
         return yield* failure(
           "capability_denied",
@@ -571,28 +574,28 @@ const make = Effect.gen(function* () {
       };
       batches.set(batch.id, batch);
       return { batch: view(batch), start: batch.start };
-    });
+    },
+  );
 
   /** The batch, when it belongs to `source`'s chat. */
-  const owned = (source: Box, batchId: string) =>
-    Effect.gen(function* () {
-      yield* prune;
-      const batch = batches.get(batchId);
-      if (batch === undefined || batch.leaseId !== source.leaseId)
-        return yield* failure(
-          "invalid_request",
-          `No fork batch ${batchId} for this chat. Finished batches are kept six hours, and a host restart ends running ones.`,
-        );
-      return batch;
-    });
+  const owned = Effect.fn("WorkerForks.owned")(function* (source: Box, batchId: string) {
+    yield* prune;
+    const batch = batches.get(batchId);
+    if (batch === undefined || batch.leaseId !== source.leaseId)
+      return yield* failure(
+        "invalid_request",
+        `No fork batch ${batchId} for this chat. Finished batches are kept six hours, and a host restart ends running ones.`,
+      );
+    return batch;
+  });
 
   const status: WorkerForks["Service"]["status"] = (source, input) =>
     owned(source, input.batchId).pipe(
       Effect.flatMap((batch) => answer(batch, Duration.seconds(input.waitSeconds ?? 0))),
     );
 
-  const cancel: WorkerForks["Service"]["cancel"] = (source, input) =>
-    Effect.gen(function* () {
+  const cancel: WorkerForks["Service"]["cancel"] = Effect.fn("WorkerForks.cancel")(
+    function* (source, input) {
       const batch = yield* owned(source, input.batchId);
       const indexes = input.jobs ?? batch.jobs.map((job) => job.index);
       const missing = indexes.find((index) => index >= batch.jobs.length);
@@ -609,7 +612,8 @@ const make = Effect.gen(function* () {
           jobs: ending,
         });
       return view(batch);
-    });
+    },
+  );
 
   return WorkerForks.of({
     run,

@@ -35,8 +35,8 @@ export const makeClaudeHostProbe = Effect.fn("makeClaudeHostProbe")(function* (
 
   return {
     /** Runs after a fresh SDK probe; the result is what the capabilities cache keeps. */
-    withSetupTokenUsage: (probe: ClaudeCapabilities): Effect.Effect<ClaudeCapabilities> =>
-      Effect.gen(function* () {
+    withSetupTokenUsage: Effect.fn("makeClaudeHostProbe.withSetupTokenUsage")(
+      function* (probe: ClaudeCapabilities) {
         const claudeEnvironment = yield* makeClaudeEnvironment(settings, environment);
         const executablePath = yield* resolveClaudeSdkExecutablePath(
           settings.binaryPath,
@@ -50,7 +50,9 @@ export const makeClaudeHostProbe = Effect.fn("makeClaudeHostProbe")(function* (
         });
         const { usage: _probedUsage, ...probed } = probe;
         return usage ? { ...probed, usage } : probed;
-      }).pipe(Effect.provide(services)),
+      },
+      (effect): Effect.Effect<ClaudeCapabilities> => effect.pipe(Effect.provide(services)),
+    ),
     /** The capabilities the status check reads; a failed probe asks `claude auth status`. */
     readCapabilities: <E>(
       capabilities: Effect.Effect<ClaudeCapabilities, E>,

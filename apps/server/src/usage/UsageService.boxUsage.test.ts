@@ -33,6 +33,7 @@ import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { BoxUsageStore, BoxUsageStoreError } from "./boxUsage.ts";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -99,6 +100,9 @@ const serviceLayers = (input: {
     Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
     Layer.provideMerge(AntigravityUsage.layer),
     Layer.provideMerge(ProviderHostLive.layer),
+    Layer.provideMerge(
+      CodexUsageHistory.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
+    ),
     Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
     Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: input.prefix })),

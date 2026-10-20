@@ -309,8 +309,8 @@ export function makeProvisionControl(
    * neither waits on a client. Safe to run any number of times: a turn is sent at most once, and
    * a settled one is never sent again. Answers where the first turn stands, null without one.
    */
-  const settleChatOnce = (operation: ProvisionOperation) =>
-    Effect.gen(function* () {
+  const settleChatOnce = Effect.fn("EnvironmentControl.settleChatOnce")(
+    function* (operation: ProvisionOperation) {
       const { state, request } = operation;
       const chat = request.chat;
       if (state.kind !== "ready" || chat === undefined) return null;
@@ -319,17 +319,18 @@ export function makeProvisionControl(
         return registered?.firstTurn?.status ?? null;
       if (registered.firstTurn.status !== "pending") return registered.firstTurn.status;
       const { requestId } = request;
-      const settle = (outcome: { status: "started" } | { status: "failed"; reason: string }) =>
-        Effect.gen(function* () {
-          if (outcome.status === "failed")
-            yield* Effect.logError("cloud chat first turn not started", {
-              requestId,
-              reason: outcome.reason,
-            });
-          yield* promise(() => leases.settleFirstTurn(registered.leaseId, outcome));
-          yield* promise(() => ports.forgetFirstTurn(requestId));
-          return outcome.status;
-        });
+      const settle = Effect.fn("EnvironmentControl.settle")(function* (
+        outcome: { status: "started" } | { status: "failed"; reason: string },
+      ) {
+        if (outcome.status === "failed")
+          yield* Effect.logError("cloud chat first turn not started", {
+            requestId,
+            reason: outcome.reason,
+          });
+        yield* promise(() => leases.settleFirstTurn(registered.leaseId, outcome));
+        yield* promise(() => ports.forgetFirstTurn(requestId));
+        return outcome.status;
+      });
       if (firstTurnOverdue(registered, DateTime.toEpochMillis(yield* DateTime.now)))
         return yield* settle({
           status: "failed",
@@ -358,7 +359,9 @@ export function makeProvisionControl(
           ? { status: "started" }
           : { status: "failed", reason: "The box refused the turn." },
       );
-    }).pipe(Effect.catch(() => Effect.succeed("pending" as const)));
+    },
+    Effect.catch(() => Effect.succeed("pending" as const)),
+  );
   /** Starts a chat's first turn now, retrying briefly while its box is not answering yet. */
   const settleChat = (operation: ProvisionOperation) =>
     settleChatOnce(operation).pipe(

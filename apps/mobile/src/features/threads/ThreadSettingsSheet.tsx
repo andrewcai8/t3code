@@ -1,3 +1,4 @@
+import { SheetHeader } from "../../components/ui/SheetHeader";
 import { Toolbar } from "../../components/ui/Toolbar";
 import * as Dialog from "../../components/ui/Dialog";
 import { createV5StackNavigator as createNativeStackNavigator } from "../../native/createV5StackNavigator";
@@ -45,7 +46,6 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { AndroidAnchoredMenu } from "../../components/ui/AndroidAnchoredMenu";
-import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { ThemedSwitch } from "../../components/ui/ThemedSwitch";
@@ -66,6 +66,8 @@ import {
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { ChatGptSharingStatus } from "./ChatGptSharingStatus";
+import { environmentCatalog } from "../../connection/catalog";
+import { useEnvironmentQuery } from "../../state/query";
 import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
 import { mobilePreferencesAtom } from "../../state/preferences";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -124,6 +126,8 @@ const EMPTY_MODEL_FAVORITES: ReadonlyArray<{
   readonly model: string;
 }> = [];
 const FAVORITES_PROVIDER_FILTER = "@favorites";
+// Servers that predate `migrateModelPreferences` drop it and keep reporting null favorites.
+const attemptedMigrationGenerations = new Map<EnvironmentId, number>();
 function ProviderHeader(props: {
   readonly driver: string | undefined;
   readonly iconUrl: string | undefined;
@@ -336,6 +340,10 @@ function ThreadSettingsSessionProvider(
   const configs = useAtomValue(environmentServerConfigsAtom);
   const config = props.environmentId ? configs.get(props.environmentId) : undefined;
   const settings = config?.settings;
+  const connection = useEnvironmentQuery(
+    props.environmentId ? environmentCatalog.stateAtom(props.environmentId) : null,
+  ).data;
+  const connectionGeneration = connection?.phase === "connected" ? connection.generation : null;
   const [manageHidden, setManageHidden] = useState(false);
   const pendingHidden = useRef(new Set<string>());
   const pendingFavorites = useRef(
@@ -364,10 +372,26 @@ function ThreadSettingsSessionProvider(
   }).favorites;
   const saveSettings = useAtomCommand(serverEnvironment.updateSettings, "model favorites update");
   useEffect(() => {
-    if (!props.environmentId || !settings || !AsyncResult.isSuccess(preferences)) return;
+    if (
+      !props.environmentId ||
+      !settings ||
+      !AsyncResult.isSuccess(preferences) ||
+      connectionGeneration === null ||
+      attemptedMigrationGenerations.get(props.environmentId) === connectionGeneration
+    )
+      return;
     const patch = modelPreferencesMigrationPatch(settings, { favorites: legacyFavorites });
-    if (patch) void saveSettings({ environmentId: props.environmentId, input: { patch } });
-  }, [legacyFavorites, preferences, props.environmentId, saveSettings, settings]);
+    if (!patch) return;
+    attemptedMigrationGenerations.set(props.environmentId, connectionGeneration);
+    void saveSettings({ environmentId: props.environmentId, input: { patch } });
+  }, [
+    connectionGeneration,
+    legacyFavorites,
+    preferences,
+    props.environmentId,
+    saveSettings,
+    settings,
+  ]);
   const favoriteKeys = new Set(
     modelFavorites.map((favorite) => modelFavoriteKey(favorite.provider, favorite.model)),
   );
@@ -1133,7 +1157,6 @@ function ThreadSettingsModelsScreen() {
   const presentation = useThreadSettingsPickerPresentation();
   const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();
   const usesNativeMailSearchToolbar = useNativeMailSearchToolbar();
-  const theme = useUniwindTheme();
   const hasCustomCatalogFilter = session.providerFilter !== null || session.showLegacy;
   const commitAndClose = useEffectEvent(() => {
     if (!session.commitPendingModel()) return;
@@ -1177,7 +1200,7 @@ function ThreadSettingsModelsScreen() {
   return (
     <>
       {Platform.OS === "android" ? (
-        <AndroidScreenHeader
+        <SheetHeader
           trailing={
             <View className="flex-row items-center">
               <AndroidAnchoredMenu
@@ -1220,14 +1243,11 @@ function ThreadSettingsModelsScreen() {
                   />
                 )}
               </AndroidAnchoredMenu>
-              {session.pendingModel ? (
-                <Button label="Save" tone="text" onPress={commitAndClose} />
-              ) : null}
             </View>
           }
-          onBack={presentation.onClose}
+          onCancel={presentation.onClose}
           title="Thread settings"
-          hideBottomBorder
+          confirm={session.pendingModel ? { label: "Save", onPress: commitAndClose } : undefined}
         />
       ) : null}
       <NativeStackScreenOptions
@@ -1279,22 +1299,17 @@ function ThreadSettingsModelsScreen() {
           }}
         />
       </ScreenContent>
-      <Toolbar placement="left">
-        <Toolbar.Button
+      {Platform.OS === "ios" ? (
+        <SheetHeader
+          title="Thread settings"
+          onCancel={presentation.onClose}
           accessibilityLabel="Cancel thread settings"
-          icon="xmark"
-          onPress={presentation.onClose}
+          confirm={{
+            label: session.pendingModel ? "Save thread settings" : "Done",
+            onPress: commitAndClose,
+          }}
         />
-      </Toolbar>
-      <Toolbar placement="right">
-        <Toolbar.Button
-          accessibilityLabel={session.pendingModel ? "Save thread settings" : "Done"}
-          icon="checkmark"
-          variant="prominent"
-          tintColor={theme["--color-prominent-action"]}
-          onPress={commitAndClose}
-        />
-      </Toolbar>
+      ) : null}
       {Platform.OS === "ios" && !usesNativeMailSearchToolbar ? (
         <Toolbar placement="bottom">
           <Toolbar.Menu

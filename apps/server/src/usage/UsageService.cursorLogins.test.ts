@@ -26,6 +26,8 @@ import * as ServerConfig from "../config.ts";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
 import * as UsageService from "./UsageService.ts";
 
 const WINDOW: UsageSummaryInput = {
@@ -107,6 +109,7 @@ const readSummary = (
         ),
         Layer.provideMerge(AntigravityUsage.layer),
         Layer.provideMerge(ProviderHostLive.layer),
+        Layer.provideMerge(CodexUsageHistory.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
         Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
         Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
         Layer.provideMerge(ServerConfig.layerTest(process.cwd(), NodePath.join(home, prefix))),

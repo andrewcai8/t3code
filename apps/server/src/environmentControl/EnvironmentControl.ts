@@ -2207,39 +2207,38 @@ export const layer = Layer.effect(
         Effect.flatMap(provider(operation), ({ allocator }) =>
           allocator.recoverFork(operation, parent),
         ),
-      dispose: (operation, resource) =>
-        Effect.gen(function* () {
-          const { runtime, namespace, modal, manifest } = yield* provider(operation);
-          if (resource.provider === "modal")
-            return yield* Effect.tryPromise({
-              try: async () => {
-                if (!modal) throw new Error("Modal unavailable");
-                await modal.dispose(operation);
-              },
-              catch: () =>
-                new ProvisionProviderError({ message: "Modal cleanup could not be confirmed." }),
-            });
-          if (resource.provider === "namespace")
-            return yield* Effect.tryPromise({
-              try: async () => {
-                if (!namespace) throw new Error("Namespace unavailable");
-                if ("engine" in resource) await namespace.mac.dispose(operation, manifest);
-                else await namespace.runtime.dispose(operation, resource);
-              },
-              catch: () =>
-                new ProvisionProviderError({
-                  message: "Namespace cleanup could not be confirmed.",
-                }),
-            });
-          const sandboxId = resource.sandboxId;
-          yield* Effect.tryPromise({
-            try: () => runtime.dispose(operation, sandboxId),
+      dispose: Effect.fn("EnvironmentControl.dispose")(function* (operation, resource) {
+        const { runtime, namespace, modal, manifest } = yield* provider(operation);
+        if (resource.provider === "modal")
+          return yield* Effect.tryPromise({
+            try: async () => {
+              if (!modal) throw new Error("Modal unavailable");
+              await modal.dispose(operation);
+            },
+            catch: () =>
+              new ProvisionProviderError({ message: "Modal cleanup could not be confirmed." }),
+          });
+        if (resource.provider === "namespace")
+          return yield* Effect.tryPromise({
+            try: async () => {
+              if (!namespace) throw new Error("Namespace unavailable");
+              if ("engine" in resource) await namespace.mac.dispose(operation, manifest);
+              else await namespace.runtime.dispose(operation, resource);
+            },
             catch: () =>
               new ProvisionProviderError({
-                message: "The allocated resource could not be confirmed disposed.",
+                message: "Namespace cleanup could not be confirmed.",
               }),
           });
-        }),
+        const sandboxId = resource.sandboxId;
+        yield* Effect.tryPromise({
+          try: () => runtime.dispose(operation, sandboxId),
+          catch: () =>
+            new ProvisionProviderError({
+              message: "The allocated resource could not be confirmed disposed.",
+            }),
+        });
+      }),
       prepare: (operation, allocation) => {
         // Sub-phases are collected rather than logged as they happen because the
         // provider runtimes are Promise-side with no Effect runtime in scope, so

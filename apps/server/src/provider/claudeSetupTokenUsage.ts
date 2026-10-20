@@ -175,8 +175,8 @@ const readFreshClaudeUsageTurn: ClaudeUsageTurnReader = (input) => {
 /** One per instance: at most one usage turn per TTL, failed turns included. */
 export const makeClaudeUsageTurnReader = Effect.gen(function* () {
   const lastTurnAt = yield* Ref.make<number | undefined>(undefined);
-  const reader: ClaudeUsageTurnReader = (input) =>
-    Effect.gen(function* () {
+  const reader: ClaudeUsageTurnReader = Effect.fn("claudeSetupTokenUsage.reader")(
+    function* (input) {
       const now = yield* Clock.currentTimeMillis;
       const last = yield* Ref.get(lastTurnAt);
       if (last !== undefined && now - last < Duration.toMillis(CLAUDE_USAGE_TURN_TTL)) {
@@ -184,7 +184,8 @@ export const makeClaudeUsageTurnReader = Effect.gen(function* () {
       }
       yield* Ref.set(lastTurnAt, now);
       return yield* readFreshClaudeUsageTurn(input);
-    });
+    },
+  );
   return reader;
 });
 

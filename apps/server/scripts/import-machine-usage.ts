@@ -52,6 +52,8 @@ import * as AntigravityUsage from "../src/provider/Drivers/AntigravityUsage.ts";
 import * as ProviderHostLive from "../src/provider/ProviderHostLive.ts";
 import * as ServerSettingsService from "../src/serverSettings.ts";
 import { BoxUsageStore } from "../src/usage/boxUsage.ts";
+import * as CodexUsageHistory from "../src/usage/CodexUsageHistory.ts";
+import * as Sqlite from "../src/persistence/Sqlite.ts";
 import * as UsageService from "../src/usage/UsageService.ts";
 
 class ImportFailure extends Schema.TaggedError<ImportFailure>()("ImportFailure", {
@@ -85,67 +87,68 @@ const SERVER_ONLY_VARIABLES = new Set([
  * This machine's hourly UTC usage since `sinceTime`, from the server's scanner. Cursor is left
  * out: the host reads the Cursor account itself, and the scan must not touch the keychain.
  */
-const scanHistory = (input: {
+const scanHistory = Effect.fn("import-machine-usage.scanHistory")(function* (input: {
   readonly t3Home: string;
   readonly cacheDir: string;
   readonly sinceTime: string;
-}) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const settingsPath = path.join(input.t3Home, "userdata", "settings.json");
-    const raw = (yield* fs.exists(settingsPath)) ? yield* fs.readFileString(settingsPath) : "{}";
-    const settings = yield* decodeSettings(raw);
-    const providerInstances = Object.fromEntries(
-      Object.entries(settings.providerInstances).filter(
-        ([, instance]) => instance.driver !== "cursor",
-      ),
-    );
-    const environment = yield* HostProcess.Environment;
-    const settingsLayer = ServerSettingsService.layerTest({
-      ...settings,
-      providerInstances,
-      cursorKeychainUsageEnabled: false,
-    });
-    // The scanner reads only its cache directory from the config and its homes from
-    // settings, so the in-memory layers stand in for a server without starting one.
-    const configLayer = ServerConfig.layerTest(input.cacheDir, input.cacheDir);
-    const usage = yield* UsageService.make.pipe(
-      Effect.provide(
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const settingsPath = path.join(input.t3Home, "userdata", "settings.json");
+  const raw = (yield* fs.exists(settingsPath)) ? yield* fs.readFileString(settingsPath) : "{}";
+  const settings = yield* decodeSettings(raw);
+  const providerInstances = Object.fromEntries(
+    Object.entries(settings.providerInstances).filter(
+      ([, instance]) => instance.driver !== "cursor",
+    ),
+  );
+  const environment = yield* HostProcess.Environment;
+  const settingsLayer = ServerSettingsService.layerTest({
+    ...settings,
+    providerInstances,
+    cursorKeychainUsageEnabled: false,
+  });
+  // The scanner reads only its cache directory from the config and its homes from
+  // settings, so the in-memory layers stand in for a server without starting one.
+  const configLayer = ServerConfig.layerTest(input.cacheDir, input.cacheDir);
+  const usage = yield* UsageService.make.pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        configLayer,
+        settingsLayer,
         Layer.mergeAll(
-          configLayer,
-          settingsLayer,
-          Layer.mergeAll(
-            AntigravityUsage.layer,
-            CursorUsageAccounts.layer.pipe(
-              Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
-            ),
-          ).pipe(
-            Layer.provide(ProviderHostLive.layer),
-            // Usage scans never ask the host for background work or stored credentials.
-            Layer.provide(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
-            Layer.provide(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
-            Layer.provide(Layer.merge(configLayer, settingsLayer)),
+          AntigravityUsage.layer,
+          CursorUsageAccounts.layer.pipe(
+            Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
           ),
-          Layer.succeed(
-            BoxUsageStore,
-            BoxUsageStore.of({
-              replace: () => Effect.void,
-              list: () => Effect.succeed([]),
-              prune: () => Effect.void,
-            }),
-          ),
+        ).pipe(
+          Layer.provide(ProviderHostLive.layer),
+          // Usage scans never ask the host for background work or stored credentials.
+          Layer.provide(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
+          Layer.provide(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+          Layer.provide(Layer.merge(configLayer, settingsLayer)),
+        ),
+        // This machine has no server database, so Codex turns read the default speed tier.
+        CodexUsageHistory.layer.pipe(Layer.provide(Sqlite.layerMemory)),
+        Layer.succeed(
+          BoxUsageStore,
+          BoxUsageStore.of({
+            replace: () => Effect.void,
+            list: () => Effect.succeed([]),
+            prune: () => Effect.void,
+          }),
         ),
       ),
-      Effect.provideService(
-        HostProcess.Environment,
-        Object.fromEntries(
-          Object.entries(environment).filter(([key]) => !SERVER_ONLY_VARIABLES.has(key)),
-        ),
+    ),
+    Effect.provideService(
+      HostProcess.Environment,
+      Object.fromEntries(
+        Object.entries(environment).filter(([key]) => !SERVER_ONLY_VARIABLES.has(key)),
       ),
-    );
-    return yield* usage.readHistory({ sinceTime: input.sinceTime });
-  }).pipe(Effect.scoped);
+    ),
+  );
+  return yield* usage.readHistory({ sinceTime: input.sinceTime });
+}, Effect.scoped);
 
 const tokens = (bucket: UsageSummary["buckets"][number]) =>
   bucket.totals.uncachedInputTokens +
@@ -195,56 +198,58 @@ const describeHistory = (history: UsageSummary) => {
 const describe = (cause: { readonly _tag: string; readonly message: string }) =>
   cause._tag === "SchemaError" ? "the host's answer did not decode" : cause.message;
 
-const bearerFor = (origin: string, pairingTokenFile: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const cachePath = `${pairingTokenFile}.bearer.json`;
-    const now = yield* Clock.currentTimeMillis;
-    const cached = yield* fs
-      .readFileString(cachePath)
-      .pipe(Effect.flatMap(decodeBearerCache), Effect.option);
-    if (
-      Option.isSome(cached) &&
-      cached.value.origin === origin &&
-      cached.value.expiresAt - now > 15 * 60_000
-    ) {
-      return cached.value.accessToken;
-    }
-    const credential = (yield* fs.readFileString(pairingTokenFile)).trim();
-    const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-    const token = yield* http
-      .execute(
-        HttpClientRequest.post(new URL("oauth/token", origin)).pipe(
-          HttpClientRequest.bodyUrlParams({
-            grant_type: AuthTokenExchangeGrantType,
-            subject_token: credential,
-            subject_token_type: AuthEnvironmentBootstrapTokenType,
-            requested_token_type: AuthAccessTokenType,
-            client_label: "usage import",
-            client_device_type: "bot",
-          }),
-        ),
-      )
-      .pipe(
-        Effect.flatMap((response) => response.json),
-        Effect.flatMap(decodeAccessToken),
-        Effect.timeout("1 minute"),
-        Effect.mapError(
-          (cause) => new ImportFailure({ message: `token exchange failed: ${describe(cause)}` }),
-        ),
-      );
-    yield* fs.writeFileString(
-      cachePath,
-      yield* encodeBearerCache({
-        origin,
-        accessToken: token.access_token,
-        expiresAt: now + token.expires_in * 1000,
-      }),
-      { mode: 0o600 },
+const bearerFor = Effect.fn("import-machine-usage.bearerFor")(function* (
+  origin: string,
+  pairingTokenFile: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const cachePath = `${pairingTokenFile}.bearer.json`;
+  const now = yield* Clock.currentTimeMillis;
+  const cached = yield* fs
+    .readFileString(cachePath)
+    .pipe(Effect.flatMap(decodeBearerCache), Effect.option);
+  if (
+    Option.isSome(cached) &&
+    cached.value.origin === origin &&
+    cached.value.expiresAt - now > 15 * 60_000
+  ) {
+    return cached.value.accessToken;
+  }
+  const credential = (yield* fs.readFileString(pairingTokenFile)).trim();
+  const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const token = yield* http
+    .execute(
+      HttpClientRequest.post(new URL("oauth/token", origin)).pipe(
+        HttpClientRequest.bodyUrlParams({
+          grant_type: AuthTokenExchangeGrantType,
+          subject_token: credential,
+          subject_token_type: AuthEnvironmentBootstrapTokenType,
+          requested_token_type: AuthAccessTokenType,
+          client_label: "usage import",
+          client_device_type: "bot",
+        }),
+      ),
+    )
+    .pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.flatMap(decodeAccessToken),
+      Effect.timeout("1 minute"),
+      Effect.mapError(
+        (cause) => new ImportFailure({ message: `token exchange failed: ${describe(cause)}` }),
+      ),
     );
-    yield* fs.chmod(cachePath, 0o600);
-    return token.access_token;
-  });
+  yield* fs.writeFileString(
+    cachePath,
+    yield* encodeBearerCache({
+      origin,
+      accessToken: token.access_token,
+      expiresAt: now + token.expires_in * 1000,
+    }),
+    { mode: 0o600 },
+  );
+  yield* fs.chmod(cachePath, 0o600);
+  return token.access_token;
+});
 
 const command = Command.make(
   "import-machine-usage",

@@ -40,8 +40,8 @@ const unavailable = (message: string) =>
  * Runs `request` as a one-job batch for this machine's own chat, which its host names in the
  * forks environment it offers. `emit` gets `started` once the batch exists.
  */
-const runInFork = (request: ForkExecRequest, emit: (event: ForkExecEvent) => Effect.Effect<void>) =>
-  Effect.gen(function* () {
+const runInFork = Effect.fn("ForkExec.runInFork")(
+  function* (request: ForkExecRequest, emit: (event: ForkExecEvent) => Effect.Effect<void>) {
     const broker = yield* FleetBroker.FleetBroker;
     const environmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
     yield* FleetBroker.awaitHostReconnect;
@@ -52,14 +52,16 @@ const runInFork = (request: ForkExecRequest, emit: (event: ForkExecEvent) => Eff
     if (!hostConnected) return yield* unavailable("This machine's host is not connected.");
     if (owner === undefined)
       return yield* unavailable("This machine's host does not offer forks to its own chat.");
-    const invoke = (fleetRequest: FleetRequest) =>
-      Effect.gen(function* () {
+    const invoke = Effect.fn("ForkExec.invoke")(
+      function* (fleetRequest: FleetRequest) {
         yield* FleetBroker.awaitHostReconnect;
         return yield* broker.invoke(CLOUD_FORKS_ENVIRONMENT_ID, {
           actor: { environmentId, threadId: owner },
           request: fleetRequest,
         });
-      }).pipe(Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }));
+      },
+      Effect.retry({ while: FleetBroker.isRelayLoss, times: 2 }),
+    );
 
     const { cwd, command, timeoutSeconds } = request;
     const job = { command, cwd, ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }) };
@@ -104,7 +106,10 @@ const runInFork = (request: ForkExecRequest, emit: (event: ForkExecEvent) => Eff
       ),
     );
     yield* emit(outcome);
-  }).pipe(Effect.catch((error) => emit({ kind: "unavailable", message: error.message })));
+  },
+  (effect, request, emit) =>
+    effect.pipe(Effect.catch((error) => emit({ kind: "unavailable", message: error.message }))),
+);
 
 const shellQuote = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 

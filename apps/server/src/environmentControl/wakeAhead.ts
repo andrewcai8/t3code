@@ -260,15 +260,14 @@ export function makeWakeAhead(deps: {
      * A client's report. A present user is counted for a few minutes and their chats start
      * waking before the answer; an absent one only reads it, since another client may be here.
      */
-    presence: (present: boolean) =>
-      Effect.gen(function* () {
-        if (present) {
-          presentUntil = (yield* Clock.currentTimeMillis) + PRESENCE_TTL_MS;
-          yield* pass;
-        }
-        const boxes = yield* deps.list.pipe(Effect.orElseSucceed(() => []));
-        const now = yield* Clock.currentTimeMillis;
-        return { machines: machines(boxes, now) } satisfies EnvironmentControlPresenceResult;
-      }),
+    presence: Effect.fn("wakeAhead.presence")(function* (present: boolean) {
+      if (present) {
+        presentUntil = (yield* Clock.currentTimeMillis) + PRESENCE_TTL_MS;
+        yield* pass;
+      }
+      const boxes = yield* deps.list.pipe(Effect.orElseSucceed(() => []));
+      const now = yield* Clock.currentTimeMillis;
+      return { machines: machines(boxes, now) } satisfies EnvironmentControlPresenceResult;
+    }),
   };
 }

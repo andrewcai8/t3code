@@ -546,56 +546,58 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   let disposed: string | null = null;
   const checks: Array<Check> = [];
 
-  const record = (environment: Transition["environment"], state: SupervisorConnectionState) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      const paused = yield* Ref.get(pausedAt);
-      const failure = state.lastFailure;
-      const transition: Transition = {
-        environment,
-        at: DateTime.formatIso(DateTime.makeUnsafe(now)),
-        seconds: yield* elapsed,
-        afterPause: paused !== null,
-        phase: state.phase,
-        stage: state.stage,
-        attempt: state.attempt,
-        generation: state.generation,
-        failure:
-          failure === null
-            ? null
-            : { tag: failure._tag, reason: failure.reason, detail: redact(failure.detail) },
-        retryInSeconds:
-          state.retryAt === null ? null : Math.max(0, Math.round((state.retryAt - now) / 1000)),
-      };
-      const previous = (yield* SubscriptionRef.get(log)).findLast(
-        (entry) => entry.environment === environment,
-      );
-      const same =
-        previous !== undefined &&
-        previous.phase === transition.phase &&
-        previous.stage === transition.stage &&
-        previous.attempt === transition.attempt &&
-        previous.generation === transition.generation &&
-        previous.failure?.detail === transition.failure?.detail;
-      if (same) return;
-      const sincePause =
-        paused === null ? "" : ` (+${Math.round((now - paused) / 100) / 10}s after pause)`;
-      yield* Console.log(
-        [
-          `[${transition.seconds}s]${sincePause} ${environment} ${transition.phase}`,
-          transition.stage === null ? "" : `stage=${transition.stage}`,
-          `attempt=${transition.attempt} generation=${transition.generation}`,
-          transition.failure === null
-            ? ""
-            : `failure=${transition.failure.tag}/${transition.failure.reason}: ${transition.failure.detail}`,
-          transition.retryInSeconds === null ? "" : `retry in ${transition.retryInSeconds}s`,
-        ]
-          .filter((part) => part !== "")
-          .join(" "),
-      );
-      // After the print: a waiter that wakes on this entry may close the scope this runs in.
-      yield* SubscriptionRef.update(log, (entries) => [...entries, transition]);
-    });
+  const record = Effect.fn("record")(function* (
+    environment: Transition["environment"],
+    state: SupervisorConnectionState,
+  ) {
+    const now = yield* Clock.currentTimeMillis;
+    const paused = yield* Ref.get(pausedAt);
+    const failure = state.lastFailure;
+    const transition: Transition = {
+      environment,
+      at: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      seconds: yield* elapsed,
+      afterPause: paused !== null,
+      phase: state.phase,
+      stage: state.stage,
+      attempt: state.attempt,
+      generation: state.generation,
+      failure:
+        failure === null
+          ? null
+          : { tag: failure._tag, reason: failure.reason, detail: redact(failure.detail) },
+      retryInSeconds:
+        state.retryAt === null ? null : Math.max(0, Math.round((state.retryAt - now) / 1000)),
+    };
+    const previous = (yield* SubscriptionRef.get(log)).findLast(
+      (entry) => entry.environment === environment,
+    );
+    const same =
+      previous !== undefined &&
+      previous.phase === transition.phase &&
+      previous.stage === transition.stage &&
+      previous.attempt === transition.attempt &&
+      previous.generation === transition.generation &&
+      previous.failure?.detail === transition.failure?.detail;
+    if (same) return;
+    const sincePause =
+      paused === null ? "" : ` (+${Math.round((now - paused) / 100) / 10}s after pause)`;
+    yield* Console.log(
+      [
+        `[${transition.seconds}s]${sincePause} ${environment} ${transition.phase}`,
+        transition.stage === null ? "" : `stage=${transition.stage}`,
+        `attempt=${transition.attempt} generation=${transition.generation}`,
+        transition.failure === null
+          ? ""
+          : `failure=${transition.failure.tag}/${transition.failure.reason}: ${transition.failure.detail}`,
+        transition.retryInSeconds === null ? "" : `retry in ${transition.retryInSeconds}s`,
+      ]
+        .filter((part) => part !== "")
+        .join(" "),
+    );
+    // After the print: a waiter that wakes on this entry may close the scope this runs in.
+    yield* SubscriptionRef.update(log, (entries) => [...entries, transition]);
+  });
 
   const waitFor = (
     what: string,
@@ -622,12 +624,16 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
     ok ? Effect.void : Effect.fail(new VerifyFailure({ message }));
 
   /** Records a named check in the report, then stops the run when it failed. */
-  const checked = (name: string, pass: boolean, value: Check["value"], evidence: unknown = null) =>
-    Effect.gen(function* () {
-      checks.push({ name, pass, value, evidence });
-      yield* Console.log(`[${yield* elapsed}s] ${pass ? "PASS" : "FAIL"} ${name} ${value ?? ""}`);
-      if (!pass) return yield* new VerifyFailure({ message: `${name}: ${value ?? "failed"}` });
-    });
+  const checked = Effect.fn("checked")(function* (
+    name: string,
+    pass: boolean,
+    value: Check["value"],
+    evidence: unknown = null,
+  ) {
+    checks.push({ name, pass, value, evidence });
+    yield* Console.log(`[${yield* elapsed}s] ${pass ? "PASS" : "FAIL"} ${name} ${value ?? ""}`);
+    if (!pass) return yield* new VerifyFailure({ message: `${name}: ${value ?? "failed"}` });
+  });
 
   /** The title of a chat's thread as the box serves it, once the box has the thread. */
   const threadTitle = (
@@ -654,23 +660,22 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       what,
     );
 
-  const listOnHost = (
+  const listOnHost = Effect.fn("listOnHost")(function* (
     registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
     managerId: EnvironmentId,
-  ) =>
-    Effect.gen(function* () {
-      const entries = yield* SubscriptionRef.get(registry.entries);
-      return yield* bounded(
-        registry.run(
-          managerId,
-          request(WS_METHODS.environmentControlListProvisioned, {
-            environmentIds: [...entries.keys()],
-            chats: [],
-          }),
-        ),
-        "list the host's boxes",
-      );
-    });
+  ) {
+    const entries = yield* SubscriptionRef.get(registry.entries);
+    return yield* bounded(
+      registry.run(
+        managerId,
+        request(WS_METHODS.environmentControlListProvisioned, {
+          environmentIds: [...entries.keys()],
+          chats: [],
+        }),
+      ),
+      "list the host's boxes",
+    );
+  });
 
   const awaitManager = (
     registry: EnvironmentRegistry.EnvironmentRegistry["Service"],

@@ -12,13 +12,16 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ChildProcessSpawner } from "effect/process";
 
+import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 import * as GitLabCli from "./GitLabCli.ts";
 import { parseGitLabAuthStatusHosts } from "./gitLabAuthStatus.ts";
 import * as GitLabSourceControlProvider from "./GitLabSourceControlProvider.ts";
 
 function makeProvider(gitlab: Partial<GitLabCli.GitLabCli["Service"]>) {
   return GitLabSourceControlProvider.make.pipe(
-    Effect.provide(Layer.mock(GitLabCli.GitLabCli)(gitlab)),
+    Effect.provide(
+      Layer.mergeAll(Layer.mock(GitLabCli.GitLabCli)(gitlab), TestSourceControlHost.layer()),
+    ),
   );
 }
 
@@ -32,6 +35,7 @@ it.effect("maps GitLab MR summaries into provider-neutral change requests", () =
           url: "https://gitlab.com/pingdotgg/t3code/-/merge_requests/42",
           baseRefName: "main",
           headRefName: "feature/source-control",
+          headSha: "a".repeat(40),
           state: "closed",
           closedAt: "2026-08-23T10:00:00Z",
           isCrossRepository: true,
@@ -52,6 +56,7 @@ it.effect("maps GitLab MR summaries into provider-neutral change requests", () =
       url: "https://gitlab.com/pingdotgg/t3code/-/merge_requests/42",
       baseRefName: "main",
       headRefName: "feature/source-control",
+      headSha: "a".repeat(40),
       state: "closed",
       closedAt: "2026-08-23T10:00:00Z",
       mergedAt: null,

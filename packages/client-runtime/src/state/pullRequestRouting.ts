@@ -41,6 +41,7 @@ const reads = new Set<string>([
   WS_METHODS.pullRequestsThreadComments,
   WS_METHODS.pullRequestsDiffFileContents,
   WS_METHODS.pullRequestsFilesViewed,
+  WS_METHODS.pullRequestsChangeBreakdown,
   WS_METHODS.pullRequestsReviewerCandidates,
   WS_METHODS.pullRequestsLabelCandidates,
 ]);
@@ -161,7 +162,13 @@ const routingAllowed = Effect.fn("PullRequestRouting.allowed")(function* (
   const entries = yield* SubscriptionRef.get(registry.entries);
   const origin = entries.get(originId);
   const destination = entries.get(destinationId);
-  if (!origin?.enabled || !destination?.enabled) return false;
+  if (
+    !origin?.enabled ||
+    !destination?.enabled ||
+    origin.unsupportedReason !== undefined ||
+    destination.unsupportedReason !== undefined
+  )
+    return false;
   const permissions = yield* GitHubRoutingPermissions;
   const source = yield* permissions.get(origin);
   const target = yield* permissions.get(destination);
