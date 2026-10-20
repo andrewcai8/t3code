@@ -306,6 +306,12 @@ export const FleetForkJob = Schema.Struct({
       description: "Stop the job after this long. The host caps it.",
     }),
   ),
+  size: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({
+      description:
+        "A machine size the host names, such as large or xlarge. Only self-hosted servers have sizes; a copy of a cloud machine has the machine's own size.",
+    }),
+  ),
 });
 export type FleetForkJob = typeof FleetForkJob.Type;
 
