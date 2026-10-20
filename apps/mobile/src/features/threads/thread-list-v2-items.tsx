@@ -11,7 +11,7 @@ import {
 import { RowPressable } from "../../components/ui/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
 import { appAtomRegistry } from "../../state/atom-registry";
-import { useCloudMachineStatus } from "../../state/cloud-machine";
+import { useCloudMachineStatus, useEnvironmentMachineGone } from "../../state/cloud-machine";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import type { ThreadMoveDestination } from "./threadOrder";
 import type {
@@ -628,6 +628,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
+  const machineGone = useEnvironmentMachineGone(thread.environmentId);
+  // A gone machine never grants a session, but settle and delete still apply on this device.
+  const lifecycleOnly = !canOperateThread && machineGone;
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
@@ -885,8 +888,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       snoozePresets,
     ],
   );
+  const primarySwipe = lifecycleOnly ? (canUnsettle ? "unsettle" : "settle") : swipeActions.primary;
   const primaryAction = useMemo(() => {
-    if (swipeActions.primary === "archive") {
+    if (primarySwipe === "archive") {
       return {
         accessibilityLabel: `Archive ${thread.title}`,
         icon: "archivebox" as const,
@@ -894,7 +898,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         onPress: handleArchive,
       };
     }
-    if (swipeActions.primary === "unsnooze") {
+    if (primarySwipe === "unsnooze") {
       return {
         accessibilityLabel: `Wake ${thread.title} now`,
         icon: "clock" as const,
@@ -902,7 +906,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         onPress: handleUnsnooze,
       };
     }
-    return swipeActions.primary === "unsettle"
+    return primarySwipe === "unsettle"
       ? {
           accessibilityLabel: `Un-settle ${thread.title}`,
           icon: "arrow.uturn.backward" as const,
@@ -915,17 +919,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           label: "Settle",
           onPress: handleSettle,
         };
-  }, [
-    handleArchive,
-    handleSettle,
-    handleUnsettle,
-    handleUnsnooze,
-    swipeActions.primary,
-    thread.title,
-  ]);
+  }, [handleArchive, handleSettle, handleUnsettle, handleUnsnooze, primarySwipe, thread.title]);
   const secondaryAction = useMemo(
     () =>
-      swipeActions.secondary === "snooze"
+      swipeActions.secondary === "snooze" && !lifecycleOnly
         ? {
             accessibilityLabel: `Choose when to snooze ${thread.title}`,
             icon: "clock" as const,
@@ -938,13 +935,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             onPress: () => undefined,
           }
         : null,
-    [handleMenuAction, snoozePresetActions, swipeActions.secondary, thread.title],
+    [handleMenuAction, lifecycleOnly, snoozePresetActions, swipeActions.secondary, thread.title],
   );
-  const swipeAccessibilityHint = !canOperateThread
-    ? "Opens the thread"
-    : secondaryAction === null
-      ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
-      : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
+  const swipeAccessibilityHint =
+    !canOperateThread && !machineGone
+      ? "Opens the thread"
+      : secondaryAction === null
+        ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
+        : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
 
   const cardContent = (
     <>
@@ -1282,7 +1280,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       </RowPressable>
     );
 
-  if (!canOperateThread)
+  if (!canOperateThread && !machineGone)
     return <View style={rowAppearance.swipeContainerStyle}>{rowContent(() => {})}</View>;
 
   return (
@@ -1311,7 +1309,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         {(close) => (
           <Menu
             actions={[
-              ...(thread.branch
+              ...(thread.branch && !lifecycleOnly
                 ? [
                     {
                       id: "new-thread-on-branch",
@@ -1321,15 +1319,19 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                   ]
                 : []),
               { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
-              ...(snoozedRow
-                ? snoozedMenuActions
-                : !props.settlementSupported
-                  ? legacyMenuActions
-                  : canUnsettle
-                    ? slimMenuActions
-                    : swipeActions.secondary === "snooze"
-                      ? snoozableCardMenuActions
-                      : cardMenuActions),
+              ...(lifecycleOnly
+                ? canUnsettle
+                  ? SLIM_MENU_ACTIONS
+                  : CARD_MENU_ACTIONS
+                : snoozedRow
+                  ? snoozedMenuActions
+                  : !props.settlementSupported
+                    ? legacyMenuActions
+                    : canUnsettle
+                      ? slimMenuActions
+                      : swipeActions.secondary === "snooze"
+                        ? snoozableCardMenuActions
+                        : cardMenuActions),
             ]}
             onPressAction={handleMenuAction}
             shouldOpenOnLongPress

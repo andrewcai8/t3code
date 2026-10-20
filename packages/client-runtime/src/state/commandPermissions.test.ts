@@ -24,7 +24,10 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
+import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import { BearerConnectionTarget } from "../connection/model.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
+import { isThreadLifecycleOfflineFailure } from "./threadLifecycleOverlay.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
 
@@ -47,11 +50,19 @@ const grant = (allowed: boolean): AuthSessionState => ({
   scopes: allowed ? [AuthOrchestrationOperateScope] : [],
   permissions: allowed ? [AuthOrchestrationOperateScope] : [],
 });
-const runtime = Atom.runtime(
-  Layer.succeed(EnvironmentRegistry, {
-    run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
-  } as unknown as EnvironmentRegistry["Service"]),
-);
+const registryLayer = (saved: ReadonlyMap<EnvironmentId, ConnectionCatalogEntry> = new Map()) =>
+  Layer.effect(
+    EnvironmentRegistry,
+    Effect.map(
+      SubscriptionRef.make(saved),
+      (entries) =>
+        ({
+          entries,
+          run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
+        }) as unknown as EnvironmentRegistry["Service"],
+    ),
+  );
+const runtime = Atom.runtime(registryLayer());
 const permissions = createCommandPermissions(runtime, WS_METHODS.scheduledTasksDelete);
 const setup = Effect.gen(function* () {
   const registry = AtomRegistry.make();
@@ -197,6 +208,46 @@ describe("command permissions", () => {
         }),
       ),
   );
+  it.effect(
+    "fails a command on a removed workspace as offline instead of waiting for its grant",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const registry = yield* setup;
+          const removed = EnvironmentId.make("removed-box");
+          const target = new BearerConnectionTarget({
+            environmentId: removed,
+            label: "removed box",
+            connectionId: "bearer:removed-box",
+            workspaceStatus: "missing",
+          });
+          const removedRuntime = Atom.runtime(
+            registryLayer(new Map([[removed, { target, profile: Option.none(), enabled: true }]])),
+          );
+          let calls = 0;
+          const command = createEnvironmentRpcCommand(removedRuntime, {
+            label: "test.delete",
+            tag: WS_METHODS.scheduledTasksDelete,
+            execute: () =>
+              Effect.sync(() => {
+                calls++;
+                return { id: ScheduledTaskId.make("task") };
+              }),
+          });
+          const result = yield* Effect.promise(() =>
+            command.run(registry, {
+              environmentId: removed,
+              input: { id: ScheduledTaskId.make("task") },
+            }),
+          );
+          const error =
+            result._tag === "Failure" ? Cause.findErrorOption(result.cause) : Option.none();
+          expect(Option.isSome(error) && isThreadLifecycleOfflineFailure(error.value)).toBe(true);
+          expect(calls).toBe(0);
+        }),
+      ),
+  );
+
   it("rechecks permission after waiting in a serial command lane", async () => {
     const registry = AtomRegistry.make();
     const unmount = registry.mount(sessions(env));

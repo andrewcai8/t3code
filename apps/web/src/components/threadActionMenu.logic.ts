@@ -67,6 +67,8 @@ export function buildDraftActionMenuItems(options: {
 
 export interface ThreadActionMenuState {
   readonly canOperate: boolean;
+  /** The thread's machine is gone for good; it can still be settled or deleted on this device. */
+  readonly machineGone: boolean;
   readonly branch: string | null;
   readonly projectFilter: {
     readonly label: string;
@@ -102,6 +104,11 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "copy-branch",
     "copy-thread-id",
   ].includes(action);
+}
+
+/** What still applies on this device after a thread's machine is gone for good. */
+export function threadActionWorksWithoutMachine(action: ThreadActionMenuId): boolean {
+  return action === "settle" || action === "unsettle" || action === "delete";
 }
 
 export function buildThreadActionMenuItems(
@@ -226,7 +233,8 @@ export function buildThreadActionMenuItems(
   return state.canOperate
     ? items
     : items.map((item) =>
-        threadActionRequiresOperate(item.id)
+        threadActionRequiresOperate(item.id) &&
+        !(state.machineGone && threadActionWorksWithoutMachine(item.id))
           ? {
               ...item,
               disabled: true,

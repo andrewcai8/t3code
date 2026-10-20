@@ -125,6 +125,7 @@ vi.mock("./useSettings", () => ({
 vi.mock("../cloud/sidebarCloud", () => ({
   useCloudThreadActions: () => ({ stopProvisionedCloudMachine: async () => {} }),
   provisionedSandboxFor: () => null,
+  isEnvironmentMachineGone: () => false,
 }));
 vi.mock("./useThreadActions", () => ({
   useThreadActions: () =>

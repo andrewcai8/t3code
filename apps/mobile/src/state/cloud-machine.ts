@@ -27,3 +27,9 @@ export function useCloudMachineStatus(environmentId: EnvironmentId): CloudMachin
   const presentation = useAtomValue(environmentPresentations.presentationAtom(environmentId));
   return cloudMachineStatus(machine ?? undefined, presentation?.connection.phase);
 }
+
+/** Whether a chat's cloud machine is gone for good, so its thread can only be settled or deleted. */
+export function useEnvironmentMachineGone(environmentId: EnvironmentId): boolean {
+  const presentation = useAtomValue(environmentPresentations.presentationAtom(environmentId));
+  return presentation?.connection.blockedReason === "workspace-missing";
+}

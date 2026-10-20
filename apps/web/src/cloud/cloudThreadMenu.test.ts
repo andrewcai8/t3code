@@ -6,6 +6,7 @@ import {
 } from "../components/threadActionMenu.logic";
 
 const baseState: ThreadActionMenuState = {
+  machineGone: false,
   branch: null,
   projectFilter: null,
   isPinned: false,

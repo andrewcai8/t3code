@@ -100,6 +100,7 @@ describe("source control environment atoms", () => {
           effect,
         ) => Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor);
         const environmentRegistry = EnvironmentRegistry.EnvironmentRegistry.of({
+          entries: yield* SubscriptionRef.make(new Map()),
           run,
         } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]);
         const removed = new Array<string>();
