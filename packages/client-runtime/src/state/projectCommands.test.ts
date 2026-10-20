@@ -101,6 +101,7 @@ const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
   const runtime = Atom.runtime(
     Layer.mergeAll(
       Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
+        entries: yield* SubscriptionRef.make(new Map()),
         run: (_environmentId, effect) =>
           Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
         followStream: (_environmentId, stream) =>
