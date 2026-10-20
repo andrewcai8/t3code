@@ -8,7 +8,7 @@ import {
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { routeSelection } from "./accountRouting.ts";
+import { routeSelection, staleRoutedDriver } from "./accountRouting.ts";
 
 const projectId = ProjectId.make("project-1");
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -152,5 +152,35 @@ describe("routeSelection", () => {
         settings: settings({ autoPickProviderAccounts: false }),
       }),
     ).toBe("claudeAgent");
+  });
+});
+
+describe("staleRoutedDriver", () => {
+  const fresh = (instanceId: string) => provider(instanceId, 10);
+  it("names the driver when one of its accounts has an old or missing reading", () => {
+    expect(
+      staleRoutedDriver(
+        [fresh("claudeAgent"), provider("claude_work", null)],
+        selection("claudeAgent"),
+        now,
+      ),
+    ).toBe("claudeAgent");
+    expect(
+      staleRoutedDriver(
+        [fresh("claudeAgent"), fresh("claude_work")],
+        selection("claudeAgent"),
+        now + 20 * 60_000,
+      ),
+    ).toBe("claudeAgent");
+  });
+
+  it("is undefined while every account's reading is recent", () => {
+    expect(
+      staleRoutedDriver(
+        [fresh("claudeAgent"), fresh("claude_work")],
+        selection("claudeAgent"),
+        now,
+      ),
+    ).toBe(undefined);
   });
 });
