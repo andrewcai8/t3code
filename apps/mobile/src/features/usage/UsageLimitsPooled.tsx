@@ -164,13 +164,6 @@ function PoolWindowCard({
                   refillPercent={window.resetsAt ? member.refillPercent : 0}
                 />
               </View>
-              {timeLeft !== null ? (
-                <View
-                  pointerEvents="none"
-                  className="absolute -top-1 -bottom-1 w-0.5 -translate-x-px rounded-full bg-foreground-muted"
-                  style={{ left: `${timeLeft}%` }}
-                />
-              ) : null}
               <View
                 pointerEvents="none"
                 className="absolute inset-0 items-center justify-center overflow-hidden rounded-md"

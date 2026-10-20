@@ -359,13 +359,6 @@ function SegmentTriggers({
             />
           ) : null}
         </div>
-        {timeLeft !== null ? (
-          <span
-            aria-hidden
-            className="absolute -inset-y-1 w-0.5 -translate-x-1/2 rounded-full bg-muted-foreground"
-            style={{ left: `${timeLeft}%` }}
-          />
-        ) : null}
         <span
           aria-hidden
           className="absolute inset-0 flex items-center justify-center overflow-hidden rounded-md text-3xs leading-none font-semibold text-foreground/80 tabular-nums @2xl/pool:hidden"
