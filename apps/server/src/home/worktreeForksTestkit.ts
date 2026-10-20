@@ -57,6 +57,14 @@ export const makeFakeSandboxes = () => {
   }> = [];
   const failures = new Map<string, Error>();
   const holds = new Map<string, ReturnType<typeof gate<void>>>();
+  const waiters: Array<{ readonly op: string; readonly resolve: (call: FakeCall) => void }> = [];
+  const record = (call: FakeCall) => {
+    calls.push(call);
+    for (const waiter of waiters.filter((candidate) => candidate.op === call.op)) {
+      waiters.splice(waiters.indexOf(waiter), 1);
+      waiter.resolve(call);
+    }
+  };
   let next = 0;
   let downloadSource: string | null = null;
 
@@ -81,14 +89,14 @@ export const makeFakeSandboxes = () => {
 
   const port: ForkSandboxes = {
     createCopy: async (spec) => {
-      calls.push({ op: "create", imageId: spec.imageId, cpu: spec.sizing.cpu, tags: spec.tags });
+      record({ op: "create", imageId: spec.imageId, cpu: spec.sizing.cpu, tags: spec.tags });
       await step("create");
       const sandboxId = `sb-${++next}`;
       sandboxes.set(sandboxId, { tags: spec.tags });
       return sandboxId;
     },
     exec: async (sandboxId, argv, options) => {
-      calls.push({ op: "exec", sandboxId, argv, ...options });
+      record({ op: "exec", sandboxId, argv, ...options });
       const reply = replyTo(argv);
       const text = (stream: "stdout" | "stderr") =>
         (reply.chunks ?? [])
@@ -102,36 +110,36 @@ export const makeFakeSandboxes = () => {
       };
     },
     execStream: async (sandboxId, argv, { onOutput, ...options }) => {
-      calls.push({ op: "stream", sandboxId, argv, ...options });
+      record({ op: "stream", sandboxId, argv, ...options });
       await step("stream");
       const reply = replyTo(argv);
       for (const [stream, text] of reply.chunks ?? []) onOutput(stream, text);
       return reply.exitCode;
     },
     upload: async (sandboxId, localPath, remotePath) => {
-      calls.push({ op: "upload", sandboxId, argv: [remotePath] });
+      record({ op: "upload", sandboxId, argv: [remotePath] });
       await step("upload");
       const copy = `${NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-upload-"))}/file`;
       NodeFS.copyFileSync(localPath, copy);
       uploads.set(remotePath, copy);
     },
     download: async (sandboxId, _remotePath, localPath) => {
-      calls.push({ op: "download", sandboxId });
+      record({ op: "download", sandboxId });
       if (downloadSource !== null) NodeFS.copyFileSync(downloadSource, localPath);
     },
     saveDisk: async (sandboxId) => {
-      calls.push({ op: "saveDisk", sandboxId });
+      record({ op: "saveDisk", sandboxId });
       await step("saveDisk");
       const imageId = `im-${++next}`;
       images.add(imageId);
       return imageId;
     },
     deleteImage: async (imageId) => {
-      calls.push({ op: "deleteImage", imageId });
+      record({ op: "deleteImage", imageId });
       images.delete(imageId);
     },
     terminate: async (sandboxId) => {
-      calls.push({ op: "terminate", sandboxId });
+      record({ op: "terminate", sandboxId });
       sandboxes.delete(sandboxId);
     },
     list: async (_app, _environment, tags) =>
@@ -159,6 +167,8 @@ export const makeFakeSandboxes = () => {
       holds.set(op, held);
       return held;
     },
+    /** Settles at the next call of `op`. */
+    next: (op: string) => new Promise<FakeCall>((resolve) => void waiters.push({ op, resolve })),
     /** A sandbox an earlier run left behind. */
     plant: (tags: Readonly<Record<string, string>>) => {
       const sandboxId = `sb-${++next}`;
