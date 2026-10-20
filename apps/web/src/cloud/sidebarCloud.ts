@@ -15,6 +15,8 @@ import {
 } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { environmentPresentations } from "../state/presentation";
 
 export { environmentAllowsThreadSettlement } from "@t3tools/client-runtime/state/thread-settled";
 export { useEnvironment } from "../state/environments";
@@ -23,6 +25,14 @@ export { stopProvisionedCloudMachineMenuItem } from "./cloudThreadMenu";
 export { draftSessionHasInvestedWork } from "./draftInvestedWork";
 export { provisionedSandboxFor } from "./provisionedSandboxLeases";
 export { useCloudThreadActions } from "./useCloudThreadActions";
+
+/** Whether a thread's cloud machine is gone for good, so it can only be settled or deleted here. */
+export function isEnvironmentMachineGone(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentPresentations.presentationAtom(environmentId))?.connection
+      ?.blockedReason === "workspace-missing"
+  );
+}
 
 /** The composer a draft row shows when its first cloud send already cleared the composer. */
 export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {

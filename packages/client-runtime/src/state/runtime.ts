@@ -17,6 +17,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
+import { workspaceMissingError } from "../connection/boxErrors.ts";
 import type { ConnectionAttemptError } from "../connection/model.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import {
@@ -851,6 +852,21 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
   });
 }
 
+/**
+ * A saved box whose workspace is gone never prepares a session, so a scope check against it can
+ * only time out as an authorization failure. Failing with the real reason instead lets offline
+ * lifecycle commands (settle, delete) recover on this device.
+ */
+const failIfWorkspaceMissing = Effect.fn("EnvironmentRpcCommand.failIfWorkspaceMissing")(function* (
+  environmentId: EnvironmentIdType,
+) {
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const target = (yield* SubscriptionRef.get(registry.entries)).get(environmentId)?.target;
+  if (target?._tag === "BearerConnectionTarget" && target.workspaceStatus === "missing") {
+    return yield* workspaceMissingError();
+  }
+});
+
 export function createEnvironmentRpcCommand<
   R,
   ER,
@@ -902,7 +918,8 @@ export function createEnvironmentRpcCommand<
       };
       // Routing requires consent on the origin as well as the actual destination.
       // The transport check below deliberately checks the destination again.
-      return permissions.authorize(registry, environmentId, input).pipe(
+      return failIfWorkspaceMissing(environmentId).pipe(
+        Effect.andThen(permissions.authorize(registry, environmentId, input)),
         Effect.andThen(() => options.execute?.(input) ?? requestGuarded(options.tag, input)),
         Effect.provideService(RpcPermissionGuard, {
           authorize: (id, method, payload) =>

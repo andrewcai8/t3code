@@ -8,6 +8,7 @@ import {
 
 const baseState: ThreadActionMenuState = {
   canOperate: true,
+  machineGone: false,
   branch: null,
   projectFilter: null,
   isPinned: false,
@@ -89,6 +90,16 @@ describe("buildThreadActionMenuItems", () => {
     ]);
     const allowed = buildThreadActionMenuItems({ ...baseState, canOperate: true });
     expect(allowed.every((item) => !item.disabled)).toBe(true);
+  });
+
+  it("keeps settle and delete for a thread whose machine is gone", () => {
+    const enabled = (state: ThreadActionMenuState) =>
+      buildThreadActionMenuItems(state)
+        .filter((item) => !item.disabled)
+        .map((item) => item.id);
+    const gone = { ...baseState, canOperate: false, machineGone: true };
+    expect(enabled(gone)).toEqual(["settle", "mark-unread", "copy", "project-settings", "delete"]);
+    expect(enabled({ ...gone, isSettled: true })).toContain("unsettle");
   });
 
   it("hides lifecycle items when the environment lacks the capabilities", () => {

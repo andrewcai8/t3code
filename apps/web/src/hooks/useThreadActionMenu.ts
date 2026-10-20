@@ -18,6 +18,7 @@ import { resolveSnoozePresets } from "../components/Sidebar.snooze";
 import {
   buildThreadActionMenuItems,
   threadActionRequiresOperate,
+  threadActionWorksWithoutMachine,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -130,8 +131,10 @@ export function useThreadActionMenu(input: {
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+      const machineGone = SidebarCloud.isEnvironmentMachineGone(threadRef.environmentId);
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
+        machineGone,
         branch: thread.branch ?? null,
         projectFilter: null,
         isPinned: thread.pinnedAt != null,
@@ -150,6 +153,7 @@ export function useThreadActionMenu(input: {
       const action: ThreadActionMenuId = clicked.value;
       if (
         threadActionRequiresOperate(action) &&
+        !(machineGone && threadActionWorksWithoutMachine(action)) &&
         !readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)
       ) {
         failureToast(

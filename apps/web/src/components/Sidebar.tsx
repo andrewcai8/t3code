@@ -194,6 +194,7 @@ import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
   threadActionRequiresOperate,
+  threadActionWorksWithoutMachine,
 } from "./threadActionMenu.logic";
 import * as SidebarCloud from "../cloud/sidebarCloud";
 import {
@@ -2546,6 +2547,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         // settle) instead of cross-fading back.
                         "pointer-events-none absolute inset-y-0 right-0 flex items-stretch opacity-0 transition-opacity has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:static group-any-hover/sidebar-row:opacity-100",
                         snoozeMenuOpen && "pointer-events-auto static opacity-100",
+                        // A removed machine's row has no other touch exit: phones never
+                        // hover, and the row's menu needs a long-press iOS Safari lacks.
+                        status === "expired" && "pointer-events-auto static opacity-100",
                       )}
                     >
                       {hasUnsentDraft ? (
@@ -4392,6 +4396,7 @@ export default function Sidebar() {
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const machineGone = SidebarCloud.isEnvironmentMachineGone(thread.environmentId);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -4399,6 +4404,7 @@ export default function Sidebar() {
                 threadRef.environmentId,
                 AuthOrchestrationOperateScope,
               ),
+              machineGone,
               branch: thread.branch ?? null,
               projectFilter: threadProjectGroup
                 ? {
@@ -4427,7 +4433,12 @@ export default function Sidebar() {
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
-        if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        if (
+          threadActionRequiresOperate(clicked.value) &&
+          !(machineGone && threadActionWorksWithoutMachine(clicked.value)) &&
+          !checkThreadOperations([thread])
+        )
+          return;
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
