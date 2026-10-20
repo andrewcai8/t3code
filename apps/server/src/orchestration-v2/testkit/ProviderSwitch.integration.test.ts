@@ -1191,6 +1191,85 @@ describe("orchestration v2 provider switching", () => {
       ),
   );
 
+  it.live("resumes a native session the thread was created around on its first turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("imported-native-session-resumes");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: {},
+            capturedTurns,
+          }),
+        ]);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("imported-native:create"),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Moved chat",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            importedNativeThread: {
+              ref: { driver: CLAUDE_DRIVER, nativeId: "moved-session", strength: "strong" },
+            },
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("imported-native:1"),
+            threadId,
+            messageId: MessageId.make("imported-native:1"),
+            createdBy: "user",
+            creationSource: "web",
+            text: "Continue",
+            attachments: [],
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          });
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                (event.payload.status === "completed" || event.payload.status === "failed"),
+            ),
+            Stream.runHead,
+          );
+          yield* worker.drain();
+
+          const [first] = yield* Ref.get(capturedTurns);
+          assert.equal(first?.nativeThreadId, "moved-session");
+          assert.isTrue(first?.nativeThreadHasTurns);
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "imported-native-session-resumes",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: { type: "readOnly" },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
   it.live("keeps the native session after turns refused before reaching the provider", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -1035,7 +1035,12 @@ export const layer: Layer.Layer<
           .filter((source) => source.nativeThreadId === undefined)
           .map((source) => source.runId),
       );
+      // A thread created around an imported or moved native session has history before
+      // T3's first turn on it, so the provider must resume it rather than start it.
+      const nativeThreadImported =
+        acceptedAttempts.length === 0 && runningProviderThread.nativeMetadata?.imported === true;
       const nativeThreadHasTurns =
+        nativeThreadImported ||
         nativeInputRunIds.size > 0 ||
         (legacyInputRunIds.size > 0 &&
           sameNativeThread &&

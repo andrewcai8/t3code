@@ -831,6 +831,8 @@ export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   itemIdentityVersion: Schema.optional(Schema.Literal(2)),
+  /** Bound to a native session that already had history when the thread was created. */
+  imported: Schema.optional(Schema.Literal(true)),
 });
 export type OrchestrationV2ProviderThreadNativeMetadata =
   typeof OrchestrationV2ProviderThreadNativeMetadata.Type;
