@@ -84,6 +84,12 @@ export interface ModalBoxSpec {
 /** A throwaway box booted from a disk image: no name, no memory snapshots, gone at its timeout. */
 export type ModalCopySpec = Omit<ModalBoxSpec, "name" | "port">;
 
+export interface ModalExecOptions {
+  readonly timeoutMs: number;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly workdir?: string;
+}
+
 /** What the runtime asks of Modal. Every sandbox of a chat carries the chat's name. */
 export interface ModalBoxes {
   /** The running sandbox named `name`, if any. */
@@ -100,15 +106,27 @@ export interface ModalBoxes {
   readonly exec: (
     sandboxId: string,
     argv: ReadonlyArray<string>,
-    options: { readonly stdin?: string; readonly timeoutMs: number },
+    options: ModalExecOptions & { readonly stdin?: string },
   ) => Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>;
+  /** Runs `argv`, handing each chunk of its output to `onOutput` as it arrives; answers its exit code. */
+  readonly execStream: (
+    sandboxId: string,
+    argv: ReadonlyArray<string>,
+    options: ModalExecOptions & {
+      readonly onOutput: (stream: "stdout" | "stderr", text: string) => void;
+    },
+  ) => Promise<number>;
   readonly upload: (sandboxId: string, localPath: string, remotePath: string) => Promise<void>;
   readonly download: (sandboxId: string, remotePath: string, localPath: string) => Promise<void>;
   /**
    * A filesystem snapshot of a running sandbox, kept `ttlMs` or, when null, until deleted. The
    * sandbox keeps running through it.
    */
-  readonly saveDisk: (sandboxId: string, ttlMs: number | null) => Promise<string>;
+  readonly saveDisk: (
+    sandboxId: string,
+    ttlMs: number | null,
+    timeoutMs?: number,
+  ) => Promise<string>;
   /** Deletes a disk image; one a running sandbox booted from keeps working. */
   readonly deleteImage: (imageId: string) => Promise<void>;
   readonly createCopy: (spec: ModalCopySpec) => Promise<string>;
@@ -123,6 +141,13 @@ export interface ModalBoxes {
 }
 
 const cidr = /^[0-9.:a-fA-F]+(?:\/\d+)?$/;
+
+// Modal takes an exec's timeout in whole seconds only.
+const execParams = ({ timeoutMs, env, workdir }: ModalExecOptions) => ({
+  timeoutMs: Math.max(1_000, Math.floor(timeoutMs / 1_000) * 1_000),
+  ...(env === undefined ? {} : { env: { ...env } }),
+  ...(workdir === undefined ? {} : { workdir }),
+});
 
 /**
  * Retries a call Modal refused for capacity, quota or a fault of its own, which a create meets
@@ -149,6 +174,9 @@ export function makeModalBoxes(credentials: {
   const isRunning = async (sandbox: Sandbox) => (await sandbox.poll()) === null;
   const nameTaken = (error: unknown) =>
     error instanceof Error && /ALREADY_EXISTS|already in use/i.test(error.message);
+  // A self-hosted server's app may not exist before its first copy.
+  const appOf = (name: string, environment: string | undefined) =>
+    modal.apps.fromName(name, { createIfMissing: true, ...(environment ? { environment } : {}) });
   return {
     find: async (app, name, environment) => {
       try {
@@ -222,13 +250,8 @@ export function makeModalBoxes(credentials: {
       if (!tunnel) throw new Error("The Modal box has no tunnel to its T3 port");
       return tunnel.url;
     },
-    exec: async (sandboxId, argv, { stdin, timeoutMs }) => {
-      // Modal takes an exec's timeout in whole seconds only.
-      const child = await (
-        await box(sandboxId)
-      ).exec([...argv], {
-        timeoutMs: Math.max(1_000, Math.floor(timeoutMs / 1_000) * 1_000),
-      });
+    exec: async (sandboxId, argv, { stdin, ...options }) => {
+      const child = await (await box(sandboxId)).exec([...argv], execParams(options));
       if (stdin) await child.stdin.writeText(stdin);
       await child.stdin.close();
       const [stdout, stderr, exitCode] = await Promise.all([
@@ -237,6 +260,19 @@ export function makeModalBoxes(credentials: {
         child.wait(),
       ]);
       return { exitCode, stdout, stderr };
+    },
+    execStream: async (sandboxId, argv, { onOutput, ...options }) => {
+      const child = await (await box(sandboxId)).exec([...argv], execParams(options));
+      await child.stdin.close();
+      const forward = async (stream: "stdout" | "stderr", source: ReadableStream<string>) => {
+        for await (const text of source) onOutput(stream, text);
+      };
+      const [, , exitCode] = await Promise.all([
+        forward("stdout", child.stdout),
+        forward("stderr", child.stderr),
+        child.wait(),
+      ]);
+      return exitCode;
     },
     upload: async (sandboxId, localPath, remotePath) => {
       const sandbox = await box(sandboxId);
@@ -247,12 +283,9 @@ export function makeModalBoxes(credentials: {
     },
     download: async (sandboxId, remotePath, localPath) =>
       (await box(sandboxId)).filesystem.copyToLocal(remotePath, localPath),
-    saveDisk: async (sandboxId, ttlMs) =>
-      (
-        await transient(async () =>
-          (await box(sandboxId)).snapshotFilesystem({ timeoutMs: 300_000, ttlMs }),
-        )
-      ).imageId,
+    saveDisk: async (sandboxId, ttlMs, timeoutMs = 300_000) =>
+      (await transient(async () => (await box(sandboxId)).snapshotFilesystem({ timeoutMs, ttlMs })))
+        .imageId,
     deleteImage: async (imageId) => {
       try {
         await modal.images.delete(imageId);
@@ -261,10 +294,7 @@ export function makeModalBoxes(credentials: {
       }
     },
     createCopy: async (spec) => {
-      const app = await modal.apps.fromName(
-        spec.app,
-        spec.environment ? { environment: spec.environment } : {},
-      );
+      const app = await appOf(spec.app, spec.environment);
       const sandbox = await transient(async () =>
         modal.sandboxes.create(app, await modal.images.fromId(spec.imageId), {
           ...(spec.runtime ? { runtime: spec.runtime } : {}),
@@ -281,7 +311,7 @@ export function makeModalBoxes(credentials: {
       return sandbox.sandboxId;
     },
     list: async (appName, environment, tags) => {
-      const app = await modal.apps.fromName(appName, environment ? { environment } : {});
+      const app = await appOf(appName, environment);
       const found: Array<{ sandboxId: string; tags: Record<string, string> }> = [];
       for await (const sandbox of modal.sandboxes.experimentalList({
         appId: app.appId,
