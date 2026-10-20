@@ -1035,7 +1035,14 @@ export const layer: Layer.Layer<
           .filter((source) => source.nativeThreadId === undefined)
           .map((source) => source.runId),
       );
+      // A native thread bound before T3's first turn on it, as when a chat is created around an
+      // imported or moved session, already has history the provider must resume.
+      const nativeThreadImported =
+        acceptedAttempts.length === 0 &&
+        runningProviderThread.nativeThreadRef !== null &&
+        runningProviderThread.forkedFrom === null;
       const nativeThreadHasTurns =
+        nativeThreadImported ||
         nativeInputRunIds.size > 0 ||
         (legacyInputRunIds.size > 0 &&
           sameNativeThread &&
