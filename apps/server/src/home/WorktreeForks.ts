@@ -431,14 +431,27 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   /** One copy: waits for a slot, prepares, announces the start, runs. Its sandbox always ends. */
   const runJob = (job: CopyJob, shipment: Shipment, base: ForkBase, observer: ExecObserver) =>
-    slots.withSlot(
-      Effect.scoped(
-        prepare(job, shipment, base.imageId).pipe(
-          Effect.tap(() => observer.started(job.id)),
-          Effect.flatMap((sandboxId) => execute(sandboxId, job, observer.output)),
+    slots
+      .withSlot(
+        Effect.scoped(
+          prepare(job, shipment, base.imageId).pipe(
+            Effect.tap(() => observer.started(job.id)),
+            Effect.flatMap((sandboxId) => execute(sandboxId, job, observer.output)),
+          ),
         ),
-      ),
-    );
+      )
+      .pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning(
+            error._tag === "Lost" ? "worktree fork copy lost" : "worktree fork copy did not start",
+            {
+              job: job.id,
+              repository: shipment.checkout.repository.repository,
+              cause: error.cause,
+            },
+          ),
+        ),
+      );
 
   const sizeOf = (name: string | undefined) => host.sizes.get(name ?? host.defaultSize);
   const unknownSize = (name: string | undefined) =>
