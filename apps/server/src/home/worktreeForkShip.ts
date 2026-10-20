@@ -121,7 +121,8 @@ export const inspectCheckout = Effect.fn("WorktreeForks.inspectCheckout")(functi
   const top = yield* run(cwd, "git", ["rev-parse", "--show-toplevel", "--show-prefix"]);
   if (top.code !== 0) return yield* new CheckoutRefused({ reason: "not_a_repository" });
   const [root = "", prefix = ""] = top.stdout.split("\n");
-  const origin = yield* run(root, "git", ["remote", "get-url", "origin"]);
+  // The URL as written: `remote get-url` applies insteadOf rewrites, which can hide GitHub.
+  const origin = yield* run(root, "git", ["config", "--get", "remote.origin.url"]);
   const repository = repositories.get(
     (origin.code === 0 ? originRepository(origin.stdout) : null) ?? "",
   );
@@ -246,12 +247,12 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
 
 /**
  * Applies a shipment in a copy's checkout, which sits at the base's commit:
- * $1 the directory holding state.tar, $2 the checkout, $3 HEAD, $4 the branch or "", then the
- * drift directories. Mounting the checkout at the worktree's own path is a separate step.
+ * $1 the uploaded archive, $2 the checkout, $3 HEAD, $4 the branch or "", then the drift
+ * directories. Mounting the checkout at the worktree's own path is a separate step.
  */
 const APPLY_SCRIPT = `set -eu
-stage=$1; cd "$2"; head=$3; branch=$4; shift 4
-tar -xf "$stage/state.tar" -C "$stage"
+archive=$1; stage=$1.d; cd "$2"; head=$3; branch=$4; shift 4
+mkdir -p "$stage" && tar -xf "$archive" -C "$stage"
 if [ -f "$stage/head.bundle" ]; then git fetch -q "$stage/head.bundle" "+HEAD:refs/t3/job"; fi
 git checkout -qf --detach "$head"
 if [ -n "$branch" ]; then git checkout -q -B "$branch"; fi
@@ -260,12 +261,12 @@ xargs -0 rm -f -- < "$stage/deleted"
 for dir in "$@"; do (cd "$dir" && bun install --frozen-lockfile); done
 `;
 
-export const applyArgv = (shipment: Shipment, stage: string): ReadonlyArray<string> => [
+export const applyArgv = (shipment: Shipment, archive: string): ReadonlyArray<string> => [
   "sh",
   "-c",
   APPLY_SCRIPT,
   "t3-apply",
-  stage,
+  archive,
   shipment.checkout.repository.workDir,
   shipment.checkout.head,
   shipment.checkout.branch ?? "",

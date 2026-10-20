@@ -21,6 +21,7 @@ import {
   PrepareCommand,
   RelativeFilePath,
 } from "../environmentControl/config.ts";
+import type { ModalBoxes, ModalCopySpec } from "../environmentControl/ModalRuntime.ts";
 
 const Bounded = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum }));
 
@@ -105,6 +106,51 @@ export interface WorktreeForksHost {
   /** Null when the bun shim is turned off. */
   readonly bunShim: { readonly skipWhenSet: ReadonlyArray<string> } | null;
 }
+
+/** What the backend asks of Modal. Tests fake exactly these members. */
+export type ForkSandboxes = Pick<
+  ModalBoxes,
+  | "createCopy"
+  | "exec"
+  | "execStream"
+  | "upload"
+  | "download"
+  | "saveDisk"
+  | "deleteImage"
+  | "terminate"
+  | "list"
+>;
+
+/** Every sandbox of this backend carries it, with the host and job, for the sweep. */
+export const COPY_PURPOSE = "t3-worktree-fork";
+
+/**
+ * A sandbox booted from `imageId`. Always the vm runtime: only it can bind-mount the checkout at
+ * the worktree's own path. Egress stays open, like the host it stands in for.
+ */
+export const copySpec = (
+  host: WorktreeForksHost,
+  input: {
+    readonly imageId: string;
+    readonly size: SandboxSize;
+    readonly lifetimeMs: number;
+    readonly tags: Readonly<Record<string, string>>;
+  },
+): ModalCopySpec => ({
+  app: host.modal.app,
+  ...(host.modal.environment === undefined ? {} : { environment: host.modal.environment }),
+  imageId: input.imageId,
+  runtime: "vm",
+  timeoutMs: input.lifetimeMs,
+  sizing: {
+    cpu: input.size.cpu,
+    cpuLimit: input.size.cpu,
+    memoryMiB: input.size.memoryMiB,
+    memoryLimitMiB: input.size.memoryMiB,
+  },
+  tags: input.tags,
+  egress: { domains: [], cidrs: [] },
+});
 
 export class WorktreeForksConfigError extends Schema.TaggedError<WorktreeForksConfigError>()(
   "WorktreeForksConfigError",

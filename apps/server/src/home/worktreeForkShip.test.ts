@@ -91,9 +91,7 @@ const visibleFiles = (root: string, extra: ReadonlyArray<string> = []) =>
   );
 
 /** Runs the apply step as a copy would, with `bun` faked to record where it installed. */
-const applyInCopy = (argv: ReadonlyArray<string>, archive: string) => {
-  const stage = tempDir("stage");
-  NodeFS.copyFileSync(archive, NodePath.join(stage, "state.tar"));
+const applyInCopy = (argv: ReadonlyArray<string>) => {
   const bin = tempDir("bin");
   const installs = NodePath.join(bin, "installs");
   NodeFS.writeFileSync(
@@ -101,8 +99,7 @@ const applyInCopy = (argv: ReadonlyArray<string>, archive: string) => {
     `#!/bin/sh\necho "$(pwd) $*" >> '${installs}'\n`,
     { mode: 0o755 },
   );
-  const [shell, flag, script, name, , ...rest] = argv;
-  NodeChildProcess.execFileSync(shell!, [flag!, script!, name!, stage, ...rest], {
+  NodeChildProcess.execFileSync(argv[0]!, argv.slice(1), {
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
     stdio: "pipe",
   });
@@ -139,7 +136,7 @@ it.effect(
       const shipment = yield* shipState(checkout, first, tempDir("ship"));
       expect(shipment.driftDirs).toEqual(["."]);
 
-      const installs = applyInCopy(applyArgv(shipment, "unused"), shipment.archive);
+      const installs = applyInCopy(applyArgv(shipment, shipment.archive));
 
       expect(git(base, "rev-parse", "HEAD")).toBe(checkout.head);
       expect(git(base, "symbolic-ref", "--short", "HEAD")).toBe("feature");
@@ -168,7 +165,7 @@ it.effect("a HEAD the base already contains is checked out by commit, with no bu
     });
     expect(listed).not.toContain("head.bundle");
     expect(shipment.driftDirs).toEqual([]);
-    applyInCopy(applyArgv(shipment, "unused"), shipment.archive);
+    applyInCopy(applyArgv(shipment, shipment.archive));
     expect(git(base, "rev-parse", "HEAD")).toBe(first);
     expect(visibleFiles(base)).toEqual(visibleFiles(host));
   }).pipe(Effect.provide(runner)),
