@@ -155,7 +155,7 @@ Write `<state dir>/worktree-forks.json` (the directory holding `settings.json`, 
       "ship": [".env", "src/generated"],
     },
   ],
-  "bunShim": { "skipWhenSet": ["MY_LOCAL_SLOT"] }, // or false
+  "bunShim": { "skipWhenSet": ["MY_LOCAL_SLOT"], "minTestFiles": 20 }, // or false
 }
 ```
 
@@ -165,7 +165,7 @@ Bases are built per repository on demand. The first `t3 fork-exec` in a reposito
 
 The exit codes are those of the cloud: the command's own, 124 on a timeout, 70 when the copy was lost after `[t3] Running in a throwaway copy` printed, and 75, with no banner, when none could start, so the caller runs the command itself. `t3_fork_run` batches belong to the calling thread, default to its worktree, and keep logs under `<state dir>/fork-results/<batch>/job-<index>/` with outputs in its `outputs` folder. Every server sets `T3CODE_HOME` to its own home as it starts, before any provider exists, so its agents find `fork.sock` (terminals drop it). This one links `~/.local/bin/t3`, logs `worktree fork job finished` with each copy's caller (`bun-shim`, `fork-exec` or `fork-run`), its command cut to 160 characters with `NAME=value` values left out, its exit code and queued, setup and command times, and every ten minutes ends sandboxes tagged with its environment id that no job owns.
 
-The bun shim is `~/.local/bin/bun`, beside `t3`. It sends `bun test` to `t3 fork-exec` only from an agent of a running server, when no `skipWhenSet` variable is set and every other argument is a directory or a flag that writes nothing; anything else, and a 75, runs the real bun. Installing it moves a user's own `~/.local/bin/bun` to `.bun.t3-real`, which the shim runs; with `bunShim: false` or without the file, the server that installed it removes it and puts that file back. The shim records the T3 home that wrote it, so another server on the machine, such as a dev server, leaves it alone. With both `bun` and `.bun.t3-real` present and neither T3's, nothing is installed and a warning is logged.
+The bun shim is `~/.local/bin/bun`, beside `t3`. It sends `bun test` to `t3 fork-exec` only from an agent of a running server, when no `skipWhenSet` variable is set and every other argument is a directory or a flag that writes nothing; anything else, and a 75, runs the real bun. A run that names directories goes only when they hold at least `minTestFiles` (default 20) files with bun's test file names outside `node_modules` and dot directories, since a copy takes about ten seconds to start. Installing it moves a user's own `~/.local/bin/bun` to `.bun.t3-real`, which the shim runs; with `bunShim: false` or without the file, the server that installed it removes it and puts that file back. The shim records the T3 home that wrote it, so another server on the machine, such as a dev server, leaves it alone. With both `bun` and `.bun.t3-real` present and neither T3's, nothing is installed and a warning is logged.
 
 ## Why the manager runs the artifact
 

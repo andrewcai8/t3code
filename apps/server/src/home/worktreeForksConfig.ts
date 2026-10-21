@@ -22,6 +22,7 @@ import {
   RelativeFilePath,
 } from "../environmentControl/config.ts";
 import type { ModalBoxes, ModalCopySpec } from "../environmentControl/ModalRuntime.ts";
+import type { BunShimSettings } from "./bunShim.ts";
 
 const Bounded = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum }));
 
@@ -67,6 +68,7 @@ const WorktreeForksFile = Schema.Struct({
         skipWhenSet: Schema.optional(
           Schema.Array(Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))),
         ),
+        minTestFiles: Schema.optional(Bounded(100_000)),
       }),
     ]),
   ),
@@ -133,7 +135,7 @@ export interface WorktreeForksHost {
   /** By canonical owner/name. */
   readonly repositories: ReadonlyMap<string, ForkRepository>;
   /** Null when the bun shim is turned off. */
-  readonly bunShim: { readonly skipWhenSet: ReadonlyArray<string> } | null;
+  readonly bunShim: BunShimSettings | null;
 }
 
 /** What the backend asks of Modal. Tests fake exactly these members. */
@@ -251,7 +253,14 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
     maxJobMs: (file.maxJobMinutes ?? 120) * 60_000,
     maxCopyBackBytes: (file.maxCopyBackMiB ?? 100) * 1024 * 1024,
     repositories,
-    bunShim: file.bunShim === false ? null : { skipWhenSet: file.bunShim?.skipWhenSet ?? [] },
+    bunShim:
+      file.bunShim === false
+        ? null
+        : {
+            skipWhenSet: file.bunShim?.skipWhenSet ?? [],
+            // A copy takes about ten seconds to start, which a run of a few files does not earn back.
+            minTestFiles: file.bunShim?.minTestFiles ?? 20,
+          },
   };
 };
 
