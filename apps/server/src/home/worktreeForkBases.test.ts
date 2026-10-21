@@ -97,7 +97,9 @@ const setup = () => {
       app: "t3-worktree-forks",
       environment: undefined,
     },
-    sizes: new Map([["default", { cpu: 8, memoryMiB: 16384 }]]),
+    sizes: new Map([
+      ["default", { cpu: 8, memoryMiB: 16384, cpuRequest: 2, memoryRequestMiB: 8192 }],
+    ]),
     defaultSize: "default",
     maxConcurrent: 8,
     maxJobMs: 120 * 60_000,

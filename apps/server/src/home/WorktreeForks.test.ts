@@ -87,8 +87,8 @@ const setup = (
       environment: undefined,
     },
     sizes: new Map([
-      ["default", { cpu: 8, memoryMiB: 16384 }],
-      ["large", { cpu: 16, memoryMiB: 32768 }],
+      ["default", { cpu: 8, memoryMiB: 16384, cpuRequest: 2, memoryRequestMiB: 8192 }],
+      ["large", { cpu: 16, memoryMiB: 32768, cpuRequest: 4, memoryRequestMiB: 16384 }],
     ]),
     defaultSize: "default",
     maxConcurrent: options.maxConcurrent ?? 8,

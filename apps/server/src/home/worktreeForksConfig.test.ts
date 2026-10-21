@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { readWorktreeForksConfig } from "./worktreeForksConfig.ts";
+import { copySpec, readWorktreeForksConfig } from "./worktreeForksConfig.ts";
 
 const stateDirWith = (config: unknown) => {
   const stateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-config-"));
@@ -38,7 +38,10 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
     const host = yield* readWorktreeForksConfig(
       stateDirWith({
         modal,
-        sizes: { huge: { cpu: 64, memoryGiB: 128 }, large: { cpu: 12, memoryGiB: 24 } },
+        sizes: {
+          huge: { cpu: 64, memoryGiB: 128, cpuRequest: 64, memoryRequestGiB: 100 },
+          large: { cpu: 12, memoryGiB: 24 },
+        },
         repositories: [megpt],
       }),
     );
@@ -50,11 +53,12 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       maxCopyBackBytes: 100 * 1024 * 1024,
       bunShim: { skipWhenSet: [] },
     });
+    const gib = 1024;
     expect(Object.fromEntries(host!.sizes)).toEqual({
-      default: { cpu: 8, memoryMiB: 16 * 1024 },
-      large: { cpu: 12, memoryMiB: 24 * 1024 },
-      xlarge: { cpu: 32, memoryMiB: 64 * 1024 },
-      huge: { cpu: 64, memoryMiB: 128 * 1024 },
+      default: { cpu: 8, memoryMiB: 16 * gib, cpuRequest: 2, memoryRequestMiB: 8 * gib },
+      large: { cpu: 12, memoryMiB: 24 * gib, cpuRequest: 3, memoryRequestMiB: 12 * gib },
+      xlarge: { cpu: 32, memoryMiB: 64 * gib, cpuRequest: 8, memoryRequestMiB: 32 * gib },
+      huge: { cpu: 64, memoryMiB: 128 * gib, cpuRequest: 64, memoryRequestMiB: 100 * gib },
     });
     expect(host!.repositories.get("andrewcai8/megpt-mono")).toMatchObject({
       workDir: "/work/megpt-mono",
@@ -94,11 +98,16 @@ it.effect(
 );
 
 it.effect(
-  "refuses a file that names a missing default size, repeats a repository, or is not JSON",
+  "refuses a file that names a missing default size, requests more than a size's limit, repeats a repository, or is not JSON",
   () =>
     Effect.gen(function* () {
       for (const stateDir of [
         stateDirWith({ modal, defaultSize: "tiny", repositories: [] }),
+        stateDirWith({
+          modal,
+          sizes: { big: { cpu: 4, memoryGiB: 8, cpuRequest: 8 } },
+          repositories: [],
+        }),
         stateDirWith({ modal, repositories: [megpt, { repository: "andrewcai8/megpt-mono" }] }),
         stateDirWith({ modal, repositories: [{ repository: "not a repo" }] }),
       ]) {
@@ -117,5 +126,23 @@ it.effect("bunShim false turns the shim off", () =>
       stateDirWith({ modal, repositories: [], bunShim: false }),
     );
     expect(host!.bunShim).toBeNull();
+  }),
+);
+
+it.effect("a copy reserves its size's requests and may burst to its limits", () =>
+  Effect.gen(function* () {
+    const host = yield* readWorktreeForksConfig(stateDirWith({ modal, repositories: [megpt] }));
+    const spec = copySpec(host!, {
+      imageId: "im-base",
+      size: host!.sizes.get("default")!,
+      lifetimeMs: 60_000,
+      tags: {},
+    });
+    expect(spec.sizing).toEqual({
+      cpu: 2,
+      cpuLimit: 8,
+      memoryMiB: 8 * 1024,
+      memoryLimitMiB: 16 * 1024,
+    });
   }),
 );

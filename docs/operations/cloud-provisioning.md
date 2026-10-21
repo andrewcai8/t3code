@@ -133,13 +133,15 @@ The manager offers a box every other cloud chat, labelled with its stored card, 
 
 A self-hosted server that is not a cloud box, such as a home Linux machine, can send its agents' heavy commands to Modal with its own token (`home/WorktreeForks.ts`). Each command runs in a throwaway copy of the caller's worktree, uncommitted changes included, and its output streams back as it runs. `t3 fork-exec`, the bun shim below and `t3_fork_run` all use it, and share one limit on copies at once. Without the configuration file nothing changes, and a cloud box ignores it.
 
+A size's `cpu` and `memoryGiB` cap a copy, and its requests are what Modal reserves. A copy bursts past them while its host has room, and Modal bills the larger of the request and the use. On the vm runtime a megpt-mono test shard peaked near 3 GiB and burst to all 8 cores from a one-core request, at the same speed as a full reservation and about 30% cheaper per job with the default requests. E2B copies of the same size ran the shard about 1.5 times slower, which is why this backend is Modal only.
+
 Write `<state dir>/worktree-forks.json` (the directory holding `settings.json`, normally `~/.t3/userdata`), mode 0600, since it holds the token, and restart the server; it is read once at start, and a file that does not decode is logged and leaves the backend off.
 
 ```jsonc
 {
   "modal": { "tokenId": "ak-…", "tokenSecret": "as-…", "imageId": "im-…" }, // optional: "app" (default "t3-worktree-forks"), "environment"
   "defaultSize": "default",
-  "sizes": { "huge": { "cpu": 64, "memoryGiB": 128 } }, // merged over default 8/16, large 16/32, xlarge 32/64
+  "sizes": { "huge": { "cpu": 64, "memoryGiB": 128 } }, // merged over default 8/16, large 16/32, xlarge 32/64; "cpuRequest"/"memoryRequestGiB" default to a quarter and half of those
   "maxConcurrent": 8,
   "maxJobMinutes": 120,
   "maxCopyBackMiB": 100,

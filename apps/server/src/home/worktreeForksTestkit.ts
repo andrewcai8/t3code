@@ -89,7 +89,7 @@ export const makeFakeSandboxes = () => {
 
   const port: ForkSandboxes = {
     createCopy: async (spec) => {
-      record({ op: "create", imageId: spec.imageId, cpu: spec.sizing.cpu, tags: spec.tags });
+      record({ op: "create", imageId: spec.imageId, cpu: spec.sizing.cpuLimit, tags: spec.tags });
       await step("create");
       const sandboxId = `sb-${++next}`;
       sandboxes.set(sandboxId, { tags: spec.tags });
