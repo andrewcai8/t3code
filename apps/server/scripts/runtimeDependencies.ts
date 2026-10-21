@@ -1,3 +1,4 @@
+import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as Schema from "effect/Schema";
 
 import { selectCliRuntimeExternalDependencies } from "../../../scripts/lib/cli-external-packages.ts";
@@ -19,6 +20,13 @@ export const PnpmLock = Schema.Struct({
   ),
 });
 export type PnpmLock = typeof PnpmLock.Type;
+
+/**
+ * pnpm 11+ writes the package manager's own lockfile as a first YAML document (`importers` holds
+ * only `.` and pnpm itself), so the workspace lockfile is the last document.
+ */
+export const decodePnpmLock = (text: string): PnpmLock =>
+  Schema.decodeUnknownSync(fromYaml(PnpmLock))(text.split(/^---$/m).at(-1) ?? text);
 
 // pnpm references carry peer and patch suffixes: `2.2.0(@bufbuild/protobuf@2.16.0)`.
 const versionOf = (reference: string) => reference.replace(/\(.*$/, "");
