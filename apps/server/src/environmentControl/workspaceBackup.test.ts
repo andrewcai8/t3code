@@ -109,11 +109,9 @@ describe("backUpWorkspace", () => {
   it("leaves a real index alone even when its file times are stale", async () => {
     const { root, workspace } = await chatRoot();
     await NodeFSP.writeFile(NodePath.join(workspace, "README.md"), "base\n");
-    await NodeFSP.utimes(
-      NodePath.join(workspace, "README.md"),
-      new Date(),
-      new Date(Date.now() + 60_000),
-    );
+    // A modification time far past the index's own makes Git's cached stat data stale.
+    const future = new Date("2100-01-01T00:00:00.000Z");
+    await NodeFSP.utimes(NodePath.join(workspace, "README.md"), future, future);
     await NodeFSP.writeFile(NodePath.join(workspace, "untracked.txt"), "new\n");
     const realIndex = await NodeFSP.readFile(NodePath.join(workspace, ".git", "index"));
     await backUpWorkspace(localPort, { root, branch: "lease-1", target: { kind: "origin" } });

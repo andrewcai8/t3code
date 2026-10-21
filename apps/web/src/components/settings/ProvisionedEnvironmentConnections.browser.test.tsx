@@ -1,9 +1,10 @@
-import { act, type ComponentProps } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import type { ComponentProps } from "react";
+import { expect, it, vi } from "vite-plus/test";
 import { DiscoveredProvisionedEnvironment } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/reactivity";
+
+import { act, render } from "../../../test/render";
 import { ProvisionedEnvironmentConnections } from "./ProvisionedEnvironmentConnections";
 
 const state = vi.hoisted(() => ({
@@ -16,10 +17,8 @@ const state = vi.hoisted(() => ({
   restore: vi.fn(),
   confirm: vi.fn(),
   forget: vi.fn(),
-  navigate: vi.fn(),
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => ({ environmentControl: true }) }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../../cloud/provisionedSandboxLeases", () => ({
   forgetProvisionedSandbox: (...args: unknown[]) => state.forget(...args),
 }));
@@ -62,8 +61,9 @@ vi.mock("../ui/button", () => ({
   Button: (props: ComponentProps<"button">) => <button {...props} />,
 }));
 
+const decodeMachine = Schema.decodeSync(DiscoveredProvisionedEnvironment);
 const machine = (lifecycle: DiscoveredProvisionedEnvironment["lifecycle"]) =>
-  Schema.decodeSync(DiscoveredProvisionedEnvironment)({
+  decodeMachine({
     requestId: "11111111-1111-4111-a111-111111111111",
     leaseId: "11111111-1111-4111-a111-111111111112",
     sandboxId: "sandbox-1",
@@ -77,10 +77,7 @@ const machine = (lifecycle: DiscoveredProvisionedEnvironment["lifecycle"]) =>
     createdAt: "2026-01-01T00:00:00.000Z",
     expiresAt: "2100-01-01T00:00:00.000Z",
   });
-let root: Root | undefined;
-let container: HTMLDivElement;
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+function setup() {
   vi.clearAllMocks();
   state.rows = [machine("active")];
   state.title = null;
@@ -88,25 +85,14 @@ beforeEach(() => {
   state.dispose.mockResolvedValue(AsyncResult.success({ kind: "disposed" }));
   state.keep.mockResolvedValue(AsyncResult.success({ kind: "updated" }));
   state.restore.mockResolvedValue(AsyncResult.success({ kind: "restored" }));
-});
-afterEach(async () => {
-  await act(async () => root?.unmount());
-  root = undefined;
-  vi.unstubAllGlobals();
-});
-const mount = async () => {
-  container = document.createElement("div");
-  root = createRoot(container);
-  await act(async () => {
-    root?.render(
-      <ProvisionedEnvironmentConnections
-        managerId={"host" as never}
-        managerLabel="andrew.megpt.app"
-      />,
-    );
-  });
-  return container;
-};
+}
+const mount = () =>
+  render(
+    <ProvisionedEnvironmentConnections
+      managerId={"host" as never}
+      managerLabel="andrew.megpt.app"
+    />,
+  );
 const buttons = (view: HTMLElement) =>
   [...view.querySelectorAll("button")].map((button) => button.textContent);
 const click = async (view: HTMLElement, label: string) => {
@@ -120,26 +106,29 @@ const paragraphs = (view: HTMLElement) =>
   [...view.querySelectorAll("p")].map((paragraph) => paragraph.textContent);
 
 it("opens a machine through its chat when that chat is on this device, never by joining", async () => {
+  setup();
   state.title = "Fix the login flow";
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   expect(paragraphs(view)).toContain("Fix the login flow");
   expect(buttons(view)).toEqual(["Refresh", "Open chat", "Delete"]);
   await click(view, "Open chat");
-  expect(state.navigate).toHaveBeenCalledWith({
-    to: "/$environmentId/$threadId",
-    params: { environmentId: "box", threadId: "existing-thread" },
-  });
+  await expect.poll(() => screen.router?.state.location.pathname).toBe("/box/existing-thread");
 });
 
 it("offers no way in to a machine whose chat is on another device", async () => {
-  const view = await mount();
+  setup();
+  await using screen = await mount();
+  const view = screen.container;
   expect(paragraphs(view)).toContain("proof/repo");
   expect(buttons(view)).toEqual(["Refresh", "Delete"]);
 });
 
 it("resumes a paused machine through its host", async () => {
+  setup();
   state.rows = [machine("paused")];
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   await click(view, "Resume");
   expect(state.resume).toHaveBeenCalledWith({
     environmentId: "host",
@@ -149,8 +138,10 @@ it("resumes a paused machine through its host", async () => {
 });
 
 it("deletes a machine through its host once confirmed, and forgets its lease", async () => {
+  setup();
   state.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   await click(view, "Delete");
   expect(state.dispose).not.toHaveBeenCalled();
   await click(view, "Delete");
@@ -162,22 +153,26 @@ it("deletes a machine through its host once confirmed, and forgets its lease", a
 });
 
 it("keeps a refused delete visible", async () => {
+  setup();
   state.confirm.mockResolvedValue(true);
   state.dispose.mockResolvedValue(AsyncResult.success({ kind: "refused", message: "busy" }));
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   await click(view, "Delete");
   expect(paragraphs(view)).toContain("The host could not delete this machine.");
   expect(state.forget).not.toHaveBeenCalled();
 });
 
 it("shows when a paused machine will be removed and keeps it on request", async () => {
+  setup();
   state.rows = [
     {
       ...machine("paused"),
       cleanup: { kind: "scheduled", at: "2026-03-07T12:00:00.000Z", reason: "idle" },
     },
   ];
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   expect(paragraphs(view)).toContain("proof/repo · E2B · Paused · Removed in 6 days");
   await click(view, "Keep");
   expect(state.keep).toHaveBeenCalledWith({
@@ -187,8 +182,10 @@ it("shows when a paused machine will be removed and keeps it on request", async 
 });
 
 it("allows cleanup again of a machine the user kept", async () => {
+  setup();
   state.rows = [{ ...machine("paused"), cleanup: { kind: "kept", reason: "user" } }];
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   expect(paragraphs(view)).toContain("proof/repo · E2B · Paused · Kept");
   await click(view, "Allow cleanup");
   expect(state.keep).toHaveBeenCalledWith({
@@ -198,19 +195,23 @@ it("allows cleanup again of a machine the user kept", async () => {
 });
 
 it("keeps the lease of a deleted machine its host can still restore", async () => {
+  setup();
   state.confirm.mockResolvedValue(true);
   state.dispose.mockResolvedValue(
     AsyncResult.success({ kind: "disposed", restorableUntil: "2026-03-31T12:00:00.000Z" }),
   );
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   await click(view, "Delete");
   expect(state.forget).not.toHaveBeenCalled();
   expect(paragraphs(view)).not.toContain("The host could not delete this machine.");
 });
 
 it("shows until when a deleted machine can be restored, and restores it through its host", async () => {
+  setup();
   state.rows = [{ ...machine("disposed"), restorableUntil: "2026-03-31T12:00:00.000Z" }];
-  const view = await mount();
+  await using screen = await mount();
+  const view = screen.container;
   expect(paragraphs(view)).toContain("proof/repo · E2B · Deleted · Restorable until Mar 31");
   expect(buttons(view)).toEqual(["Refresh", "Restore"]);
   await click(view, "Restore");

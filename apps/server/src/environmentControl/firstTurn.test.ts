@@ -11,6 +11,7 @@ import {
   type ProvisionFirstTurn,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -19,6 +20,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { makeProvisionControl } from "./ProvisionControl.ts";
 import { ProvisionPreparationManifest, provisionDigest } from "./ProvisionPreparation.ts";
@@ -115,6 +117,7 @@ const fakeBox = (behavior: BoxBehavior) =>
         ? [{ id: "draft-thread", messages: [{ id: "message-1" }] }]
         : [];
       const turnStarted = Deferred.makeUnsafe<void>();
+      const hanging = Deferred.makeUnsafe<void>();
       let unavailable = behavior.unavailableFor ?? 0;
       const json = (response: NodeHttp.ServerResponse, status: number, body: unknown) =>
         response
@@ -128,7 +131,10 @@ const fakeBox = (behavior: BoxBehavior) =>
           response.writeHead(401).end();
           return;
         }
-        if (behavior.hang) return;
+        if (behavior.hang) {
+          Deferred.doneUnsafe(hanging, Effect.void);
+          return;
+        }
         if (unavailable > 0) {
           unavailable -= 1;
           response.writeHead(503).end();
@@ -179,7 +185,7 @@ const fakeBox = (behavior: BoxBehavior) =>
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const { port } = server.address() as { port: number };
-      return { origin: `http://127.0.0.1:${port}`, commands, turnStarted, server };
+      return { origin: `http://127.0.0.1:${port}`, commands, turnStarted, hanging, server };
     }),
     ({ server }) =>
       Effect.promise(
@@ -369,6 +375,7 @@ it.live("gives up on a turn still owed past its deadline without sending it", ()
   withHost(
     Effect.gen(function* () {
       const { box, control, leases, lease, kept, prepared } = yield* host({});
+      const now = yield* Clock.currentTimeMillis;
       yield* Effect.promise(() =>
         leases.register({
           leaseId: input.requestId,
@@ -377,7 +384,7 @@ it.live("gives up on a turn still owed past its deadline without sending it", ()
           provider: "e2b",
           owner: { environmentId: "remote", threadId: "draft-thread" },
           firstTurnPending: true,
-          now: new Date(Date.now() - 31 * 60_000),
+          now: new Date(now - 31 * 60_000),
         }),
       );
       yield* Deferred.succeed(prepared, undefined);
@@ -486,16 +493,16 @@ it.live.each([
     ),
 );
 
-it.live("answers ready within seconds when the box hangs, leaving later tries to upkeep", () =>
+it.effect("answers ready within seconds when the box hangs, leaving later tries to upkeep", () =>
   withHost(
     Effect.gen(function* () {
-      const { control, lease, prepared } = yield* host({ hang: true }, {});
+      const { box, control, lease, prepared } = yield* host({ hang: true }, {});
       yield* Deferred.succeed(prepared, undefined);
-      const started = Date.now();
-      const ready = yield* control.provision(input);
-      const elapsedMs = Date.now() - started;
+      const provisioning = yield* Effect.forkChild(control.provision(input));
+      yield* Deferred.await(box.hanging);
+      yield* TestClock.adjust("6 seconds");
+      const ready = yield* Fiber.join(provisioning);
       expect(ready).toMatchObject({ kind: "ready", environment: { firstTurn: "pending" } });
-      expect(elapsedMs).toBeLessThan(8_000);
       expect(yield* lease()).toMatchObject({ firstTurn: { status: "pending" } });
     }),
   ),

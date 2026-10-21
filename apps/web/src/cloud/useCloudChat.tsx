@@ -105,9 +105,6 @@ import {
 import { provisionedSandboxFor, transferProvisionedSandboxLease } from "./provisionedSandboxLeases";
 import { type ReconnectResult, useReconnectSend } from "./useReconnectSend";
 
-export { needsLoadBalancedPick } from "./cloudChat.logic";
-export { cloudUnavailableBanner, useCloudMachine } from "./cloudUnavailableBanner";
-
 type CloudProvider = PendingCloudEnvironmentSend["provider"];
 
 /** Whether a saved connection is a cloud box, which belongs to its chat. */

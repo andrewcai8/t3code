@@ -1,18 +1,11 @@
-import { act, StrictMode, useLayoutEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { StrictMode, useLayoutEffect } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
+
+import { act, render } from "../../test/render";
 import { type ReconnectResult, useReconnectSend } from "./useReconnectSend";
 
-let root: Root | undefined;
-afterEach(async () => {
-  await act(() => root?.unmount());
-  root = undefined;
-  vi.unstubAllGlobals();
-});
-
 async function setup() {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   let complete = (_result: ReconnectResult) => {};
   const recovery = new Promise<ReconnectResult>((resolve) => {
     complete = resolve;
@@ -43,15 +36,14 @@ async function setup() {
     });
     return null;
   }
-  root = createRoot(document.createElement("div"));
-  await act(() => {
-    root?.render(
-      <StrictMode>
-        <Composer />
-      </StrictMode>,
-    );
-  });
-  return {
+  // A fresh element each time, so a rerender reaches Composer instead of bailing out on identity.
+  const ui = () => (
+    <StrictMode>
+      <Composer />
+    </StrictMode>
+  );
+  const screen = await render(ui(), { router: false });
+  return Object.assign(screen, {
     sent,
     failures,
     abandoned,
@@ -70,20 +62,14 @@ async function setup() {
       threadKey = next.threadKey ?? threadKey;
       ready = next.ready ?? ready;
       draft = next.draft ?? draft;
-      await act(() => {
-        root?.render(
-          <StrictMode>
-            <Composer />
-          </StrictMode>,
-        );
-      });
+      await screen.rerender(ui());
     },
-  };
+  });
 }
 
 describe("send after reconnect", () => {
   it("uses the current ready render and retained draft, sending once after repeated clicks", async () => {
-    const state = await setup();
+    await using state = await setup();
     let pending: Promise<void> | undefined;
     await act(() => {
       pending = state.request();
@@ -101,7 +87,7 @@ describe("send after reconnect", () => {
     expect(state.sent).toEqual(["original/foreground/hello from the retained draft"]);
   });
   it("does not send to a different route when the user navigates during recovery, and says the message stayed", async () => {
-    const state = await setup();
+    await using state = await setup();
     let pending: Promise<void> | undefined;
     await act(() => {
       pending = state.request();
@@ -116,7 +102,7 @@ describe("send after reconnect", () => {
     expect(state.abandoned).toEqual(["other"]);
   });
   it("cancels a send that waits on a reconnect, leaving the draft unsent", async () => {
-    const state = await setup();
+    await using state = await setup();
     let pending: Promise<void> | undefined;
     await act(() => {
       pending = state.request();
@@ -134,7 +120,7 @@ describe("send after reconnect", () => {
     expect(state.abandoned).toEqual([]);
   });
   it("retains the draft on failure without dispatching a turn", async () => {
-    const state = await setup();
+    await using state = await setup();
     let pending: Promise<void> | undefined;
     await act(() => {
       pending = state.request();

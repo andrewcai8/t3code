@@ -6,9 +6,10 @@ import { readBoxHealth } from "./boxHealth.ts";
 describe("readBoxHealth", () => {
   const answered = Promise.resolve();
   const GB = 1024 ** 3;
-  /** A sample `seconds` old with this CPU and this share of an 8 GB box's memory in use. */
+  const NOW = Date.parse("2026-10-06T12:00:00.000Z");
+  /** A sample `seconds` before NOW with this CPU and this share of an 8 GB box's memory in use. */
   const sample = (seconds: number, cpuUsedPct: number, memoryShare: number) => ({
-    timestamp: new Date(Date.now() - seconds * 1_000),
+    timestamp: new Date(NOW - seconds * 1_000),
     cpuUsedPct,
     memUsed: memoryShare * 8 * GB,
     memTotal: 8 * GB,
@@ -41,18 +42,23 @@ describe("readBoxHealth", () => {
   });
 
   it("judges only recent samples, so load that ended before the probe does not pin the box", async () => {
-    const earlier = [sample(40, 100, 0.95), sample(30, 100, 0.95)];
-    expect(
-      await readBoxHealth({
-        answered,
-        samples: async () => [...earlier, sample(10, 30, 0.5), sample(5, 20, 0.5)],
-      }),
-    ).toEqual({ kind: "healthy" });
-    expect(
-      await readBoxHealth({
-        answered,
-        samples: async () => [...earlier, sample(10, 96, 0.91), sample(5, 98, 0.91)],
-      }),
-    ).toEqual({ kind: "pinned", cpuPercent: 97, memoryPercent: 91 });
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    try {
+      const earlier = [sample(40, 100, 0.95), sample(30, 100, 0.95)];
+      expect(
+        await readBoxHealth({
+          answered,
+          samples: async () => [...earlier, sample(10, 30, 0.5), sample(5, 20, 0.5)],
+        }),
+      ).toEqual({ kind: "healthy" });
+      expect(
+        await readBoxHealth({
+          answered,
+          samples: async () => [...earlier, sample(10, 96, 0.91), sample(5, 98, 0.91)],
+        }),
+      ).toEqual({ kind: "pinned", cpuPercent: 97, memoryPercent: 91 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -199,10 +199,7 @@ it.effect("leaves models the user hid out of the capabilities Home reads", () =>
       providers: [
         expect.objectContaining({
           providerInstanceId: "codex",
-          models: [
-            { id: "gpt-5.4", label: "GPT-5.4" },
-            { id: "my-model", label: "Mine" },
-          ],
+          models: [{ id: "gpt-5.4" }, { id: "my-model", label: "Mine" }],
         }),
       ],
     });

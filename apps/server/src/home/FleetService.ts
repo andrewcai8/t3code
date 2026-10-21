@@ -208,14 +208,18 @@ const make = Effect.gen(function* () {
     "forks.status": hostOnly,
     "forks.cancel": hostOnly,
 
-    capabilities: Effect.fn("FleetService.capabilities")(function* () {
+    capabilities: Effect.fn("FleetService.capabilities")(function* (input) {
       const providers = yield* providerRegistry.getProviders;
       const capable = new Set<string>(yield* adapters.list());
-      const { providerModelPreferences } = yield* settings.getSettings.pipe(
-        Effect.mapError(orchestrationError),
-      );
+      const serverSettings = yield* settings.getSettings.pipe(Effect.mapError(orchestrationError));
       return {
-        providers: providerCapabilities(providers, capable, providerModelPreferences ?? {}),
+        providers: providerCapabilities({
+          providers,
+          orchestrationCapableInstanceIds: capable,
+          settings: serverSettings,
+          inherited: undefined,
+          search: input.search,
+        }),
       };
     }),
 

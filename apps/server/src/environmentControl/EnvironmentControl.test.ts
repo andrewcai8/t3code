@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - these tests use a temporary filesystem boundary.
 // @effect-diagnostics globalDate:off - these tests use fixed registry timestamps.
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { createEnvironmentControl } from "./EnvironmentControl.ts";
 import { makeAccountRotation, type AccountSwitchPorts } from "./accountSwitch.ts";
@@ -700,45 +700,57 @@ describe("managed cloud commands", () => {
     });
   });
   it("never idles out a box whose chat's first turn has not started", async () => {
-    await withSqlRegistry(async (registry) => {
-      await registry.register({
-        leaseId: "lease",
-        sandboxId: "sandbox",
-        providerInstanceId: "codex",
-        owner: { environmentId: "child", threadId: "thread" },
-        firstTurnPending: true,
-        now: new Date(Date.now() - 16 * 60_000),
+    const now = Date.parse("2026-10-01T00:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"], now });
+    try {
+      await withSqlRegistry(async (registry) => {
+        await registry.register({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          providerInstanceId: "codex",
+          owner: { environmentId: "child", threadId: "thread" },
+          firstTurnPending: true,
+          now: new Date(now - 16 * 60_000),
+        });
+        const manager = createEnvironmentControl([], setup().driver, registry, async () => ({
+          activity: "idle",
+        }));
+        await manager.reapExpiredLeases();
+        expect(await registry.findById("lease")).toMatchObject({ state: "active" });
+        await registry.settleFirstTurn("lease", { status: "started" });
+        await manager.reapExpiredLeases();
+        expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
       });
-      const manager = createEnvironmentControl([], setup().driver, registry, async () => ({
-        activity: "idle",
-      }));
-      await manager.reapExpiredLeases();
-      expect(await registry.findById("lease")).toMatchObject({ state: "active" });
-      await registry.settleFirstTurn("lease", { status: "started" });
-      await manager.reapExpiredLeases();
-      expect(await registry.findById("lease")).toMatchObject({ state: "paused" });
-    });
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("gives up an overdue first turn itself, so a box no upkeep settles still pauses", async () => {
-    await withSqlRegistry(async (registry) => {
-      await registry.register({
-        leaseId: "lease",
-        sandboxId: "sandbox",
-        providerInstanceId: "codex",
-        owner: { environmentId: "child", threadId: "thread" },
-        firstTurnPending: true,
-        now: new Date(Date.now() - 31 * 60_000),
+    const now = Date.parse("2026-10-01T00:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"], now });
+    try {
+      await withSqlRegistry(async (registry) => {
+        await registry.register({
+          leaseId: "lease",
+          sandboxId: "sandbox",
+          providerInstanceId: "codex",
+          owner: { environmentId: "child", threadId: "thread" },
+          firstTurnPending: true,
+          now: new Date(now - 31 * 60_000),
+        });
+        const manager = createEnvironmentControl([], setup().driver, registry, async () => ({
+          activity: "idle",
+        }));
+        await manager.reapExpiredLeases();
+        expect(await registry.findById("lease")).toMatchObject({
+          state: "paused",
+          owner: null,
+          firstTurn: { status: "failed", reason: "The box did not take the turn in time." },
+        });
       });
-      const manager = createEnvironmentControl([], setup().driver, registry, async () => ({
-        activity: "idle",
-      }));
-      await manager.reapExpiredLeases();
-      expect(await registry.findById("lease")).toMatchObject({
-        state: "paused",
-        owner: null,
-        firstTurn: { status: "failed", reason: "The box did not take the turn in time." },
-      });
-    });
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("refresh only observes targets and never contacts or bootstraps the broker", async () => {
     const { manager, calls } = setup();
@@ -1446,7 +1458,7 @@ describe("a cloud box's cleanup", () => {
           return lease ? { lease, thread: null } : null;
         };
         await createCleanupSweep({
-          now: () => Date.now(),
+          now: () => Date.parse("2026-03-09T00:00:00.000Z"),
           afterDays: async () => 7,
           candidates: async () =>
             (await registry.paused()).map((lease) => ({ lease, thread: null })),
@@ -1520,7 +1532,7 @@ describe("a cloud box's cleanup", () => {
           return lease ? { lease, thread: null } : null;
         };
         await createCleanupSweep({
-          now: () => Date.now(),
+          now: () => Date.parse("2026-03-09T00:00:00.000Z"),
           afterDays: async () => 7,
           candidates: async () =>
             (await registry.paused()).map((lease) => ({ lease, thread: null })),
@@ -1792,17 +1804,12 @@ describe("a cloud machine checked before it sleeps", () => {
       sandboxId: "sandbox",
       environmentId: EnvironmentId.make("child"),
     });
-  /** Runs `work` on fake timers, moving them on until it settles, so the gap between probes costs nothing. */
+  /** Runs `work` on fake timers that jump to each timer it sets, so the gap between probes costs nothing. */
   async function withoutWaiting<A>(work: () => Promise<A>): Promise<A> {
     vi.useFakeTimers({ toFake: ["setTimeout"] });
+    vi.setTimerTickMode("nextTimerAsync");
     try {
-      const state = { settled: false };
-      const result = work().finally(() => (state.settled = true));
-      while (!state.settled) {
-        await vi.advanceTimersByTimeAsync(1_000);
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-      return await result;
+      return await work();
     } finally {
       vi.useRealTimers();
     }
@@ -1897,9 +1904,12 @@ describe("a cloud machine checked before it sleeps", () => {
     );
   });
 
-  /** An E2B metrics sample `seconds` old with this CPU and this share of memory in use. */
-  const sample = (seconds: number, cpuUsedPct: number, memoryShare: number) => ({
-    timestamp: new Date(Date.now() - seconds * 1_000),
+  /**
+   * An E2B metrics sample `seconds` old at the probe, with this CPU and this share of memory in
+   * use. The probe asks for the last 15 s of samples, so its `since` is 15 s before the probe.
+   */
+  const sample = (since: Date, seconds: number, cpuUsedPct: number, memoryShare: number) => ({
+    timestamp: new Date(since.getTime() + 15_000 - seconds * 1_000),
     cpuUsedPct,
     memUsed: memoryShare * 1_000,
     memTotal: 1_000,
@@ -1918,25 +1928,25 @@ describe("a cloud machine checked before it sleeps", () => {
     {
       box: "with no metrics from the last 15 s",
       answered: envdAnswers,
-      samples: async () => [sample(30, 100, 0.95)],
+      samples: async (since: Date) => [sample(since, 30, 100, 0.95)],
       expected: keptMemory,
     },
     {
       box: "pinned with its memory at 60%",
       answered: envdAnswers,
-      samples: async () => [sample(10, 98, 0.6), sample(5, 99, 0.6)],
+      samples: async (since: Date) => [sample(since, 10, 98, 0.6), sample(since, 5, 99, 0.6)],
       expected: keptMemory,
     },
     {
       box: "pinned with its memory at 93%",
       answered: envdAnswers,
-      samples: async () => [sample(10, 98, 0.93), sample(5, 99, 0.93)],
+      samples: async (since: Date) => [sample(since, 10, 98, 0.93), sample(since, 5, 99, 0.93)],
       expected: ["probe:pinned", "probe:pinned", "backup", "pause:sandbox:disk"],
     },
     {
       box: "whose envd stays silent",
       answered: () => new Promise<never>(() => {}),
-      samples: async () => [sample(5, 10, 0.2)],
+      samples: async (since: Date) => [sample(since, 5, 10, 0.2)],
       expected: ["probe:unresponsive", "probe:unresponsive", "backup", "pause:sandbox:disk"],
     },
   ])(
@@ -2042,6 +2052,15 @@ describe("a cloud machine checked before it sleeps", () => {
 });
 
 describe("a cloud machine saved after each turn", () => {
+  // Frozen, a backup's deadline lies exactly its budget past NOW.
+  const NOW = Date.parse("2026-10-06T12:01:00.000Z");
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("saves a box once after its owner's turn completes, and the pause flushes on top of it", async () => {
     const chat = (latestRunId: string | null, latestRunCompletedAt: string | null) =>
       ownerChat(
@@ -2076,7 +2095,7 @@ describe("a cloud machine saved after each turn", () => {
             sleepBudgetMs: 45_000,
             turnBudgetMs: 30_000,
             run: async (lease, deadline) => {
-              const budget = Math.round((deadline - Date.now()) / 1000);
+              const budget = (deadline - NOW) / 1000;
               runs.push(`backup:${budget}s:after ${lease.backup?.at ?? "none"}`);
               return {
                 backup: { at: `saved-${runs.length}`, branches: ["t3-backup/lease"] },

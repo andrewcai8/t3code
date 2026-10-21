@@ -1,61 +1,55 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 
+import { act, fakeTimers, render } from "../../test/render";
 import { useVisibleInterval } from "./useVisibleInterval";
 
-let root: Root;
-let calls = 0;
-let visibility: DocumentVisibilityState = "visible";
-
-function setVisibility(state: DocumentVisibilityState) {
-  visibility = state;
-  document.dispatchEvent(new Event("visibilitychange"));
-}
-
-function Probe({ enabled }: { enabled: boolean }) {
-  useVisibleInterval(() => (calls += 1), 1_000, enabled);
+function Probe({ enabled, onTick }: { enabled: boolean; onTick: () => void }) {
+  useVisibleInterval(onTick, 1_000, enabled);
   return null;
 }
 
-beforeEach(() => {
-  calls = 0;
-  visibility = "visible";
-  vi.useFakeTimers();
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+function stubVisibility() {
+  let visibility: DocumentVisibilityState = "visible";
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     get: () => visibility,
   });
-  root = createRoot(document.createElement("div"));
+  return {
+    set(state: DocumentVisibilityState) {
+      visibility = state;
+      document.dispatchEvent(new Event("visibilitychange"));
+    },
+    [Symbol.dispose]() {
+      Reflect.deleteProperty(document, "visibilityState");
+    },
+  };
+}
+
+it("ticks while visible, stops while hidden, and catches up once on return", async () => {
+  using _timers = fakeTimers();
+  using visibility = stubVisibility();
+  const onTick = vi.fn();
+  await using _screen = await render(<Probe enabled onTick={onTick} />, { router: false });
+  await act(() => vi.advanceTimersByTime(3_000));
+  expect(onTick).toHaveBeenCalledTimes(3);
+  await act(() => visibility.set("hidden"));
+  await act(() => vi.advanceTimersByTime(10_000));
+  expect(onTick).toHaveBeenCalledTimes(3);
+  await act(() => visibility.set("visible"));
+  expect(onTick).toHaveBeenCalledTimes(4);
+  await act(() => vi.advanceTimersByTime(1_000));
+  expect(onTick).toHaveBeenCalledTimes(5);
 });
 
-afterEach(() => {
-  act(() => root.unmount());
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(document, "visibilityState");
-});
-
-it("ticks while visible, stops while hidden, and catches up once on return", () => {
-  act(() => root.render(<Probe enabled />));
-  act(() => vi.advanceTimersByTime(3_000));
-  expect(calls).toBe(3);
-  act(() => setVisibility("hidden"));
-  act(() => vi.advanceTimersByTime(10_000));
-  expect(calls).toBe(3);
-  act(() => setVisibility("visible"));
-  expect(calls).toBe(4);
-  act(() => vi.advanceTimersByTime(1_000));
-  expect(calls).toBe(5);
-});
-
-it("does nothing while disabled", () => {
-  act(() => root.render(<Probe enabled={false} />));
-  act(() => vi.advanceTimersByTime(3_000));
-  act(() => setVisibility("visible"));
-  expect(calls).toBe(0);
-  act(() => root.render(<Probe enabled />));
-  act(() => vi.advanceTimersByTime(1_000));
-  expect(calls).toBe(1);
+it("does nothing while disabled", async () => {
+  using _timers = fakeTimers();
+  using visibility = stubVisibility();
+  const onTick = vi.fn();
+  await using screen = await render(<Probe enabled={false} onTick={onTick} />, { router: false });
+  await act(() => vi.advanceTimersByTime(3_000));
+  await act(() => visibility.set("visible"));
+  expect(onTick).toHaveBeenCalledTimes(0);
+  await screen.rerender(<Probe enabled onTick={onTick} />);
+  await act(() => vi.advanceTimersByTime(1_000));
+  expect(onTick).toHaveBeenCalledTimes(1);
 });

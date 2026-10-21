@@ -22,6 +22,7 @@ import {
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
+  OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpClientRequestId,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpProviderCapability,
@@ -389,7 +390,13 @@ const operation = <const Op extends string, S extends Schema.Top>(op: Op, input:
 
 /** One operation Home asks an environment to run, with the user's reach. */
 export const FleetRequest = Schema.Union([
-  operation("capabilities", Schema.Struct({ environmentId: environmentIdField })),
+  operation(
+    "capabilities",
+    Schema.Struct({
+      environmentId: environmentIdField,
+      ...OrchestratorMcpCapabilitiesInput.fields,
+    }),
+  ),
   operation("projects.list", FleetProjectListInput),
   operation("threads.list", OrchestratorMcpThreadListInput),
   operation("threads.read", OrchestratorMcpThreadReadInput),
