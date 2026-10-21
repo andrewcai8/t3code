@@ -101,7 +101,7 @@ export class WorktreeForks extends Context.Service<
     /** This host runs its own copies. Transports keep their old path when false. */
     readonly enabled: boolean;
     /** The bun shim's settings, or null when this host has none. */
-    readonly bunShim: { readonly skipWhenSet: ReadonlyArray<string> } | null;
+    readonly bunShim: WorktreeForksHost["bunShim"];
     /** One command for `t3 fork-exec`. Interrupting it ends its copy. */
     readonly exec: (request: ForkExecRequest, observer: ExecObserver) => Effect.Effect<ExecOutcome>;
     /** Starts a batch for `owner` and answers at once with every job queued. */
@@ -145,8 +145,24 @@ class Lost extends Schema.TaggedError<Lost>()("Lost", { cause: Schema.Defect() }
 const notStarted = (error: { readonly message: string }) =>
   new NotStarted({ reason: error.message, cause: error });
 
+/** Which path sent a job: the bun shim, another `t3 fork-exec` call, or t3_fork_run. */
+type ForkCaller = "bun-shim" | "fork-exec" | "fork-run";
+
+const callerOf = (request: ForkExecRequest): ForkCaller =>
+  request.environment.T3CODE_FORK_CALLER === "bun-shim" ? "bun-shim" : "fork-exec";
+
+/** The command on one log line, with the value of every `NAME=value` word left out. */
+const commandSummary = (command: string) => {
+  const summary = command
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/(^| )([A-Za-z_]\w*)=('[^']*'|"[^"]*"|\S*)/g, "$1$2=…");
+  return summary.length <= 160 ? summary : `${summary.slice(0, 159)}…`;
+};
+
 interface CopyJob {
   readonly id: string;
+  readonly caller: ForkCaller;
   readonly command: string;
   readonly cwd: string;
   /** Already mapped for the copy. */
@@ -466,6 +482,8 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           // One line per finished copy, so this host's offload use can be read from its log.
           yield* Effect.logInfo("worktree fork job finished", {
             job: job.id,
+            caller: job.caller,
+            command: commandSummary(job.command),
             repository: shipment.checkout.repository.repository,
             cpu: job.size.cpu,
             memoryMiB: job.size.memoryMiB,
@@ -483,10 +501,16 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   });
 
   /** Logged where an outcome is decided, so a refusal before any copy exists says why too. */
-  const logFailure = (error: NotStarted | Lost, cwd: string) =>
+  const logFailure = (error: NotStarted | Lost, job: Pick<CopyJob, "cwd" | "caller" | "command">) =>
     Effect.logWarning(
       error._tag === "Lost" ? "worktree fork copy lost" : "worktree fork copy did not start",
-      { cwd, reason: error.message, cause: error.cause },
+      {
+        cwd: job.cwd,
+        caller: job.caller,
+        command: commandSummary(job.command),
+        reason: error.message,
+        cause: error.cause,
+      },
     );
 
   const sizeOf = (name: string | undefined) => host.sizes.get(name ?? host.defaultSize);
@@ -506,6 +530,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       const exited = yield* runJob(
         {
           id: NodeCrypto.randomUUID(),
+          caller: callerOf(request),
           command: request.command,
           cwd: checkout.cwd,
           environment: sandboxEnvironment(request.environment, checkout.root, hostHome),
@@ -527,7 +552,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     (effect, request) =>
       effect.pipe(
         Effect.scoped,
-        Effect.tapError((error) => logFailure(error, request.cwd)),
+        Effect.tapError((error) => logFailure(error, { ...request, caller: callerOf(request) })),
         Effect.catchTags({
           NotStarted: (error) =>
             Effect.succeed<ExecOutcome>({ _tag: "NotStarted", message: error.message }),
@@ -579,6 +604,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       const exited = yield* runJob(
         {
           id: `${batch.id}-${index}`,
+          caller: "fork-run",
           command: job.command,
           cwd: target.cwd,
           environment: sandboxEnvironment(
@@ -612,10 +638,16 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         logsUri: `${dir}/`,
       });
     },
-    (effect, batch, _input, index, target) =>
+    (effect, batch, input, index, target) =>
       effect.pipe(
         Effect.scoped,
-        Effect.tapError((error) => logFailure(error, target.cwd)),
+        Effect.tapError((error) =>
+          logFailure(error, {
+            cwd: target.cwd,
+            caller: "fork-run",
+            command: input.jobs[index]!.command,
+          }),
+        ),
         Effect.catchTags({
           NotStarted: (error) =>
             Effect.sync(() => setJob(batch, { index, state: "failed", message: error.message })),
