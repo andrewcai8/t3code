@@ -343,8 +343,7 @@ it.effect("each finished copy logs its job, repository, size, exit code and phas
     ]);
   }).pipe(
     Effect.scoped,
-    Effect.provide(layer),
-    Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    Effect.provide(Layer.merge(layer, Logger.layer([logger], { mergeWithExisting: false }))),
   );
 });
 

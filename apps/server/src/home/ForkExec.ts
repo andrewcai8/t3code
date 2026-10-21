@@ -234,9 +234,6 @@ export const layer = Layer.effectDiscard(
       yield* reconcileShim(baseDir, forks.enabled ? forks.bunShim : null);
     const relays = onCloudBox && platform === "linux";
     if (!relays && !forks.enabled) return;
-    // Provider CLIs inherit this server's environment, so their agents and scripts find the
-    // socket at $T3CODE_HOME/fork.sock, as a cloud box's service unit already arranges.
-    if (forks.enabled && !environment.T3CODE_HOME?.trim()) environment.T3CODE_HOME = baseDir;
     const path = forkExecSocketPath(baseDir);
     const context = yield* Effect.context<Backends>();
     const serve = (socket: NodeNet.Socket) => {

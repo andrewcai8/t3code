@@ -2713,6 +2713,7 @@ it.layer(
         env: {
           PORT: "5173",
           T3CODE_PORT: "3773",
+          T3CODE_HOME: "/home/user/.t3",
           VITE_DEV_SERVER_URL: "http://localhost:5173",
           TEST_TERMINAL_KEEP: "keep-me",
           TMUX: "/tmp/tmux-1000/default,1234,0",
@@ -2729,6 +2730,8 @@ it.layer(
 
       expect(spawnInput.env.PORT).toBeUndefined();
       expect(spawnInput.env.T3CODE_PORT).toBeUndefined();
+      // The bun shim takes T3CODE_HOME to mean an agent, never a person at a terminal.
+      expect(spawnInput.env.T3CODE_HOME).toBeUndefined();
       expect(spawnInput.env.VITE_DEV_SERVER_URL).toBeUndefined();
       expect(spawnInput.env.TEST_TERMINAL_KEEP).toBe("keep-me");
       expect(spawnInput.env.TMUX).toBeUndefined();

@@ -308,19 +308,6 @@ it.effect("closing the connection ends the copy", () =>
 );
 
 it.effect(
-  "advertises its socket to the agents it starts, unless T3CODE_HOME already says where",
-  () =>
-    Effect.gen(function* () {
-      const unset: NodeJS.ProcessEnv = {};
-      const { home } = yield* onSelfHostedServer({ enabled: true }, unset);
-      expect(unset.T3CODE_HOME).toBe(home);
-      const pinned: NodeJS.ProcessEnv = { T3CODE_HOME: "/srv/t3" };
-      yield* onSelfHostedServer({ enabled: true }, pinned);
-      expect(pinned.T3CODE_HOME).toBe("/srv/t3");
-    }).pipe(Effect.scoped),
-);
-
-it.effect(
   "installs the bun shim with worktree forks and, without them, serves nothing and removes it",
   () =>
     Effect.gen(function* () {

@@ -200,6 +200,7 @@ import { loopbackUrlHostForAddress } from "./startupAccess.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import { usageHttpApiLayer, usageImportBodyLimitLayer } from "./usage/http.ts";
 import * as ProjectHttp from "./project/http.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
@@ -780,6 +781,11 @@ const layerMakeServer = Layer.unwrap(
     const layerLauncher = ServiceLauncherClient.layer;
 
     yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
+    // Agents and the scripts they run find this server's home, and its fork.sock, through
+    // T3CODE_HOME. Provider adapters copy this environment when they are created, so it is set
+    // here, before any exists, and to the home this server resolved, not an ambient one. Terminals
+    // strip T3CODE_*.
+    (yield* HostProcess.Environment).T3CODE_HOME = config.baseDir;
 
     const layerHttpListening = Layer.effectDiscard(
       Effect.gen(function* () {
