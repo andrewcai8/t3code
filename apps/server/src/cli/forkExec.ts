@@ -1,13 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off - a fast-path CLI that loads nothing heavy.
 /**
- * `t3 fork-exec [--timeout <seconds>] -- <command>`: runs a command in a throwaway copy of this
- * cloud machine and prints its output and exit code as if it ran here (see home/ForkExec.ts).
+ * `t3 fork-exec [--timeout <seconds>] [--size <name>] -- <command>`: runs a command in a throwaway
+ * copy of this machine or worktree and prints its output and exit code as if it ran here (see
+ * home/ForkExec.ts).
  *
  * Exit codes: the command's own, 124 when it timed out, 70 when its copy was lost, and 75 when no
  * copy could start, so a wrapper can run the command here instead.
  */
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -18,6 +18,8 @@ import {
   type ForkExecEvent,
   ForkExecEvent as ForkExecEventSchema,
   forkExecSocketPath,
+  portableEnvironment,
+  shellQuote,
 } from "../home/forkExecProtocol.ts";
 
 const FORK_UNAVAILABLE_EXIT = 75;
@@ -28,36 +30,31 @@ const TAIL_CHARS = 3_900;
 
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ForkExecEventSchema));
 
-const quote = (word: string) =>
-  /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
-
-/** The shell's own variables are left to the copy's shell. */
-const SHELL_OWNED = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
-
-/** `export` lines that recreate `environment` in a shell. */
-export const exportsOf = (environment: NodeJS.ProcessEnv) =>
-  Object.entries(environment)
-    .flatMap(([name, value]) =>
-      value === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || SHELL_OWNED.has(name)
-        ? []
-        : [`export ${name}=${quote(value)}\n`],
-    )
-    .join("");
-
-/** One argument is a shell command as given; several are a command and its arguments. */
+/**
+ * Flags come in any order before `--`. One argument after them is a shell command as given;
+ * several are a command and its arguments.
+ */
 export function parseForkExecArgs(args: ReadonlyArray<string>) {
   let rest = [...args];
   let timeoutSeconds: number | undefined;
-  if (rest[0] === "--timeout") {
-    timeoutSeconds = Number(rest[1]);
+  let size: string | undefined;
+  for (;;) {
+    if (rest[0] === "--timeout") timeoutSeconds = Number(rest[1]);
+    else if (rest[0] === "--size") size = rest[1];
+    else break;
     rest = rest.slice(2);
   }
   if (rest[0] === "--") rest = rest.slice(1);
-  if (rest.length === 0 || (timeoutSeconds !== undefined && !Number.isInteger(timeoutSeconds)))
+  if (
+    rest.length === 0 ||
+    (timeoutSeconds !== undefined && !Number.isInteger(timeoutSeconds)) ||
+    size === ""
+  )
     return null;
   return {
-    command: rest.length === 1 ? rest[0]! : rest.map(quote).join(" "),
+    command: rest.length === 1 ? rest[0]! : rest.map(shellQuote).join(" "),
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+    ...(size === undefined ? {} : { size }),
   };
 }
 
@@ -73,8 +70,13 @@ const report = (event: ForkExecEvent): number => {
   switch (event.kind) {
     case "started":
       process.stderr.write(
-        `[t3] Running in a throwaway copy of this machine (batch ${event.batchId}); its output follows when it finishes.\n`,
+        event.live
+          ? `[t3] Running in a throwaway copy of this worktree on Modal (job ${event.batchId}); its output follows as it runs.\n`
+          : `[t3] Running in a throwaway copy of this machine (batch ${event.batchId}); its output follows when it finishes.\n`,
       );
+      return -1;
+    case "output":
+      (event.stream === "stdout" ? process.stdout : process.stderr).write(event.text);
       return -1;
     case "exited": {
       const stdout = event.logsUri ? fullLog(event.logsUri, "stdout.log") : null;
@@ -101,30 +103,27 @@ const report = (event: ForkExecEvent): number => {
 export async function runForkExec(args: ReadonlyArray<string>): Promise<number> {
   const parsed = parseForkExecArgs(args);
   if (parsed === null) {
-    process.stderr.write("Usage: t3 fork-exec [--timeout <seconds>] -- <command>\n");
+    process.stderr.write(
+      "Usage: t3 fork-exec [--timeout <seconds>] [--size <name>] -- <command>\n",
+    );
     return 2;
   }
   const home = process.env.T3CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".t3");
-  // The copy starts from this machine's disk, so the command picks up this process's environment
-  // from a file written before the copy is taken.
-  const environmentFile = NodePath.join(home, "fork-exec", `${process.pid}.env`);
-  NodeFS.mkdirSync(NodePath.dirname(environmentFile), { recursive: true, mode: 0o700 });
-  NodeFS.writeFileSync(environmentFile, exportsOf(process.env), { mode: 0o600 });
-  const request = { ...parsed, command: `. ${quote(environmentFile)} && ${parsed.command}` };
+  const request = {
+    ...parsed,
+    cwd: process.cwd(),
+    environment: portableEnvironment(process.env),
+  };
   const socket = NodeNet.createConnection(forkExecSocketPath(home));
-  const removeEnvironment = () => NodeFS.rmSync(environmentFile, { force: true });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
     process.once(signal, () => {
       socket.destroy();
-      removeEnvironment();
       process.exit(130);
     });
   return new Promise<number>((resolve) => {
     let buffered = "";
     let exitCode: number | null = null;
-    socket.on("connect", () =>
-      socket.write(`${JSON.stringify({ ...request, cwd: process.cwd() })}\n`),
-    );
+    socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk) => {
       buffered += chunk.toString("utf8");
       for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
@@ -138,5 +137,5 @@ export async function runForkExec(args: ReadonlyArray<string>): Promise<number> 
       exitCode ??= FORK_UNAVAILABLE_EXIT;
     });
     socket.on("close", () => resolve(exitCode ?? FORK_LOST_EXIT));
-  }).finally(removeEnvironment);
+  });
 }

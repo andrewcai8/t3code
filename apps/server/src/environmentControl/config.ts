@@ -15,7 +15,7 @@ export function canonicalRepository(repository: string): string {
   return cleaned.toLowerCase();
 }
 
-const RelativeFilePath = TrimmedNonEmptyString.check(
+export const RelativeFilePath = TrimmedNonEmptyString.check(
   Schema.makeFilter(
     (path) =>
       !NodePath.posix.isAbsolute(path) &&
@@ -36,7 +36,7 @@ const WorkspaceFile = Schema.Struct({
  * it, a copy of the chat's machine runs it to its end before the copy's job (see WorkerForks.ts),
  * and an instance-engine template builder, which runs no chat, skips it.
  */
-const PrepareCommand = Schema.Union([
+export const PrepareCommand = Schema.Union([
   TrimmedNonEmptyString,
   Schema.Struct({ command: TrimmedNonEmptyString, background: Schema.optional(Schema.Boolean) }),
 ]);

@@ -104,6 +104,7 @@ async function fakeModal() {
         return { exitCode: 0, stdout: '{"refreshError":null,"serverReady":true}', stderr: "" };
       return { exitCode: 1, stdout: "", stderr: `unexpected exec ${argv.join(" ")}` };
     },
+    execStream: async () => 1,
     upload: async () => {},
     download: async () => {},
     saveDisk: async (sandboxId) => {

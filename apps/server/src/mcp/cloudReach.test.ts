@@ -22,6 +22,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../home/FleetBroker.ts";
 import * as FleetService from "../home/FleetService.ts";
 import * as HomeService from "../home/HomeService.ts";
+import * as WorktreeForks from "../home/WorktreeForks.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -257,6 +258,7 @@ it.effect("waits out the pause a fork batch causes and asks the host again", () 
   const dependencies = Layer.mergeAll(
     layer,
     Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+    Layer.mock(WorktreeForks.WorktreeForks)({ enabled: false, bunShim: null }),
     FleetBroker.layer.pipe(Layer.provide(NodeCrypto.layer)),
   );
   return Effect.gen(function* () {
@@ -287,4 +289,65 @@ it.effect("waits out the pause a fork batch causes and asks the host again", () 
     const result = yield* Fiber.join(call);
     expect(result.at(-1)?.result).toEqual(batch);
   }).pipe(Effect.provide(dependencies));
+});
+
+it.effect("on a server with worktree forks, a thread's fork calls run there, as its own", () => {
+  const owners: Array<[string, ThreadId]> = [];
+  const batch = { batchId: "batch-1", state: "running" as const, jobs: [] };
+  const forksFor = (caller: Partial<typeof topLevelChat>) => {
+    const { layer, relayed } = onBox(caller);
+    const dependencies = Layer.mergeAll(
+      layer,
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(WorktreeForks.WorktreeForks)({
+        enabled: true,
+        bunShim: null,
+        run: (owner) => Effect.sync(() => void owners.push(["run", owner])).pipe(Effect.as(batch)),
+        status: (owner) =>
+          Effect.sync(() => void owners.push(["status", owner])).pipe(Effect.as(batch)),
+        cancel: (owner) =>
+          Effect.sync(() => void owners.push(["cancel", owner])).pipe(Effect.as(batch)),
+      }),
+    );
+    const toolkit = HomeToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(HomeHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    return { relayed, dependencies, toolkit };
+  };
+  const allowed = forksFor({});
+  const readOnly = forksFor({ runtimeMode: "approval-required" });
+  return Effect.gen(function* () {
+    const results = yield* Effect.gen(function* () {
+      const toolkit = yield* allowed.toolkit;
+      return [
+        yield* toolkit
+          .handle("t3_fork_run", { jobs: [{ command: "bun test" }] })
+          .pipe(Stream.unwrap, Stream.runCollect),
+        yield* toolkit
+          .handle("t3_fork_status", { batchId: "batch-1" })
+          .pipe(Stream.unwrap, Stream.runCollect),
+        yield* toolkit
+          .handle("t3_fork_cancel", { batchId: "batch-1" })
+          .pipe(Stream.unwrap, Stream.runCollect),
+      ];
+    }).pipe(Effect.provide(allowed.dependencies));
+    expect(results.map((result) => result.at(-1)?.result)).toEqual([batch, batch, batch]);
+    expect(owners).toEqual([
+      ["run", chat],
+      ["status", chat],
+      ["cancel", chat],
+    ]);
+    expect(allowed.relayed).toEqual([]);
+
+    const refused = yield* Effect.gen(function* () {
+      const toolkit = yield* readOnly.toolkit;
+      return yield* toolkit
+        .handle("t3_fork_run", { jobs: [{ command: "bun test" }] })
+        .pipe(Stream.unwrap, Stream.runCollect);
+    }).pipe(Effect.provide(readOnly.dependencies));
+    expect(refused.at(-1)?.result).toMatchObject({ code: "capability_denied" });
+    expect(owners).toHaveLength(3);
+  });
 });

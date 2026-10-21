@@ -12,20 +12,40 @@ import * as Schema from "effect/Schema";
 export const ForkExecRequest = Schema.Struct({
   command: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(20000)),
   cwd: Schema.String.check(Schema.isMinLength(1)),
+  /** The caller's environment. Each backend decides how it reaches the copy. */
+  environment: Schema.Record(Schema.String, Schema.String),
   timeoutSeconds: Schema.optional(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 86_400 })),
   ),
+  /** A size this host names; copies of a cloud machine always have the machine's own size. */
+  size: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64))),
 });
 export type ForkExecRequest = typeof ForkExecRequest.Type;
 
-/** What the socket answers, one JSON line each: `started` first, then exactly one outcome. */
+/** A request line carries the caller's whole environment, so it may be long, but not unbounded. */
+export const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
+/**
+ * What the socket answers, one JSON line each: `started`, then (when it is `live`) the command's
+ * output as it runs, then exactly one outcome.
+ */
 export const ForkExecEvent = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("started"), batchId: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("started"),
+    batchId: Schema.String,
+    live: Schema.optional(Schema.Literal(true)),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("output"),
+    stream: Schema.Literals(["stdout", "stderr"]),
+    text: Schema.String,
+  }),
   Schema.Struct({
     kind: Schema.Literal("exited"),
     exitCode: Schema.Int,
     timedOut: Schema.Boolean,
     durationMs: Schema.Number,
+    /** Output not already sent as `output` events: empty after a live start. */
     stdoutTail: Schema.String,
     stderrTail: Schema.String,
     /** Holds the job's full stdout.log and stderr.log. */
@@ -39,3 +59,27 @@ export const ForkExecEvent = Schema.Union([
 export type ForkExecEvent = typeof ForkExecEvent.Type;
 
 export const forkExecSocketPath = (baseDir: string) => NodePath.join(baseDir, "fork.sock");
+
+export const shellQuote = (word: string) =>
+  /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+
+/** The shell's own variables are left to the copy's shell. */
+const SHELL_OWNED = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
+
+/** The variables of `environment` a shell can take, without the shell's own. */
+export const portableEnvironment = (
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(environment).flatMap(([name, value]) =>
+      value === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || SHELL_OWNED.has(name)
+        ? []
+        : [[name, value]],
+    ),
+  );
+
+/** `export` lines that recreate `environment` in a shell. */
+export const exportsOf = (environment: Readonly<Record<string, string | undefined>>) =>
+  Object.entries(portableEnvironment(environment))
+    .map(([name, value]) => `export ${name}=${shellQuote(value)}\n`)
+    .join("");
