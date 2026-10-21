@@ -61,8 +61,11 @@ routable() {
   while [ $# -gt 0 ]; do
     case $1 in
       --bail | --bail=* | --only | --todo | --concurrent | --randomize | --pass-with-no-tests) ;;
+      --isolate | --no-isolate | --parallel | --dots | --reporter=dots | --only-failures | --no-orphans) ;;
       --timeout=* | --rerun-each=* | --max-concurrency=* | --seed=* | --shard=* | --test-name-pattern=*) ;;
-      --timeout | --rerun-each | --max-concurrency | --seed | --shard | --test-name-pattern | -t)
+      --retry=* | --parallel=* | --parallel-delay=* | --path-ignore-patterns=*) ;;
+      --timeout | --rerun-each | --max-concurrency | --seed | --shard | --test-name-pattern | -t | \
+        --retry | --parallel-delay | --path-ignore-patterns)
         [ $# -ge 2 ] || return 1
         shift
         ;;
