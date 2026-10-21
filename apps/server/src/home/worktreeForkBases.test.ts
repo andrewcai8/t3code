@@ -341,3 +341,39 @@ it.effect("a failed build is not tried again for an hour", () =>
     expect(creates(fake)).toHaveLength(2);
   }).pipe(Effect.scoped, Effect.provide(layer())),
 );
+
+it.effect("prepares with this server's environment, whichever caller's run started the build", () =>
+  Effect.gen(function* () {
+    const { host, checkout, fake } = setup();
+    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    yield* bases.current(checkout, { ...environment, API_KEY: "smoke-test" }, true);
+    const prepare = fake.calls.find((call) => call.argv?.[2] === "make prepare");
+    expect(prepare?.env).toMatchObject({ API_KEY: "k" });
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(layer()),
+    Effect.provideService(HostProcess.Environment, environment),
+  ),
+);
+
+it.effect("a failed refresh keeps the previous base in use and is tried again an hour later", () =>
+  Effect.gen(function* () {
+    const { upstream, host, checkout, fake } = setup();
+    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const first = yield* bases.current(checkout, environment, true);
+
+    commit(upstream, "b.txt", "two\n");
+    fake.onExec(isCommand("make prepare"), { exitCode: 1, stdout: "prepare broke" });
+    yield* TestClock.adjust("1 hour");
+    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    yield* bases.idle;
+    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    yield* bases.idle;
+    expect(creates(fake)).toHaveLength(2);
+
+    yield* TestClock.adjust("1 hour");
+    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    yield* bases.idle;
+    expect(creates(fake)).toHaveLength(3);
+  }).pipe(Effect.scoped, Effect.provide(layer())),
+);
