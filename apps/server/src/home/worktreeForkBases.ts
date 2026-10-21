@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { portableEnvironment } from "./forkExecProtocol.ts";
 import {
   COPY_PURPOSE,
   copySpec,
@@ -169,7 +170,6 @@ export interface Bases {
    */
   readonly current: (
     checkout: Checkout,
-    environment: Readonly<Record<string, string>>,
     waitForFirst: boolean,
   ) => Effect.Effect<ForkBase, BaseUnavailable>;
   /** Waits for every build and refresh in flight now to end, however it ends. */
@@ -178,7 +178,9 @@ export interface Bases {
 
 /**
  * `live` holds the sweep's job tags; a build adds its own while its sandbox exists. Builds run in
- * the scope this is made in, so a caller that stops waiting never cancels one.
+ * the scope this is made in, so a caller that stops waiting never cancels one. Every later copy
+ * boots from a base, so it prepares with this server's environment, as the host prepares its own
+ * worktrees, and never with that of the caller whose run happened to start the build.
  */
 export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   host: WorktreeForksHost,
@@ -189,6 +191,7 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   const runner = yield* ProcessRunner.ProcessRunner;
   const stateDir = (yield* ServerConfig).stateDir;
   const hostHome = yield* HostProcess.HomeDirectory;
+  const serverEnvironment = portableEnvironment(yield* HostProcess.Environment);
   const scope = yield* Effect.scope;
   const builds = new Map<string, Deferred.Deferred<ForkBase, BaseUnavailable>>();
   const recordPath = (repository: ForkRepository) =>
@@ -250,19 +253,18 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
       try: () => sandboxes.exec(sandboxId, argv, { timeoutMs: PREPARE_TIMEOUT_MS, ...options }),
       catch: (cause) => new BaseBuildFailed({ step, cause }),
     });
+    // A failing script often prints an error object whose fields alone run past 2,000
+    // characters, so a shorter tail keeps the fields and loses the message.
     if (result.exitCode !== 0)
       return yield* new BaseBuildFailed({
         step,
         cause: new Error(
-          `exited ${result.exitCode}: ${`${result.stdout}${result.stderr}`.slice(-2000)}`,
+          `exited ${result.exitCode}: ${`${result.stdout}${result.stderr}`.slice(-8000)}`,
         ),
       });
   });
 
-  const build = Effect.fn("WorktreeForks.buildBase")(function* (
-    checkout: Checkout,
-    environment: Readonly<Record<string, string>>,
-  ) {
+  const build = Effect.fn("WorktreeForks.buildBase")(function* (checkout: Checkout) {
     const { repository, root } = checkout;
     const record = yield* readRecord(repository);
     const from = pickBase(record, repository.key, yield* Clock.currentTimeMillis);
@@ -341,7 +343,7 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
       catch: (cause) => new BaseBuildFailed({ step: "checkout", cause }),
     });
     yield* inSandbox("checkout", sandboxId, buildArgv(ARCHIVE, repository, branch, tip));
-    const prepareEnvironment = sandboxEnvironment(environment, root, hostHome);
+    const prepareEnvironment = sandboxEnvironment(serverEnvironment, root, hostHome);
     for (const command of repository.prepare)
       yield* inSandbox("prepare", sandboxId, ["bash", "-lc", command], {
         env: prepareEnvironment,
@@ -381,8 +383,8 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
     return built;
   }, Effect.scoped);
 
-  const settle = (checkout: Checkout, environment: Readonly<Record<string, string>>) =>
-    build(checkout, environment).pipe(
+  const settle = (checkout: Checkout) =>
+    build(checkout).pipe(
       Effect.tapError((error) =>
         Effect.gen(function* () {
           const { repository } = checkout;
@@ -404,16 +406,13 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
     );
 
   /** The build in flight for the checkout's repository, started now when there is none. */
-  const buildOnce = Effect.fn("WorktreeForks.buildOnce")(function* (
-    checkout: Checkout,
-    environment: Readonly<Record<string, string>>,
-  ) {
+  const buildOnce = Effect.fn("WorktreeForks.buildOnce")(function* (checkout: Checkout) {
     const key = checkout.repository.repository;
     const running = builds.get(key);
     if (running !== undefined) return running;
     const done = Deferred.makeUnsafe<ForkBase, BaseUnavailable>();
     builds.set(key, done);
-    yield* settle(checkout, environment).pipe(
+    yield* settle(checkout).pipe(
       Effect.onExit((exit) =>
         Effect.sync(() => builds.delete(key)).pipe(Effect.andThen(Deferred.done(done, exit))),
       ),
@@ -423,18 +422,18 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   });
 
   const current: Bases["current"] = Effect.fn("WorktreeForks.currentBase")(
-    function* (checkout, environment, waitForFirst) {
+    function* (checkout, waitForFirst) {
       const { key } = checkout.repository;
       const record = yield* readRecord(checkout.repository);
       const now = yield* Clock.currentTimeMillis;
       const base = pickBase(record, key, now);
       const blocked = backingOff(record, key, now);
       if (base !== null) {
-        if (refreshDue(record, key, now) && !blocked) yield* buildOnce(checkout, environment);
+        if (refreshDue(record, key, now) && !blocked) yield* buildOnce(checkout);
         return base;
       }
       if (blocked) return yield* new BaseUnavailable({ reason: "failed" });
-      const done = yield* buildOnce(checkout, environment);
+      const done = yield* buildOnce(checkout);
       if (!waitForFirst) return yield* new BaseUnavailable({ reason: "building" });
       return yield* Deferred.await(done);
     },

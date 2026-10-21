@@ -120,7 +120,7 @@ const setup = () => {
   return { upstream, first, workDir, host, checkout, fake };
 };
 
-const environment = { HOME: "/home/me", PATH: "/usr/bin", API_KEY: "k" };
+const serverEnvironment = { HOME: "/home/me", PATH: "/usr/bin", API_KEY: "k" };
 
 const layer = () =>
   Layer.mergeAll(
@@ -129,6 +129,7 @@ const layer = () =>
   ).pipe(
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, "/home/me")),
+    Layer.provideMerge(Layer.succeed(HostProcess.Environment, serverEnvironment)),
   );
 
 const creates = (fake: ReturnType<typeof makeFakeSandboxes>) =>
@@ -195,7 +196,7 @@ it("keeps the two newest bases of the current key and drops every other image", 
 });
 
 it.effect(
-  "the first copy starts one build that later callers join; it prepares with the ship paths and keeps none",
+  "the first copy starts one build that later callers join; it prepares with the server's environment and the ship paths and keeps none",
   () =>
     Effect.gen(function* () {
       const { upstream, workDir, host, checkout, fake } = setup();
@@ -209,13 +210,9 @@ it.effect(
       const held = fake.hold("saveDisk");
       const bases = yield* makeBases(host, fake.port, "host-1", new Set());
 
-      expect((yield* bases.current(checkout, environment, false).pipe(Effect.flip)).reason).toBe(
-        "building",
-      );
-      expect((yield* bases.current(checkout, environment, false).pipe(Effect.flip)).reason).toBe(
-        "building",
-      );
-      const waiter = yield* bases.current(checkout, environment, true).pipe(Effect.forkChild);
+      expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("building");
+      expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("building");
+      const waiter = yield* bases.current(checkout, true).pipe(Effect.forkChild);
       yield* Effect.promise(() => held.reached);
       held.open();
       const base = yield* Fiber.join(waiter);
@@ -257,7 +254,7 @@ it.effect(
         "terminate",
       ]);
       expect(fake.running().size).toBe(0);
-      expect(yield* bases.current(checkout, environment, false)).toEqual(base);
+      expect(yield* bases.current(checkout, false)).toEqual(base);
       expect(creates(fake)).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(layer())),
 );
@@ -267,12 +264,12 @@ it.effect("a caller that stops waiting leaves the build running", () =>
     const { host, checkout, fake } = setup();
     const held = fake.hold("saveDisk");
     const bases = yield* makeBases(host, fake.port, "host-1", new Set());
-    const waiter = yield* bases.current(checkout, environment, true).pipe(Effect.forkChild);
+    const waiter = yield* bases.current(checkout, true).pipe(Effect.forkChild);
     yield* Effect.promise(() => held.reached);
     yield* Fiber.interrupt(waiter);
     held.open();
     yield* bases.idle;
-    expect((yield* bases.current(checkout, environment, false)).imageId).toMatch(/^im-/);
+    expect((yield* bases.current(checkout, false)).imageId).toMatch(/^im-/);
   }).pipe(Effect.scoped, Effect.provide(layer())),
 );
 
@@ -280,20 +277,20 @@ it.effect("refreshes in the background once origin moves, on top of the previous
   Effect.gen(function* () {
     const { upstream, workDir, host, checkout, fake } = setup();
     const bases = yield* makeBases(host, fake.port, "host-1", new Set());
-    const first = yield* bases.current(checkout, environment, true);
+    const first = yield* bases.current(checkout, true);
 
     const moved = commit(upstream, "b.txt", "two\n");
     yield* TestClock.adjust("1 hour");
-    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    expect(yield* bases.current(checkout, false)).toEqual(first);
     yield* bases.idle;
-    const second = yield* bases.current(checkout, environment, false);
+    const second = yield* bases.current(checkout, false);
     expect(second.sha).toBe(moved);
     expect(creates(fake).map((call) => call.imageId)).toEqual(["im-template", first.imageId]);
     expect(git(workDir, "rev-parse", "HEAD")).toBe(moved);
 
     commit(upstream, "c.txt", "three\n");
     yield* TestClock.adjust("1 hour");
-    yield* bases.current(checkout, environment, false);
+    yield* bases.current(checkout, false);
     yield* bases.idle;
     expect(fake.calls).toContainEqual({ op: "deleteImage", imageId: first.imageId });
     expect(fake.images.has(second.imageId)).toBe(true);
@@ -304,16 +301,16 @@ it.effect("with origin unchanged it only checks again, until the base is a week 
   Effect.gen(function* () {
     const { host, checkout, fake } = setup();
     const bases = yield* makeBases(host, fake.port, "host-1", new Set());
-    const first = yield* bases.current(checkout, environment, true);
+    const first = yield* bases.current(checkout, true);
     yield* TestClock.adjust("1 hour");
-    yield* bases.current(checkout, environment, false);
+    yield* bases.current(checkout, false);
     yield* bases.idle;
     expect(creates(fake)).toHaveLength(1);
 
     yield* TestClock.adjust("7 days");
-    yield* bases.current(checkout, environment, false);
+    yield* bases.current(checkout, false);
     yield* bases.idle;
-    const renewed = yield* bases.current(checkout, environment, false);
+    const renewed = yield* bases.current(checkout, false);
     expect(creates(fake)).toHaveLength(2);
     expect(renewed.sha).toBe(first.sha);
     expect(renewed.imageId).not.toBe(first.imageId);
@@ -325,54 +322,34 @@ it.effect("a failed build is not tried again for an hour", () =>
     const { host, checkout, fake } = setup();
     fake.onExec(isCommand("make prepare"), { exitCode: 1, stdout: "prepare broke" });
     const bases = yield* makeBases(host, fake.port, "host-1", new Set());
-    expect((yield* bases.current(checkout, environment, true).pipe(Effect.flip)).reason).toBe(
-      "failed",
-    );
+    expect((yield* bases.current(checkout, true).pipe(Effect.flip)).reason).toBe("failed");
     expect(fake.running().size).toBe(0);
-    expect((yield* bases.current(checkout, environment, false).pipe(Effect.flip)).reason).toBe(
-      "failed",
-    );
+    expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("failed");
     expect(creates(fake)).toHaveLength(1);
     yield* TestClock.adjust("1 hour");
-    expect((yield* bases.current(checkout, environment, false).pipe(Effect.flip)).reason).toBe(
-      "building",
-    );
+    expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("building");
     yield* bases.idle;
     expect(creates(fake)).toHaveLength(2);
   }).pipe(Effect.scoped, Effect.provide(layer())),
-);
-
-it.effect("prepares with this server's environment, whichever caller's run started the build", () =>
-  Effect.gen(function* () {
-    const { host, checkout, fake } = setup();
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
-    yield* bases.current(checkout, { ...environment, API_KEY: "smoke-test" }, true);
-    const prepare = fake.calls.find((call) => call.argv?.[2] === "make prepare");
-    expect(prepare?.env).toMatchObject({ API_KEY: "k" });
-  }).pipe(
-    Effect.scoped,
-    Effect.provide(layer()),
-    Effect.provideService(HostProcess.Environment, environment),
-  ),
 );
 
 it.effect("a failed refresh keeps the previous base in use and is tried again an hour later", () =>
   Effect.gen(function* () {
     const { upstream, host, checkout, fake } = setup();
     const bases = yield* makeBases(host, fake.port, "host-1", new Set());
-    const first = yield* bases.current(checkout, environment, true);
+    const first = yield* bases.current(checkout, true);
 
     commit(upstream, "b.txt", "two\n");
     fake.onExec(isCommand("make prepare"), { exitCode: 1, stdout: "prepare broke" });
     yield* TestClock.adjust("1 hour");
-    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    expect(yield* bases.current(checkout, false)).toEqual(first);
     yield* bases.idle;
-    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    expect(yield* bases.current(checkout, false)).toEqual(first);
     yield* bases.idle;
     expect(creates(fake)).toHaveLength(2);
 
     yield* TestClock.adjust("1 hour");
-    expect(yield* bases.current(checkout, environment, false)).toEqual(first);
+    expect(yield* bases.current(checkout, false)).toEqual(first);
     yield* bases.idle;
     expect(creates(fake)).toHaveLength(3);
   }).pipe(Effect.scoped, Effect.provide(layer())),

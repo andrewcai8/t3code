@@ -477,9 +477,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       if (size === undefined) return yield* new NotStarted({ reason: unknownSize(request.size) });
       const checkout = yield* inspect(request.cwd);
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
-      const base = yield* bases
-        .current(checkout, request.environment, false)
-        .pipe(Effect.mapError(notStarted));
+      const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
       const shipment = yield* ship(checkout, base, yield* scratchDir);
       const exited = yield* runJob(
         {
@@ -622,9 +620,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         const target = Deferred.makeUnsafe<Target, NotStarted>();
         byRoot.set(checkout.root, target);
         yield* Effect.gen(function* () {
-          const base = yield* bases
-            .current(checkout, environment, true)
-            .pipe(Effect.mapError(notStarted));
+          const base = yield* bases.current(checkout, true).pipe(Effect.mapError(notStarted));
           const shipment = yield* ship(checkout, base, yield* scratchDir);
           return { shipment, base };
         }).pipe(
