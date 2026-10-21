@@ -3021,7 +3021,8 @@ export const layer = Layer.effect(
       sendSwitch: async (lease, input) => {
         if (!lease.remoteAccess) throw new Error("The cloud machine has no remote access.");
         await serveProxy(lease);
-        return sendAccountSwitch(lease.remoteAccess, input);
+        const { continuationPrompt } = await runLogged(settings.getSettings);
+        return sendAccountSwitch(lease.remoteAccess, { ...input, continuationPrompt });
       },
     };
     const accountRotation = makeAccountRotation({

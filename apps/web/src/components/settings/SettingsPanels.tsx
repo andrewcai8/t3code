@@ -596,6 +596,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.autoSwitchCloudAccounts !== DEFAULT_UNIFIED_SETTINGS.autoSwitchCloudAccounts
       ? ["Switch cloud chats to another account at a usage limit"]
       : []),
+    ...(settings.continuationPrompt !== DEFAULT_UNIFIED_SETTINGS.continuationPrompt
+      ? ["Continuation message"]
+      : []),
     ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
     ...(settings.persistComposerContextStrip !==
     DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip
@@ -756,6 +759,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       autoPickProviderAccounts: DEFAULT_UNIFIED_SETTINGS.autoPickProviderAccounts,
       autoSwitchCloudAccounts: DEFAULT_UNIFIED_SETTINGS.autoSwitchCloudAccounts,
+      continuationPrompt: DEFAULT_UNIFIED_SETTINGS.continuationPrompt,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
@@ -2162,6 +2166,7 @@ export function GeneralSettingsPanel() {
   const backgroundActivityProfileOption = resolveBackgroundActivityProfileOption(settings);
   const mixedBackgroundActivity = useScopedSettingsMixed(["backgroundActivity"]);
   const mixedAddProjectBaseDirectory = useScopedSettingsMixed(["addProjectBaseDirectory"]);
+  const mixedContinuationPrompt = useScopedSettingsMixed(["continuationPrompt"]);
   const mixedTextGenerationModel = useScopedSettingsMixed(["textGenerationModelSelection"]);
   const backgroundActivityDescription =
     backgroundActivityProfileOption === "advanced"
@@ -2320,6 +2325,40 @@ export function GeneralSettingsPanel() {
             }
           />
         ) : null}
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("continuation-prompt")}
+          description="Sent when T3 Code continues a turn on its own, after a restart or a usage limit. Start it with a skill, such as /review, to run that skill on every continuation."
+          settingKeys={["continuationPrompt"]}
+          resetAction={
+            settings.continuationPrompt !== DEFAULT_UNIFIED_SETTINGS.continuationPrompt ? (
+              <SettingResetButton
+                label="continuation message"
+                onClick={() =>
+                  updateSettings({
+                    continuationPrompt: DEFAULT_UNIFIED_SETTINGS.continuationPrompt,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <DraftInput
+              size="sm"
+              className="w-full sm:w-72"
+              value={mixedContinuationPrompt ? "" : settings.continuationPrompt}
+              onCommit={(next) =>
+                updateSettings({
+                  continuationPrompt: next.trim() || DEFAULT_UNIFIED_SETTINGS.continuationPrompt,
+                })
+              }
+              placeholder={
+                mixedContinuationPrompt ? "Mixed" : DEFAULT_UNIFIED_SETTINGS.continuationPrompt
+              }
+              aria-label="Continuation message"
+            />
+          }
+        />
 
         <SettingsRow
           {...searchableSetting("working-shelf")}

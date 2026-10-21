@@ -348,6 +348,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     environmentControlOnly: true,
   },
   {
+    id: "continuation-prompt",
+    title: "Continuation message",
+    to: "/settings/general",
+    searchTerms: ["continue resume prompt restart usage limit account switch skill slash command"],
+  },
+  {
     id: "working-shelf",
     title: "Working section (beta)",
     to: "/settings/general",

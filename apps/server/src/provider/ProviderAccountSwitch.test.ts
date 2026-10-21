@@ -292,7 +292,12 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
                   variables: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", value: "token-b" }],
                 },
                 threadId,
-                ...(continueRunId === undefined ? {} : { continueRunId }),
+                ...(continueRunId === undefined
+                  ? {}
+                  : {
+                      continueRunId,
+                      continuationPrompt: "/poteto-mode Continue where you left off.",
+                    }),
               });
 
             yield* saveInstance(claudeInstanceId, {
@@ -361,7 +366,10 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               after.runs.map((run) => run.status),
               ["failed", "running"],
             );
-            assert.equal(after.messages.at(-1)?.text, "Continue where you left off.");
+            assert.equal(
+              after.messages.at(-1)?.text,
+              "/poteto-mode Continue where you left off.\n\nYour previous account hit its usage limit, so this chat moved to another account with room. Subagents and new chats are also routed to accounts with room, so keep working and delegating as usual.",
+            );
             const instance = (yield* settings.getSettings).providerInstances[claudeInstanceId];
             assert.equal(instance?.displayName, "Second account");
             assert.deepEqual(instance?.config, { accountEmail: "second@example.com" });
@@ -551,6 +559,10 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
 
             const after = yield* orchestrator.getThreadProjection(threadId);
             assert.deepEqual(switched, { kind: "switched", continued: true });
+            assert.include(
+              after.messages.map((message) => message.text),
+              "Continue where you left off.\n\nYour previous account hit its usage limit, so this chat moved to another account with room. Subagents and new chats are also routed to accounts with room, so keep working and delegating as usual.",
+            );
             assert.deepEqual(
               after.runs.map((run) => [run.status, run.ordinal]),
               [

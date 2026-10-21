@@ -36,6 +36,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import { credentialVariables } from "../environmentControl/ProvisioningProviderProfile.ts";
+import { accountSwitchContinuation } from "../orchestration-v2/accountSwitchContinuation.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettingsModule from "../serverSettings.ts";
@@ -262,7 +263,7 @@ const make = Effect.gen(function* () {
         messageId: MessageId.make(continuation),
         threadId: input.threadId,
         manualContinuationOfRunId: input.continueRunId,
-        text: "Continue where you left off.",
+        text: accountSwitchContinuation(input.continuationPrompt ?? after.continuationPrompt),
         attachments: [],
         dispatchMode: { type: "start_immediately" },
         createdBy: "user",
