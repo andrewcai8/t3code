@@ -75,6 +75,9 @@ describe("routing", () => {
     [["test", "packages/api"]],
     [["test", "--bail", "-t", "renders a row", "packages/api"]],
     [["test", "--shard=1/4", "--timeout", "30000"]],
+    [["test", "--isolate", "--timeout", "60000", "packages/api"]],
+    [["test", "--parallel=4", "--retry", "2", "--max-concurrency", "5", "--dots"]],
+    [["test", "--only-failures", "--no-orphans", "--path-ignore-patterns=**/e2e/**"]],
   ])("sends a whole-suite run to fork-exec: bun %j", (args) => {
     expect(bun(args)).toEqual({ code: 0, calls: [`t3 fork-exec -- bun ${args.join(" ")}`] });
   });
@@ -86,6 +89,10 @@ describe("routing", () => {
     [["test", "-u"]],
     [["test", "--coverage"]],
     [["test", "--timeout"]],
+    [["test", "--reporter=junit", "--reporter-outfile=junit.xml"]],
+    [["test", "--coverage-dir=cov"]],
+    [["test", "--timings=t.json", "--update-timings"]],
+    [["test", "--changed"]],
     [["run", "test"]],
     [["install"]],
   ])("runs anything else with the real bun: bun %j", (args) => {
