@@ -97,9 +97,10 @@ if (args[0] === 'auth') {
 }
 `;
 
+/** An hour-long broker token issued in 2000, long expired on the guest's clock. */
 const expiredBroker = () => {
-  const now = Date.now();
-  return `${Buffer.from(JSON.stringify({ iat: now - 7_200_000, exp: now - 3_600_000 })).toString("base64url")}.test-private-broker`;
+  const issuedAt = Date.parse("2000-01-01T00:00:00.000Z");
+  return `${Buffer.from(JSON.stringify({ iat: issuedAt, exp: issuedAt + 3_600_000 })).toString("base64url")}.test-private-broker`;
 };
 
 /** What a pairing mint runs on the guest before it asks the server for a grant. */
@@ -502,7 +503,7 @@ describe("remote preparation subprocess", () => {
       `Preparation command timed out: sh -lc ${stall}\nSkipped the 1 setup command after it`,
     );
     expect(await NodeFSP.readFile(NodePath.join(input.root, "after-stall"), "utf8")).toBe("ran\n");
-  }, 45_000);
+  });
 
   it("serializes concurrent retries and preserves agent commits, credentials and environment identity", async () => {
     const input = await fixture();
@@ -1706,12 +1707,13 @@ describe("box disk guard", () => {
       git(path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init");
       await NodeFSP.writeFile(NodePath.join(path, "notes.txt"), "mine\n");
       if (!options.idle) return;
-      const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000);
+      // Untouched since 2000: idle far past the guard's hour on any clock.
+      const longAgo = new Date("2000-01-01T00:00:00.000Z");
       const age = async (target: string): Promise<void> => {
         const entry = await NodeFSP.lstat(target);
         if (entry.isDirectory())
           for (const name of await NodeFSP.readdir(target)) await age(NodePath.join(target, name));
-        await NodeFSP.utimes(target, twoHoursAgo, twoHoursAgo);
+        await NodeFSP.utimes(target, longAgo, longAgo);
       };
       await age(path);
     };
@@ -1871,7 +1873,7 @@ describe("bounded preparation commands", () => {
       onTime: true,
       survived: false,
     });
-  }, 45_000);
+  });
 });
 
 describe("warm base", () => {

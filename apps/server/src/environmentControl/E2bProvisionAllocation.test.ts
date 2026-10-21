@@ -1,8 +1,9 @@
-// @effect-diagnostics globalDate:off - the HTTP provider fixture uses the real wall clock.
-// @effect-diagnostics globalDateInEffect:off - actual SDK timeouts are checked against the provider wall clock.
+// @effect-diagnostics globalDate:off - the HTTP provider fixture stamps deadlines from the frozen Date.
+// @effect-diagnostics globalDateInEffect:off - actual SDK timeouts are checked against the provider's Date deadlines.
 // @effect-diagnostics nodeBuiltinImport:off - the actual SDK talks to an isolated HTTP provider fixture.
 import * as NodeHttp from "node:http";
 import { expect, it } from "@effect/vitest";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DurableProvisionRequest,
@@ -20,6 +21,19 @@ import { makeE2bProvisionRuntime } from "./E2bProvisionRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import { Provisioning, ProvisionProviderError, ProvisionProviderPorts } from "./Provisioning.ts";
+
+// Retention math and the provider fixture both read Date; frozen, a deadline a minute out
+// leaves exactly the seconds the cap allows however long the HTTP round trips take.
+const NOW = Date.parse("2026-10-01T00:00:00.000Z");
+const inAMinute = new Date(NOW + 60_000).toISOString();
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+const providerEndAt = (timeoutSeconds: number, drift: boolean) =>
+  new Date(NOW + timeoutSeconds * 1000 + (drift ? 60_000 : 0)).toISOString();
 
 const request = Schema.decodeUnknownSync(DurableProvisionRequest)({
   requestId: "26d53765-3f84-4688-90f6-7c7d26b890cc",
@@ -108,9 +122,7 @@ async function providerHttp(drop?: "create" | "fork") {
         const parsed = decodeCreate(body);
         creates.push(parsed);
         const resource = sandbox(`parent-${creates.length}`, parsed.metadata, parsed.templateID);
-        resource.endAt = new Date(
-          Date.now() + parsed.timeout * 1000 + (state.drift ? 60_000 : 0),
-        ).toISOString();
+        resource.endAt = providerEndAt(parsed.timeout, state.drift);
         resources.push(resource);
         if (state.drop === "create") {
           state.drop = undefined;
@@ -131,9 +143,7 @@ async function providerHttp(drop?: "create" | "fork") {
           { ...parent.metadata },
           parent.templateID,
         );
-        resource.endAt = new Date(
-          Date.now() + parsed.timeout * 1000 + (state.drift ? 60_000 : 0),
-        ).toISOString();
+        resource.endAt = providerEndAt(parsed.timeout, state.drift);
         resources.push(resource);
         if (state.drop === "fork") {
           state.drop = undefined;
@@ -159,9 +169,7 @@ async function providerHttp(drop?: "create" | "fork") {
       ) {
         const parsed = decodeTimeout(body);
         (url.pathname.endsWith("/timeout") ? timeouts : connects).push(parsed.timeout);
-        parent.endAt = new Date(
-          Date.now() + parsed.timeout * 1000 + (state.drift ? 60_000 : 0),
-        ).toISOString();
+        parent.endAt = providerEndAt(parsed.timeout, state.drift);
         res.writeHead(url.pathname.endsWith("/timeout") ? 204 : 201);
         res.end(url.pathname.endsWith("/timeout") ? undefined : JSON.stringify(parent));
         return;
@@ -384,7 +392,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const cap = new Date(Date.now() + 60_000).toISOString();
+      const cap = inAMinute;
       const bounded = { ...operation, request: { ...request, retentionDeadline: cap } };
       const ports = makeE2bAllocationPorts(f.config);
       const parent = yield* ports.create(bounded);
@@ -416,7 +424,7 @@ it.effect(
       f.state.drift = true;
       const bounded = {
         ...operation,
-        request: { ...request, retentionDeadline: new Date(Date.now() + 60_000).toISOString() },
+        request: { ...request, retentionDeadline: inAMinute },
       };
       const ports = makeE2bAllocationPorts(f.config);
       const result = yield* ports.create(bounded).pipe(Effect.result);
@@ -476,7 +484,7 @@ it.effect(
       const f = yield* fixture();
       const bounded = {
         ...operation,
-        request: { ...request, retentionDeadline: new Date(Date.now() + 60_000).toISOString() },
+        request: { ...request, retentionDeadline: inAMinute },
       };
       const ports = makeE2bAllocationPorts(f.config);
       const resource = yield* ports.create(bounded);

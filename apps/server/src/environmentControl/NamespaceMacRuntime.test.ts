@@ -1,11 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off - a local stand-in for Namespace runs the guest scripts as subprocesses.
-// @effect-diagnostics globalDate:off - the stand-in gives Macs real deadlines, which the runtime reads from the clock.
+// @effect-diagnostics globalDate:off - the stand-in gives Macs deadlines on the frozen Date the runtime reads.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   artifactStore,
@@ -32,15 +32,23 @@ import {
   type MacTemplateIdentity,
 } from "./ProvisionPreparation.ts";
 
+const MINUTE = 60_000;
+// The runtime reads the live Effect clock, which is Date; frozen at NOW, a stand-in Mac's
+// deadline is exactly its lifetime from the runtime's now.
+const NOW = Date.parse("2026-10-01T00:00:00.000Z");
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+});
+
 const cleanups: Cleanups = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
 });
 
 const decodeOperation = Schema.decodeUnknownSync(ProvisionOperation);
 const decodeManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest);
 const chatId = "6f0c1d2e-3a4b-4c5d-8e6f-7a8b9c0d1e2f";
-const MINUTE = 60_000;
 
 /**
  * Namespace as one machine at a time owning the world's volume: creating a Mac
@@ -85,7 +93,7 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
       macs.set(instanceId, {
         labels: { ...spec.labels },
         alive: true,
-        deadline: Math.min(spec.deadline, Date.now() + lifetimeMs),
+        deadline: Math.min(spec.deadline, NOW + lifetimeMs),
       });
       if (failCreate?.(spec.labels)) {
         failCreate = null;
@@ -135,7 +143,7 @@ function fakeNamespace(w: World, lifetimeMs = 5 * 60 * MINUTE) {
       void macs.set(InstanceId.make(instanceId), {
         labels,
         alive: true,
-        deadline: Date.now() + lifetimeMs,
+        deadline: NOW + lifetimeMs,
         elsewhere: true,
       }),
     failNextCreate: (when: (labels: Readonly<Record<string, string>>) => boolean) => {
@@ -570,7 +578,7 @@ describe("Namespace Mac runtime", () => {
 
   it("keeps a snapshot only as long as its lease's retention, and resumes an expired one as missing", async () => {
     const t = await setup();
-    const retention = new Date(Date.now() + 3 * 86_400_000).toISOString();
+    const retention = new Date(NOW + 3 * 86_400_000).toISOString();
     const ready = await t.runtime.prepare(t.operation("pending", retention), t.manifest);
     const op = t.operation(ready.environmentId, retention);
     expect(await t.runtime.release(op, t.manifest)).toBe("released");
@@ -708,7 +716,7 @@ describe("Namespace Mac runtime", () => {
     const mac = await t.namespace.instances.create({
       labels: { "t3.chat": chatId },
       cache: null,
-      deadline: Date.now() + 60 * MINUTE,
+      deadline: NOW + 60 * MINUTE,
       size: "m",
       purpose: "t3 chat",
     });

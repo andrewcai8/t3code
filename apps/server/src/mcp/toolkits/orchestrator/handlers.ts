@@ -16,7 +16,7 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      const local = yield* service.capabilities(scope);
+      const local = yield* service.capabilities(scope, input);
       if (input.environmentId === undefined || input.environmentId === scope.environmentId) {
         return local;
       }

@@ -5,7 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { ProvisionedSandboxMissing } from "./driver.ts";
 import { makeModalChatStore, type ModalChatRecord } from "./modalChatStore.ts";
@@ -351,18 +351,26 @@ describe("Modal runtime", () => {
     expect(await t.runtime.release(t.operation)).toBe("missing");
   });
 
-  const backUp = (t: Awaited<ReturnType<typeof setup>>) =>
-    t.runtime.backUp(
-      t.operation,
-      t.manifest,
-      {
-        leaseId: chatId,
-        target: { kind: "none", reason: "No origin in this test." },
-        previous: undefined,
-        now: "2026-10-01T00:00:00Z",
-      },
-      Date.now() + 60_000,
-    );
+  /** Backs the chat up with Date frozen, so its deadline leaves exactly a minute's budget. */
+  const backUp = async (t: Awaited<ReturnType<typeof setup>>) => {
+    const now = Date.parse("2026-10-01T00:00:00Z");
+    vi.useFakeTimers({ toFake: ["Date"], now });
+    try {
+      return await t.runtime.backUp(
+        t.operation,
+        t.manifest,
+        {
+          leaseId: chatId,
+          target: { kind: "none", reason: "No origin in this test." },
+          previous: undefined,
+          now: "2026-10-01T00:00:00Z",
+        },
+        now + 60_000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  };
 
   it("keeps one disk save per chat, replacing the one before", async () => {
     const t = await setup();
@@ -444,7 +452,7 @@ describe("Modal runtime", () => {
         previous: undefined,
         now: "2026-10-01T00:00:00Z",
       },
-      Date.now() - 1,
+      Date.parse("2000-01-01T00:00:00Z"),
     );
 
     expect(await t.runtime.release(t.operation)).toBe("released");

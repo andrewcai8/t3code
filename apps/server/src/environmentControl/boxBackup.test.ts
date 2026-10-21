@@ -4,7 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { CloudBackupManifest } from "@t3tools/contracts";
 import { backUpBox, backUpSessions, workTarget } from "./boxBackup.ts";
@@ -282,6 +282,15 @@ describe("workTarget", () => {
 });
 
 describe("backUpBox", () => {
+  const NOW = Date.parse("2026-10-06T12:00:00.000Z");
+  // A frozen clock gives every command the deadline's full minute, however slow the runner.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("records the work's branches and the sessions, then leaves an unchanged box's record alone", async () => {
     const f = await box();
     await NodeFSP.writeFile(NodePath.join(f.workspace, "notes.txt"), "unsaved\n");
@@ -291,7 +300,7 @@ describe("backUpBox", () => {
       target: { kind: "origin" as const },
       sessions: { uri: URI, environmentId: "child", account: "claude-a", threadId: "owner-thread" },
       now: "2026-10-06T12:00:00.000Z",
-      deadline: Date.now() + 60_000,
+      deadline: NOW + 60_000,
     };
     const first = await backUpBox(f.port, { ...input, previous: undefined });
     expect(first).toMatchObject({
@@ -319,7 +328,7 @@ describe("backUpBox", () => {
       sessions: { uri: URI, environmentId: "child", account: "claude-a", threadId: "owner-thread" },
       previous: undefined,
       now: "2026-10-06T12:00:00.000Z",
-      deadline: Date.now() + 60_000,
+      deadline: NOW + 60_000,
     });
     expect(result).toMatchObject({ backup: { branches: ["t3-backup/lease-1"] }, problems: [] });
     expect(git(f.origin, "for-each-ref", "refs/heads/t3-backup/")).toBe("");
@@ -361,7 +370,7 @@ describe("backUpBox", () => {
         },
         previous,
         now: "2026-10-06T13:00:00.000Z",
-        deadline: Date.now() + 60_000,
+        deadline: NOW + 60_000,
       }),
     ).toEqual({ backup: previous, problems: ["The chat's database could not be read."] });
   });

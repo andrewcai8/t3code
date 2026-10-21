@@ -242,6 +242,7 @@ async function fixture(
         }
         const booting = state.bootedAt - DateTime.toEpochMillis(DateTime.nowUnsafe());
         if (booting > 0)
+          // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- the boot races the command's real AbortSignal.timeout, which no fake clock drives
           await NodeTimersPromises.setTimeout(booting, undefined, { signal }).catch(() => {
             throw new Error("Namespace CLI command aborted or timed out");
           });
@@ -619,8 +620,9 @@ describe("Namespace runtime transport", () => {
       "issue\n",
     ]);
 
-    const now = Date.now();
-    const expired = `${Buffer.from(encodeJson({ iat: now - 7_200_000, exp: now - 3_600_000 })).toString("base64url")}.fixture-broker`;
+    // An hour-long token issued in 2000 has long expired on the guest's clock.
+    const issuedAt = Date.parse("2000-01-01T00:00:00.000Z");
+    const expired = `${Buffer.from(encodeJson({ iat: issuedAt, exp: issuedAt + 3_600_000 })).toString("base64url")}.fixture-broker`;
     await NodeFSP.writeFile(NodePath.join(root, "broker-token"), expired);
     const renewed = await mint();
     const stored = await read("broker-token");

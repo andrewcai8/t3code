@@ -1048,6 +1048,8 @@ it.effect("saves each launch before the next one routes, so two at once take two
       }),
     );
     const routed: string[] = [];
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => (releaseFirst = resolve));
     let bothRouted!: () => void;
     const routedTwice = new Promise<void>((resolve) => (bothRouted = resolve));
     const control = makeProvisionControl(
@@ -1058,9 +1060,9 @@ it.effect("saves each launch before the next one routes, so two at once take two
         // Routes like the host: to the first account no saved request runs on.
         freeze: async (launch) => {
           const account = ["codex_ac1", "codex_ac3"].find((id) => !saved.has(id))!;
-          for (let tick = 0; tick < 3; tick++)
-            await new Promise((resolve) => setImmediate(resolve));
-          if (routed.push(account) === 2) bothRouted();
+          const order = routed.push(account);
+          if (order === 1) await firstHeld;
+          if (order === 2) bothRouted();
           return {
             ...manifest,
             input: launch,
@@ -1080,13 +1082,18 @@ it.effect("saves each launch before the next one routes, so two at once take two
       },
       createProvisionedLeaseRegistry(yield* SqlClient.SqlClient),
     );
-    const launches = yield* Effect.forEach(
-      ["0b9f7d2e-5a43-4c8e-9f1a-2d6b8c4e7a01", "0b9f7d2e-5a43-4c8e-9f1a-2d6b8c4e7a02"],
-      (requestId) => control.provision(decodeInput({ ...input, requestId })).pipe(Effect.forkChild),
-    );
+    // Started at once, a launch runs until it waits: on the first's freeze, or on routing.
+    const launch = (requestId: string) =>
+      control
+        .provision(decodeInput({ ...input, requestId }))
+        .pipe(Effect.forkChild({ startImmediately: true }));
+    const first = yield* launch("0b9f7d2e-5a43-4c8e-9f1a-2d6b8c4e7a01");
+    const second = yield* launch("0b9f7d2e-5a43-4c8e-9f1a-2d6b8c4e7a02");
+    expect(routed, "the second launch waits while the first is unsaved").toEqual(["codex_ac1"]);
+    releaseFirst();
     yield* Effect.promise(() => routedTwice);
     expect(routed).toEqual(["codex_ac1", "codex_ac3"]);
-    yield* Fiber.interruptAll(launches);
+    yield* Fiber.interruptAll([first, second]);
   }).pipe(
     Effect.provide(
       ProvisionOperationStore.layer.pipe(

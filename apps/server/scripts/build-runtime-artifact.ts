@@ -5,11 +5,9 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import packageJson from "../package.json" with { type: "json" };
-import { fromYaml } from "@t3tools/shared/schemaYaml";
-import * as Schema from "effect/Schema";
 import {
   findUntestedPackages,
-  PnpmLock,
+  decodePnpmLock,
   resolveRuntimeDependencies,
 } from "./runtimeDependencies.ts";
 
@@ -28,9 +26,7 @@ if (platform && !install) {
 
 const repoRoot = NodePath.resolve(new URL("../../..", import.meta.url).pathname);
 const { dependencies, overrides, versions } = resolveRuntimeDependencies(
-  Schema.decodeUnknownSync(fromYaml(PnpmLock))(
-    await NodeFSP.readFile(NodePath.join(repoRoot, "pnpm-lock.yaml"), "utf8"),
-  ),
+  decodePnpmLock(await NodeFSP.readFile(NodePath.join(repoRoot, "pnpm-lock.yaml"), "utf8")),
   "apps/server",
 );
 const stage = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-runtime-artifact-"));

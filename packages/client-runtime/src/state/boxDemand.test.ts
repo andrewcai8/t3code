@@ -2,7 +2,6 @@ import { EnvironmentId, type OrchestrationV2ThreadShell } from "@t3tools/contrac
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "@effect/vitest";
-import * as Effect from "effect/Effect";
 
 import type { ProvisionedBox } from "../cloud/provisioning.ts";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "../connection/catalog.ts";
@@ -72,7 +71,16 @@ describe("running box demand", () => {
     readonly lifecycle: ProvisionedBox["lifecycle"];
     readonly catalog?: EnvironmentCatalogState;
   }) {
-    const registry = AtomRegistry.make();
+    const tasks: Array<() => void> = [];
+    const registry = AtomRegistry.make({
+      scheduleTask: (task) => {
+        tasks.push(task);
+        return () => {};
+      },
+    });
+    const flush = () => {
+      for (let task = tasks.shift(); task !== undefined; task = tasks.shift()) task();
+    };
     const threads = Atom.make<ReadonlyArray<RunState>>([input.thread]);
     const lifecycle = Atom.make(input.lifecycle);
     const held = new Set<EnvironmentId>();
@@ -102,21 +110,19 @@ describe("running box demand", () => {
       demandAtom,
     });
     registry.mount(atom);
-    return { registry, threads, lifecycle, held };
+    return { registry, flush, threads, lifecycle, held };
   }
   const running: RunState = { status: "running", activityRunStatus: "running" };
   const idle: RunState = { status: "idle", activityRunStatus: null };
 
-  it.live("holds a box connected while a turn runs on it, and lets go when it ends", () =>
-    Effect.gen(function* () {
-      const { registry, threads, held } = harness({ thread: running, lifecycle: "active" });
-      expect([...held]).toEqual([BOX.environmentId]);
-      registry.set(threads, [idle]);
-      // The registry drops an atom nothing mounts on its next task.
-      yield* Effect.sleep("1 millis");
-      expect([...held]).toEqual([]);
-    }),
-  );
+  it("holds a box connected while a turn runs on it, and lets go when it ends", () => {
+    const { registry, flush, threads, held } = harness({ thread: running, lifecycle: "active" });
+    expect([...held]).toEqual([BOX.environmentId]);
+    registry.set(threads, [idle]);
+    // The registry drops an atom nothing mounts on its next task.
+    flush();
+    expect([...held]).toEqual([]);
+  });
 
   it("does not dial a box its host paused, whatever the cache last saw", () => {
     const { registry, lifecycle, held } = harness({ thread: running, lifecycle: "paused" });

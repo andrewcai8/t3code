@@ -2,13 +2,11 @@
 import * as NodeFS from "node:fs";
 
 import { assert, it } from "@effect/vitest";
-import { fromYaml } from "@t3tools/shared/schemaYaml";
 import e2bPackage from "e2b/package.json" with { type: "json" };
-import * as Schema from "effect/Schema";
 
 import {
   findUntestedPackages,
-  PnpmLock,
+  decodePnpmLock,
   resolveRuntimeDependencies,
 } from "./runtimeDependencies.ts";
 
@@ -96,7 +94,7 @@ it("fails when pnpm-lock.yaml is missing a package in the closure", () => {
 // DELETE, so E2B refused every sandbox kill and snapshot delete after a 10 s read timeout.
 it("installs an undici major the bundled E2B SDK was built against", () => {
   const { dependencies, overrides } = resolveRuntimeDependencies(
-    Schema.decodeUnknownSync(fromYaml(PnpmLock))(
+    decodePnpmLock(
       NodeFS.readFileSync(new URL("../../../pnpm-lock.yaml", import.meta.url), "utf8"),
     ),
     "apps/server",

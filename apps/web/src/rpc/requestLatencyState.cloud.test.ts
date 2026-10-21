@@ -1,16 +1,11 @@
 import { WS_METHODS } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import {
-  getSlowRpcAckRequests,
-  resetRequestLatencyStateForTests,
-  trackRpcRequestSent,
-} from "./requestLatencyState";
+import { getSlowRpcAckRequests, trackRpcRequestSent } from "./requestLatencyState";
 
 describe("a cloud machine's resume", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    resetRequestLatencyStateForTests();
   });
 
   afterEach(() => {
