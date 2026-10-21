@@ -6252,7 +6252,7 @@ export default function ChatView(props: ChatViewProps) {
           message: {
             messageId: newMessageId(),
             role: "user",
-            text: "Continue where you left off.",
+            text: settings.continuationPrompt,
             attachments: [],
           },
           runtimeMode,
