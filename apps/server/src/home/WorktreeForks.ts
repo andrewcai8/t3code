@@ -448,15 +448,39 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   });
 
   /** One copy: waits for a slot, prepares, announces the start, runs. Its sandbox always ends. */
-  const runJob = (job: CopyJob, shipment: Shipment, base: ForkBase, observer: ExecObserver) =>
-    slots.withSlot(
+  const runJob = Effect.fn("WorktreeForks.runJob")(function* (
+    job: CopyJob,
+    shipment: Shipment,
+    base: ForkBase,
+    observer: ExecObserver,
+  ) {
+    const queuedAt = yield* Clock.currentTimeMillis;
+    return yield* slots.withSlot(
       Effect.scoped(
-        prepare(job, shipment, base.imageId).pipe(
-          Effect.tap(() => observer.started(job.id)),
-          Effect.flatMap((sandboxId) => execute(sandboxId, job, observer.output)),
-        ),
+        Effect.gen(function* () {
+          const setupAt = yield* Clock.currentTimeMillis;
+          const sandboxId = yield* prepare(job, shipment, base.imageId);
+          yield* observer.started(job.id);
+          const commandAt = yield* Clock.currentTimeMillis;
+          const exited = yield* execute(sandboxId, job, observer.output);
+          // One line per finished copy, so this host's offload use can be read from its log.
+          yield* Effect.logInfo("worktree fork job finished", {
+            job: job.id,
+            repository: shipment.checkout.repository.repository,
+            cpu: job.size.cpu,
+            memoryMiB: job.size.memoryMiB,
+            shippedBytes: NodeFS.statSync(shipment.archive, { throwIfNoEntry: false })?.size,
+            exitCode: exited.exitCode,
+            timedOut: exited.timedOut,
+            queuedMs: setupAt - queuedAt,
+            setupMs: commandAt - setupAt,
+            commandMs: exited.durationMs,
+          });
+          return exited;
+        }),
       ),
     );
+  });
 
   /** Logged where an outcome is decided, so a refusal before any copy exists says why too. */
   const logFailure = (error: NotStarted | Lost, cwd: string) =>
@@ -477,9 +501,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       if (size === undefined) return yield* new NotStarted({ reason: unknownSize(request.size) });
       const checkout = yield* inspect(request.cwd);
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
-      const base = yield* bases
-        .current(checkout, request.environment, false)
-        .pipe(Effect.mapError(notStarted));
+      const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
       const shipment = yield* ship(checkout, base, yield* scratchDir);
       const exited = yield* runJob(
         {
@@ -622,9 +644,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         const target = Deferred.makeUnsafe<Target, NotStarted>();
         byRoot.set(checkout.root, target);
         yield* Effect.gen(function* () {
-          const base = yield* bases
-            .current(checkout, environment, true)
-            .pipe(Effect.mapError(notStarted));
+          const base = yield* bases.current(checkout, true).pipe(Effect.mapError(notStarted));
           const shipment = yield* ship(checkout, base, yield* scratchDir);
           return { shipment, base };
         }).pipe(

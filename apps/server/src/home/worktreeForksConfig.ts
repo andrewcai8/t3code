@@ -25,7 +25,16 @@ import type { ModalBoxes, ModalCopySpec } from "../environmentControl/ModalRunti
 
 const Bounded = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum }));
 
-const ForkSize = Schema.Struct({ cpu: Bounded(64), memoryGiB: Bounded(512) });
+/**
+ * `cpu` and `memoryGiB` cap a copy; the requests are what Modal reserves and bills at least.
+ * A copy bursts past them while its host has room, and Modal bills max(request, use).
+ */
+const ForkSize = Schema.Struct({
+  cpu: Bounded(64),
+  memoryGiB: Bounded(512),
+  cpuRequest: Schema.optional(Bounded(64)),
+  memoryRequestGiB: Schema.optional(Bounded(512)),
+});
 
 const WorktreeForksFile = Schema.Struct({
   modal: Schema.Struct({
@@ -72,7 +81,27 @@ const BUILT_IN_SIZES = {
 export interface SandboxSize {
   readonly cpu: number;
   readonly memoryMiB: number;
+  readonly cpuRequest: number;
+  readonly memoryRequestMiB: number;
 }
+
+/**
+ * Measured on Modal's vm runtime (2026-10-20): a megpt test shard peaked near 3 GiB and, with a
+ * one-core request, still burst to all 8 cores. A quarter of the CPU keeps a floor if bursting
+ * dries up; half the memory leaves headroom against eviction above the request.
+ */
+const sandboxSize = (size: typeof ForkSize.Type): SandboxSize => {
+  const cpuRequest = size.cpuRequest ?? Math.max(1, Math.floor(size.cpu / 4));
+  const memoryRequestGiB = size.memoryRequestGiB ?? Math.max(1, Math.floor(size.memoryGiB / 2));
+  if (cpuRequest > size.cpu || memoryRequestGiB > size.memoryGiB)
+    throw new Error("A size's request exceeds its limit");
+  return {
+    cpu: size.cpu,
+    memoryMiB: size.memoryGiB * 1024,
+    cpuRequest,
+    memoryRequestMiB: memoryRequestGiB * 1024,
+  };
+};
 
 export interface ForkRepository {
   /** Canonical owner/name, matched against a checkout's origin. */
@@ -143,9 +172,9 @@ export const copySpec = (
   runtime: "vm",
   timeoutMs: input.lifetimeMs,
   sizing: {
-    cpu: input.size.cpu,
+    cpu: input.size.cpuRequest,
     cpuLimit: input.size.cpu,
-    memoryMiB: input.size.memoryMiB,
+    memoryMiB: input.size.memoryRequestMiB,
     memoryLimitMiB: input.size.memoryMiB,
   },
   tags: input.tags,
@@ -196,7 +225,7 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
   const sizes = new Map<string, SandboxSize>(
     Object.entries({ ...BUILT_IN_SIZES, ...file.sizes }).map(([name, size]) => [
       name,
-      { cpu: size.cpu, memoryMiB: size.memoryGiB * 1024 },
+      sandboxSize(size),
     ]),
   );
   const defaultSize = file.defaultSize ?? "default";

@@ -18,6 +18,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as TestClock from "effect/testing/TestClock";
 
 import { ServerConfig } from "../config.ts";
@@ -87,8 +88,8 @@ const setup = (
       environment: undefined,
     },
     sizes: new Map([
-      ["default", { cpu: 8, memoryMiB: 16384 }],
-      ["large", { cpu: 16, memoryMiB: 32768 }],
+      ["default", { cpu: 8, memoryMiB: 16384, cpuRequest: 2, memoryRequestMiB: 8192 }],
+      ["large", { cpu: 16, memoryMiB: 32768, cpuRequest: 4, memoryRequestMiB: 16384 }],
     ]),
     defaultSize: "default",
     maxConcurrent: options.maxConcurrent ?? 8,
@@ -306,6 +307,44 @@ it.effect("a copy lost after the banner is reported lost, and its sandbox still 
     expect(seen).toEqual(["started true"]);
     expect(fake.running().size).toBe(0);
   }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("each finished copy logs its job, repository, size, exit code and phase times", () => {
+  const { root, fake, layer, start } = setup();
+  const logs: Array<ReadonlyArray<unknown>> = [];
+  const logger = Logger.make(({ message }) => {
+    logs.push(Array.isArray(message) ? message : [message]);
+  });
+  return Effect.gen(function* () {
+    fake.onExec(isCommand("bun test"), { exitCode: 3 });
+    const forks = yield* start;
+    let jobId = "";
+    yield* forks.exec(request(root), {
+      started: (id) => Effect.sync(() => (jobId = id)),
+      output: () => {},
+    });
+    const finished = logs.filter(([text]) => text === "worktree fork job finished");
+    expect(finished).toEqual([
+      [
+        "worktree fork job finished",
+        {
+          job: jobId,
+          repository: "acme/widgets",
+          cpu: 8,
+          memoryMiB: 16384,
+          shippedBytes: expect.any(Number),
+          exitCode: 3,
+          timedOut: false,
+          queuedMs: expect.any(Number),
+          setupMs: expect.any(Number),
+          commandMs: expect.any(Number),
+        },
+      ],
+    ]);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(Layer.merge(layer, Logger.layer([logger], { mergeWithExisting: false }))),
+  );
 });
 
 it.effect("a command past its timeout exits 124 and its copy ends", () => {
