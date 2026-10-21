@@ -913,7 +913,10 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
   }),
 );
 
-const continuationDispatches = (projection: OrchestrationV2ThreadProjection) =>
+const continuationDispatches = (
+  projection: OrchestrationV2ThreadProjection,
+  continuationPrompt?: string,
+) =>
   Effect.gen(function* () {
     const dispatches: Array<Extract<OrchestrationV2Command, { type: "message.dispatch" }>> = [];
     yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
@@ -927,15 +930,21 @@ const continuationDispatches = (projection: OrchestrationV2ThreadProjection) =>
               return Effect.succeed({} as never);
             },
           }),
-          ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+          ServerSettings.layerTest({
+            continueThreadsAfterServerUpdate: true,
+            ...(continuationPrompt === undefined ? {} : { continuationPrompt }),
+          }),
         ),
       ),
     );
     return dispatches;
   });
 
-const continuationTexts = (projection: OrchestrationV2ThreadProjection) =>
-  continuationDispatches(projection).pipe(
+const continuationTexts = (
+  projection: OrchestrationV2ThreadProjection,
+  continuationPrompt?: string,
+) =>
+  continuationDispatches(projection, continuationPrompt).pipe(
     Effect.map((dispatches) => dispatches.map((command) => command.text)),
   );
 
@@ -1053,7 +1062,23 @@ it.effect("tells a turn cut mid-way about the background work it lost", () =>
     );
     assert.lengthOf(texts, 1);
     assert.include(texts[0]!, "Background reviewer");
-    assert.isTrue(texts[0]!.endsWith("Continue where you left off."));
+    assert.isTrue(texts[0]!.startsWith("Continue where you left off.\n\n"));
+  }),
+);
+
+it.effect("continues with the configured prompt first, and no account note", () =>
+  Effect.gen(function* () {
+    const prompt = "/poteto-mode Continue where you left off.";
+    assert.deepEqual(yield* continuationTexts(cutMidTurn(), prompt), [prompt]);
+    const [withNote] = yield* continuationTexts(
+      cutMidTurn({
+        restartCancelledBackgroundWork: [{ kind: "subagent", label: "Background reviewer" }],
+      }),
+      prompt,
+    );
+    assert.isTrue(withNote!.startsWith(`${prompt}\n\n`));
+    assert.include(withNote!, "Background reviewer");
+    assert.notInclude(withNote!, "usage limit");
   }),
 );
 

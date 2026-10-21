@@ -7191,6 +7191,7 @@ const limitSwitchAccounts = Effect.map(DateTime.now, (now) => [
 ]);
 const layerLimitSwitchSettings = ServerSettings.layerTest({
   autoResumeLimitedThreads: true,
+  continuationPrompt: "/poteto-mode Continue where you left off.",
   providerInstances: { [alternateInstanceId]: { driver: "codex", enabled: true } },
   projectSettingsOverrides: {
     [limitSwitchNoRoomProjectId]: {
@@ -7317,12 +7318,16 @@ it.layer(layerLimitSwitchTest)("usage-limit account switch", (it) => {
       const threadId = yield* limitedThread("room", ProjectId.make("project:limit-switch-room"));
       yield* sweep();
       yield* sweep();
-      const { runs, thread } = yield* orchestrator.getThreadProjection(threadId);
+      const { messages, runs, thread } = yield* orchestrator.getThreadProjection(threadId);
       assert.deepEqual(
         runs.map((run) => run.modelSelection.instanceId),
         [modelSelection.instanceId, alternateInstanceId],
       );
       assert.isFalse(thread.limitRecovery?.snooze);
+      assert.equal(
+        messages.at(-1)?.text,
+        "/poteto-mode Continue where you left off.\n\nYour previous account hit its usage limit, so this chat moved to another account with room. Subagents and new chats are also routed to accounts with room, so keep working and delegating as usual.",
+      );
     }),
   );
 
@@ -7337,12 +7342,12 @@ it.layer(layerLimitSwitchTest)("usage-limit account switch", (it) => {
       assert.isTrue(armed.thread.limitRecovery?.autoResume);
       yield* TestClock.adjust("1 hour");
       yield* sweep();
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
       assert.deepEqual(
-        (yield* orchestrator.getThreadProjection(threadId)).runs.map(
-          (run) => run.modelSelection.instanceId,
-        ),
+        resumed.runs.map((run) => run.modelSelection.instanceId),
         [modelSelection.instanceId, modelSelection.instanceId],
       );
+      assert.equal(resumed.messages.at(-1)?.text, "/poteto-mode Continue where you left off.");
     }),
   );
 });

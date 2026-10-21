@@ -28,8 +28,6 @@ import {
   restartContinuationNote,
 } from "./RestartBackgroundNote.ts";
 
-const CONTINUE_PROMPT = "Continue where you left off.";
-
 const MAX_CONTINUATION_CHAIN = 3;
 const CONTINUATION_LOOP_WINDOW_MS = 5 * 60 * 1_000;
 
@@ -274,12 +272,10 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     );
     const noteText =
       note.work.length === 0 ? undefined : restartCancelledBackgroundWorkNote(note.work);
+    const prompt = enabled.continuationPrompt;
+    // The prompt leads so a skill invocation in it stays the message's first word.
     const text =
-      noteText === undefined
-        ? CONTINUE_PROMPT
-        : note.settled
-          ? noteText
-          : `${noteText}\n\n${CONTINUE_PROMPT}`;
+      noteText === undefined ? prompt : note.settled ? noteText : `${prompt}\n\n${noteText}`;
     yield* threads
       .dispatch({
         type: "message.dispatch",

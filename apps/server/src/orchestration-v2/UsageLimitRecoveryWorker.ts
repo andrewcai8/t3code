@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_CONTINUATION_PROMPT,
   MessageId,
   type OrchestrationV2Command,
   type OrchestrationV2LimitRecoveryUpdate,
@@ -12,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { makeAccountRouting } from "./accountRouting.ts";
+import { accountSwitchContinuation } from "./accountSwitchContinuation.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -21,6 +23,7 @@ export function limitRecoveryCommand(
   autoResume: boolean,
   nowMs: number,
   snooze = false,
+  prompt = DEFAULT_CONTINUATION_PROMPT,
 ): OrchestrationV2Command | null {
   if (
     thread.status !== "failed" ||
@@ -66,6 +69,7 @@ export function limitRecoveryCommand(
     thread.latestRunId,
     `limit-resume:${identity}:${recovery.requestId ?? "legacy"}`,
     recovery.requestId,
+    prompt,
   );
 }
 
@@ -80,6 +84,7 @@ function limitSwitchCommand(
     readonly commandId: CommandId;
     readonly limitRecovery: OrchestrationV2LimitRecoveryUpdate;
   },
+  prompt: string,
 ): OrchestrationV2Command {
   const { runId, resetAt } = arm.limitRecovery;
   return {
@@ -88,6 +93,7 @@ function limitSwitchCommand(
       runId,
       `limit-switch:${thread.id}:${runId}:${Date.parse(resetAt)}`,
       arm.commandId,
+      accountSwitchContinuation(prompt),
     ),
     modelSelection: thread.modelSelection,
   };
@@ -98,6 +104,7 @@ const continuation = (
   runId: RunId,
   id: string,
   requestId: CommandId | undefined,
+  text: string,
 ) =>
   ({
     type: "message.dispatch",
@@ -106,7 +113,7 @@ const continuation = (
     threadId,
     usageLimitContinuationOfRunId: runId,
     ...(requestId === undefined ? {} : { usageLimitRecoveryRequestId: requestId }),
-    text: "Continue where you left off.",
+    text,
     attachments: [],
     dispatchMode: { type: "start_immediately" },
     createdBy: "user",
@@ -134,6 +141,7 @@ export const makeSweep = Effect.gen(function* () {
         preferences.autoResumeLimitedThreads,
         nowMs,
         preferences.snoozeLimitedThreads,
+        preferences.continuationPrompt,
       );
       if (command === null) continue;
       yield* Effect.gen(function* () {
@@ -157,10 +165,11 @@ export const makeSweep = Effect.gen(function* () {
           });
           if (moves)
             yield* threads.dispatch(
-              limitSwitchCommand(thread, {
-                commandId: command.commandId,
-                limitRecovery: command.limitRecovery,
-              }),
+              limitSwitchCommand(
+                thread,
+                { commandId: command.commandId, limitRecovery: command.limitRecovery },
+                preferences.continuationPrompt,
+              ),
             );
         } else {
           yield* threads.dispatch(command);
