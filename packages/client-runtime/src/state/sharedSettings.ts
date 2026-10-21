@@ -16,6 +16,7 @@ const SHARED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleOnMerge",
   "autoResumeLimitedThreads",
   "snoozeLimitedThreads",
+  "continuationPrompt",
   "newWorktreesStartFromOrigin",
   "sourceControlWritingStyle",
   "textGenerationModelSelection",

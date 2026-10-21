@@ -447,6 +447,8 @@ export const GuestAccountSwitchInput = Schema.Struct({
   threadId: ThreadId,
   /** The chat's run that hit a usage limit, continued on the new account. */
   continueRunId: Schema.optional(RunId),
+  /** The host's `continuationPrompt`, so a cloud chat continues as the host's chats do. */
+  continuationPrompt: Schema.optional(TrimmedNonEmptyString),
 });
 export type GuestAccountSwitchInput = typeof GuestAccountSwitchInput.Type;
 

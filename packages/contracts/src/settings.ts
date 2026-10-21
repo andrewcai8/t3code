@@ -1101,6 +1101,8 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+export const DEFAULT_CONTINUATION_PROMPT = "Continue where you left off.";
+
 export const ServerSettings = Schema.Struct({
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
@@ -1184,6 +1186,14 @@ export const ServerSettings = Schema.Struct({
    * left, and stays on it until it runs out; pickers offer the provider instead of each account.
    */
   autoPickProviderAccounts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * What T3 Code sends when it continues a turn on its own: after a restart, at a usage-limit
+   * reset, or on another account. It stays the message's first word, so a skill invocation such as
+   * `/review` still reads as one.
+   */
+  continuationPrompt: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONTINUATION_PROMPT)),
+  ),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1508,6 +1518,7 @@ export const ServerSettingsPatch = Schema.Struct({
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   autoSwitchCloudAccounts: Schema.optionalKey(Schema.Boolean),
   autoPickProviderAccounts: Schema.optionalKey(Schema.Boolean),
+  continuationPrompt: Schema.optionalKey(TrimmedNonEmptyString),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
