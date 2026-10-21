@@ -51,7 +51,7 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       maxConcurrent: 8,
       maxJobMs: 120 * 60_000,
       maxCopyBackBytes: 100 * 1024 * 1024,
-      bunShim: { skipWhenSet: [] },
+      bunShim: { skipWhenSet: [], minTestFiles: 20 },
     });
     const gib = 1024;
     expect(Object.fromEntries(host!.sizes)).toEqual({
@@ -120,12 +120,18 @@ it.effect(
     }),
 );
 
-it.effect("bunShim false turns the shim off", () =>
+it.effect("bunShim false turns the shim off, and minTestFiles sets its size floor", () =>
   Effect.gen(function* () {
-    const host = yield* readWorktreeForksConfig(
+    const off = yield* readWorktreeForksConfig(
       stateDirWith({ modal, repositories: [], bunShim: false }),
     );
-    expect(host!.bunShim).toBeNull();
+    expect(off!.bunShim).toBeNull();
+    const raised = yield* readWorktreeForksConfig(
+      stateDirWith({ modal, repositories: [], bunShim: { minTestFiles: 50 } }),
+    );
+    expect(raised!.bunShim).toEqual({ skipWhenSet: [], minTestFiles: 50 });
+    const zero = stateDirWith({ modal, repositories: [], bunShim: { minTestFiles: 0 } });
+    expect((yield* readWorktreeForksConfig(zero).pipe(Effect.flip)).operation).toBe("decode");
   }),
 );
 

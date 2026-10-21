@@ -118,7 +118,10 @@ const onSelfHostedServer = (
             Layer.mock(FleetBroker.FleetBroker)({}),
             ServerConfig.layerTest(process.cwd(), home).pipe(Layer.provide(NodeServices.layer)),
             Layer.mock(ServerEnvironment.ServerEnvironment)({}),
-            Layer.mock(WorktreeForks.WorktreeForks)({ bunShim: { skipWhenSet: [] }, ...forks }),
+            Layer.mock(WorktreeForks.WorktreeForks)({
+              bunShim: { skipWhenSet: [], minTestFiles: 20 },
+              ...forks,
+            }),
             NodeServices.layer,
           ),
         ),

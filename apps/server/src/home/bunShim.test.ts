@@ -28,19 +28,37 @@ describe("routing", () => {
   const bin = NodePath.join(home, ".local", "bin");
   const t3Home = NodePath.join(home, ".t3");
   const log = NodePath.join(home, "log");
-  const suite = NodePath.join(home, "repo", "packages", "api");
+  const packages = NodePath.join(home, "repo", "packages");
+  const locked = NodePath.join(packages, "locked");
   let server: NodeNet.Server;
+
+  const files = (dir: string, names: ReadonlyArray<string>) => {
+    for (const name of names) {
+      NodeFS.mkdirSync(NodePath.dirname(NodePath.join(packages, dir, name)), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(packages, dir, name), "");
+    }
+  };
 
   beforeAll(async () => {
     NodeFS.mkdirSync(t3Home, { recursive: true });
-    NodeFS.mkdirSync(suite, { recursive: true });
-    NodeFS.writeFileSync(NodePath.join(suite, "a.test.ts"), "");
-    executable(NodePath.join(bin, "bun"), "#!/bin/sh\necho user wrapper\n");
-    executable(NodePath.join(bin, "t3"), recorder(log, "t3", "FAKE_T3_EXIT"));
-    expect(reconcileBunShim(bin, OWNER, { skipWhenSet: ["MEGPT_HEAVY_SLOT"] })).toEqual([
-      "moved_aside",
-      "installed",
+    files("api", ["a.test.ts", "nested/b_spec.tsx", "c.spec.mjs"]);
+    files("small", [
+      "one.test.js",
+      "helper.ts",
+      "notes.test.md",
+      "node_modules/dep/x.test.ts",
+      "node_modules/dep/y.test.ts",
+      ".cache/z.test.ts",
+      ".cache/w.test.ts",
     ]);
+    files("tiny", ["two_test.cjs", "three.spec.jsx"]);
+    files("locked", ["a.test.ts", "b.test.ts", "c.test.ts"]);
+    NodeFS.chmodSync(locked, 0o000);
+    executable(NodePath.join(bin, "bun"), "#!/bin/sh\necho user wrapper\n");
+    executable(NodePath.join(bin, "t3"), recorder(log, "t3($T3CODE_FORK_CALLER)", "FAKE_T3_EXIT"));
+    expect(
+      reconcileBunShim(bin, OWNER, { skipWhenSet: ["MEGPT_HEAVY_SLOT"], minTestFiles: 3 }),
+    ).toEqual(["moved_aside", "installed"]);
     executable(NodePath.join(bin, ".bun.t3-real"), recorder(log, "real", "FAKE_BUN_EXIT"));
     server = NodeNet.createServer();
     await new Promise<void>((resolve) =>
@@ -49,6 +67,7 @@ describe("routing", () => {
   });
   afterAll(() => {
     server.close();
+    NodeFS.chmodSync(locked, 0o755);
   });
 
   const bun = (args: ReadonlyArray<string>, env: Record<string, string | undefined> = {}) => {
@@ -63,6 +82,7 @@ describe("routing", () => {
         }).filter((entry): entry is [string, string] => entry[1] !== undefined),
       ),
       encoding: "utf8",
+      timeout: 10_000,
     });
     return {
       code: result.status,
@@ -73,13 +93,40 @@ describe("routing", () => {
   it.each([
     [["test"]],
     [["test", "packages/api"]],
+    [["test", "packages/small", "packages/tiny"]],
+    [["test", "packages/api", "packages/small"]],
+    [["test", `${packages}/api`]],
     [["test", "--bail", "-t", "renders a row", "packages/api"]],
     [["test", "--shard=1/4", "--timeout", "30000"]],
     [["test", "--isolate", "--timeout", "60000", "packages/api"]],
     [["test", "--parallel=4", "--retry", "2", "--max-concurrency", "5", "--dots"]],
     [["test", "--only-failures", "--no-orphans", "--path-ignore-patterns=**/e2e/**"]],
-  ])("sends a whole-suite run to fork-exec: bun %j", (args) => {
-    expect(bun(args)).toEqual({ code: 0, calls: [`t3 fork-exec -- bun ${args.join(" ")}`] });
+  ])("sends a whole suite, or directories with enough test files, to fork-exec: bun %j", (args) => {
+    expect(bun(args)).toEqual({
+      code: 0,
+      calls: [`t3(bun-shim) fork-exec -- bun ${args.join(" ")}`],
+    });
+  });
+
+  it.each([
+    [["test", "packages/small"]],
+    [["test", "packages/tiny", "--bail"]],
+    [["test", "packages/small", "-t", "renders a row"]],
+  ])("runs directories with too few test files with the real bun: bun %j", (args) => {
+    expect(bun(args)).toEqual({ code: 0, calls: [`real ${args.join(" ")}`] });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("runs a directory it cannot count with the real bun", () => {
+    expect(bun(["test", "packages/locked"]).calls).toEqual(["real test packages/locked"]);
+  });
+
+  it("stops counting at the threshold", () => {
+    const endless = NodePath.join(home, "endless");
+    executable(NodePath.join(endless, "find"), "#!/bin/sh\nwhile :; do echo a.test.ts; done\n");
+    expect(bun(["test", "packages/small"], { PATH: `${endless}:${bin}:/usr/bin:/bin` })).toEqual({
+      code: 0,
+      calls: ["t3(bun-shim) fork-exec -- bun test packages/small"],
+    });
   });
 
   it.each([
@@ -103,7 +150,9 @@ describe("routing", () => {
     expect(bun(["test"], { T3CODE_HOME: undefined }).calls).toEqual(["real test"]);
     expect(bun(["test"], { T3CODE_HOME: home }).calls).toEqual(["real test"]);
     expect(bun(["test"], { MEGPT_HEAVY_SLOT: "1" }).calls).toEqual(["real test"]);
-    expect(bun(["test"], { MEGPT_HEAVY_SLOT: "" }).calls).toEqual(["t3 fork-exec -- bun test"]);
+    expect(bun(["test"], { MEGPT_HEAVY_SLOT: "" }).calls).toEqual([
+      "t3(bun-shim) fork-exec -- bun test",
+    ]);
     NodeFS.renameSync(NodePath.join(bin, "t3"), NodePath.join(bin, "t3.off"));
     try {
       expect(bun(["test"]).calls).toEqual(["real test"]);
@@ -115,12 +164,12 @@ describe("routing", () => {
   it("runs the real bun when no copy started (75) and passes every other code through", () => {
     expect(bun(["test"], { FAKE_T3_EXIT: "75", FAKE_BUN_EXIT: "4" })).toEqual({
       code: 4,
-      calls: ["t3 fork-exec -- bun test", "real test"],
+      calls: ["t3(bun-shim) fork-exec -- bun test", "real test"],
     });
     for (const code of ["1", "70", "124"])
       expect(bun(["test"], { FAKE_T3_EXIT: code })).toEqual({
         code: Number(code),
-        calls: ["t3 fork-exec -- bun test"],
+        calls: ["t3(bun-shim) fork-exec -- bun test"],
       });
   });
 });
@@ -130,7 +179,7 @@ describe("finding the real bun with nothing moved aside", () => {
     const home = tempDir("path");
     const bin = NodePath.join(home, ".local", "bin");
     const other = NodePath.join(home, "other");
-    reconcileBunShim(bin, OWNER, { skipWhenSet: [] });
+    reconcileBunShim(bin, OWNER, { skipWhenSet: [], minTestFiles: 20 });
     executable(NodePath.join(other, "bun"), '#!/bin/sh\necho "other $*"\n');
     const run = (path: string) =>
       NodeChildProcess.spawnSync(NodePath.join(bin, "bun"), ["--version"], {
@@ -161,7 +210,7 @@ describe("installing and removing", () => {
     return bin;
   };
   const users = '#!/bin/sh\nexec /usr/local/bin/bun "$@"\n';
-  const install = { skipWhenSet: [] };
+  const install = { skipWhenSet: [], minTestFiles: 20 };
 
   it.each<
     [
@@ -199,8 +248,8 @@ describe("installing and removing", () => {
 
   it("an installed shim takes a new skip list on the next start", () => {
     const bin = binWith({});
-    reconcileBunShim(bin, OWNER, { skipWhenSet: [] });
-    reconcileBunShim(bin, OWNER, { skipWhenSet: ["MEGPT_HEAVY_SLOT"] });
+    reconcileBunShim(bin, OWNER, { skipWhenSet: [], minTestFiles: 20 });
+    reconcileBunShim(bin, OWNER, { skipWhenSet: ["MEGPT_HEAVY_SLOT"], minTestFiles: 20 });
     expect(NodeFS.readFileSync(NodePath.join(bin, "bun"), "utf8")).toContain("MEGPT_HEAVY_SLOT");
   });
 

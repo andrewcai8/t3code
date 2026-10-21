@@ -309,26 +309,35 @@ it.effect("a copy lost after the banner is reported lost, and its sandbox still 
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
-it.effect("each finished copy logs its job, repository, size, exit code and phase times", () => {
-  const { root, fake, layer, start } = setup();
+const capturedLogs = () => {
   const logs: Array<ReadonlyArray<unknown>> = [];
   const logger = Logger.make(({ message }) => {
     logs.push(Array.isArray(message) ? message : [message]);
   });
+  return { logs, layer: Logger.layer([logger], { mergeWithExisting: false }) };
+};
+
+it.effect("each finished copy logs its caller, command, size, exit code and phase times", () => {
+  const { root, fake, layer, start } = setup();
+  const { logs, layer: logging } = capturedLogs();
+  const command = `API_TOKEN='s3cret value' bun test ${"packages/api ".repeat(20)}`;
   return Effect.gen(function* () {
-    fake.onExec(isCommand("bun test"), { exitCode: 3 });
+    fake.onExec(isCommand(command), { exitCode: 3 });
     const forks = yield* start;
     let jobId = "";
-    yield* forks.exec(request(root), {
-      started: (id) => Effect.sync(() => (jobId = id)),
-      output: () => {},
-    });
+    const shimmed = request(root, { command });
+    yield* forks.exec(
+      { ...shimmed, environment: { ...shimmed.environment, T3CODE_FORK_CALLER: "bun-shim" } },
+      { started: (id) => Effect.sync(() => (jobId = id)), output: () => {} },
+    );
     const finished = logs.filter(([text]) => text === "worktree fork job finished");
     expect(finished).toEqual([
       [
         "worktree fork job finished",
         {
           job: jobId,
+          caller: "bun-shim",
+          command: `API_TOKEN=… bun test ${"packages/api ".repeat(20)}`.slice(0, 159) + "…",
           repository: "acme/widgets",
           cpu: 8,
           memoryMiB: 16384,
@@ -341,10 +350,22 @@ it.effect("each finished copy logs its job, repository, size, exit code and phas
         },
       ],
     ]);
-  }).pipe(
-    Effect.scoped,
-    Effect.provide(Layer.merge(layer, Logger.layer([logger], { mergeWithExisting: false }))),
-  );
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(layer, logging)));
+});
+
+it.effect("a copy that does not start logs its caller and command", () => {
+  const { root, layer, start } = setup();
+  const { logs, layer: logging } = capturedLogs();
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    yield* forks.exec(request(root, { size: "huge" }), watcher().observer);
+    expect(logs.filter(([text]) => text === "worktree fork copy did not start")).toEqual([
+      [
+        "worktree fork copy did not start",
+        expect.objectContaining({ cwd: root, caller: "fork-exec", command: "bun test" }),
+      ],
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(layer, logging)));
 });
 
 it.effect("a command past its timeout exits 124 and its copy ends", () => {
