@@ -134,7 +134,11 @@ const onSelfHostedServer = (
   });
 
 /** Sends one request over the socket and collects each line it answers, until `stop` says so. */
-const send = (socketPath: string, stop: (lines: ReadonlyArray<string>) => boolean = () => false) =>
+const send = (
+  socketPath: string,
+  stop: (lines: ReadonlyArray<string>) => boolean = () => false,
+  overrides: Partial<ForkExecRequest> = {},
+) =>
   Effect.gen(function* () {
     const lines = yield* Queue.unbounded<string>();
     const closed = yield* Deferred.make<void>();
@@ -156,6 +160,7 @@ const send = (socketPath: string, stop: (lines: ReadonlyArray<string>) => boolea
         command: "bun run check:types",
         cwd: "/workspace",
         environment: { NODE_OPTIONS: "--max-old-space-size=8192 'x'" },
+        ...overrides,
       })}\n`,
     );
     return { lines, closed };
@@ -225,6 +230,18 @@ it.effect("tells the caller to run it here when the host offers no forks to the 
     yield* Deferred.await(closed);
     expect((yield* Queue.takeAll(lines)).map((line) => JSON.parse(line).kind)).toEqual([
       "unavailable",
+    ]);
+    expect(yield* Queue.size(requests)).toBe(0);
+  }).pipe(Effect.scoped, Effect.provide(FleetBroker.layer.pipe(Layer.provide(NodeCrypto.layer)))),
+);
+
+it.effect("tells the caller to run it here when it wants outputs back from a box's copy", () =>
+  Effect.gen(function* () {
+    const { requests, socketPath } = yield* onBox(forks(true));
+    const { lines, closed } = yield* send(socketPath, undefined, { outputs: ["/workspace/out"] });
+    yield* Deferred.await(closed);
+    expect((yield* Queue.takeAll(lines)).map((line) => JSON.parse(line))).toEqual([
+      { kind: "unavailable", message: "A copy of this machine cannot bring outputs back." },
     ]);
     expect(yield* Queue.size(requests)).toBe(0);
   }).pipe(Effect.scoped, Effect.provide(FleetBroker.layer.pipe(Layer.provide(NodeCrypto.layer)))),

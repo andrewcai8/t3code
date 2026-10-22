@@ -47,6 +47,16 @@ it("takes a size and a timeout in either order before the command", () => {
   expect(parseForkExecArgs(["--size", "", "--", "make"])).toBeNull();
 });
 
+it("takes repeated inputs and outputs as absolute paths from the caller's directory", () => {
+  expect(
+    parseForkExecArgs(
+      ["--input", "/data/a.json", "--output", "out", "--input", "../b", "--", "make"],
+      "/repo/app",
+    ),
+  ).toEqual({ command: "make", inputs: ["/data/a.json", "/repo/b"], outputs: ["/repo/app/out"] });
+  expect(parseForkExecArgs(["--input", "", "--", "make"])).toBeNull();
+});
+
 it("recreates the caller's environment in the copy's shell", () => {
   const exports = exportsOf({
     FLAG: `a 'b' "c" $d`,

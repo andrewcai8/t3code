@@ -9,6 +9,15 @@ import * as NodePath from "node:path";
 
 import * as Schema from "effect/Schema";
 
+/** Absolute and normalized, so a copy and this host read each one as the same place. */
+const HostPaths = Schema.Array(
+  Schema.String.check(
+    Schema.makeFilter(
+      (path) => path.startsWith("/") && path !== "/" && NodePath.normalize(path) === path,
+    ),
+  ),
+).check(Schema.isMaxLength(256));
+
 export const ForkExecRequest = Schema.Struct({
   command: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(20000)),
   cwd: Schema.String.check(Schema.isMinLength(1)),
@@ -19,6 +28,13 @@ export const ForkExecRequest = Schema.Struct({
   ),
   /** A size this host names; copies of a cloud machine always have the machine's own size. */
   size: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64))),
+  /**
+   * Host files or directories outside what a copy of the worktree holds, which the copy gets at
+   * the same paths before the command runs. A copy of a cloud machine has them already.
+   */
+  inputs: Schema.optional(HostPaths),
+  /** Host paths the copy brings back to the same place once the command exits. */
+  outputs: Schema.optional(HostPaths),
 });
 export type ForkExecRequest = typeof ForkExecRequest.Type;
 

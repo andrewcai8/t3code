@@ -59,6 +59,7 @@ import {
   applyArgv,
   type Checkout,
   inspectCheckout,
+  packInputs,
   sandboxEnvironment,
   type Shipment,
   shipState,
@@ -73,6 +74,7 @@ const RESULTS_TTL_MS = 24 * 3_600_000;
 const MAX_RUNNING_BATCHES_PER_OWNER = 4;
 const TAIL_CHARS = 4_000;
 const ARCHIVE = "/tmp/t3-state.tar";
+const INPUTS = "/tmp/t3-inputs.tgz";
 const OUTPUTS = "/tmp/t3-outputs.tgz";
 
 export type OutputSink = (stream: "stdout" | "stderr", text: string) => void;
@@ -169,8 +171,15 @@ interface CopyJob {
   readonly environment: Readonly<Record<string, string>>;
   readonly size: SandboxSize;
   readonly timeoutMs: number;
-  /** Batch jobs bring listed outputs back to this host; fork-exec never does. */
-  readonly outputs: { readonly paths: ReadonlyArray<string>; readonly into: string } | null;
+  /** Host paths packed for the copy to unpack at the same paths. */
+  readonly inputs: { readonly archive: string; readonly bytes: number } | null;
+  /** Paths under `root` in the copy that come back under `into` here, through `archive`. */
+  readonly outputs: {
+    readonly paths: ReadonlyArray<string>;
+    readonly root: string;
+    readonly into: string;
+    readonly archive: string;
+  } | null;
 }
 
 /** A checkout's state shipped against the base its copies boot from. */
@@ -199,6 +208,9 @@ interface Exited {
  * refuses rename(2) across mount points, so a test moving a file into /tmp failed with EXDEV.
  */
 const PLACE_SCRIPT = `mkdir -p "$(dirname "$1")" && mv "$2" "$1" && ln -s "$1" "$2"`;
+
+/** Unpacks the inputs at their host paths, once the checkout sits at its own. */
+const INPUTS_SCRIPT = `tar -xzf "$1" --no-same-owner -C /`;
 
 /**
  * Runs the command as a child subreaper. Modal's agent is PID 1 in a copy and never reaps, so a
@@ -378,6 +390,18 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       ["sh", "-c", PLACE_SCRIPT, "t3-place", checkout.root, checkout.repository.workDir],
       "move its checkout to this worktree's path",
     );
+    if (job.inputs !== null) {
+      const { archive } = job.inputs;
+      yield* Effect.tryPromise({
+        try: () => sandboxes.upload(sandboxId, archive, INPUTS),
+        catch: couldNot("receive the command's inputs"),
+      });
+      yield* stepSucceeds(
+        sandboxId,
+        ["sh", "-c", INPUTS_SCRIPT, "t3-inputs", INPUTS],
+        "unpack the command's inputs",
+      );
+    }
     if (checkout.repository.services.length > 0) {
       const services = yield* step(
         sandboxId,
@@ -396,7 +420,6 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   /** Brings listed outputs back under `into`. Never fails: a problem is reported instead. */
   const collectOutputs = Effect.fn("WorktreeForks.collectOutputs")(function* (
     sandboxId: string,
-    cwd: string,
     outputs: NonNullable<CopyJob["outputs"]>,
   ) {
     const packed = yield* step(
@@ -406,7 +429,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         "-c",
         OUTPUTS_SCRIPT,
         "t3-outputs",
-        cwd,
+        outputs.root,
         String(host.maxCopyBackBytes),
         ...outputs.paths,
       ],
@@ -419,7 +442,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         outputsProblem: `The outputs are ${Math.ceil(Number(stderr.trim()) / 1048576)} MiB compressed, over the ${Math.floor(host.maxCopyBackBytes / 1048576)} MiB copy-back limit.`,
       };
     if (exitCode !== 0) return { outputsProblem: "Packing the outputs failed." };
-    const local = `${outputs.into}.tgz`;
+    const local = outputs.archive;
     const unpacked = yield* Effect.tryPromise(() =>
       sandboxes.download(sandboxId, OUTPUTS, local),
     ).pipe(
@@ -458,8 +481,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const durationMs = (yield* Clock.currentTimeMillis) - startedAt;
     if (Option.isNone(exitCode))
       return { exitCode: 124, timedOut: true, durationMs } satisfies Exited;
-    const outputs =
-      job.outputs === null ? {} : yield* collectOutputs(sandboxId, job.cwd, job.outputs);
+    const outputs = job.outputs === null ? {} : yield* collectOutputs(sandboxId, job.outputs);
     return { exitCode: exitCode.value, timedOut: false, durationMs, ...outputs } satisfies Exited;
   });
 
@@ -488,6 +510,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
             cpu: job.size.cpu,
             memoryMiB: job.size.memoryMiB,
             shippedBytes: NodeFS.statSync(shipment.archive, { throwIfNoEntry: false })?.size,
+            inputBytes: job.inputs?.bytes,
             exitCode: exited.exitCode,
             timedOut: exited.timedOut,
             queuedMs: setupAt - queuedAt,
@@ -526,8 +549,16 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       const checkout = yield* inspect(request.cwd);
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
       const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
-      const shipment = yield* ship(checkout, base, yield* scratchDir);
-      const exited = yield* runJob(
+      const dir = yield* scratchDir;
+      const shipment = yield* ship(checkout, base, dir);
+      const inputs =
+        (request.inputs ?? []).length === 0
+          ? null
+          : yield* packInputs(request.inputs!, dir).pipe(
+              Effect.mapError(notStarted),
+              Effect.provideService(ProcessRunner.ProcessRunner, runner),
+            );
+      const exited: Exited = yield* runJob(
         {
           id: NodeCrypto.randomUUID(),
           caller: callerOf(request),
@@ -536,12 +567,24 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           environment: sandboxEnvironment(request.environment, checkout.root, hostHome),
           size,
           timeoutMs: timeoutOf(request.timeoutSeconds),
-          outputs: null,
+          inputs,
+          // Absolute paths, so they pack from the copy's root and unpack at this host's.
+          outputs:
+            (request.outputs ?? []).length === 0
+              ? null
+              : {
+                  paths: request.outputs!,
+                  root: "/",
+                  into: "/",
+                  archive: NodePath.join(dir, "outputs.tgz"),
+                },
         },
         shipment,
         base,
         observer,
       );
+      if (exited.outputsProblem !== undefined)
+        observer.output("stderr", `[t3] ${exited.outputsProblem}\n`);
       return {
         _tag: "Exited",
         exitCode: exited.exitCode,
@@ -614,10 +657,16 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           ),
           size: sizeOf(job.size)!,
           timeoutMs: timeoutOf(job.timeoutSeconds),
+          inputs: null,
           outputs:
             (job.outputs ?? []).length === 0
               ? null
-              : { paths: job.outputs!, into: NodePath.join(dir, "outputs") },
+              : {
+                  paths: job.outputs!,
+                  root: target.cwd,
+                  into: NodePath.join(dir, "outputs"),
+                  archive: NodePath.join(dir, "outputs.tgz"),
+                },
         },
         shipment,
         base,

@@ -62,6 +62,9 @@ const runInFork = Effect.fn("ForkExec.runInFork")(
     const owner = environments.find(
       (environment) => environment.environmentId === CLOUD_FORKS_ENVIRONMENT_ID,
     )?.chat?.threadId;
+    // A copy of this machine starts with its inputs on disk, but nothing brings its files back.
+    if ((request.outputs ?? []).length > 0)
+      return yield* unavailable("A copy of this machine cannot bring outputs back.");
     if (!hostConnected) return yield* unavailable("This machine's host is not connected.");
     if (owner === undefined)
       return yield* unavailable("This machine's host does not offer forks to its own chat.");
