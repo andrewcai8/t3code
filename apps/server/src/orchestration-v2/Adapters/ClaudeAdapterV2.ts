@@ -8612,6 +8612,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               usageLimited && message.subtype === "success" && message.local_command === "compact"
                 ? context.compactionFailure
                 : null;
+            // A wake turn the limit stopped before any model call also ends in
+            // an empty success. Completing it would end the thread's limit and
+            // the recovery armed for its reset.
+            const limitedEmptyTurn =
+              usageLimited &&
+              message.subtype === "success" &&
+              !message.is_error &&
+              message.num_turns === 0 &&
+              message.local_command === undefined;
             const resetTimes = Array.from(context.rateLimitResetTimes.values());
             const assistantLimit = context.latestAssistantRateLimit;
             if (
@@ -8632,7 +8641,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     message: limitedCompaction.message ?? failureHint,
                     code: "compaction_failed",
                   })
-                : providerFailureFromResult(message, completedAt, failureHint, usageLimited);
+                : limitedEmptyTurn
+                  ? makeProviderFailure({ class: "usage_limit", message: failureHint })
+                  : providerFailureFromResult(message, completedAt, failureHint, usageLimited);
             const terminalFailure =
               resultFailure?.class === "usage_limit"
                 ? { ...resultFailure, resetAt: resetAt ?? resultFailure.resetAt ?? null }
@@ -8641,7 +8652,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               context,
               status: interrupted
                 ? "interrupted"
-                : limitedCompaction !== null
+                : limitedCompaction !== null || limitedEmptyTurn
                   ? "failed"
                   : terminalStatusFromResult(message, failureHint),
               completedAt,
