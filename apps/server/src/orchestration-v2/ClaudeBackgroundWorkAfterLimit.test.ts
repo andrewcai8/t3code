@@ -210,7 +210,7 @@ const runtime = (
         ];
       }),
     ).pipe(Layer.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer, NodeCrypto.layer))),
-    options,
+    { ...options, exposeStoresAndSettings: true },
   );
 
 /**
