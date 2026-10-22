@@ -140,9 +140,8 @@ export function ProvisionedEnvironmentRows(props: {
               accessibilityRole="button"
               accessibilityLabel="New cloud chat"
               onPress={() =>
-                navigation.navigate("NewTaskSheet", {
-                  screen: "NewTaskCloudMachine",
-                  params: { environmentId: String(props.managerId) },
+                navigation.navigate("NewTaskCloudMachine", {
+                  environmentId: String(props.managerId),
                 })
               }
               className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70"

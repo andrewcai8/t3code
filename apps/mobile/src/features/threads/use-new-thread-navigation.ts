@@ -12,6 +12,7 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { useCallback, useLayoutEffect, useRef } from "react";
 
+import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { readProjects } from "../../state/cloud-entities";
 import { useServerConfigs } from "../../state/entities";
@@ -35,45 +36,47 @@ function newThreadProject(
   });
 }
 
+type ThreadRouteParams = ReactNavigation.RootParamList["Thread"];
+
 /**
  * "New thread in project" and "New thread on branch". Both open on the project's copy off any
  * box. On a host that runs no agents but can provision, they start a cloud machine on the host
- * instead of a draft the host would refuse. The latest configs and boxes are read when a callback
+ * instead of a draft the host would refuse. Drafts open through `selectThreadRoute`, the caller's
+ * way into the Thread route. The latest configs, boxes and selector are read when a callback
  * runs, so the callbacks stay stable for the layouts using them.
  */
-export function useNewThreadNavigation() {
+export function useNewThreadNavigation(selectThreadRoute: (params: ThreadRouteParams) => void) {
   const navigation = useNavigation();
   const serverConfigs = useServerConfigs();
   const groupingSettings = useMobileProjectGroupingSettings();
   const boxes = useOtherChatBoxes();
-  const latest = useRef({ serverConfigs, boxes, groupingSettings });
+  const latest = useRef({ serverConfigs, boxes, groupingSettings, selectThreadRoute });
   useLayoutEffect(() => {
-    latest.current = { serverConfigs, boxes, groupingSettings };
-  }, [serverConfigs, boxes, groupingSettings]);
+    latest.current = { serverConfigs, boxes, groupingSettings, selectThreadRoute };
+  }, [serverConfigs, boxes, groupingSettings, selectThreadRoute]);
 
+  /** False when only boxes hold the project, so nothing opened. */
   const newThreadInProject = useCallback(
-    (requested: EnvironmentProject) => {
+    (requested: Pick<EnvironmentProject, "environmentId" | "id">): boolean => {
       const project = newThreadProject(requested.environmentId, requested.id, latest.current);
-      if (!project) return;
+      if (!project) return false;
       const start = resolveNewThreadStart({ project, ...latest.current });
       if (start.kind === "cloud-machine") {
-        navigation.navigate("NewTaskSheet", {
-          screen: "NewTaskCloudMachine",
-          params: {
-            environmentId: String(start.managerId),
-            repository: start.repository,
-          },
+        navigation.navigate("NewTaskCloudMachine", {
+          environmentId: String(start.managerId),
+          repository: start.repository,
         });
-        return;
+        return true;
       }
-      navigation.navigate("NewTaskSheet", {
-        screen: "NewTaskDraft",
-        params: {
+      latest.current.selectThreadRoute({
+        draft: {
+          requestId: uuidv4(),
           environmentId: String(project.environmentId),
           projectId: String(project.id),
           title: project.title,
         },
       });
+      return true;
     },
     [navigation],
   );
@@ -84,21 +87,18 @@ export function useNewThreadNavigation() {
       if (!project) return;
       const start = resolveNewThreadStart({ project, ...latest.current });
       if (start.kind === "cloud-machine") {
-        navigation.navigate("NewTaskSheet", {
-          screen: "NewTaskCloudMachine",
-          params: {
-            environmentId: String(start.managerId),
-            repository: start.repository,
-            branch: thread.branch,
-          },
+        navigation.navigate("NewTaskCloudMachine", {
+          environmentId: String(start.managerId),
+          repository: start.repository,
+          branch: thread.branch,
         });
         return;
       }
       // The thread's worktree is on its own machine, and its branch may not have reached this one.
       const moved = project.environmentId !== thread.environmentId;
-      navigation.navigate("NewTaskSheet", {
-        screen: "NewTaskDraft",
-        params: {
+      latest.current.selectThreadRoute({
+        draft: {
+          requestId: uuidv4(),
           environmentId: String(project.environmentId),
           projectId: String(project.id),
           branch: thread.branch,

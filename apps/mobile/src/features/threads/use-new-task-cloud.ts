@@ -44,6 +44,8 @@ export function useNewTaskEnvironmentPick(input: {
   /** A queued task being edited stays on its own machine, box or not. */
   readonly pinned: boolean;
   readonly projects: ReadonlyArray<EnvironmentProject>;
+  /** The flow outlives its draft screen, so demand holds only while a draft is open. */
+  readonly active: boolean;
 }): NewTaskEnvironmentPick {
   const serverConfigs = useServerConfigs();
   const boxes = useOtherChatBoxes();
@@ -55,7 +57,7 @@ export function useNewTaskEnvironmentPick(input: {
     boxes,
     placement,
   });
-  useBoxDemand(selectedEnvironmentId);
+  useBoxDemand(input.active ? selectedEnvironmentId : null);
   const blockedBox =
     input.picked !== null && !input.pinned && boxes.has(input.picked) ? input.picked : null;
   return { selectedEnvironmentId, boxes, placement, blockedBox };
