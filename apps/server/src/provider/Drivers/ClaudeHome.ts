@@ -9,6 +9,13 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const quotePath = Schema.encodeSync(Schema.fromJsonString(Schema.String));
 
+/** Variables that sign Claude in by themselves, without the login in its config directory. */
+export const CLAUDE_TOKEN_VARIABLES: ReadonlyArray<string> = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
 export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
   environment?: NodeJS.ProcessEnv,

@@ -436,6 +436,79 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("gives a token login none of the host login's organization", () =>
+    Effect.gen(function* () {
+      if (yield* HostProcess.isWindows) return;
+
+      const fixtures = yield* makeTildeProviderFixtures();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const hostHome = path.join(fixtures.claudeHomePath, "host-home");
+      yield* fs.makeDirectory(hostHome, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(hostHome, ".claude.json"),
+        JSON.stringify({ oauthAccount: { organizationUuid: "host-org" } }),
+      );
+      const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+        () =>
+          ({
+            initializationResult: () =>
+              Promise.resolve({
+                commands: [{ name: "probe", description: "", argumentHint: "" }],
+                account: {
+                  email: "someone@example.com",
+                  subscriptionType: "pro",
+                  tokenSource: "oauth",
+                },
+              }),
+            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+              rate_limits_available: true,
+              rate_limits: {
+                five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" },
+              },
+            }),
+          }) as ReturnType<typeof ClaudeSdk.query>,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+
+      const hostLoginId = ProviderInstanceId.make("claude_host_login");
+      const tokenLoginId = ProviderInstanceId.make("claude_token_login");
+      // The fixture's `~` path must resolve against the real home, not the one this test fakes.
+      const binaryPath = fixtures.claudeBinaryPath.replace(/^~/, yield* HostProcess.HomeDirectory);
+      const config = makeClaudeConfig({ enabled: true, binaryPath });
+      const snapshots = yield* Effect.gen(function* () {
+        const { registry } = yield* makeProviderInstanceRegistry<ClaudeDriverEnv>({
+          drivers: [ClaudeDriver],
+          configMap: {
+            [hostLoginId]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              enabled: true,
+              config,
+            },
+            [tokenLoginId]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              enabled: true,
+              environment: [
+                { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "setup-token", sensitive: true },
+              ],
+              config,
+            },
+          },
+        });
+        const hostLogin = yield* registry.getInstance(hostLoginId);
+        const tokenLogin = yield* registry.getInstance(tokenLoginId);
+        return {
+          hostLogin: yield* hostLogin!.snapshot.refresh,
+          tokenLogin: yield* tokenLogin!.snapshot.refresh,
+        };
+      }).pipe(Effect.provideService(HostProcess.HomeDirectory, hostHome));
+
+      expect(snapshots.hostLogin.auth).toMatchObject({ workspaceId: "host-org" });
+      expect(snapshots.tokenLogin.auth.status).toBe("authenticated");
+      expect(snapshots.tokenLogin.auth.workspaceId).toBeUndefined();
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   const redeemClaudeReset = (claim: { result: string; usageFailsAfterClaim: boolean }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

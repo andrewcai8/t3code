@@ -57,6 +57,7 @@ import {
   type ProviderSnapshotSettings,
 } from "@t3tools/provider-core/server/snapshotSettings";
 import {
+  CLAUDE_TOKEN_VARIABLES,
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
@@ -157,11 +158,19 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     );
     const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig, processEnv);
     const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
-    const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
-      effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()
-        ? configDir
-        : undefined,
+    const ownConfigDir = Boolean(
+      effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim(),
     );
+    const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
+      ownConfigDir ? configDir : undefined,
+    );
+    // A token login without its own config directory is not the login in the host's
+    // .claude.json. Reading that file's organization would give every such account the host
+    // user's workspace, and Limits would then split one account across machines.
+    const readWorkspaceId =
+      !ownConfigDir && CLAUDE_TOKEN_VARIABLES.some((name) => processEnv[name]?.trim())
+        ? Effect.succeed(undefined)
+        : ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath);
     const stampIdentity = withInstanceIdentity({
       instanceId,
       driverKind: DRIVER_KIND,
@@ -208,7 +217,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         probeClaudeCapabilities(effectiveConfig, processEnv, stateDir).pipe(
           Effect.flatMap(hostProbe.withSetupTokenUsage),
           Effect.flatMap((capabilities) =>
-            ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+            readWorkspaceId.pipe(
               Effect.map((workspaceId) => ({
                 _tag: "fresh" as const,
                 capabilities:
@@ -222,7 +231,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               Effect.flatMap((capabilities) =>
                 capabilities === undefined
                   ? Effect.fail(error)
-                  : ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+                  : readWorkspaceId.pipe(
                       Effect.flatMap((workspaceId) =>
                         workspaceId === capabilities.workspaceId
                           ? Effect.succeed({
