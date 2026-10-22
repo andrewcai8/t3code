@@ -36,7 +36,9 @@ ACP Registry agents run their own tools in their own mode; T3 Code answers their
 by the permission mode. See [ACP Registry permissions](./providers-acp.md#permissions-and-terminals).
 
 Claude can still ask in **Full access** when its settings disable bypass permissions or require
-approval for an action.
+approval for an action. **Settings → General → New threads → Auto-approve Full access prompts**
+allows those requests automatically from the next turn, while questions from the agent, Plan mode,
+and a disabled bypass still ask.
 
 Antigravity can still send native approval requests in **Full access**. It only offers remembered
 approvals for actions that support them.

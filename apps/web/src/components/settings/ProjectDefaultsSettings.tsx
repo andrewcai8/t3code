@@ -29,6 +29,7 @@ import { TraitsPicker } from "../chat/TraitsPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { toastManager } from "../ui/toast";
 import { Switch } from "../ui/switch";
+import { ScopedSwitch } from "./ScopedSwitch";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
 import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -329,6 +330,31 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   })}
                 </SelectPopup>
               </Select>
+            }
+          />
+          <SettingsRow
+            serverScoped
+            settingKeys={["autoApproveFullAccessPrompts"]}
+            {...searchableSetting("auto-approve-full-access-prompts")}
+            description="Claude's own safety checks can still ask for approval in Full access. Allow those requests automatically. Questions the agent asks you are still shown. Applies to Claude threads on the next turn."
+            resetAction={
+              settings.autoApproveFullAccessPrompts ? (
+                <SettingResetButton
+                  label="auto-approve Full access prompts"
+                  tooltip="Reset to off"
+                  onClick={() => updateSettings({ autoApproveFullAccessPrompts: false })}
+                />
+              ) : null
+            }
+            control={
+              <ScopedSwitch
+                settingKeys={["autoApproveFullAccessPrompts"]}
+                aria-label="Auto-approve Full access prompts"
+                checked={settings.autoApproveFullAccessPrompts}
+                onCheckedChange={(enabled) =>
+                  updateSettings({ autoApproveFullAccessPrompts: enabled })
+                }
+              />
             }
           />
           {workspaceRow}

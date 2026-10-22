@@ -351,6 +351,16 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       />
                     ))}
                   </SettingsSection>
+                  <SettingsSection title="Approvals">
+                    <SettingsSwitchRow
+                      icon="checkmark.circle"
+                      label="Auto-approve Full access prompts"
+                      subtitle="Claude's own safety checks can still ask for approval in Full access. Allow them automatically. Applies to Claude threads on the next turn."
+                      value={uniform("autoApproveFullAccessPrompts")}
+                      disabled={disabledFor("autoApproveFullAccessPrompts")}
+                      onValueChange={(value) => write({ autoApproveFullAccessPrompts: value })}
+                    />
+                  </SettingsSection>
                 </>
               ) : null}
 
