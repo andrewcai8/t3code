@@ -67,7 +67,12 @@ const selection = (instanceId: string) => ({
 const route = (
   selected: string,
   providers: ReadonlyArray<ServerProvider>,
-  extra: { current?: string; settings?: ServerSettings; load?: Record<string, number> } = {},
+  extra: {
+    current?: string;
+    settings?: ServerSettings;
+    load?: Record<string, number>;
+    spentUntil?: Record<string, number>;
+  } = {},
 ) =>
   routeSelection({
     projectId,
@@ -81,6 +86,13 @@ const route = (
       : {
           load: new Map(
             Object.entries(extra.load).map(([id, count]) => [ProviderInstanceId.make(id), count]),
+          ),
+        }),
+    ...(extra.spentUntil === undefined
+      ? {}
+      : {
+          spentUntil: new Map(
+            Object.entries(extra.spentUntil).map(([id, at]) => [ProviderInstanceId.make(id), at]),
           ),
         }),
   }).instanceId;
@@ -156,6 +168,23 @@ describe("routeSelection", () => {
         { current: "claudeAgent" },
       ),
     ).toBe("claudeAgent");
+  });
+
+  it("reads every instance of a subscription a usage limit stopped as spent until its reset", () => {
+    const sameLogin = { auth: { status: "authenticated", email: "dev@example.com" } } as const;
+    const providers = [
+      provider("claudeAgent", 10, sameLogin),
+      provider("claude_work", 10, sameLogin),
+      provider("claude_home", 50),
+    ];
+    const spentUntil = { claudeAgent: now + 60_000 };
+    expect(route("claudeAgent", providers, { current: "claude_work", spentUntil })).toBe(
+      "claude_home",
+    );
+    expect(route("claudeAgent", providers, { spentUntil })).toBe("claude_home");
+    expect(
+      route("claudeAgent", providers, { current: "claude_work", spentUntil: { claudeAgent: now } }),
+    ).toBe("claude_work");
   });
 
   it("routes a thread moving to another driver among that driver's accounts", () => {

@@ -75,6 +75,7 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
+import { makeAccountRouting } from "./accountRouting.ts";
 import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
@@ -6276,10 +6277,11 @@ const codexAccount = (instanceId: ProviderInstanceId, usedPercent: number, now: 
       ],
     },
   }) satisfies ServerProvider;
-const limitSwitchAccounts = Effect.map(DateTime.now, (now) => [
-  codexAccount(modelSelection.instanceId, 100, now),
-  codexAccount(alternateInstanceId, 10, now),
-]);
+const limitSwitchAccounts = (limitedUsedPercent: number, alternateUsedPercent: number) =>
+  Effect.map(DateTime.now, (now) => [
+    codexAccount(modelSelection.instanceId, limitedUsedPercent, now),
+    codexAccount(alternateInstanceId, alternateUsedPercent, now),
+  ]);
 const layerLimitSwitchSettings = ServerSettings.layerTest({
   autoResumeLimitedThreads: true,
   continuationPrompt: "/poteto-mode Continue where you left off.",
@@ -6291,117 +6293,118 @@ const layerLimitSwitchSettings = ServerSettings.layerTest({
   },
 });
 
-const layerLimitSwitchTest = Layer.mergeAll(
-  RuntimeLayer.layer,
-  RuntimeLayer.layerEventSink,
-  ProjectStore.layer,
-  ProjectionStore.layer,
-  EffectOutbox.layer,
-  ThreadCommandExecutor.layer,
-).pipe(
-  Layer.provide(McpSessionRegistryTestkit.layer),
-  Layer.provide(McpProviderSessions.layer),
-  Layer.provide(SqlitePersistence.layerMemory),
-  Layer.provide(layerCheckpointStoreTest),
-  Layer.provide(layerServerConfig),
-  Layer.provideMerge(layerLimitSwitchSettings),
-  Layer.provideMerge(
-    Layer.mock(ProviderRegistry.ProviderRegistry)({
-      getProviders: limitSwitchAccounts,
-      refresh: () => limitSwitchAccounts,
-    }),
-  ),
-  Layer.provide(layerTestProviderInstanceRegistry),
-  Layer.provide(layerGitWorkflowTest),
-  Layer.provide(layerProjectServiceTest),
-  Layer.provide(layerPlatformTest),
-);
+const layerLimitSwitchTest = (accounts: ReturnType<typeof limitSwitchAccounts>) =>
+  Layer.mergeAll(
+    RuntimeLayer.layer,
+    RuntimeLayer.layerEventSink,
+    ProjectStore.layer,
+    ProjectionStore.layer,
+    EffectOutbox.layer,
+    ThreadCommandExecutor.layer,
+  ).pipe(
+    Layer.provide(McpSessionRegistryTestkit.layer),
+    Layer.provide(McpProviderSessions.layer),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+    Layer.provide(layerCheckpointStoreTest),
+    Layer.provide(layerServerConfig),
+    Layer.provideMerge(layerLimitSwitchSettings),
+    Layer.provideMerge(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: accounts,
+        refresh: () => accounts,
+      }),
+    ),
+    Layer.provide(layerTestProviderInstanceRegistry),
+    Layer.provide(layerGitWorkflowTest),
+    Layer.provide(layerProjectServiceTest),
+    Layer.provide(layerPlatformTest),
+  );
 
-it.layer(layerLimitSwitchTest)("usage-limit account switch", (it) => {
-  const limitedThread = (scenario: string, projectId: ProjectId) =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const events = yield* EventSink.EventSinkV2;
-      const threadId = ThreadId.make(`limit-switch:${scenario}`);
-      const now = yield* DateTime.now;
-      yield* seedProject({
-        projectId,
-        title: "Limit switch project",
-        workspaceRoot: process.cwd(),
-        defaultModelSelection: modelSelection,
-        createdAt: DateTime.formatIso(now),
-      });
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make(`limit-switch:create:${scenario}`),
-        threadId,
-        projectId,
-        title: "Limited thread",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        createdBy: "user",
-        creationSource: "web",
-      });
-      yield* orchestrator.dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make(`limit-switch:message:${scenario}`),
-        threadId,
-        messageId: MessageId.make(`limit-switch:message:${scenario}`),
-        text: "Work on this.",
-        attachments: [],
-        dispatchMode: { type: "defer_start" },
-        createdBy: "user",
-        creationSource: "web",
-      });
-      const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
-      yield* events.write({
-        commandId: CommandId.make(`limit-switch:failure:${scenario}`),
-        events: [
-          {
-            id: EventId.make(`limit-switch:run:${scenario}`),
-            type: "run.updated",
+const limitedThread = (scenario: string, projectId: ProjectId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const events = yield* EventSink.EventSinkV2;
+    const threadId = ThreadId.make(`limit-switch:${scenario}`);
+    const now = yield* DateTime.now;
+    yield* seedProject({
+      projectId,
+      title: "Limit switch project",
+      workspaceRoot: process.cwd(),
+      defaultModelSelection: modelSelection,
+      createdAt: DateTime.formatIso(now),
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`limit-switch:create:${scenario}`),
+      threadId,
+      projectId,
+      title: "Limited thread",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`limit-switch:message:${scenario}`),
+      threadId,
+      messageId: MessageId.make(`limit-switch:message:${scenario}`),
+      text: "Work on this.",
+      attachments: [],
+      dispatchMode: { type: "defer_start" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    yield* events.write({
+      commandId: CommandId.make(`limit-switch:failure:${scenario}`),
+      events: [
+        {
+          id: EventId.make(`limit-switch:run:${scenario}`),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...run, status: "failed", completedAt: now },
+        },
+        {
+          id: EventId.make(`limit-switch:error:${scenario}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`limit-switch:error:${scenario}`),
+            type: "error",
             threadId,
-            occurredAt: now,
-            payload: { ...run, status: "failed", completedAt: now },
-          },
-          {
-            id: EventId.make(`limit-switch:error:${scenario}`),
-            type: "turn-item.updated",
-            threadId,
-            occurredAt: now,
-            payload: {
-              id: TurnItemId.make(`limit-switch:error:${scenario}`),
-              type: "error",
-              threadId,
-              runId: run.id,
-              nodeId: run.rootNodeId,
-              providerThreadId: null,
-              providerTurnId: null,
-              nativeItemRef: null,
-              parentItemId: null,
-              ordinal: 2,
-              status: "failed",
-              title: "Usage limit reached",
-              startedAt: now,
-              completedAt: now,
-              updatedAt: now,
-              failure: {
-                class: "usage_limit",
-                message: "Plan limit reached.",
-                code: "usageLimitExceeded",
-                retryable: null,
-                resetAt: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
-              },
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 2,
+            status: "failed",
+            title: "Usage limit reached",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            failure: {
+              class: "usage_limit",
+              message: "Plan limit reached.",
+              code: "usageLimitExceeded",
+              retryable: null,
+              resetAt: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
             },
           },
-        ],
-      });
-      return threadId;
+        },
+      ],
     });
+    return threadId;
+  });
 
+it.layer(layerLimitSwitchTest(limitSwitchAccounts(100, 10)))("usage-limit account switch", (it) => {
   it.effect("continues a limited chat on another account with room before the reset, once", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -6442,6 +6445,42 @@ it.layer(layerLimitSwitchTest)("usage-limit account switch", (it) => {
     }),
   );
 });
+
+// A provider's readings of a limited account can still show room after its run failed on the
+// limit: a later probe can overwrite the spent window, and a failed probe leaves it unknown.
+it.layer(layerLimitSwitchTest(limitSwitchAccounts(10, 50)))(
+  "usage-limit account switch while readings still show room",
+  (it) => {
+    it.effect("moves a limited chat to another account with room", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sweep = yield* UsageLimitRecoveryWorker.makeSweep;
+        const threadId = yield* limitedThread(
+          "stale-room",
+          ProjectId.make("project:limit-switch-stale-room"),
+        );
+        yield* sweep();
+        const { runs } = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(
+          runs.map((run) => run.modelSelection.instanceId),
+          [modelSelection.instanceId, alternateInstanceId],
+        );
+      }),
+    );
+
+    it.effect("routes new chats around the limited account until its reset", () =>
+      Effect.gen(function* () {
+        const routeAccount = yield* makeAccountRouting;
+        const projectId = ProjectId.make("project:limit-switch-new-chat");
+        yield* limitedThread("new-chat", projectId);
+        const newChat = routeAccount({ projectId, selection: modelSelection });
+        assert.equal((yield* newChat).instanceId, alternateInstanceId);
+        yield* TestClock.adjust("1 hour");
+        assert.equal((yield* newChat).instanceId, modelSelection.instanceId);
+      }),
+    );
+  },
+);
 
 const queueResumeDisabledInstanceProjectId = ProjectId.make(
   "project:queue-resume-disabled-instance",
