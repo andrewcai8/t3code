@@ -2,19 +2,21 @@ import {
   isProviderAvailable,
   type ModelSelection,
   type ProjectId,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   resolveProjectProviderInstanceEnabled,
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
 import {
   type AccountLoad,
+  accountKey,
   hasKnownRoom,
   isAccountSpent,
   rankAccounts,
   ROUTED_ACCOUNT_DRIVERS,
 } from "@t3tools/shared/usageLimits";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -38,7 +40,8 @@ export interface AccountRequest {
  * account winning ties. A thread keeps its account: pickers offer the driver rather than each
  * account while routing is on, so a follow-up naming another account of the driver is that
  * driver's row, not a request to move. Only an account known to be spent lets the thread go, and
- * only to one known to have room; otherwise it stays and waits for its own reset.
+ * only to one known to have room; otherwise it stays and waits for its own reset. An account is
+ * known to be spent when its readings say so or, until the reset, when `spentUntil` names it.
  */
 export function routeSelection(
   input: AccountRequest & {
@@ -46,10 +49,12 @@ export function routeSelection(
     readonly providers: ReadonlyArray<ServerProvider>;
     readonly now: number;
     readonly load?: AccountLoad;
+    readonly spentUntil?: SpentAccounts;
   },
 ): ModelSelection {
-  const { selection, providers } = input;
+  const { selection } = input;
   if (!input.settings.autoPickProviderAccounts) return selection;
+  const providers = withUsageLimitFailures(input.providers, input.spentUntil, input.now);
   const driverOf = (instanceId: ProviderInstanceId | undefined) =>
     providers.find((provider) => provider.instanceId === instanceId)?.driver;
   const driver = driverOf(selection.instanceId);
@@ -88,6 +93,81 @@ export function routeSelection(
       : pick(current.instanceId);
   return best === undefined ? selection : pick(best.instanceId);
 }
+
+/** When each account a run failed on with a usage limit resets, in epoch milliseconds. */
+type SpentAccounts = ReadonlyMap<ProviderInstanceId, number>;
+
+/**
+ * The providers with every account a usage limit stopped, and every instance of its subscription,
+ * reading spent until that limit resets. The failure is the provider's own word; its readings can
+ * miss it, since a later probe replaces the spent window and a failed one leaves it unknown.
+ */
+function withUsageLimitFailures(
+  providers: ReadonlyArray<ServerProvider>,
+  spentUntil: SpentAccounts | undefined,
+  now: number,
+): ReadonlyArray<ServerProvider> {
+  if (spentUntil === undefined || spentUntil.size === 0) return providers;
+  const keyOf = (provider: ServerProvider) =>
+    accountKey(provider.driver, provider.auth.email, provider.usageLimits) ?? provider.instanceId;
+  const resets = new Map<string, number>();
+  for (const provider of providers) {
+    const resetAt = spentUntil.get(provider.instanceId);
+    if (resetAt === undefined || resetAt <= now) continue;
+    const key = keyOf(provider);
+    resets.set(key, Math.max(resets.get(key) ?? 0, resetAt));
+  }
+  const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis));
+  return providers.map((provider) => {
+    const resetAt = resets.get(keyOf(provider));
+    if (resetAt === undefined) return provider;
+    const fingerprint = provider.usageLimits?.credentialFingerprint;
+    return {
+      ...provider,
+      usageLimits: {
+        checkedAt: iso(now),
+        windows: [
+          {
+            id: "usage_limit",
+            kind: "other",
+            label: "Usage limit",
+            usedPercent: 100,
+            resetsAt: iso(resetAt),
+          },
+        ],
+        ...(fingerprint === undefined ? {} : { credentialFingerprint: fingerprint }),
+      },
+    };
+  });
+}
+
+/** Accounts this host's runs failed on with a usage limit that has not reset yet. */
+const readSpentAccounts = (sql: SqlClient.SqlClient, now: number) =>
+  sql<{ readonly providerInstanceId: string; readonly resetAt: string }>`
+    SELECT run.provider_instance_id AS "providerInstanceId",
+      MAX(json_extract(item.payload_json, '$.failure.resetAt')) AS "resetAt"
+    FROM orchestration_v2_projection_turn_items item
+    INNER JOIN orchestration_v2_projection_runs run ON run.run_id = item.run_id
+    WHERE item.type = 'error' AND item.status = 'failed'
+      AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
+      AND julianday(json_extract(item.payload_json, '$.failure.resetAt'))
+        > julianday(${DateTime.formatIso(DateTime.makeUnsafe(now))})
+      AND run.provider_instance_id IS NOT NULL
+    GROUP BY run.provider_instance_id
+  `.pipe(
+    Effect.map(
+      (rows): SpentAccounts =>
+        new Map(
+          rows.map((row) => [
+            ProviderInstanceId.make(row.providerInstanceId),
+            Date.parse(row.resetAt),
+          ]),
+        ),
+    ),
+    Effect.catch((cause) =>
+      Effect.as(Effect.logDebug("usage-limit failures unread for routing", { cause }), new Map()),
+    ),
+  );
 
 const STALE_READING_MS = 15 * 60_000;
 const REFRESH_SPACING_MS = 10 * 60_000;
@@ -146,7 +226,12 @@ export const makeAccountRouting = Effect.gen(function* () {
       settings: current.value,
       providers,
       now,
-      ...(Option.isSome(sql) ? { load: yield* readLocalAccountLoad(sql.value) } : {}),
+      ...(Option.isSome(sql)
+        ? {
+            load: yield* readLocalAccountLoad(sql.value),
+            spentUntil: yield* readSpentAccounts(sql.value, now),
+          }
+        : {}),
     });
   });
 });
