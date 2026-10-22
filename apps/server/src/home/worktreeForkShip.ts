@@ -21,6 +21,8 @@ import type { ForkRepository } from "./worktreeForksConfig.ts";
 
 /** A shipment past this is not a worktree's state but something that belongs in .gitignore. */
 const MAX_SHIPMENT_BYTES = 256 * 1024 * 1024;
+/** Checked before inputs are packed, so an oversized one never costs this host a full gzip. */
+const MAX_INPUT_BYTES = 1024 * 1024 * 1024;
 
 const REFUSALS = {
   not_a_repository: "The command's directory is not inside a git checkout.",
@@ -30,6 +32,9 @@ const REFUSALS = {
     "This checkout lacks the commit its copy starts from; fetch origin and run it again.",
   too_large: "This worktree's uncommitted state is over 256 MiB, too much to copy.",
   unreadable: "This worktree's state could not be read.",
+  missing_input: "A path given as an input does not exist on this host.",
+  symlinked_input: "An input is a symlink; name the file or directory it points to.",
+  inputs_too_large: "The command's inputs are over 1 GiB, or 256 MiB compressed, too much to copy.",
 } as const;
 
 export class CheckoutRefused extends Schema.TaggedError<CheckoutRefused>()("CheckoutRefused", {
@@ -39,6 +44,9 @@ export class CheckoutRefused extends Schema.TaggedError<CheckoutRefused>()("Chec
     "missing_base_commit",
     "too_large",
     "unreadable",
+    "missing_input",
+    "symlinked_input",
+    "inputs_too_large",
   ]),
   cause: Schema.optional(Schema.Defect()),
 }) {
@@ -267,6 +275,44 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
       NodeFS.existsSync(NodePath.join(root, lockDir, "bun.lock")),
     ),
   } satisfies Shipment;
+});
+
+/** Bytes of the files under `path`, not following symlinks. */
+const diskBytes = (path: string): number => {
+  const stat = NodeFS.lstatSync(path);
+  return stat.isDirectory()
+    ? NodeFS.readdirSync(path).reduce((sum, name) => sum + diskBytes(NodePath.join(path, name)), 0)
+    : stat.size;
+};
+
+/**
+ * Packs host paths the command reads beyond its worktree into `dir`, relative to `/`, for a copy
+ * to unpack at the same paths (INPUTS_SCRIPT in WorktreeForks.ts).
+ */
+export const packInputs = Effect.fn("WorktreeForks.packInputs")(function* (
+  paths: ReadonlyArray<string>,
+  dir: string,
+) {
+  if (paths.some((path) => !NodeFS.existsSync(path)))
+    return yield* new CheckoutRefused({ reason: "missing_input" });
+  // tar packs a symlink as a link, which would dangle in the copy.
+  if (paths.some((path) => NodeFS.lstatSync(path).isSymbolicLink()))
+    return yield* new CheckoutRefused({ reason: "symlinked_input" });
+  if (paths.reduce((sum, path) => sum + diskBytes(path), 0) > MAX_INPUT_BYTES)
+    return yield* new CheckoutRefused({ reason: "inputs_too_large" });
+  const archive = NodePath.join(dir, "inputs.tgz");
+  const packed = yield* run("/", "tar", ["-czf", archive, "--null", "-T", "-"], {
+    stdin: paths.map((path) => `${path.slice(1)}\0`).join(""),
+    env: { COPYFILE_DISABLE: "1" },
+  });
+  if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
+    return yield* new CheckoutRefused({
+      reason: "unreadable",
+      cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+    });
+  const bytes = NodeFS.statSync(archive).size;
+  if (bytes > MAX_SHIPMENT_BYTES) return yield* new CheckoutRefused({ reason: "inputs_too_large" });
+  return { archive, bytes };
 });
 
 /**

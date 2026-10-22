@@ -1,8 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - a fast-path CLI that loads nothing heavy.
 /**
- * `t3 fork-exec [--timeout <seconds>] [--size <name>] -- <command>`: runs a command in a throwaway
- * copy of this machine or worktree and prints its output and exit code as if it ran here (see
- * home/ForkExec.ts).
+ * `t3 fork-exec [--timeout <seconds>] [--size <name>] [--input <path>]... [--output <path>]...
+ * -- <command>`: runs a command in a throwaway copy of this machine or worktree and prints its
+ * output and exit code as if it ran here (see home/ForkExec.ts). An input is a file or directory
+ * the copy gets at the same path; an output comes back to the same path once the command exits.
  *
  * Exit codes: the command's own, 124 when it timed out, 70 when its copy was lost, and 75 when no
  * copy could start, so a wrapper can run the command here instead.
@@ -30,18 +31,27 @@ const TAIL_CHARS = 3_900;
 
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ForkExecEventSchema));
 
+const USAGE =
+  "Usage: t3 fork-exec [--timeout <seconds>] [--size <name>] [--input <path>]... [--output <path>]... -- <command>\n";
+
 /**
- * Flags come in any order before `--`. One argument after them is a shell command as given;
- * several are a command and its arguments.
+ * Flags come in any order before `--`; `--input` and `--output` repeat, and their paths resolve
+ * against `cwd`. One argument after the flags is a shell command as given; several are a command
+ * and its arguments.
  */
-export function parseForkExecArgs(args: ReadonlyArray<string>) {
+export function parseForkExecArgs(args: ReadonlyArray<string>, cwd = process.cwd()) {
   let rest = [...args];
   let timeoutSeconds: number | undefined;
   let size: string | undefined;
+  const inputs: Array<string> = [];
+  const outputs: Array<string> = [];
   for (;;) {
     if (rest[0] === "--timeout") timeoutSeconds = Number(rest[1]);
     else if (rest[0] === "--size") size = rest[1];
-    else break;
+    else if (rest[0] === "--input" || rest[0] === "--output") {
+      if (!rest[1]) return null;
+      (rest[0] === "--input" ? inputs : outputs).push(NodePath.resolve(cwd, rest[1]));
+    } else break;
     rest = rest.slice(2);
   }
   if (rest[0] === "--") rest = rest.slice(1);
@@ -55,6 +65,8 @@ export function parseForkExecArgs(args: ReadonlyArray<string>) {
     command: rest.length === 1 ? rest[0]! : rest.map(shellQuote).join(" "),
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
     ...(size === undefined ? {} : { size }),
+    ...(inputs.length === 0 ? {} : { inputs }),
+    ...(outputs.length === 0 ? {} : { outputs }),
   };
 }
 
@@ -103,9 +115,7 @@ const report = (event: ForkExecEvent): number => {
 export async function runForkExec(args: ReadonlyArray<string>): Promise<number> {
   const parsed = parseForkExecArgs(args);
   if (parsed === null) {
-    process.stderr.write(
-      "Usage: t3 fork-exec [--timeout <seconds>] [--size <name>] -- <command>\n",
-    );
+    process.stderr.write(USAGE);
     return 2;
   }
   const home = process.env.T3CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".t3");

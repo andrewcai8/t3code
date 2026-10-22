@@ -244,6 +244,11 @@ it.effect(
           message: /not inside a git checkout/,
         },
         {
+          arrange: () => {},
+          overrides: { inputs: ["/nonexistent/t3wf-input.json"] },
+          message: /given as an input does not exist/,
+        },
+        {
           arrange: (fake) => fake.failNext("create", new Error("no capacity")),
           message: /Modal could not start a copy/,
         },
@@ -306,6 +311,161 @@ it.effect("a copy lost after the banner is reported lost, and its sandbox still 
     expect(outcome).toEqual({ _tag: "Lost", message: "Its Modal sandbox stopped answering." });
     expect(seen).toEqual(["started true"]);
     expect(fake.running().size).toBe(0);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("inputs reach the copy at their own paths, and outputs come back to theirs", () => {
+  const { root, fake, layer, start } = setup();
+  const input = NodePath.join(tempDir("inputs"), "snapshot.json");
+  NodeFS.writeFileSync(input, "{}\n");
+  const output = NodePath.join(tempDir("outputs"), "run");
+  // What the copy packs from its root: the output's own path without the leading slash.
+  const packed = tempDir("packed");
+  NodeFS.mkdirSync(NodePath.join(packed, output), { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(packed, output, "report.json"), "done\n");
+  NodeChildProcess.execFileSync("tar", ["-czf", "out.tgz", output.slice(1)], { cwd: packed });
+  return Effect.gen(function* () {
+    let shipped: Array<string> = [];
+    fake.onExec(isStep("t3-inputs"), {
+      run: (argv, uploaded) => {
+        shipped = NodeChildProcess.execFileSync("tar", ["-tzf", uploaded.get(argv[4]!)!])
+          .toString()
+          .split("\n")
+          .filter((line) => line !== "");
+        return 0;
+      },
+    });
+    fake.onExec(isStep("t3-outputs"), { exitCode: 0, stdout: "/nowhere\0" });
+    fake.downloadFrom(NodePath.join(packed, "out.tgz"));
+    const forks = yield* start;
+    const { seen, observer } = watcher();
+    const outcome = yield* forks.exec(
+      request(root, { inputs: [input], outputs: [output, "/nowhere"] }),
+      observer,
+    );
+
+    expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(labels(fake)).toEqual([
+      "create",
+      "upload",
+      "t3-apply",
+      "t3-place",
+      "upload",
+      "t3-inputs",
+      "stream",
+      "t3-outputs",
+      "download",
+      "terminate",
+    ]);
+    expect(shipped).toEqual([input.slice(1)]);
+    expect(fake.calls.find((call) => call.argv?.[3] === "t3-outputs")?.argv?.slice(4)).toEqual([
+      "/",
+      String(100 * 1024 * 1024),
+      output,
+      "/nowhere",
+    ]);
+    expect(NodeFS.readFileSync(NodePath.join(output, "report.json"), "utf8")).toBe("done\n");
+    expect(seen.at(-1)).toBe("stderr [t3] Not found: /nowhere.\n");
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+/** A gzip tar as a copy packs it from its root: each file at its own path, less the slash. */
+const packedArchive = (
+  files: Readonly<Record<string, string>>,
+  links: Readonly<Record<string, string>> = {},
+) => {
+  const packed = tempDir("packed");
+  for (const [path, text] of Object.entries(files)) {
+    NodeFS.mkdirSync(NodePath.dirname(NodePath.join(packed, path)), { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(packed, path), text);
+  }
+  for (const [path, target] of Object.entries(links)) {
+    NodeFS.mkdirSync(NodePath.dirname(NodePath.join(packed, path)), { recursive: true });
+    NodeFS.symlinkSync(target, NodePath.join(packed, path));
+  }
+  const top = NodeFS.readdirSync(packed);
+  NodeChildProcess.execFileSync("tar", ["-czf", "out.tgz", ...top], { cwd: packed });
+  return NodePath.join(packed, "out.tgz");
+};
+
+it.effect("outputs come back only whole and as asked, or leave the host as it was", () => {
+  const { root, fake, layer, start } = setup();
+  const output = NodePath.join(tempDir("outputs"), "run");
+  const elsewhere = NodePath.join(tempDir("elsewhere"), "authorized_keys");
+  NodeFS.mkdirSync(output);
+  NodeFS.writeFileSync(NodePath.join(output, "stale.txt"), "old\n");
+  const garbage = NodePath.join(tempDir("garbage"), "out.tgz");
+  NodeFS.writeFileSync(garbage, "not a tar");
+  return Effect.gen(function* () {
+    fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+    const forks = yield* start;
+    const copyBack = (archive: string) =>
+      Effect.gen(function* () {
+        fake.downloadFrom(archive);
+        const { seen, observer } = watcher();
+        yield* forks.exec(request(root, { outputs: [output] }), observer);
+        return seen.at(-1);
+      });
+    const untouched = () => {
+      expect(NodeFS.readdirSync(output)).toEqual(["stale.txt"]);
+      expect(NodeFS.existsSync(elsewhere)).toBe(false);
+      expect(NodeFS.readdirSync(NodePath.dirname(output))).toEqual(["run"]);
+    };
+
+    expect(
+      yield* copyBack(
+        packedArchive({ [`${output}/report.json`]: "new\n", [elsewhere]: "ssh-ed25519 x\n" }),
+      ),
+    ).toBe(
+      `stderr [t3] The outputs were not copied back: ${NodePath.dirname(elsewhere)} is not a requested output.\n`,
+    );
+    untouched();
+    expect(yield* copyBack(packedArchive({}, { [`${output}/keys`]: elsewhere }))).toBe(
+      `stderr [t3] The outputs were not copied back: ${output}/keys is not a plain file or directory.\n`,
+    );
+    untouched();
+    expect(yield* copyBack(garbage)).toBe(
+      "stderr [t3] The outputs were not copied back: Copying the outputs back failed.\n",
+    );
+    untouched();
+
+    expect(yield* copyBack(packedArchive({ [`${output}/report.json`]: "new\n" }))).toBe(
+      "started true",
+    );
+    // The output replaced its host path whole: the stale file went with the old directory.
+    expect(NodeFS.readdirSync(output)).toEqual(["report.json"]);
+    expect(NodeFS.readdirSync(NodePath.dirname(output))).toEqual(["run"]);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a copy may not read or write T3 home, nor replace the home directory", () => {
+  const { root, stateDir, fake, layer, start } = setup();
+  const t3Home = NodePath.dirname(stateDir);
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    const cases: Array<readonly [Partial<ForkExecRequest>, RegExp]> = [
+      [
+        { inputs: [NodePath.join(stateDir, "settings.json")] },
+        /T3 home, which a copy may not read/,
+      ],
+      [{ outputs: [NodePath.join(t3Home, "secrets")] }, /T3 home, which a copy may not write/],
+      [{ outputs: [NodePath.dirname(t3Home)] }, /T3 home, which a copy may not write/],
+      [{ outputs: ["/Users/me"] }, /home directory, which an output may not replace/],
+    ];
+    // macOS and Windows ignore case, so another spelling names the same T3 home there.
+    const otherCase = NodePath.join(
+      NodePath.dirname(t3Home),
+      NodePath.basename(t3Home).toUpperCase(),
+      "secrets",
+    );
+    if (!otherCase.startsWith(t3Home) && NodeFS.existsSync(NodePath.dirname(otherCase))) {
+      cases.push([{ outputs: [otherCase] }, /T3 home, which a copy may not write/]);
+    }
+    for (const [overrides, message] of cases) {
+      const outcome = yield* forks.exec(request(root, overrides), watcher().observer);
+      expect(outcome._tag === "NotStarted" ? outcome.message : outcome._tag).toMatch(message);
+    }
+    expect(fake.calls.some((call) => call.op === "create")).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
@@ -374,8 +534,9 @@ it.effect("a command past its timeout exits 124 and its copy ends", () => {
     fake.onExec(isCommand("bun test"), { exitCode: new Promise<number>(() => {}) });
     const forks = yield* start;
     const streaming = fake.next("stream");
+    const { seen, observer } = watcher();
     const fiber = yield* forks
-      .exec(request(root, { timeoutSeconds: 60 }), watcher().observer)
+      .exec(request(root, { timeoutSeconds: 60, outputs: [`${root}/dist`] }), observer)
       .pipe(Effect.forkChild);
     yield* Effect.promise(() => streaming);
     yield* TestClock.adjust("60 seconds");
@@ -384,6 +545,9 @@ it.effect("a command past its timeout exits 124 and its copy ends", () => {
       exitCode: 124,
       timedOut: true,
     });
+    expect(seen.at(-1)).toBe(
+      "stderr [t3] The command timed out, so its outputs were not copied back.\n",
+    );
     expect(fake.running().size).toBe(0);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
