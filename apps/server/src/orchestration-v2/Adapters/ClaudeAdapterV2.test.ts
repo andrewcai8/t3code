@@ -57,6 +57,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -2941,6 +2942,194 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       ),
     );
+  });
+
+  describe("Full-access auto-approval", () => {
+    const AUTO_APPROVED_LOG = "orchestration-v2.claude-permission-auto-approved";
+
+    const layerWithLogs = () => {
+      const entries: Array<{ readonly name: unknown; readonly fields: unknown }> = [];
+      const logger = Logger.make(({ message }) => {
+        const [name, fields] = Array.isArray(message) ? message : [message, undefined];
+        entries.push({ name, fields });
+      });
+      return {
+        autoApprovals: () => entries.filter((entry) => entry.name === AUTO_APPROVED_LOG),
+        layer: Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          Logger.layer([logger], { mergeWithExisting: false }),
+        ),
+      };
+    };
+
+    const openTurn = Effect.fn("openAutoApprovalTurn")(function* (input: {
+      readonly runtimeMode: "approval-required" | "auto-accept-edits" | "full-access";
+      readonly interactionMode?: "default" | "plan";
+      readonly autoApprove: boolean;
+    }) {
+      const harness = yield* makeWakeHarness;
+      const interactionMode = input.interactionMode ?? "default";
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: input.runtimeMode,
+        interactionMode,
+        cwd: "/workspace",
+        ...(input.autoApprove ? { autoApproveFullAccessPrompts: true } : {}),
+      });
+      const turnInput = makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("attempt-claude-auto-approval"),
+        text: "Clean up.",
+        attachments: [],
+        runtimePolicy,
+      });
+      yield* harness.runtime.startTurn({
+        ...turnInput,
+        appThread: { ...turnInput.appThread, runtimeMode: input.runtimeMode, interactionMode },
+      });
+      const canUseTool = harness.getOpenedOptions()?.canUseTool;
+      assert.isDefined(canUseTool);
+      return { ...harness, canUseTool: canUseTool! };
+    });
+
+    const forward = Effect.fn("forwardAutoApprovalRequest")(function* (
+      turn: Effect.Success<ReturnType<typeof openTurn>>,
+      toolName: string,
+      toolInput: Record<string, unknown>,
+    ) {
+      const decision = yield* Effect.promise(() =>
+        turn.canUseTool(toolName, toolInput, {
+          signal: new AbortController().signal,
+          toolUseID: `tool-${toolName}`,
+          requestId: `request-${toolName}`,
+        }),
+      ).pipe(Effect.forkScoped);
+      return yield* Effect.raceFirst(
+        Queue.take(turn.runtimeRequestReceipts).pipe(
+          Effect.map((event) => ({ type: "request", event, decision }) as const),
+        ),
+        Fiber.join(decision).pipe(Effect.map((result) => ({ type: "decision", result }) as const)),
+      );
+    });
+
+    it.effect.each([
+      { toolName: "Bash", toolInput: { command: "rm -f /tmp/report.json" } },
+      {
+        toolName: "Edit",
+        toolInput: { file_path: "/tmp/outside.txt", old_string: "a", new_string: "b" },
+      },
+      { toolName: "mcp__docs__search", toolInput: { query: "approvals" } },
+    ] as const)("allows a forwarded $toolName request without a pending request", (request) => {
+      const logs = layerWithLogs();
+      return Effect.gen(function* () {
+        const turn = yield* openTurn({ runtimeMode: "full-access", autoApprove: true });
+        const outcome = yield* forward(turn, request.toolName, request.toolInput);
+        assert.equal(outcome.type, "decision", "the request was raised for approval");
+        if (outcome.type !== "decision") return;
+        assert.equal(outcome.result?.behavior, "allow");
+        if (outcome.result?.behavior === "allow") {
+          assert.deepEqual(outcome.result.updatedInput, request.toolInput);
+          assert.equal(outcome.result.toolUseID, `tool-${request.toolName}`);
+        }
+        assert.isTrue(
+          turn.events.every((event) => event.type !== "runtime_request.updated"),
+          "an auto-approved request must not leave a pending runtime request",
+        );
+        assert.deepEqual(
+          logs.autoApprovals().map((entry) => (entry.fields as { toolName?: string }).toolName),
+          [request.toolName],
+        );
+      }).pipe(Effect.scoped, Effect.provide(logs.layer));
+    });
+
+    it.effect("logs the thread and a redacted, shortened summary of what was approved", () => {
+      const logs = layerWithLogs();
+      return Effect.gen(function* () {
+        const turn = yield* openTurn({ runtimeMode: "full-access", autoApprove: true });
+        yield* forward(turn, "Bash", {
+          command: `API_TOKEN=abc123secret curl -H "Authorization: Bearer ghp_abcdefghijklmnop" https://u:hunter2@example.com/${"x".repeat(300)}`,
+        });
+        const [entry] = logs.autoApprovals();
+        const fields = entry?.fields as { threadId: string; summary: string } | undefined;
+        assert.equal(fields?.threadId, turn.threadId);
+        assert.include(fields?.summary ?? "", "Bash: API_TOKEN=***");
+        for (const secret of ["abc123secret", "ghp_abcdefghijklmnop", "hunter2"]) {
+          assert.notInclude(fields?.summary ?? "", secret);
+        }
+        assert.isAtMost(fields?.summary.length ?? 0, 160);
+      }).pipe(Effect.scoped, Effect.provide(logs.layer));
+    });
+
+    it.effect.each([
+      { name: "the setting is off", mode: "full-access", interaction: "default", on: false },
+      { name: "Plan mode", mode: "full-access", interaction: "plan", on: true },
+      { name: "Supervised", mode: "approval-required", interaction: "default", on: true },
+      { name: "Auto-accept edits", mode: "auto-accept-edits", interaction: "default", on: true },
+    ] as const)("still asks for a forwarded Bash request when $name", (scenario) => {
+      const logs = layerWithLogs();
+      return Effect.gen(function* () {
+        const turn = yield* openTurn({
+          runtimeMode: scenario.mode,
+          interactionMode: scenario.interaction,
+          autoApprove: scenario.on,
+        });
+        const outcome = yield* forward(turn, "Bash", { command: "rm -f /tmp/report.json" });
+        assert.equal(outcome.type, "request", "the request was approved without asking");
+        if (outcome.type !== "request") return;
+        assert.equal(outcome.event.runtimeRequest.status, "pending");
+        assert.equal(outcome.event.runtimeRequest.kind, "command");
+        yield* turn.runtime.respondToRuntimeRequest({
+          requestId: outcome.event.runtimeRequest.id,
+          decision: "decline",
+        });
+        assert.equal((yield* Fiber.join(outcome.decision))?.behavior, "deny");
+        assert.deepEqual(logs.autoApprovals(), []);
+      }).pipe(Effect.scoped, Effect.provide(logs.layer));
+    });
+
+    it.effect("keeps asking the user an AskUserQuestion even when auto-approval is on", () => {
+      const logs = layerWithLogs();
+      return Effect.gen(function* () {
+        const turn = yield* openTurn({ runtimeMode: "full-access", autoApprove: true });
+        const outcome = yield* forward(turn, "AskUserQuestion", {
+          questions: [
+            {
+              header: "Target",
+              question: "Which target?",
+              options: [
+                { label: "Production", description: "Deploy to production." },
+                { label: "Staging", description: "Deploy to staging." },
+              ],
+              multiSelect: false,
+            },
+          ],
+        });
+        assert.equal(outcome.type, "request", "the question was answered without the user");
+        if (outcome.type !== "request") return;
+        assert.equal(outcome.event.runtimeRequest.kind, "user_input");
+        assert.deepEqual(logs.autoApprovals(), []);
+      }).pipe(Effect.scoped, Effect.provide(logs.layer));
+    });
+
+    it.effect("still captures ExitPlanMode as a plan when auto-approval is on", () => {
+      const logs = layerWithLogs();
+      return Effect.gen(function* () {
+        const turn = yield* openTurn({
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          autoApprove: true,
+        });
+        const outcome = yield* forward(turn, "ExitPlanMode", { plan: "# Plan\n\nDo the work." });
+        assert.equal(outcome.type, "decision");
+        if (outcome.type !== "decision") return;
+        assert.equal(outcome.result?.behavior, "deny");
+        assert.equal((yield* Queue.take(turn.planReceipts)).plan.kind, "proposed_plan");
+        assert.deepEqual(logs.autoApprovals(), []);
+      }).pipe(Effect.scoped, Effect.provide(logs.layer));
+    });
   });
 
   it.effect(

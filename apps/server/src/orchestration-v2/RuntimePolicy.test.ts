@@ -16,6 +16,7 @@ import * as Stream from "effect/Stream";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
@@ -74,40 +75,42 @@ const providerInstanceFor = (instanceId: ProviderInstanceId) =>
     },
   }) as ProviderInstance;
 
-const layerTest = RuntimePolicy.layerFromProjectStore.pipe(
-  Layer.provide(
-    Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-      getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
-      listInstances: Effect.succeed([]),
-      listUnavailable: Effect.succeed([]),
-      streamChanges: Stream.empty,
-      subscribeChanges: Effect.never,
-    }),
-  ),
-  Layer.provide(
-    Layer.mock(ProjectStore.ProjectStoreV2)({
-      get: () =>
-        Effect.succeed(
-          Option.some({
-            projectId,
-            title: "Project",
-            workspaceRoot: "/project-root",
-            defaultModelSelection: null,
-            defaultThreadEnvMode: null,
-            autoPull: false,
-            faviconPath: null,
-            projectIcon: null,
-            scripts: [],
-            createdAt: "2026-06-21T00:00:00.000Z",
-            updatedAt: "2026-06-21T00:00:00.000Z",
-            deletedAt: null,
-          }),
-        ),
-    }),
-  ),
-);
+const makeLayerTest = (autoApproveFullAccessPrompts: boolean) =>
+  RuntimePolicy.layerFromProjectStore.pipe(
+    Layer.provide(ServerSettings.layerTest({ autoApproveFullAccessPrompts })),
+    Layer.provide(
+      Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+        getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
+        listInstances: Effect.succeed([]),
+        listUnavailable: Effect.succeed([]),
+        streamChanges: Stream.empty,
+        subscribeChanges: Effect.never,
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(ProjectStore.ProjectStoreV2)({
+        get: () =>
+          Effect.succeed(
+            Option.some({
+              projectId,
+              title: "Project",
+              workspaceRoot: "/project-root",
+              defaultModelSelection: null,
+              defaultThreadEnvMode: null,
+              autoPull: false,
+              faviconPath: null,
+              projectIcon: null,
+              scripts: [],
+              createdAt: "2026-06-21T00:00:00.000Z",
+              updatedAt: "2026-06-21T00:00:00.000Z",
+              deletedAt: null,
+            }),
+          ),
+      }),
+    ),
+  );
 
-it.layer(layerTest)("RuntimePolicyV2", (it) => {
+it.layer(makeLayerTest(false))("RuntimePolicyV2", (it) => {
   it.effect("runs a mode the provider does not offer in Supervised", () =>
     Effect.gen(function* () {
       const policy = yield* RuntimePolicy.RuntimePolicyV2;
@@ -124,6 +127,32 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
       assert.equal(yield* modeFor(grokInstanceId, "auto"), "auto");
       assert.equal(yield* modeFor(grokInstanceId, "full-access"), "full-access");
       assert.equal(yield* modeFor(providerInstanceId, "auto-accept-edits"), "auto-accept-edits");
+    }),
+  );
+
+  it.effect("leaves auto-approval unset when the server setting is off", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const resolved = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: null }),
+        modelSelection,
+      });
+      assert.isUndefined(resolved.autoApproveFullAccessPrompts);
+    }),
+  );
+});
+
+it.layer(makeLayerTest(true))("RuntimePolicyV2 with auto-approval enabled", (it) => {
+  it.effect("carries the server setting into the resolved policy", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const resolved = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: null }),
+        modelSelection,
+      });
+      assert.equal(resolved.autoApproveFullAccessPrompts, true);
     }),
   );
 });

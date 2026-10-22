@@ -2174,6 +2174,39 @@ function requiresClaudeApproval(context: ActiveClaudeTurnContext): boolean {
   return policy.installPermissionCallback || policy.permissionMode === "bypassPermissions";
 }
 
+// Plan mode and a CLI-downgraded bypass keep asking: only a live bypass in
+// Full access carries the user's opt-in.
+function autoApprovesClaudeToolRequest(
+  context: ActiveClaudeTurnContext,
+  toolName: string,
+): boolean {
+  const { runtimePolicy } = context.input;
+  return (
+    toolName !== "AskUserQuestion" &&
+    toolName !== "ExitPlanMode" &&
+    runtimePolicy.autoApproveFullAccessPrompts === true &&
+    runtimePolicy.runtimeMode === "full-access" &&
+    runtimePolicy.interactionMode !== "plan" &&
+    context.queryPolicy.permissionMode === "bypassPermissions"
+  );
+}
+
+const CLAUDE_AUTO_APPROVAL_SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH)[A-Za-z0-9_]*=)\S+/gi, "$1***"],
+  [/\b(Bearer|Basic)\s+\S+/gi, "$1 ***"],
+  [/(--?(?:token|password|passwd|secret|api-key|apikey|auth)[= ])\S+/gi, "$1***"],
+  [/\b(?:sk|ghp|gho|xox[a-z])[-_][A-Za-z0-9_-]{12,}/g, "***"],
+  [/(:\/\/[^\s:@/]+:)[^\s@/]+@/g, "$1***@"],
+];
+
+function auditSummaryForClaudeToolRequest(toolName: string, input: ClaudeNativeToolInput): string {
+  const summary = CLAUDE_AUTO_APPROVAL_SECRET_PATTERNS.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    summarizeClaudeToolRequest(toolName, input),
+  );
+  return summary.length <= 160 ? summary : `${summary.slice(0, 157)}...`;
+}
+
 function claudeRuntimeQueryPolicyKey(policy: ClaudeRuntimeQueryPolicy): string {
   return JSON.stringify({
     permissionMode: policy.permissionMode,
@@ -8795,7 +8828,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             heldForEcho &&
             toolName !== "ExitPlanMode" &&
-            (toolName === "AskUserQuestion" || requiresClaudeApproval(context))
+            (toolName === "AskUserQuestion" ||
+              (requiresClaudeApproval(context) &&
+                !autoApprovesClaudeToolRequest(context, toolName)))
           ) {
             // The SDK blocks on the answer, and the prompt echo cannot arrive
             // until the held turn goes on, so the request is raised now and
@@ -8908,6 +8943,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               behavior: "deny",
               message:
                 "This tool requires approval in Plan mode, but approvals are disabled for this thread.",
+              toolUseID: callbackOptions.toolUseID,
+            } satisfies PermissionResult;
+          }
+
+          if (autoApprovesClaudeToolRequest(context, toolName)) {
+            yield* Effect.logInfo("orchestration-v2.claude-permission-auto-approved", {
+              threadId: context.input.threadId,
+              toolName,
+              summary: auditSummaryForClaudeToolRequest(toolName, nativeToolInput),
+            });
+            return {
+              behavior: "allow",
+              updatedInput: toolInput,
               toolUseID: callbackOptions.toolUseID,
             } satisfies PermissionResult;
           }

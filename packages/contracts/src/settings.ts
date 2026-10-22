@@ -1152,6 +1152,14 @@ export const ServerSettings = Schema.Struct({
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
   ),
+  /**
+   * Claude Code's own safety checks still forward some actions to the user under
+   * Full access. When on, a Full access Claude thread allows them without asking.
+   * Environment-wide; read when a turn starts.
+   */
+  autoApproveFullAccessPrompts: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
 
   projectSettingsOverrides: Schema.Record(ProjectId, ProjectSettingsOverrides).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1488,6 +1496,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
+  autoApproveFullAccessPrompts: Schema.optionalKey(Schema.Boolean),
   /**
    * Per-project entry replacement: each entry replaces that project's whole
    * override set and `null` removes it.
