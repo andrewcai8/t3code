@@ -35,6 +35,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
@@ -64,6 +65,7 @@ import {
   type Shipment,
   shipState,
 } from "./worktreeForkShip.ts";
+import { placeOutputs, refusedPath } from "./worktreeForkPaths.ts";
 
 /** Time a copy keeps beyond its job's timeout for applying, services and outputs. */
 const SETUP_MS = 20 * 60_000;
@@ -173,12 +175,16 @@ interface CopyJob {
   readonly timeoutMs: number;
   /** Host paths packed for the copy to unpack at the same paths. */
   readonly inputs: { readonly archive: string; readonly bytes: number } | null;
-  /** Paths under `root` in the copy that come back under `into` here, through `archive`. */
+  /**
+   * Paths under `root` in the copy that come back under `into` here, through `archive`. With
+   * `place`, `into` only stages them, and each then replaces its own host path (placeOutputs).
+   */
   readonly outputs: {
     readonly paths: ReadonlyArray<string>;
     readonly root: string;
     readonly into: string;
     readonly archive: string;
+    readonly place?: true;
   } | null;
 }
 
@@ -284,7 +290,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   host: WorktreeForksHost,
   sandboxes: ForkSandboxes,
 ) {
-  const stateDir = (yield* ServerConfig).stateDir;
+  const { stateDir, baseDir: t3Home } = yield* ServerConfig;
   const hostTag = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor).environmentId;
   const hostHome = yield* HostProcess.HomeDirectory;
   const serverEnvironment = yield* HostProcess.Environment;
@@ -453,6 +459,13 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     );
     if (Option.isNone(unpacked) || Number(unpacked.value.code) !== 0)
       return { outputsProblem: "Copying the outputs back failed." };
+    if (outputs.place) {
+      const placed = yield* Effect.try({
+        try: () => placeOutputs(outputs.into, outputs.paths, NodeCrypto.randomUUID()),
+        catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+      }).pipe(Effect.result);
+      if (Result.isFailure(placed)) return { outputsProblem: placed.failure };
+    }
     const missing = stdout.split("\0").filter((path) => path !== "");
     return {
       copiedTo: outputs.into,
@@ -546,6 +559,11 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     function* (request, observer) {
       const size = sizeOf(request.size);
       if (size === undefined) return yield* new NotStarted({ reason: unknownSize(request.size) });
+      const refused = [
+        ...(request.inputs ?? []).map((path) => refusedPath(path, "input", t3Home, hostHome)),
+        ...(request.outputs ?? []).map((path) => refusedPath(path, "output", t3Home, hostHome)),
+      ].find((reason) => reason !== null);
+      if (refused !== undefined) return yield* new NotStarted({ reason: refused });
       const checkout = yield* inspect(request.cwd);
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
       const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
@@ -575,16 +593,23 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
               : {
                   paths: request.outputs!,
                   root: "/",
-                  into: "/",
+                  into: NodePath.join(dir, "outputs"),
                   archive: NodePath.join(dir, "outputs.tgz"),
+                  place: true,
                 },
         },
         shipment,
         base,
         observer,
       );
-      if (exited.outputsProblem !== undefined)
-        observer.output("stderr", `[t3] ${exited.outputsProblem}\n`);
+      if ((request.outputs ?? []).length > 0) {
+        const problem = exited.timedOut
+          ? "The command timed out, so its outputs were not copied back."
+          : exited.copiedTo === undefined
+            ? `The outputs were not copied back: ${exited.outputsProblem}`
+            : exited.outputsProblem;
+        if (problem !== undefined) observer.output("stderr", `[t3] ${problem}\n`);
+      }
       return {
         _tag: "Exited",
         exitCode: exited.exitCode,

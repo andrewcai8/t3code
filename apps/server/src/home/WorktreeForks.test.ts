@@ -369,6 +369,97 @@ it.effect("inputs reach the copy at their own paths, and outputs come back to th
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
+/** A gzip tar as a copy packs it from its root: each file at its own path, less the slash. */
+const packedArchive = (
+  files: Readonly<Record<string, string>>,
+  links: Readonly<Record<string, string>> = {},
+) => {
+  const packed = tempDir("packed");
+  for (const [path, text] of Object.entries(files)) {
+    NodeFS.mkdirSync(NodePath.dirname(NodePath.join(packed, path)), { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(packed, path), text);
+  }
+  for (const [path, target] of Object.entries(links)) {
+    NodeFS.mkdirSync(NodePath.dirname(NodePath.join(packed, path)), { recursive: true });
+    NodeFS.symlinkSync(target, NodePath.join(packed, path));
+  }
+  const top = NodeFS.readdirSync(packed);
+  NodeChildProcess.execFileSync("tar", ["-czf", "out.tgz", ...top], { cwd: packed });
+  return NodePath.join(packed, "out.tgz");
+};
+
+it.effect("outputs come back only whole and as asked, or leave the host as it was", () => {
+  const { root, fake, layer, start } = setup();
+  const output = NodePath.join(tempDir("outputs"), "run");
+  const elsewhere = NodePath.join(tempDir("elsewhere"), "authorized_keys");
+  NodeFS.mkdirSync(output);
+  NodeFS.writeFileSync(NodePath.join(output, "stale.txt"), "old\n");
+  const garbage = NodePath.join(tempDir("garbage"), "out.tgz");
+  NodeFS.writeFileSync(garbage, "not a tar");
+  return Effect.gen(function* () {
+    fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+    const forks = yield* start;
+    const copyBack = (archive: string) =>
+      Effect.gen(function* () {
+        fake.downloadFrom(archive);
+        const { seen, observer } = watcher();
+        yield* forks.exec(request(root, { outputs: [output] }), observer);
+        return seen.at(-1);
+      });
+    const untouched = () => {
+      expect(NodeFS.readdirSync(output)).toEqual(["stale.txt"]);
+      expect(NodeFS.existsSync(elsewhere)).toBe(false);
+      expect(NodeFS.readdirSync(NodePath.dirname(output))).toEqual(["run"]);
+    };
+
+    expect(
+      yield* copyBack(
+        packedArchive({ [`${output}/report.json`]: "new\n", [elsewhere]: "ssh-ed25519 x\n" }),
+      ),
+    ).toBe(
+      `stderr [t3] The outputs were not copied back: ${NodePath.dirname(elsewhere)} is not a requested output.\n`,
+    );
+    untouched();
+    expect(yield* copyBack(packedArchive({}, { [`${output}/keys`]: elsewhere }))).toBe(
+      `stderr [t3] The outputs were not copied back: ${output}/keys is not a plain file or directory.\n`,
+    );
+    untouched();
+    expect(yield* copyBack(garbage)).toBe(
+      "stderr [t3] The outputs were not copied back: Copying the outputs back failed.\n",
+    );
+    untouched();
+
+    expect(yield* copyBack(packedArchive({ [`${output}/report.json`]: "new\n" }))).toBe(
+      "started true",
+    );
+    // The output replaced its host path whole: the stale file went with the old directory.
+    expect(NodeFS.readdirSync(output)).toEqual(["report.json"]);
+    expect(NodeFS.readdirSync(NodePath.dirname(output))).toEqual(["run"]);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a copy may not read or write T3 home, nor replace the home directory", () => {
+  const { root, stateDir, fake, layer, start } = setup();
+  const t3Home = NodePath.dirname(stateDir);
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    const cases: Array<readonly [Partial<ForkExecRequest>, RegExp]> = [
+      [
+        { inputs: [NodePath.join(stateDir, "settings.json")] },
+        /T3 home, which a copy may not read/,
+      ],
+      [{ outputs: [NodePath.join(t3Home, "secrets")] }, /T3 home, which a copy may not write/],
+      [{ outputs: [NodePath.dirname(t3Home)] }, /T3 home, which a copy may not write/],
+      [{ outputs: ["/Users/me"] }, /home directory, which an output may not replace/],
+    ];
+    for (const [overrides, message] of cases) {
+      const outcome = yield* forks.exec(request(root, overrides), watcher().observer);
+      expect(outcome._tag === "NotStarted" ? outcome.message : outcome._tag).toMatch(message);
+    }
+    expect(fake.calls.some((call) => call.op === "create")).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
 const capturedLogs = () => {
   const logs: Array<ReadonlyArray<unknown>> = [];
   const logger = Logger.make(({ message }) => {
@@ -434,8 +525,9 @@ it.effect("a command past its timeout exits 124 and its copy ends", () => {
     fake.onExec(isCommand("bun test"), { exitCode: new Promise<number>(() => {}) });
     const forks = yield* start;
     const streaming = fake.next("stream");
+    const { seen, observer } = watcher();
     const fiber = yield* forks
-      .exec(request(root, { timeoutSeconds: 60 }), watcher().observer)
+      .exec(request(root, { timeoutSeconds: 60, outputs: [`${root}/dist`] }), observer)
       .pipe(Effect.forkChild);
     yield* Effect.promise(() => streaming);
     yield* TestClock.adjust("60 seconds");
@@ -444,6 +536,9 @@ it.effect("a command past its timeout exits 124 and its copy ends", () => {
       exitCode: 124,
       timedOut: true,
     });
+    expect(seen.at(-1)).toBe(
+      "stderr [t3] The command timed out, so its outputs were not copied back.\n",
+    );
     expect(fake.running().size).toBe(0);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
