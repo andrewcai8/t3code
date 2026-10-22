@@ -211,6 +211,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "auto-approve-full-access-prompts",
+    title: "Auto-approve Full access prompts",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: [
+      "claude approval permission safety check bypass prompts allow automatically runtime mode",
+    ],
+  },
+  {
     id: "color-scheme",
     title: "Color scheme",
     to: "/settings/appearance",
