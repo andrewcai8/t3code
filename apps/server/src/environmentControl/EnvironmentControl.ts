@@ -67,6 +67,7 @@ import {
   currentMacTemplate,
   homeFileData,
   provisionProviders,
+  inheritedHostSettings,
   makeProvisionPreparationStore,
   spareKey,
   warmBaseKey,
@@ -2442,6 +2443,7 @@ export const layer = Layer.effect(
           ),
         warmTemplate,
         spareClaim,
+        inheritedHostSettings(await runLogged(settings.getSettings)),
       );
     };
     const warmStore = makeWarmBaseStore(stateDir);

@@ -5,6 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import {
+  DEFAULT_SERVER_SETTINGS,
   DurableProvisionRequest,
   defaultInstanceIdForDriver,
   EnvironmentProvisionInput,
@@ -13,6 +14,7 @@ import {
   ProvisionProvider,
   ProvisionRequestConflict,
   ProvisionRequestId,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Schema from "effect/Schema";
@@ -418,6 +420,39 @@ function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
   return ".codex/skills";
 }
 
+/**
+ * The host settings a box's own server must follow. A box reads only its own `settings.json`, and
+ * nothing else carries these over, so each is copied when the host prepares the box, and a box
+ * installs its files once, so later host changes do not reach it. Only keys
+ * that decide how the box's server continues a turn belong here; account choice stays the
+ * host's, which gives a box one account per provider.
+ *
+ * - `continuationPrompt`: the box sends it on restarts and limit resumes, not only on an account
+ *   switch (the one case the host sends it with).
+ * - `autoApproveFullAccessPrompts`: the box runs the Claude turn that raises the prompt.
+ *
+ * `autoResumeLimitedThreads` stays out: the host moves a limited box to another account and
+ * continues the turn, and arming the box's own recovery as well could continue it twice.
+ * `autoPickProviderAccounts` stays out: a box holds one account per provider, so it has none to pick.
+ */
+const INHERITED_HOST_SETTING_KEYS = [
+  "continuationPrompt",
+  "autoApproveFullAccessPrompts",
+] as const satisfies ReadonlyArray<keyof ServerSettings>;
+
+type InheritedHostSettings = Partial<
+  Pick<ServerSettings, (typeof INHERITED_HOST_SETTING_KEYS)[number]>
+>;
+
+/** The inherited settings the host changed from their defaults; a box is born with the defaults anyway. */
+export function inheritedHostSettings(host: ServerSettings): InheritedHostSettings {
+  return Object.fromEntries(
+    INHERITED_HOST_SETTING_KEYS.filter((key) => host[key] !== DEFAULT_SERVER_SETTINGS[key]).map(
+      (key) => [key, host[key]],
+    ),
+  );
+}
+
 type ChildSettings = {
   providerInstances?: Record<string, ChildProviderInstanceSettings>;
   [key: string]: unknown;
@@ -444,6 +479,7 @@ function enableChildProvider(
   profiles: ProvisioningProviderProfiles,
   homePath = "/home/user",
   devices = false,
+  inherited: InheritedHostSettings = {},
 ): string {
   let settings: ChildSettings = {};
   try {
@@ -510,6 +546,7 @@ function enableChildProvider(
     // Namespace children are macOS Macs used for iOS work; nobody opens
     // settings on a cloud Mac to flip device access on by hand.
     ...(devices ? { enableDeviceSupport: true, enableAgentDeviceAccess: true } : {}),
+    ...inherited,
     // An upgrade restarts the guest's server; nobody is there to resume its runs by hand.
     continueThreadsAfterServerUpdate: true,
     providerInstances: {
@@ -942,6 +979,8 @@ export function makeProvisionPreparationStore(stateDir: string) {
         readonly select: (repository: string, key: string) => Promise<ProvisionRequestId | null>;
         readonly claim: (spare: ProvisionRequestId, chat: ProvisionRequestId) => Promise<boolean>;
       },
+      /** The host's chat settings the box's server follows, frozen into its `settings.json`. */
+      inherited?: InheritedHostSettings,
     ): Promise<ProvisionPreparationManifest> => {
       const { input, firstTurn, firstTurnSha256 } = splitFirstTurn(decodeInput(rawInput));
       const sameRequest = (saved: ProvisionPreparationManifest) =>
@@ -1079,7 +1118,13 @@ export function makeProvisionPreparationStore(stateDir: string) {
       if (settingsIndex !== -1) files.splice(settingsIndex, 1);
       // Environment entries reach the provider's child process without shell interpolation.
       const configuredSettings: unknown = JSON.parse(
-        enableChildProvider(settings, profiles, `${root}/home`, input.provider === "namespace"),
+        enableChildProvider(
+          settings,
+          profiles,
+          `${root}/home`,
+          input.provider === "namespace",
+          inherited,
+        ),
       );
       const parsedSettings = decodeSettings(configuredSettings);
       const kinds = profiles.map(({ kind }) => kind);
