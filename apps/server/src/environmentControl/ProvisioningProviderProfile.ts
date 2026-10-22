@@ -24,7 +24,7 @@ import {
   codexLoginRefreshDue,
   parseCodexLogin,
 } from "../provider/codexLoginCopy.ts";
-import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
+import { CLAUDE_TOKEN_VARIABLES, resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { credentialSecretName } from "../provider/providerCredentialName.ts";
@@ -51,7 +51,7 @@ export interface ProvisioningProviderProfile {
 export const credentialVariables = {
   codex: ["OPENAI_API_KEY"],
   cursor: ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"],
-  claudeAgent: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+  claudeAgent: CLAUDE_TOKEN_VARIABLES,
 };
 
 /**
