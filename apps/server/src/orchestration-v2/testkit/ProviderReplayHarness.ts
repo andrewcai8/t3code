@@ -255,32 +255,60 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   return layerWithRegistry(scenario, layerRegistry, options);
 }
 
-export function layerWithRegistry<Error>(
-  scenario: Pick<OrchestratorV2ProviderReplayScenario, "name" | "runtimePolicyOverride">,
-  registryLayer: Layer.Layer<
-    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
-    Error,
-    McpProviderSessions.McpProviderSessions
-  >,
-  options: {
-    readonly databaseLayer?: Layer.Layer<
-      SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
-    >;
-    readonly runEffectWorker?: boolean;
-    readonly runContinuationWorker?: boolean;
-    readonly recoverOnStartup?: boolean;
-    readonly continueThreadsAfterServerUpdate?: boolean;
-  } = {},
-): Layer.Layer<
+type ReplayRegistryRuntimeServices =
   | Orchestrator.OrchestratorV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | ThreadManagementService.ThreadManagementService
-  | CommandOutputRecorder.CommandOutputRecorder,
-  Error | MigrationError | PlatformError.PlatformError | SqlError
-> {
+  | CommandOutputRecorder.CommandOutputRecorder;
+
+type ReplayRegistryOptions = {
+  readonly databaseLayer?: Layer.Layer<
+    SqlClient.SqlClient,
+    MigrationError | PlatformError.PlatformError | SqlError
+  >;
+  readonly runEffectWorker?: boolean;
+  readonly runContinuationWorker?: boolean;
+  readonly recoverOnStartup?: boolean;
+  readonly continueThreadsAfterServerUpdate?: boolean;
+};
+
+type ReplayRegistryScenario = Pick<
+  OrchestratorV2ProviderReplayScenario,
+  "name" | "runtimePolicyOverride"
+>;
+
+type ReplayRegistryLayer<Error> = Layer.Layer<
+  ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+  Error,
+  McpProviderSessions.McpProviderSessions
+>;
+
+type ReplayRegistryError<Error> = Error | MigrationError | PlatformError.PlatformError | SqlError;
+
+// Outputting the harness's own stores and ServerSettings is opt-in: a caller that provides its own
+// settings layer downstream would otherwise get the harness's from this layer first.
+export function layerWithRegistry<Error>(
+  scenario: ReplayRegistryScenario,
+  registryLayer: ReplayRegistryLayer<Error>,
+  options?: ReplayRegistryOptions & { readonly exposeStoresAndSettings?: false },
+): Layer.Layer<ReplayRegistryRuntimeServices, ReplayRegistryError<Error>>;
+export function layerWithRegistry<Error>(
+  scenario: ReplayRegistryScenario,
+  registryLayer: ReplayRegistryLayer<Error>,
+  options: ReplayRegistryOptions & { readonly exposeStoresAndSettings: true },
+): Layer.Layer<
+  | ReplayRegistryRuntimeServices
+  | ProjectionStore.ProjectionStoreV2
+  | ServerSettings.ServerSettingsService,
+  ReplayRegistryError<Error>
+>;
+export function layerWithRegistry<Error>(
+  scenario: ReplayRegistryScenario,
+  registryLayer: ReplayRegistryLayer<Error>,
+  options: ReplayRegistryOptions & { readonly exposeStoresAndSettings?: boolean } = {},
+): Layer.Layer<ReplayRegistryRuntimeServices, ReplayRegistryError<Error>> {
   const layerServerConfig = Layer.effect(
     ServerConfig.ServerConfig,
     makeReplayServerConfig(scenario.name).pipe(Effect.orDie),
@@ -509,6 +537,12 @@ export function layerWithRegistry<Error>(
   const layerEffectWorkerProvided = EffectWorker.layer.pipe(
     Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
   );
+  // Typed as outputting nothing, since the implementation signature is the narrow overload; the
+  // exposing overload is what tells a caller these services are there.
+  const layerExposed: Layer.Layer<never, MigrationError | PlatformError.PlatformError | SqlError> =
+    options.exposeStoresAndSettings === true
+      ? Layer.merge(layerStores, layerServerSettings)
+      : Layer.empty;
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
     layerProviderSessionManagerProvided,
@@ -517,6 +551,7 @@ export function layerWithRegistry<Error>(
     layerContinuationWorkerProvided,
     layerThreadManagementProvided,
     layerCommandOutputHubProvided,
+    layerExposed,
   ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
 
   if (options.runEffectWorker === false) {
