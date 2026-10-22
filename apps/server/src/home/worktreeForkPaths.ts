@@ -11,12 +11,16 @@ import * as NodePath from "node:path";
 
 const inside = (path: string, dir: string) => path === dir || path.startsWith(`${dir}/`);
 
-/** `path` with symlinks resolved as far as it exists, so a link cannot hide where it points. */
+/**
+ * `path` with symlinks resolved as far as it exists, so a link cannot hide where it points. The
+ * native call returns the spelling on disk, so on a case-insensitive filesystem `~/.T3` cannot
+ * pass for a different folder than `~/.t3`.
+ */
 const resolved = (path: string): string => {
   const missing: Array<string> = [];
   for (let at = path; ; at = NodePath.dirname(at)) {
     try {
-      return NodePath.join(NodeFS.realpathSync(at), ...missing.toReversed());
+      return NodePath.join(NodeFS.realpathSync.native(at), ...missing.toReversed());
     } catch {
       if (at === "/") return path;
       missing.push(NodePath.basename(at));

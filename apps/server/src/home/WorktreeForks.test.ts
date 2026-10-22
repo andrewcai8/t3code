@@ -452,6 +452,15 @@ it.effect("a copy may not read or write T3 home, nor replace the home directory"
       [{ outputs: [NodePath.dirname(t3Home)] }, /T3 home, which a copy may not write/],
       [{ outputs: ["/Users/me"] }, /home directory, which an output may not replace/],
     ];
+    // macOS and Windows ignore case, so another spelling names the same T3 home there.
+    const otherCase = NodePath.join(
+      NodePath.dirname(t3Home),
+      NodePath.basename(t3Home).toUpperCase(),
+      "secrets",
+    );
+    if (!otherCase.startsWith(t3Home) && NodeFS.existsSync(NodePath.dirname(otherCase))) {
+      cases.push([{ outputs: [otherCase] }, /T3 home, which a copy may not write/]);
+    }
     for (const [overrides, message] of cases) {
       const outcome = yield* forks.exec(request(root, overrides), watcher().observer);
       expect(outcome._tag === "NotStarted" ? outcome.message : outcome._tag).toMatch(message);
