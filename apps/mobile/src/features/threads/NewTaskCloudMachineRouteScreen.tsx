@@ -1,9 +1,10 @@
-import { CommonActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { useCallback, useEffect, useRef } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { uuidv4 } from "../../lib/uuid";
 import { readProject } from "../../state/cloud-entities";
 import {
   useRemoteConnectionStatus,
@@ -11,6 +12,7 @@ import {
 } from "../../state/use-remote-environment-registry";
 import { NewCloudMachineForm } from "../connection/NewCloudMachineForm";
 import { useCreateCloudMachine } from "../connection/useCreateCloudMachine";
+import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 
 type NewTaskCloudMachineRouteParams = {
   /** The host that starts the machine: the project's own host, or the host of the box it is on. */
@@ -49,6 +51,7 @@ function NewTaskCloudMachine({
 }: NewTaskCloudMachineRouteParams) {
   const managerId = EnvironmentId.make(environmentId);
   const navigation = useNavigation();
+  const { selectThreadRoute } = useAdaptiveWorkspaceLayout();
   const insets = useSafeAreaInsets();
   const manager = useSavedRemoteConnection(managerId);
   const { connectedEnvironments } = useRemoteConnectionStatus();
@@ -64,30 +67,23 @@ function NewTaskCloudMachine({
   const onCreated = useCallback(
     (projectRef: ScopedProjectRef) => {
       // A screen pushed over this one (such as another project's draft opened from the
-      // sidebar) is where the user is now; resetting the sheet would throw it away.
+      // sidebar) is where the user is now; opening the draft would throw it away.
       if (!mounted.current || !navigation.isFocused()) return;
       const title = readProject(projectRef)?.title;
-      navigation.dispatch(
-        CommonActions.reset({
-          index: 0,
-          routes: [
-            {
-              name: "NewTaskDraft",
-              params: {
-                environmentId: projectRef.environmentId,
-                projectId: projectRef.projectId,
-                ...(title ? { title } : {}),
-                // The branch carries over by name. The draft checks it out on the machine and
-                // stays on the default branch when it cannot, since the sheet has nothing
-                // behind it to go back to.
-                ...(branch ? { branch, branchOptional: "1" } : {}),
-              },
-            },
-          ],
-        }),
-      );
+      // Selecting the thread route also dismisses this overlay.
+      selectThreadRoute({
+        draft: {
+          requestId: uuidv4(),
+          environmentId: projectRef.environmentId,
+          projectId: projectRef.projectId,
+          ...(title ? { title } : {}),
+          // The branch carries over by name. The draft checks it out on the machine and stays
+          // on the default branch when it cannot, rather than closing after the wait.
+          ...(branch ? { branch, branchOptional: "1" } : {}),
+        },
+      });
     },
-    [branch, navigation],
+    [branch, navigation, selectThreadRoute],
   );
   const creation = useCreateCloudMachine({ managerId, connectedEnvironments, onCreated });
 

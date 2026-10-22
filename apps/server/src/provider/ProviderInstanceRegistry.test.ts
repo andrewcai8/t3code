@@ -98,6 +98,7 @@ const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings =>
   accountEmail: "",
   launchArgs: "",
   autoCompactWindow: "",
+  idleCompaction: "default",
   ...overrides,
 });
 

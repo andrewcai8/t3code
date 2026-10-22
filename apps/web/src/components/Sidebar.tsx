@@ -115,7 +115,7 @@ import {
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
   useServerConfigs,
-  useThreadShells,
+  useQuietThreadShells,
 } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import {
@@ -371,7 +371,7 @@ function useSidebarThreads(input: {
     routeThreadRef,
     homeThreadRef,
   } = input;
-  const threads = useThreadShells();
+  const threads = useQuietThreadShells();
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
