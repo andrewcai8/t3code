@@ -16,9 +16,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { resolveProviderInstanceEnabled, ServerSettings } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  resolveProviderInstanceEnabled,
+  ServerSettings,
+} from "@t3tools/contracts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
 import {
+  inheritedHostSettings,
   makeProvisionPreparationStore,
   spareKey,
   currentMacTemplate,
@@ -1274,6 +1279,53 @@ it("roots a Namespace preparation on the retained Devbox volume and every E2B bo
     );
     // An upgrade restarts a guest's server mid-run, with nobody there to resume it.
     expect(parsedE2bSettings.continueThreadsAfterServerUpdate).toBe(true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("carries the host's changed chat settings into a box's settings, and nothing at defaults", async () => {
+  const f = await fixture();
+  try {
+    const boxSettings = async (requestId: string, host: ServerSettings) => {
+      const manifest = await f.store.freeze(
+        decodeProvisionInput({ ...input, requestId }),
+        f.config,
+        f.resolver,
+        [f.profile],
+        undefined,
+        undefined,
+        inheritedHostSettings(host),
+      );
+      return JSON.parse(
+        Buffer.from(
+          homeFile(manifest, ".t3/userdata/settings.json")?.contentsBase64 ?? "",
+          "base64",
+        ).toString(),
+      );
+    };
+    const changed = await boxSettings("1f0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f", {
+      ...DEFAULT_SERVER_SETTINGS,
+      continuationPrompt: "keep going",
+      autoApproveFullAccessPrompts: true,
+      autoResumeLimitedThreads: true,
+      autoPickProviderAccounts: false,
+    });
+    expect(changed).toMatchObject({
+      continuationPrompt: "keep going",
+      autoApproveFullAccessPrompts: true,
+      continueThreadsAfterServerUpdate: true,
+      providerInstances: { codex: { driver: "codex", enabled: true } },
+    });
+    expect(changed).not.toHaveProperty("autoResumeLimitedThreads");
+    expect(changed).not.toHaveProperty("autoPickProviderAccounts");
+    const defaults = await boxSettings(
+      "2f0e2d4f-1c3a-4e5b-8f7d-9a0b1c2d3e4f",
+      DEFAULT_SERVER_SETTINGS,
+    );
+    expect(defaults).not.toHaveProperty("continuationPrompt");
+    expect(defaults).not.toHaveProperty("autoApproveFullAccessPrompts");
+    expect(defaults.continueThreadsAfterServerUpdate).toBe(true);
   } finally {
     await f.cleanup();
   }
