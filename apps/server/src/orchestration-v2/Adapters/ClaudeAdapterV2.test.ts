@@ -8717,6 +8717,111 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  // Frames from a live session: a background subagent fails on the account's limit, and Claude
+  // wakes the root for its notification but ends that turn without calling the model.
+  it.effect("fails a wake turn the usage limit stopped before any model call", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const subagent = { taskId: "task-limited-wake", toolUseId: "toolu_limited_wake" };
+        const limitText = "You've hit your session limit · resets 5:10am (America/New_York)";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-limited-wake-1"),
+            text: "Audit in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeSubagentTaskStartedFrame({
+            ...subagent,
+            uuid: "00000000-0000-4000-8000-000000001401",
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000001402", result: "Started." }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+
+        for (const frame of [
+          claudeSdkFrame({
+            type: "rate_limit_event",
+            rate_limit_info: {
+              status: "rejected",
+              resetsAt: 1792660200,
+              rateLimitType: "five_hour",
+              overageStatus: "rejected",
+              isUsingOverage: false,
+            },
+            uuid: "00000000-0000-4000-8000-000000001403",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+          makeAssistantErrorFrame({
+            uuid: "00000000-0000-4000-8000-000000001404",
+            error: "rate_limit",
+            text: limitText,
+            parentToolUseId: subagent.toolUseId,
+          }),
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: subagent.taskId,
+            tool_use_id: subagent.toolUseId,
+            status: "failed",
+            output_file: `/tmp/${subagent.taskId}.output`,
+            summary: `Agent terminated early due to an API error: ${limitText}`,
+            uuid: "00000000-0000-4000-8000-000000001405",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+          claudeSdkFrame({
+            ...wakeTurnInit,
+            uuid: "00000000-0000-4000-8000-000000001406",
+          }),
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000001407",
+            result: "",
+            numTurns: 0,
+            origin: { kind: "task-notification" },
+            terminalReason: null,
+          }),
+        ]) {
+          yield* harness.offerAndWait(frame);
+        }
+        assert.lengthOf(harness.continuationRequests, 1);
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-limited-wake-2"),
+            text: "Background task failed.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "failed");
+        if (terminal.status !== "failed") return;
+        assert.equal(terminal.failure.class, "usage_limit");
+        assert.equal(terminal.failure.resetAt, "2026-10-22T09:10:00.000Z");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("streams a background subagent's work while the root turn is idle", () =>
     Effect.scoped(
       Effect.gen(function* () {

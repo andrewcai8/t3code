@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 
 import * as ClaudeAdapterV2 from "./Adapters/ClaudeAdapterV2.ts";
@@ -34,6 +35,8 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
+import * as ServerSettings from "../serverSettings.ts";
 
 const nativeSession = "native-session-1";
 const instanceId = ProviderInstanceId.make("claudeAgent");
@@ -73,8 +76,96 @@ const usageLimitResult = {
   modelUsage: {},
 } as unknown as SDKMessage;
 
+const subagent = { task_id: "agent-audit", tool_use_id: "toolu_agent_audit" } as const;
+const limitText = "You've hit your session limit · resets 1:00am (UTC)";
+
+// The test clock starts at the epoch, so this window resets an hour in.
+const rejectedLimit = (uuid: string) =>
+  ({
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "rejected",
+      resetsAt: 3_600,
+      rateLimitType: "five_hour",
+      overageStatus: "rejected",
+      isUsingOverage: false,
+    },
+    uuid,
+    session_id: nativeSession,
+  }) as unknown as SDKMessage;
+
+const subagentStarted = {
+  type: "system",
+  subtype: "task_started",
+  ...subagent,
+  description: "Audit recent commits",
+  subagent_type: "general-purpose",
+  is_backgrounded: true,
+  task_type: "local_agent",
+  prompt: "Audit the last five commits.",
+  uuid: "agent-started",
+  session_id: nativeSession,
+} as unknown as SDKMessage;
+
+/**
+ * What the CLI sent on a live host when a background subagent failed on the limit: it wakes the
+ * root for the notification, then ends that turn without calling the model.
+ */
+const limitedWakeTurn = [
+  rejectedLimit("wake-limit"),
+  {
+    type: "assistant",
+    message: {
+      model: "<synthetic>",
+      id: "msg_wake_limit",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: limitText }],
+      stop_reason: "stop_sequence",
+      stop_sequence: "",
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+    parent_tool_use_id: subagent.tool_use_id,
+    error: "rate_limit",
+    uuid: "agent-limited",
+    session_id: nativeSession,
+  },
+  {
+    type: "system",
+    subtype: "task_notification",
+    ...subagent,
+    status: "failed",
+    output_file: "",
+    summary: `Agent terminated early due to an API error: ${limitText}`,
+    uuid: "agent-failed",
+    session_id: nativeSession,
+  },
+  { type: "system", subtype: "init", uuid: "wake-init", session_id: nativeSession },
+  {
+    type: "result",
+    subtype: "success",
+    uuid: "wake-result",
+    session_id: nativeSession,
+    is_error: false,
+    num_turns: 0,
+    result: "",
+    stop_reason: null,
+    origin: { kind: "task-notification" },
+    permission_denials: [],
+    duration_ms: 0,
+    duration_api_ms: 0,
+    total_cost_usd: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    modelUsage: {},
+  },
+] as unknown as ReadonlyArray<SDKMessage>;
+
 /** The orchestration runtime with the real Claude adapter behind a fake CLI. */
-const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
+const runtime = (
+  cli: Ref.Ref<FakeCli | undefined>,
+  cwd: string,
+  options: { readonly runContinuationWorker?: boolean } = {},
+) =>
   ProviderReplayHarness.layerWithRegistry(
     { name: "claude-background-after-limit" },
     ProviderAdapterRegistry.layerFromAdaptersEffect(
@@ -89,6 +180,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
             path: yield* Path.Path,
             crypto: yield* Crypto.Crypto,
             idAllocator: yield* IdAllocator.IdAllocatorV2,
+            continuationRequests: yield* ProviderContinuationRequests.ProviderContinuationRequests,
             queryRunner: {
               allocateSessionId: Effect.succeed(nativeSession),
               open: () =>
@@ -118,6 +210,7 @@ const runtime = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
         ];
       }),
     ).pipe(Layer.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer, NodeCrypto.layer))),
+    options,
   );
 
 /**
@@ -144,10 +237,17 @@ const rosterCleared = (event: OrchestrationV2DomainEvent) =>
 const devServer = { taskId: "bash-1", kind: "command", description: "bun run dev" } as const;
 
 /**
- * Runs a chat whose turn starts a background dev server and then fails on the usage limit,
- * and hands the test the fake CLI with the shell still running.
+ * Runs a chat whose turn starts background work (a dev server unless `background` says
+ * otherwise) and then fails on the usage limit, and hands the test the fake CLI with that work
+ * still running.
  */
-const limitedChat = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
+const limitedChat = (
+  cli: Ref.Ref<FakeCli | undefined>,
+  cwd: string,
+  background: ReadonlyArray<SDKMessage> = [
+    backgroundTasks([{ task_id: devServer.taskId, description: devServer.description }]),
+  ],
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
@@ -186,11 +286,7 @@ const limitedChat = (cli: Ref.Ref<FakeCli | undefined>, cwd: string) =>
     const failed = yield* watch(
       (event) => event.type === "run.updated" && event.payload.status === "failed",
     );
-    yield* Queue.offer(
-      messages,
-      backgroundTasks([{ task_id: devServer.taskId, description: devServer.description }]),
-    );
-    yield* Queue.offer(messages, usageLimitResult);
+    yield* Queue.offerAll(messages, [...background, usageLimitResult]);
     yield* failed;
     yield* worker.drain();
     return (yield* Ref.get(cli))!;
@@ -339,6 +435,52 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
             [],
           );
         }).pipe(Effect.provide(runtime(cli, cwd)));
+      }),
+    ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("resumes at the reset after a wake turn the limit stopped", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("claude-limited-wake-turn");
+        const cli = yield* Ref.make<FakeCli | undefined>(undefined);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const { continuationPrompt } = yield* settings.updateSettings({
+            autoResumeLimitedThreads: true,
+          });
+          const sweep = yield* UsageLimitRecoveryWorker.makeSweep;
+          const { messages } = yield* limitedChat(cli, cwd, [
+            subagentStarted,
+            rejectedLimit("turn-limit"),
+          ]);
+          yield* sweep();
+          const armed = yield* orchestrator.getThreadProjection(threadId);
+          const limitedRun = armed.runs.at(-1)!;
+          assert.isTrue(armed.thread.limitRecovery?.autoResume);
+
+          const wakeEnded = yield* watch(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id !== limitedRun.id &&
+              (event.payload.status === "completed" || event.payload.status === "failed"),
+          );
+          yield* Queue.offerAll(messages, limitedWakeTurn);
+          yield* wakeEnded;
+          yield* worker.drain();
+          const sent = orchestrator
+            .getThreadProjection(threadId)
+            .pipe(Effect.map(({ messages }) => messages.map((message) => message.text)));
+          yield* sweep();
+          assert.notInclude(yield* sent, continuationPrompt);
+
+          yield* TestClock.adjust("1 hour");
+          yield* sweep();
+          yield* worker.drain();
+          assert.include(yield* sent, continuationPrompt);
+        }).pipe(Effect.provide(runtime(cli, cwd, { runContinuationWorker: true })));
       }),
     ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );

@@ -278,7 +278,9 @@ export function layerWithRegistry<Error>(
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | ThreadManagementService.ThreadManagementService
-  | CommandOutputRecorder.CommandOutputRecorder,
+  | CommandOutputRecorder.CommandOutputRecorder
+  | ProjectionStore.ProjectionStoreV2
+  | ServerSettings.ServerSettingsService,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const layerServerConfig = Layer.effect(
@@ -517,6 +519,7 @@ export function layerWithRegistry<Error>(
     layerContinuationWorkerProvided,
     layerThreadManagementProvided,
     layerCommandOutputHubProvided,
+    Layer.merge(layerStores, layerServerSettings),
   ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
 
   if (options.runEffectWorker === false) {
