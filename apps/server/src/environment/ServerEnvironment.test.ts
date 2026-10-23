@@ -115,6 +115,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         );
         expect(descriptor.capabilities).toMatchObject({
           settledWorktreeCleanup: true,
+          orphanWorktreeCleanup: true,
           storageCleanupRun: true,
           projectWorktreeCleanup: true,
           worktreesDirectory: true,

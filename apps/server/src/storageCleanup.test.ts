@@ -28,6 +28,9 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as ProcessRunner from "./processRunner.ts";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
@@ -271,7 +274,9 @@ const cleanupFixture = (
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
+    const processRunner = yield* ProcessRunner.make();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
         execute: (input) =>
@@ -1786,3 +1791,166 @@ it.live("keeps saved usage data when removing a settled checkout", () =>
     }),
   ),
 );
+
+describe("orphan worktree removal", () => {
+  const OLD_DAYS = 30;
+  // No thread rule is on, so only the orphan setting makes the sweep look at these.
+  const orphanFixture = (overrides: Partial<StorageCleanupSettings> = {}) =>
+    Effect.gen(function* () {
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        orphanWorktreeAfterDays: 7,
+        ...overrides,
+      });
+      fixture.setThreads([]);
+      const orphan = `${fixture.config.worktreesDir}/agent-made`;
+      yield* fixture.command(fixture.repo, ["worktree", "add", "-b", "agent-made", orphan]);
+      // Every timestamp in the checkout, its folder included, moves into the past.
+      const age = (target: string) =>
+        Effect.gen(function* () {
+          const when = new Date(Date.now() - OLD_DAYS * DAY_MS);
+          for (const name of yield* fixture.fs.readDirectory(target))
+            yield* fixture.fs.utimes(`${target}/${name}`, when, when);
+          yield* fixture.fs.utimes(target, when, when);
+        });
+      yield* age(orphan);
+      const entry = (report: { entries: ReadonlyArray<{ path: string | null }> }) =>
+        report.entries.find((candidate) => candidate.path === orphan);
+      return { ...fixture, orphan, age, entry };
+    });
+
+  it.live("removes an orphan linked worktree that has been idle past the limit", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, command, repo, orphan, entry } = yield* orphanFixture();
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "removed",
+          reason: expect.stringContaining("nothing in it changed in the last 7 days"),
+          threadId: null,
+        });
+        expect(report.counts.removed).toBe(1);
+        expect(yield* fs.exists(orphan)).toBe(false);
+        expect((yield* command(repo, ["worktree", "list", "--porcelain"])).stdout).not.toContain(
+          "agent-made",
+        );
+        // The branch is not removed with its checkout.
+        expect((yield* command(repo, ["branch", "--list", "agent-made"])).stdout).toContain(
+          "agent-made",
+        );
+        expect(yield* fs.exists(`${repo}/tracked.txt`)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an orphan with a file modified inside the limit", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, entry } = yield* orphanFixture();
+        // Ignored, so only its age separates this checkout from an idle one.
+        yield* fs.makeDirectory(`${orphan}/dist`);
+        yield* fs.writeFileString(`${orphan}/dist/build.log`, "built\n");
+        const old = new Date(Date.now() - OLD_DAYS * DAY_MS);
+        yield* fs.utimes(`${orphan}/dist`, old, old);
+        yield* fs.utimes(orphan, old, old);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: "No thread uses this worktree, but something in it changed in the last 7 days",
+        });
+        expect(report.counts.removed).toBe(0);
+        expect(yield* fs.readFileString(`${orphan}/dist/build.log`)).toBe("built\n");
+      }),
+    ),
+  );
+
+  it.live.each([
+    { keepWhen: "uncommitted-changes", file: "tracked.txt", reason: "has uncommitted changes" },
+    { keepWhen: "any-local-files", file: ".env", reason: "has ignored files" },
+  ] as const)("keeps an idle orphan when the $keepWhen rule protects it", (rule) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, age, entry, setPolicy } = yield* orphanFixture();
+        setPolicy(rule.keepWhen);
+        yield* fs.writeFileString(`${orphan}/${rule.file}`, "edited\n");
+        yield* age(orphan);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining(rule.reason),
+        });
+        expect(yield* fs.readFileString(`${orphan}/${rule.file}`)).toBe("edited\n");
+      }),
+    ),
+  );
+
+  it.live("keeps an idle orphan whose detached head holds commits no branch has", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, age, command, entry } = yield* orphanFixture();
+        yield* command(orphan, ["switch", "--detach"]);
+        yield* command(orphan, ["commit", "--allow-empty", "-m", "stranded"]);
+        yield* age(orphan);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining("commits that are not on any branch"),
+        });
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an idle orphan while a process runs inside it", (context) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        if (yield* HostProcess.isWindows) return context.skip();
+        const { service, fs, orphan, entry } = yield* orphanFixture();
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        yield* spawner.spawn(ChildProcess.make("sleep", ["60"], { cwd: orphan }));
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining("a running process"),
+        });
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an idle folder that is not a git worktree", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, config, age } = yield* orphanFixture();
+        const folder = `${config.worktreesDir}/repository/leftover`;
+        yield* fs.makeDirectory(folder, { recursive: true });
+        yield* fs.writeFileString(`${folder}/payload`, "leftover data");
+        yield* age(folder);
+        const report = yield* service.runNow;
+        expect(report.entries.find((entry) => entry.path === folder)).toMatchObject({
+          outcome: "kept",
+          reason: "No thread uses this folder, and it isn't a git worktree",
+        });
+        expect(yield* fs.readFileString(`${folder}/payload`)).toBe("leftover data");
+      }),
+    ),
+  );
+
+  it.live("only reports an idle orphan when the setting is off", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, entry } = yield* orphanFixture({
+          orphanWorktreeAfterDays: null,
+          worktreeAfterDays: 8,
+        });
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: "No thread uses this worktree",
+        });
+        expect(report.counts.removed).toBe(0);
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+});

@@ -44,6 +44,7 @@ vi.mock(import("./SettingsScopeContext"), async (original) => ({
             storageCleanup: true,
             storageCleanupRun: true,
             settledWorktreeCleanup: true,
+            orphanWorktreeCleanup: true,
           },
         },
       },
@@ -96,6 +97,7 @@ function setup() {
       worktreeOnMerge: false,
       worktreeOnDelete: false,
       worktreeUnchanged: false,
+      orphanWorktreeAfterDays: null,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
       cloudMachinesAfterDays: null,
@@ -124,4 +126,20 @@ it("keeps cleanup disabled when settled retention and all other rules are off", 
   expect(button.disabled).toBe(true);
   await act(async () => button.click());
   expect(state.run).not.toHaveBeenCalled();
+});
+
+it("treats the unused worktree rule as a cleanup rule", async () => {
+  setup();
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, orphanWorktreeAfterDays: 14 },
+  };
+  state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
+  await using screen = await render(panel());
+  const button = deleteButton(screen.container);
+
+  expect(screen.container.textContent).toContain("Delete unused worktrees");
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(state.run).toHaveBeenCalledOnce();
 });

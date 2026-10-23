@@ -47,6 +47,8 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { removeLinkedWorktree } from "./vcs/worktreeRemoval.ts";
+import * as ProcessRunner from "./processRunner.ts";
+import { makeProcessUseProbe } from "./workspace/processUse.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -220,6 +222,9 @@ const make = Effect.gen(function* () {
   const terminals = yield* TerminalManager.TerminalManager;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const processUse = yield* makeProcessUseProbe.pipe(
+    Effect.provideService(ProcessRunner.ProcessRunner, yield* ProcessRunner.ProcessRunner),
+  );
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
   const orphanSizes = new Map<string, number | null>();
   const noteTerminal = (terminal: TerminalSummary) => {
@@ -330,6 +335,45 @@ const make = Effect.gen(function* () {
     Effect.orElseSucceed(() => null),
   );
 
+  // Finds the first file or folder under a worktree modified after `cutoff`,
+  // ignored files and node_modules included, and stops there. The walk is
+  // bounded like measureWorktree, and one that cannot finish is "unknown", which
+  // callers treat as recent: deleting on a guess is worse than keeping.
+  const findRecentChange = Effect.fn("StorageCleanup.findRecentChange")(
+    function* (worktreePath: string, cutoff: number) {
+      const pending = [yield* fs.realPath(worktreePath)];
+      let entries = 1;
+      while (pending.length > 0) {
+        const target = pending.pop()!;
+        // Links are not followed, and their own timestamps say nothing about the files inside.
+        const isLink = yield* fs.readLink(target).pipe(
+          Effect.as(true),
+          Effect.catchIf(
+            (error) =>
+              error.cause instanceof Error &&
+              "code" in error.cause &&
+              error.cause.code === "EINVAL",
+            () => Effect.succeed(false),
+          ),
+        );
+        if (isLink) continue;
+        const stat = yield* fs.stat(target);
+        const modified = Option.getOrNull(stat.mtime);
+        if (modified === null || modified.getTime() > cutoff)
+          return { status: "recent" as const, path: target };
+        if (stat.type === "Directory") {
+          const names = yield* fs.readDirectory(target);
+          entries += names.length;
+          if (entries > 2_000_000) return { status: "unknown" as const };
+          for (const name of names) pending.push(path.join(target, name));
+        }
+      }
+      return { status: "idle" as const };
+    },
+    Effect.timeout("30 seconds"),
+    Effect.orElseSucceed(() => ({ status: "unknown" as const })),
+  );
+
   // The snapshot takes seconds on large databases, so it runs on the reader
   // worker instead of the event loop.
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
@@ -358,8 +402,11 @@ const make = Effect.gen(function* () {
   const reportOrphanWorktrees = Effect.fn("StorageCleanup.reportOrphanWorktrees")(function* (
     roots: ReadonlyArray<string>,
     projects: ReadonlyArray<{ readonly workspaceRoot: string }>,
+    serverSettings: ServerSettings,
     entries: StorageCleanupReportEntry[],
   ) {
+    const orphanAfterDays = serverSettings.storageCleanup.orphanWorktreeAfterDays;
+    const orphanRules = resolveWorktreeCleanup(serverSettings, null);
     // Include deleted and archived threads, even those without a branch or project.
     const rows = yield* sql<{ worktreePath: string }>`
       SELECT DISTINCT json_extract(payload_json, '$.worktreePath') AS "worktreePath"
@@ -443,7 +490,7 @@ const make = Effect.gen(function* () {
           if (Option.isSome(measured)) orphanSizes.set(key, measured.value);
         }
         const bytes = orphanSizes.get(key) ?? null;
-        entries.push({
+        const orphan: StorageCleanupReportEntry = {
           kind: "worktree",
           outcome: "kept",
           reason: linked
@@ -455,6 +502,30 @@ const make = Effect.gen(function* () {
           threadTitle: null,
           bytes,
           files: null,
+        };
+        // Only linked worktrees are removed. A plain folder may hold anything.
+        if (!linked || orphanAfterDays === null) return void entries.push(orphan);
+        const result = yield* removeOrphanWorktree(
+          worktreePath,
+          orphanRules,
+          orphanAfterDays,
+          now,
+        ).pipe(
+          Effect.catch((error) =>
+            Effect.succeed({ outcome: "failed" as const, reason: cleanupFailureReason(error) }),
+          ),
+        );
+        if (result.outcome === "failed")
+          yield* Effect.logWarning("storage cleanup failed for orphan worktree", {
+            path: worktreePath,
+            reason: result.reason,
+          });
+        entries.push({
+          ...orphan,
+          outcome: result.outcome,
+          reason:
+            result.outcome === "kept" ? `${orphan.reason}, but ${result.reason}` : result.reason,
+          bytes: result.outcome === "failed" ? null : bytes,
         });
       },
       Effect.orElseSucceed(() => undefined),
@@ -713,12 +784,101 @@ const make = Effect.gen(function* () {
       );
   });
 
+  /** Removes a worktree whose checks passed. Returns why it was kept instead, or null once removed. */
+  const removeCheckedWorktree = Effect.fn("StorageCleanup.removeCheckedWorktree")(function* (
+    worktreePath: string,
+    repositoryCwd: string,
+    rules: WorktreeCleanupRules,
+  ) {
+    // Clean only untracked files. Ordinary worktrees retain Git's final tracked-edit check.
+    if (rules.worktreeKeepWhen === "tracked-changes")
+      yield* cleanupGit(worktreePath, ["clean", "-ffdx"], "git clean");
+    const submodules = yield* submoduleRemoval(worktreePath, rules);
+    if (submodules.reason !== null) return submodules.reason;
+    if (submodules.force) {
+      const changes = yield* localChangesReason(worktreePath, rules);
+      if (changes !== null) return changes;
+    }
+    yield* removeLinkedWorktree({
+      operation: "StorageCleanup.cleanupGit",
+      cwd: repositoryCwd,
+      worktreePath,
+      // Git requires force for submodules; recursive checks above cannot make removal atomic.
+      force: submodules.force,
+      execute: git.execute,
+      run: (args) => cleanupGit(repositoryCwd, [...args], "git worktree remove"),
+    });
+    return null;
+  });
+
+  /**
+   * Removes a linked worktree no thread uses once nothing in it has changed for
+   * `afterDays`. A kept result says why in words that follow "but". The branch
+   * stays in its repository, so commits on it survive the removal.
+   */
+  const removeOrphanWorktree = Effect.fn("StorageCleanup.removeOrphanWorktree")(function* (
+    worktreePath: string,
+    rules: WorktreeCleanupRules,
+    afterDays: number,
+    now: number,
+  ) {
+    const keep = (reason: string) => ({ outcome: "kept" as const, reason });
+    return yield* Effect.gen(function* () {
+      if (hasTerminal(worktreePath)) return keep("it has an open terminal");
+      // The slow check goes first so the quick ones below are as fresh as possible when removal starts.
+      const recent = yield* findRecentChange(worktreePath, now - afterDays * DAY_MS);
+      if (recent.status === "recent")
+        return keep(`something in it changed in the last ${afterDays} days`);
+      if (recent.status === "unknown")
+        return keep("its files could not all be checked for changes");
+      const use = yield* processUse(worktreePath);
+      if (use.status === "busy") return keep(`a running process (${use.pid}) is using it`);
+      if (use.status === "unknown") return keep(use.reason);
+      if (hasTerminal(worktreePath)) return keep("it has an open terminal");
+      const changes = yield* localChangesReason(worktreePath, rules);
+      if (changes !== null) return keep(changes);
+      // A detached HEAD can hold commits that no ref keeps once the checkout is gone.
+      const stranded = yield* git.execute({
+        operation: "StorageCleanup.orphanCommits",
+        cwd: worktreePath,
+        args: ["rev-list", "--max-count=1", "HEAD", "--not", "--branches", "--remotes", "--tags"],
+        maxOutputBytes: 1024,
+      });
+      if (stranded.stdout.trim() !== "") return keep("it has commits that are not on any branch");
+      const current = yield* settingsService.getSettings;
+      if (
+        current.storageCleanup.orphanWorktreeAfterDays !== afterDays ||
+        resolveWorktreeCleanup(current, null).worktreeKeepWhen !== rules.worktreeKeepWhen
+      )
+        return keep("cleanup settings changed since the check");
+      const common = yield* git.execute({
+        operation: "StorageCleanup.orphanRepository",
+        cwd: worktreePath,
+        args: ["rev-parse", "--git-common-dir"],
+      });
+      // Git runs from inside the repository because the worktree is about to disappear.
+      const repositoryCwd = path.resolve(worktreePath, common.stdout.trim());
+      const notRemoved = yield* removeCheckedWorktree(worktreePath, repositoryCwd, rules);
+      if (notRemoved !== null) return keep(notRemoved);
+      yield* gitManager.invalidateStatus(repositoryCwd);
+      yield* Effect.logInfo("storage cleanup removed orphan worktree", { path: worktreePath });
+      return {
+        outcome: "removed" as const,
+        reason: `No thread uses this worktree, and nothing in it changed in the last ${afterDays} days`,
+      };
+    }).pipe((effect) => withWorkspaceLease(worktreePath, effect));
+  });
+
   const cleanWorktrees = Effect.fn("StorageCleanup.cleanWorktrees")(function* (
     serverSettings: ServerSettings,
     now: number,
     entries: StorageCleanupReportEntry[],
   ) {
-    if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled)) return;
+    if (
+      !anyWorktreePolicy(serverSettings, worktreeCleanupEnabled) &&
+      serverSettings.storageCleanup.orphanWorktreeAfterDays === null
+    )
+      return;
     const roots: Array<string> = [];
     for (const directory of managedWorktreesDirectories(
       serverSettings,
@@ -1011,24 +1171,12 @@ const make = Effect.gen(function* () {
           )
         )
           return keep("settings changed since check");
-        // Clean only untracked files. Ordinary worktrees retain Git's final tracked-edit check.
-        if (settings.worktreeKeepWhen === "tracked-changes")
-          yield* cleanupGit(worktreePath, ["clean", "-ffdx"], "git clean");
-        const submodules = yield* submoduleRemoval(worktreePath, settings);
-        if (submodules.reason !== null) return keep(submodules.reason);
-        if (submodules.force) {
-          const changes = yield* localChangesReason(worktreePath, settings);
-          if (changes !== null) return keep(changes);
-        }
-        yield* removeLinkedWorktree({
-          operation: "StorageCleanup.cleanupGit",
-          cwd: project.workspaceRoot,
+        const notRemoved = yield* removeCheckedWorktree(
           worktreePath,
-          // Git requires force for submodules; recursive checks above cannot make removal atomic.
-          force: submodules.force,
-          execute: git.execute,
-          run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
-        });
+          project.workspaceRoot,
+          settings,
+        );
+        if (notRemoved !== null) return keep(notRemoved);
         entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
         yield* gitManager.invalidateStatus(project.workspaceRoot);
         // Preserve branch and path: ProviderTurnStartService recreates the checkout
@@ -1054,6 +1202,7 @@ const make = Effect.gen(function* () {
     yield* reportOrphanWorktrees(
       roots,
       yield* projectStore.list({ includeDeleted: true }),
+      serverSettings,
       entries,
     );
   });

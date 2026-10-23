@@ -37,6 +37,7 @@ describe("storage cleanup settings", () => {
       worktreeOnDelete: false,
       worktreeUnchanged: false,
       worktreeKeepWhen: "uncommitted-changes",
+      orphanWorktreeAfterDays: null,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
       cloudMachinesAfterDays: 1,

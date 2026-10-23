@@ -212,7 +212,13 @@ Existing prompts for deleting a worktree manually remain available when this pol
 
 Choose **Delete now** to run the enabled rules immediately. The latest results show which
 worktrees were removed or kept and why, plus any failures.
-Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.
+Results also list folders in the worktree folder that no thread uses, with their sizes. Agents
+sometimes create these themselves. They are only listed unless you turn on **Delete unused
+worktrees**, a machine-wide rule that removes a linked git worktree once nothing in it, ignored files
+included, has changed for the chosen number of days. A worktree with local changes (following **Keep
+worktrees with local changes**), a running process or open terminal, or commits on no branch is
+kept, and a folder that isn't a git worktree is never removed. Process checks run on Linux and macOS
+only, so Windows hosts keep these worktrees. Branches stay.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
