@@ -82,7 +82,9 @@ in the durable outbox. That intent survives another restart before provider star
 Continuation effects wait for activation; a slow provider must not delay the server's
 readiness or the launcher's commit boundary. Graceful shutdown captures intent first, since
 the launcher kills an updating server 5 s after asking it to stop, then stops parked
-background work and closes providers. It does not reconcile: startup
+background work and closes providers. It runs before any other layer closes, because routes,
+the fork-exec socket, and tunnels can each wait on a remote peer, and the process exits
+5 s after intent is saved whatever is still closing. It does not reconcile: startup
 reconciles after every restart, graceful or not, when no provider can still report a
 late completion that a stale cancellation would overwrite. Doing both doubled the
 database work of a stop, which ran past systemd's stop timeout on a busy disk.

@@ -893,6 +893,35 @@ it.effect("outputs a run already placed on this host are never placed again", ()
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
+it.effect("a fork-exec job its socket ends once the server pauses is left for the next run", () => {
+  const { root, fake, layer, start } = setup();
+  return Effect.gen(function* () {
+    fake.onExec(isCommand("bun test"), { exitCode: 0, chunks: [["stdout", "ok\n"]] });
+    const following = fake.hold("stream");
+    const first = yield* Scope.make();
+    const before = yield* start.pipe(Scope.provide(first));
+    const { started, observer } = watcher();
+    let jobId = "";
+    const caller = yield* before
+      .exec(request(root), {
+        ...observer,
+        started: (id) => Effect.sync(() => (jobId = id)).pipe(Effect.andThen(observer.started(id))),
+      })
+      .pipe(Effect.forkDetach);
+    yield* Deferred.await(started);
+    yield* Effect.promise(() => following.reached);
+    // Shutdown pauses forks, then ends each caller's request as it closes the socket.
+    yield* before.pause;
+    yield* Fiber.interrupt(caller);
+    yield* Scope.close(first, Exit.void);
+    expect(fake.calls.some((call) => call.op === "terminate")).toBe(false);
+
+    const after = yield* start;
+    const outcome = yield* after.attach(jobId, { stdout: 0, stderr: 0 }, () => {});
+    expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0 });
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
 it.effect(
   "a run killed while downloading outputs leaves them for the run that adopts the job",
   () => {

@@ -12,8 +12,10 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -85,7 +87,11 @@ const onBox = (forksEntry: FleetEnvironment) =>
             Layer.mock(ServerEnvironment.ServerEnvironment)({
               getEnvironmentId: Effect.succeed(box),
             }),
-            Layer.mock(WorktreeForks.WorktreeForks)({ enabled: false, bunShim: null }),
+            Layer.mock(WorktreeForks.WorktreeForks)({
+              enabled: false,
+              bunShim: null,
+              pause: Effect.void,
+            }),
             NodeServices.layer,
           ),
         ),
@@ -120,6 +126,7 @@ const onSelfHostedServer = (
             Layer.mock(ServerEnvironment.ServerEnvironment)({}),
             Layer.mock(WorktreeForks.WorktreeForks)({
               bunShim: { skipWhenSet: [], minTestFiles: 20 },
+              pause: Effect.void,
               ...forks,
             }),
             NodeServices.layer,
@@ -372,6 +379,40 @@ it.effect("closing the connection ends the copy", () =>
     });
     yield* send(socketPath, (seen) => seen.length === 1);
     yield* Deferred.await(ended);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("shutting down pauses running copies and ends their connections without waiting", () =>
+  Effect.gen(function* () {
+    const steps: Array<string> = [];
+    const started = yield* Deferred.make<void>();
+    const interrupted = yield* Deferred.make<void>();
+    const serverScope = yield* Scope.make();
+    const { socketPath } = yield* onSelfHostedServer({
+      enabled: true,
+      pause: Effect.sync(() => steps.push("paused")),
+      exec: (_, observer) =>
+        observer.started("job-1").pipe(
+          Effect.andThen(Deferred.succeed(started, undefined)),
+          // A job runs for as long as its command does, minutes past systemd's stop timeout.
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => steps.push("job interrupted")).pipe(
+              Effect.andThen(Deferred.succeed(interrupted, undefined)),
+            ),
+          ),
+        ),
+    }).pipe(Scope.provide(serverScope));
+    const { closed } = yield* send(socketPath);
+    yield* Deferred.await(started);
+
+    // Before, this waited for the caller's connection, so for the job to finish.
+    yield* Scope.close(serverScope, Exit.void);
+
+    yield* Deferred.await(interrupted);
+    expect(steps).toEqual(["paused", "job interrupted"]);
+    // The caller sees its connection close and rejoins the job once a server answers again.
+    yield* Deferred.await(closed);
   }).pipe(Effect.scoped),
 );
 

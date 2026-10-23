@@ -17,6 +17,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -80,6 +81,11 @@ export class ServerRuntimeStartup extends Context.Service<
     readonly enqueueCommand: <A, E>(
       effect: Effect.Effect<A, E>,
     ) => Effect.Effect<A, E | ServerRuntimeStartupError>;
+    /**
+     * Saves restart intent and stops background work and provider sessions. The server runs it
+     * before any other layer closes; runs after the first wait for it and do nothing more.
+     */
+    readonly shutdown: Effect.Effect<void>;
   }
 >()("t3/serverRuntimeStartup") {}
 
@@ -395,6 +401,12 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
   );
 
 interface StartupOptions {
+  /**
+   * How long shutdown may run once restart intent is durable before the process exits anyway.
+   * Everything left is safe to cut: Claude's group watchers stop the CLIs when this process
+   * ends, fork-exec callers rejoin their jobs, and the next start reconciles the rest.
+   */
+  readonly shutdownBackstop?: Duration.Duration;
   readonly activate?: Effect.Effect<void>;
   readonly awaitAuxiliaryParked?: Effect.Effect<void>;
   readonly abort?: (error: ServerRuntimeStartupError) => Effect.Effect<void>;
@@ -425,17 +437,40 @@ export const startEffectWorkerWithRelay = Effect.fn(
   );
 });
 
+// Info-level, so a stop that hangs in production shows the step it waits on.
+const shutdownStep = Effect.fn("ServerRuntimeStartup.shutdownStep")(function* <A, E>(
+  name: string,
+  effect: Effect.Effect<A, E>,
+) {
+  const startedAt = yield* Clock.currentTimeMillis;
+  yield* Effect.logInfo(`Shutdown: ${name}`);
+  return yield* effect.pipe(
+    Effect.ensuring(
+      Clock.currentTimeMillis.pipe(
+        Effect.flatMap((now) =>
+          Effect.logInfo(`Shutdown: ${name} done`, { durationMs: now - startedAt }),
+        ),
+      ),
+    ),
+  );
+});
+
 export const shutdownRuntime = Effect.fn("ServerRuntimeStartup.shutdownRuntime")(function* <
   PrepareError,
 >(input: {
   readonly parkedWork: FiberSet.FiberSet<unknown, unknown> | undefined;
   readonly workerFiberRef: Ref.Ref<Fiber.Fiber<void, never> | null>;
   readonly prepareForShutdown: Effect.Effect<void, PrepareError>;
+  /** Runs once restart intent is durable, or failed to be. */
+  readonly afterIntent?: Effect.Effect<void>;
   readonly shutdownSessions: Effect.Effect<void>;
 }) {
   const workerFiber = yield* Ref.getAndSet(input.workerFiberRef, null);
   if (workerFiber !== null) {
-    yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
+    yield* shutdownStep(
+      "stopping the effect worker",
+      Fiber.interrupt(workerFiber).pipe(Effect.ignore),
+    );
   }
   // Background loops live in layers that close after this one, so they would keep
   // fetching, settling, and writing until the end of shutdown.
@@ -451,8 +486,13 @@ export const shutdownRuntime = Effect.fn("ServerRuntimeStartup.shutdownRuntime")
   // SIGTERM, and a chat cut without it never resumes. Each write is its own transaction, so
   // loops still running cannot tear it. It must also be durable before sessions record
   // their release. The rest of recovery waits for startup, which reconciles every restart.
-  yield* input.prepareForShutdown.pipe(
-    Effect.ensuring(Effect.andThen(stopParkedWork, input.shutdownSessions)),
+  yield* shutdownStep("saving restart intent", input.prepareForShutdown).pipe(
+    Effect.ensuring(
+      (input.afterIntent ?? Effect.void).pipe(
+        Effect.andThen(shutdownStep("stopping background work", stopParkedWork)),
+        Effect.andThen(shutdownStep("stopping provider sessions", input.shutdownSessions)),
+      ),
+    ),
   );
 });
 
@@ -507,9 +547,25 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
 
   const parkedWork = yield* ParkedWork;
 
-  yield* Effect.addFinalizer(() =>
+  // Detached, so closing the layers it outlives cannot cancel it. runMain exits the process
+  // as soon as shutdown finishes, so it never fires after a shutdown that ends in time.
+  const armBackstop = Effect.gen(function* () {
+    const backstop = options?.shutdownBackstop;
+    if (backstop === undefined) return;
+    yield* Effect.sleep(backstop).pipe(
+      Effect.andThen(
+        Effect.logWarning("Shutdown: still running after restart intent was saved; exiting", {
+          backstopMs: Duration.toMillis(backstop),
+        }),
+      ),
+      Effect.andThen(Effect.sync(() => process.exit(130))),
+      Effect.forkDetach,
+    );
+  });
+  const shutdown = yield* Effect.cached(
     Effect.gen(function* () {
       const startedAt = yield* Clock.currentTimeMillis;
+      yield* Effect.logInfo("Shutdown: started");
       yield* commandGate.failCommandReady(
         new ServerRuntimeStartupError({
           mode: serverConfig.mode,
@@ -522,9 +578,10 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
         parkedWork,
         workerFiberRef: effectWorkerFiber,
         prepareForShutdown: providerRuntimeRecovery.prepareForShutdown,
+        afterIntent: armBackstop,
         shutdownSessions: providerSessions.shutdown,
       });
-      yield* Effect.logInfo("V2 orchestration shutdown completed", {
+      yield* Effect.logInfo("Shutdown: runtime stopped", {
         durationMs: (yield* Clock.currentTimeMillis) - startedAt,
       });
     }).pipe(
@@ -535,6 +592,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       ),
     ),
   );
+  yield* Effect.addFinalizer(() => shutdown);
 
   const startup = Effect.gen(function* () {
     yield* Effect.logDebug("startup phase: starting keybindings runtime");
@@ -760,6 +818,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     awaitCommandReady: commandGate.awaitCommandReady,
     markHttpListening: Deferred.succeed(httpListening, undefined),
     enqueueCommand: commandGate.enqueueCommand,
+    shutdown,
   } satisfies ServerRuntimeStartup["Service"];
 });
 
