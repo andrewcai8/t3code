@@ -190,6 +190,60 @@ describe("finding the real bun with nothing moved aside", () => {
     expect(run(`${bin}/:${bin}:${other}:/usr/bin:/bin`).stdout).toBe("other --version\n");
     expect(run(`${bin}:/usr/bin:/bin`).status).toBe(127);
   });
+
+  const systemBun = ["/usr/bin/bun", "/bin/bun"].some((path) => NodeFS.existsSync(path));
+
+  it.skipIf(systemBun)(
+    "mounted at another path with no other bun, exits 127 rather than running itself",
+    () => {
+      const home = tempDir("mount");
+      const bin = NodePath.join(home, ".local", "bin");
+      reconcileBunShim(bin, OWNER, { skipWhenSet: [], minTestFiles: 20 });
+      // A container mounts the shim as its own bun; the install path does not exist there.
+      const mounted = NodePath.join(home, "container", "usr", "local", "bin");
+      executable(
+        NodePath.join(mounted, "bun"),
+        NodeFS.readFileSync(NodePath.join(bin, "bun"), "utf8"),
+      );
+      NodeFS.rmSync(bin, { recursive: true, force: true });
+      const result = NodeChildProcess.spawnSync(
+        "/bin/sh",
+        [NodePath.join(mounted, "bun"), "--version"],
+        {
+          env: { PATH: `${mounted}:/usr/bin:/bin` },
+          encoding: "utf8",
+          timeout: 5_000,
+        },
+      );
+      expect(result.status).toBe(127);
+      expect(result.stderr).toContain("found no other bun");
+    },
+  );
+
+  it.skipIf(systemBun)(
+    "two mounted copies with no other bun exit 127 rather than running each other",
+    () => {
+      const home = tempDir("mounts");
+      const bin = NodePath.join(home, ".local", "bin");
+      reconcileBunShim(bin, OWNER, { skipWhenSet: [], minTestFiles: 20 });
+      const text = NodeFS.readFileSync(NodePath.join(bin, "bun"), "utf8");
+      const first = NodePath.join(home, "root", ".local", "bin");
+      const second = NodePath.join(home, "usr", "local", "bin");
+      executable(NodePath.join(first, "bun"), text);
+      executable(NodePath.join(second, "bun"), text);
+      NodeFS.rmSync(bin, { recursive: true, force: true });
+      const result = NodeChildProcess.spawnSync(
+        "/bin/sh",
+        [NodePath.join(first, "bun"), "--version"],
+        {
+          env: { PATH: `${first}:${second}:/usr/bin:/bin` },
+          encoding: "utf8",
+          timeout: 5_000,
+        },
+      );
+      expect(result.status).toBe(127);
+    },
+  );
 });
 
 describe("installing and removing", () => {
