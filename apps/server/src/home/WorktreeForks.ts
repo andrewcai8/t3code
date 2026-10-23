@@ -472,16 +472,6 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       removeJobDir(jobsDir, jobId);
     });
 
-  /** A directory on this host that lasts as long as the scope. */
-  const scratchDir = Effect.acquireRelease(
-    Effect.sync(() => {
-      const dir = NodePath.join(scratchRoot, NodeCrypto.randomUUID());
-      NodeFS.mkdirSync(dir, { recursive: true });
-      return dir;
-    }),
-    (dir) => Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
-  );
-
   /** Fails as "the copy could not <what>", so nothing of the command ran. */
   const couldNot = (what: string) => (cause: unknown) =>
     new NotStarted({ reason: `The copy could not ${what}.`, cause });
@@ -525,8 +515,13 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       Effect.mapError(notStarted),
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
     );
-  const ship = (checkout: Checkout, base: ForkBase, dir: string) =>
-    shipState(checkout, base.sha, dir).pipe(
+  /**
+   * The checkout's state as the job is sent, packed now unless the cache holds it, for as long as
+   * the scope lasts.
+   */
+  const ship = (checkout: Checkout, base: ForkBase) =>
+    shipState(checkout, base.sha).pipe(
+      Effect.tap((shipment) => cache.prepack(shipment.state)),
       Effect.mapError(notStarted),
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
     );
@@ -849,9 +844,9 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       const checkout = yield* inspect(request.cwd);
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
       const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
-      const dir = yield* scratchDir;
-      const shipment = yield* ship(checkout, base, dir);
-      const inputs = yield* inputUploads(request.inputs ?? [], dir).pipe(
+      const shipment = yield* ship(checkout, base);
+      const inputs = yield* inputUploads(request.inputs ?? []).pipe(
+        Effect.tap(Effect.forEach((input) => cache.prepack(input), { discard: true })),
         Effect.mapError(notStarted),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
       );
@@ -1022,7 +1017,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         byRoot.set(checkout.root, target);
         yield* Effect.gen(function* () {
           const base = yield* bases.current(checkout, true).pipe(Effect.mapError(notStarted));
-          const shipment = yield* ship(checkout, base, yield* scratchDir);
+          const shipment = yield* ship(checkout, base);
           return { shipment, base };
         }).pipe(
           Effect.exit,

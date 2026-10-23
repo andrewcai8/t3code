@@ -8,19 +8,17 @@
  *
  * @module worktreeForkShip
  */
-import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { canonicalRepository } from "../environmentControl/config.ts";
 import { MODAL_GUEST_ENV } from "../environmentControl/ModalRuntime.ts";
-import { fileDigest } from "../environmentControl/ProvisionPreparation.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import type { Packed, Upload } from "./worktreeForkCache.ts";
+import { archiveKey, contentKey } from "./worktreeForkContent.ts";
 import type { ForkRepository } from "./worktreeForksConfig.ts";
 
 /** A shipment past this is not a worktree's state but something that belongs in .gitignore. */
@@ -190,14 +188,16 @@ export const driftInstallDirs = (
   return [...dirs].toSorted();
 };
 
+/** A hash failure is the worktree being unreadable, as a failed pack is. */
+const unreadable = (cause: unknown) => new CheckoutRefused({ reason: "unreadable", cause });
+
 /**
  * What a copy booted from the base commit `baseSha` needs to reproduce `checkout`, committed or
- * not: its key now, and its archive packed into `dir` once something asks for it.
+ * not: the key of that state now, and how to pack it into a directory.
  */
 export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
   checkout: Checkout,
   baseSha: string,
-  dir: string,
 ) {
   const { root } = checkout;
   if ((yield* run(root, "git", ["cat-file", "-e", `${baseSha}^{commit}`])).code !== 0)
@@ -208,6 +208,7 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
       reason: "unreadable",
       cause: new Error(contained.stderr.slice(-2000)),
     });
+  const bundled = contained.code === 1;
   const changed = [
     ...nulList(
       yield* succeeded(root, "git", [
@@ -232,137 +233,71 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
       "HEAD",
     ]),
   );
-  // HEAD and the base name the bundle; the rest is what delta.tgz and `deleted` hold.
-  const stateKey = contentKey(
-    ["state", baseSha, checkout.head, contained.code === 1 ? "bundle" : "", ...deleted],
+  // The bundle is named by the commits it brings; delta.tgz and `deleted` by what they hold.
+  const context = (head: string) => ["state", baseSha, head, bundled ? "bundle" : "", ...deleted];
+  const key = yield* contentKey(
+    context(checkout.head),
     changed.map((path) => ({ name: path, path: NodePath.join(root, path) })),
-  );
-  const key = yield* stateKey;
-  const pack = Effect.gen(function* () {
-    yield* Effect.try({
-      try: () => NodeFS.mkdirSync(dir, { recursive: true }),
-      catch: (cause) => new CheckoutRefused({ reason: "unreadable", cause }),
-    });
-    const parts = ["delta.tgz", "deleted"];
-    if (contained.code === 1) {
-      yield* succeeded(root, "git", [
-        "bundle",
-        "create",
-        "-q",
-        NodePath.join(dir, "head.bundle"),
-        "HEAD",
-        `^${baseSha}`,
-      ]);
-      parts.unshift("head.bundle");
-    }
-    yield* Effect.try({
-      try: () =>
-        NodeFS.writeFileSync(
-          NodePath.join(dir, "deleted"),
-          deleted.map((path) => `${path}\0`).join(""),
-        ),
-      catch: (cause) => new CheckoutRefused({ reason: "unreadable", cause }),
-    });
-    // gzip, not zstd: the template image has no zstd. No AppleDouble files from a macOS host.
-    const packed = yield* run(
-      root,
-      "tar",
-      ["-czf", NodePath.join(dir, "delta.tgz"), "--null", "-T", "-"],
-      { stdin: changed.map((path) => `${path}\0`).join(""), env: { COPYFILE_DISABLE: "1" } },
-    );
-    if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
-      return yield* new CheckoutRefused({
-        reason: "unreadable",
-        cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+  ).pipe(Effect.mapError(unreadable));
+  const runner = yield* ProcessRunner.ProcessRunner;
+  const pack = Effect.fn("WorktreeForks.packState")(
+    function* (dir: string) {
+      yield* Effect.try({
+        try: () => NodeFS.mkdirSync(dir, { recursive: true }),
+        catch: unreadable,
       });
-    const archive = NodePath.join(dir, "state.tar");
-    yield* succeeded(dir, "tar", ["-cf", archive, ...parts], { env: { COPYFILE_DISABLE: "1" } });
-    const bytes = NodeFS.statSync(archive).size;
-    if (bytes > MAX_SHIPMENT_BYTES) return yield* new CheckoutRefused({ reason: "too_large" });
-    // A HEAD that moved since is bundled under another key, so this pack is not cached.
-    const head = (yield* succeeded(root, "git", ["rev-parse", "HEAD"])).trim();
-    return {
-      archive,
-      bytes,
-      key: head === checkout.head ? yield* stateKey : `moved to ${head}`,
-    } satisfies Packed;
-  }).pipe(Effect.provideService(ProcessRunner.ProcessRunner, yield* ProcessRunner.ProcessRunner));
+      const parts = ["delta.tgz", "deleted"];
+      let head = checkout.head;
+      if (bundled) {
+        const bundle = NodePath.join(dir, "head.bundle");
+        yield* succeeded(root, "git", ["bundle", "create", "-q", bundle, "HEAD", `^${baseSha}`]);
+        // The commit the bundle holds, which a HEAD that moved since the job was sent changed.
+        head = (yield* succeeded(root, "git", ["bundle", "list-heads", bundle])).split(" ")[0]!;
+        parts.unshift("head.bundle");
+      }
+      yield* Effect.try({
+        try: () =>
+          NodeFS.writeFileSync(
+            NodePath.join(dir, "deleted"),
+            deleted.map((path) => `${path}\0`).join(""),
+          ),
+        catch: unreadable,
+      });
+      const delta = NodePath.join(dir, "delta.tgz");
+      // gzip, not zstd: the template image has no zstd. No AppleDouble files from a macOS host.
+      const packed = yield* run(root, "tar", ["-czf", delta, "--null", "-T", "-"], {
+        stdin: changed.map((path) => `${path}\0`).join(""),
+        env: { COPYFILE_DISABLE: "1" },
+      });
+      if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
+        return yield* new CheckoutRefused({
+          reason: "unreadable",
+          cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+        });
+      const archive = NodePath.join(dir, "state.tar");
+      yield* succeeded(dir, "tar", ["-cf", archive, ...parts], {
+        env: { COPYFILE_DISABLE: "1" },
+      });
+      const bytes = NodeFS.statSync(archive).size;
+      if (bytes > MAX_SHIPMENT_BYTES) return yield* new CheckoutRefused({ reason: "too_large" });
+      return {
+        archive,
+        bytes,
+        key: yield* archiveKey(context(head), delta).pipe(Effect.mapError(unreadable)),
+      } satisfies Packed;
+    },
+    Effect.provideService(ProcessRunner.ProcessRunner, runner),
+  );
   const committed = nulList(
     yield* succeeded(root, "git", ["diff", "--name-only", "-z", "--no-renames", baseSha, "HEAD"]),
   );
   return {
     checkout,
-    // Once per shipment, so a batch's jobs share one pack.
-    state: { key, pack: yield* Effect.cached(pack) },
+    state: { key, pack },
     driftDirs: driftInstallDirs([...committed, ...changed, ...deleted], (lockDir) =>
       NodeFS.existsSync(NodePath.join(root, lockDir, "bun.lock")),
     ),
   } satisfies Shipment;
-});
-
-/**
- * Files whose content an earlier hash read, by path, while their inode, size, times and mode stay
- * as they were. A write changes ctime, which nothing can set back, so a hit is the same content;
- * a file changed in the last two seconds could change again within the same tick, so it is not kept.
- */
-const digests = new Map<string, { readonly stat: string; readonly digest: string }>();
-const MAX_DIGESTS = 50_000;
-const RACY_MS = 2_000;
-
-const digestOf = async (path: string, stat: NodeFS.BigIntStats, now: number) => {
-  const signature = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode].join(
-    ":",
-  );
-  const known = digests.get(path);
-  if (known?.stat === signature) return known.digest;
-  const digest = await fileDigest(path);
-  if (now - Number(stat.ctimeMs) > RACY_MS) {
-    digests.delete(path);
-    digests.set(path, { stat: signature, digest });
-    if (digests.size > MAX_DIGESTS) digests.delete(digests.keys().next().value!);
-  }
-  return digest;
-};
-
-/** Feeds `path`, named `name`, to `hash` as tar would pack it: modes, links and content. */
-const hashTree = async (
-  hash: NodeCrypto.Hash,
-  name: string,
-  path: string,
-  now: number,
-): Promise<void> => {
-  const stat = NodeFS.lstatSync(path, { bigint: true, throwIfNoEntry: false });
-  if (stat === undefined) return void hash.update(`${name}\0missing\0`);
-  const mode = (stat.mode & 0o7777n).toString(8);
-  if (stat.isSymbolicLink())
-    return void hash.update(`${name}\0link\0${NodeFS.readlinkSync(path)}\0`);
-  if (stat.isFile())
-    return void hash.update(`${name}\0file\0${mode}\0${await digestOf(path, stat, now)}\0`);
-  if (!stat.isDirectory()) return void hash.update(`${name}\0other\0`);
-  hash.update(`${name}\0dir\0${mode}\0`);
-  for (const child of NodeFS.readdirSync(path).toSorted())
-    await hashTree(hash, `${name}/${child}`, NodePath.join(path, child), now);
-};
-
-/**
- * The sha256 of `context` and each entry's tree, read from `path` and named `name`, the path it is
- * packed under. File times are left out: what a copy runs is the same without them.
- */
-const contentKey = Effect.fnUntraced(function* (
-  context: ReadonlyArray<string>,
-  entries: ReadonlyArray<{ readonly name: string; readonly path: string }>,
-) {
-  const now = yield* Clock.currentTimeMillis;
-  return yield* Effect.tryPromise({
-    try: async () => {
-      const hash = NodeCrypto.createHash("sha256").update(
-        `${context.length}\0${context.join("\0")}\0`,
-      );
-      for (const entry of entries) await hashTree(hash, entry.name, entry.path, now);
-      return hash.digest("hex");
-    },
-    catch: (cause) => new CheckoutRefused({ reason: "unreadable", cause }),
-  });
 });
 
 /** Bytes of the files under `path`, not following symlinks. */
@@ -375,12 +310,11 @@ const diskBytes = (path: string): number => {
 
 /**
  * Host paths the command reads beyond its worktree, one archive each, keyed by what it holds and
- * packed into `dir` relative to `/` only when a copy needs it, for the copy to unpack at the same
+ * packed relative to `/` into a directory when a copy needs it, for the copy to unpack at the same
  * paths (INPUTS_SCRIPT in WorktreeForks.ts).
  */
 export const inputUploads = Effect.fn("WorktreeForks.inputUploads")(function* (
   paths: ReadonlyArray<string>,
-  dir: string,
 ) {
   if (paths.some((path) => !NodeFS.existsSync(path)))
     return yield* new CheckoutRefused({ reason: "missing_input" });
@@ -390,26 +324,38 @@ export const inputUploads = Effect.fn("WorktreeForks.inputUploads")(function* (
   if (paths.reduce((sum, path) => sum + diskBytes(path), 0) > MAX_INPUT_BYTES)
     return yield* new CheckoutRefused({ reason: "inputs_too_large" });
   const runner = yield* ProcessRunner.ProcessRunner;
-  return yield* Effect.forEach(paths, (path, index) =>
+  return yield* Effect.forEach(paths, (path) =>
     Effect.gen(function* () {
-      const inputKey = contentKey(["input"], [{ name: path, path }]);
-      const pack = Effect.gen(function* () {
-        const archive = NodePath.join(dir, `input-${index}.tgz`);
-        const packed = yield* run("/", "tar", ["-czf", archive, "--null", "-T", "-"], {
-          stdin: `${path.slice(1)}\0`,
-          env: { COPYFILE_DISABLE: "1" },
-        });
-        if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
-          return yield* new CheckoutRefused({
-            reason: "unreadable",
-            cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+      const pack = Effect.fn("WorktreeForks.packInput")(
+        function* (dir: string) {
+          yield* Effect.try({
+            try: () => NodeFS.mkdirSync(dir, { recursive: true }),
+            catch: unreadable,
           });
-        const bytes = NodeFS.statSync(archive).size;
-        if (bytes > MAX_SHIPMENT_BYTES)
-          return yield* new CheckoutRefused({ reason: "inputs_too_large" });
-        return { archive, bytes, key: yield* inputKey } satisfies Packed;
-      }).pipe(Effect.provideService(ProcessRunner.ProcessRunner, runner));
-      return { key: yield* inputKey, pack } satisfies Upload;
+          const archive = NodePath.join(dir, "input.tgz");
+          const packed = yield* run("/", "tar", ["-czf", archive, "--null", "-T", "-"], {
+            stdin: `${path.slice(1)}\0`,
+            env: { COPYFILE_DISABLE: "1" },
+          });
+          if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
+            return yield* new CheckoutRefused({
+              reason: "unreadable",
+              cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+            });
+          const bytes = NodeFS.statSync(archive).size;
+          if (bytes > MAX_SHIPMENT_BYTES)
+            return yield* new CheckoutRefused({ reason: "inputs_too_large" });
+          const key = yield* archiveKey(["input"], archive, (name) => `/${name}`).pipe(
+            Effect.mapError(unreadable),
+          );
+          return { archive, bytes, key } satisfies Packed;
+        },
+        Effect.provideService(ProcessRunner.ProcessRunner, runner),
+      );
+      const key = yield* contentKey(["input"], [{ name: path, path }]).pipe(
+        Effect.mapError(unreadable),
+      );
+      return { key, pack } satisfies Upload;
     }),
   );
 });

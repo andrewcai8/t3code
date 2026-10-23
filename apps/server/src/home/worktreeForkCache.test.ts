@@ -20,7 +20,7 @@ const setup = () => {
   NodeFS.writeFileSync(archive, "archive bytes");
   const item: Upload = {
     key: "a".repeat(64),
-    pack: Effect.succeed({ archive, bytes: 13, key: "a".repeat(64) }),
+    pack: () => Effect.succeed({ archive, bytes: 13, key: "a".repeat(64) }),
   };
   const host = {
     modal: { tokenId: "ak", tokenSecret: "as", imageId: "im", app: "app", environment: undefined },
@@ -91,7 +91,7 @@ it.effect("the sweep deletes an image unused for a day, and one too old to mount
       stateDir,
     );
     expect((yield* other.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(13);
-  });
+  }).pipe(Effect.scoped);
 });
 
 it.effect("a cache that errs falls back to the job's own upload, and says so", () => {
@@ -128,7 +128,7 @@ it.effect("a cache that errs falls back to the job's own upload, and says so", (
     yield* cache.place(yield* copy(fake), item, "/tmp/input.tgz");
     expect(fake.calls.filter((call) => call.op === "saveDirectory")).toHaveLength(before + 1);
     expect((yield* cache.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(0);
-  }).pipe(Effect.provide(logging));
+  }).pipe(Effect.scoped, Effect.provide(logging));
 });
 
 it.effect("content that changed while it was packed is used once and never cached", () => {
@@ -137,10 +137,11 @@ it.effect("content that changed while it was packed is used once and never cache
     const cache = yield* start;
     const moved: Upload = {
       key: item.key,
-      pack: item.pack.pipe(Effect.map((packed) => ({ ...packed, key: "b".repeat(64) }))),
+      pack: (dir) =>
+        item.pack(dir).pipe(Effect.map((packed) => ({ ...packed, key: "b".repeat(64) }))),
     };
     expect((yield* cache.place(yield* copy(fake), moved, "/tmp/input.tgz")).uploadedBytes).toBe(13);
     expect(fake.calls.filter((call) => call.op === "saveDirectory")).toEqual([]);
     expect((yield* cache.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(13);
-  });
+  }).pipe(Effect.scoped);
 });

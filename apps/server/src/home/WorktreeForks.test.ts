@@ -1186,3 +1186,109 @@ it.effect("an upload cut short is never served to another job", () => {
     expect(callsOf(fake, "saveDirectory", next)).toHaveLength(1);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
+
+/** This host's processes as they run, with `around` wrapped about each. */
+const watchedRunner = (
+  around: (
+    input: ProcessRunner.ProcessRunInput,
+    run: ReturnType<ProcessRunner.ProcessRunner["Service"]["run"]>,
+  ) => ReturnType<ProcessRunner.ProcessRunner["Service"]["run"]>,
+) =>
+  Layer.effect(
+    ProcessRunner.ProcessRunner,
+    Effect.gen(function* () {
+      const real = yield* ProcessRunner.ProcessRunner;
+      return ProcessRunner.ProcessRunner.of({
+        ...real,
+        run: (input) => around(input, real.run(input)),
+      });
+    }),
+  );
+
+it.effect("an input torn while tar packs it is used by its job and never cached", () => {
+  const { root, fake, layer, start } = setup();
+  const input = NodePath.join(tempDir("inputs"), "policy.json");
+  NodeFS.writeFileSync(input, '{"allow":true}\n');
+  // A formatter's truncate-then-write: tar reads the file empty, and it is whole again after.
+  let tear = true;
+  const tearing = watchedRunner((process, run) =>
+    tear && process.command === "tar" && process.stdin === `${input.slice(1)}\0`
+      ? Effect.sync(() => NodeFS.writeFileSync(input, "")).pipe(
+          Effect.andThen(run),
+          Effect.ensuring(Effect.sync(() => NodeFS.writeFileSync(input, '{"allow":true}\n'))),
+        )
+      : run,
+  );
+  return Effect.gen(function* () {
+    const unpacked = unpackedInputs(fake);
+    const forks = yield* start;
+    const stages = () =>
+      callsOf(fake, "saveDirectory").filter((call) =>
+        call.argv?.[0]?.startsWith("/tmp/t3-cache-stage/"),
+      );
+
+    expect(yield* forks.exec(request(root, { inputs: [input] }), watcher().observer)).toMatchObject(
+      {
+        _tag: "Exited",
+      },
+    );
+    expect(unpacked[0]).toEqual([""]);
+    // Only the worktree's state was kept; the torn input went to its own job alone.
+    expect(stages()).toHaveLength(1);
+
+    tear = false;
+    const next = fake.calls.length;
+    yield* forks.exec(request(root, { inputs: [input] }), watcher().observer);
+    expect(unpacked[1]).toEqual(['{"allow":true}\n']);
+    expect(callsOf(fake, "upload", next)).toHaveLength(1);
+    expect(stages()).toHaveLength(2);
+  }).pipe(Effect.scoped, Effect.provide(tearing.pipe(Layer.provideMerge(layer))));
+});
+
+it.effect("a job waiting for a copy runs the worktree as it was sent, not as it is later", () => {
+  const { root, fake, layer, start } = setup({ maxConcurrent: 1 });
+  let packs = 0;
+  const packed = Deferred.makeUnsafe<void>();
+  // Settles once the second job's state is packed, as it is sent.
+  const watching = watchedRunner((process, run) =>
+    process.command === "tar" && process.args[1]?.endsWith("state.tar")
+      ? run.pipe(
+          Effect.tap(() => (++packs === 2 ? Deferred.succeed(packed, undefined) : Effect.void)),
+        )
+      : run,
+  );
+  return Effect.gen(function* () {
+    const applied: Array<string> = [];
+    fake.onExec(isStep("t3-apply"), {
+      run: (argv, uploaded) => {
+        const dir = tempDir("applied");
+        NodeChildProcess.execFileSync("tar", ["-xf", uploaded.get(argv[4]!)!, "-C", dir]);
+        applied.push(
+          NodeChildProcess.execFileSync(
+            "tar",
+            ["-xOzf", NodePath.join(dir, "delta.tgz"), "a.txt"],
+            {
+              encoding: "utf8",
+            },
+          ),
+        );
+        return 0;
+      },
+    });
+    const forks = yield* start;
+    const holding = fake.hold("stream");
+    const first = yield* forks.exec(request(root), watcher().observer).pipe(Effect.forkChild);
+    yield* Effect.promise(() => holding.reached);
+
+    NodeFS.writeFileSync(NodePath.join(root, "a.txt"), "as sent\n");
+    const second = yield* forks.exec(request(root), watcher().observer).pipe(Effect.forkChild);
+    yield* Deferred.await(packed);
+    // The second job waits for the only copy slot while its worktree moves on.
+    NodeFS.writeFileSync(NodePath.join(root, "a.txt"), "edited after\n");
+    holding.open();
+    yield* Fiber.join(first);
+    expect(yield* Fiber.join(second)).toMatchObject({ _tag: "Exited" });
+
+    expect(applied).toEqual(["edited\n", "as sent\n"]);
+  }).pipe(Effect.scoped, Effect.provide(watching.pipe(Layer.provideMerge(layer))));
+});

@@ -4,9 +4,11 @@
  * the sha256 of what they hold, so jobs that send the same content cost this host one upload, not
  * one each.
  *
- * The first job to need an archive uploads it, checks its digest in the copy, and saves the
- * directory holding it as a Modal directory image; only then does the image's id go into the
- * index under the content's key, so a cut-short or garbled upload is never served. Jobs needing
+ * A job packs what it sends as it is sent, unless the cache already holds it, and jobs sent with
+ * the same key share that pack. The first job to need an archive uploads it, checks its digest in
+ * the copy, and saves the directory holding it as a Modal directory image; only then, and only when
+ * the archive's own key (worktreeForkContent.ts) is the one the job was sent with, does the image's
+ * id go into the index, so a cut-short, garbled or torn archive is never served. Jobs needing
  * the same key meanwhile wait for that one upload. Later jobs mount the image instead, and a mount
  * is the copy's own: what a job writes there no other job sees. Anything going wrong in the cache
  * falls back to uploading the archive as before.
@@ -52,10 +54,10 @@ export interface Packed {
   readonly key: string;
 }
 
-/** What a copy needs from this host: the key of its content, and how to pack it. */
+/** What a copy needs from this host: the key of its content now, and how to pack it into a directory. */
 export interface Upload {
   readonly key: string;
-  readonly pack: Effect.Effect<Packed, CheckoutRefused>;
+  readonly pack: (dir: string) => Effect.Effect<Packed, CheckoutRefused>;
 }
 
 /** Where an archive is in the copy, how big it is, and how much of it this host sent. */
@@ -90,15 +92,17 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
   stateDir: string,
 ) {
   const path = NodePath.join(stateDir, "worktree-forks", "upload-cache.json");
-  const scope = NodeCrypto.createHash("sha256")
+  const workspace = NodeCrypto.createHash("sha256")
     .update([host.modal.tokenId, host.modal.app, host.modal.environment ?? ""].join("\0"))
     .digest("hex");
   const index = new Map<string, Entry>();
+  const scope = yield* Effect.scope;
+  const packRoot = NodePath.join(stateDir, "worktree-forks", "tmp", "packs");
   yield* Effect.try(() => {
     if (!NodeFS.existsSync(path)) return;
     const saved = decodeIndex(NodeFS.readFileSync(path, "utf8"));
     // Another workspace's images are not this one's to mount; Modal expires them.
-    if (saved.scope === scope)
+    if (saved.scope === workspace)
       for (const [key, entry] of Object.entries(saved.entries)) index.set(key, entry);
   }).pipe(
     Effect.catch((cause) =>
@@ -111,13 +115,70 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
   const save = Effect.try(() => {
     NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
     const temporary = `${path}.${NodeCrypto.randomUUID()}`;
-    NodeFS.writeFileSync(temporary, encodeIndex({ scope, entries: Object.fromEntries(index) }));
+    NodeFS.writeFileSync(
+      temporary,
+      encodeIndex({ scope: workspace, entries: Object.fromEntries(index) }),
+    );
     NodeFS.renameSync(temporary, path);
   }).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("worktree fork upload cache could not be saved", { path, cause }),
     ),
   );
+  /**
+   * Each key's archive on this host while a job holds it: packed once, in the cache's own scope so
+   * no one job's interruption cuts it short for the others, and removed once the last lets go.
+   */
+  const packs = new Map<
+    string,
+    {
+      readonly packed: Deferred.Deferred<Packed, CheckoutRefused>;
+      readonly dir: string;
+      refs: number;
+    }
+  >();
+  const packOnce = (item: Upload) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const known = packs.get(item.key);
+        if (known !== undefined) {
+          known.refs += 1;
+          return { shared: known, fresh: false };
+        }
+        const shared = {
+          packed: Deferred.makeUnsafe<Packed, CheckoutRefused>(),
+          dir: NodePath.join(packRoot, NodeCrypto.randomUUID()),
+          refs: 1,
+        };
+        packs.set(item.key, shared);
+        return { shared, fresh: true };
+      }),
+      ({ shared }) =>
+        Effect.sync(() => {
+          shared.refs -= 1;
+          if (shared.refs > 0) return;
+          if (packs.get(item.key) === shared) packs.delete(item.key);
+          NodeFS.rmSync(shared.dir, { recursive: true, force: true });
+        }),
+    ).pipe(
+      Effect.tap(({ shared, fresh }) =>
+        fresh
+          ? item.pack(shared.dir).pipe(
+              Effect.exit,
+              Effect.flatMap((exit) => Deferred.done(shared.packed, exit)),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (shared.refs === 0)
+                    NodeFS.rmSync(shared.dir, { recursive: true, force: true });
+                }),
+              ),
+              Effect.forkIn(scope),
+            )
+          : Effect.void,
+      ),
+      Effect.flatMap(({ shared }) => Deferred.await(shared.packed)),
+    );
+
   /** Each key's first upload in progress, settling with what it committed, or null. */
   const uploading = new Map<string, Deferred.Deferred<Entry | null>>();
 
@@ -134,7 +195,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
     fallbackPath: string,
     packed?: Packed,
   ) {
-    const archive = packed ?? (yield* item.pack);
+    const archive = packed ?? (yield* packOnce(item));
     yield* upload(sandboxId, archive.archive, fallbackPath);
     return {
       path: fallbackPath,
@@ -156,7 +217,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
   ) {
     let committed: Entry | null = null;
     return yield* Effect.gen(function* () {
-      const packed = yield* item.pack;
+      const packed = yield* packOnce(item);
       const uploaded = `${STAGES}/${item.key}.upload`;
       const stage = `${STAGES}/${item.key}`;
       yield* upload(sandboxId, packed.archive, uploaded);
@@ -254,7 +315,10 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
       yield* fallBack("could not mount an image", item.key, mounted.failure);
       return yield* direct(sandboxId, item, fallbackPath);
     }
-    index.set(item.key, { ...entry, usedAt: yield* Clock.currentTimeMillis });
+    // Only the entry still there: one the sweep evicted or a newer upload replaced stays so.
+    const current = index.get(item.key);
+    if (current?.imageId === entry.imageId)
+      index.set(item.key, { ...current, usedAt: yield* Clock.currentTimeMillis });
     return { path: `${mountPath}/archive`, bytes: entry.bytes, uploadedBytes: 0 } satisfies Placed;
   });
 
@@ -275,5 +339,16 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
     );
   });
 
-  return { place, evict };
+  /**
+   * Packs `item` as the job is sent, unless the cache holds it, so a job that waits for a slot
+   * still runs the worktree as it was sent. Jobs holding the same key share one pack.
+   */
+  const prepack = Effect.fn("WorktreeForks.prepackUpload")(function* (item: Upload) {
+    const now = yield* Clock.currentTimeMillis;
+    const entry = index.get(item.key);
+    if (entry !== undefined && now - entry.createdAt < USABLE_MS) return;
+    yield* packOnce(item);
+  });
+
+  return { place, prepack, evict };
 });
