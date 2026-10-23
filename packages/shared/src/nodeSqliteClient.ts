@@ -1242,7 +1242,18 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
           resume(Effect.succeed({ id, error: { operation: "execute", message: unavailable } }));
           return;
         }
-        pending.set(id, (reply) => resume(Effect.succeed(reply)));
+        pending.set(id, (reply) => {
+          // Here, not in the caller's continuation: an interrupt takes effect as
+          // this resumes and skips it, though the statement ran and may have grown the WAL.
+          if (reply.admission !== true) {
+            isTransaction = reply.isTransaction === true;
+            if (reply.wal !== undefined) {
+              wal = reply.wal ?? undefined;
+              checkpoint?.check();
+            }
+          }
+          resume(Effect.succeed(reply));
+        });
         if (pending.size === 1) worker.ref();
         const cached = input.cached && !hasLargeBinding(input.params);
         try {
@@ -1266,11 +1277,6 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
             return checkpoint === undefined
               ? attempt(true)
               : checkpoint.runWithAdmission(() => attempt(true));
-          }
-          isTransaction = reply.isTransaction === true;
-          if (reply.wal !== undefined) {
-            wal = reply.wal ?? undefined;
-            checkpoint?.check();
           }
           return reply.error === undefined
             ? Effect.succeed(reply.rows ?? [])
