@@ -1,7 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - downloads land in real files, as Modal's do.
 /**
  * An in-memory stand-in for the Modal members WorktreeForks uses. Sandboxes are ids with tags;
- * execs answer from scripted rules, so tests can hold a step open or fail it.
+ * execs answer from scripted rules, so tests can hold a step open or fail it. A launched command
+ * answers whoever follows it, as a copy's files do, so a second service can adopt it.
  *
  * @module worktreeForksTestkit
  */
@@ -67,6 +68,8 @@ export const makeFakeSandboxes = () => {
   };
   let next = 0;
   let downloadSource: string | null = null;
+  /** Each sandbox's launched command, as its rule answers it. */
+  const launched = new Map<string, Exclude<FakeExecReply, { readonly run: unknown }>>();
 
   const step = async (op: string) => {
     const failure = failures.get(op);
@@ -98,6 +101,10 @@ export const makeFakeSandboxes = () => {
     exec: async (sandboxId, argv, options) => {
       record({ op: "exec", sandboxId, argv, ...options });
       const reply = replyTo(argv);
+      if (argv[3] === "t3-launch") {
+        launched.set(sandboxId, reply);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       const text = (stream: "stdout" | "stderr") =>
         (reply.chunks ?? [])
           .filter(([from]) => from === stream)
@@ -112,7 +119,8 @@ export const makeFakeSandboxes = () => {
     execStream: async (sandboxId, argv, { onOutput, ...options }) => {
       record({ op: "stream", sandboxId, argv, ...options });
       await step("stream");
-      const reply = replyTo(argv);
+      const reply =
+        argv[3] === "t3-follow" ? (launched.get(sandboxId) ?? { exitCode: 0 }) : replyTo(argv);
       for (const [stream, text] of reply.chunks ?? []) onOutput(stream, text);
       return reply.exitCode;
     },

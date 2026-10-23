@@ -38,12 +38,24 @@ export const ForkExecRequest = Schema.Struct({
 });
 export type ForkExecRequest = typeof ForkExecRequest.Type;
 
+/**
+ * Joins a running job again after the socket closed under it, as when the server restarts. The
+ * byte counts are the output already received, so only the rest is sent. A server that predates
+ * it answers `unavailable`, and the caller reports the copy lost as before.
+ */
+export const ForkExecAttach = Schema.Struct({
+  attach: Schema.String.check(Schema.isMinLength(1)),
+  stdoutBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  stderrBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type ForkExecAttach = typeof ForkExecAttach.Type;
+
 /** A request line carries the caller's whole environment, so it may be long, but not unbounded. */
 export const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
 /**
  * What the socket answers, one JSON line each: `started`, then (when it is `live`) the command's
- * output as it runs, then exactly one outcome.
+ * output as it runs, then exactly one outcome. An attach gets the output and the outcome.
  */
 export const ForkExecEvent = Schema.Union([
   Schema.Struct({

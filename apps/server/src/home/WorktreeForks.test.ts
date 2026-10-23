@@ -16,9 +16,11 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 
 import { ServerConfig } from "../config.ts";
@@ -28,6 +30,14 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import type { ForkExecRequest } from "./forkExecProtocol.ts";
 import * as WorktreeForks from "./WorktreeForks.ts";
+import {
+  claimCopyBack,
+  type JobRecord,
+  jobDir,
+  jobsRoot,
+  writeBatch,
+  writeJob,
+} from "./worktreeForkJobs.ts";
 import type { ForkRepository, WorktreeForksHost } from "./worktreeForksConfig.ts";
 import { gate, isCommand, isStep, makeFakeSandboxes } from "./worktreeForksTestkit.ts";
 
@@ -194,6 +204,7 @@ it.effect(
         "upload",
         "t3-apply",
         "t3-place",
+        "t3-launch",
         "stream",
         "terminate",
       ]);
@@ -207,7 +218,7 @@ it.effect(
         root,
         "/work/widgets",
       ]);
-      const run = fake.calls.find((call) => call.op === "stream");
+      const run = fake.calls.find((call) => call.argv?.[3] === "t3-launch");
       expect(run?.argv?.slice(-3)).toEqual(["bash", "-lc", "bun test"]);
       expect(run).toMatchObject({
         workdir: root,
@@ -352,6 +363,7 @@ it.effect("inputs reach the copy at their own paths, and outputs come back to th
       "t3-place",
       "upload",
       "t3-inputs",
+      "t3-launch",
       "stream",
       "t3-outputs",
       "download",
@@ -611,7 +623,7 @@ it.effect(
       expect(fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
       expect(
         fake.calls
-          .filter((call) => call.op === "stream")
+          .filter((call) => call.argv?.[3] === "t3-launch")
           .map((call) => [call.workdir, call.env?.SERVER_ONLY]),
       ).toEqual([
         [root, "yes"],
@@ -758,3 +770,207 @@ it.effect("a host without worktree-forks.json, or a cloud box, has no backend", 
     expect((yield* forksOf({ T3CODE_USAGE_HOST_ID: "host" })).enabled).toBe(false);
   }).pipe(Effect.scoped),
 );
+
+/** A job record as a run killed mid-command leaves it, for a sandbox `sandboxId`. */
+const leftRecord = (
+  stateDir: string,
+  overrides: Partial<JobRecord> & Pick<JobRecord, "id" | "sandboxId">,
+): JobRecord => {
+  const record: JobRecord = {
+    caller: "fork-exec",
+    command: "bun test",
+    cwd: "/work/widgets",
+    repository: "acme/widgets",
+    size: { cpu: 8, memoryMiB: 16384 },
+    batch: null,
+    startedAt: 0,
+    timeoutMs: 60 * 60_000,
+    outputs: null,
+    logs: NodePath.join(stateDir, "worktree-forks", "tmp", `job-${overrides.id}`),
+    ...overrides,
+  };
+  writeJob(jobsRoot(stateDir), record);
+  return record;
+};
+
+/** Collects what a rejoining caller is sent, per stream. */
+const rejoiner = () => {
+  const sent = { stdout: "", stderr: "" };
+  return {
+    sent,
+    output: (stream: "stdout" | "stderr", text: string) => void (sent[stream] += text),
+  };
+};
+
+it.effect(
+  "a fork-exec job in flight across a restart is adopted, its outputs come back once, and its caller rejoins",
+  () => {
+    const { root, stateDir, fake, layer, start } = setup();
+    const output = NodePath.join(tempDir("outputs"), "run");
+    return Effect.gen(function* () {
+      fake.onExec(isCommand("bun test"), {
+        exitCode: 3,
+        chunks: [
+          ["stdout", "pass 1\n"],
+          ["stderr", "warn\n"],
+          ["stdout", "pass 2\n"],
+        ],
+      });
+      fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+      fake.downloadFrom(packedArchive({ [`${output}/report.json`]: "done\n" }));
+      // The first run dies while it follows the command: its follow never answers.
+      fake.hold("stream");
+      const first = yield* Scope.make();
+      const before = yield* start.pipe(Scope.provide(first));
+      const { started, observer } = watcher();
+      let jobId = "";
+      // As on the socket, the caller's fiber is not the server's to end.
+      yield* before
+        .exec(request(root, { outputs: [output] }), {
+          ...observer,
+          started: (id) =>
+            Effect.sync(() => (jobId = id)).pipe(Effect.andThen(observer.started(id))),
+        })
+        .pipe(Effect.forkDetach);
+      yield* Deferred.await(started);
+      yield* Scope.close(first, Exit.void);
+      expect(fake.running().size).toBe(1);
+
+      const after = yield* start;
+      const { sent, output: rejoined } = rejoiner();
+      // The caller had seen the first line before the socket closed.
+      const outcome = yield* after.attach(jobId, { stdout: 7, stderr: 0 }, rejoined);
+
+      expect(outcome).toEqual({ _tag: "Exited", exitCode: 3, timedOut: false, durationMs: 0 });
+      expect(sent).toEqual({ stdout: "pass 2\n", stderr: "warn\n" });
+      expect(NodeFS.readFileSync(NodePath.join(output, "report.json"), "utf8")).toBe("done\n");
+      expect(fake.calls.filter((call) => call.op === "download")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.argv?.[3] === "t3-launch")).toHaveLength(1);
+      expect(fake.running().size).toBe(0);
+      expect(NodeFS.existsSync(jobDir(jobsRoot(stateDir), jobId))).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  },
+);
+
+it.effect(
+  "a stale record whose outputs already started coming back never copies them again",
+  () => {
+    const { stateDir, fake, layer, start } = setup();
+    return Effect.gen(function* () {
+      const sandboxId = fake.plant({ purpose: "t3-worktree-fork", host: "env-host", job: "job-a" });
+      leftRecord(stateDir, {
+        id: "job-a",
+        sandboxId,
+        outputs: {
+          paths: ["/tmp/x"],
+          root: "/",
+          into: "/tmp/in",
+          archive: "/tmp/a.tgz",
+          place: true,
+        },
+      });
+      expect(claimCopyBack(jobsRoot(stateDir), "job-a")).toBe(true);
+      const forks = yield* start;
+      const { sent, output } = rejoiner();
+      const outcome = yield* forks.attach("job-a", { stdout: 0, stderr: 0 }, output);
+      expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0 });
+      expect(sent.stderr).toBe(
+        "[t3] The outputs were not copied back: T3 Code restarted while the outputs were coming back, so they were not copied again.\n",
+      );
+      expect(fake.calls.some((call) => call.argv?.[3] === "t3-outputs")).toBe(false);
+      expect(fake.calls.some((call) => call.op === "download")).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  },
+);
+
+it.effect(
+  "a batch in flight across a restart answers status and copies its outputs back once",
+  () => {
+    const { fake, layer, start } = setup();
+    const packed = tempDir("packed");
+    NodeFS.mkdirSync(NodePath.join(packed, "coverage"));
+    NodeFS.writeFileSync(NodePath.join(packed, "coverage", "lcov.info"), "TN:\n");
+    NodeChildProcess.execFileSync("tar", ["-czf", "out.tgz", "coverage"], { cwd: packed });
+    return Effect.gen(function* () {
+      fake.onExec(isCommand("bun test"), { exitCode: 1, chunks: [["stderr", "boom\n"]] });
+      fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+      fake.downloadFrom(NodePath.join(packed, "out.tgz"));
+      fake.hold("stream");
+      const following = fake.next("stream");
+      const first = yield* Scope.make();
+      const before = yield* start.pipe(Scope.provide(first));
+      const { batchId } = yield* before.run(owner, {
+        jobs: [{ command: "bun test", outputs: ["coverage"] }],
+      });
+      yield* Effect.promise(() => following);
+      yield* Scope.close(first, Exit.void);
+      // A server shutting down leaves the copy for the next run.
+      expect(fake.calls.some((call) => call.op === "terminate")).toBe(false);
+
+      const after = yield* start;
+      const done = yield* after.status(owner, { batchId, waitSeconds: 45 });
+      expect(done).toMatchObject({
+        state: "finished",
+        jobs: [{ index: 0, state: "exited", exitCode: 1, stderrTail: "boom\n" }],
+      });
+      const copiedTo = done.jobs[0]?.state === "exited" ? done.jobs[0].copiedTo! : "";
+      expect(NodeFS.readFileSync(NodePath.join(copiedTo, "coverage", "lcov.info"), "utf8")).toBe(
+        "TN:\n",
+      );
+      expect(fake.calls.filter((call) => call.op === "download")).toHaveLength(1);
+      expect(fake.running().size).toBe(0);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  },
+);
+
+it.effect("a record whose sandbox is gone fails its job, and a queued job fails too", () => {
+  const { stateDir, fake, layer, start } = setup();
+  return Effect.gen(function* () {
+    leftRecord(stateDir, { id: "job-gone", sandboxId: "sb-gone" });
+    const resultsDir = NodePath.join(stateDir, "fork-results", "batch-1");
+    leftRecord(stateDir, {
+      id: "batch-1-0",
+      sandboxId: "sb-gone-too",
+      caller: "fork-run",
+      batch: { id: "batch-1", owner, index: 0 },
+      logs: NodePath.join(resultsDir, "job-0"),
+    });
+    writeBatch(resultsDir, {
+      owner,
+      jobs: [
+        { index: 0, state: "running" },
+        { index: 1, state: "queued" },
+      ],
+      finishedAt: null,
+    });
+    const forks = yield* start;
+    expect(yield* forks.attach("job-gone", { stdout: 0, stderr: 0 }, () => {})).toEqual({
+      _tag: "Lost",
+      message: "Its Modal sandbox ended while T3 Code restarted.",
+    });
+    expect(yield* forks.status(owner, { batchId: "batch-1", waitSeconds: 45 })).toEqual({
+      batchId: "batch-1",
+      state: "finished",
+      jobs: [
+        { index: 0, state: "failed", message: "Its Modal sandbox ended while T3 Code restarted." },
+        { index: 1, state: "failed", message: "T3 Code restarted before this job's copy started." },
+      ],
+    });
+    expect(NodeFS.readdirSync(jobsRoot(stateDir))).toEqual([]);
+    expect(fake.calls.some((call) => call.op === "stream")).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("at start the sweep ends sandboxes no record owns and keeps adopted ones", () => {
+  const { stateDir, fake, layer, start } = setup();
+  return Effect.gen(function* () {
+    const kept = fake.plant({ purpose: "t3-worktree-fork", host: "env-host", job: "job-kept" });
+    const orphan = fake.plant({ purpose: "t3-worktree-fork", host: "env-host", job: "job-orphan" });
+    leftRecord(stateDir, { id: "job-kept", sandboxId: kept });
+    fake.hold("stream");
+    const swept = fake.next("terminate");
+    yield* start;
+    expect((yield* Effect.promise(() => swept)).sandboxId).toBe(orphan);
+    expect(fake.running()).toEqual(new Set([kept]));
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});

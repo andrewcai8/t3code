@@ -6,12 +6,15 @@
  * the copy gets at the same path; an output comes back to the same path once the command exits.
  *
  * Exit codes: the command's own, 124 when it timed out, 70 when its copy was lost, and 75 when no
- * copy could start, so a wrapper can run the command here instead.
+ * copy could start, so a wrapper can run the command here instead. When the socket closes under a
+ * running copy, as when T3 Code restarts, it rejoins the job for up to ten minutes and exits as the
+ * command did; only a job it cannot rejoin is lost.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeTimersPromises from "node:timers/promises";
 
 import * as Schema from "effect/Schema";
 
@@ -26,6 +29,9 @@ import {
 const FORK_UNAVAILABLE_EXIT = 75;
 const FORK_LOST_EXIT = 70;
 const TIMED_OUT_EXIT = 124;
+/** How long a caller whose socket closed keeps trying to rejoin its job, as T3 Code restarts. */
+const REJOIN_WINDOW_MS = 10 * 60_000;
+const REJOIN_MAX_DELAY_MS = 10_000;
 /** A copy reports the last 4,000 bytes of each stream. */
 const TAIL_CHARS = 3_900;
 
@@ -112,40 +118,115 @@ const report = (event: ForkExecEvent): number => {
   }
 };
 
-export async function runForkExec(args: ReadonlyArray<string>): Promise<number> {
+/** What one connection ended with: the exit code, or why it ended without one. */
+interface Exchange {
+  readonly code: number | null;
+  readonly connected: boolean;
+  readonly error?: Error;
+  /** The server answered an attach with `unavailable`: it cannot rejoin jobs. */
+  readonly refused?: string;
+}
+
+export async function runForkExec(
+  args: ReadonlyArray<string>,
+  options: { readonly rejoinWindowMs?: number } = {},
+): Promise<number> {
   const parsed = parseForkExecArgs(args);
   if (parsed === null) {
     process.stderr.write(USAGE);
     return 2;
   }
   const home = process.env.T3CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".t3");
+  const path = forkExecSocketPath(home);
   const request = {
     ...parsed,
     cwd: process.cwd(),
     environment: portableEnvironment(process.env),
   };
-  const socket = NodeNet.createConnection(forkExecSocketPath(home));
+  let socket: NodeNet.Socket | null = null;
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
     process.once(signal, () => {
-      socket.destroy();
+      socket?.destroy();
       process.exit(130);
     });
-  return new Promise<number>((resolve) => {
-    let buffered = "";
-    let exitCode: number | null = null;
-    socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-    socket.on("data", (chunk) => {
-      buffered += chunk.toString("utf8");
-      for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
-        const code = report(decodeEvent(buffered.slice(0, newline)));
-        buffered = buffered.slice(newline + 1);
-        if (code !== -1) exitCode = code;
-      }
+  let jobId: string | null = null;
+  const seen = { stdout: 0, stderr: 0 };
+
+  const exchange = (line: string, attaching: boolean) =>
+    new Promise<Exchange>((resolve) => {
+      const connection = NodeNet.createConnection(path);
+      socket = connection;
+      let buffered = "";
+      let code: number | null = null;
+      let connected = false;
+      let error: Error | undefined;
+      let refused: string | undefined;
+      connection.on("connect", () => {
+        connected = true;
+        connection.write(`${line}\n`);
+      });
+      connection.on("data", (chunk) => {
+        buffered += chunk.toString("utf8");
+        for (
+          let newline = buffered.indexOf("\n");
+          newline !== -1;
+          newline = buffered.indexOf("\n")
+        ) {
+          const event = decodeEvent(buffered.slice(0, newline));
+          buffered = buffered.slice(newline + 1);
+          if (attaching && event.kind === "unavailable") {
+            refused = event.message;
+            continue;
+          }
+          if (event.kind === "started") jobId = event.batchId;
+          if (event.kind === "output") seen[event.stream] += Buffer.byteLength(event.text, "utf8");
+          const reported = report(event);
+          if (reported !== -1) code = reported;
+        }
+      });
+      connection.on("error", (cause) => (error = cause));
+      connection.on("close", () =>
+        resolve({
+          code,
+          connected,
+          ...(error === undefined ? {} : { error }),
+          ...(refused === undefined ? {} : { refused }),
+        }),
+      );
     });
-    socket.on("error", (error) => {
-      process.stderr.write(`[t3] No copy of this machine could start: ${error.message}\n`);
-      exitCode ??= FORK_UNAVAILABLE_EXIT;
-    });
-    socket.on("close", () => resolve(exitCode ?? FORK_LOST_EXIT));
-  });
+
+  const first = await exchange(JSON.stringify(request), false);
+  if (first.code !== null) return first.code;
+  if (jobId === null) {
+    if (first.error === undefined) return FORK_LOST_EXIT;
+    process.stderr.write(`[t3] No copy of this machine could start: ${first.error.message}\n`);
+    return FORK_UNAVAILABLE_EXIT;
+  }
+
+  // The copy runs on without this connection, so it is rejoined once the server answers again.
+  const job: string = jobId;
+  const windowMs = options.rejoinWindowMs ?? REJOIN_WINDOW_MS;
+  process.stderr.write(
+    `[t3] Lost the connection to T3 Code, which may be restarting; rejoining job ${job} for up to ${Math.round(windowMs / 60_000)} minutes.\n`,
+  );
+  let waited = 0;
+  let delay = 250;
+  let reason = "T3 Code did not answer in time";
+  for (;;) {
+    const attempt = await exchange(
+      JSON.stringify({ attach: job, stdoutBytes: seen.stdout, stderrBytes: seen.stderr }),
+      true,
+    );
+    if (attempt.code !== null) return attempt.code;
+    if (attempt.refused !== undefined) {
+      reason = `this T3 Code cannot rejoin jobs (${attempt.refused})`;
+      break;
+    }
+    if (waited + delay > windowMs) break;
+    await NodeTimersPromises.setTimeout(delay);
+    waited += delay;
+    delay = Math.min(delay * 2, REJOIN_MAX_DELAY_MS);
+  }
+  process.stderr.write(`[t3] Could not rejoin job ${job}: ${reason}.\n`);
+  return FORK_LOST_EXIT;
 }
