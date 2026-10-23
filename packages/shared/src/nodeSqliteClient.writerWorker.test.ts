@@ -1,4 +1,5 @@
 import * as NodeSqlite from "node:sqlite";
+import type * as NodeWorkerThreads from "node:worker_threads";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -11,8 +12,45 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
+import { vi } from "vite-plus/test";
 
 import * as SqliteClient from "./nodeSqliteClient.ts";
+
+const workers = vi.hoisted(() => ({
+  started: [] as Array<{ readonly source: unknown; readonly worker: NodeWorkerThreads.Worker }>,
+  afterPost: undefined as
+    | ((worker: NodeWorkerThreads.Worker, message: unknown) => void)
+    | undefined,
+}));
+
+vi.mock("node:worker_threads", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeWorkerThreads>();
+  class RecordedWorker extends actual.Worker {
+    constructor(...args: ConstructorParameters<typeof actual.Worker>) {
+      super(...args);
+      workers.started.push({ source: args[0], worker: this });
+    }
+    override postMessage(...args: Parameters<NodeWorkerThreads.Worker["postMessage"]>) {
+      super.postMessage(...args);
+      workers.afterPost?.(this, args[0]);
+    }
+  }
+  return { ...actual, Worker: RecordedWorker };
+});
+
+const WRITER_SOURCE_MARKER = "admission: true";
+const latestWorker = (marker: string) =>
+  workers.started.findLast((entry) => String(entry.source).includes(marker))!.worker;
+
+/** The worker's reply to the next statement containing `marker` fails to deserialize. */
+const failReplyTo = (marker: string) => {
+  workers.afterPost = (worker, message) => {
+    if (typeof message !== "object" || message === null || !("sql" in message)) return;
+    if (!String(message.sql).includes(marker)) return;
+    workers.afterPost = undefined;
+    queueMicrotask(() => worker.emit("messageerror", new Error("simulated clone failure")));
+  };
+};
 
 const tempDatabase = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -25,7 +63,10 @@ const clientLayer = (filename: string, writerWorker = true) =>
   SqliteClient.layer({ filename, writerWorker, readerWorker: true, checkpointWorker: true });
 
 const withClient = <A, E>(
-  use: (sql: SqlClient.SqlClient, filename: string) => Effect.Effect<A, E, SqlClient.SqlClient>,
+  use: (
+    sql: SqlClient.SqlClient,
+    filename: string,
+  ) => Effect.Effect<A, E, SqlClient.SqlClient | Scope.Scope>,
   writerWorker = true,
 ) =>
   Effect.gen(function* () {
@@ -264,4 +305,72 @@ it.effect.each([{ writerWorker: false }, { writerWorker: true }])(
         }),
       writerWorker,
     ),
+);
+
+const slowCount = (sql: SqlClient.SqlClient) =>
+  sql<{ readonly n: number }>`
+    WITH RECURSIVE slow(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM slow WHERE x < 2000000)
+    SELECT COUNT(*) AS n FROM slow
+  `;
+
+it.effect("fails a statement whose reply cannot be read, then keeps writing", () =>
+  withClient((sql) =>
+    Effect.gen(function* () {
+      yield* sql`CREATE TABLE entries(value INTEGER NOT NULL)`;
+      failReplyTo("WITH RECURSIVE slow");
+      const error = yield* slowCount(sql).pipe(Effect.flip);
+      assert.include(String(error.reason.cause), "Database writer reply could not be read");
+      yield* sql`INSERT INTO entries VALUES (1)`;
+      assert.equal(yield* countEntries(sql), 1);
+    }),
+  ),
+);
+
+it.effect("fails a read whose reply cannot be read, then keeps reading", () =>
+  withClient((sql) =>
+    Effect.gen(function* () {
+      yield* sql`CREATE TABLE entries(value INTEGER NOT NULL)`;
+      yield* sql`INSERT INTO entries VALUES (1)`;
+      failReplyTo("WITH RECURSIVE slow");
+      const error = yield* slowCount(sql).pipe(SqliteClient.readOnly, Effect.flip);
+      assert.include(String(error.reason.cause), "Database reader reply could not be read");
+      assert.equal(yield* countEntries(sql).pipe(SqliteClient.readOnly), 1);
+    }),
+  ),
+);
+
+it.effect("reports a writer worker that stops on its own, not one closed at shutdown", () =>
+  Effect.gen(function* () {
+    const filename = yield* tempDatabase;
+    const lost: Array<string> = [];
+    let report: (reason: string) => void = () => {};
+    const reported = new Promise<string>((resolve) => {
+      report = resolve;
+    });
+    const layer = SqliteClient.layer({
+      filename,
+      writerWorker: true,
+      onWriterLost: (reason) => {
+        lost.push(reason);
+        report(reason);
+      },
+    });
+
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE entries(value INTEGER NOT NULL)`;
+    }).pipe(Effect.provide(layer), Effect.scoped);
+    // The close finalizer has seen the worker exit by now.
+    yield* eventLoopTurn;
+    assert.deepEqual(lost, []);
+
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* Effect.promise(() => latestWorker(WRITER_SOURCE_MARKER).terminate());
+      assert.include(yield* Effect.promise(() => reported), "Database writer exited");
+      const error = yield* sql`INSERT INTO entries VALUES (1)`.pipe(Effect.flip);
+      assert.include(String(error.reason.cause), "Database writer exited");
+    }).pipe(Effect.provide(layer), Effect.scoped);
+    assert.equal(lost.length, 1);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

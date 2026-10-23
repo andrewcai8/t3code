@@ -64,6 +64,9 @@ export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (d
       // A write can wait seconds on a busy disk (the ext4 journal, page-cache
       // misses on a large database), so the writer runs off the event loop too.
       writerWorker: true,
+      // Every write fails without it, so exit and let the service manager restart
+      // the server. The database, restart intent and job records are on disk.
+      onWriterLost: () => process.exit(1),
       // Checkpoints sync the database, with F_FULLFSYNC on macOS. Run them off
       // the writer so a slow flush does not hold writes.
       checkpointWorker: true,

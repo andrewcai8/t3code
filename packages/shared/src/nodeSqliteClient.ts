@@ -51,6 +51,11 @@ export interface SqliteClientConfig {
    * disk delays writes instead of the event loop. Ignored for in-memory databases.
    */
   readonly writerWorker?: boolean | undefined;
+  /**
+   * Called once if the writer worker stops on its own. Every later write fails,
+   * so a server should exit and let its supervisor restart it.
+   */
+  readonly onWriterLost?: ((reason: string) => void) | undefined;
 }
 
 // SqlClient masks transaction acquisition, so readOnly carries the caller's interruption policy.
@@ -379,6 +384,17 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
       pending.delete(reply.id);
       if (pending.size === 0) worker.unref();
       request.resume(reply);
+    });
+    // A reply that cannot be deserialized never arrives, so fail what waits on it.
+    worker.on("messageerror", (cause) => {
+      const message = `Database reader reply could not be read: ${cause.message}`;
+      // A resumed caller may send its next request at once; that one must not fail too.
+      const waiting = [...pending];
+      pending.clear();
+      worker.unref();
+      for (const [id, request] of waiting) {
+        request.resume({ id, error: { operation: "execute", message } });
+      }
     });
     worker.on("error", (cause) => stop(`Database reader failed: ${cause.message}`));
     worker.on("exit", (code) => stop(`Database reader exited with code ${code}`));
@@ -1155,7 +1171,9 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
     // A new worker cannot take over: a transaction's later statements would run outside it.
     if (ready && !closing) {
       runFork(
-        Effect.logError("SQLite writer worker stopped; writes fail until restart", { message }),
+        Effect.logError("SQLite writer worker stopped; writes fail until restart", {
+          message,
+        }).pipe(Effect.andThen(Effect.sync(() => options.onWriterLost?.(message)))),
       );
     }
     for (const [id, resume] of pending) resume({ id, error: { operation: "execute", message } });
@@ -1181,6 +1199,17 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
       resume(message);
     },
   );
+  // A reply that cannot be deserialized never arrives. Fail the statement waiting on
+  // it, or it would hold the writer lock forever; the worker itself still runs.
+  worker.on("messageerror", (cause) => {
+    const message = `Database writer reply could not be read: ${cause.message}`;
+    runFork(Effect.logError("SQLite writer reply could not be read", { message }));
+    // A resumed caller may send its next statement at once; that one must not fail too.
+    const waiting = [...pending];
+    pending.clear();
+    if (!closing) worker.unref();
+    for (const [id, resume] of waiting) resume({ id, error: { operation: "execute", message } });
+  });
   worker.on("error", (cause) => stop(`Database writer failed: ${cause.message}`));
   worker.on("exit", (code) => stop(`Database writer exited with code ${code}`));
 
@@ -1246,7 +1275,8 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
           // Here, not in the caller's continuation: an interrupt takes effect as
           // this resumes and skips it, though the statement ran and may have grown the WAL.
           if (reply.admission !== true) {
-            isTransaction = reply.isTransaction === true;
+            // Failures raised here, without a worker reply, leave the state alone.
+            if (reply.isTransaction !== undefined) isTransaction = reply.isTransaction;
             if (reply.wal !== undefined) {
               wal = reply.wal ?? undefined;
               checkpoint?.check();
