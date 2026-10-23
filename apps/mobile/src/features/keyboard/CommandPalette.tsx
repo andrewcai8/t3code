@@ -309,7 +309,10 @@ export function CommandPalette(props: {
       run: () => newThreadInProject(project),
     }));
     const threadItems: CommandPaletteItem[] = threads
-      .filter((thread) => thread.archivedAt === null)
+      .filter(
+        (thread) =>
+          thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent",
+      )
       .sort((left, right) =>
         (right.latestUserMessageAt ?? right.updatedAt).localeCompare(
           left.latestUserMessageAt ?? left.updatedAt,
