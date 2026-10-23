@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import { selectLimitPresentations } from "@t3tools/client-runtime/state/presentation";
 import { EnvironmentId } from "@t3tools/contracts";
 import {
   collectLimitAccounts,
@@ -250,10 +251,7 @@ export function UsageLimitsSection({
   readonly cursorPrompt?: ReactNode;
 }) {
   const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
-  const selected =
-    selectedEnvironmentIds === null
-      ? presentations
-      : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
+  const selected = selectLimitPresentations(presentations, selectedEnvironmentIds);
   const pools = collectLimitPools(collectLimitAccounts(selected), now);
   const notices = collectLimitNotices(selected);
   const externalLinks = collectExternalUsageLinks(selected);
@@ -272,7 +270,7 @@ export function UsageLimitsSection({
       externalLinks.length === 0 ? (
         <Text className="py-12 text-center text-base text-foreground-muted">
           {selected.size === 0
-            ? "Select an environment to see limits."
+            ? "No connected environment is selected."
             : "No provider on the selected environments reports subscription limits."}
         </Text>
       ) : null}
@@ -370,10 +368,7 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
   const { accountKey, windowId, windowKind, environmentIds, now } = route.params;
   const selectedIds =
     environmentIds === null ? null : new Set(environmentIds.map((id) => EnvironmentId.make(id)));
-  const selected =
-    selectedIds === null
-      ? presentations
-      : new Map([...presentations].filter(([id]) => selectedIds.has(id)));
+  const selected = selectLimitPresentations(presentations, selectedIds);
   const accounts = collectLimitAccounts(selected);
   const account = accounts.find((candidate) => candidate.key === accountKey);
   const pool = collectLimitPools(accounts, now)

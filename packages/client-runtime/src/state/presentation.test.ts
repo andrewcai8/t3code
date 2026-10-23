@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
+import { EnvironmentId, ProviderDriverKind, type ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
@@ -8,6 +8,8 @@ import { AVAILABLE_CONNECTION_STATE, PrimaryConnectionTarget } from "../connecti
 import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
+  selectLimitPresentations,
+  type EnvironmentPresentationWithProviders,
 } from "./presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 
@@ -133,5 +135,66 @@ describe("presentations with providers", () => {
       stop();
       h.registry.dispose();
     }
+  });
+});
+
+describe("selectLimitPresentations", () => {
+  const limitPresentation = (phase: string, withConfig = true) =>
+    ({
+      connection: { phase },
+      serverConfig: withConfig
+        ? {
+            providers: [{ driver: "claudeAgent" }, { driver: "codex" }],
+            usageLimitSources: [
+              { accounts: [{ driver: "claudeAgent" }] },
+              { accounts: [{ driver: "codex" }] },
+            ],
+          }
+        : null,
+    }) as unknown as EnvironmentPresentationWithProviders;
+
+  it("keeps connected environments and drops disconnected ones with their sources", () => {
+    const selected = selectLimitPresentations(
+      new Map([
+        [FIRST, limitPresentation("connected")],
+        [SECOND, limitPresentation("disconnected")],
+      ]),
+      null,
+    );
+    expect([...selected.keys()]).toEqual([FIRST]);
+    expect(selected.get(FIRST)?.serverConfig?.usageLimitSources).toHaveLength(2);
+  });
+
+  it("drops environments that are connecting or have no config yet", () => {
+    const selected = selectLimitPresentations(
+      new Map([
+        [FIRST, limitPresentation("connecting")],
+        [SECOND, limitPresentation("connected", false)],
+      ]),
+      null,
+    );
+    expect(selected.size).toBe(0);
+  });
+
+  it("still applies the environment selection", () => {
+    const selected = selectLimitPresentations(
+      new Map([
+        [FIRST, limitPresentation("connected")],
+        [SECOND, limitPresentation("connected")],
+      ]),
+      new Set([SECOND]),
+    );
+    expect([...selected.keys()]).toEqual([SECOND]);
+  });
+
+  it("still filters hidden drivers from providers and sources", () => {
+    const selected = selectLimitPresentations(
+      new Map([[FIRST, limitPresentation("connected")]]),
+      null,
+      new Set([ProviderDriverKind.make("codex")]),
+    );
+    const config = selected.get(FIRST)?.serverConfig;
+    expect(config?.providers.map((provider) => provider.driver)).toEqual(["claudeAgent"]);
+    expect(config?.usageLimitSources).toEqual([{ accounts: [{ driver: "claudeAgent" }] }]);
   });
 });

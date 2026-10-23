@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { selectLimitPresentations } from "@t3tools/client-runtime/state/presentation";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { CHATGPT_USAGE_URL, collectExternalUsageLinks } from "@t3tools/shared/usageLimits";
 import { Linking, Pressable, View } from "react-native";
@@ -12,10 +13,7 @@ export function ChatGptUsageSummary({
   selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
 }) {
   const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
-  const selected =
-    selectedEnvironmentIds === null
-      ? presentations
-      : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
+  const selected = selectLimitPresentations(presentations, selectedEnvironmentIds);
   const usage = collectExternalUsageLinks(selected).find((link) => link.url === CHATGPT_USAGE_URL);
   if (!usage) return null;
   return (
