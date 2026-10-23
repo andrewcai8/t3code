@@ -264,7 +264,12 @@ export const layer = Layer.effectDiscard(
     if (!relays && !forks.enabled) return;
     const path = forkExecSocketPath(baseDir);
     const context = yield* Effect.context<Backends>();
+    // Each caller's request runs detached from this layer, so shutdown ends them itself.
+    const sockets = new Set<NodeNet.Socket>();
+    const requests = new Set<Fiber.Fiber<void>>();
     const serve = (socket: NodeNet.Socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
       const write = (event: ForkExecEvent) => void socket.write(`${encodeEvent(event)}\n`);
       const emit = (event: ForkExecEvent) => Effect.sync(() => write(event));
       const run = (
@@ -283,8 +288,13 @@ export const layer = Layer.effectDiscard(
         const newline = buffered.indexOf("\n");
         if (newline === -1 && buffered.length <= MAX_REQUEST_BYTES) return;
         socket.off("data", onData);
+        // Its first step waits a tick: run synchronously, it could reach a shutdown before it
+        // is registered below.
         const fiber = Effect.runForkWith(context)(
-          decodeRequest(newline === -1 ? "" : buffered.slice(0, newline)).pipe(
+          Effect.andThen(
+            Effect.yieldNow,
+            decodeRequest(newline === -1 ? "" : buffered.slice(0, newline)),
+          ).pipe(
             Effect.matchEffect({
               onFailure: () => emit({ kind: "unavailable", message: "The request was malformed." }),
               onSuccess: run,
@@ -292,6 +302,8 @@ export const layer = Layer.effectDiscard(
             Effect.ensuring(Effect.sync(() => socket.end())),
           ),
         );
+        requests.add(fiber);
+        fiber.addObserver(() => requests.delete(fiber));
         socket.once("close", () => Effect.runFork(Fiber.interrupt(fiber)));
       };
       socket.on("data", onData);
@@ -311,10 +323,21 @@ export const layer = Layer.effectDiscard(
           resume(Effect.succeed(server));
         });
       }),
+      // `server.close` alone waits for every connection to end, and a caller stays connected
+      // until its job finishes, which held shutdown until systemd killed the server. Each
+      // caller rejoins its job once this server, or the next, answers again.
       (server) =>
-        Effect.callback<void>((resume) => {
-          server.close(() => resume(Effect.void));
+        Effect.gen(function* () {
+          yield* Effect.logInfo("Shutdown: closing the fork-exec socket", {
+            connections: sockets.size,
+          });
+          server.close();
           NodeFS.rmSync(path, { force: true });
+          // First, so the jobs interrupted below stay for the next run to adopt.
+          yield* forks.pause;
+          // Not awaited: a request relaying to a cloud box's host waits on that host to cancel.
+          for (const request of requests) request.interruptUnsafe();
+          for (const socket of sockets) socket.destroy();
         }),
     ).pipe(
       Effect.tapCause((cause) =>

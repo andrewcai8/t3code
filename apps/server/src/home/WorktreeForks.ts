@@ -149,6 +149,11 @@ export class WorktreeForks extends Context.Service<
       seen: { readonly stdout: number; readonly stderr: number },
       output: OutputSink,
     ) => Effect.Effect<ExecOutcome | null>;
+    /**
+     * This server is shutting down: a job interrupted from now on keeps its copy and record for
+     * the next run to adopt, instead of ending.
+     */
+    readonly pause: Effect.Effect<void>;
     /** Starts a batch for `owner` and answers at once with every job queued. */
     readonly run: (
       owner: ThreadId,
@@ -416,6 +421,7 @@ const disabled = WorktreeForks.of({
   exec: () =>
     Effect.succeed({ _tag: "NotStarted", message: "This host has no worktree forks set up." }),
   attach: () => Effect.succeed(null),
+  pause: Effect.void,
   run: () => Effect.fail(failure("environment_unavailable", "This host has no worktree forks.")),
   status: () => Effect.fail(failure("environment_unavailable", "This host has no worktree forks.")),
   cancel: () => Effect.fail(failure("environment_unavailable", "This host has no worktree forks.")),
@@ -1400,6 +1406,9 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     bunShim: host.bunShim,
     exec,
     attach,
+    pause: Effect.sync(() => {
+      closing = true;
+    }),
     run,
     status,
     cancel,

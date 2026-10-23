@@ -294,10 +294,16 @@ it.effect("saves restart intent, then stops parked work, then sessions on shutdo
         parkedWork,
         workerFiberRef,
         prepareForShutdown: Effect.sync(() => steps.push("restart intent saved")),
+        afterIntent: Effect.sync(() => steps.push("backstop armed")),
         shutdownSessions: Effect.sync(() => steps.push("sessions stopped")),
       });
 
-      assert.deepEqual(steps, ["restart intent saved", "loop stopped", "sessions stopped"]);
+      assert.deepEqual(steps, [
+        "restart intent saved",
+        "backstop armed",
+        "loop stopped",
+        "sessions stopped",
+      ]);
     }),
   ),
 );

@@ -217,6 +217,9 @@ const HTTP_ROUTER_CONFIG = {
 // T3's primary transport is long-lived WebSocket RPC, whose Effect scope finalizer
 // already closes the websocket gracefully.
 const HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS = 0;
+// Past this long after restart intent is saved, shutdown exits instead of waiting on what is
+// left. systemd allows 90 s; the service launcher kills an updating server after 5 s anyway.
+const SHUTDOWN_BACKSTOP = Duration.seconds(5);
 const layerResourceAttribution = ResourceAttribution.layer;
 const layerApplicationObservability = EventLoopMonitor.layer.pipe(
   Layer.provideMerge(Observability.layer),
@@ -775,6 +778,8 @@ const layerMakeServer = Layer.unwrap(
     const config = yield* ServerConfig.ServerConfig;
     // Before anything opens the database: one server per T3 home.
     const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
+    // Registered before any service, so it runs after every one of them has closed.
+    yield* Effect.addFinalizer(() => Effect.logInfo("Shutdown: finished"));
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const parkedWork = yield* FiberSet.make();
@@ -1068,6 +1073,7 @@ const layerMakeServer = Layer.unwrap(
     );
 
     const layerRuntimeServices = ServerRuntimeStartup.layerWithOptions({
+      shutdownBackstop: SHUTDOWN_BACKSTOP,
       activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
       abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
       awaitAuxiliaryParked: Effect.all(
@@ -1088,13 +1094,25 @@ const layerMakeServer = Layer.unwrap(
       withUntracedRequests,
       Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)),
     );
-    const layerServerApplication = Layer.mergeAll(
-      layerRoutes,
-      layerHttpListening,
-      layerRuntimeState.pipe(Layer.provide(layerLauncher)),
-      layerTailscaleServe,
-      layerCloudDesiredLinkReconcile,
-      HeapSnapshot.layer,
+    // Built last, so it closes first: restart intent is saved, and background work stopped,
+    // before routes, sockets, or tunnels close, any of which can wait on a remote peer.
+    const layerShutdownFirst = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+        yield* Effect.addFinalizer(() => startup.shutdown);
+      }),
+    );
+    const layerServerApplication = layerShutdownFirst.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          layerRoutes,
+          layerHttpListening,
+          layerRuntimeState.pipe(Layer.provide(layerLauncher)),
+          layerTailscaleServe,
+          layerCloudDesiredLinkReconcile,
+          HeapSnapshot.layer,
+        ),
+      ),
     );
 
     return layerServerApplication.pipe(
