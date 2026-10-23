@@ -270,6 +270,8 @@ export default defineConfig({
           "apps/server/src/project/ProjectService.test.ts",
           "apps/server/src/scheduledTasks/ScheduledTaskService.webhook.test.ts",
           "apps/server/src/usage/UsageService.test.ts",
+          "packages/client-runtime/src/cloud/provisionRequests.test.ts",
+          "packages/client-runtime/src/connection/registry.cloud.test.ts",
           "packages/client-runtime/src/connection/supervisor.test.ts",
           "packages/client-runtime/src/rpc/client.test.ts",
           "packages/client-runtime/src/rpc/session.test.ts",
