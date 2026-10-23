@@ -190,6 +190,30 @@ describe("finding the real bun with nothing moved aside", () => {
     expect(run(`${bin}/:${bin}:${other}:/usr/bin:/bin`).stdout).toBe("other --version\n");
     expect(run(`${bin}:/usr/bin:/bin`).status).toBe(127);
   });
+
+  it("mounted at another path with no other bun, exits 127 rather than running itself", () => {
+    const home = tempDir("mount");
+    const bin = NodePath.join(home, ".local", "bin");
+    reconcileBunShim(bin, OWNER, { skipWhenSet: [], minTestFiles: 20 });
+    // A container mounts the shim as its own bun; the install path does not exist there.
+    const mounted = NodePath.join(home, "container", "usr", "local", "bin");
+    executable(
+      NodePath.join(mounted, "bun"),
+      NodeFS.readFileSync(NodePath.join(bin, "bun"), "utf8"),
+    );
+    NodeFS.rmSync(bin, { recursive: true, force: true });
+    const result = NodeChildProcess.spawnSync(
+      "/bin/sh",
+      [NodePath.join(mounted, "bun"), "--version"],
+      {
+        env: { PATH: `${mounted}:/usr/bin:/bin` },
+        encoding: "utf8",
+        timeout: 5_000,
+      },
+    );
+    expect(result.status).toBe(127);
+    expect(result.stderr).toContain("found no other bun");
+  });
 });
 
 describe("installing and removing", () => {
