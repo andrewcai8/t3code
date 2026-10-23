@@ -842,12 +842,16 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     function* (request, observer) {
       const size = sizeOf(request.size);
       if (size === undefined) return yield* new NotStarted({ reason: unknownSize(request.size) });
+      const checkout = yield* inspect(request.cwd);
       const refused = [
-        ...(request.inputs ?? []).map((path) => refusedPath(path, "input", t3Home, hostHome)),
-        ...(request.outputs ?? []).map((path) => refusedPath(path, "output", t3Home, hostHome)),
+        ...(request.inputs ?? []).map((path) =>
+          refusedPath(path, "input", t3Home, hostHome, checkout.root),
+        ),
+        ...(request.outputs ?? []).map((path) =>
+          refusedPath(path, "output", t3Home, hostHome, checkout.root),
+        ),
       ].find((reason) => reason !== null);
       if (refused !== undefined) return yield* new NotStarted({ reason: refused });
-      const checkout = yield* inspect(request.cwd);
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
       const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
       const shipment = yield* ship(checkout, base);

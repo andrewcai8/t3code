@@ -31,17 +31,24 @@ const resolved = (path: string): string => {
 /**
  * Why a copy may not be given `path` or write it back here, or null. T3 home holds this server's
  * state, secrets and fork socket, so neither it, anything in it, nor a directory holding it
- * crosses; nor does the whole home directory come back as an output.
+ * crosses; nor does the whole home directory come back as an output. The caller's own checkout is
+ * the exception: managed worktrees live inside T3 home, and a job reads and writes its checkout.
+ * The checkout itself is never replaced whole.
  */
 export const refusedPath = (
   path: string,
   direction: "input" | "output",
   t3Home: string,
   userHome: string,
+  checkoutRoot?: string,
 ): string | null => {
   const target = resolved(path);
   const home = resolved(t3Home);
-  if (inside(target, home) || inside(home, target))
+  const checkout = checkoutRoot === undefined ? undefined : resolved(checkoutRoot);
+  if (direction === "output" && checkout !== undefined && target === checkout)
+    return `${path} is the job's whole checkout, which an output may not replace.`;
+  const inCheckout = checkout !== undefined && inside(target, checkout) && !inside(home, checkout);
+  if (!inCheckout && (inside(target, home) || inside(home, target)))
     return `${path} is or holds this server's T3 home, which a copy may not ${direction === "input" ? "read" : "write"}.`;
   if (direction === "output" && target === resolved(userHome))
     return `${path} is the home directory, which an output may not replace.`;
