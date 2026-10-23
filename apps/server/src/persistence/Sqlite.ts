@@ -24,9 +24,9 @@ const layerSetup = Layer.effectDiscard(
     }>`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table'`;
     if (tables[0]?.count === 0) yield* sql`PRAGMA auto_vacuum = INCREMENTAL;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
-    // FULL fsyncs the WAL on every commit, on the main thread. Every provider
-    // event is its own commit, so a slow or busy disk stalls the event loop
-    // and clients drop. In WAL mode NORMAL only fsyncs at checkpoints. It
+    // FULL fsyncs the WAL on every commit. Every provider event is its own
+    // commit, so a slow or busy disk would hold every write behind an fsync.
+    // In WAL mode NORMAL only fsyncs at checkpoints. It
     // cannot corrupt the database and an app crash loses nothing; an OS crash
     // or power loss can roll back commits since the last checkpoint.
     yield* sql`PRAGMA synchronous = NORMAL;`;
@@ -61,8 +61,14 @@ export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (d
     NodeSqliteClient.layer({
       filename: dbPath,
       readerWorker: true,
+      // A write can wait seconds on a busy disk (the ext4 journal, page-cache
+      // misses on a large database), so the writer runs off the event loop too.
+      writerWorker: true,
+      // Every write fails without it, so exit and let the service manager restart
+      // the server. The database, restart intent and job records are on disk.
+      onWriterLost: () => process.exit(1),
       // Checkpoints sync the database, with F_FULLFSYNC on macOS. Run them off
-      // the event loop so a slow flush cannot stall clients.
+      // the writer so a slow flush does not hold writes.
       checkpointWorker: true,
       spanAttributes: {
         "db.name": path.basename(dbPath),
