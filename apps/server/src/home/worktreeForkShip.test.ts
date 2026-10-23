@@ -134,10 +134,17 @@ it.effect(
         branch: "feature",
         head: git(host, "rev-parse", "HEAD"),
       });
-      const shipment = yield* shipState(checkout, first, tempDir("ship"));
+      const shipment = yield* shipState(checkout, first);
       expect(shipment.driftDirs).toEqual(["."]);
+      const packed = yield* shipment.state.pack(tempDir("pack"));
+      expect(packed.key).toBe(shipment.state.key);
+      // The same state keys the same, so its copies share one upload; any change keys anew.
+      expect((yield* shipState(checkout, first)).state.key).toBe(shipment.state.key);
+      write(host, "b.txt", "b changed again\n");
+      expect((yield* shipState(checkout, first)).state.key).not.toBe(shipment.state.key);
+      write(host, "b.txt", "b unstaged\n");
 
-      const installs = applyInCopy(applyArgv(shipment, shipment.archive));
+      const installs = applyInCopy(applyArgv(shipment, packed.archive));
 
       expect(git(base, "rev-parse", "HEAD")).toBe(checkout.head);
       expect(git(base, "symbolic-ref", "--short", "HEAD")).toBe("feature");
@@ -160,16 +167,48 @@ it.effect("a HEAD the base already contains is checked out by commit, with no bu
       new Map([["acme/widgets", repository([], base)]]),
     );
     expect(checkout.branch).toBeNull();
-    const shipment = yield* shipState(checkout, second, tempDir("ship"));
-    const listed = NodeChildProcess.execFileSync("tar", ["-tf", shipment.archive], {
+    const shipment = yield* shipState(checkout, second);
+    const { archive } = yield* shipment.state.pack(tempDir("pack"));
+    const listed = NodeChildProcess.execFileSync("tar", ["-tf", archive], {
       encoding: "utf8",
     });
     expect(listed).not.toContain("head.bundle");
     expect(shipment.driftDirs).toEqual([]);
-    applyInCopy(applyArgv(shipment, shipment.archive));
+    applyInCopy(applyArgv(shipment, archive));
     expect(git(base, "rev-parse", "HEAD")).toBe(first);
     expect(visibleFiles(base)).toEqual(visibleFiles(host));
   }).pipe(Effect.provide(runner)),
+);
+
+it.effect(
+  "a state torn while tar packs it keys as what the archive holds, so it is not shared",
+  () =>
+    Effect.gen(function* () {
+      const { host, base, first } = setup();
+      write(host, "b.txt", "b whole\n");
+      const checkout = yield* inspectCheckout(
+        host,
+        new Map([["acme/widgets", repository([], base)]]),
+      );
+      // b.txt is truncated while delta.tgz is packed, and whole again after.
+      const real = yield* ProcessRunner.ProcessRunner;
+      const tearing = ProcessRunner.ProcessRunner.of({
+        ...real,
+        run: (input) =>
+          input.command === "tar" && input.args[1]?.endsWith("delta.tgz")
+            ? Effect.sync(() => write(host, "b.txt", "")).pipe(
+                Effect.andThen(real.run(input)),
+                Effect.ensuring(Effect.sync(() => write(host, "b.txt", "b whole\n"))),
+              )
+            : real.run(input),
+      });
+      const shipment = yield* shipState(checkout, first).pipe(
+        Effect.provideService(ProcessRunner.ProcessRunner, tearing),
+      );
+      const torn = yield* shipment.state.pack(tempDir("pack"));
+      expect(torn.key).not.toBe(shipment.state.key);
+      expect((yield* shipState(checkout, first)).state.key).toBe(shipment.state.key);
+    }).pipe(Effect.provide(runner)),
 );
 
 it.effect("refuses a directory outside git, an unlisted origin, and a base it lacks", () =>
@@ -184,9 +223,7 @@ it.effect("refuses a directory outside git, an unlisted origin, and a base it la
     expect(yield* reason(inspectCheckout(tempDir("plain"), listed))).toBe("not_a_repository");
     expect(yield* reason(inspectCheckout(host, new Map()))).toBe("unconfigured_repository");
     const checkout = yield* inspectCheckout(host, listed);
-    expect(yield* reason(shipState(checkout, "1".repeat(40), tempDir("ship")))).toBe(
-      "missing_base_commit",
-    );
+    expect(yield* reason(shipState(checkout, "1".repeat(40)))).toBe("missing_base_commit");
   }).pipe(Effect.provide(runner)),
 );
 

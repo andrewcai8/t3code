@@ -107,6 +107,8 @@ async function fakeModal() {
     execStream: async () => 1,
     upload: async () => {},
     download: async () => {},
+    saveDirectory: async () => "im-directory",
+    mountImage: async () => {},
     saveDisk: async (sandboxId) => {
       if (!boxes.get(sandboxId)?.alive) throw new Error("not running");
       calls.push("saveDisk");

@@ -17,6 +17,8 @@ import * as Schema from "effect/Schema";
 import { canonicalRepository } from "../environmentControl/config.ts";
 import { MODAL_GUEST_ENV } from "../environmentControl/ModalRuntime.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import type { Packed, Upload } from "./worktreeForkCache.ts";
+import { archiveKey, contentKey } from "./worktreeForkContent.ts";
 import type { ForkRepository } from "./worktreeForksConfig.ts";
 
 /** A shipment past this is not a worktree's state but something that belongs in .gitignore. */
@@ -70,8 +72,11 @@ export interface Checkout {
 /** A checkout's state packed against one base, on this host until its job or batch ends. */
 export interface Shipment {
   readonly checkout: Checkout;
-  /** One tar holding `head.bundle` (when HEAD is not in the base), `delta.tgz` and `deleted`. */
-  readonly archive: string;
+  /**
+   * One tar holding `head.bundle` (when HEAD is not in the base), `delta.tgz` and `deleted`, keyed
+   * by what it holds and packed at most once, only when a copy needs it and the cache lacks it.
+   */
+  readonly state: Upload;
   /** Directories whose installs drifted from the base, relative to the root. */
   readonly driftDirs: ReadonlyArray<string>;
 }
@@ -183,14 +188,16 @@ export const driftInstallDirs = (
   return [...dirs].toSorted();
 };
 
+/** A hash failure is the worktree being unreadable, as a failed pack is. */
+const unreadable = (cause: unknown) => new CheckoutRefused({ reason: "unreadable", cause });
+
 /**
- * Packs `checkout` against the base commit `baseSha` into `dir`: what a copy booted from that
- * base needs to reproduce the worktree, committed or not.
+ * What a copy booted from the base commit `baseSha` needs to reproduce `checkout`, committed or
+ * not: the key of that state now, and how to pack it into a directory.
  */
 export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
   checkout: Checkout,
   baseSha: string,
-  dir: string,
 ) {
   const { root } = checkout;
   if ((yield* run(root, "git", ["cat-file", "-e", `${baseSha}^{commit}`])).code !== 0)
@@ -201,22 +208,7 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
       reason: "unreadable",
       cause: new Error(contained.stderr.slice(-2000)),
     });
-  yield* Effect.try({
-    try: () => NodeFS.mkdirSync(dir, { recursive: true }),
-    catch: (cause) => new CheckoutRefused({ reason: "unreadable", cause }),
-  });
-  const parts = ["delta.tgz", "deleted"];
-  if (contained.code === 1) {
-    yield* succeeded(root, "git", [
-      "bundle",
-      "create",
-      "-q",
-      NodePath.join(dir, "head.bundle"),
-      "HEAD",
-      `^${baseSha}`,
-    ]);
-    parts.unshift("head.bundle");
-  }
+  const bundled = contained.code === 1;
   const changed = [
     ...nulList(
       yield* succeeded(root, "git", [
@@ -241,36 +233,67 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
       "HEAD",
     ]),
   );
-  yield* Effect.try({
-    try: () =>
-      NodeFS.writeFileSync(
-        NodePath.join(dir, "deleted"),
-        deleted.map((path) => `${path}\0`).join(""),
-      ),
-    catch: (cause) => new CheckoutRefused({ reason: "unreadable", cause }),
-  });
-  // gzip, not zstd: the template image has no zstd. No AppleDouble files from a macOS host.
-  const packed = yield* run(
-    root,
-    "tar",
-    ["-czf", NodePath.join(dir, "delta.tgz"), "--null", "-T", "-"],
-    { stdin: changed.map((path) => `${path}\0`).join(""), env: { COPYFILE_DISABLE: "1" } },
+  // The bundle is named by the commits it brings; delta.tgz and `deleted` by what they hold.
+  const context = (head: string) => ["state", baseSha, head, bundled ? "bundle" : "", ...deleted];
+  const key = yield* contentKey(
+    context(checkout.head),
+    changed.map((path) => ({ name: path, path: NodePath.join(root, path) })),
+  ).pipe(Effect.mapError(unreadable));
+  const runner = yield* ProcessRunner.ProcessRunner;
+  const pack = Effect.fn("WorktreeForks.packState")(
+    function* (dir: string) {
+      yield* Effect.try({
+        try: () => NodeFS.mkdirSync(dir, { recursive: true }),
+        catch: unreadable,
+      });
+      const parts = ["delta.tgz", "deleted"];
+      let head = checkout.head;
+      if (bundled) {
+        const bundle = NodePath.join(dir, "head.bundle");
+        yield* succeeded(root, "git", ["bundle", "create", "-q", bundle, "HEAD", `^${baseSha}`]);
+        // The commit the bundle holds, which a HEAD that moved since the job was sent changed.
+        head = (yield* succeeded(root, "git", ["bundle", "list-heads", bundle])).split(" ")[0]!;
+        parts.unshift("head.bundle");
+      }
+      yield* Effect.try({
+        try: () =>
+          NodeFS.writeFileSync(
+            NodePath.join(dir, "deleted"),
+            deleted.map((path) => `${path}\0`).join(""),
+          ),
+        catch: unreadable,
+      });
+      const delta = NodePath.join(dir, "delta.tgz");
+      // gzip, not zstd: the template image has no zstd. No AppleDouble files from a macOS host.
+      const packed = yield* run(root, "tar", ["-czf", delta, "--null", "-T", "-"], {
+        stdin: changed.map((path) => `${path}\0`).join(""),
+        env: { COPYFILE_DISABLE: "1" },
+      });
+      if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
+        return yield* new CheckoutRefused({
+          reason: "unreadable",
+          cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+        });
+      const archive = NodePath.join(dir, "state.tar");
+      yield* succeeded(dir, "tar", ["-cf", archive, ...parts], {
+        env: { COPYFILE_DISABLE: "1" },
+      });
+      const bytes = NodeFS.statSync(archive).size;
+      if (bytes > MAX_SHIPMENT_BYTES) return yield* new CheckoutRefused({ reason: "too_large" });
+      return {
+        archive,
+        bytes,
+        key: yield* archiveKey(context(head), delta).pipe(Effect.mapError(unreadable)),
+      } satisfies Packed;
+    },
+    Effect.provideService(ProcessRunner.ProcessRunner, runner),
   );
-  if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
-    return yield* new CheckoutRefused({
-      reason: "unreadable",
-      cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
-    });
-  const archive = NodePath.join(dir, "state.tar");
-  yield* succeeded(dir, "tar", ["-cf", archive, ...parts], { env: { COPYFILE_DISABLE: "1" } });
-  if (NodeFS.statSync(archive).size > MAX_SHIPMENT_BYTES)
-    return yield* new CheckoutRefused({ reason: "too_large" });
   const committed = nulList(
     yield* succeeded(root, "git", ["diff", "--name-only", "-z", "--no-renames", baseSha, "HEAD"]),
   );
   return {
     checkout,
-    archive,
+    state: { key, pack },
     driftDirs: driftInstallDirs([...committed, ...changed, ...deleted], (lockDir) =>
       NodeFS.existsSync(NodePath.join(root, lockDir, "bun.lock")),
     ),
@@ -286,12 +309,12 @@ const diskBytes = (path: string): number => {
 };
 
 /**
- * Packs host paths the command reads beyond its worktree into `dir`, relative to `/`, for a copy
- * to unpack at the same paths (INPUTS_SCRIPT in WorktreeForks.ts).
+ * Host paths the command reads beyond its worktree, one archive each, keyed by what it holds and
+ * packed relative to `/` into a directory when a copy needs it, for the copy to unpack at the same
+ * paths (INPUTS_SCRIPT in WorktreeForks.ts).
  */
-export const packInputs = Effect.fn("WorktreeForks.packInputs")(function* (
+export const inputUploads = Effect.fn("WorktreeForks.inputUploads")(function* (
   paths: ReadonlyArray<string>,
-  dir: string,
 ) {
   if (paths.some((path) => !NodeFS.existsSync(path)))
     return yield* new CheckoutRefused({ reason: "missing_input" });
@@ -300,20 +323,48 @@ export const packInputs = Effect.fn("WorktreeForks.packInputs")(function* (
     return yield* new CheckoutRefused({ reason: "symlinked_input" });
   if (paths.reduce((sum, path) => sum + diskBytes(path), 0) > MAX_INPUT_BYTES)
     return yield* new CheckoutRefused({ reason: "inputs_too_large" });
-  const archive = NodePath.join(dir, "inputs.tgz");
-  const packed = yield* run("/", "tar", ["-czf", archive, "--null", "-T", "-"], {
-    stdin: paths.map((path) => `${path.slice(1)}\0`).join(""),
-    env: { COPYFILE_DISABLE: "1" },
-  });
-  if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
-    return yield* new CheckoutRefused({
-      reason: "unreadable",
-      cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
-    });
-  const bytes = NodeFS.statSync(archive).size;
-  if (bytes > MAX_SHIPMENT_BYTES) return yield* new CheckoutRefused({ reason: "inputs_too_large" });
-  return { archive, bytes };
+  const runner = yield* ProcessRunner.ProcessRunner;
+  return yield* Effect.forEach(paths, (path) =>
+    Effect.gen(function* () {
+      const pack = Effect.fn("WorktreeForks.packInput")(
+        function* (dir: string) {
+          yield* Effect.try({
+            try: () => NodeFS.mkdirSync(dir, { recursive: true }),
+            catch: unreadable,
+          });
+          const archive = NodePath.join(dir, "input.tgz");
+          const packed = yield* run("/", "tar", ["-czf", archive, "--null", "-T", "-"], {
+            stdin: `${path.slice(1)}\0`,
+            env: { COPYFILE_DISABLE: "1" },
+          });
+          if (packed.code !== 0 && !onlyLiveFileWarnings(packed.stderr))
+            return yield* new CheckoutRefused({
+              reason: "unreadable",
+              cause: new Error(`tar exited ${packed.code}: ${packed.stderr.slice(-2000)}`),
+            });
+          const bytes = NodeFS.statSync(archive).size;
+          if (bytes > MAX_SHIPMENT_BYTES)
+            return yield* new CheckoutRefused({ reason: "inputs_too_large" });
+          const key = yield* archiveKey(["input"], archive, (name) => `/${name}`).pipe(
+            Effect.mapError(unreadable),
+          );
+          return { archive, bytes, key } satisfies Packed;
+        },
+        Effect.provideService(ProcessRunner.ProcessRunner, runner),
+      );
+      const key = yield* contentKey(["input"], [{ name: path, path }]).pipe(
+        Effect.mapError(unreadable),
+      );
+      return { key, pack } satisfies Upload;
+    }),
+  );
 });
+
+/** Whether inputs placed in a copy are past the compressed cap, as one archive of them was. */
+export const inputsTooLarge = (bytes: ReadonlyArray<number>) =>
+  bytes.reduce((sum, size) => sum + size, 0) > MAX_SHIPMENT_BYTES
+    ? new CheckoutRefused({ reason: "inputs_too_large" })
+    : null;
 
 /**
  * Applies a shipment in a copy's checkout, which sits at the base's commit:
@@ -321,7 +372,7 @@ export const packInputs = Effect.fn("WorktreeForks.packInputs")(function* (
  * directories. Mounting the checkout at the worktree's own path is a separate step.
  */
 const APPLY_SCRIPT = `set -eu
-archive=$1; stage=$1.d; cd "$2"; head=$3; branch=$4; shift 4
+archive=$1; stage=$(mktemp -d); cd "$2"; head=$3; branch=$4; shift 4
 mkdir -p "$stage" && tar -xf "$archive" -C "$stage"
 if [ -f "$stage/head.bundle" ]; then git fetch -q "$stage/head.bundle" "+HEAD:refs/t3/job"; fi
 git checkout -qf --detach "$head"

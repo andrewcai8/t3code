@@ -129,6 +129,10 @@ export interface ModalBoxes {
   ) => Promise<string>;
   /** Deletes a disk image; one a running sandbox booted from keeps working. */
   readonly deleteImage: (imageId: string) => Promise<void>;
+  /** An image of one directory of a running sandbox, which Modal deletes `ttlMs` after it is taken. */
+  readonly saveDirectory: (sandboxId: string, path: string, ttlMs: number) => Promise<string>;
+  /** Shows a directory image at `path`; writes there stay in this sandbox's own copy of it. */
+  readonly mountImage: (sandboxId: string, path: string, imageId: string) => Promise<void>;
   readonly createCopy: (spec: ModalCopySpec) => Promise<string>;
   /** The running sandboxes of `app` that carry every one of `tags`. */
   readonly list: (
@@ -322,6 +326,14 @@ export function makeModalBoxes(credentials: {
         if (!(error instanceof NotFoundError)) throw error;
       }
     },
+    saveDirectory: async (sandboxId, path, ttlMs) =>
+      (
+        await transient(async () =>
+          (await box(sandboxId)).snapshotDirectory(path, { ttlMs, timeoutMs: 300_000 }),
+        )
+      ).imageId,
+    mountImage: async (sandboxId, path, imageId) =>
+      (await box(sandboxId)).mountImage(path, await modal.images.fromId(imageId)),
     createCopy: async (spec) => {
       const app = await appOf(spec.app, spec.environment);
       const sandbox = await transient(async () =>
