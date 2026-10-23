@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { ProvisionedSandboxMissing } from "./driver.ts";
 import { makeModalChatStore, type ModalChatRecord } from "./modalChatStore.ts";
-import { makeModalRuntime, modalEgress, type ModalBoxes } from "./ModalRuntime.ts";
+import { makeModalRuntime, modalEgress, type ModalBoxes, uploadFile } from "./ModalRuntime.ts";
 import { NamespaceProxyManager } from "./namespaceProxy.ts";
 import { ProvisionPreparationManifest } from "./ProvisionPreparation.ts";
 
@@ -489,5 +489,63 @@ describe("modalEgress", () => {
       domains: ["github.com", "*.npmjs.org"],
       cidrs: ["10.0.0.0/8", "1.2.3.4"],
     });
+  });
+});
+
+describe("uploadFile", () => {
+  /**
+   * copyFromLocal as Modal's SDK 0.11.0 does it: one FileHandle for every attempt, a read stream
+   * per attempt with `autoClose: false`, and a resume from the same handle after the first
+   * attempt's stream breaks, as a busy host's uploads do.
+   */
+  const sdkLikeSandbox = (copied: Array<string>) => {
+    let broken = false;
+    return {
+      filesystem: {
+        copyFromLocal: async (localPath: string) => {
+          const handle = await NodeFSP.open(localPath, "r");
+          try {
+            // Each upload's first stream breaks after its first chunk, then resumes on the handle.
+            const breaks = !broken;
+            broken = true;
+            const chunks: Array<Buffer> = [];
+            const first = handle.createReadStream({ autoClose: false });
+            const closed = new Promise<void>((resolve) => first.once("close", () => resolve()));
+            // The broken attempt's error is the resumable one the SDK swallows.
+            await (async () => {
+              for await (const chunk of first) {
+                chunks.push(chunk as Buffer);
+                if (breaks) break;
+              }
+            })().catch(() => undefined);
+            if (breaks) {
+              // The SDK asks the server for its offset before resuming; the stream closes meanwhile.
+              await closed;
+              const offset = chunks[0]!.length;
+              for await (const chunk of handle.createReadStream({
+                start: offset,
+                autoClose: false,
+              }))
+                chunks.push(chunk as Buffer);
+            }
+            copied.push(Buffer.concat(chunks).toString());
+          } finally {
+            await handle.close();
+          }
+        },
+      },
+      exec: async () => ({ wait: async () => 0 }),
+    };
+  };
+
+  it("starts a copy over with a fresh handle when the SDK's resume reads a closed one", async () => {
+    const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-upload-"));
+    const file = NodePath.join(dir, "inputs.tgz");
+    await NodeFSP.writeFile(file, "x".repeat(200_000));
+    const copied: Array<string> = [];
+    await Promise.all(
+      Array.from({ length: 3 }, () => uploadFile(sdkLikeSandbox(copied), file, "/tmp/inputs.tgz")),
+    );
+    expect(copied).toEqual(Array.from({ length: 3 }, () => "x".repeat(200_000)));
   });
 });

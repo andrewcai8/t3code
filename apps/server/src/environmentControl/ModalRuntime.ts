@@ -165,6 +165,40 @@ async function transient<A>(call: () => Promise<A>, attempts = 4): Promise<A> {
   }
 }
 
+/**
+ * Whether `copyFromLocal` failed on its own closed file. It resumes a stream that broke mid-upload
+ * from the FileHandle it opened, but Node closes a FileHandle when a read stream on it is destroyed,
+ * `autoClose: false` or not, so the resume reads fd -1 and fails. Busy hosts break streams often.
+ */
+const isClosedHandleResume = (error: unknown) =>
+  error instanceof RangeError && "code" in error && error.code === "ERR_OUT_OF_RANGE";
+
+/** Copies a local file into the sandbox, starting over with a fresh handle when a resume fails. */
+export async function uploadFile(
+  sandbox: {
+    readonly filesystem: Pick<Sandbox["filesystem"], "copyFromLocal">;
+    readonly exec: (
+      argv: Array<string>,
+      options: { readonly timeoutMs: number },
+    ) => Promise<{ readonly wait: () => Promise<number> }>;
+  },
+  localPath: string,
+  remotePath: string,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await sandbox.filesystem.copyFromLocal(localPath, remotePath);
+      break;
+    } catch (error) {
+      if (!isClosedHandleResume(error) || attempt >= 4) throw error;
+      await NodeTimersPromises.setTimeout(1_000 * 2 ** (attempt - 1));
+    }
+  }
+  // Copied as root; the guest reads it as the image's user.
+  const chmod = await sandbox.exec(["chmod", "0644", remotePath], { timeoutMs: 60_000 });
+  if ((await chmod.wait()) !== 0) throw new Error("The runtime archive could not be shared");
+}
+
 export function makeModalBoxes(credentials: {
   readonly tokenId: string;
   readonly tokenSecret: string;
@@ -274,13 +308,8 @@ export function makeModalBoxes(credentials: {
       ]);
       return exitCode;
     },
-    upload: async (sandboxId, localPath, remotePath) => {
-      const sandbox = await box(sandboxId);
-      await sandbox.filesystem.copyFromLocal(localPath, remotePath);
-      // Copied as root; the guest reads it as the image's user.
-      const chmod = await sandbox.exec(["chmod", "0644", remotePath], { timeoutMs: 60_000 });
-      if ((await chmod.wait()) !== 0) throw new Error("The runtime archive could not be shared");
-    },
+    upload: async (sandboxId, localPath, remotePath) =>
+      uploadFile(await box(sandboxId), localPath, remotePath),
     download: async (sandboxId, remotePath, localPath) =>
       (await box(sandboxId)).filesystem.copyToLocal(remotePath, localPath),
     saveDisk: async (sandboxId, ttlMs, timeoutMs = 300_000) =>
