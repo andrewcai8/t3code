@@ -112,6 +112,7 @@ const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [5, "ProvisionedChatsV2"],
   [6, "ScheduledTaskTarget"],
   [7, "DiagnosticsReadGrants"],
+  [8, "RecoveryScanIndexes"],
 ];
 
 /** Replaces the ledger above upstream's shared 51 with what an older fork build recorded. */

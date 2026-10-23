@@ -26,6 +26,7 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FiberSet from "effect/FiberSet";
 import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -776,7 +777,11 @@ const layerMakeServer = Layer.unwrap(
     const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
-    const layerActivation = Layer.succeed(ServerActivation.ServerActivation, awaitActivation);
+    const parkedWork = yield* FiberSet.make();
+    const layerActivation = Layer.mergeAll(
+      Layer.succeed(ServerActivation.ServerActivation, awaitActivation),
+      Layer.succeed(ServerActivation.ParkedWork, parkedWork),
+    );
     const runtimeStateParked = yield* Deferred.make<void>();
     const tailscaleParked = yield* Deferred.make<void>();
     const cloudLinkParked = yield* Deferred.make<void>();

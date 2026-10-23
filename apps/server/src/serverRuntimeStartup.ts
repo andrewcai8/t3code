@@ -11,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -19,6 +20,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
@@ -44,7 +46,7 @@ import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import { autoBootstrapModelSelection } from "./autoBootstrapModelSelection.ts";
-import { forkParked, forkParkedFiber } from "./serverActivation.ts";
+import { forkParked, forkParkedFiber, ParkedWork } from "./serverActivation.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { getServerOwners } from "./telemetry/Identify.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
@@ -80,6 +82,10 @@ export class ServerRuntimeStartup extends Context.Service<
     ) => Effect.Effect<A, E | ServerRuntimeStartupError>;
   }
 >()("t3/serverRuntimeStartup") {}
+
+// Work that ignores interruption must not hold shutdown inside the service launcher's 5 s
+// kill window. Child processes are force-killed after 1 s (see processRunner.ts).
+const PARKED_WORK_STOP_TIMEOUT = "1 second";
 
 interface QueuedCommand {
   readonly run: Effect.Effect<void, never>;
@@ -419,6 +425,37 @@ export const startEffectWorkerWithRelay = Effect.fn(
   );
 });
 
+export const shutdownRuntime = Effect.fn("ServerRuntimeStartup.shutdownRuntime")(function* <
+  PrepareError,
+>(input: {
+  readonly parkedWork: FiberSet.FiberSet<unknown, unknown> | undefined;
+  readonly workerFiberRef: Ref.Ref<Fiber.Fiber<void, never> | null>;
+  readonly prepareForShutdown: Effect.Effect<void, PrepareError>;
+  readonly shutdownSessions: Effect.Effect<void>;
+}) {
+  const workerFiber = yield* Ref.getAndSet(input.workerFiberRef, null);
+  if (workerFiber !== null) {
+    yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
+  }
+  // Background loops live in layers that close after this one, so they would keep
+  // fetching, settling, and writing until the end of shutdown.
+  const stopParkedWork = Effect.gen(function* () {
+    if (input.parkedWork === undefined) return;
+    // Detached, so the timeout can give up on a fiber still inside an uninterruptible step.
+    const stopping = yield* FiberSet.clear(input.parkedWork).pipe(
+      Effect.forkDetach({ startImmediately: true }),
+    );
+    yield* Fiber.await(stopping).pipe(Effect.timeoutOption(PARKED_WORK_STOP_TIMEOUT));
+  });
+  // Restart intent goes first: the service launcher SIGKILLs an updating server 5 s after
+  // SIGTERM, and a chat cut without it never resumes. Each write is its own transaction, so
+  // loops still running cannot tear it. It must also be durable before sessions record
+  // their release. The rest of recovery waits for startup, which reconciles every restart.
+  yield* input.prepareForShutdown.pipe(
+    Effect.ensuring(Effect.andThen(stopParkedWork, input.shutdownSessions)),
+  );
+});
+
 const runOrderedV2StartupPhases = Effect.fn("serverRuntimeStartup.runOrderedV2StartupPhases")(
   function* <
     Import,
@@ -468,8 +505,11 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
   const httpListening = yield* Deferred.make<void>();
   const effectWorkerFiber = yield* Ref.make<Fiber.Fiber<void, never> | null>(null);
 
+  const parkedWork = yield* ParkedWork;
+
   yield* Effect.addFinalizer(() =>
     Effect.gen(function* () {
+      const startedAt = yield* Clock.currentTimeMillis;
       yield* commandGate.failCommandReady(
         new ServerRuntimeStartupError({
           mode: serverConfig.mode,
@@ -478,18 +518,18 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           cause: "Server runtime is shutting down.",
         }),
       );
-      const workerFiber = yield* Ref.getAndSet(effectWorkerFiber, null);
-      if (workerFiber !== null) {
-        yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
-      }
-      yield* providerRuntimeRecovery.prepareForShutdown.pipe(
-        Effect.ensuring(providerSessions.shutdown),
-      );
-      const reconciliation = yield* providerRuntimeRecovery.reconcile("shutdown");
-      yield* Effect.logInfo("V2 orchestration shutdown reconciliation completed", reconciliation);
+      yield* shutdownRuntime({
+        parkedWork,
+        workerFiberRef: effectWorkerFiber,
+        prepareForShutdown: providerRuntimeRecovery.prepareForShutdown,
+        shutdownSessions: providerSessions.shutdown,
+      });
+      yield* Effect.logInfo("V2 orchestration shutdown completed", {
+        durationMs: (yield* Clock.currentTimeMillis) - startedAt,
+      });
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("V2 orchestration shutdown reconciliation failed", {
+        Effect.logWarning("V2 orchestration shutdown failed", {
           cause: Cause.pretty(cause),
         }),
       ),
