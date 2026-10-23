@@ -311,6 +311,54 @@ it.effect("a copy that never started is unavailable, and one lost after starting
   }).pipe(Effect.scoped),
 );
 
+it.effect("a caller rejoining after a restart gets the rest of the output and the outcome", () =>
+  Effect.gen(function* () {
+    const asked: Array<unknown> = [];
+    const { socketPath } = yield* onSelfHostedServer({
+      enabled: true,
+      attach: (jobId, seen, output) =>
+        Effect.sync(() => {
+          asked.push([jobId, seen]);
+          if (jobId !== "job-1") return null;
+          output("stdout", "pass 2\n");
+          return { _tag: "Exited", exitCode: 3, timedOut: false, durationMs: 50 } as const;
+        }),
+    });
+    const rejoin = (jobId: string) =>
+      Effect.gen(function* () {
+        const socket = NodeNet.createConnection(socketPath);
+        const closed = yield* Deferred.make<string>();
+        let answered = "";
+        socket.on("data", (chunk) => (answered += chunk.toString("utf8")));
+        socket.on("close", () => Deferred.doneUnsafe(closed, Effect.succeed(answered)));
+        socket.write(`${JSON.stringify({ attach: jobId, stdoutBytes: 7, stderrBytes: 0 })}\n`);
+        const lines = yield* Deferred.await(closed);
+        return lines
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+      });
+    expect(yield* rejoin("job-1")).toEqual([
+      { kind: "output", stream: "stdout", text: "pass 2\n" },
+      {
+        kind: "exited",
+        exitCode: 3,
+        timedOut: false,
+        durationMs: 50,
+        stdoutTail: "",
+        stderrTail: "",
+      },
+    ]);
+    expect(yield* rejoin("job-2")).toEqual([
+      { kind: "failed", message: "This server has no job job-2 to rejoin." },
+    ]);
+    expect(asked).toEqual([
+      ["job-1", { stdout: 7, stderr: 0 }],
+      ["job-2", { stdout: 7, stderr: 0 }],
+    ]);
+  }).pipe(Effect.scoped),
+);
+
 it.effect("closing the connection ends the copy", () =>
   Effect.gen(function* () {
     const ended = yield* Deferred.make<void>();

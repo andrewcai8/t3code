@@ -39,6 +39,7 @@ import * as FleetBroker from "./FleetBroker.ts";
 import * as WorktreeForks from "./WorktreeForks.ts";
 import {
   exportsOf,
+  ForkExecAttach,
   ForkExecEvent,
   ForkExecRequest,
   forkExecSocketPath,
@@ -173,6 +174,28 @@ const runInWorktreeCopy = Effect.fn("ForkExec.runInWorktreeCopy")(function* (
     started: (jobId) => Effect.sync(() => write({ kind: "started", batchId: jobId, live: true })),
     output: (stream, text) => write({ kind: "output", stream, text }),
   });
+  writeOutcome(outcome, write);
+});
+
+/** Joins a worktree copy a previous run of this server started, after the caller reconnects. */
+const attachToWorktreeCopy = Effect.fn("ForkExec.attachToWorktreeCopy")(function* (
+  attach: ForkExecAttach,
+  write: (event: ForkExecEvent) => void,
+) {
+  const outcome = yield* (yield* WorktreeForks.WorktreeForks).attach(
+    attach.attach,
+    { stdout: attach.stdoutBytes, stderr: attach.stderrBytes },
+    (stream, text) => write({ kind: "output", stream, text }),
+  );
+  if (outcome === null)
+    return write({ kind: "failed", message: `This server has no job ${attach.attach} to rejoin.` });
+  writeOutcome(outcome, write);
+});
+
+const writeOutcome = (
+  outcome: WorktreeForks.ExecOutcome,
+  write: (event: ForkExecEvent) => void,
+) => {
   switch (outcome._tag) {
     case "Exited":
       return write({
@@ -188,7 +211,7 @@ const runInWorktreeCopy = Effect.fn("ForkExec.runInWorktreeCopy")(function* (
     case "Lost":
       return write({ kind: "failed", message: outcome.message });
   }
-});
+};
 
 /**
  * Makes `~/.local/bin/bun` this host's bun shim, or puts back what it replaced. A cloud box has
@@ -218,7 +241,9 @@ type Backends =
   | ServerConfig
   | WorktreeForks.WorktreeForks;
 
-const decodeRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(ForkExecRequest));
+const decodeRequest = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Union([ForkExecRequest, ForkExecAttach])),
+);
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(ForkExecEvent));
 
 /**
@@ -242,8 +267,16 @@ export const layer = Layer.effectDiscard(
     const serve = (socket: NodeNet.Socket) => {
       const write = (event: ForkExecEvent) => void socket.write(`${encodeEvent(event)}\n`);
       const emit = (event: ForkExecEvent) => Effect.sync(() => write(event));
-      const run = (request: ForkExecRequest): Effect.Effect<void, never, Backends> =>
-        relays ? runInFork(request, emit) : runInWorktreeCopy(request, write);
+      const run = (
+        request: ForkExecRequest | ForkExecAttach,
+      ): Effect.Effect<void, never, Backends> =>
+        "attach" in request
+          ? relays
+            ? emit({ kind: "failed", message: "A copy of this machine cannot be rejoined." })
+            : attachToWorktreeCopy(request, write)
+          : relays
+            ? runInFork(request, emit)
+            : runInWorktreeCopy(request, write);
       let buffered = "";
       const onData = (chunk: Buffer) => {
         buffered += chunk.toString("utf8");
