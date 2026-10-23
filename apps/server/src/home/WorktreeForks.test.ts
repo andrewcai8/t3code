@@ -852,33 +852,95 @@ it.effect(
   },
 );
 
+/** Outputs as `t3 fork-exec` asks for them, staged in the job's own directory. */
+const execOutputs = (stateDir: string, id: string, paths: ReadonlyArray<string>) => ({
+  paths,
+  root: "/",
+  into: NodePath.join(jobDir(jobsRoot(stateDir), id), "outputs"),
+  archive: NodePath.join(jobDir(jobsRoot(stateDir), id), "outputs.tgz"),
+  place: true as const,
+});
+
+it.effect("outputs a run already placed on this host are never placed again", () => {
+  const { stateDir, fake, layer, start } = setup();
+  const output = NodePath.join(tempDir("outputs"), "run");
+  return Effect.gen(function* () {
+    fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+    fake.downloadFrom(packedArchive({ [`${output}/report.json`]: "again\n" }));
+    const sandboxId = fake.plant({ purpose: "t3-worktree-fork", host: "env-host", job: "job-a" });
+    leftRecord(stateDir, {
+      id: "job-a",
+      sandboxId,
+      outputs: execOutputs(stateDir, "job-a", [output]),
+    });
+    expect(claimCopyBack(jobsRoot(stateDir), "job-a")).toBe(true);
+    const forks = yield* start;
+    const { sent, output: rejoined } = rejoiner();
+    const outcome = yield* forks.attach("job-a", { stdout: 0, stderr: 0 }, rejoined);
+    expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(sent.stderr).toBe(
+      "[t3] The outputs were not copied back: T3 Code restarted while the outputs were coming back, so they were not copied again.\n",
+    );
+    expect(NodeFS.existsSync(output)).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
 it.effect(
-  "a stale record whose outputs already started coming back never copies them again",
+  "a run killed while downloading outputs leaves them for the run that adopts the job",
+  () => {
+    const { root, fake, layer, start } = setup();
+    const output = NodePath.join(tempDir("outputs"), "run");
+    return Effect.gen(function* () {
+      fake.onExec(isCommand("bun test"), { exitCode: 0 });
+      fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+      fake.downloadFrom(packedArchive({ [`${output}/report.json`]: "done\n" }));
+      const downloading = fake.hold("download");
+      const first = yield* Scope.make();
+      const before = yield* start.pipe(Scope.provide(first));
+      let jobId = "";
+      yield* before
+        .exec(request(root, { outputs: [output] }), {
+          started: (id) => Effect.sync(() => (jobId = id)),
+          output: () => {},
+        })
+        .pipe(Effect.forkDetach);
+      yield* Effect.promise(() => downloading.reached);
+      yield* Scope.close(first, Exit.void);
+
+      const after = yield* start;
+      const outcome = yield* after.attach(jobId, { stdout: 0, stderr: 0 }, () => {});
+      expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0 });
+      expect(NodeFS.readFileSync(NodePath.join(output, "report.json"), "utf8")).toBe("done\n");
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  },
+);
+
+it.effect(
+  "an adopted job whose command exited by its deadline keeps its exit code and outputs",
   () => {
     const { stateDir, fake, layer, start } = setup();
+    const output = NodePath.join(tempDir("outputs"), "run");
     return Effect.gen(function* () {
-      const sandboxId = fake.plant({ purpose: "t3-worktree-fork", host: "env-host", job: "job-a" });
-      leftRecord(stateDir, {
-        id: "job-a",
-        sandboxId,
-        outputs: {
-          paths: ["/tmp/x"],
-          root: "/",
-          into: "/tmp/in",
-          archive: "/tmp/a.tgz",
-          place: true,
-        },
-      });
-      expect(claimCopyBack(jobsRoot(stateDir), "job-a")).toBe(true);
-      const forks = yield* start;
-      const { sent, output } = rejoiner();
-      const outcome = yield* forks.attach("job-a", { stdout: 0, stderr: 0 }, output);
-      expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0 });
-      expect(sent.stderr).toBe(
-        "[t3] The outputs were not copied back: T3 Code restarted while the outputs were coming back, so they were not copied again.\n",
+      fake.onExec(isStep("t3-outputs"), { exitCode: 0 });
+      fake.downloadFrom(packedArchive({ [`${output}/report.json`]: "done\n" }));
+      const sandboxId = fake.plant(
+        { purpose: "t3-worktree-fork", host: "env-host", job: "job-late" },
+        { exitCode: 0, chunks: [["stdout", "ok\n"]] },
       );
-      expect(fake.calls.some((call) => call.argv?.[3] === "t3-outputs")).toBe(false);
-      expect(fake.calls.some((call) => call.op === "download")).toBe(false);
+      // The server came back after the job's deadline, which its command beat.
+      leftRecord(stateDir, {
+        id: "job-late",
+        sandboxId,
+        startedAt: -120_000,
+        timeoutMs: 60_000,
+        outputs: execOutputs(stateDir, "job-late", [output]),
+      });
+      const forks = yield* start;
+      const { sent, output: rejoined } = rejoiner();
+      const outcome = yield* forks.attach("job-late", { stdout: 0, stderr: 0 }, rejoined);
+      expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 0, timedOut: false });
+      expect(sent).toEqual({ stdout: "ok\n", stderr: "" });
+      expect(NodeFS.readFileSync(NodePath.join(output, "report.json"), "utf8")).toBe("done\n");
     }).pipe(Effect.scoped, Effect.provide(layer));
   },
 );

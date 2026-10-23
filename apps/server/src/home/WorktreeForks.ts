@@ -280,6 +280,9 @@ with open(d + "/exit.part", "w") as f:
     f.write(str(code if code >= 0 else 128 - code))
 os.rename(d + "/exit.part", d + "/exit")`;
 
+/** Exits 0 once the launched command has exited. */
+const EXITED_SCRIPT = `test -e ${JOB_FILES}/exit`;
+
 /** Streams the launched command's output from its start, then exits with its code. */
 const FOLLOW_SCRIPT = `import os, sys, time
 d = "${JOB_FILES}"
@@ -578,6 +581,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   /** Brings listed outputs back under `into`. Never fails: a problem is reported instead. */
   const collectOutputs = Effect.fn("WorktreeForks.collectOutputs")(function* (
+    jobId: string,
     sandboxId: string,
     outputs: NonNullable<CopyJob["outputs"]>,
   ) {
@@ -602,10 +606,25 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       };
     if (exitCode !== 0) return { outputsProblem: "Packing the outputs failed." };
     const local = outputs.archive;
-    const unpacked = yield* Effect.tryPromise(() =>
+    const download = yield* Effect.tryPromise(() =>
       sandboxes.download(sandboxId, OUTPUTS, local),
+    ).pipe(Effect.option);
+    if (Option.isNone(download)) {
+      yield* Effect.sync(() => NodeFS.rmSync(local, { force: true }));
+      return { outputsProblem: "Copying the outputs back failed." };
+    }
+    // Claimed only once the outputs are here, so a run killed mid-download leaves them in the copy
+    // for the run that adopts it, and still only one ever writes them to this host.
+    if (!claimCopyBack(jobsDir, jobId)) {
+      yield* Effect.sync(() => NodeFS.rmSync(local, { force: true }));
+      return {
+        outputsProblem:
+          "T3 Code restarted while the outputs were coming back, so they were not copied again.",
+      };
+    }
+    const unpacked = yield* Effect.sync(() =>
+      NodeFS.mkdirSync(outputs.into, { recursive: true }),
     ).pipe(
-      Effect.andThen(Effect.sync(() => NodeFS.mkdirSync(outputs.into, { recursive: true }))),
       Effect.andThen(runner.run({ command: "tar", args: ["-xzf", local, "-C", outputs.into] })),
       Effect.ensuring(Effect.sync(() => NodeFS.rmSync(local, { force: true }))),
       Effect.option,
@@ -680,27 +699,36 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       0,
       record.startedAt + record.timeoutMs - (yield* Clock.currentTimeMillis),
     );
+    // At the deadline the command times out unless it has already exited, as one may have while
+    // the server was down, or while its output replays to a run that adopted it.
+    const deadline = Effect.sleep(Duration.millis(left)).pipe(
+      Effect.andThen(
+        step(record.sandboxId, ["sh", "-c", EXITED_SCRIPT, "t3-exited"], "check its command").pipe(
+          Effect.map((result) => result.exitCode === 0),
+          Effect.orElseSucceed(() => false),
+        ),
+      ),
+      Effect.flatMap((exited) => (exited ? Effect.never : Effect.succeed(Option.none<number>()))),
+    );
     // Host-side, since Modal counts an exec's timeout in whole seconds; its own is a backstop.
-    const exitCode = yield* Effect.tryPromise({
-      try: () =>
-        sandboxes.execStream(record.sandboxId, ["python3", "-c", FOLLOW_SCRIPT, "t3-follow"], {
-          timeoutMs: left + 60_000,
-          onOutput: output,
-        }),
-      catch: (cause) => new Lost({ cause }),
-    }).pipe(Effect.timeoutOption(Duration.millis(left)));
+    const exitCode = yield* Effect.raceFirst(
+      Effect.tryPromise({
+        try: () =>
+          sandboxes.execStream(record.sandboxId, ["python3", "-c", FOLLOW_SCRIPT, "t3-follow"], {
+            timeoutMs: left + 60_000,
+            onOutput: output,
+          }),
+        catch: (cause) => new Lost({ cause }),
+      }).pipe(Effect.map(Option.some)),
+      deadline,
+    );
     const durationMs = (yield* Clock.currentTimeMillis) - record.startedAt;
     if (Option.isNone(exitCode))
       return { exitCode: 124, timedOut: true, durationMs } satisfies Exited;
     const outputs =
       record.outputs === null
         ? {}
-        : claimCopyBack(jobsDir, record.id)
-          ? yield* collectOutputs(record.sandboxId, record.outputs)
-          : {
-              outputsProblem:
-                "T3 Code restarted while the outputs were coming back, so they were not copied again.",
-            };
+        : yield* collectOutputs(record.id, record.sandboxId, record.outputs);
     return { exitCode: exitCode.value, timedOut: false, durationMs, ...outputs } satisfies Exited;
   });
 
