@@ -35,6 +35,10 @@ describe("refusedPath with the job's checkout inside T3 home", () => {
     const sibling = NodePath.join(t3Home, "worktrees", "repo", "other");
     expect(refusedPath(sibling, "output", t3Home, userHome, checkout)).toMatch(/T3 home/);
     expect(refusedPath(checkout, "output", t3Home, userHome, checkout)).toMatch(/whole checkout/);
+    for (const git of [".git", ".git/config", ".git/hooks/post-checkout"]) {
+      const path = NodePath.join(checkout, git);
+      expect(refusedPath(path, "output", t3Home, userHome, checkout)).toMatch(/git metadata/);
+    }
   });
 
   it("refuses everything inside T3 home when no checkout is given", () => {

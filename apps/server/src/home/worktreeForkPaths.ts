@@ -47,6 +47,13 @@ export const refusedPath = (
   const checkout = checkoutRoot === undefined ? undefined : resolved(checkoutRoot);
   if (direction === "output" && checkout !== undefined && target === checkout)
     return `${path} is the job's whole checkout, which an output may not replace.`;
+  // Git runs this checkout's hooks and config on the host, so a copy may not rewrite them.
+  if (
+    direction === "output" &&
+    checkout !== undefined &&
+    inside(target, NodePath.join(checkout, ".git"))
+  )
+    return `${path} is the checkout's git metadata, which an output may not replace.`;
   const inCheckout = checkout !== undefined && inside(target, checkout) && !inside(home, checkout);
   if (!inCheckout && (inside(target, home) || inside(home, target)))
     return `${path} is or holds this server's T3 home, which a copy may not ${direction === "input" ? "read" : "write"}.`;
