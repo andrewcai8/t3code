@@ -33,6 +33,8 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { parse as parseYaml } from "yaml";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect's File.Info has no ctime or lstat.
+import * as NodeFSP from "node:fs/promises";
 
 import * as ServerConfig from "./config.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -345,23 +347,15 @@ const make = Effect.gen(function* () {
       let entries = 1;
       while (pending.length > 0) {
         const target = pending.pop()!;
-        // Links are not followed, and their own timestamps say nothing about the files inside.
-        const isLink = yield* fs.readLink(target).pipe(
-          Effect.as(true),
-          Effect.catchIf(
-            (error) =>
-              error.cause instanceof Error &&
-              "code" in error.cause &&
-              error.cause.code === "EINVAL",
-            () => Effect.succeed(false),
-          ),
-        );
-        if (isLink) continue;
-        const stat = yield* fs.stat(target);
-        const modified = Option.getOrNull(stat.mtime);
-        if (modified === null || modified.getTime() > cutoff)
+        // lstat does not follow links, and a link's own timestamps say nothing
+        // about the files inside. Content copied in with `rsync -a`, `tar x` or
+        // `cp -p` keeps its old mtime but gets a fresh ctime, which Effect's
+        // File.Info does not expose.
+        const stat = yield* Effect.tryPromise(() => NodeFSP.lstat(target));
+        if (stat.isSymbolicLink()) continue;
+        if (Math.max(stat.mtimeMs, stat.ctimeMs) > cutoff)
           return { status: "recent" as const, path: target };
-        if (stat.type === "Directory") {
+        if (stat.isDirectory()) {
           const names = yield* fs.readDirectory(target);
           entries += names.length;
           if (entries > 2_000_000) return { status: "unknown" as const };
@@ -399,15 +393,8 @@ const make = Effect.gen(function* () {
     return false;
   });
 
-  const reportOrphanWorktrees = Effect.fn("StorageCleanup.reportOrphanWorktrees")(function* (
-    roots: ReadonlyArray<string>,
-    projects: ReadonlyArray<{ readonly workspaceRoot: string }>,
-    serverSettings: ServerSettings,
-    entries: StorageCleanupReportEntry[],
-  ) {
-    const orphanAfterDays = serverSettings.storageCleanup.orphanWorktreeAfterDays;
-    const orphanRules = resolveWorktreeCleanup(serverSettings, null);
-    // Include deleted and archived threads, even those without a branch or project.
+  /** Every path a thread, even a deleted or archived one, has recorded as its worktree. */
+  const readReferencedWorktrees = Effect.fn("StorageCleanup.readReferencedWorktrees")(function* () {
     const rows = yield* sql<{ worktreePath: string }>`
       SELECT DISTINCT json_extract(payload_json, '$.worktreePath') AS "worktreePath"
       FROM orchestration_v2_projection_threads
@@ -421,6 +408,18 @@ const make = Effect.gen(function* () {
         pathKey(yield* fs.realPath(resolved).pipe(Effect.orElseSucceed(() => resolved))),
       );
     }
+    return referenced;
+  });
+
+  const reportOrphanWorktrees = Effect.fn("StorageCleanup.reportOrphanWorktrees")(function* (
+    roots: ReadonlyArray<string>,
+    projects: ReadonlyArray<{ readonly workspaceRoot: string }>,
+    serverSettings: ServerSettings,
+    entries: StorageCleanupReportEntry[],
+  ) {
+    const orphanAfterDays = serverSettings.storageCleanup.orphanWorktreeAfterDays;
+    const orphanRules = resolveWorktreeCleanup(serverSettings, null);
+    const referenced = yield* readReferencedWorktrees();
     const referencedAncestors = new Set<string>();
     for (let ancestor of referenced) {
       while (roots.some((root) => inside(root, ancestor))) {
@@ -858,6 +857,13 @@ const make = Effect.gen(function* () {
       });
       // Git runs from inside the repository because the worktree is about to disappear.
       const repositoryCwd = path.resolve(worktreePath, common.stdout.trim());
+      // A thread can claim the path mid-sweep, for example by a worktree handoff.
+      const claimed = yield* readReferencedWorktrees();
+      if (
+        claimed.has(pathKey(worktreePath)) ||
+        [...claimed].some((referenced) => inside(worktreePath, referenced))
+      )
+        return keep("a thread started using it during cleanup");
       const notRemoved = yield* removeCheckedWorktree(worktreePath, repositoryCwd, rules);
       if (notRemoved !== null) return keep(notRemoved);
       yield* gitManager.invalidateStatus(repositoryCwd);

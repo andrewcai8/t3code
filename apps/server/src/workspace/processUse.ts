@@ -37,15 +37,27 @@ export const makeProcessUseProbe = Effect.gen(function* () {
     );
   };
 
+  // "Free" is only believable if the probe could see the server's own process,
+  // which always has a working directory. An empty or partial listing from a
+  // blocked or failed probe would otherwise read as "nothing is using it".
+  const ownPid = process.pid;
+  const unreadable = {
+    status: "unknown",
+    reason: "running processes could not be checked",
+  } as const satisfies ProcessUse;
+
   const fromProc = Effect.fnUntraced(function* (root: string) {
     const names = yield* fs.readDirectory("/proc");
+    let sawSelf = false;
     for (const name of names) {
       if (!/^\d+$/.test(name)) continue;
       // A process that exits mid-scan, or belongs to another user, has no readable cwd.
       const cwd = yield* fs.readLink(`/proc/${name}/cwd`).pipe(Effect.orElseSucceed(() => null));
-      if (cwd !== null && within(root, cwd)) return { status: "busy", pid: Number(name) } as const;
+      if (cwd === null) continue;
+      if (Number(name) === ownPid) sawSelf = true;
+      if (within(root, cwd)) return { status: "busy", pid: Number(name) } as const;
     }
-    return { status: "free" } as const;
+    return sawSelf ? ({ status: "free" } as const) : unreadable;
   });
 
   const fromLsof = Effect.fnUntraced(function* (root: string) {
@@ -58,31 +70,30 @@ export const makeProcessUseProbe = Effect.gen(function* () {
       maxOutputBytes: LSOF_MAX_OUTPUT_BYTES,
     });
     // lsof exits 1 when it could not inspect some processes but still listed the rest.
-    if (result.code !== 0 && result.code !== 1) return yield* Effect.fail(result);
+    if (result.code !== 0 && result.code !== 1) return unreadable;
     let pid = 0;
+    let sawSelf = false;
     for (const line of result.stdout.split("\n")) {
-      if (line.startsWith("p")) pid = Number(line.slice(1));
-      else if (line.startsWith("n") && within(root, line.slice(1)))
+      if (line.startsWith("p")) {
+        pid = Number(line.slice(1));
+        if (pid === ownPid) sawSelf = true;
+      } else if (line.startsWith("n") && within(root, line.slice(1))) {
         return { status: "busy", pid } as const;
+      }
     }
-    return { status: "free" } as const;
+    return sawSelf ? ({ status: "free" } as const) : unreadable;
   });
 
-  return Effect.fn("WorkspaceProcessUse.probe")(function* (root: string) {
-    const probe = platform === "linux" ? fromProc : platform === "darwin" ? fromLsof : null;
-    if (probe === null) {
-      return {
-        status: "unknown",
-        reason: "running processes can't be checked on this operating system",
-      } satisfies ProcessUse;
-    }
-    return yield* probe(root).pipe(
-      Effect.catch(() =>
-        Effect.succeed({
-          status: "unknown",
-          reason: "running processes could not be checked",
-        } satisfies ProcessUse),
-      ),
-    );
+  return Effect.fn("WorkspaceProcessUse.probe")(function* (
+    root: string,
+  ): Effect.fn.Return<ProcessUse> {
+    if (platform === "linux")
+      return yield* fromProc(root).pipe(Effect.orElseSucceed(() => unreadable));
+    if (platform === "darwin")
+      return yield* fromLsof(root).pipe(Effect.orElseSucceed(() => unreadable));
+    return {
+      status: "unknown",
+      reason: "running processes can't be checked on this operating system",
+    };
   });
 });
