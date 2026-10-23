@@ -9,6 +9,7 @@ import {
   UsageProviderKind,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
+import { selectLimitPresentations } from "@t3tools/client-runtime/state/presentation";
 import {
   formatDuration,
   formatResetsIn,
@@ -39,7 +40,6 @@ import {
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { UsageLimitsPooled } from "./UsageLimitsPooled";
-import { selectLimitPresentations } from "./usageLimitSelection";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
 
 const PACE: Record<LimitPace, { readonly label: string; readonly icon: typeof GaugeIcon }> = {
