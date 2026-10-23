@@ -10,6 +10,7 @@ export default Effect.gen(function* () {
     ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)
     WHERE type = 'user_message'
   `;
+  // Restart recovery names this index with INDEXED BY (ProjectionStore.ts); renaming it breaks recovery.
   yield* sql`
     CREATE INDEX IF NOT EXISTS orchestration_v2_projection_nodes_live_idx
     ON orchestration_v2_projection_nodes(thread_id)

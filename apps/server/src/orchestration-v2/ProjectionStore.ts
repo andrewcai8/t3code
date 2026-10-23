@@ -3949,8 +3949,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 UNION
                 -- A held queue already went through recovery; rereading it on
                 -- every boot costs a projection read per held thread.
+                -- The redundant status list matches runs_recovery_idx, so this
+                -- reads the queued rows instead of every run.
                 SELECT thread_id FROM orchestration_v2_projection_runs
-                WHERE status = 'queued'
+                WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                  AND status = 'queued'
                   AND CASE WHEN json_valid(payload_json)
                     THEN json_extract(payload_json, '$.queueHeld') IS NOT 1
                     ELSE 1 END
@@ -3987,16 +3990,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT subagents.child_thread_id FROM orchestration_v2_projection_subagents AS subagents
                 WHERE subagents.child_thread_id IS NOT NULL
                   AND EXISTS (
+                    -- A provider-native child has no runs, so (thread_id, run_id)
+                    -- would read every node it ever had, for every child thread.
                     SELECT 1 FROM orchestration_v2_projection_nodes AS node
+                      INDEXED BY orchestration_v2_projection_nodes_live_idx
                     WHERE node.thread_id = subagents.child_thread_id
                       AND node.run_id IS NULL
                       AND node.kind = 'root_turn'
+                      AND node.status IN ('pending', 'starting', 'running', 'waiting')
                       AND node.status IN ('pending', 'running', 'waiting')
                   )
                 UNION
                 -- No native subagent outlives the provider process that ran it.
+                -- The first status list matches subagents_live_idx.
                 SELECT thread_id FROM orchestration_v2_projection_subagents
-                WHERE origin = 'provider_native'
+                WHERE status IN ('pending', 'starting', 'running', 'waiting')
+                  AND origin = 'provider_native'
                   AND status IN ('pending', 'running', 'waiting')
                 UNION
                 SELECT item.thread_id FROM orchestration_v2_projection_turn_items AS item
@@ -4316,6 +4325,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           if (threadRows[0] === undefined) {
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
           }
+          // The live turn items recovery acts on: those of live runs, live
+          // background work, and those under a live runless root turn. Each
+          // branch has its own index; the unary plus keeps SQLite from reading
+          // the thread's whole history through thread_id instead.
+          const recoveryTurnItems = sql`
+            +item.thread_id = ${threadId}
+            AND item.status IN ('pending', 'running', 'waiting')
+            AND (
+              item.run_id IN (
+                SELECT run_id FROM orchestration_v2_projection_runs
+                WHERE thread_id = ${threadId}
+                  AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+              )
+              OR (
+                item.thread_id = ${threadId}
+                AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+              )
+              OR (
+                +item.run_id IS NULL
+                AND item.node_id IN (
+                  SELECT node_id FROM orchestration_v2_projection_nodes
+                    INDEXED BY orchestration_v2_projection_nodes_live_idx
+                  WHERE thread_id = ${threadId}
+                    AND run_id IS NULL
+                    AND kind = 'root_turn'
+                    AND status IN ('pending', 'starting', 'running', 'waiting')
+                    AND status IN ('pending', 'running', 'waiting')
+                )
+              )
+            )
+          `;
           const [
             thread,
             runRows,
@@ -4332,9 +4372,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             decodeThreadPayload(threadRows[0].payload_json),
             sql<PayloadRow>`
               SELECT payload_json FROM orchestration_v2_projection_runs AS run
-              WHERE run.thread_id = ${threadId}
+              -- Recovery runs before the server serves anything, so each query
+              -- here must read only live rows, not a long thread's history.
+              -- The unary plus keeps SQLite off thread_id for the whole OR, so
+              -- it unions one index lookup per branch instead.
+              WHERE +run.thread_id = ${threadId}
                 AND (
-                  run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                  (
+                    run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                    AND run.thread_id = ${threadId}
+                  )
                   OR run.run_id = (
                     SELECT latest.run_id FROM orchestration_v2_projection_runs AS latest
                     WHERE latest.thread_id = ${threadId}
@@ -4365,6 +4412,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   )
                   OR run.run_id IN (
                     SELECT item.run_id FROM orchestration_v2_projection_turn_items AS item
+                      INDEXED BY orchestration_v2_projection_turn_items_recovery_idx
                     WHERE item.thread_id = ${threadId}
                       AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
                       AND item.status IN ('pending', 'running', 'waiting')
@@ -4496,11 +4544,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE run.thread_id = ${threadId}
                       AND run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
                   )
+                  -- Only the items recovery loads below can reach a provider
+                  -- thread, and any live item of the thread would read its history.
                   OR provider_thread.provider_thread_id IN (
                     SELECT item.provider_thread_id
                     FROM orchestration_v2_projection_turn_items AS item
-                    WHERE item.thread_id = ${threadId}
-                      AND item.status IN ('pending', 'running', 'waiting')
+                    WHERE ${recoveryTurnItems}
                   )
                   -- A native subagent's item names its own provider thread; the
                   -- run that waits on it (see awaitingProviderThreadId) is woken.
@@ -4508,8 +4557,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     SELECT run.provider_thread_id
                     FROM orchestration_v2_projection_turn_items AS item
                     JOIN orchestration_v2_projection_runs AS run ON run.run_id = item.run_id
-                    WHERE item.thread_id = ${threadId}
-                      AND item.status IN ('pending', 'running', 'waiting')
+                    WHERE ${recoveryTurnItems}
                   )
                 )
               ORDER BY COALESCE(provider_thread.first_run_ordinal, 0), provider_thread.provider_thread_id ASC
@@ -4537,7 +4585,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `,
             sql<PayloadRow>`
               SELECT message.payload_json FROM orchestration_v2_projection_messages AS message
-              WHERE message.thread_id = ${threadId} AND message.streaming = 1
+              -- Through the live runs, not every message of the thread.
+              WHERE +message.thread_id = ${threadId} AND message.streaming = 1
                 AND message.run_id IN (
                   SELECT run_id FROM orchestration_v2_projection_runs
                   WHERE thread_id = ${threadId}
@@ -4547,26 +4596,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `,
             sql<PayloadRow>`
               SELECT item.payload_json FROM orchestration_v2_projection_turn_items AS item
-              WHERE item.thread_id = ${threadId}
-                AND item.status IN ('pending', 'running', 'waiting')
-                AND (
-                  item.run_id IN (
-                    SELECT run_id FROM orchestration_v2_projection_runs
-                    WHERE thread_id = ${threadId}
-                      AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                  )
-                  OR item.type IN ('command_execution', 'dynamic_tool', 'subagent')
-                  OR (
-                    item.run_id IS NULL
-                    AND item.node_id IN (
-                      SELECT node_id FROM orchestration_v2_projection_nodes
-                      WHERE thread_id = ${threadId}
-                        AND run_id IS NULL
-                        AND kind = 'root_turn'
-                        AND status IN ('pending', 'running', 'waiting')
-                    )
-                  )
-                )
+              WHERE ${recoveryTurnItems}
               ORDER BY item.ordinal ASC, item.turn_item_id ASC
             `,
           ]);

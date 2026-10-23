@@ -369,6 +369,113 @@ it.effect("selects unfinished recovery work without reading settled thread histo
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("recovers a native subagent's live runless turn among its settled ones", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    const parent = yield* createThread("native-parent");
+    const child = yield* createThread("native-child", {
+      lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+    });
+    yield* createRun(parent, "completed");
+    yield* projections.apply({
+      id: EventId.make("event:native-child-task"),
+      type: "subagent.updated",
+      threadId: parent,
+      occurredAt: now,
+      payload: {
+        id: NodeId.make("node:native-child-task"),
+        threadId: parent,
+        runId: null,
+        parentNodeId: NodeId.make("node:native-parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: child,
+        nativeTaskRef: null,
+        prompt: "Work.",
+        title: null,
+        model: null,
+        status: "completed",
+        result: "Done.",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      },
+    });
+    // A provider-native child has no runs, so all of its turns are runless.
+    const rootTurn = (index: number, status: "completed" | "running") => {
+      const id = NodeId.make(`node:native-child:${index}`);
+      return projections.apply({
+        id: EventId.make(`event:native-child:${index}:${status}`),
+        type: "node.updated",
+        threadId: child,
+        nodeId: id,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id,
+          threadId: child,
+          runId: null,
+          parentNodeId: null,
+          rootNodeId: id,
+          kind: "root_turn",
+          status,
+          countsForRun: true,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: status === "completed" ? now : null,
+        },
+      });
+    };
+    for (let index = 0; index < 50; index += 1) yield* rootTurn(index, "completed");
+    assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), []);
+
+    yield* rootTurn(50, "running");
+    yield* projections.apply({
+      id: EventId.make("event:native-child:item"),
+      type: "turn-item.updated",
+      threadId: child,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make("item:native-child:message"),
+        threadId: child,
+        runId: null,
+        nodeId: NodeId.make("node:native-child:50"),
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        type: "reasoning",
+        status: "running",
+        title: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        text: "Thinking.",
+        streaming: true,
+      },
+    });
+    assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), [child]);
+    const recovery = yield* projections.getRuntimeRecoveryProjection(child);
+    assert.deepEqual(
+      recovery.nodes.map((node) => node.id),
+      [NodeId.make("node:native-child:50")],
+    );
+    assert.deepEqual(
+      recovery.turnItems.map((item) => item.id),
+      [TurnItemId.make("item:native-child:message")],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("recovers terminal subagent results until their cross-thread transfer exists", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
