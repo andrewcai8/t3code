@@ -202,6 +202,8 @@ it.effect(
       expect(labels(fake)).toEqual([
         "create",
         "upload",
+        "t3-verify",
+        "saveDirectory",
         "t3-apply",
         "t3-place",
         "t3-launch",
@@ -359,9 +361,13 @@ it.effect("inputs reach the copy at their own paths, and outputs come back to th
     expect(labels(fake)).toEqual([
       "create",
       "upload",
+      "t3-verify",
+      "saveDirectory",
       "t3-apply",
       "t3-place",
       "upload",
+      "t3-verify",
+      "saveDirectory",
       "t3-inputs",
       "t3-launch",
       "stream",
@@ -514,6 +520,7 @@ it.effect("each finished copy logs its caller, command, size, exit code and phas
           cpu: 8,
           memoryMiB: 16384,
           shippedBytes: expect.any(Number),
+          uploadedBytes: expect.any(Number),
           exitCode: 3,
           timedOut: false,
           queuedMs: expect.any(Number),
@@ -619,8 +626,9 @@ it.effect(
       expect(NodeFS.readFileSync(NodePath.join(copiedTo, "coverage", "lcov.info"), "utf8")).toBe(
         "TN:\n",
       );
-      // Both jobs ran in the same shipped state, in the thread's worktree.
-      expect(fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+      // Both jobs ran in the same shipped state, sent from this host once, in the thread's worktree.
+      expect(fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.op === "mount")).toHaveLength(1);
       expect(
         fake.calls
           .filter((call) => call.argv?.[3] === "t3-launch")
@@ -1034,5 +1042,147 @@ it.effect("at start the sweep ends sandboxes no record owns and keeps adopted on
     yield* start;
     expect((yield* Effect.promise(() => swept)).sandboxId).toBe(orphan);
     expect(fake.running()).toEqual(new Set([kept]));
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+/** What each `t3-inputs` step unpacked: every archive it was given, listed and read back. */
+const unpackedInputs = (fake: ReturnType<typeof makeFakeSandboxes>) => {
+  const unpacked: Array<ReadonlyArray<string>> = [];
+  fake.onExec(isStep("t3-inputs"), {
+    run: (argv, uploaded) => {
+      unpacked.push(
+        argv.slice(4).map((path) => {
+          const dir = tempDir("unpacked");
+          NodeChildProcess.execFileSync("tar", ["-xzf", uploaded.get(path)!, "-C", dir]);
+          return NodeChildProcess.execFileSync(
+            "find",
+            [".", "-type", "f", "-exec", "cat", "{}", ";"],
+            {
+              cwd: dir,
+              encoding: "utf8",
+            },
+          );
+        }),
+      );
+      return 0;
+    },
+  });
+  return unpacked;
+};
+
+const callsOf = (fake: ReturnType<typeof makeFakeSandboxes>, op: string, from = 0) =>
+  fake.calls.slice(from).filter((call) => call.op === op);
+
+it.effect("a second job with the same state and inputs uploads nothing from this host", () => {
+  const { root, fake, layer, start } = setup();
+  const { logs, layer: logging } = capturedLogs();
+  const inputs = tempDir("inputs");
+  const snapshot = NodePath.join(inputs, "snapshot");
+  NodeFS.mkdirSync(snapshot);
+  NodeFS.writeFileSync(NodePath.join(snapshot, "moment.json"), '{"moment":1}\n');
+  const owners = NodePath.join(inputs, "owners.json");
+  NodeFS.writeFileSync(owners, "[1]\n");
+  return Effect.gen(function* () {
+    const unpacked = unpackedInputs(fake);
+    const forks = yield* start;
+    const run = () => forks.exec(request(root, { inputs: [snapshot, owners] }), watcher().observer);
+
+    expect(yield* run()).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(callsOf(fake, "upload")).toHaveLength(3);
+    expect(callsOf(fake, "saveDirectory")).toHaveLength(3);
+
+    const second = fake.calls.length;
+    expect(yield* run()).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(callsOf(fake, "upload", second)).toEqual([]);
+    expect(callsOf(fake, "mount", second)).toHaveLength(3);
+    // The same content as the first job's, from the mounted copies.
+    expect(unpacked[1]).toEqual(unpacked[0]);
+    expect(unpacked[1]).toEqual(['{"moment":1}\n', "[1]\n"]);
+    const apply = fake.calls.slice(second).find((call) => call.argv?.[3] === "t3-apply");
+    expect(apply?.argv?.[4]).toMatch(/^\/tmp\/t3-cache\/[0-9a-f]{64}\/archive$/);
+
+    // Only what changed goes up again.
+    NodeFS.writeFileSync(owners, "[2]\n");
+    const third = fake.calls.length;
+    yield* run();
+    expect(callsOf(fake, "upload", third)).toHaveLength(1);
+    expect(unpacked[2]).toEqual(['{"moment":1}\n', "[2]\n"]);
+
+    const finished = logs.filter(([text]) => text === "worktree fork job finished");
+    expect(
+      finished.map(([, fields]) => (fields as { uploadedBytes: number }).uploadedBytes),
+    ).toEqual([expect.any(Number), 0, expect.any(Number)]);
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(layer, logging)));
+});
+
+it.effect("jobs that need the same new content at once upload it once", () => {
+  const { root, fake, layer, start } = setup();
+  const input = NodePath.join(tempDir("inputs"), "policy.json");
+  NodeFS.writeFileSync(input, "{}\n");
+  return Effect.gen(function* () {
+    const unpacked = unpackedInputs(fake);
+    const forks = yield* start;
+    const creating = fake.holdAll("create");
+    const jobs = yield* Effect.all(
+      Array.from({ length: 4 }, () =>
+        forks.exec(request(root, { inputs: [input] }), watcher().observer),
+      ),
+      { concurrency: "unbounded" },
+    ).pipe(Effect.forkChild);
+    // Every job has its copy before any uploads, so all four need the content at once.
+    yield* Effect.promise(() => creating.reached(4));
+    creating.open();
+    const outcomes = yield* Fiber.join(jobs);
+
+    expect(outcomes.map((outcome) => outcome._tag)).toEqual([
+      "Exited",
+      "Exited",
+      "Exited",
+      "Exited",
+    ]);
+    // One for the state and one for the input, then the other three mount both.
+    expect(callsOf(fake, "upload")).toHaveLength(2);
+    expect(callsOf(fake, "saveDirectory")).toHaveLength(2);
+    expect(callsOf(fake, "mount")).toHaveLength(6);
+    expect(unpacked).toEqual(Array.from({ length: 4 }, () => ["{}\n"]));
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("an upload cut short is never served to another job", () => {
+  const { root, fake, layer, start } = setup();
+  return Effect.gen(function* () {
+    const forks = yield* start;
+
+    // The stream broke and the upload failed: nothing ran, and nothing was kept.
+    fake.failNext("upload", new Error("stream reset"));
+    const failed = yield* forks.exec(request(root), watcher().observer);
+    expect(failed._tag === "NotStarted" ? failed.message : failed._tag).toMatch(
+      /could not receive this worktree's state/,
+    );
+
+    // The upload "succeeded" but landed garbled: its check fails, so it goes up again directly.
+    fake.garbleNextUpload();
+    const garbled = fake.calls.length;
+    expect(yield* forks.exec(request(root), watcher().observer)).toMatchObject({
+      _tag: "Exited",
+    });
+    expect(labels(fake).slice(garbled, garbled + 5)).toEqual([
+      "create",
+      "upload",
+      "t3-verify",
+      "upload",
+      "t3-apply",
+    ]);
+    expect(fake.calls.slice(garbled).find((call) => call.argv?.[3] === "t3-apply")?.argv?.[4]).toBe(
+      "/tmp/t3-state.tar",
+    );
+    expect(callsOf(fake, "saveDirectory")).toEqual([]);
+
+    // So the next job uploads its own, which is the first one kept.
+    const next = fake.calls.length;
+    yield* forks.exec(request(root), watcher().observer);
+    expect(callsOf(fake, "upload", next)).toHaveLength(1);
+    expect(callsOf(fake, "mount", next)).toEqual([]);
+    expect(callsOf(fake, "saveDirectory", next)).toHaveLength(1);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });

@@ -6,6 +6,7 @@
  *
  * @module worktreeForksTestkit
  */
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -52,12 +53,20 @@ export const makeFakeSandboxes = () => {
   const calls: Array<FakeCall> = [];
   const sandboxes = new Map<string, { readonly tags: Readonly<Record<string, string>> }>();
   const images = new Set<string>();
+  /** Each directory image's files, by their path under it. */
+  const directories = new Map<string, ReadonlyMap<string, string>>();
+  let garbleNext = false;
   const rules: Array<{
     readonly match: (argv: ReadonlyArray<string>) => boolean;
     readonly reply: FakeExecReply;
   }> = [];
   const failures = new Map<string, Error>();
   const holds = new Map<string, ReturnType<typeof gate<void>>>();
+  /** Ops whose every call waits until the test opens them, counting the calls that arrive. */
+  const barriers = new Map<
+    string,
+    { readonly opened: Promise<void>; arrived: number; readonly arrivals: Array<() => void> }
+  >();
   const waiters: Array<{ readonly op: string; readonly resolve: (call: FakeCall) => void }> = [];
   const record = (call: FakeCall) => {
     calls.push(call);
@@ -82,6 +91,12 @@ export const makeFakeSandboxes = () => {
     if (failure !== undefined) {
       failures.delete(op);
       throw failure;
+    }
+    const barrier = barriers.get(op);
+    if (barrier !== undefined) {
+      barrier.arrived += 1;
+      for (const arrival of barrier.arrivals) arrival();
+      await barrier.opened;
     }
     const hold = holds.get(op);
     if (hold !== undefined) {
@@ -113,6 +128,19 @@ export const makeFakeSandboxes = () => {
       }
       if (argv[3] === "t3-exited")
         return { exitCode: exited.has(sandboxId) ? 0 : 1, stdout: "", stderr: "" };
+      // Checks the upload's digest and moves it into its directory, as VERIFY_SCRIPT does.
+      if (argv[3] === "t3-verify" && !rules.some((rule) => rule.match(argv))) {
+        const [, , , , uploaded, digest, stage] = argv as Array<string>;
+        const local = uploads.get(uploaded!);
+        const actual =
+          local === undefined
+            ? null
+            : NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(local)).digest("hex");
+        if (actual !== digest) return { exitCode: 1, stdout: "", stderr: "FAILED" };
+        uploads.delete(uploaded!);
+        uploads.set(`${stage}/archive`, local!);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       const text = (stream: "stdout" | "stderr") =>
         (reply.chunks ?? [])
           .filter(([from]) => from === stream)
@@ -137,6 +165,10 @@ export const makeFakeSandboxes = () => {
       await step("upload");
       const copy = `${NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-upload-"))}/file`;
       NodeFS.copyFileSync(localPath, copy);
+      if (garbleNext) {
+        garbleNext = false;
+        NodeFS.truncateSync(copy, Math.floor(NodeFS.statSync(copy).size / 2));
+      }
       uploads.set(remotePath, copy);
     },
     download: async (sandboxId, _remotePath, localPath) => {
@@ -154,6 +186,28 @@ export const makeFakeSandboxes = () => {
     deleteImage: async (imageId) => {
       record({ op: "deleteImage", imageId });
       images.delete(imageId);
+      directories.delete(imageId);
+    },
+    saveDirectory: async (sandboxId, path) => {
+      record({ op: "saveDirectory", sandboxId, argv: [path] });
+      await step("saveDirectory");
+      const imageId = `im-dir-${++next}`;
+      directories.set(
+        imageId,
+        new Map(
+          [...uploads]
+            .filter(([remote]) => remote.startsWith(`${path}/`))
+            .map(([remote, local]) => [remote.slice(path.length), local]),
+        ),
+      );
+      return imageId;
+    },
+    mountImage: async (sandboxId, path, imageId) => {
+      record({ op: "mount", sandboxId, argv: [path], imageId });
+      await step("mount");
+      const files = directories.get(imageId);
+      if (files === undefined) throw new Error(`Could not find image with ID ${imageId}`);
+      for (const [name, local] of files) uploads.set(`${path}${name}`, local);
     },
     terminate: async (sandboxId) => {
       record({ op: "terminate", sandboxId });
@@ -171,18 +225,42 @@ export const makeFakeSandboxes = () => {
     port,
     calls,
     images,
+    /** Directory images Modal still holds. */
+    directories,
     /** Sandboxes created and not yet terminated. */
     running: () => new Set(sandboxes.keys()),
     /** The first matching rule answers an exec; anything unmatched exits 0. */
     onExec: (match: (argv: ReadonlyArray<string>) => boolean, reply: FakeExecReply) =>
       void rules.unshift({ match, reply }),
-    failNext: (op: "create" | "upload" | "saveDisk" | "stream", error: Error) =>
-      void failures.set(op, error),
+    failNext: (
+      op: "create" | "upload" | "saveDisk" | "stream" | "saveDirectory" | "mount",
+      error: Error,
+    ) => void failures.set(op, error),
+    /** The next upload lands cut short, as a broken stream that resumed wrongly would leave it. */
+    garbleNextUpload: () => void (garbleNext = true),
     /** Holds the next call of `op` until the returned gate opens. */
-    hold: (op: "create" | "saveDisk" | "stream" | "download") => {
+    hold: (op: "create" | "saveDisk" | "stream" | "download" | "saveDirectory") => {
       const held = gate<void>();
       holds.set(op, held);
       return held;
+    },
+    /** Holds every call of `op` until opened; `reached(n)` settles once `n` calls wait. */
+    holdAll: (op: "create") => {
+      const held = gate<void>();
+      const barrier = { opened: held.value, arrived: 0, arrivals: [] as Array<() => void> };
+      barriers.set(op, barrier);
+      return {
+        reached: (count: number) =>
+          new Promise<void>((resolve) => {
+            const arrival = () => void (barrier.arrived >= count && resolve());
+            barrier.arrivals.push(arrival);
+            arrival();
+          }),
+        open: () => {
+          barriers.delete(op);
+          held.open();
+        },
+      };
     },
     /** Settles at the next call of `op`. */
     next: (op: string) => new Promise<FakeCall>((resolve) => void waiters.push({ op, resolve })),

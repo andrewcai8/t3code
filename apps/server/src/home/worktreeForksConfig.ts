@@ -148,6 +148,8 @@ export type ForkSandboxes = Pick<
   | "download"
   | "saveDisk"
   | "deleteImage"
+  | "saveDirectory"
+  | "mountImage"
   | "terminate"
   | "list"
 >;

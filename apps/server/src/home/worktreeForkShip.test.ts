@@ -136,8 +136,19 @@ it.effect(
       });
       const shipment = yield* shipState(checkout, first, tempDir("ship"));
       expect(shipment.driftDirs).toEqual(["."]);
+      const packed = yield* shipment.state.pack;
+      expect(packed.key).toBe(shipment.state.key);
+      // The same state keys the same, so its copies share one upload; any change keys anew.
+      expect((yield* shipState(checkout, first, tempDir("ship"))).state.key).toBe(
+        shipment.state.key,
+      );
+      write(host, "b.txt", "b changed again\n");
+      expect((yield* shipState(checkout, first, tempDir("ship"))).state.key).not.toBe(
+        shipment.state.key,
+      );
+      write(host, "b.txt", "b unstaged\n");
 
-      const installs = applyInCopy(applyArgv(shipment, shipment.archive));
+      const installs = applyInCopy(applyArgv(shipment, packed.archive));
 
       expect(git(base, "rev-parse", "HEAD")).toBe(checkout.head);
       expect(git(base, "symbolic-ref", "--short", "HEAD")).toBe("feature");
@@ -161,12 +172,13 @@ it.effect("a HEAD the base already contains is checked out by commit, with no bu
     );
     expect(checkout.branch).toBeNull();
     const shipment = yield* shipState(checkout, second, tempDir("ship"));
-    const listed = NodeChildProcess.execFileSync("tar", ["-tf", shipment.archive], {
+    const { archive } = yield* shipment.state.pack;
+    const listed = NodeChildProcess.execFileSync("tar", ["-tf", archive], {
       encoding: "utf8",
     });
     expect(listed).not.toContain("head.bundle");
     expect(shipment.driftDirs).toEqual([]);
-    applyInCopy(applyArgv(shipment, shipment.archive));
+    applyInCopy(applyArgv(shipment, archive));
     expect(git(base, "rev-parse", "HEAD")).toBe(first);
     expect(visibleFiles(base)).toEqual(visibleFiles(host));
   }).pipe(Effect.provide(runner)),
