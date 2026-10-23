@@ -234,7 +234,7 @@ export const shipState = Effect.fn("WorktreeForks.shipState")(function* (
   );
   // HEAD and the base name the bundle; the rest is what delta.tgz and `deleted` hold.
   const stateKey = contentKey(
-    ["state", baseSha, checkout.head, contained.code === 1, deleted],
+    ["state", baseSha, checkout.head, contained.code === 1 ? "bundle" : "", ...deleted],
     changed.map((path) => ({ name: path, path: NodePath.join(root, path) })),
   );
   const key = yield* stateKey;
@@ -348,14 +348,16 @@ const hashTree = async (
  * The sha256 of `context` and each entry's tree, read from `path` and named `name`, the path it is
  * packed under. File times are left out: what a copy runs is the same without them.
  */
-export const contentKey = Effect.fnUntraced(function* (
-  context: ReadonlyArray<unknown>,
+const contentKey = Effect.fnUntraced(function* (
+  context: ReadonlyArray<string>,
   entries: ReadonlyArray<{ readonly name: string; readonly path: string }>,
 ) {
   const now = yield* Clock.currentTimeMillis;
   return yield* Effect.tryPromise({
     try: async () => {
-      const hash = NodeCrypto.createHash("sha256").update(JSON.stringify(context));
+      const hash = NodeCrypto.createHash("sha256").update(
+        `${context.length}\0${context.join("\0")}\0`,
+      );
       for (const entry of entries) await hashTree(hash, entry.name, entry.path, now);
       return hash.digest("hex");
     },

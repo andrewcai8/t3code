@@ -91,7 +91,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
 ) {
   const path = NodePath.join(stateDir, "worktree-forks", "upload-cache.json");
   const scope = NodeCrypto.createHash("sha256")
-    .update(JSON.stringify([host.modal.tokenId, host.modal.app, host.modal.environment ?? null]))
+    .update([host.modal.tokenId, host.modal.app, host.modal.environment ?? ""].join("\0"))
     .digest("hex");
   const index = new Map<string, Entry>();
   yield* Effect.try(() => {
