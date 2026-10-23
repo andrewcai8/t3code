@@ -39,6 +39,8 @@ Claude can still ask in **Full access** when its settings disable bypass permiss
 approval for an action. **Settings → General → New threads → Auto-approve Full access prompts**
 allows those requests automatically from the next turn, while questions from the agent, Plan mode,
 and a disabled bypass still ask.
+While a Claude approval is pending, type a text reply to decline that request and give feedback
+directly to the agent that asked, including a subagent. Other pending requests stay unanswered.
 
 Antigravity can still send native approval requests in **Full access**. It only offers remembered
 approvals for actions that support them.
