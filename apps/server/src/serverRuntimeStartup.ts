@@ -83,8 +83,9 @@ export class ServerRuntimeStartup extends Context.Service<
   }
 >()("t3/serverRuntimeStartup") {}
 
-// Work that ignores interruption must not hold shutdown past systemd's stop timeout.
-const PARKED_WORK_STOP_TIMEOUT = "5 seconds";
+// Work that ignores interruption must not hold shutdown inside the service launcher's 5 s
+// kill window. Child processes are force-killed after 1 s (see processRunner.ts).
+const PARKED_WORK_STOP_TIMEOUT = "1 second";
 
 interface QueuedCommand {
   readonly run: Effect.Effect<void, never>;
@@ -432,22 +433,27 @@ export const shutdownRuntime = Effect.fn("ServerRuntimeStartup.shutdownRuntime")
   readonly prepareForShutdown: Effect.Effect<void, PrepareError>;
   readonly shutdownSessions: Effect.Effect<void>;
 }) {
+  const workerFiber = yield* Ref.getAndSet(input.workerFiberRef, null);
+  if (workerFiber !== null) {
+    yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
+  }
   // Background loops live in layers that close after this one, so they would keep
-  // fetching, settling, and writing through every step below.
-  if (input.parkedWork !== undefined) {
+  // fetching, settling, and writing until the end of shutdown.
+  const stopParkedWork = Effect.gen(function* () {
+    if (input.parkedWork === undefined) return;
     // Detached, so the timeout can give up on a fiber still inside an uninterruptible step.
     const stopping = yield* FiberSet.clear(input.parkedWork).pipe(
       Effect.forkDetach({ startImmediately: true }),
     );
     yield* Fiber.await(stopping).pipe(Effect.timeoutOption(PARKED_WORK_STOP_TIMEOUT));
-  }
-  const workerFiber = yield* Ref.getAndSet(input.workerFiberRef, null);
-  if (workerFiber !== null) {
-    yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
-  }
-  // Restart intent must be durable before sessions record their release. The rest of
-  // recovery waits for startup, which reconciles every restart, crashed or not.
-  yield* input.prepareForShutdown.pipe(Effect.ensuring(input.shutdownSessions));
+  });
+  // Restart intent goes first: the service launcher SIGKILLs an updating server 5 s after
+  // SIGTERM, and a chat cut without it never resumes. Each write is its own transaction, so
+  // loops still running cannot tear it. It must also be durable before sessions record
+  // their release. The rest of recovery waits for startup, which reconciles every restart.
+  yield* input.prepareForShutdown.pipe(
+    Effect.ensuring(Effect.andThen(stopParkedWork, input.shutdownSessions)),
+  );
 });
 
 const runOrderedV2StartupPhases = Effect.fn("serverRuntimeStartup.runOrderedV2StartupPhases")(

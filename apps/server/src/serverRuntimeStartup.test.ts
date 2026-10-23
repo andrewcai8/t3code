@@ -271,7 +271,7 @@ it.effect("interrupts the effect worker when awareness relay startup fails", () 
   ),
 );
 
-it.effect("stops parked background work before saving restart intent on shutdown", () =>
+it.effect("saves restart intent, then stops parked work, then sessions on shutdown", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const steps: string[] = [];
@@ -297,42 +297,47 @@ it.effect("stops parked background work before saving restart intent on shutdown
         shutdownSessions: Effect.sync(() => steps.push("sessions stopped")),
       });
 
-      assert.deepEqual(steps, ["loop stopped", "restart intent saved", "sessions stopped"]);
+      assert.deepEqual(steps, ["restart intent saved", "loop stopped", "sessions stopped"]);
     }),
   ),
 );
 
-it.effect("does not let parked work that ignores interruption hold shutdown", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const parkedWork = yield* FiberSet.make();
-      const workerFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null);
-      const started = yield* Deferred.make<void>();
-      yield* Effect.provideService(
-        forkParked(
-          Deferred.succeed(started, undefined).pipe(
-            Effect.andThen(Effect.sleep("1 hour")),
-            Effect.uninterruptible,
+it.effect(
+  "records restart intent and finishes within 1 s when parked work ignores interruption",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const parkedWork = yield* FiberSet.make();
+        const workerFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null);
+        const started = yield* Deferred.make<void>();
+        yield* Effect.provideService(
+          forkParked(
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Effect.sleep("1 hour")),
+              Effect.uninterruptible,
+            ),
           ),
-        ),
-        ParkedWork,
-        parkedWork,
-      );
-      yield* Deferred.await(started);
-      const sessionsStopped = yield* Deferred.make<void>();
+          ParkedWork,
+          parkedWork,
+        );
+        yield* Deferred.await(started);
+        const intentWritten = yield* Deferred.make<void>();
+        const sessionsStopped = yield* Deferred.make<void>();
 
-      const shutdown = yield* ServerRuntimeStartup.shutdownRuntime({
-        parkedWork,
-        workerFiberRef,
-        prepareForShutdown: Effect.void,
-        shutdownSessions: Deferred.succeed(sessionsStopped, undefined).pipe(Effect.asVoid),
-      }).pipe(Effect.forkChild);
-      yield* TestClock.adjust("5 seconds");
-      yield* Fiber.join(shutdown);
-      assert.isTrue(yield* Deferred.isDone(sessionsStopped));
-      yield* TestClock.adjust("1 hour");
-    }),
-  ),
+        const shutdown = yield* ServerRuntimeStartup.shutdownRuntime({
+          parkedWork,
+          workerFiberRef,
+          prepareForShutdown: Deferred.succeed(intentWritten, undefined).pipe(Effect.asVoid),
+          shutdownSessions: Deferred.succeed(sessionsStopped, undefined).pipe(Effect.asVoid),
+        }).pipe(Effect.forkChild({ startImmediately: true }));
+        // The service launcher can SIGKILL at any moment from here, so no time may pass first.
+        assert.isTrue(yield* Deferred.isDone(intentWritten));
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(shutdown);
+        assert.isTrue(yield* Deferred.isDone(sessionsStopped));
+        yield* TestClock.adjust("1 hour");
+      }),
+    ),
 );
 
 it.effect("queues commands until startup signals readiness", () =>
