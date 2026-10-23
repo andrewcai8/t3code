@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -28,6 +29,9 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as ProcessRunner from "./processRunner.ts";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
@@ -239,6 +243,9 @@ const cleanupFixture = (
     worktreeAfterDays: 8,
     worktreeOnDelete: true,
   },
+  // Moves the sweep's clock forward so freshly written files look idle. A
+  // file's ctime cannot be backdated, only outwaited.
+  clockOffsetMs = 0,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -266,12 +273,26 @@ const cleanupFixture = (
     let projectRoots = [repo];
     let editBeforeRemoval = false;
     let openSessionCwd: string | null = null;
+    let lateClaim: string | null = null;
+    let worktreePathReads = 0;
     let sessionLive = true;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
+    const processRunner = yield* ProcessRunner.make();
+    const baseClock = yield* Clock.Clock;
+    // The base clock is a class, so its methods live on the prototype.
+    const sweepClock: Clock.Clock = Object.assign(Object.create(baseClock) as Clock.Clock, {
+      currentTimeMillis: Effect.map(
+        baseClock.currentTimeMillis,
+        (millis) => millis + clockOffsetMs,
+      ),
+      currentTimeMillisUnsafe: () => baseClock.currentTimeMillisUnsafe() + clockOffsetMs,
+    });
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
+      Effect.provideService(Clock.Clock, sweepClock),
+      Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
         execute: (input) =>
@@ -362,6 +383,8 @@ const cleanupFixture = (
               ? [
                   ...threads.flatMap((thread) => thread.worktreePath ?? []),
                   ...storedWorktreePaths,
+                  // Recorded after the sweep's first look at the threads.
+                  ...(++worktreePathReads > 1 && lateClaim !== null ? [lateClaim] : []),
                 ].map((worktreePath) => ({ worktreePath }))
               : [],
         )) as unknown as SqlClient.SqlClient),
@@ -427,6 +450,9 @@ const cleanupFixture = (
       setOpenSessionCwd: (cwd: string | null) => {
         openSessionCwd = cwd;
       },
+      claimDuringSweep: (worktreePath: string) => {
+        lateClaim = worktreePath;
+      },
       fullStatusCalls: () => fullStatusCalls,
       snapshotReads: () => snapshotReads,
       activate: (domainEvents: Stream.Stream<OrchestrationV2DomainEvent>) => {
@@ -470,6 +496,7 @@ const runCleanupTest = <A, E>(
     | GitVcsDriver.GitVcsDriver
     | Path.Path
     | Scope.Scope
+    | ChildProcessSpawner.ChildProcessSpawner
   >,
 ) => effect.pipe(Effect.provide(cleanupTestLayer), Effect.scoped);
 
@@ -1786,3 +1813,197 @@ it.live("keeps saved usage data when removing a settled checkout", () =>
     }),
   ),
 );
+
+describe("orphan worktree removal", () => {
+  const OLD_DAYS = 30;
+  // No thread rule is on, so only the orphan setting makes the sweep look at these.
+  // The sweep's clock runs OLD_DAYS ahead, so a checkout made now already looks idle.
+  const orphanFixture = (overrides: Partial<StorageCleanupSettings> = {}) =>
+    Effect.gen(function* () {
+      const fixture = yield* cleanupFixture(
+        { ...DEFAULT_SERVER_SETTINGS.storageCleanup, orphanWorktreeAfterDays: 7, ...overrides },
+        OLD_DAYS * DAY_MS,
+      );
+      fixture.setThreads([]);
+      const orphan = `${fixture.config.worktreesDir}/agent-made`;
+      yield* fixture.command(fixture.repo, ["worktree", "add", "-b", "agent-made", orphan]);
+      // Sets every mtime in the checkout, its folder included.
+      const setModified = (target: string, offsetMs: number) =>
+        Effect.gen(function* () {
+          // utimes reads a number as seconds.
+          const when = ((yield* Clock.currentTimeMillis) + offsetMs) / 1000;
+          for (const name of yield* fixture.fs.readDirectory(target))
+            yield* fixture.fs.utimes(`${target}/${name}`, when, when);
+          yield* fixture.fs.utimes(target, when, when);
+        });
+      const entry = (report: { entries: ReadonlyArray<{ path: string | null }> }) =>
+        report.entries.find((candidate) => candidate.path === orphan);
+      return { ...fixture, orphan, setModified, entry };
+    });
+
+  it.live("removes an orphan linked worktree that has been idle past the limit", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, command, repo, orphan, entry } = yield* orphanFixture();
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "removed",
+          reason: expect.stringContaining("nothing in it changed in the last 7 days"),
+          threadId: null,
+        });
+        expect(report.counts.removed).toBe(1);
+        expect(yield* fs.exists(orphan)).toBe(false);
+        expect((yield* command(repo, ["worktree", "list", "--porcelain"])).stdout).not.toContain(
+          "agent-made",
+        );
+        // The branch is not removed with its checkout.
+        expect((yield* command(repo, ["branch", "--list", "agent-made"])).stdout).toContain(
+          "agent-made",
+        );
+        expect(yield* fs.exists(`${repo}/tracked.txt`)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an orphan with a file modified inside the limit", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, entry } = yield* orphanFixture();
+        // Ignored, so only its age separates this checkout from an idle one.
+        yield* fs.makeDirectory(`${orphan}/dist`);
+        yield* fs.writeFileString(`${orphan}/dist/build.log`, "built\n");
+        const recent = ((yield* Clock.currentTimeMillis) + (OLD_DAYS - 1) * DAY_MS) / 1000;
+        yield* fs.utimes(`${orphan}/dist/build.log`, recent, recent);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: "No thread uses this worktree, but something in it changed in the last 7 days",
+        });
+        expect(report.counts.removed).toBe(0);
+        expect(yield* fs.readFileString(`${orphan}/dist/build.log`)).toBe("built\n");
+      }),
+    ),
+  );
+
+  it.live("keeps an orphan whose old files were copied in recently", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        // Copies made with `rsync -a`, `tar x` or `cp -p` keep their old mtime but get a fresh
+        // ctime. Here the clock reaches 30 days past that ctime, inside the 60-day limit.
+        const { service, fs, orphan, setModified, entry } = yield* orphanFixture({
+          orphanWorktreeAfterDays: 60,
+        });
+        yield* setModified(orphan, -100 * DAY_MS);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining("changed in the last 60 days"),
+        });
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live.each([
+    { keepWhen: "uncommitted-changes", file: "tracked.txt", reason: "has uncommitted changes" },
+    { keepWhen: "any-local-files", file: ".env", reason: "has ignored files" },
+  ] as const)("keeps an idle orphan when the $keepWhen rule protects it", (rule) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, entry, setPolicy } = yield* orphanFixture();
+        setPolicy(rule.keepWhen);
+        yield* fs.writeFileString(`${orphan}/${rule.file}`, "edited\n");
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining(rule.reason),
+        });
+        expect(yield* fs.readFileString(`${orphan}/${rule.file}`)).toBe("edited\n");
+      }),
+    ),
+  );
+
+  it.live("keeps an idle orphan whose detached head holds commits no branch has", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, command, entry } = yield* orphanFixture();
+        yield* command(orphan, ["switch", "--detach"]);
+        yield* command(orphan, ["commit", "--allow-empty", "-m", "stranded"]);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining("commits that are not on any branch"),
+        });
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an idle orphan while a process runs inside it", (context) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        if (yield* HostProcess.isWindows) return context.skip();
+        const { service, fs, orphan, entry } = yield* orphanFixture();
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        yield* spawner.spawn(ChildProcess.make("sleep", ["60"], { cwd: orphan }));
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining("a running process"),
+        });
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an idle orphan that a thread claims during the sweep", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, claimDuringSweep, entry } = yield* orphanFixture();
+        claimDuringSweep(orphan);
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: expect.stringContaining("a thread started using it"),
+        });
+        expect(report.counts.removed).toBe(0);
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("keeps an idle folder that is not a git worktree", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, config } = yield* orphanFixture();
+        const folder = `${config.worktreesDir}/repository/leftover`;
+        yield* fs.makeDirectory(folder, { recursive: true });
+        yield* fs.writeFileString(`${folder}/payload`, "leftover data");
+        const report = yield* service.runNow;
+        expect(report.entries.find((entry) => entry.path === folder)).toMatchObject({
+          outcome: "kept",
+          reason: "No thread uses this folder, and it isn't a git worktree",
+        });
+        expect(yield* fs.readFileString(`${folder}/payload`)).toBe("leftover data");
+      }),
+    ),
+  );
+
+  it.live("only reports an idle orphan when the setting is off", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, orphan, entry } = yield* orphanFixture({
+          orphanWorktreeAfterDays: null,
+          worktreeAfterDays: 8,
+        });
+        const report = yield* service.runNow;
+        expect(entry(report)).toMatchObject({
+          outcome: "kept",
+          reason: "No thread uses this worktree",
+        });
+        expect(report.counts.removed).toBe(0);
+        expect(yield* fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+});

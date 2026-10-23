@@ -310,6 +310,7 @@ function CleanupSection() {
       rules.worktreeOnDelete ||
       rules.worktreeUnchanged;
     return (
+      settings.storageCleanup.orphanWorktreeAfterDays !== null ||
       settings.storageCleanup.browserArtifactsAfterDays !== null ||
       settings.storageCleanup.logsAfterDays !== null ||
       enabled(resolveWorktreeCleanup(settings, null)) ||
@@ -628,6 +629,25 @@ export function StorageSettingsPanel() {
                 />
               }
             />
+            {!isProjectScope &&
+              connectedEnvironments.every(
+                (environment) =>
+                  environment.serverConfig?.environment.capabilities.orphanWorktreeCleanup === true,
+              ) && (
+                <SettingsRow
+                  title="Delete unused worktrees"
+                  status={ruleStatus("orphanWorktreeAfterDays")}
+                  description="Remove git worktrees that no thread uses, such as ones agents create themselves, once nothing in them has changed for this many days. Worktrees with local changes or a running process are kept, and other folders are only listed."
+                  serverScoped
+                  control={
+                    <RetentionControl
+                      label="Delete unused worktrees"
+                      value={settings.orphanWorktreeAfterDays}
+                      onChange={(orphanWorktreeAfterDays) => update({ orphanWorktreeAfterDays })}
+                    />
+                  }
+                />
+              )}
             {connectedEnvironments.every(
               (environment) =>
                 environment.serverConfig?.environment.capabilities.storageCleanupRun === true,
