@@ -496,6 +496,7 @@ const runCleanupTest = <A, E>(
     | GitVcsDriver.GitVcsDriver
     | Path.Path
     | Scope.Scope
+    | ChildProcessSpawner.ChildProcessSpawner
   >,
 ) => effect.pipe(Effect.provide(cleanupTestLayer), Effect.scoped);
 
@@ -1829,7 +1830,8 @@ describe("orphan worktree removal", () => {
       // Sets every mtime in the checkout, its folder included.
       const setModified = (target: string, offsetMs: number) =>
         Effect.gen(function* () {
-          const when = new Date((yield* Clock.currentTimeMillis) + offsetMs);
+          // utimes reads a number as seconds.
+          const when = ((yield* Clock.currentTimeMillis) + offsetMs) / 1000;
           for (const name of yield* fixture.fs.readDirectory(target))
             yield* fixture.fs.utimes(`${target}/${name}`, when, when);
           yield* fixture.fs.utimes(target, when, when);
@@ -1870,7 +1872,7 @@ describe("orphan worktree removal", () => {
         // Ignored, so only its age separates this checkout from an idle one.
         yield* fs.makeDirectory(`${orphan}/dist`);
         yield* fs.writeFileString(`${orphan}/dist/build.log`, "built\n");
-        const recent = new Date((yield* Clock.currentTimeMillis) + (OLD_DAYS - 1) * DAY_MS);
+        const recent = ((yield* Clock.currentTimeMillis) + (OLD_DAYS - 1) * DAY_MS) / 1000;
         yield* fs.utimes(`${orphan}/dist/build.log`, recent, recent);
         const report = yield* service.runNow;
         expect(entry(report)).toMatchObject({
