@@ -47,8 +47,8 @@ if ! [ -x "$real" ]; then
   old_ifs=$IFS
   IFS=:
   for dir in $PATH; do
-    # $0 too: a container that mounts this file elsewhere would otherwise exec it forever.
-    if [ -n "$dir" ] && [ -f "$dir/bun" ] && [ -x "$dir/bun" ] && ! [ "$dir/bun" -ef "$shim" ] && ! [ "$dir/bun" -ef "$0" ]; then
+    # Skip every copy of this shim, wherever it is mounted, or two copies exec each other forever.
+    if [ -n "$dir" ] && [ -f "$dir/bun" ] && [ -x "$dir/bun" ] && ! [ "$dir/bun" -ef "$shim" ] && ! [ "$dir/bun" -ef "$0" ] && ! head -c 64 "$dir/bun" 2>/dev/null | grep -q 't3-bun-shim'; then
       real=$dir/bun
       break
     fi
