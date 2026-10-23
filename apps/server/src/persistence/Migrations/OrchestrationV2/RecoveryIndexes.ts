@@ -21,6 +21,7 @@ export default Effect.gen(function* () {
     ON orchestration_v2_projection_runtime_requests(thread_id)
     WHERE status = 'pending'
   `;
+  // Restart recovery names this index with INDEXED BY (ProjectionStore.ts); renaming it breaks recovery.
   yield* sql`
     CREATE INDEX orchestration_v2_projection_turn_items_recovery_idx
     ON orchestration_v2_projection_turn_items(thread_id)
