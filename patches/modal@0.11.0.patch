@@ -1,0 +1,69 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 603ca6c..5954bd0 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -70858,12 +70858,13 @@ function bytesSource(bytes) {
+     }
+   };
+ }
+-function fileHandleSource(handle) {
++// Each read opens the file again. Node closes a FileHandle when a read stream on it is
++// destroyed, autoClose: false or not, so resuming a broken upload from one handle reads fd -1.
++function pathSource(localPath) {
+   return {
+     readFrom(offset) {
+-      return handle.createReadStream({
++      return (0, import_node_fs2.createReadStream)(localPath, {
+         start: offset,
+-        autoClose: false,
+         highWaterMark: STREAMING_STDIN_CHUNK_SIZE
+       });
+     }
+@@ -70899,7 +70900,7 @@ var SandboxFilesystem = class {
+     const handle = await (0, import_promises2.open)(localPath, "r");
+     try {
+       await this.#execFsToolWrite(
+-        fileHandleSource(handle),
++        pathSource(localPath),
+         remotePath,
+         "copyFromLocal"
+       );
+diff --git a/dist/index.js b/dist/index.js
+index 5a84b8d..b484870 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -70293,7 +70293,7 @@ import { v4 as uuidv42 } from "uuid";
+ 
+ // src/sandbox_fs.ts
+ import { randomBytes } from "node:crypto";
+-import { createWriteStream } from "node:fs";
++import { createReadStream, createWriteStream } from "node:fs";
+ import { mkdir, open, rename, rm, unlink } from "node:fs/promises";
+ import { Writable } from "node:stream";
+ import { dirname } from "node:path";
+@@ -70776,12 +70776,13 @@ function bytesSource(bytes) {
+     }
+   };
+ }
+-function fileHandleSource(handle) {
++// Each read opens the file again. Node closes a FileHandle when a read stream on it is
++// destroyed, autoClose: false or not, so resuming a broken upload from one handle reads fd -1.
++function pathSource(localPath) {
+   return {
+     readFrom(offset) {
+-      return handle.createReadStream({
++      return createReadStream(localPath, {
+         start: offset,
+-        autoClose: false,
+         highWaterMark: STREAMING_STDIN_CHUNK_SIZE
+       });
+     }
+@@ -70817,7 +70818,7 @@ var SandboxFilesystem = class {
+     const handle = await open(localPath, "r");
+     try {
+       await this.#execFsToolWrite(
+-        fileHandleSource(handle),
++        pathSource(localPath),
+         remotePath,
+         "copyFromLocal"
+       );
