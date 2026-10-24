@@ -366,6 +366,7 @@ patchedDependencies:
   mdast-util-math@3.0.0: afe6b2c89e1eaddfd3c90cf2723f12c9a17d513e65beff51653781486013251c
   micromark-extension-gfm-table@2.1.1: 9ad23a530e45d9f83cba1da8654fe16d5af8b59d5c73d5c7a7c91fd25b9be1d8
   micromark-extension-llm-math@3.1.0: 49ab4815c18b003f6af998dcc6c258c17a21b50b2cc87745f12d4bd8b6d591f9
+  modal@0.11.0: a2d55a893ecd458a25ec5f84e78a654cf65ff0eff150c022f507a48bd0f243b2
   node-pty@1.2.0-beta.15: f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651
   react-native-gesture-handler@3.3.0: abe20e1d1c23549297cbbc818e14fe479b41455930d9663135d6b40fe359b626
   react-native-image-viewing@0.2.2: 419f35ee91eac88ced9438058281db5eb09d9c799d8974c1172926068c9448cf
@@ -929,7 +930,7 @@ importers:
         version: 6.2.2
       modal:
         specifier: 0.11.0
-        version: 0.11.0
+        version: 0.11.0(patch_hash=a2d55a893ecd458a25ec5f84e78a654cf65ff0eff150c022f507a48bd0f243b2)
       node-pty:
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15(patch_hash=f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651)
@@ -20601,7 +20602,7 @@ snapshots:
     dependencies:
       minimist: 1.2.8
 
-  modal@0.11.0:
+  modal@0.11.0(patch_hash=a2d55a893ecd458a25ec5f84e78a654cf65ff0eff150c022f507a48bd0f243b2):
     dependencies:
       cbor-x: 1.6.8
       long: 5.3.2

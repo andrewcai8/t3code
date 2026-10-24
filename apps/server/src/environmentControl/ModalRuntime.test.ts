@@ -3,8 +3,10 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 import { ProvisionOperation } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { type ContainerProcess, SandboxFilesystem } from "modal";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { ProvisionedSandboxMissing } from "./driver.ts";
@@ -496,58 +498,42 @@ describe("modalEgress", () => {
 
 describe("uploadFile", () => {
   /**
-   * copyFromLocal as Modal's SDK 0.11.0 does it: one FileHandle for every attempt, a read stream
-   * per attempt with `autoClose: false`, and a resume from the same handle after the first
-   * attempt's stream breaks, as a busy host's uploads do.
+   * The patched SDK's own copyFromLocal, with a stdin stream that breaks after its first chunk and
+   * resumes from the server's offset, as uploads from a busy host do.
    */
-  const sdkLikeSandbox = (copied: Array<string>) => {
-    let broken = false;
-    return {
-      filesystem: {
-        copyFromLocal: async (localPath: string) => {
-          const handle = await NodeFSP.open(localPath, "r");
-          try {
-            // Each upload's first stream breaks after its first chunk, then resumes on the handle.
-            const breaks = !broken;
-            broken = true;
-            const chunks: Array<Buffer> = [];
-            const first = handle.createReadStream({ autoClose: false });
-            const closed = new Promise<void>((resolve) => first.once("close", () => resolve()));
-            // The broken attempt's error is the resumable one the SDK swallows.
-            await (async () => {
-              for await (const chunk of first) {
-                chunks.push(chunk as Buffer);
-                if (breaks) break;
-              }
-            })().catch(() => undefined);
-            if (breaks) {
-              // The SDK asks the server for its offset before resuming; the stream closes meanwhile.
-              await closed;
-              const offset = chunks[0]!.length;
-              for await (const chunk of handle.createReadStream({
-                start: offset,
-                autoClose: false,
-              }))
-                chunks.push(chunk as Buffer);
-            }
-            copied.push(Buffer.concat(chunks).toString());
-          } finally {
-            await handle.close();
-          }
-        },
+  const breakingSandbox = (received: Array<Buffer>) => {
+    const process: Pick<ContainerProcess, "_stdinWriteStream" | "_poll" | "wait"> = {
+      _stdinWriteStream: async (source) => {
+        const first = source.readFrom(0);
+        if (!(first instanceof NodeStream.Readable)) throw new Error("expected a read stream");
+        // The SDK asks the server where to resume only after the broken stream is destroyed.
+        const closed = new Promise((resolve) => first.once("close", resolve));
+        for await (const chunk of first) {
+          received.push(Buffer.from(chunk));
+          break;
+        }
+        await closed;
+        const offset = received[0]!.length;
+        for await (const chunk of source.readFrom(offset)) received.push(Buffer.from(chunk));
+        return offset;
       },
+      _poll: async () => null,
+      wait: async () => 0,
+    };
+    return {
+      filesystem: new SandboxFilesystem(async () => process as ContainerProcess),
       exec: async () => ({ wait: async () => 0 }),
     };
   };
 
-  it("starts a copy over with a fresh handle when the SDK's resume reads a closed one", async () => {
+  it("resumes a broken upload from the file, not the handle the broken stream closed", async () => {
     const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-upload-"));
     const file = NodePath.join(dir, "inputs.tgz");
-    await NodeFSP.writeFile(file, "x".repeat(200_000));
-    const copied: Array<string> = [];
-    await Promise.all(
-      Array.from({ length: 3 }, () => uploadFile(sdkLikeSandbox(copied), file, "/tmp/inputs.tgz")),
-    );
-    expect(copied).toEqual(Array.from({ length: 3 }, () => "x".repeat(200_000)));
+    const content = Buffer.from("x".repeat(3_000_000));
+    await NodeFSP.writeFile(file, content);
+    const received: Array<Buffer> = [];
+    await uploadFile(breakingSandbox(received), file, "/tmp/inputs.tgz");
+    expect(received.length).toBeGreaterThan(1);
+    expect(Buffer.concat(received).equals(content)).toBe(true);
   });
 });
