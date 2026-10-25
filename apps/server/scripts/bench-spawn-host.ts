@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a standalone benchmark that reads process memory and prints its report.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalConsoleInEffect:off preferSchemaOverJson:off - a standalone benchmark that reads process memory and prints its report as JSON lines.
 /**
  * How long does starting a child process block the server's event loop, spawning directly
  * versus through the spawn host? Inflates this process to a server-like RSS, then alternates

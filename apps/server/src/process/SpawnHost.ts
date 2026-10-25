@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - starts the host with an IPC channel and adopts the sockets it hands over, which ChildProcess.make cannot express.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - starts the host with an IPC channel and adopts the sockets it hands over, which ChildProcess.make cannot express. Its answer deadlines are timers on that event-driven channel.
 /**
  * Before libuv 1.53, Node starts every child on Linux with fork(), which copies the page tables
  * of the whole server on its main thread. At the server's usual 1.5 GB that blocks the event
@@ -71,12 +71,27 @@ interface SpawnListener {
 
 interface PendingSpawn {
   readonly listener: SpawnListener;
+  readonly deadline: NodeJS.Timeout;
   readonly stdio: Array<NodeNet.Socket | undefined>;
   pipesLeft: number;
   pid: number | undefined;
   started: boolean;
   abandoned: boolean;
 }
+
+/**
+ * A healthy host answers in milliseconds, so these only have to outlast a stall short of a hang
+ * (a loaded machine, a cold Node start). Waiting happens inside an uninterruptible acquire, so
+ * without them one wedged host would block every spawn.
+ */
+export interface SpawnHostDeadlines {
+  /** From starting the host to its `ready`. */
+  readonly readyMillis: number;
+  /** From sending a request to receiving `spawned` and every stdio handle. */
+  readonly spawnMillis: number;
+}
+
+const DEFAULT_DEADLINES: SpawnHostDeadlines = { readyMillis: 30_000, spawnMillis: 30_000 };
 
 const MAX_HOST_DEATHS = 3;
 const PROCESS_GROUP_GRACE_MILLIS = 1_000;
@@ -104,12 +119,19 @@ class HostConnection {
   readonly ready = Deferred.makeUnsafe<boolean>();
   readonly #process: NodeChildProcess.ChildProcess;
   readonly #pending = new Map<number, PendingSpawn>();
+  readonly #deadlines: SpawnHostDeadlines;
   readonly #onLost: (wasReady: boolean) => void;
+  readonly #readyDeadline: NodeJS.Timeout;
   #nextId = 0;
   #wasReady = false;
   #lost = false;
 
-  constructor(host: SpawnHostCommand, onLost: (wasReady: boolean) => void) {
+  constructor(
+    host: SpawnHostCommand,
+    deadlines: SpawnHostDeadlines,
+    onLost: (wasReady: boolean) => void,
+  ) {
+    this.#deadlines = deadlines;
     this.#onLost = onLost;
     this.#process = NodeChildProcess.spawn(host.command, [...host.args], {
       // Under Electron, execPath is the app; this makes it run the entry as Node.
@@ -120,6 +142,7 @@ class HostConnection {
     // `disconnect` comes after every message the host sent, so nothing in flight is lost.
     this.#process.once("disconnect", this.#lose);
     this.#process.once("error", this.#lose);
+    this.#readyDeadline = this.#startDeadline(deadlines.readyMillis);
   }
 
   spawn(request: Omit<SpawnHostRequest, "id">, listener: SpawnListener): () => void {
@@ -130,6 +153,7 @@ class HostConnection {
     const id = this.#nextId++;
     const pending: PendingSpawn = {
       listener,
+      deadline: this.#startDeadline(this.#deadlines.spawnMillis),
       stdio: [],
       pipesLeft: request.stdio.filter((stdio) => stdio === "pipe").length,
       pid: undefined,
@@ -151,15 +175,30 @@ class HostConnection {
     if (this.#process.connected) this.#process.disconnect();
   }
 
+  // An unanswered host is replaced: killing it fails what it still owes through `#lose`.
+  #startDeadline(millis: number) {
+    const timer = setTimeout(() => {
+      this.#process.kill("SIGKILL");
+      this.#lose();
+    }, millis);
+    timer.unref();
+    return timer;
+  }
+
   readonly #onMessage = (message: unknown, handle: unknown) => {
     const event = message as SpawnHostEvent;
     if (event.type === "ready") {
+      clearTimeout(this.#readyDeadline);
       this.#wasReady = true;
       Deferred.doneUnsafe(this.ready, Exit.succeed(true));
       return;
     }
     const pending = this.#pending.get(event.id);
-    if (pending === undefined) return;
+    if (pending === undefined) {
+      // The spawn was already answered; close the handle rather than leak its descriptor.
+      if (event.type === "stdio") (handle as NodeNet.Socket).destroy();
+      return;
+    }
     switch (event.type) {
       case "spawned":
         pending.pid = event.pid;
@@ -174,10 +213,20 @@ class HostConnection {
       }
       case "exit":
         this.#pending.delete(event.id);
-        if (!pending.abandoned) pending.listener.exited([event.code, event.signal]);
+        clearTimeout(pending.deadline);
+        if (pending.abandoned) return;
+        if (pending.started) {
+          pending.listener.exited([event.code, event.signal]);
+          return;
+        }
+        // The host sends `exit` after every handle, so this host broke its protocol. The child
+        // is already reaped, so its pid is not signalled: it may belong to a stranger now.
+        for (const socket of pending.stdio) socket?.destroy();
+        pending.listener.started({ _tag: "HostLost" });
         return;
       case "error":
         this.#pending.delete(event.id);
+        clearTimeout(pending.deadline);
         if (!pending.abandoned) {
           pending.listener.started({
             _tag: "Failed",
@@ -189,6 +238,7 @@ class HostConnection {
     }
     if (pending.pipesLeft === 0 && pending.pid !== undefined && !pending.started) {
       pending.started = true;
+      clearTimeout(pending.deadline);
       if (!pending.abandoned) {
         pending.listener.started({ _tag: "Spawned", pid: pending.pid, stdio: pending.stdio });
       }
@@ -198,8 +248,10 @@ class HostConnection {
   readonly #lose = () => {
     if (this.#lost) return;
     this.#lost = true;
+    clearTimeout(this.#readyDeadline);
     Deferred.doneUnsafe(this.ready, Exit.succeed(false));
     for (const pending of this.#pending.values()) {
+      clearTimeout(pending.deadline);
       if (pending.abandoned) continue;
       if (pending.started) {
         pending.listener.exited(undefined);
@@ -224,13 +276,13 @@ type HostState =
  * Starts the host now, while the caller is small, and replaces it lazily if it dies. A host
  * that never became ready, or that died too often, turns hosting off: spawns go direct.
  */
-const makeHostSupervisor = (host: SpawnHostCommand) => {
+const makeHostSupervisor = (host: SpawnHostCommand, deadlines: SpawnHostDeadlines) => {
   let state: HostState = { _tag: "Down" };
   let deaths = 0;
 
   const start = (): HostConnection | undefined => {
     try {
-      const connection: HostConnection = new HostConnection(host, (wasReady) => {
+      const connection: HostConnection = new HostConnection(host, deadlines, (wasReady) => {
         if (state._tag !== "Up" || state.connection !== connection) return;
         deaths++;
         state =
@@ -355,11 +407,14 @@ const resolveOutput = (
   return option.stream;
 };
 
-const make = Effect.fn("SpawnHost.make")(function* (host: SpawnHostCommand) {
+const make = Effect.fn("SpawnHost.make")(function* (
+  host: SpawnHostCommand,
+  deadlines: SpawnHostDeadlines,
+) {
   const direct = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const supervisor = makeHostSupervisor(host);
+  const supervisor = makeHostSupervisor(host, deadlines);
   yield* Effect.addFinalizer(() => Effect.sync(supervisor.close));
 
   const readOutput = (
@@ -463,17 +518,11 @@ const make = Effect.fn("SpawnHost.make")(function* (host: SpawnHostCommand) {
           return false;
         }
       };
+      const gone: Effect.Effect<void> = Effect.suspend(() =>
+        isAlive() ? Effect.andThen(Effect.sleep(PROCESS_GROUP_POLL_MILLIS), gone) : Effect.void,
+      );
       const awaitGone = (timeoutMillis: number) =>
-        Effect.callback<void>((resume) => {
-          const deadline = Date.now() + timeoutMillis;
-          let timer: NodeJS.Timeout | undefined;
-          const poll = () => {
-            if (Date.now() >= deadline || !isAlive()) return resume(Effect.void);
-            timer = setTimeout(poll, PROCESS_GROUP_POLL_MILLIS);
-          };
-          poll();
-          return Effect.sync(() => clearTimeout(timer));
-        });
+        gone.pipe(Effect.timeoutOption(timeoutMillis), Effect.asVoid);
       const signalGroup = (signal: NodeJS.Signals) =>
         Effect.try({
           try: () => process.kill(-pid, signal),
@@ -583,8 +632,11 @@ const make = Effect.fn("SpawnHost.make")(function* (host: SpawnHostCommand) {
 });
 
 /** Always spawns through a host started with `host`, falling back to Node when it cannot. */
-export const layerHosted = (host: SpawnHostCommand) =>
-  Layer.effect(ChildProcessSpawner.ChildProcessSpawner, make(host)).pipe(
+export const layerHosted = (
+  host: SpawnHostCommand,
+  deadlines: SpawnHostDeadlines = DEFAULT_DEADLINES,
+) =>
+  Layer.effect(ChildProcessSpawner.ChildProcessSpawner, make(host, deadlines)).pipe(
     Layer.provide(NodeChildProcessSpawner.layer),
   );
 

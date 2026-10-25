@@ -13,7 +13,6 @@ import * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import * as NodeFS from "node:fs";
 import * as NodeURL from "node:url";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -24,8 +23,16 @@ const hostCommand = {
   args: [NodeURL.fileURLToPath(new URL("../bin.ts", import.meta.url)), "__spawn-host"],
 };
 
-const layerHosted = (host: SpawnHost.SpawnHostCommand = hostCommand) =>
-  SpawnHost.layerHosted(host).pipe(Layer.provideMerge(NodeServices.layer));
+const layerHosted = (
+  host: SpawnHost.SpawnHostCommand = hostCommand,
+  deadlines?: SpawnHost.SpawnHostDeadlines,
+) => SpawnHost.layerHosted(host, deadlines).pipe(Layer.provideMerge(NodeServices.layer));
+
+/** A scripted stand-in for the host that speaks the same IPC protocol. */
+const fakeHost = (script: string): SpawnHost.SpawnHostCommand => ({
+  command: process.execPath,
+  args: ["-e", script],
+});
 
 const layerDirect = NodeChildProcessSpawner.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
@@ -108,7 +115,7 @@ describe("SpawnHost.layer", () => {
   // The server's platform layer: NodeServices with this spawner in place of Node's.
   const layerPlatform = SpawnHost.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
-  it.effect.skipIf(!SpawnHost.spawnsThroughHost("linux", process.versions.uv))(
+  it.live.skipIf(!SpawnHost.spawnsThroughHost("linux", process.versions.uv))(
     "forks children from a host running this checkout's CLI entry on Linux",
     () =>
       forkingPid.pipe(
@@ -118,7 +125,7 @@ describe("SpawnHost.layer", () => {
       ),
   );
 
-  it.effect("spawns directly elsewhere", () =>
+  it.live("spawns directly elsewhere", () =>
     forkingPid.pipe(
       Effect.map((parent) => expect(parent).toBe(process.pid)),
       Effect.provide(layerPlatform),
@@ -128,7 +135,7 @@ describe("SpawnHost.layer", () => {
 });
 
 describe("SpawnHost.layerHosted", () => {
-  it.effect("forks children from the host, not from this process", () =>
+  it.live("forks children from the host, not from this process", () =>
     Effect.gen(function* () {
       const parent = yield* forkingPid;
       expect(parent).not.toBe(process.pid);
@@ -136,7 +143,7 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(layerHosted())),
   );
 
-  it.effect("reports what the Node spawner reports for output, exits and spawn errors", () =>
+  it.live("reports what the Node spawner reports for output, exits and spawn errors", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -176,7 +183,7 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("streams large output and stdin through the handed-over sockets", () =>
+  it.live("streams large output and stdin through the handed-over sockets", () =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const input = "x".repeat(3_000_000);
@@ -201,7 +208,7 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(layerHosted())),
   );
 
-  it.effect("runs many processes at once without crossing their output", () =>
+  it.live("runs many processes at once without crossing their output", () =>
     Effect.gen(function* () {
       const runner = yield* ProcessRunner.ProcessRunner;
       const results = yield* Effect.forEach(
@@ -223,22 +230,24 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provideMerge(layerHosted())))),
   );
 
-  it.effect("closes every socket it adopts once the children are done", () =>
+  it.live("closes every socket it adopts once the children are done", () =>
     Effect.gen(function* () {
       const runner = yield* ProcessRunner.ProcessRunner;
-      const openDescriptors = () => NodeFS.readdirSync("/dev/fd").length;
+      const fs = yield* FileSystem.FileSystem;
+      const openDescriptors = () =>
+        fs.readDirectory("/dev/fd").pipe(Effect.map((fds) => fds.length));
       yield* runner.run({ command: "true", args: [] });
-      const before = openDescriptors();
+      const before = yield* openDescriptors();
       yield* Effect.forEach(
         Array.from({ length: 200 }),
         () => runner.run({ command: "sh", args: ["-c", "printf done"] }),
         { concurrency: 20 },
       );
-      expect(openDescriptors() - before).toBeLessThan(50);
+      expect((yield* openDescriptors()) - before).toBeLessThan(50);
     }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provideMerge(layerHosted())))),
   );
 
-  it.effect("kill stops the child's whole process group", () =>
+  it.live("kill stops the child's whole process group", () =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const handle = yield* spawner.spawn(sh("sleep 30 & echo $!; wait"));
@@ -253,7 +262,7 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.scoped, Effect.provide(layerHosted())),
   );
 
-  it.effect("closing the scope stops a running child and its group", () =>
+  it.live("closing the scope stops a running child and its group", () =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const { child, grandchild } = yield* Effect.scoped(
@@ -267,7 +276,7 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(layerHosted())),
   );
 
-  it.effect("a dead host fails its children's exit instead of hanging, then is replaced", () =>
+  it.live("a dead host fails its children's exit instead of hanging, then is replaced", () =>
     Effect.gen(function* () {
       const { hostPid, exit } = yield* killHost;
       expect(Exit.isFailure(exit)).toBe(true);
@@ -283,7 +292,7 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(layerHosted())),
   );
 
-  it.effect("spawns directly once the host keeps dying", () =>
+  it.live("spawns directly once the host keeps dying", () =>
     Effect.gen(function* () {
       yield* killHost;
       yield* killHost;
@@ -292,7 +301,58 @@ describe("SpawnHost.layerHosted", () => {
     }).pipe(Effect.provide(layerHosted())),
   );
 
-  it.effect("spawns directly when the host never starts", () =>
+  it.live("fails a spawn whose child exits before its stdio arrives instead of hanging", () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(run(sh("true")));
+      expect(Exit.isFailure(exit)).toBe(true);
+    }).pipe(
+      Effect.provide(
+        layerHosted(
+          fakeHost(`
+            process.send({ type: "ready" });
+            process.on("message", ({ id }) => {
+              process.send({ type: "spawned", id, pid: process.pid });
+              process.send({ type: "exit", id, code: 0, signal: null });
+            });
+          `),
+        ),
+      ),
+    ),
+  );
+
+  it.live("spawns directly when the host never becomes ready", () =>
+    Effect.gen(function* () {
+      expect(yield* forkingPid).toBe(process.pid);
+      expect(yield* run(sh("printf fallback"))).toEqual({
+        stdout: "fallback",
+        stderr: "",
+        code: 0,
+      });
+    }).pipe(
+      Effect.provide(
+        layerHosted(fakeHost(`process.on("message", () => {});`), {
+          readyMillis: 100,
+          spawnMillis: 30_000,
+        }),
+      ),
+    ),
+  );
+
+  it.live("fails a spawn the host never answers instead of hanging", () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(run(sh("true")));
+      expect(Exit.isFailure(exit)).toBe(true);
+    }).pipe(
+      Effect.provide(
+        layerHosted(fakeHost(`process.send({ type: "ready" }); process.on("message", () => {});`), {
+          readyMillis: 30_000,
+          spawnMillis: 100,
+        }),
+      ),
+    ),
+  );
+
+  it.live("spawns directly when the host never starts", () =>
     Effect.gen(function* () {
       expect(yield* forkingPid).toBe(process.pid);
       expect(yield* run(sh("printf fallback"))).toEqual({

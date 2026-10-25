@@ -8,6 +8,7 @@
  * has to come from here, because only the parent can wait for it.
  */
 import * as NodeChildProcess from "node:child_process";
+import type * as NodeNet from "node:net";
 
 /** The CLI argument that starts a spawn host instead of the CLI. */
 export const SPAWN_HOST_COMMAND = "__spawn-host";
@@ -56,7 +57,7 @@ export type SpawnHostEvent =
       readonly error: SpawnHostError;
     };
 
-const send = (event: SpawnHostEvent, handle?: unknown) =>
+const send = (event: SpawnHostEvent, handle?: NodeChildProcess.SendHandle) =>
   new Promise<void>((resolve) => {
     process.send?.(event, handle, undefined, () => resolve());
   });
@@ -76,11 +77,36 @@ const errorFields = (error: unknown): SpawnHostError => {
 // Node starts reading an output pipe as soon as it creates it. Bytes read here would stay in
 // this process when the socket is handed over, so reading stops before the next poll.
 // `Socket.pause` would not stop it: it only stops reading once a chunk is buffered.
+interface ReadableHandle {
+  reading: boolean;
+  readStop(): number;
+}
+
+const readableHandle = (pipe: unknown): ReadableHandle | undefined => {
+  const handle = (pipe as { _handle?: Partial<ReadableHandle> } | null)?._handle;
+  return typeof handle?.readStop === "function" && typeof handle.reading === "boolean"
+    ? (handle as ReadableHandle)
+    : undefined;
+};
+
 const stopReading = (pipe: unknown) => {
-  const handle = (pipe as { _handle?: { reading: boolean; readStop(): number } } | null)?._handle;
+  const handle = readableHandle(pipe);
   if (handle?.reading !== true) return;
   handle.reading = false;
   handle.readStop();
+};
+
+// `stopReading` leans on Node's private handle. Without it, bytes read here would be lost
+// silently, so a host on a Node where it changed shape declines to start instead.
+const canStopReading = () => {
+  const probe = NodeChildProcess.spawn(process.execPath, ["-e", ""], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  probe.on("error", () => {});
+  const capable = readableHandle(probe.stdout) !== undefined;
+  probe.stdout?.destroy();
+  probe.kill();
+  return capable;
 };
 
 const spawnChild = (request: SpawnHostRequest) => {
@@ -117,7 +143,7 @@ const spawnChild = (request: SpawnHostRequest) => {
   );
   void send({ type: "spawned", id, pid: child.pid });
   const handedOver = pipes.flatMap((pipe, fd) =>
-    pipe === null ? [] : [send({ type: "stdio", id, fd }, pipe)],
+    pipe === null ? [] : [send({ type: "stdio", id, fd }, pipe as NodeNet.Socket)],
   );
   // Plain messages can overtake queued handles, so the exit waits for every handle.
   void Promise.all([exited, ...handedOver]).then(([status]) =>
@@ -126,6 +152,8 @@ const spawnChild = (request: SpawnHostRequest) => {
 };
 
 export const runSpawnHost = () => {
+  // No `ready` is sent, so the server sees a host that never started and spawns directly.
+  if (!canStopReading()) process.exit(1);
   // Lives exactly as long as the server's IPC channel. Terminal and service-manager signals
   // reach the server, which closes the channel when it is done spawning.
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => {});
