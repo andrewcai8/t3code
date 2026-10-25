@@ -47,6 +47,7 @@
       "entry": [
         "src/bin.ts!",
         "src/claude-history-worker.ts!",
+        "scripts/bench-spawn-host.ts",
         "scripts/cli.ts",
         "scripts/evaluate-thread-titles.ts",
         "scripts/import-machine-usage.ts",
