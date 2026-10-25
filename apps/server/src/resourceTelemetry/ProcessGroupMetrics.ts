@@ -5,6 +5,7 @@ import * as Metric from "effect/Metric";
 
 import * as ServerConfig from "../config.ts";
 import { metricAttributes } from "../observability/Metrics.ts";
+import { SPAWN_HOST_COMMAND } from "../process/spawnHostProcess.ts";
 import * as ResourceTelemetry from "./ResourceTelemetry.ts";
 
 const SAMPLE_INTERVAL = "1 minute";
@@ -63,14 +64,20 @@ export function groupProcesses(
 ): ReadonlyMap<string, ProcessGroupTotals> {
   const byPid = new Map(processes.map((process) => [process.identity.pid, process]));
   const serverPid = processes.find((process) => process.category === "server")?.identity.pid;
+  // On Linux the server's children are forked by its spawn host, which counts as the server.
+  const spawnHostPid = processes.find(
+    (process) => process.ppid === serverPid && process.command.includes(SPAWN_HOST_COMMAND),
+  )?.identity.pid;
   const groupOf = (process: ResourceTelemetryProcess): string => {
-    if (process.category === "server") return "server";
+    if (process.category === "server" || process.identity.pid === spawnHostPid) return "server";
     if (process.category === "resource-monitor") return "resource-monitor";
     if (process.category.startsWith("electron-")) return "electron";
     let current = process;
     // Bounded by the table size, in case a reused PID makes the parent chain loop.
     for (let step = 0; step < processes.length; step++) {
-      if (current.ppid === serverPid) return childGroup(current.name, current.command);
+      if (current.ppid === serverPid || current.ppid === spawnHostPid) {
+        return childGroup(current.name, current.command);
+      }
       const parent = byPid.get(current.ppid);
       if (parent === undefined) break;
       current = parent;

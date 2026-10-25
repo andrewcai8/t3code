@@ -56,4 +56,22 @@ describe("groupProcesses", () => {
       other: { residentBytes: 220_000, cpuPercent: 220, count: 3 },
     });
   });
+
+  it("groups the spawn host's children as the server's own, and the host as the server", () => {
+    const totals = groupProcesses([
+      process(10, 1, "node", "server"),
+      process(11, 10, "node", "server-child", "node /opt/t3/dist/bin.mjs __spawn-host"),
+      process(30, 11, "codex"),
+      process(31, 30, "bash"),
+      process(40, 11, "git"),
+      process(50, 10, "claude"),
+    ]);
+
+    assert.deepStrictEqual(Object.fromEntries(totals), {
+      server: { residentBytes: 21_000, cpuPercent: 21, count: 2 },
+      codex: { residentBytes: 61_000, cpuPercent: 61, count: 2 },
+      other: { residentBytes: 40_000, cpuPercent: 40, count: 1 },
+      claude: { residentBytes: 50_000, cpuPercent: 50, count: 1 },
+    });
+  });
 });
