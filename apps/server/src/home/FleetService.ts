@@ -22,6 +22,7 @@ import {
   OrchestratorMcpFailure,
   ThreadId,
 } from "@t3tools/contracts";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -331,6 +332,7 @@ const make = Effect.gen(function* () {
       const run = result.projection.runs.find((candidate) => candidate.userMessageId === messageId);
       return {
         threadId: thread.id,
+        link: formatThreadLink(thread.id, thread.title),
         projectId: thread.projectId,
         modelSelection: thread.modelSelection,
         runId: run?.id ?? null,
@@ -358,6 +360,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(threadManagementFailure));
       return {
         threadId: input.threadId,
+        link: formatThreadLink(input.threadId, shell.title),
         messageId,
         runId: result.run.id,
         status: result.run.status,
