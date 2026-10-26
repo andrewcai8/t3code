@@ -2,13 +2,9 @@
 
 /**
  * Fails when two source files in one directory resolve to the same module specifier on a
- * case-insensitive filesystem.
- *
- * TypeScript resolves `./Foo` by stem, so `Foo.tsx` beside `foo.ts` is one module on macOS and
- * Windows and two on Linux. CI runs on Linux, where the collision is invisible, so nothing else
- * in the pipeline can catch it. The repository's own convention of a `Component.tsx` beside its
- * `componentLogic.ts` keeps walking up to this edge, which is why this is a check rather than a
- * note to reviewers.
+ * case-insensitive filesystem. TypeScript resolves `./Foo` by stem, so `Foo.tsx` beside `foo.ts` is
+ * one module on macOS and Windows and two on Linux. CI runs on Linux, where the collision is
+ * invisible, so nothing else in the pipeline can catch it.
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";

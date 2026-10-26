@@ -36,12 +36,9 @@ const classify = (status: number): FirstTurnDelivery =>
 
 /**
  * Starts a chat's first turn on its box, at most once. One launch creates the thread and sends its
- * first message under a fixed command id: the box keeps a receipt per command, so a retry after any
- * crash replays the earlier launch instead of starting a second turn.
- *
- * The box runs each driver's one account under the driver's default instance id, so a turn naming
- * a host account launches there. The driver is the one the box was provisioned for; `driverOf`
- * resolves a host instance id to its driver for a request that recorded none.
+ * first message under a fixed command id; the box keeps a receipt per command, so a retry replays
+ * the earlier launch instead of starting a second turn. The box runs each driver's one account
+ * under the default instance id; `driverOf` resolves a host instance id to its driver.
  */
 export async function deliverFirstTurn(
   remote: RemoteAccess,

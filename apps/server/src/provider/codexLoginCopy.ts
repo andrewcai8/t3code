@@ -1,16 +1,8 @@
 /**
- * Codex rotates a ChatGPT login's refresh token on every refresh and rejects
- * reuse, so when copies of one `auth.json` exist, whichever refreshes first
- * logs out every other copy. Each login therefore has one owner that
- * refreshes it: the user's machine for its own logins, and a host for the
- * separate logins made for it. Every other copy keeps the access token and
- * gets a refresh token that can never be redeemed, so it works until that
- * access token expires.
- *
- * Codex still loads the file (`refresh_token` is a required string), and a
- * refresh attempt fails with a 401 that Codex records as permanent. An empty
- * string would instead get a 400 that Codex treats as transient and retries
- * on every request.
+ * Codex rotates a ChatGPT login's refresh token on every refresh and rejects reuse, so whichever
+ * copy of one `auth.json` refreshes first logs out the others. Each login has one owner that
+ * refreshes it; every other copy gets a refresh token that can never be redeemed. It must stay a
+ * non-empty string: an empty one gets a 400 Codex retries on every request, instead of a permanent 401.
  */
 const UNREDEEMABLE_CODEX_REFRESH_TOKEN = "t3-copy-cannot-refresh";
 

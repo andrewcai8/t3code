@@ -1,10 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - hashes this host's files and the archives packed from them.
 /**
  * The key an upload is cached under: the sha256 of what a copy unpacks, read two ways that must
- * agree. `contentKey` reads the host's files when a job is sent; `archiveKey` reads the archive
- * tar packed. A file that changed while tar read it leaves an archive whose key differs from the
- * files', so it serves its own job and is never cached for another. Both list each entry by the
- * path it unpacks at, with its mode and content, or a link's target, and leave out file times.
+ * agree. `contentKey` reads the host's files; `archiveKey` reads the archive tar packed. A file that
+ * changed while tar read it yields a differing key, so it serves its own job and is never cached.
  *
  * @module worktreeForkContent
  */

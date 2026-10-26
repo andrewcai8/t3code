@@ -1,20 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - hashes this host's files and keeps a small index beside the base records.
 /**
- * Archives a copy takes from this host (a worktree's state, each `--input` path), kept in Modal by
- * the sha256 of what they hold, so jobs that send the same content cost this host one upload, not
- * one each.
- *
- * A job packs what it sends as it is sent, unless the cache already holds it, and jobs sent with
- * the same key share that pack. The first job to need an archive uploads it, checks its digest in
- * the copy, and saves the directory holding it as a Modal directory image; only then, and only when
- * the archive's own key (worktreeForkContent.ts) is the one the job was sent with, does the image's
- * id go into the index, so a cut-short, garbled or torn archive is never served. Jobs needing
- * the same key meanwhile wait for that one upload. Later jobs mount the image instead, and a mount
- * is the copy's own: what a job writes there no other job sees. Anything going wrong in the cache
- * falls back to uploading the archive as before.
- *
- * Images live in the forks' own Modal workspace, app and environment. Modal deletes each a week
- * after it was taken; the sweep deletes one unused for a day, and none is mounted past six days.
+ * Archives a copy takes from this host, kept in Modal by the sha256 of what they hold, so jobs that
+ * send the same content cost one upload. An archive's id enters the index only after its digest
+ * is checked in the copy and its key matches the job's, so a torn archive is never served.
  *
  * @module worktreeForkCache
  */

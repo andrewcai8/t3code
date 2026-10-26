@@ -1,18 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - shipments, logs and outputs are files on this host.
 /**
  * WorktreeForks - runs agents' heavy commands in throwaway Modal copies of their worktree, on a
- * self-hosted server that has its own Modal token in worktree-forks.json.
- *
- * A copy boots from the repository's base image (worktreeForkBases.ts), takes the worktree's
- * uncommitted state and new commits (worktreeForkShip.ts), mounts its checkout at the worktree's
- * own path, starts the repository's services, and runs the command with its output streamed back.
- * `t3 fork-exec` (through fork.sock) and t3_fork_run batches both run here, sharing one limit on
- * copies at once. The line between a copy that never ran the command and one that did is the
- * banner: before it, every failure lets the caller run the command itself (exit 75); after it, a
- * lost copy is exit 70. Once a command runs, a restart only pauses its job: the next run adopts
- * the copy from its record (worktreeForkJobs.ts), follows the command to its end and brings its
- * outputs back, and `t3 fork-exec` re-attaches by the job's id. The sweep at start, then every ten
- * minutes, ends every sandbox no job owns.
+ * self-hosted server with its own Modal token in worktree-forks.json. A failure before the command's
+ * banner lets the caller run it itself (exit 75); after it, a lost copy is exit 70.
  *
  * @module WorktreeForks
  */
@@ -261,11 +251,10 @@ const PLACE_SCRIPT = `mkdir -p "$(dirname "$1")" && mv "$2" "$1" && ln -s "$1" "
 const INPUTS_SCRIPT = `for archive in "$@"; do tar -xzf "$archive" --no-same-owner -C / || exit; done`;
 
 /**
- * Starts the command detached from the exec that launches it, with its output and exit code in
- * files of the copy, so a server that restarts meanwhile can follow it from the start
- * (FOLLOW_SCRIPT). It runs as a child subreaper: Modal's agent is PID 1 in a copy and never reaps,
- * so a killed orphan stayed a zombie that still answered kill(pid, 0); on the host, the user's
- * service manager reaps it. Its code is the command's, or 128 plus the signal that ended it.
+ * Starts the command detached from the exec that launches it, with output and exit code in files of
+ * the copy, so a restarted server can follow it (FOLLOW_SCRIPT). It runs as a child subreaper:
+ * Modal's agent is PID 1 in a copy and never reaps, so a killed orphan stayed a zombie that still
+ * answered kill(pid, 0). Its code is the command's, or 128 plus the signal.
  */
 const LAUNCH_SCRIPT = `import ctypes, os, subprocess, sys
 d = "${JOB_FILES}"
@@ -418,13 +407,25 @@ const view = (batch: Batch): FleetForkBatch => ({
 const disabled = WorktreeForks.of({
   enabled: false,
   bunShim: null,
-  exec: () =>
-    Effect.succeed({ _tag: "NotStarted", message: "This host has no worktree forks set up." }),
-  attach: () => Effect.succeed(null),
+  exec: Effect.fn("WorktreeForks.exec")(function () {
+    return Effect.succeed({
+      _tag: "NotStarted",
+      message: "This host has no worktree forks set up.",
+    });
+  }),
+  attach: Effect.fn("WorktreeForks.attach")(function () {
+    return Effect.succeed(null);
+  }),
   pause: Effect.void,
-  run: () => Effect.fail(failure("environment_unavailable", "This host has no worktree forks.")),
-  status: () => Effect.fail(failure("environment_unavailable", "This host has no worktree forks.")),
-  cancel: () => Effect.fail(failure("environment_unavailable", "This host has no worktree forks.")),
+  run: Effect.fn("WorktreeForks.run")(function () {
+    return Effect.fail(failure("environment_unavailable", "This host has no worktree forks."));
+  }),
+  status: Effect.fn("WorktreeForks.status")(function () {
+    return Effect.fail(failure("environment_unavailable", "This host has no worktree forks."));
+  }),
+  cancel: Effect.fn("WorktreeForks.cancel")(function () {
+    return Effect.fail(failure("environment_unavailable", "This host has no worktree forks."));
+  }),
 });
 
 /** The service over `host`'s configuration and a Modal port. */
@@ -742,7 +743,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
             onOutput: output,
           }),
         catch: (cause) => new Lost({ cause }),
-      }).pipe(Effect.map(Option.some)),
+      }).pipe(Effect.asSome),
       deadline,
     );
     const durationMs = (yield* Clock.currentTimeMillis) - record.startedAt;
@@ -1015,7 +1016,6 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   const runBatch = Effect.fn("WorktreeForks.runBatch")(
     function* (batch: Batch, input: FleetForkRunInput, fallbackCwd: string | null) {
-      const environment = portableEnvironment(serverEnvironment);
       // Every job of a checkout sees the same state, shipped once as the batch starts. The wait
       // for a first base and the shipping run beside the jobs, so cancelling a job ends its wait.
       const byRoot = new Map<string, Deferred.Deferred<Target, NotStarted>>();

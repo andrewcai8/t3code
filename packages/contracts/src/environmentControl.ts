@@ -173,12 +173,9 @@ export const ProvisionChat = Schema.Struct({
 export type ProvisionChat = typeof ProvisionChat.Type;
 
 /**
- * A cloud environment asked for on demand, rather than declared in advance.
- *
- * The managed environments above are long-lived machines an operator names in
- * configuration. This is the other shape: a caller picks a provider and an
- * account, and gets back a fresh environment to pair with. The two share a
- * provider vocabulary and nothing else.
+ * A cloud environment asked for on demand: a caller picks a provider and an account and gets a fresh
+ * environment to pair with. Unlike the managed environments above, which an operator names in
+ * configuration, it shares only their provider vocabulary.
  */
 export const EnvironmentProvisionInput = Schema.Struct({
   requestId: ProvisionRequestId,

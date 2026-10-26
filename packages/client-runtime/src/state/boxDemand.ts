@@ -15,11 +15,10 @@ function turnRunning({ status, activityRunStatus }: ThreadRunState): boolean {
 }
 
 /**
- * Keeps a cloud box connected while a turn runs on it, so its chat's status stays live with the
- * chat closed. A turn counts while the box's last known threads show one running and its host
- * lists the box active; a box the host paused or lost cannot be running one, whatever this client
- * last saw. A box this device never opened is left alone, so listing running chats pairs nothing.
- * Mount the result; its value lists the boxes it holds.
+ * Keeps a cloud box connected while a turn runs on it, so its chat's status stays live with the chat
+ * closed. A turn counts while the box's last known threads show one running and its host lists the
+ * box active. A box this device never opened is left alone, so listing chats pairs nothing. Mount
+ * the result; its value lists the boxes it holds.
  */
 export function createRunningBoxDemandAtom(input: {
   readonly catalogValueAtom: Atom.Atom<EnvironmentCatalogState>;

@@ -60,7 +60,9 @@ export function useCreateCloudMachine(input: {
   readonly onCreated: (projectRef: ScopedProjectRef) => void;
 }) {
   const { managerId, connectedEnvironments, onCreated } = input;
-  const manager = connectedEnvironments.find((entry) => entry.environmentId === managerId);
+  const managerDisplayUrl = connectedEnvironments.find(
+    (entry) => entry.environmentId === managerId,
+  )?.displayUrl;
   const provision = useAtomCommand(serverEnvironment.provisionEnvironment, {
     reportFailure: false,
   });
@@ -86,85 +88,80 @@ export function useCreateCloudMachine(input: {
       // just before an app kill would have no record to dispose it by.
       await hydrateProvisionStorage();
       const draftId = `mobile-cloud-machine:${uuidv4()}`;
-      try {
-        const outcome = await provisionCloudEnvironment(
-          {
-            draftId,
-            managerEnvironmentId: managerId,
-            input: {
-              provider: selection.provider,
-              providerInstanceId: selection.account.instanceId,
-              agentDriver: selection.account.driver,
-              repository: selection.repository,
-            },
+      const outcome = await provisionCloudEnvironment(
+        {
+          draftId,
+          managerEnvironmentId: managerId,
+          input: {
+            provider: selection.provider,
+            providerInstanceId: selection.account.instanceId,
+            agentDriver: selection.account.driver,
+            repository: selection.repository,
           },
-          {
-            requests: provisionRequests,
-            leases: provisionedSandboxLeases,
-            provision: async (request) => {
-              const result = await provision({
-                environmentId: request.managerEnvironmentId,
-                input: request.input,
-              });
-              return AsyncResult.isSuccess(result) ? result.value : null;
-            },
-            attach: async (request) => {
-              const result = await attach({
-                environmentId: request.managerEnvironmentId,
-                input: { requestId: request.input.requestId },
-              });
-              return AsyncResult.isSuccess(result) ? result.value : null;
-            },
-            pair: async (pairingUrl) => {
-              const result = await pair({ pairingUrl, managerId });
-              return AsyncResult.isSuccess(result) ? result.value : null;
-            },
-            ...(manager?.displayUrl
-              ? {
-                  rewritePairingUrl: (pairingUrl: string, leaseId: string) =>
-                    provisionedGatewayPairingUrl(manager.displayUrl, leaseId, pairingUrl),
-                }
-              : {}),
-            isPaired: (environmentId) =>
-              holdsPairing(
-                appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(environmentId),
-              ),
-            // A phone is never the machine that started the box, so a loopback pairing URL is
-            // one it cannot reach however healthy the box is.
-            canReach: isOffDeviceReachablePairingUrl,
-            waitForProject: (environmentId, timeoutMs) => {
-              // The box publishes its checkout over its connection; its draft holds it after.
-              const release = holdBoxDemand(environmentId);
-              return waitForEnvironmentProject(environmentId, timeoutMs)
-                .then((project) => project?.id ?? null)
-                .finally(release);
-            },
-            onPhase: (phase) => setState({ kind: "working", phase }),
+        },
+        {
+          requests: provisionRequests,
+          leases: provisionedSandboxLeases,
+          provision: async (request) => {
+            const result = await provision({
+              environmentId: request.managerEnvironmentId,
+              input: request.input,
+            });
+            return AsyncResult.isSuccess(result) ? result.value : null;
           },
-        );
-        if (outcome.kind === "failed") {
-          setState({ kind: "failed", message: outcome.message });
-          return;
-        }
-        setState(IDLE);
-        if (outcome.kind === "ready") {
-          // The first turn on the machine claims it on the host (see the outbox drain); until
-          // then its lease waits under the machine's environment.
-          const lease = provisionedSandboxLeases.leaseFor(draftId);
-          if (lease) {
-            provisionedSandboxLeases.rememberForEnvironment(
-              outcome.projectRef.environmentId,
-              lease,
-            );
-            provisionedSandboxLeases.forget(draftId);
-          }
-          onCreated(outcome.projectRef);
-        }
-      } finally {
+          attach: async (request) => {
+            const result = await attach({
+              environmentId: request.managerEnvironmentId,
+              input: { requestId: request.input.requestId },
+            });
+            return AsyncResult.isSuccess(result) ? result.value : null;
+          },
+          pair: async (pairingUrl) => {
+            const result = await pair({ pairingUrl, managerId });
+            return AsyncResult.isSuccess(result) ? result.value : null;
+          },
+          ...(managerDisplayUrl
+            ? {
+                rewritePairingUrl: (pairingUrl: string, leaseId: string) =>
+                  provisionedGatewayPairingUrl(managerDisplayUrl, leaseId, pairingUrl),
+              }
+            : {}),
+          isPaired: (environmentId) =>
+            holdsPairing(
+              appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(environmentId),
+            ),
+          // A phone is never the machine that started the box, so a loopback pairing URL is
+          // one it cannot reach however healthy the box is.
+          canReach: isOffDeviceReachablePairingUrl,
+          waitForProject: (environmentId, timeoutMs) => {
+            // The box publishes its checkout over its connection; its draft holds it after.
+            const release = holdBoxDemand(environmentId);
+            return waitForEnvironmentProject(environmentId, timeoutMs)
+              .then((project) => project?.id ?? null)
+              .finally(release);
+          },
+          onPhase: (phase) => setState({ kind: "working", phase }),
+        },
+      ).finally(() => {
         inFlight.current = false;
+      });
+      if (outcome.kind === "failed") {
+        setState({ kind: "failed", message: outcome.message });
+        return;
+      }
+      setState(IDLE);
+      if (outcome.kind === "ready") {
+        // The first turn on the machine claims it on the host (see the outbox drain); until
+        // then its lease waits under the machine's environment.
+        const lease = provisionedSandboxLeases.leaseFor(draftId);
+        if (lease) {
+          provisionedSandboxLeases.rememberForEnvironment(outcome.projectRef.environmentId, lease);
+          provisionedSandboxLeases.forget(draftId);
+        }
+        onCreated(outcome.projectRef);
       }
     },
-    [attach, manager, managerId, onCreated, pair, provision],
+    [attach, managerDisplayUrl, managerId, onCreated, pair, provision],
   );
 
   const dismissError = useCallback(() => setState(IDLE), []);

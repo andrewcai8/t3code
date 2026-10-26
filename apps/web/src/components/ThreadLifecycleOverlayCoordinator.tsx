@@ -30,6 +30,7 @@ export function ThreadLifecycleOverlayCoordinator() {
   const flushedKeys = useRef(new Set<string>());
   const inFlight = useRef(new Set<string>());
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Subscribes to overlay, config, and environment atoms to flush queued settle and delete commands once a machine is live; unsubscribes on cleanup.
   useEffect(() => {
     let cancelled = false;
     const sync = () => {
@@ -50,7 +51,7 @@ export function ThreadLifecycleOverlayCoordinator() {
       });
       replaceThreadLifecycleOverlays(registry, planned.overlays);
       persistThreadLifecycleOverlays(planned.overlays);
-      for (const key of [...flushedKeys.current]) {
+      for (const key of flushedKeys.current) {
         if (!planned.overlays.has(key)) flushedKeys.current.delete(key);
       }
       for (const job of planned.jobs) {

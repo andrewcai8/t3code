@@ -125,6 +125,7 @@ export function useNewTaskCloud(input: {
           }),
     [blockedBoxProject, boxes, projects, savedConnectionsById, serverConfigs],
   );
+  // oxlint-disable-next-line t3code/react-effect-budget -- Moves the draft to the matching project on the box's environment once that project is known.
   useEffect(() => {
     if (boxStart?.kind !== "environment" || blockedBoxProject === null) return;
     const match = resolveEnvironmentProjectMatch(
@@ -147,6 +148,7 @@ export function useCloudMachineInsteadOfBox(
   const navigation = useNavigation();
   const start = boxStart?.kind === "cloud-machine" && !input.incomingShareId ? boxStart : null;
   const { branch } = input;
+  // oxlint-disable-next-line t3code/react-effect-budget -- Replaces this route with a fresh cloud machine screen when the flow leaves another chat's box; navigation is external.
   useEffect(() => {
     if (!start) return;
     navigation.dispatch(

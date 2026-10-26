@@ -2,7 +2,6 @@
 import { EnvironmentProvisionInput } from "@t3tools/contracts";
 import { retentionExpired } from "./retention.ts";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/sql/SqlClient";
 import type { NamespaceResource } from "./namespaceProvisioner.ts";
@@ -169,18 +168,10 @@ export const StoredProvisionedLease = Schema.Struct({
    * resume since the first of them. Absent means none.
    */
   unwatchedMoves: Schema.optional(Schema.Int),
-  backup: Schema.optional(
-    LeaseBackup.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
-  ),
-  rebuild: Schema.optional(
-    LeaseRebuild.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
-  ),
-  reboot: Schema.optional(
-    LeaseReboot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
-  ),
-  freshBoot: Schema.optional(
-    LeaseFreshBoot.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
-  ),
+  backup: Schema.optional(LeaseBackup.pipe(Schema.catchDecoding(() => Effect.succeedNone))),
+  rebuild: Schema.optional(LeaseRebuild.pipe(Schema.catchDecoding(() => Effect.succeedNone))),
+  reboot: Schema.optional(LeaseReboot.pipe(Schema.catchDecoding(() => Effect.succeedNone))),
+  freshBoot: Schema.optional(LeaseFreshBoot.pipe(Schema.catchDecoding(() => Effect.succeedNone))),
   /** When the lease's box was removed; present exactly while `state` is `removed`. */
   removedAt: Schema.optional(Schema.String),
   createdAt: Schema.String,

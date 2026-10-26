@@ -738,11 +738,9 @@ except FileExistsError:
   return {
     prepare,
     /**
-     * Turns a ready spare build into what the chat that claims it adopts: its
-     * root sealed like a warm E2B base, and the Mac stopped. A stopped Devbox
-     * keeps its volume and nothing else: the runner's own home and every
-     * process are gone, it costs only storage, and claiming it starts a new
-     * instance with a full lifetime ahead of it.
+     * Turns a ready spare build into what the chat that claims it adopts: its root sealed like a warm
+     * E2B base, and the Mac stopped. A stopped Devbox keeps only its volume, so it costs only storage,
+     * and claiming it starts a new instance with a full lifetime.
      */
     seal: async (
       operation: ProvisionOperation,

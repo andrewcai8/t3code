@@ -31,10 +31,9 @@ const WorkspaceFile = Schema.Struct({
 });
 /**
  * A repository prepare command. `background: true` marks one that starts a service for the chat,
- * such as a dev server or a simulator, rather than preparing its checkout. Write it to start the
- * service and exit once it is up, nonzero when it could not: a chat starts it without waiting for
- * it, a copy of the chat's machine runs it to its end before the copy's job (see WorkerForks.ts),
- * and an instance-engine template builder, which runs no chat, skips it.
+ * such as a dev server. Write it to start the service and exit once it is up, nonzero on failure:
+ * a chat starts it without waiting, a copy runs it to its end first (see WorkerForks.ts), and an
+ * instance-engine template builder skips it.
  */
 export const PrepareCommand = Schema.Union([
   TrimmedNonEmptyString,
@@ -112,46 +111,30 @@ const Provisioning = Schema.Struct({
   /** Required only for cloning private repositories into a new environment. */
   githubToken: Schema.optional(TrimmedNonEmptyString),
   /**
-   * `claude setup-token` values by Claude provider instance id, installed only
-   * in cloud environments.
-   *
-   * A keychain login cannot be copied: Claude Code rotates its refresh token,
-   * so two machines holding one login fork the chain and one is signed out.
-   * A setup-token does not rotate, and keeping it here rather than in the
-   * instance environment leaves local runs on the keychain login.
+   * `claude setup-token` values by Claude provider instance id, installed only in cloud environments.
+   * A keychain login cannot be copied: Claude Code rotates its refresh token, so two machines holding
+   * one login sign each other out. A setup-token does not rotate.
    */
   claudeOAuthTokens: Schema.optional(Schema.Record(Schema.String, TrimmedNonEmptyString)),
   /**
-   * Hosts a new environment may reach. Everything else is denied.
-   *
-   * An agent with a shell can read any credential the environment holds, so
-   * the useful control is not hiding values but bounding where they can go.
-   * Absent, the environment reaches the whole internet, which is E2B's
-   * default; listing hosts turns that into deny-by-default.
-   *
-   * Host rules cover HTTP and HTTPS. Anything speaking another protocol — a
-   * database wire protocol, say — needs its address listed as a CIDR instead.
+   * Hosts a new environment may reach; everything else is denied. Absent, the environment reaches the
+   * whole internet (E2B's default). Host rules cover HTTP and HTTPS; other protocols, such as a
+   * database wire protocol, need their address listed as a CIDR instead.
    */
   egressAllow: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   /**
-   * Environment variables an environment's agents run with, and its repository's prepare commands
-   * too, minus any agent login. Prepare commands see the values configured when they run, so a
-   * change reaches environments that already exist on their next preparation.
-   *
-   * Some agents read their credential from the environment rather than a file,
-   * and a sandbox command does not inherit anything the template was built
-   * with, so the value has to be placed where a shell will find it.
+   * Environment variables an environment's agents and its repository's prepare commands run with,
+   * minus any agent login. Prepare commands see the values configured when they run, so a change
+   * reaches existing environments on their next preparation. Some agents read their credential from
+   * the environment, and a sandbox command inherits nothing from the template.
    */
   shellEnvironment: Schema.optional(
     Schema.Array(Schema.Struct({ name: TrimmedNonEmptyString, source: TrimmedNonEmptyString })),
   ),
   /**
-   * Files placed in a new environment's home directory, by path within it.
-   *
-   * Agent CLIs keep their sign-in where they expect to find it, and each keeps
-   * it somewhere different. Copying those files is what makes an environment
-   * usable by more than the one agent whose credentials provisioning knows how
-   * to install, and saves signing in again on every machine.
+   * Files placed in a new environment's home directory, by path within it. Agent CLIs keep their
+   * sign-in in different places; copying those files makes an environment usable by agents whose
+   * credentials provisioning does not know how to install.
    */
   homeFiles: Schema.optional(
     Schema.Array(
@@ -220,12 +203,8 @@ const Provisioning = Schema.Struct({
     ),
   ),
   /**
-   * Skill bundles copied into a new environment, by directory.
-   *
-   * An agent that reaches a prepared sandbox without its playbooks will
-   * improvise, which is the opposite of why a bug is routed to one. Each CLI
-   * reads skills from a different place, so a bundle is named once here and
-   * the selected driver decides where it lands.
+   * Skill bundles copied into a new environment, by directory. Each CLI reads skills from a different
+   * place, so a bundle is named once here and the selected driver decides where it lands.
    */
   skills: Schema.optional(
     Schema.Array(
@@ -233,13 +212,10 @@ const Provisioning = Schema.Struct({
         /** Absolute directory on the machine running the server. */
         source: TrimmedNonEmptyString,
         /**
-         * Directory name within the environment's skill root, for a source
-         * that is one skill.
-         *
-         * Omitted, the source is read as a directory of skills and its
-         * children land in the root directly. Every supported CLI resolves a
-         * skill as `<root>/<directory>/SKILL.md` and looks no deeper, so a
-         * plugin holding many skills needs the flat form to be found at all.
+         * Directory name within the environment's skill root, for a source that is one skill. Omitted, the
+         * source is read as a directory of skills whose children land in the root directly. Every supported
+         * CLI resolves `<root>/<directory>/SKILL.md` and looks no deeper, so a plugin holding many skills
+         * needs the flat form.
          */
         name: Schema.optional(TrimmedNonEmptyString),
         /**
@@ -402,14 +378,10 @@ const onDisk = async (path: string) => {
 };
 
 /**
- * Where to read cloud control configuration, or `null` when it is not set up.
- *
- * Prefer the file beside `settings.json` in the state directory, then the T3
- * home that owns that userdata directory (`--home-dir ~/.t3/dev` pins
- * `~/.t3/dev/environment-control.json`), then the machine-level `~/.t3` file.
- * An explicit override is returned even when the file is missing: naming a
- * path that does not exist is a misconfiguration and has to fail loudly,
- * whereas the default being absent just means a machine has no cloud controls.
+ * Where to read cloud control configuration, or `null` when it is not set up. Prefers the file
+ * beside `settings.json`, then the owning T3 home, then the machine-level `~/.t3` file. An explicit
+ * override is returned even when the file is missing: naming a path that does not exist is a
+ * misconfiguration and has to fail loudly.
  */
 function controlConfigCandidates(input: {
   readonly stateDir: string;

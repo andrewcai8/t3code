@@ -1,15 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off - starts the host with an IPC channel and adopts the sockets it hands over, which ChildProcess.make cannot express. Its answer deadlines are timers on that event-driven channel.
 /**
- * Before libuv 1.53, Node starts every child on Linux with fork(), which copies the page tables
- * of the whole server on its main thread. At the server's usual 1.5 GB that blocks the event
- * loop for 10 to 30 ms per process, and the server starts several each second
- * (pingdotgg/t3code#21289). This spawner hands every spawn to a small host process, forked once
- * while the server is still small. Children read and write their stdio sockets in the server
- * directly, and the server signals them by pid; only the exit status comes from the host.
- *
- * Once the Node that T3 Code ships bundles libuv 1.53 (posix_spawn), `spawnsThroughHost` turns
- * this off. Then delete this module, `spawnHostProcess.ts`, the `__spawn-host` command, and the
- * host's case in `ProcessGroupMetrics`.
+ * Before libuv 1.53, Node starts every child on Linux with fork(), which copies the server's page
+ * tables on its main thread and blocks the event loop 10 to 30 ms per process (pingdotgg/t3code#21289).
+ * This spawner hands every spawn to a small host process forked once while the server is small.
+ * Once Node bundles libuv 1.53, `spawnsThroughHost` turns this off; then delete this module and its users.
  */
 import * as NodeChildProcess from "node:child_process";
 import type * as NodeNet from "node:net";
@@ -316,6 +310,7 @@ const makeHostSupervisor = (host: SpawnHostCommand, deadlines: SpawnHostDeadline
         );
       }
       case "Off":
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
         if (!state.unreported) return Effect.succeed(undefined);
         state = { _tag: "Off", unreported: false };
         return Effect.logWarning(

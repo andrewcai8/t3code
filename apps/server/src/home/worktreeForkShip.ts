@@ -1,10 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - ship state is packed into scratch files on this host.
 /**
- * How a worktree on this host becomes the same worktree inside a copy booted from a base image:
- * what is shipped (a bundle of commits the base lacks, a tarball of everything that differs from
- * HEAD, a list of deletions), the script that applies it, how paths and the caller's environment
- * map into the copy, and which installs drifted from the base. These change together, so they live
- * together.
+ * How a worktree on this host becomes the same worktree inside a copy booted from a base image: the
+ * commits bundle, tarball of differences from HEAD and list of deletions, the script that applies
+ * them, how paths and environment map into the copy, and which installs drifted from the base.
  *
  * @module worktreeForkShip
  */
@@ -421,11 +419,10 @@ const GUEST_IDENTITY = Object.fromEntries(
 );
 
 /**
- * The caller's environment as a copy should see it. Host session variables go, and so does any
- * path under the host's home outside the worktree, since nothing else of the host exists in the
- * copy; for a colon list only those entries go. PATH keeps the caller's entries inside the
- * worktree (node_modules/.bin from `bun run`) ahead of the image's own. T3CODE_* goes too: a copy
- * is no T3 host, so wrappers there run their command where they are.
+ * The caller's environment as a copy should see it. Host session variables go, as does any path
+ * under the host's home outside the worktree. PATH keeps the caller's entries inside the worktree
+ * ahead of the image's own. T3CODE_* goes too: a copy is no T3 host, so wrappers there run their
+ * command where they are.
  */
 export const sandboxEnvironment = (
   caller: Readonly<Record<string, string>>,

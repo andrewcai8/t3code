@@ -169,7 +169,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     // user's workspace, and Limits would then split one account across machines.
     const readWorkspaceId =
       !ownConfigDir && CLAUDE_TOKEN_VARIABLES.some((name) => processEnv[name]?.trim())
-        ? Effect.succeed(undefined)
+        ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+          Effect.succeed(undefined)
         : ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath);
     const stampIdentity = withInstanceIdentity({
       instanceId,

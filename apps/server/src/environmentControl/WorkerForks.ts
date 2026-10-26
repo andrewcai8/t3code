@@ -1,21 +1,7 @@
 /**
- * WorkerForks - runs a cloud chat's jobs in throwaway copies of its machine (t3_fork_run).
- *
- * A chat's box is one sandbox with fixed CPU, memory and disk. Parallel work there (many
- * worktrees with installs, eval replays) fills the disk and crawls. Here the host copies the
- * chat's machine once per job, so each job starts with everything the chat already installed,
- * runs alone, and is thrown away. The host holds the provider key and decides limits; the box only
- * asks over its fleet channel. Copies are never leases or chats: nothing registers them, so they
- * never appear in a sidebar or receive fleet calls.
- *
- * Who may ask is CloudFleetHost's call, from the host's own records: the box's own chat, in
- * full-access/default mode. This service trusts the source and actor it is given.
- *
- * A batch outlives the call that started it. Capturing the chat's machine pauses it, which drops
- * the fleet connection the call came in on, so `run` only reserves the batch and answers with its
- * id; its caller starts the batch once that answer is delivered, `status` reports on it, and
- * `cancel` ends jobs that hang. Batches live in memory: a host
- * restart ends them, and the sweep at start, then every few minutes, removes what they left.
+ * WorkerForks - runs a cloud chat's jobs in throwaway copies of its machine (t3_fork_run), because
+ * parallel work on the chat's one box fills the disk. Copies are never leases or chats. `run` only
+ * reserves a batch, since capturing pauses the box and drops the call's connection; batches live in memory.
  *
  * @module WorkerForks
  */
@@ -234,7 +220,7 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const runJob = (
+  const runJob = Effect.fn("runJob")(function (
     batch: Batch,
     source: Box,
     actor: FleetActor,
@@ -242,7 +228,7 @@ const make = Effect.gen(function* () {
     limits: ForkLimits,
     captureId: string,
     index: number,
-  ) => {
+  ) {
     const job = input.jobs[index]!;
     const cwd = job.cwd ?? source.projectDir ?? "/home/user";
     const timeoutMs = Math.min((job.timeoutSeconds ?? Infinity) * 1000, limits.maxJobMs);
@@ -366,7 +352,7 @@ const make = Effect.gen(function* () {
           }).pipe(Effect.andThen(logStep(error))),
       }),
     );
-  };
+  });
 
   const runBatch = Effect.fn("WorkerForks.runBatch")(
     function* (

@@ -32,11 +32,10 @@ function environmentKey(environmentId: EnvironmentId): string {
 }
 
 /**
- * Which sandbox a draft or thread owns, so the client can heartbeat, pause, and dispose it.
- * A lease starts under the draft that provisioned it and moves to the thread once the first
- * turn starts; whichever holds it is the one whose deletion must tear the machine down.
- * An environment joined from Settings before it has any thread is recorded under the
- * environment itself, which answers "is this a manager lease" but owns no lifecycle.
+ * Which sandbox a draft or thread owns, so the client can heartbeat, pause, and dispose it. A lease
+ * starts under the draft and moves to the thread at its first turn; whichever holds it is the one
+ * whose deletion tears the machine down. An environment joined from Settings before any thread is
+ * recorded under itself: a manager lease with no lifecycle.
  */
 export function createProvisionedSandboxLeaseStore(storage: ProvisionStorage) {
   const leases = new Map<string, ProvisionedSandboxLease>();

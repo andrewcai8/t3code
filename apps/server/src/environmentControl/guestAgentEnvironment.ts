@@ -1,24 +1,8 @@
 /**
  * Python that reads, on a cloud box, the environment its chat's agent runs with: the T3 server's
- * own, plus each provider instance's variables, such as the AWS keys the agent uploads with. A
- * guest script embeds it and calls `agent_env(root)` with the box's provision root. It answers
- * `(env, server_pid, t3_home, settings)`; the pid is None when no server is running.
- *
- * Once the server saves its settings, a sensitive variable's value is kept out of settings.json
- * (`value: ""`, `valueRedacted: true`) and lives in the server's secret store as
- * `<t3 home>/userdata/secrets/provider-env-<instance>-<name>.bin`, both parts base64url. This
- * reads it from there, as the server does (serverSettings.ts). A variable whose secret is missing
- * is left out of `env`; `unresolved_env(t3_home, settings)` names them so a caller can say so.
- *
- * `provider_home(env, settings, root, driver, instance_id)` answers where a Claude or Codex
- * instance keeps its sessions: its `homePath`, else `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, else the
- * folder under HOME.
- *
- * Without a running server, as on a machine booted fresh from its disk, where the recorded pid may
- * belong to another process, `env` falls back to what remote preparation starts the server with:
- * its home, T3 home and the home's bin on PATH.
- *
- * @module guestAgentEnvironment
+ * own plus each provider instance's variables. A guest script embeds it and calls `agent_env(root)`,
+ * which answers `(env, server_pid, t3_home, settings)`. Sensitive values live in the server's secret
+ * store, not settings.json; `unresolved_env` names those whose secret is missing.
  */
 export const agentEnvironmentPython = String.raw`
 import base64

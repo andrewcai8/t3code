@@ -542,7 +542,7 @@ it.effect("starts a new cloud chat with one provision like this chat's machine",
   ),
 );
 
-// The thread answers as contracts defined them before #200, which each required a `link`.
+// The thread answers as the older contracts defined them, which each required a `link`.
 const LegacyThreadListItem = Schema.Struct({
   threadId: ThreadId,
   link: Schema.String,
@@ -632,9 +632,10 @@ const resultOf = (response: FleetHostResponse) =>
 it.effect("answers with the thread links boxes on builds before #200 still require", () =>
   withBoxes(({ relay, send, responses, answers, provisioned }) =>
     Effect.gen(function* () {
+      // A sleeping box's list already carries the current link format, which old decoders accept.
       const listed = yield* relay(environment(2), { op: "threads.list", input: {} });
       expect(decodeLegacyList(resultOf(listed)).threads.map((thread) => thread.link)).toEqual([
-        "[Write docs](t3-thread://v1/box-2/chat-2)",
+        "[Write docs](t3-thread://v1/chat-2)",
       ]);
 
       answers.set("threads.read", {

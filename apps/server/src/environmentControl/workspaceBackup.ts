@@ -1,8 +1,7 @@
 /**
- * Pushes a cloud chat's unsaved git work to `t3-backup/` branches on its origin before the machine
- * holding it is removed. Runs on the guest as one Python script: JSON in on stdin, one JSON line
- * out. Builds its commits from copies of each index, so the checkout an agent may resume in is
- * never written.
+ * Pushes a cloud chat's unsaved git work to `t3-backup/` branches on its origin before its machine
+ * is removed. Runs on the guest as one Python script: JSON in on stdin, one JSON line out. Builds
+ * commits from copies of each index, so the checkout an agent may resume in is never written.
  *
  * @module workspaceBackup
  */
@@ -196,17 +195,10 @@ export type WorkspaceBackupTarget =
   | { readonly kind: "none"; readonly reason: string };
 
 /**
- * Whether the chat under `root` has git work only its machine holds, and saves it to `target`
- * when it does. Every tree with changes or unpushed commits goes to `t3-backup/<branch>`
- * (`-<n>` for the n-th worktree), every local branch with unpushed commits to
- * `t3-backup/<branch>-branch-<n>` (its position among the sorted branches), and every stash entry to
- * `t3-backup/<branch>-stash-<n>`, wherever the worktree lives. A changed tree with submodules is
- * `unsaved`. Pushed, `saved` means each branch was read back from origin at the pushed commit,
- * and origin keeps no other branch under the same name an earlier backup made; `stale` asks a
- * `clean` checkout to remove them too. Bundled, the branches are `refs/t3-bundle/<branch>` in the
- * bundle, which holds only what origin lacks. A rerun saves the same commits under the same names,
- * unless `previous` is the fingerprint of the last `saved` and nothing changed since: then nothing
- * is saved and the answer is `unchanged`.
+ * Whether the chat under `root` has git work only its machine holds, and saves it to `target` when
+ * it does: changed trees and unpushed branches and stashes go to `t3-backup/<branch>...` names.
+ * Pushed, `saved` means each branch was read back from origin; bundled, branches are
+ * `refs/t3-bundle/<branch>`. A rerun is `unchanged` if the `previous` fingerprint still matches.
  */
 export async function backUpWorkspace(
   port: RemotePreparationPort,

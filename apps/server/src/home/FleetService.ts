@@ -1,10 +1,7 @@
 /**
- * FleetService - runs one Home operation in this environment.
- *
- * Every T3 server has it. Home's own server calls it in process; the user's
- * other environments receive the same operations over `fleet.invoke`, relayed
- * by the desktop renderer. It acts with the reach of the user's client: any
- * project, no calling-project limit. Nothing here deletes data.
+ * FleetService - runs one Home operation in this environment. Every T3 server has it; other
+ * environments receive the same operations over `fleet.invoke`, relayed by the desktop renderer.
+ * It acts with the reach of the user's client: any project. Nothing here deletes data.
  *
  * @module FleetService
  */
@@ -172,10 +169,9 @@ const make = Effect.gen(function* () {
   const loadShell = (threadId: ThreadId) =>
     threads.getThreadShell(threadId).pipe(
       Effect.mapError(threadManagementFailure),
-      Effect.flatMap((shell) =>
-        shell === null || shell.deletedAt !== null
-          ? Effect.fail(failure("thread_not_found", `Thread ${threadId} was not found.`))
-          : Effect.succeed(shell),
+      Effect.filterOrFail(
+        (shell): shell is NonNullable<typeof shell> => shell !== null && shell.deletedAt === null,
+        (_shell) => failure("thread_not_found", `Thread ${threadId} was not found.`),
       ),
     );
 
@@ -534,10 +530,10 @@ const make = Effect.gen(function* () {
     )(request.input as never, actor);
 
   return FleetService.of({
-    execute: ({ actor, request }) =>
-      run(request, actor).pipe(
-        Effect.withSpan("FleetService.execute", { attributes: { "fleet.op": request.op } }),
-      ),
+    execute: Effect.fn("FleetService.execute")(function* ({ actor, request }) {
+      yield* Effect.annotateCurrentSpan("fleet.op", request.op);
+      return yield* run(request, actor);
+    }),
   });
 });
 

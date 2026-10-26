@@ -1,8 +1,7 @@
 /**
- * The Claude driver's view of a login on a host that runs many Claude
- * accounts: a setup-token login spends a turn on the usage windows `get_usage`
- * cannot read, a slow SDK probe falls back to `claude auth status`, and a
- * login that cannot read its profile takes the account email the host named.
+ * The Claude driver's view of a login on a host that runs many Claude accounts: a setup-token login
+ * spends a turn on the usage windows `get_usage` cannot read, a slow SDK probe falls back to
+ * `claude auth status`, and a login that cannot read its profile takes the account email the host named.
  *
  * @module provider/Drivers/claudeHostProbe
  */
@@ -62,8 +61,9 @@ export const makeClaudeHostProbe = Effect.fn("makeClaudeHostProbe")(function* (
           orClaudeAuthStatus(runClaudeCommand(settings, ["auth", "status"], environment))(
             undefined,
           ).pipe(
-            Effect.flatMap((status) =>
-              status === undefined ? Effect.fail(error) : Effect.succeed(status),
+            Effect.filterOrFail(
+              (status) => !(status === undefined),
+              (_status) => error,
             ),
           ),
         ),

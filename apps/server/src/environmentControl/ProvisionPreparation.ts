@@ -340,11 +340,9 @@ export function configuredRuntimeArtifact(
   );
 }
 /**
- * The cloud environments this configuration can provision. Each needs its
- * pinned runtime; E2B also needs its template and a Mac its Namespace
- * defaults. Namespace
- * credentials are checked when a provision starts, since `nsc login` can
- * supply them outside this file.
+ * The cloud environments this configuration can provision. Each needs its pinned runtime; E2B also
+ * needs its template and a Mac its Namespace defaults. Namespace credentials are checked when a
+ * provision starts, since `nsc login` can supply them outside this file.
  */
 export function provisionProviders(
   config: EnvironmentControlConfig,
@@ -367,22 +365,10 @@ const decodeSettings = Schema.decodeUnknownSync(
 );
 const decodeInput = Schema.decodeUnknownSync(EnvironmentProvisionInput);
 /**
- * Where a guest keeps the runtime archive it uploads. Everything else T3
- * prepares (the checkout, the isolated home with credentials and T3 state)
- * lives under the preparation root.
- *
- * A Namespace Mac wipes /tmp and the runner home on shutdown but keeps its
- * Devbox volume, so only a root on that volume lets a paused Mac resume as the
- * same environment.
- *
- * Every E2B box prepares at one fixed root. A warm snapshot's checkout carries
- * absolute paths (Python venvs, prepare records, `$HOME` caches), so a base is
- * only reusable by a box that prepares where it was built. Each E2B request
- * has its own sandbox, so the request id never needed to be in the path.
- * E2B clears /tmp when a sandbox boots cold and keeps the home volume, so the
- * root lives under the home. The archive can stay in /tmp: prepare uploads it
- * again whenever the runtime it installs under the root is missing. Existing
- * manifests keep the root they persisted.
+ * Where a guest keeps the runtime archive it uploads. Everything else lives under the preparation root.
+ * A Namespace Mac wipes /tmp and the runner home on shutdown but keeps its Devbox volume, so only a
+ * root on that volume lets a paused Mac resume. Every E2B box prepares at one fixed root, because a
+ * warm snapshot's checkout carries absolute paths; the root is under home since E2B clears /tmp on cold boot.
  */
 const guestVolume = { e2b: "/tmp", modal: "/tmp", namespace: "/Volumes/devbox" } as const;
 /**
@@ -407,12 +393,9 @@ export async function fileDigest(path: string) {
 const provisionInputLimit = 64 * 1024 * 1024;
 
 /**
- * Where an agent CLI reads skills inside a provisioned environment, relative
- * to its home directory.
- *
- * Every supported CLI resolves a user-scoped root, so skills land in the home
- * rather than the checkout. A checkout is what the agent opens a pull request
- * from, and a skill bundle committed by accident is worse than a missing one.
+ * Where an agent CLI reads skills inside a provisioned environment, relative to its home directory.
+ * Skills land in the home rather than the checkout, since a skill bundle committed by accident is
+ * worse than a missing one.
  */
 function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
   if (kind === "cursor") return ".cursor/skills";
@@ -421,19 +404,10 @@ function skillRoot(kind: ProvisioningProviderProfile["kind"]): string {
 }
 
 /**
- * The host settings a box's own server must follow. A box reads only its own `settings.json`, and
- * nothing else carries these over, so each is copied when the host prepares the box, and a box
- * installs its files once, so later host changes do not reach it. Only keys
- * that decide how the box's server continues a turn belong here; account choice stays the
- * host's, which gives a box one account per provider.
- *
- * - `continuationPrompt`: the box sends it on restarts and limit resumes, not only on an account
- *   switch (the one case the host sends it with).
- * - `autoApproveFullAccessPrompts`: the box runs the Claude turn that raises the prompt.
- *
- * `autoResumeLimitedThreads` stays out: the host moves a limited box to another account and
- * continues the turn, and arming the box's own recovery as well could continue it twice.
- * `autoPickProviderAccounts` stays out: a box holds one account per provider, so it has none to pick.
+ * The host settings a box's own server must follow. A box reads only its own `settings.json` and
+ * installs its files once, so each is copied when the host prepares it. Only keys that decide how
+ * the box continues a turn belong here (`continuationPrompt`, `autoApproveFullAccessPrompts`);
+ * account choice and `autoResumeLimitedThreads` stay the host's, or a turn could continue twice.
  */
 const INHERITED_HOST_SETTING_KEYS = [
   "continuationPrompt",
@@ -463,13 +437,9 @@ type ChildProviderInstanceSettings = Record<string, unknown> & {
 };
 
 /**
- * The instance id a provisioned environment keys a driver's account by.
- *
- * An enabled driver already contributes an implicit instance under this id, so
- * an account keyed by the manager's own slug leaves that implicit instance
- * enabled with no credentials for a guest client to pick. A guest holds one
- * account per driver and the manager's slug is not a routing key there, so the
- * account takes the id the guest would have synthesized anyway.
+ * The instance id a provisioned environment keys a driver's account by. An enabled driver already
+ * contributes an implicit instance under this id, so an account keyed by the manager's slug would
+ * leave that instance enabled with no credentials. The account takes the id the guest would have used.
  */
 const guestInstanceId = (agentDriver: string) =>
   defaultInstanceIdForDriver(ProviderDriverKind.make(agentDriver));
@@ -624,13 +594,9 @@ function submittedFiles(input: EnvironmentProvisionInput) {
 }
 
 /**
- * Every file in a skill bundle, by path within it.
- *
- * A bundle is configuration a manager operator points at, but it lands in an
- * environment that then holds whatever it names, so a link out of the bundle
- * is refused rather than resolved. A link that stays inside it is carried as
- * an ordinary file, which is the shape npm leaves behind in a skill that has
- * its own scripts.
+ * Every file in a skill bundle, by path within it. A bundle lands in an environment that then holds
+ * whatever it names, so a link out of the bundle is refused rather than resolved. A link that stays
+ * inside it is carried as an ordinary file, the shape npm leaves behind in a skill with scripts.
  */
 async function skillFiles(source: string, limit: { remaining: number }) {
   const collected: Array<{ path: string; data: Uint8Array }> = [];
@@ -765,13 +731,10 @@ async function workspaceFileDigests(provisioning: ProvisioningSettings, reposito
 }
 
 /**
- * What a repository's warm E2B snapshot has on disk, or null when the
- * repository keeps no warm base. Chat freezes and the warm base upkeep both
- * key on this, so they cannot disagree about whether a base fits.
- *
- * Home files are left out: credentials rotate, and sealing a base removes
- * them. So are the revision and branch, which each chat fetches into the warm
- * checkout, and the provider CLI install, which each chat reruns.
+ * What a repository's warm E2B snapshot has on disk, or null when it keeps no warm base. Chat
+ * freezes and warm base upkeep both key on this, so they cannot disagree about whether a base fits.
+ * Home files are left out (credentials rotate, and sealing removes them), as are the revision and
+ * branch and the provider CLI install, which each chat refetches or reruns.
  */
 export async function warmBaseKey(
   config: EnvironmentControlConfig,
@@ -1030,11 +993,9 @@ export function makeProvisionPreparationStore(stateDir: string) {
       const instanceEngine = input.provider === "namespace" && repositoryEngine === "instance";
       const volume = instanceEngine ? NAMESPACE_INSTANCE_MOUNT : guestVolume[input.provider];
       let warmKey: string | null = null;
-      // A chat that claims a spare becomes the owner of its Devbox and prepares
-      // where the spare was built: its tree carries absolute paths, like a warm
-      // E2B base's. Claimed before anything is derived from the root. A freeze
-      // that fails after this leaves the claim to the upkeep, which disposes a
-      // spare whose chat never starts on it.
+      // A chat that claims a spare becomes the owner of its Devbox and prepares where the spare was built,
+      // since its tree carries absolute paths. Claimed before anything is derived from the root; a freeze
+      // that fails after this leaves the claim to the upkeep, which disposes a spare whose chat never starts.
       let spare: ProvisionRequestId | null = null;
       if (input.provider === "namespace" && input.repository && !instanceEngine) {
         warmKey = await spareKey(config, input.repository);
@@ -1085,12 +1046,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
             files.push(file("home", `${root}/${prefix}${entry.path}`, entry.data));
         }
       }
-      // A configured home file never decides which login a provisioned account
-      // uses. A CLI handed a stale credentials file prefers it over the token
-      // and fails the turn refreshing a login this manager no longer keeps,
-      // so the credential provisioning resolved replaces every copy of it --
-      // including the ones a file credential does not itself write, which a
-      // guest on another platform would read first.
+      // A configured home file never decides which login a provisioned account uses. A CLI handed a stale
+      // credentials file prefers it over the token and fails the turn, so the resolved credential replaces
+      // every copy of it, including ones a file credential does not itself write, which a guest on
+      // another platform would read first.
       const replaced = new Set(profiles.flatMap(({ kind }) => credentialDestinations[kind]));
       files = files.filter((item) => !(item.scope === "home" && replaced.has(item.destination)));
       for (const profile of profiles) {
@@ -1210,19 +1169,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
           });
         destinations.add(destination);
       }
-      // A prepared environment has two halves, and only one of them is about
-      // this request.
-      //
-      // `build` is what the disk would contain for anyone asking the same
-      // thing: the repository at a revision, the runtime artifact, and how it
-      // is started. Identical inputs describe an identical machine, so it is
-      // the identity a prepared parent, a snapshot, or a baked base image can
-      // all be keyed on — the same idea whichever provider realises it.
-      //
-      // The overlay below is what only this request wants: its id, the root
-      // named after it, and the files it carries. Those are why every request
-      // currently hashes differently even when the machine is the same, and
-      // why nothing prepared can be shared yet.
+      // A prepared environment has two halves. `build` is what the disk contains for anyone asking the
+      // same thing (repository revision, runtime artifact, how it is started), so it is the identity a
+      // prepared parent, snapshot or base image can be keyed on. The overlay below is what only this
+      // request wants; it is why every request currently hashes differently and nothing can be shared yet.
       const repositoryEntry = input.repository
         ? provisioning.repositories?.find(
             (entry) =>

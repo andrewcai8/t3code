@@ -40,7 +40,7 @@ const token = `e30.${Buffer.from(encodeJson({ actor_id: "user-test", tenant_id: 
 const requestId = "7314a443-30af-4c88-bc3a-9b70940eb563";
 const decodeOperation = Schema.decodeUnknownSync(ProvisionOperation);
 const decodeManifest = Schema.decodeUnknownSync(ProvisionPreparationManifest);
-const resource = Schema.decodeUnknownSync(ProvisionResource)({
+const resource = Schema.decodeSync(ProvisionResource)({
   provider: "namespace",
   devboxId: "owned-box",
   devboxName: `t3-${requestId}`,

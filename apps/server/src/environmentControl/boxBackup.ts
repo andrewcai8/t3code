@@ -1,10 +1,8 @@
 // @effect-diagnostics globalTimers:off globalFetch:off globalDate:off - the budget bounds a Promise-side backup, and GitHub is asked over plain HTTP.
 /**
- * Backs a cloud box up, so its chat can be restored on a fresh box if this one is lost or never
- * resumes: its unsaved git work goes to `t3-backup/` branches, pushed to a private origin or kept
- * in a git bundle, and its owner chat's provider sessions, the bundle and a restore manifest
- * (`CloudBackupManifest`) go to S3 with the AWS credentials the chat's agent has. The host never
- * holds AWS keys for it. Each part skips itself when the box holds what it held at the last backup.
+ * Backs a cloud box up so its chat can be restored on a fresh box: unsaved git work goes to
+ * `t3-backup/` branches (or a git bundle), and the chat's provider sessions, bundle and restore
+ * manifest go to S3 with the AWS credentials the chat's agent has; the host never holds AWS keys.
  *
  * @module boxBackup
  */

@@ -10,11 +10,10 @@ const ModalDiskSave = Schema.Struct({ imageId: Schema.String, at: Schema.Number 
 export type ModalDiskSave = typeof ModalDiskSave.Type;
 
 /**
- * Where a Modal chat is. `awake` runs on a sandbox; `saving` is written before that sandbox's
- * memory snapshot, which ends it, and `asleep` records the snapshot it wakes from. `stopped` kept
- * only its disk, so it wakes as a fresh boot. `chainStartedAt` is when the first snapshot this
- * chat's memory descends from was taken, since a restored box's snapshot expires with that one;
- * null on a box that was never snapshotted. `disk` is the chat's latest disk save, if any.
+ * Where a Modal chat is. `awake` runs on a sandbox; `saving` is written before its memory snapshot,
+ * which ends it; `asleep` records the snapshot it wakes from; `stopped` kept only its disk.
+ * `chainStartedAt` is when the first snapshot this chat's memory descends from was taken, since a
+ * restored box's snapshot expires with that one. `disk` is the latest disk save, if any.
  */
 export const ModalChatRecord = Schema.Union([
   Schema.Struct({

@@ -12,7 +12,7 @@ import {
   provisionedGatewayPairingUrl,
 } from "./provisioned.ts";
 
-const environment = Schema.decodeUnknownSync(DiscoveredProvisionedEnvironment)({
+const environment = Schema.decodeSync(DiscoveredProvisionedEnvironment)({
   requestId: "11111111-1111-4111-a111-111111111111",
   leaseId: "11111111-1111-4111-a111-111111111112",
   sandboxId: "sandbox-1",

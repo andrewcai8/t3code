@@ -1,11 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - the spawn host is plain Node so it stays small and starts fast.
 /**
- * The spawn host: a small process the server starts once, while its own memory is still small,
- * that starts every other child process for it. See `SpawnHost.ts` for why.
- *
- * Each piped stdio of a child goes to the server as a socket handle over IPC, so output never
- * passes through this process. The server signals children by pid itself; only the exit status
- * has to come from here, because only the parent can wait for it.
+ * The spawn host: a small process the server starts once, while its memory is small, that starts
+ * every other child process for it (see `SpawnHost.ts`). Each piped stdio of a child goes to the
+ * server as a socket handle over IPC, so output never passes through here; only the exit status
+ * comes from here, because only the parent can wait for it.
  */
 import * as NodeChildProcess from "node:child_process";
 import type * as NodeNet from "node:net";

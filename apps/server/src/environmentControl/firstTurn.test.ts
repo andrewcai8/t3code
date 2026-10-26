@@ -39,14 +39,14 @@ const turn = {
   interactionMode: "default",
   createdAt: "2026-10-01T00:01:27.000Z",
 } as ProvisionFirstTurn;
-const input = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+const input = Schema.decodeSync(EnvironmentProvisionInput)({
   requestId: "1b3650ed-0923-4876-b450-ccb4cf46a905",
   provider: "e2b",
   providerInstanceId: "codex",
   chat: { threadId: "draft-thread", firstTurn: turn },
 });
 // As freeze stores it: the request keeps the message's digest, never the message.
-const manifest = Schema.decodeUnknownSync(ProvisionPreparationManifest)({
+const manifest = Schema.decodeSync(ProvisionPreparationManifest)({
   input: { ...input, chat: { threadId: "draft-thread" } },
   request: {
     requestId: input.requestId,

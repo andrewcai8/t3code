@@ -1,16 +1,8 @@
 /**
  * CloudFleetHost - plays the desktop window's part for the host's cloud boxes.
- *
- * Every cloud chat runs on its own box with its own T3 server. The host holds
- * each box's broker token, so it registers with every awake box as that box's
- * fleet host (see home/FleetBroker.ts) and offers the user's other cloud chats
- * as environments, each with its stored chat card. A request a box relays runs
- * on its target box with that box's token: the host wakes a sleeping target
- * first, and answers a thread list for one from its card instead. One more
- * environment starts a new cloud chat through the same provisioning a client
- * uses. Boxes never hold a host credential; the host decides what each sees.
- *
- * @module CloudFleetHost
+ * Registers with every awake box as its fleet host (see home/FleetBroker.ts), offers the user's
+ * other cloud chats as environments, and runs a relayed request on its target box, waking it first.
+ * Boxes never hold a host credential; the host decides what each sees.
  */
 import {
   CLOUD_FORKS_ENVIRONMENT_ID,
@@ -182,10 +174,9 @@ class StartAfterAnswer {
 type BoxConnection = BoxFleetClient.BoxFleetConnection;
 
 /**
- * Boxes on builds before #200 decode thread answers with a required `link`, which upstream #17017
- * dropped, so a launch that went through would read as a failure there and be retried. The host
- * adds the old link to each thread it answers with. Delete once every cloud box runs #200 or later.
- * A link the answer already has wins: an older box's own, or a new chat's from startChat.
+ * Boxes on older builds decode thread answers with a required `link`, which upstream dropped, so a
+ * launch that went through would read as a failure there. The host adds the old link to each thread
+ * it answers with, unless the answer already has one. Delete once every cloud box runs a newer build.
  */
 const legacySegment = (id: string) =>
   encodeURIComponent(id).replace(/\(/g, "%28").replace(/\)/g, "%29");

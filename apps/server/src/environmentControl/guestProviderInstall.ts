@@ -1,9 +1,7 @@
 /**
- * Installs a global npm CLI unless the copy already in the isolated home is
- * the registry's latest and runs. A warm base or a resumed box almost always
- * has it, and reinstalling the same version cost each chat about ten seconds a
- * CLI. An install killed between unpacking and linking leaves the package
- * without its command, which the check has to see through.
+ * Installs a global npm CLI unless the copy already in the isolated home is the registry's latest
+ * and runs. An install killed between unpacking and linking leaves the package without its command,
+ * which the check has to see through.
  */
 const npmLatest = (name: string, bin: string) =>
   `{ v=$(npm view ${name}@latest version 2>/dev/null) && [ -n "$v" ] && ` +
@@ -75,11 +73,9 @@ const guestToolPins = {
 };
 
 /**
- * Installs the AWS CLI and wrangler into the isolated home without sudo. Each
- * tool is skipped when its pinned version is already there, so a resumed Mac
- * pays only two file checks. The AWS CLI lands in a versioned directory by
- * rename, so a download cut short never passes for an install, and a new pin
- * replaces every older version.
+ * Installs the AWS CLI and wrangler into the isolated home without sudo, skipping each whose pinned
+ * version is already there. The AWS CLI lands in a versioned directory by rename, so a download cut
+ * short never passes for an install, and a new pin replaces every older version.
  */
 export function guestToolInstallCommand(pins = guestToolPins): string {
   return [

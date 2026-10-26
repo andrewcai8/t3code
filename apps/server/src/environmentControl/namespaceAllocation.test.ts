@@ -15,6 +15,7 @@ import {
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeProvisionOperation = Schema.decodeUnknownSync(ProvisionOperation);
 const workloadRequest = {
   requestId: "7314a443-30af-4c88-bc3a-9b70940eb563",
   provider: "namespace",
@@ -28,7 +29,7 @@ const workloadRequest = {
   idleTimeoutMinutes: 30,
 };
 const makeOperation = (request: object) =>
-  Schema.decodeUnknownSync(ProvisionOperation)({
+  decodeProvisionOperation({
     request,
     requestHash: "b".repeat(64),
     revision: 1,

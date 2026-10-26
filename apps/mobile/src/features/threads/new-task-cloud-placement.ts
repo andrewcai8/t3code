@@ -182,11 +182,10 @@ export type NewThreadStart =
   | { readonly kind: "environment"; readonly environmentId: EnvironmentId };
 
 /**
- * How a new thread in `project` starts, by the same rules as the web composer. A host that runs
- * no agents but can provision refuses a draft on itself, and a new thread never joins another
- * chat's box, so either starts a fresh cloud machine for the project's repository on that host.
- * With no cloud machine to start, it moves to the first of `environments` that can take it, else
- * opens a draft on the project as before.
+ * How a new thread in `project` starts, by the web composer's rules. A host that runs no agents but
+ * can provision refuses a draft on itself, and a new thread never joins another chat's box, so either
+ * starts a fresh cloud machine there. Otherwise it moves to the first of `environments` that can
+ * take it, else opens a draft on the project.
  */
 export function resolveNewThreadStart(input: {
   readonly project: Pick<EnvironmentProject, "environmentId" | "repositoryIdentity">;

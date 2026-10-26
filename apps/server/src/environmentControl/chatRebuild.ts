@@ -1,9 +1,7 @@
 // @effect-diagnostics globalDate:off cryptoRandomUUID:off cryptoRandomUUIDInEffect:off - a rebuild runs on the Promise side of the host and mints one-off command ids.
 /**
- * Rebuilds a cloud chat on a fresh box from its last backup when its own box cannot be started:
- * the box restores the work from the backup with its own AWS keys, the host imports the chat's
- * Claude session there over the box's RPC, and the chat is told why it moved and what did not
- * come back. The old box is never touched; it stays paused for its provider to recover.
+ * Rebuilds a cloud chat on a fresh box from its last backup when its own box cannot be started.
+ * The old box is never touched; it stays paused for its provider to recover.
  *
  * @module chatRebuild
  */
@@ -270,9 +268,9 @@ export const continueChatOnBox = Effect.fn("chatRebuild.continueChatOnBox")(func
     Effect.map(Option.flatten),
   );
   if (Option.isNone(project))
-    return yield* Effect.fail(
-      new ChatRebuildError({ reason: `The new box has no project at ${input.workspace}.` }),
-    );
+    return yield* new ChatRebuildError({
+      reason: `The new box has no project at ${input.workspace}.`,
+    });
   yield* rpc["server.getConfig"]({}).pipe(
     Effect.map((config) =>
       config.providers.some(
@@ -289,9 +287,9 @@ export const continueChatOnBox = Effect.fn("chatRebuild.continueChatOnBox")(func
   });
   yield* Effect.tryPromise(() => restore.unstage(input.files.staged));
   if ((yield* threadProjection(rpc, threadId)) === null)
-    return yield* Effect.fail(
-      new ChatRebuildError({ reason: `The new box did not import session ${plan.sessionId}.` }),
-    );
+    return yield* new ChatRebuildError({
+      reason: `The new box did not import session ${plan.sessionId}.`,
+    });
   yield* rpc["orchestration.dispatchCommand"]({
     type: "thread.metadata.update",
     commandId: CommandId.make(crypto.randomUUID()),
@@ -311,9 +309,9 @@ export const continueChatOnBox = Effect.fn("chatRebuild.continueChatOnBox")(func
     modelSelection: selection,
   });
   if (header === null)
-    return yield* Effect.fail(
-      new ChatRebuildError({ reason: "The header turn on the new box did not settle." }),
-    );
+    return yield* new ChatRebuildError({
+      reason: "The header turn on the new box did not settle.",
+    });
   const sessions: ReadonlyArray<OrchestrationV2ProviderSession> =
     header.projection.providerSessions;
   for (const session of sessions.filter((candidate) => candidate.status !== "stopped"))

@@ -15,6 +15,7 @@ import { provisionedSandboxLeases } from "../../state/provision-stores";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 import {
   presentProvisionedEnvironment,
   type ProvisionedRowAction,
@@ -25,8 +26,8 @@ const IDLE: ProvisionedRowAction = { kind: "idle" };
 /**
  * "Cloud machines" section: every machine a connected manager runs for a chat. A machine belongs
  * to its chat, so it is opened through that chat; here it can be woken, kept from automatic
- * cleanup, deleted or restored once deleted, and the "+" starts a new cloud chat. Renders nothing for an environment
- * that is not a manager.
+ * cleanup, deleted or restored once deleted, and the "+" starts a new cloud chat. Renders
+ * nothing for an environment that is not a manager.
  */
 export function ProvisionedEnvironmentRows(props: {
   readonly managerId: EnvironmentId;
@@ -223,7 +224,7 @@ function ProvisionedEnvironmentRowView(props: {
       : scopeThreadRef(environment.environmentId, environment.threadId);
   // Only a chat this device has is readable here, and only that one can be opened.
   const thread = useThreadShell(threadRef);
-  const navigation = useNavigation();
+  const selectDetail = useSelectWorkspaceDetail();
   // Read once per row: the countdown is coarse, and the list refreshes after every action.
   const [now] = useState(Date.now);
   const presentation = presentProvisionedEnvironment({
@@ -248,9 +249,12 @@ function ProvisionedEnvironmentRowView(props: {
           {
             label: "Open chat",
             onPress: () =>
-              navigation.navigate("Thread", {
-                environmentId: String(threadRef.environmentId),
-                threadId: String(threadRef.threadId),
+              selectDetail({
+                name: "Thread",
+                params: {
+                  environmentId: String(threadRef.environmentId),
+                  threadId: String(threadRef.threadId),
+                },
               }),
           },
         ]

@@ -194,7 +194,8 @@ export class NamespaceProxyManager {
         "",
       ];
       connect.write(lines.join("\r\n"));
-      client.pipe(connect).pipe(client);
+      client.pipe(connect);
+      connect.pipe(client);
     });
     connect.once("error", () => client.destroy());
     client.once("error", () => connect.destroy());

@@ -134,11 +134,10 @@ subprocess.run(['sudo', '-n', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'], 
 `;
 
 /**
- * Lets envd keep the memory envd.service reserves for it. cgroup v2 protects a group only up to
- * what its parent holds, and E2B leaves `system.slice` with none, so an agent that fills the box
- * starves envd and the box stops answering. This is E2B's own drop-in, still behind its
- * `build-envd-memory-protection` flag. It is written, and systemd reloaded, only when it differs,
- * so it runs on every wake. Needs passwordless sudo, which the E2B template's user has.
+ * Lets envd keep the memory envd.service reserves for it. cgroup v2 protects a group only up to what
+ * its parent holds and E2B leaves `system.slice` with none, so an agent that fills the box starves
+ * envd. This is E2B's own drop-in, still behind its `build-envd-memory-protection` flag; it is
+ * written only when it differs, so it runs on every wake. Needs passwordless sudo.
  */
 export const protectEnvdCommand = (directory = "/etc/systemd/system/system.slice.d") => {
   const file = shellQuote(`${directory}/10-e2b-envd.conf`);
@@ -149,12 +148,10 @@ MemoryLow=256M'
 };
 
 /**
- * earlyoom's settings. When free memory falls to 8% it stops the process with the highest score,
- * preferring test runners and builds, and avoiding envd and the agents. Measured on this template
- * with 32 bun workers filling memory over a 1.5 GB file corpus: without it envd stopped answering
- * for half a minute; with it envd answered within a second, earlyoom stopped only bun workers, and
- * the T3 server and claude kept running. The T3 server runs as `node`, so it is avoided too; a
- * runaway node test worker is still stopped, as the biggest process left.
+ * earlyoom's settings. At 8% free memory it stops the highest-scoring process, preferring test
+ * runners and builds and avoiding envd and the agents. Measured with 32 bun workers filling memory:
+ * without it envd stopped answering for half a minute; with it envd answered within a second. The T3
+ * server runs as `node`, so it is avoided too.
  */
 const EARLYOOM_ARGS =
   "-m 8 -s 100 -r 0 --avoid (^|/)(envd|systemd|sshd|claude|codex|node)$ --prefer (^|/)(bun|python3|vitest|tsc|esbuild)$";
@@ -430,11 +427,9 @@ export function makeE2bProvisionRuntime(
     },
     prepare,
     /**
-     * Converges a woken box on its preparation. A box whose T3 server still
-     * answers only fetches its followed branch. One whose server died while
-     * the sandbox stayed up is prepared again, which restarts the server under
-     * the same environment identity. `envdUnprotected` says why envd's memory
-     * could not be protected, or null.
+     * Converges a woken box on its preparation. A box whose T3 server still answers only fetches its
+     * followed branch; one whose server died is prepared again, keeping its environment identity.
+     * `envdUnprotected` says why envd's memory could not be protected, or null.
      */
     resume: async (
       operation: ProvisionOperation,
@@ -490,12 +485,9 @@ with urllib.request.urlopen(request, timeout=30) as response:
       };
     },
     /**
-     * Turns a ready warm base build into what its snapshot should hold.
-     *
-     * A box restored from a snapshot pages its memory in on demand, and a
-     * build leaves gigabytes of page cache that made every restore slow. So
-     * the sealed build drops its cache and rehearses a chat's start, which
-     * reads back only what a chat reads, before it is sealed for good.
+     * Turns a ready warm base build into what its snapshot should hold. A box restored from a snapshot
+     * pages memory in on demand, and a build leaves gigabytes of page cache that made every restore
+     * slow, so the sealed build drops its cache and rehearses a chat's start first.
      */
     seal: async (
       operation: ProvisionOperation,

@@ -47,7 +47,7 @@ const evidence = {
   sha256: provisionDigest("evidence"),
   contentsBase64: Buffer.from("evidence").toString("base64"),
 };
-const input = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+const input = Schema.decodeSync(EnvironmentProvisionInput)({
   requestId: "05d43b4e-0b92-477b-9503-31a377147fb0",
   provider: "e2b",
   providerInstanceId: "codex",

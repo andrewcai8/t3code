@@ -1,13 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - a plain planner for a deploy script, outside Effect.
 /**
- * Decides which of the operator's provider accounts travel to a provisioning
- * manager, and what the manager needs on disk so that
- * `resolveProvisioningProviderProfile`, running on the manager, resolves each
- * account to the same credential the laptop would.
- *
- * Sources are this machine's files, and every destination is the path the
- * manager, a Linux box, reads. A Cursor sign-in lives in T3's secret store, so
- * it travels from this machine's store into the manager's under the same name.
+ * Decides which of the operator's provider accounts travel to a provisioning manager, and what it
+ * needs on disk so `resolveProvisioningProviderProfile` resolves each to the credential the laptop
+ * would. Every destination is the path the manager, a Linux box, reads; a Cursor sign-in travels
+ * from this machine's secret store into the manager's under the same name.
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -124,14 +120,10 @@ const codexAuthSource = (config: unknown, homedir: string) => {
 };
 
 /**
- * The account a Claude instance is signed in to on this machine, which its
- * setup token cannot report on the manager. Claude Code records it in
- * `.claude.json`, inside the config dir when one is set and in the home
- * directory otherwise; the instance's "Claude · email" name stands in when no
- * login is on disk. Only the instance's own config dir counts: a
- * `CLAUDE_CONFIG_DIR` in the packing shell, as an agent's shell often has,
- * would file the default account under another one. When the login and the
- * name disagree there is no email, since a wrong one merges two accounts.
+ * The account a Claude instance is signed in to on this machine, which its setup token cannot report
+ * on the manager. Claude Code records it in `.claude.json`, in the instance's own config dir (never
+ * the packing shell's `CLAUDE_CONFIG_DIR`, which would file the default account under another one).
+ * When the login and the name disagree there is no email, since a wrong one merges two accounts.
  */
 const claudeAccountEmail = (instance: HostInstance, host: PlanInput["host"]) => {
   const homePath = trimmed(instance.config, "homePath");

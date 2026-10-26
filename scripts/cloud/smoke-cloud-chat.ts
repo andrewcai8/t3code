@@ -1,13 +1,8 @@
 /**
- * End-to-end smoke for cloud chats against a live T3 manager: provision one box, run one turn
- * per agent in it, pause and resume it, then delete it. Every check lands in a JSON report and
- * the process exits nonzero when any check fails.
- *
- *   node scripts/cloud/smoke-cloud-chat.ts --origin https://host --pairing-token-file ./token \
- *     --provider e2b --agents codex,claudeAgent,cursor --report ./run.json
- *
- * The pairing token is exchanged once; the bearer is cached next to it (0600) until it expires.
- * Tokens and pairing URLs never reach stdout or the report.
+ * End-to-end smoke for cloud chats against a live T3 manager: provision one box, run one turn per
+ * agent, pause and resume it, then delete it. Exits nonzero when any check fails; tokens and pairing
+ * URLs never reach stdout or the report.
+ * Usage: node scripts/cloud/smoke-cloud-chat.ts --origin <url> --pairing-token-file <file> --provider e2b --agents codex,claudeAgent --report <file>
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1362,9 +1357,7 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
           Effect.suspend(() => (scratch && scratchCreated ? deleteScratch(scratch) : Effect.void)),
         ),
       );
-    }).pipe(
-      Effect.catch((cause) => record("manager.connect", false, null, { error: describe(cause) })),
-    );
+    });
   }
 
   const managerPhases =

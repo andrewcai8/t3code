@@ -71,14 +71,10 @@ function providerReading(provider: ServerProvider, fallbackKey: string): LimitRe
 }
 
 /**
- * Accounts whose readings agree window for window, share used and reset
- * alike. Separate subscriptions do not land on the same numbers, so a match
- * means logins filed under different accounts are one subscription, usually a
- * setup token made while signed in to another account. Only windows with a
- * reset are compared, as an idle window may have none, and a reading counts
- * only when one of those shows use, since untouched accounts all read 0%.
- * Each group names its suspects once for a person to check; rows never merge.
- * A group that names one account is that account seen before its email was.
+ * Accounts whose readings agree window for window, share used and reset alike. Separate subscriptions
+ * never land on the same numbers, so a match means logins filed under different accounts are one
+ * subscription. Only windows with a reset are compared, and a reading counts only if one shows use,
+ * since untouched accounts all read 0%. Groups name suspects once for a person to check; rows never merge.
  */
 function findIdenticalReadings(readings: readonly LimitReading[]): string[][] {
   const bySignature = new Map<string, Map<string, LimitReading>>();
@@ -125,21 +121,10 @@ const USAGE_LIMITS_STALE_MS = 30 * MINUTE;
 const ROUTING_HORIZON_MS = 5 * HOUR;
 
 /**
- * How much an account has for a chat over `ROUTING_HORIZON_MS` before any of
- * its windows stops it, in percent of a full window: the tightest window's.
- * A window that refills within the horizon is full for the part of it left
- * after the reset, as far as its room lasts until then at the window's own
- * pace. So 5% left with a reset in ten minutes counts as nearly 100, 1% left
- * with a reset in half an hour as about 10, and 40% left with a reset in six
- * days as 40. A window spent right now
- * counts as 0 however soon it refills, since the chat's first turn would
- * fail. A window past its reset counts as full, and an account with no
- * subscription limits (an API key) as 100.
- * A window's usage only rises until it resets, so an old reading still
- * counts as the best the host knows. `null` means unknown: a failed probe,
- * no report at all, or an old reading of a spent window that never reports
- * when it resets and no other window still spent.
- * Ranking divides it among the account's active sessions plus the new one.
+ * How much an account has for a chat over `ROUTING_HORIZON_MS`, in percent of a full window: the
+ * tightest window's. A window refilling within the horizon is full for the part after its reset, as far
+ * as its room lasts at its own pace (5% left, reset in ten minutes, is nearly 100). A window spent now
+ * counts 0; past its reset, or no limits (API key), 100. `null` is unknown. Divided among active sessions + 1.
  */
 export interface AccountHeadroom {
   readonly remainingPercent: number;
@@ -148,14 +133,9 @@ export interface AccountHeadroom {
 }
 
 /**
- * The windows that decide whether an account can take another turn.
- *
- * Cursor reports two pools and a combined figure. Cloud chats run Cursor's
- * default model, Auto, which draws on either pool, so the combined figure is
- * the account's remaining capacity. Ranking on the tighter pool would call an
- * account spent while its Auto turns still succeed (the API pool reads 100%
- * long before Auto stops). Without the combined figure, Auto keeps running
- * while either pool has room, so the roomier pool stands in for it.
+ * The windows that decide whether an account can take another turn. Cursor chats run Auto, which
+ * draws on either pool, so the combined figure is the remaining capacity; ranking on the tighter pool
+ * would call an account spent while Auto still succeeds. Without it the roomier pool stands in.
  */
 function headroomWindows(
   driver: ServerProvider["driver"],
@@ -249,16 +229,10 @@ const earlier = (left: number | null, right: number | null) =>
 export type AccountLoad = ReadonlyMap<ProviderInstanceId, number>;
 
 /**
- * Accounts of one driver, the one whose remaining usage leaves the new chat
- * the largest share first: `remainingPercent / (active + 1)`. Not knowing how
- * much a chat will use, routing gives it the account where its fair share of
- * what is left is largest, which spreads chats out. Instances of one
- * subscription, by email, credential, or identical readings, count the
- * sessions of all. Unknown
- * headroom ranks below any account with room left, fewest active sessions
- * first, and above a spent one. Ties go to the account whose tightest window
- * refills first, then the preferred account, then the id, so the same
- * snapshots always rank the same way.
+ * Accounts of one driver, the one whose remaining usage leaves the new chat the largest share first:
+ * `remainingPercent / (active + 1)`, which spreads chats out. Instances of one subscription (email,
+ * credential, or identical readings) count all their sessions. Unknown headroom ranks below any
+ * account with room, fewest sessions first, above a spent one. Ties: earliest refill, preferred, id.
  */
 export function rankAccounts<
   A extends {

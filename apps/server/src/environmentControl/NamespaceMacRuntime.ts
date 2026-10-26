@@ -702,11 +702,10 @@ export function makeNamespaceMacRuntime(config: {
       return alive ? ("running" as const) : settleGone(chatId, record.mac.incarnation.instanceId);
     },
     /**
-     * One upkeep pass for an awake chat: release a Mac nearing its deadline,
-     * idle ones first, otherwise save what changed since the last pass. Only a
-     * chat confirmed idle is released to sleep; any other awake chat off its Mac,
-     * or on one it was never restored onto, is `reopen`, owed a ready Mac, so a
-     * host restart at any point of a move still finishes it.
+     * One upkeep pass for an awake chat: release a Mac nearing its deadline, idle ones first, otherwise
+     * save what changed. Only a chat confirmed idle is released to sleep; any other awake chat off its
+     * Mac, or on one it was never restored onto, is `reopen`, owed a ready Mac, so a host restart
+     * mid-move still finishes it.
      */
     upkeep: async (
       operation: ProvisionOperation,

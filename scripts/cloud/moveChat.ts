@@ -70,10 +70,9 @@ const PATH_PATTERN = /(?<![\w.~$/-])(?:~|\$HOME|\$\{HOME\})?\/[\w.@%+~-]+(?:\/[\
 
 /**
  * The paths outside `cwd` an agent's tool calls named or their output printed, from a session's
- * transcripts (main and subagents, JSONL) and its persisted tool outputs (plain text). Only paths
- * under `home` or `/tmp` count; Claude's own `/tmp/claude-<uid>` scratch does not. Anything in a
- * dot-directory of `home` or in `~/Library` is tool config, reported once as that directory.
- * Sorted, so a parent precedes its children.
+ * transcripts and persisted tool outputs. Only paths under `home` or `/tmp` count, except Claude's
+ * own scratch. Anything in a dot-directory of `home` or in `~/Library` is tool config, reported once
+ * as that directory. Sorted, so a parent precedes its children.
  */
 export function referencedPaths(
   input: { readonly transcripts: ReadonlyArray<string>; readonly outputs: ReadonlyArray<string> },

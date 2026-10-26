@@ -16,12 +16,9 @@ export type ProcessUse =
   | { readonly status: "unknown"; readonly reason: string };
 
 /**
- * Whether any live process has its working directory at or below a folder.
- *
- * Linux reads `/proc/<pid>/cwd`, which needs no helper binary. macOS asks
- * `lsof`. Other hosts, Windows included, have no cheap equivalent, so they
- * answer "unknown". Processes of other users are invisible to both, which
- * matches the privileges the server needs to delete the folder anyway.
+ * Whether any live process has its working directory at or below a folder. Linux reads
+ * `/proc/<pid>/cwd`, macOS asks `lsof`, and other hosts answer "unknown". Processes of other users
+ * are invisible to both, which matches the privileges the server needs to delete the folder anyway.
  */
 export const makeProcessUseProbe = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;

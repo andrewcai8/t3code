@@ -236,10 +236,15 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
   // A saved connection whose workspace is gone is not dialed again until it is paired anew.
   const driver = ConnectionDriver.ConnectionDriver.of({
     ...dialer,
-    connect: (entry, reportProgress) =>
-      entry.target._tag === "BearerConnectionTarget" && entry.target.workspaceStatus === "missing"
-        ? Effect.fail(workspaceMissingError())
-        : dialer.connect(entry, reportProgress),
+    connect: Effect.fn("EnvironmentRegistry.connect")(function* (entry, reportProgress) {
+      if (
+        entry.target._tag === "BearerConnectionTarget" &&
+        entry.target.workspaceStatus === "missing"
+      ) {
+        return yield* workspaceMissingError();
+      }
+      return yield* dialer.connect(entry, reportProgress);
+    }),
   });
   const presence = yield* UserPresence;
   const pairing = yield* PairingRedemption;
@@ -388,11 +393,10 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
     Effect.withSpan("EnvironmentRegistry.wakeBox"),
   );
 
-  // Every client whose user has a box's chat open keeps its lease alive, not only the one that
-  // started it, so a phone or a second tab does not let the host pause the box under the open
-  // chat. A hidden or untouched client does not, so a forgotten tab lets the box idle. It runs
-  // only while this client is connected to the box, which proves it holds the box's credential;
-  // the host still requires an operate session and an active, claimed lease to renew one.
+  // Every client with a box's chat open keeps its lease alive, so a phone or second tab does not let
+  // the host pause the box under the open chat; a hidden or untouched client does not. It runs only
+  // while connected to the box, which proves it holds the credential; the host still requires an
+  // operate session and an active, claimed lease to renew.
   const keepBoxAlive = (
     environmentId: EnvironmentId,
     managerId: EnvironmentId,
@@ -431,7 +435,10 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
       for (;;) {
         yield* userArrives;
         yield* renew;
-        yield* Effect.raceFirst(Effect.sleep(BOX_LEASE_HEARTBEAT_INTERVAL), userReturns);
+        yield* Effect.timeoutOrElse(userReturns, {
+          duration: BOX_LEASE_HEARTBEAT_INTERVAL,
+          orElse: () => Effect.void,
+        });
       }
     }).pipe(Effect.withSpan("EnvironmentRegistry.keepBoxAlive"));
   };
@@ -547,7 +554,10 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
         reportedAt = -Infinity;
       }
       if (!(yield* hostConnected(managerId))) {
-        yield* Effect.raceFirst(Effect.sleep(PRESENCE_RETRY_INTERVAL), userReturns);
+        yield* Effect.timeoutOrElse(userReturns, {
+          duration: PRESENCE_RETRY_INTERVAL,
+          orElse: () => Effect.void,
+        });
         continue;
       }
       const now = yield* Clock.currentTimeMillis;
@@ -574,15 +584,17 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
           (machine) => machine.state !== "asleep" || machine.providerFailure !== undefined,
         ) ?? false;
       const reportDue = Math.max(0, reportedAt + PRESENCE_REPORT_MS - now);
-      yield* Effect.raceFirst(
-        Effect.sleep(
-          answer === null
-            ? PRESENCE_RETRY_INTERVAL
-            : changing
-              ? MACHINE_CHANGE_POLL_INTERVAL
-              : Duration.millis(reportDue),
-        ),
-        userReturns.pipe(Effect.andThen(Effect.sync(() => (reportedAt = -Infinity)))),
+      yield* userReturns.pipe(
+        Effect.andThen(Effect.sync(() => (reportedAt = -Infinity))),
+        Effect.timeoutOrElse({
+          duration:
+            answer === null
+              ? PRESENCE_RETRY_INTERVAL
+              : changing
+                ? MACHINE_CHANGE_POLL_INTERVAL
+                : Duration.millis(reportDue),
+          orElse: () => Effect.void,
+        }),
       );
     }
   }, Effect.withSpan("EnvironmentRegistry.reportPresence"));
@@ -723,11 +735,10 @@ export const makeRegistryBoxes = Effect.fn("EnvironmentRegistry.makeRegistryBoxe
       }),
     );
 
-  // A box this device never paired pairs through its host inside its dial, so a paused one wakes
-  // first and the pairing happens at most once per device: every later dial finds it saved.
-  // Servers never widen a stored grant, so a box paired before granular permissions keeps its
-  // narrow one after it upgrades. Its first dial in a launch reads the grant and, if it is that
-  // legacy one, pairs once more for the standard grant and dials with it instead.
+  // A box this device never paired pairs through its host inside its dial, so a paused one wakes first
+  // and pairing happens once per device. Servers never widen a stored grant, so a box paired before
+  // granular permissions keeps its legacy one: its first dial per launch pairs once more for the
+  // standard grant.
   const boxDriver = (environmentId: EnvironmentId, managerId: EnvironmentId) =>
     ConnectionDriver.ConnectionDriver.of({
       ...driver,

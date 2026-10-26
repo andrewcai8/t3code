@@ -258,12 +258,10 @@ export function nextDraftEnvironment<
 }
 
 /**
- * The project a new chat opens on: `requested`, else the first copy of the same logical project
- * in `projects`, else with nothing requested the first project at all. Only a copy on a user
- * environment, one `environmentState` knows, and never on a gone machine; a cloud box is not a
- * user environment, and every new chat gets a fresh box. A connected copy wins over one that is
- * not, whose files a new chat could not read. The route or chat in view only ever shapes
- * `requested`. Null when only boxes hold the project, or `requested` is not among `projects`.
+ * The project a new chat opens on: `requested`, else the first copy of the same logical project in
+ * `projects`, else with nothing requested the first project. Only copies on a user environment
+ * count (known to `environmentState`, never gone), connected ones first. Null when only boxes hold
+ * the project, or `requested` is not among `projects`.
  */
 export function newChatProject<
   Project extends { readonly environmentId: EnvironmentId; readonly id: ProjectId },
@@ -309,12 +307,10 @@ export interface NewChatRunTargets<Environment> {
   /** The cloud kinds the manager can create for the chat. */
   readonly cloudProviders: ReadonlyArray<ProvisionProvider>;
   /**
-   * Where a chat that cannot start where it points goes instead. A chat on a
-   * gone machine moves to the first live environment, not a box, that runs
-   * agents or can hand the chat to a cloud kind. A chat on another chat's box,
-   * or on a live environment that runs no agents, starts on the manager's
-   * first cloud kind, else moves to the first environment that runs them. Null
-   * when the chat may stay, or there is nowhere else to go.
+   * Where a chat that cannot start where it points goes instead. A gone machine moves to the first live
+   * non-box environment that runs agents or can hand off to a cloud kind. A chat on another chat's box
+   * or an agentless environment starts on the manager's first cloud kind, else the first environment
+   * that runs agents. Null when the chat may stay or has nowhere else to go.
    */
   readonly redirect:
     | { readonly kind: "cloud"; readonly provider: ProvisionProvider }

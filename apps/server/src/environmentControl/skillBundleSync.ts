@@ -43,12 +43,10 @@ async function extract(archive: Uint8Array, versions: string, target: string) {
 }
 
 /**
- * Points `source` at the extracted contents of the archive published at `url`.
- *
- * `source` is a link to `${source}.versions/<sha256 of the archive>`, replaced
- * by a rename, so a provision that resolved it keeps reading one whole
- * version. That version and the new one survive the prune. Every step
- * converges when rerun, so the next refresh finishes one interrupted anywhere.
+ * Points `source` at the extracted contents of the archive published at `url`. `source` is a link
+ * to `${source}.versions/<sha256>`, replaced by a rename, so a provision that resolved it keeps
+ * reading one whole version. Every step converges when rerun, so the next refresh finishes an
+ * interrupted one.
  */
 export async function refreshSkillBundle(
   bundle: { readonly source: string; readonly url: string },

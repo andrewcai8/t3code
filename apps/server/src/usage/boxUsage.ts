@@ -1,12 +1,8 @@
 // @effect-diagnostics globalDate:off - stored hour buckets are re-bucketed by ISO instant.
 /**
- * Usage a host keeps for machines it does not scan itself.
- *
- * Cloud chats write transcripts on an ephemeral box, so the host pulls each
- * box's hourly UTC history. A machine no client connects to pushes the same
- * history instead. The host stores its sources per row and its buckets per
- * hour, and folds a window's hours into its own summary. Hour buckets
- * re-bucket exactly into any client's day or hour window.
+ * Usage a host keeps for machines it does not scan itself: each cloud box's hourly UTC history,
+ * pulled by the host, or pushed by a machine no client connects to. Stored per source and per hour,
+ * which re-bucket exactly into any client's day or hour window.
  *
  * @module boxUsage
  */
@@ -399,13 +395,10 @@ function sumBuckets(a: UsageBucket, b: UsageBucket): UsageBucket {
 }
 
 /**
- * Folds stored box history into a host summary for `input`'s window.
- *
- * A live box or an imported machine keeps its own fingerprint so a client
- * that also reaches it counts it once, with a per-row `sourcePath` so rows
- * sharing a home path stay apart. Retired boxes collapse into one source per
- * provider at `retiredHome`, so the summary does not grow with every box the
- * host ever ran.
+ * Folds stored box history into a host summary for `input`'s window. A live box or imported machine
+ * keeps its own fingerprint so a client that also reaches it counts it once, with a per-row
+ * `sourcePath`. Retired boxes collapse into one source per provider at `retiredHome`, so the summary
+ * does not grow with every box the host ever ran.
  */
 export function foldBoxUsage(
   summary: UsageSummary,

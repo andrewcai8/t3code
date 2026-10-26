@@ -1,22 +1,8 @@
 /**
  * Live proof for waking cloud chats ahead of the user, against a manager from
  * `scripts/cloud/local-manager.sh`. Each step reads and extends one state file, so steps run
- * separately and `dispose` always finds what earlier steps made.
- *
- *   node scripts/cloud/verify-wake-ahead.ts <step> --origin http://127.0.0.1:PORT \
- *     --pairing-token-file .t3/manager/pairing-token --state /tmp/wake-ahead.json [--count 4] \
- *     [--manager-config .t3/manager/environment-control.json]
- *
- * Steps:
- *   create    provisions `--count` E2B boxes, each with a Claude chat that answered one turn
- *   memory    box 0: teaches the agent a code word, restarts the box's T3 server mid-turn,
- *             wakes the box, and asks for the word back
- *   presence  boxes 1-3: settles box 3's chat, pauses all three, reports the user present, and
- *             times which boxes wake
- *   resume    box 1: pauses it, then times a resume (run after bumping the pinned build)
- *   dispose   deletes every box the state file names
- *
- * Every step appends checks to the state file and prints them; it exits nonzero on a failed one.
+ * separately: `create`, `memory`, `presence`, `resume`, `dispose` (which deletes every box the
+ * state file names). Exits nonzero on a failed check.
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";

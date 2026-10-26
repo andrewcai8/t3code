@@ -521,11 +521,9 @@ export function createEnvironmentControl(
     }
   };
   /**
-   * The middle rung for a box E2B cannot resume: boot it fresh from its saved disk, which E2B can
-   * place when it cannot restore the memory it captured. Single-flight under the box's lock,
-   * which the caller takes in the same tick it releases its own, so no resume and no other start
-   * races it (E2B refuses a reboot while another start is in flight). Once booted the box is woken
-   * as any resume wakes it, which prepares its T3 server again and tells its chat what was lost.
+   * The middle rung for a box E2B cannot resume: boot it fresh from its saved disk. Single-flight
+   * under the box's lock, which the caller takes in the same tick it releases its own, since E2B
+   * refuses a reboot while another start is in flight. Once booted it wakes as any resume does.
    * A reboot that fails moves on to the rebuild.
    */
   const startReboot = (lease: ProvisionedLease) => {
@@ -575,12 +573,10 @@ export function createEnvironmentControl(
   const beforeSleep = (lease: ProvisionedLease) =>
     Promise.all([pullBeforeStop(lease), backUpBeforeSleep(lease)]);
   /**
-   * Why an awake box must be paused without its memory, or null when it may keep it. E2B captures
-   * a box's memory on pause, and boxes captured with envd not answering could not be resumed
-   * again. Dropping the memory ends whatever the chat was running, including a turn or a job left
-   * running after one, so it takes two probes CONFIRM_PROBE_MS apart that each find envd silent, or
-   * the CPU pinned with memory nearly full (see boxHealth). A probe E2B's API failed to answer says
-   * nothing of the box, so the box keeps its memory.
+   * Why an awake box must be paused without its memory, or null when it may keep it. Dropping memory
+   * ends whatever the chat was running, so it takes two probes CONFIRM_PROBE_MS apart that each find
+   * envd silent, or the CPU pinned with memory nearly full (see boxHealth). A probe E2B's API failed
+   * to answer says nothing of the box, so the box keeps its memory.
    */
   const memoryUnsafe = async (lease: ProvisionedLease): Promise<string | null> => {
     const check = driver.healthCheck;
@@ -1460,7 +1456,7 @@ export const recoverRefusedResume = (
         Effect.map((upgraded): EnvironmentProvisionResumeResult =>
           upgraded.kind === "upgraded" ? { kind: "resumed" } : refused,
         ),
-        Effect.catch(() => Effect.succeed(refused)),
+        Effect.orElseSucceed(() => refused),
       )
     : Effect.succeed(refused);
 
@@ -1643,9 +1639,7 @@ export const layer = Layer.effect(
                 due: async (lease) => {
                   if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId))
                     return null;
-                  const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(
-                    () => null,
-                  );
+                  const operation = await runLogged(store.get(lease.leaseId)).catch(() => null);
                   if (operation?.state.kind !== "ready") return null;
                   // Read per sweep: upkeep keeps the service it started with, and the pinned
                   // build follows config edits.
@@ -1877,7 +1871,7 @@ export const layer = Layer.effect(
       requestId: ProvisionRequestId,
       recordedProxy?: NamespaceProxyLease,
     ) => {
-      const operation = await Effect.runPromise(store.get(requestId));
+      const operation = await runLogged(store.get(requestId));
       if (
         operation.state.kind !== "ready" ||
         operation.state.allocation.resource.provider !== "modal"
@@ -1911,7 +1905,7 @@ export const layer = Layer.effect(
       requestId: ProvisionRequestId,
       recordedProxy?: NamespaceProxyLease,
     ) => {
-      const operation = await Effect.runPromise(store.get(requestId));
+      const operation = await runLogged(store.get(requestId));
       if (
         operation.state.kind !== "ready" ||
         operation.state.allocation.resource.provider !== "namespace"
@@ -1946,7 +1940,7 @@ export const layer = Layer.effect(
       const pending =
         reconnecting.get(requestId) ??
         (async () => {
-          const operation = await Effect.runPromise(store.get(requestId));
+          const operation = await runLogged(store.get(requestId));
           if (operation.state.kind !== "ready") return;
           const manifest = await manifests.load(requestId);
           const resource = operation.state.allocation.resource;
@@ -2027,7 +2021,7 @@ export const layer = Layer.effect(
         throw new Error(`The new box was not provisioned: ${ready.kind}.`);
       await runLogged(provisionControl.attach({ requestId }));
       const remoteAccess = (await leaseRegistry.findById(requestId))?.remoteAccess;
-      const operation = await Effect.runPromise(store.get(requestId));
+      const operation = await runLogged(store.get(requestId));
       if (!remoteAccess || operation.state.kind !== "ready")
         throw new Error("The new box is not reachable.");
       const resource = operation.state.allocation.resource;
@@ -2074,7 +2068,7 @@ export const layer = Layer.effect(
     /** The ready E2B box this manager provisioned for a lease; null for any other lease. */
     const e2bBox = async (lease: ProvisionedLease) => {
       if (!isProvisionRequestId(lease.leaseId) || importedLeases.has(lease.leaseId)) return null;
-      const operation = await Effect.runPromise(store.get(lease.leaseId)).catch(() => null);
+      const operation = await runLogged(store.get(lease.leaseId)).catch(() => null);
       if (
         !operation ||
         operation.state.kind !== "ready" ||
@@ -2086,7 +2080,7 @@ export const layer = Layer.effect(
     /** The chat behind a lease, when it runs on Modal. */
     const modalChat = async (sandboxId: string) => {
       if (!isProvisionRequestId(sandboxId) || importedLeases.has(sandboxId)) return null;
-      const operation = await Effect.runPromise(store.get(sandboxId)).catch(() => null);
+      const operation = await runLogged(store.get(sandboxId)).catch(() => null);
       if (
         !operation ||
         !allocatedResources(operation.state).some((resource) => resource.provider === "modal")
@@ -2097,7 +2091,7 @@ export const layer = Layer.effect(
     /** The chat behind a lease, when it runs on the Namespace instance engine. */
     const instanceChat = async (sandboxId: string) => {
       if (!isProvisionRequestId(sandboxId) || importedLeases.has(sandboxId)) return null;
-      const operation = await Effect.runPromise(store.get(sandboxId)).catch(() => null);
+      const operation = await runLogged(store.get(sandboxId)).catch(() => null);
       if (
         !operation ||
         !allocatedResources(operation.state).some((resource) => "engine" in resource)
@@ -2110,7 +2104,7 @@ export const layer = Layer.effect(
       };
     };
     const resumeProvisionedE2b = async (requestId: ProvisionRequestId, apiKey: string) => {
-      const operation = await Effect.runPromise(store.get(requestId));
+      const operation = await runLogged(store.get(requestId));
       if (
         operation.state.kind !== "ready" ||
         operation.state.allocation.resource.provider !== "e2b"
@@ -2407,11 +2401,9 @@ export const layer = Layer.effect(
         input,
         manager.config,
         resolution(manager.config),
-        // Credentials and skill roots follow the accounts' real settings
-        // rather than paths this module guesses from driver names.
-        // Each driver runs on the account with the most usage left per
-        // active session right now. The manifest freezes that choice, so
-        // a retry keeps it without routing again.
+        // Credentials and skill roots follow the accounts' real settings. Each driver runs on the account
+        // with the most usage left per active session now; the manifest freezes that choice so a retry
+        // keeps it without routing again.
         () =>
           resolveAccounts((current) =>
             Effect.all({
@@ -2798,7 +2790,7 @@ export const layer = Layer.effect(
     /** The Devbox a provisioned lease runs on, while its provision is ready; null otherwise. */
     const readyDevbox = async (leaseId: string) => {
       if (!isProvisionRequestId(leaseId) || importedLeases.has(leaseId)) return null;
-      const operation = await Effect.runPromise(store.get(leaseId)).catch(() => null);
+      const operation = await runLogged(store.get(leaseId)).catch(() => null);
       const resource =
         operation?.state.kind === "ready" ? operation.state.allocation.resource : null;
       if (!operation || resource?.provider !== "namespace" || "engine" in resource) return null;
@@ -3151,25 +3143,29 @@ export const layer = Layer.effect(
       Effect.forkScoped,
     );
     return {
-      namespaceProxyOrigin: (leaseId) =>
-        Effect.tryPromise({
-          try: async () => {
-            const lease = await leaseRegistry.findById(leaseId);
-            if (
-              !lease ||
-              (lease.state !== "active" && lease.state !== "paused") ||
-              !lease.namespaceProxy
-            )
-              return null;
-            await serveProxy(lease);
-            return lease.namespaceProxy.proxyOrigin;
-          },
-          catch: () => new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
-        }),
+      namespaceProxyOrigin: Effect.fn("EnvironmentControl.namespaceProxyOrigin")(
+        function (leaseId) {
+          return Effect.tryPromise({
+            try: async () => {
+              const lease = await leaseRegistry.findById(leaseId);
+              if (
+                !lease ||
+                (lease.state !== "active" && lease.state !== "paused") ||
+                !lease.namespaceProxy
+              )
+                return null;
+              await serveProxy(lease);
+              return lease.namespaceProxy.proxyOrigin;
+            },
+            catch: () =>
+              new EnvironmentControlError({ message: "Cloud lease could not be loaded." }),
+          });
+        },
+      ),
       list: run((service) => service.list(), []),
       controlConfig: run<EnvironmentControlConfig | null>(async (service) => service.config, null),
-      modalForkSource: (sandboxId) =>
-        Effect.tryPromise({
+      modalForkSource: Effect.fn("EnvironmentControl.modalForkSource")(function (sandboxId) {
+        return Effect.tryPromise({
           try: async () => {
             const chat = await modalChat(sandboxId);
             if (!chat) return null;
@@ -3183,7 +3179,8 @@ export const layer = Layer.effect(
           },
           catch: () =>
             new EnvironmentControlError({ message: "The Modal chat could not be read." }),
-        }),
+        });
+      }),
       modalBoxes: run(async (service) => {
         const modal = service.config.provisioning?.modal;
         if (!modal || !service.config.modalTokenId || !service.config.modalTokenSecret) return null;
@@ -3195,7 +3192,8 @@ export const layer = Layer.effect(
       }, null),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
       provisionedSkills: localAgentRuns
-        ? Effect.succeed(undefined)
+        ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+          Effect.succeed(undefined)
         : run(async (service) => {
             const bundles = service.config.provisioning?.skills ?? [];
             if (bundles.length === 0) return undefined;
@@ -3216,32 +3214,35 @@ export const layer = Layer.effect(
               scannedSkills = { service, mtimes, skills: readProvisionedSkills(bundles) };
             return scannedSkills.skills;
           }, undefined).pipe(Effect.orElseSucceed(() => undefined)),
-      listProvisioned: (knownEnvironmentIds, addresses, chats, providers) =>
-        cloudMachinesAfterDays.pipe(
-          Effect.orElseSucceed(() => null),
-          Effect.flatMap((afterDays) =>
-            listProvisionedEnvironments(
-              sql,
-              knownEnvironmentIds,
-              addresses,
-              chats,
-              afterDays,
-              true,
-              readableProvisionProviders(providers),
+      listProvisioned: Effect.fn("EnvironmentControl.listProvisioned")(
+        function (knownEnvironmentIds, addresses, chats, providers) {
+          return cloudMachinesAfterDays.pipe(
+            Effect.orElseSucceed(() => null),
+            Effect.flatMap((afterDays) =>
+              listProvisionedEnvironments(
+                sql,
+                knownEnvironmentIds,
+                addresses,
+                chats,
+                afterDays,
+                true,
+                readableProvisionProviders(providers),
+              ),
             ),
-          ),
-          // A chat started since the last sweep has no card yet, so it is read in the background
-          // and the client's next list carries it.
-          Effect.tap(() =>
-            chats === undefined
-              ? Effect.void
-              : Effect.sync(() => {
-                  void resolve()
-                    .then((service) => service?.readNewChats())
-                    .catch(() => undefined);
-                }),
-          ),
-        ),
+            // A chat started since the last sweep has no card yet, so it is read in the background
+            // and the client's next list carries it.
+            Effect.tap(() =>
+              chats === undefined
+                ? Effect.void
+                : Effect.sync(() => {
+                    void resolve()
+                      .then((service) => service?.readNewChats())
+                      .catch(() => undefined);
+                  }),
+            ),
+          );
+        },
+      ),
       provision: provisionControl.provision,
       attach: provisionControl.attach,
       dispose: Effect.fn("EnvironmentControl.dispose")(function* (
@@ -3267,16 +3268,17 @@ export const layer = Layer.effect(
           message: "This install has no cloud provisioning configuration.",
         });
       }),
-      pause: (input) =>
-        run<EnvironmentProvisionPauseResult>((service) => service.pause(input), {
+      pause: Effect.fn("EnvironmentControl.pause")(function (input) {
+        return run<EnvironmentProvisionPauseResult>((service) => service.pause(input), {
           kind: "refused" as const,
           reason: "unknown" as const,
           message: "This install has no provisioning template configured.",
-        }),
+        });
+      }),
       claim: provisionControl.claim,
       resume: resumeWorkspace,
-      restore: (input) =>
-        Effect.tryPromise({
+      restore: Effect.fn("EnvironmentControl.restore")(function (input) {
+        return Effect.tryPromise({
           try: async (): Promise<EnvironmentProvisionRestoreResult> =>
             (await leaseRegistry.restore(input.leaseId))
               ? { kind: "restored" }
@@ -3287,7 +3289,8 @@ export const layer = Layer.effect(
                 },
           catch: () =>
             new EnvironmentControlError({ message: "Cloud lease could not be updated." }),
-        }),
+        });
+      }),
       upgrade: provisionControl.upgrade,
       switchAccount: Effect.fn("EnvironmentControl.switchAccount")(function* (
         input: EnvironmentProvisionSwitchAccountInput,
@@ -3327,9 +3330,11 @@ export const layer = Layer.effect(
           }
         );
       }),
-      presence: (input) => wakeAhead.presence(input.present),
-      touch: (input) =>
-        importedLeases.has(input.leaseId)
+      presence: Effect.fn("EnvironmentControl.presence")(function (input) {
+        return wakeAhead.presence(input.present);
+      }),
+      touch: Effect.fn("EnvironmentControl.touch")(function (input) {
+        return importedLeases.has(input.leaseId)
           ? run<EnvironmentProvisionTouchResult>(
               async (service) => {
                 const imported = importedLeases.get(input.leaseId)!;
@@ -3356,9 +3361,10 @@ export const layer = Layer.effect(
                 message: "The cloud lease manager is unavailable.",
               },
             )
-          : provisionControl.touch(input),
-      keep: (input) =>
-        Effect.tryPromise({
+          : provisionControl.touch(input);
+      }),
+      keep: Effect.fn("EnvironmentControl.keep")(function (input) {
+        return Effect.tryPromise({
           try: async (): Promise<EnvironmentProvisionKeepResult> => {
             const lease = await leaseRegistry.findById(input.requestId);
             if (!lease || lease.state === "disposed")
@@ -3373,9 +3379,14 @@ export const layer = Layer.effect(
           },
           catch: () =>
             new EnvironmentControlError({ message: "Cloud lease could not be updated." }),
-        }),
-      start: (id) => run((service) => service.start(id), refused("unknown")),
-      stop: (id) => run((service) => service.stop(id), refused("unknown")),
+        });
+      }),
+      start: Effect.fn("EnvironmentControl.start")(function (id) {
+        return run((service) => service.start(id), refused("unknown"));
+      }),
+      stop: Effect.fn("EnvironmentControl.stop")(function (id) {
+        return run((service) => service.stop(id), refused("unknown"));
+      }),
     };
   }),
 ).pipe(Layer.provide(ProvisionOperationStore.layer), Layer.provide(BoxUsageStore.layer));

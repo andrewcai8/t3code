@@ -1,13 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalConsoleInEffect:off preferSchemaOverJson:off - a standalone benchmark that reads process memory and prints its report as JSON lines.
 /**
- * How long does starting a child process block the server's event loop, spawning directly
- * versus through the spawn host? Inflates this process to a server-like RSS, then alternates
- * the two spawners over rounds of git commands run through ProcessRunner, as the server does.
- *
- *   node apps/server/scripts/bench-spawn-host.ts [--rss-mb 1536] [--rounds 5]
- *     [--sequential 30] [--burst 100]
- *
- * Linux with libuv < 1.53 is the case that matters; on macOS, Node does not fork the caller.
+ * Times how long starting a child process blocks the event loop, spawning directly versus through
+ * the spawn host, with this process inflated to a server-like RSS.
+ * Usage: node apps/server/scripts/bench-spawn-host.ts [--rss-mb 1536] [--rounds 5] [--sequential 30] [--burst 100]
+ * Only Linux with libuv < 1.53 matters; on macOS, Node does not fork the caller.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";

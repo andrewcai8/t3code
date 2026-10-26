@@ -24,11 +24,9 @@ export interface CloudSendDriverPorts extends Pick<CloudProvisionPorts, "request
 }
 
 /**
- * Drives a draft's cloud send from "Send" to its held message going out, from whichever page
- * has the draft. Everything it needs survives a reload: the draft's provision request says which
- * host and request to rejoin, and the draft's own record keeps the held message. So a page that
- * loads a draft mid-setup resumes it exactly as the page that sent it would have, and one page
- * running both a send and a resume joins them into one drive.
+ * Drives a draft's cloud send from "Send" to its held message going out, from whichever page has the
+ * draft. Everything it needs survives a reload, so a page loading a draft mid-setup resumes it, and
+ * one page running both a send and a resume joins them into one drive.
  */
 export function createCloudSendDriver(ports: CloudSendDriverPorts) {
   const { requests } = ports;

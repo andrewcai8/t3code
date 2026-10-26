@@ -30,10 +30,9 @@ const resolved = (path: string): string => {
 
 /**
  * Why a copy may not be given `path` or write it back here, or null. T3 home holds this server's
- * state, secrets and fork socket, so neither it, anything in it, nor a directory holding it
- * crosses; nor does the whole home directory come back as an output. The caller's own checkout is
- * the exception: managed worktrees live inside T3 home, and a job reads and writes its checkout.
- * The checkout itself is never replaced whole.
+ * state, secrets and fork socket, so neither it, anything in it, nor a directory holding it crosses.
+ * The caller's own checkout is the exception: managed worktrees live inside T3 home, but it is
+ * never replaced whole.
  */
 export const refusedPath = (
   path: string,

@@ -34,14 +34,10 @@ export interface AccountRequest {
 }
 
 /**
- * The selection a chat runs with when this host picks the account. Only a driver whose accounts
- * are interchangeable is routed, among its accounts enabled for the project, not signed out, and
- * serving the selected model, by the cloud manager's ranking (`rankAccounts`) with the selected
- * account winning ties. A thread keeps its account: pickers offer the driver rather than each
- * account while routing is on, so a follow-up naming another account of the driver is that
- * driver's row, not a request to move. Only an account known to be spent lets the thread go, and
- * only to one known to have room; otherwise it stays and waits for its own reset. An account is
- * known to be spent when its readings say so or, until the reset, when `spentUntil` names it.
+ * The selection a chat runs with when this host picks the account. Only a driver whose accounts are
+ * interchangeable is routed, by the cloud manager's ranking (`rankAccounts`) with the selected
+ * account winning ties. A thread keeps its account unless that account is known to be spent (by its
+ * readings or, until the reset, `spentUntil`), and then only moves to one known to have room.
  */
 export function routeSelection(
   input: AccountRequest & {

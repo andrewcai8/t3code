@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a packer and CLI for deploy scripts, outside Effect.
 /**
- * Computes the state a provisioning host needs on disk: its
- * `environment-control` config, a slim `settings.json`, each travelling
- * account's credential files, shell-environment copies, and skill bundles.
- * Transports decide where it lands: `deploy-provision-manager.mjs` writes it
- * into an E2B sandbox, and the CLI below packs it as a seed tarball for a
- * container host.
+ * Computes the state a provisioning host needs on disk: its `environment-control` config, a slim
+ * `settings.json`, each travelling account's credential files, shell-environment copies, and skill
+ * bundles. Transports decide where it lands: `deploy-provision-manager.mjs` writes it into an E2B
+ * sandbox, and the CLI below packs it as a seed tarball for a container host.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -97,12 +95,10 @@ export interface HostState {
    */
   readonly codexLogins: Readonly<Record<string, "host" | "copy">>;
   /**
-   * The host's config minus what only the transport knows: `broker`, which for
-   * the E2B manager is the sandbox it creates after packing, and
-   * `provisioning.runtimeArtifacts`, which a host pins itself. Namespace
-   * settings travel only with a `namespaceToken` or a Namespace session: a host
-   * has no `nsc login` of its own, so without one it could not start the Macs
-   * it offers. Modal settings travel only with both Modal token halves, for the same reason.
+   * The host's config minus what only the transport knows: `broker` and
+   * `provisioning.runtimeArtifacts`. Namespace settings travel only with a `namespaceToken` or a
+   * Namespace session, and Modal settings only with both token halves, since a host has no login of
+   * its own to start the Macs or sandboxes it offers.
    */
   readonly config: {
     readonly e2bApiKey: string;

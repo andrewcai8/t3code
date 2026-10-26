@@ -13,9 +13,10 @@ import { isLoopbackHost } from "@t3tools/shared/preview";
 import { PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest } from "effect/http";
-import { RpcClient, RpcSerialization } from "effect/rpc";
+import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc";
 import * as Socket from "effect/socket/Socket";
 
 const wsUrl = (httpBaseUrl: string) => {
@@ -25,9 +26,9 @@ const wsUrl = (httpBaseUrl: string) => {
   return url.toString();
 };
 
-const makeClient = RpcClient.make(WsRpcGroup);
-export type T3Client =
-  typeof makeClient extends Effect.Effect<infer C, infer _E, infer _R> ? C : never;
+export type T3Client = RpcClient.FromGroup<typeof WsRpcGroup, RpcClientError.RpcClientError>;
+const makeClient: Effect.Effect<T3Client, never, RpcClient.Protocol | Scope.Scope> =
+  RpcClient.make(WsRpcGroup);
 
 const decodeWebSocketTicket = Schema.decodeUnknownEffect(
   Schema.Struct({ ticket: AuthWebSocketTicketResult.fields.ticket }),

@@ -32,6 +32,7 @@ interface EnvironmentSetupCardProps {
 
 function useNowWhile(active: boolean): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // oxlint-disable-next-line t3code/react-effect-budget -- Ticks a one-second clock only while setup runs; the interval is cleared when it ends or unmounts.
   useEffect(() => {
     if (!active) return;
     const id = setInterval(() => setNowMs(Date.now()), 1_000);
