@@ -246,7 +246,8 @@ const seedCompaction = Effect.fnUntraced(function* () {
   ) SELECT n * 2, 'command-' || n, 'thread', 'imported', '2026-10-17', 0, 'accepted', 'legacy' FROM history`;
 });
 
-it.effect("discovers on the reader worker and deletes on the writer", () =>
+// The fork's writer also runs on a worker, so neither discovery nor deletes reach the main thread.
+it.effect("discovers on the reader worker and deletes on the writer worker", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -290,8 +291,15 @@ it.effect("discovers on the reader worker and deletes on the writer", () =>
         reads.filter((query) => /\bSELECT\b/.test(query)),
         [],
       );
-      assert(writes.some((query) => query.includes("DELETE FROM orchestration_events")));
-      assert(writes.some((query) => query.includes("DELETE FROM orchestration_command_receipts")));
+      assert.deepEqual(
+        writes.filter((query) => /\bDELETE\b/.test(query)),
+        [],
+      );
+      const [remaining] = yield* sql<{ readonly events: number; readonly receipts: number }>`
+        SELECT
+          (SELECT COUNT(*) FROM orchestration_events) AS events,
+          (SELECT COUNT(*) FROM orchestration_command_receipts) AS receipts`;
+      assert.deepEqual(remaining, { events: 3, receipts: 0 });
     }).pipe(
       Effect.provide(
         ProjectionMaintenance.layer.pipe(
